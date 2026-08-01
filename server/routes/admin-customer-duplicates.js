@@ -153,6 +153,7 @@ router.get('/merges', async (req, res) => {
   try {
     const rows = await db('customer_merge_journal as j')
       .leftJoin('customers as w', 'j.winner_customer_id', 'w.id')
+      .leftJoin('customers as l', 'j.loser_customer_id', 'l.id')
       .select(
         'j.id', 'j.winner_customer_id', 'j.loser_customer_id', 'j.tier', 'j.performed_by',
         'j.created_at', 'j.undone_at', 'j.undone_by', 'j.loser_snapshot', 'j.repointed_ids',
@@ -161,6 +162,9 @@ router.get('/merges', async (req, res) => {
         'w.active as winner_active', 'w.deleted_at as winner_deleted_at',
         // Compared server-side for the revertible flag ONLY — never emitted.
         'w.stripe_customer_id as winner_stripe_customer_id',
+        // The LOSER's live state (revertMerge refuses a purged or
+        // already-live row — the snapshot alone is not the live state).
+        'l.id as loser_row_id', 'l.deleted_at as loser_row_deleted_at',
       )
       .orderBy('j.created_at', 'desc')
       .limit(20);
@@ -298,9 +302,17 @@ router.get('/merges', async (req, res) => {
                 for (const id of ids) journaledVisitIds.add(id);
               }
             }
+            // r8: strand-free = journaled AND currently winner-owned (the
+            // undo moves it back to the loser) OR already loser-owned;
+            // anything else — winner-owned unjournaled, or a journaled
+            // visit drifted to a third customer — makes revertMerge refuse.
             postMergeVisitStrand = (visitsByProperty.get(recorded.linked_property_id) || [])
-              .some((visit) => visit.customer_id === row.winner_customer_id
-                && !journaledVisitIds.has(visit.id));
+              .some((visit) => {
+                const movesBack = journaledVisitIds.has(visit.id)
+                  && visit.customer_id === row.winner_customer_id;
+                const loserOwned = visit.customer_id === row.loser_customer_id;
+                return !movesBack && !loserOwned;
+              });
           }
         }
         return {
@@ -333,6 +345,11 @@ router.get('/merges', async (req, res) => {
             && recorded?.tables
             && row.winner_active === true
             && !row.winner_deleted_at
+            // The merged-away row must EXIST and still be merged-away:
+            // a purged loser cannot be restored, and a live one has
+            // nothing to undo (mirrors revertMerge's refusals).
+            && Boolean(row.loser_row_id)
+            && Boolean(row.loser_row_deleted_at)
             && !collisionHandled
             && !pmMovedWithoutFlags
             && !linkedPropertyUnrecorded

@@ -769,9 +769,18 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     const allPmStripeIds = [...new Set([...winnerPmStripeIds, ...loserPmStripeIds])];
     const effectiveWinnerStripe = winner.stripe_customer_id || loser.stripe_customer_id || null;
     const foreignPmStripe = allPmStripeIds.filter((id) => id !== effectiveWinnerStripe);
+    let stripeDerivedFrom = null;
     if (foreignPmStripe.length) {
       if (!effectiveWinnerStripe && allPmStripeIds.length === 1) {
         derivedStripeCustomerId = allPmStripeIds[0];
+        // WHICH side's cards identified the derived profile — journaled so
+        // an undo knows where the id belongs: 'loser' restores it to the
+        // split-out customer; 'winner'/'both' means the kept customer's
+        // own cards ride it and it stays put (the undo refuses if it would
+        // also return cards onto it).
+        const winnerHasIt = winnerPmStripeIds.includes(derivedStripeCustomerId);
+        const loserHasIt = loserPmStripeIds.includes(derivedStripeCustomerId);
+        stripeDerivedFrom = winnerHasIt && loserHasIt ? 'both' : (winnerHasIt ? 'winner' : 'loser');
       } else {
         throw new Error("executeMerge: saved cards belong to a different Stripe profile than the surviving customer's — resolve in Stripe first");
       }
@@ -1351,6 +1360,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         version: 1,
         tables: repointedIds,
         stripe_transferred_id: backfills.stripe_customer_id || null,
+        // Source of the transferred id: null (nothing transferred),
+        // 'loser' (the loser's row named it — the classic transfer), or
+        // 'loser'/'winner'/'both' when it was DERIVED from saved cards
+        // (whose cards identified it). Drives the undo's restore-vs-stay
+        // decision; see the derivation capture above.
+        stripe_derived_from: backfills.stripe_customer_id
+          ? (derivedStripeCustomerId ? stripeDerivedFrom : 'loser')
+          : null,
         // ORIGINAL per-card default/autopay flags for every loser payment
         // method (the demotion above may have cleared them on the moved
         // rows) — the revert restores them, and REFUSES journals that moved
@@ -1704,6 +1721,35 @@ function parseJsonb(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+// ---------------------------------------------------------------------------
+// UNDO CONTRACT (r8): the undo reverts ONLY UNTOUCHED merges. When any
+// probed surface shows activity on either customer since the merge, the
+// undo REFUSES (409, zero writes) instead of reasoning about how to unwind
+// it — restoration finesse is reserved for state the journal recorded.
+// "Activity" on a probed surface means:
+//   - a row OUTSIDE the journaled repoint set — regardless of created_at
+//     when the surface's rows can be UPDATED in place by soft-pointer
+//     writers (an old booking intent re-captured post-merge keeps its old
+//     created_at), or scoped to created/updated-since-merge for surfaces
+//     where old rows legitimately pre-exist (the winner's own invoices);
+//   - a JOURNALED row whose updated_at moved past the merge (the merge
+//     itself never touches updated_at on plain repoints, and same-
+//     transaction stamps share the merge's transaction timestamp, so
+//     strictly-greater means someone touched it afterwards).
+// ---------------------------------------------------------------------------
+function countActivityRows(rows, { keyColumn = 'id', journaledIds, mergeAt, sinceOnly = false }) {
+  const after = (v) => Boolean(mergeAt && v && new Date(v).getTime() > new Date(mergeAt).getTime());
+  let n = 0;
+  for (const row of rows) {
+    if (journaledIds.has(row[keyColumn])) {
+      if (after(row.updated_at)) n += 1;
+    } else if (!sinceOnly || after(row.created_at) || after(row.updated_at)) {
+      n += 1;
+    }
+  }
+  return n;
+}
+
 // "Still the merge-written value" comparison for directly-applied winner
 // fields (autopay). Timestamps round-trip through the journal's JSON as ISO
 // strings while knex reads them back as Date objects — when both sides parse
@@ -1775,6 +1821,20 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     if (evidence.via === 'admin_link_as_property' && !('linked_property_id' in recorded)) {
       refuse('The property row this merge created was never recorded in the journal — revert by hand');
     }
+    // Shared by every activity probe below: the merge's timestamp and the
+    // journaled key set for a given table (union of that table's recorded
+    // per-row lists; count-only records contribute nothing — their tables
+    // refuse or skip through their own paths).
+    const mergeAt = journal.created_at || null;
+    const journaledIdsFor = (table) => {
+      const set = new Set();
+      for (const [key, ids] of Object.entries(recorded.tables)) {
+        if (key.startsWith(`${table}.`) && Array.isArray(ids)) {
+          for (const id of ids) set.add(id);
+        }
+      }
+      return set;
+    };
     // payment_methods rows moved without their original default/autopay
     // flags journaled: restoring ownership but not the flags could leave
     // autopay charging the wrong card. Fail closed (billing continuity).
@@ -1904,6 +1964,30 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (stillOnWinner.length) plans.push({ key, table, column, pkColumn, ids: stillOnWinner });
     }
 
+    // Payment-method consents are IMMUTABLE authorizations bound to
+    // (customer, method) — hasConsentFor requires both to match, so a
+    // consent captured for the WINNER on a card this undo returns to the
+    // loser authorizes nothing after the split, and a consent row we did
+    // not journal is post-merge activity. Any unjournaled consent tied to
+    // a returned card REFUSES the undo (untouched-merges contract).
+    const pmReturnIds = plans.filter((p) => p.table === 'payment_methods').flatMap((p) => p.ids);
+    if (pmReturnIds.length) {
+      let consentRows = [];
+      try {
+        consentRows = await trx('payment_method_consents')
+          .whereIn('payment_method_id', pmReturnIds)
+          .select('id');
+      } catch (e) {
+        refuse(`Cannot verify payment_method_consents for the returned card(s) (${e.message}) — refusing to revert`);
+      }
+      const consentActivity = countActivityRows(consentRows, {
+        journaledIds: journaledIdsFor('payment_method_consents'), mergeAt,
+      });
+      if (consentActivity) {
+        refuse(`${consentActivity} payment-method consent record(s) tied to the returned card(s) are outside this merge's journal — post-merge authorizations cannot be split back; revert by hand`);
+      }
+    }
+
     const repointedBack = {};
     for (const plan of plans) {
       const count = await trx(plan.table)
@@ -1972,24 +2056,19 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           .forUpdate()
           .select('id', 'customer_id')
         : [];
-      // A visit booked for the WINNER after the merge (references the
-      // property, still winner-owned, absent from the journaled repoint set
-      // — journaled visits were the loser's and moved back above) would be
-      // STRANDED by the transfer: its customer stays the winner while its
-      // property moves to the loser. Moving visits between customers has
-      // billing/comms side effects we must not automate — REFUSE (409; the
-      // throw rolls the transaction back to zero writes). Rebook or
-      // reassign the appointment first, then revert.
-      const journaledVisitIds = new Set();
-      for (const [key, ids] of Object.entries(recorded.tables)) {
-        if (key.startsWith('scheduled_services.') && Array.isArray(ids)) {
-          for (const id of ids) journaledVisitIds.add(id);
-        }
-      }
-      const postMergeVisits = referencingVisits
-        .filter((v) => v.customer_id === winnerId && !journaledVisitIds.has(v.id));
-      if (postMergeVisits.length) {
-        refuse(`${postMergeVisits.length} appointment(s) booked for the kept customer after the merge still reference the linked property — moving visits between customers has billing/comms side effects; rebook or reassign them first, then revert`);
+      // The transfer must leave EVERY referencing visit belonging to the
+      // RESTORED customer. The journaled visits (the loser's own) were
+      // moved back above and read loser-owned here; anything else — a
+      // winner visit booked after the merge, or a journaled visit the
+      // skip path left on the winner or a THIRD customer — would end up
+      // referencing a property on someone else's account. Moving visits
+      // between customers has billing/comms side effects we must not
+      // automate — REFUSE (409; the throw rolls the transaction back to
+      // zero writes). Rebook or reassign the appointment first, then
+      // revert. (Untouched-merges contract.)
+      const strandedVisits = referencingVisits.filter((v) => v.customer_id !== loserId);
+      if (strandedVisits.length) {
+        refuse(`${strandedVisits.length} appointment(s) referencing the linked property would not belong to the restored customer after the undo — moving visits between customers has billing/comms side effects; rebook or reassign them first, then revert`);
       }
       let removed = 0;
       let transferred = 0;
@@ -2030,11 +2109,39 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     const winnerPatch = {};
     let stripeMovedBack = false;
     if (transferredStripe) {
-      if (winner.stripe_customer_id === transferredStripe) {
-        winnerPatch.stripe_customer_id = null;
-        stripeMovedBack = true;
-      } else {
+      if (winner.stripe_customer_id !== transferredStripe) {
         skipped.push({ key: 'customers.stripe_customer_id', reason: 'winner_stripe_changed_since_merge' });
+      } else {
+        // WHICH side supplied the transferred id decides where it goes
+        // back (repointed_ids.stripe_derived_from, journaled at merge
+        // time): null/'loser' — the loser's row named it, or its cards
+        // alone identified it → moves back to the loser as before.
+        // 'winner'/'both' — the KEPT customer's own cards identified the
+        // profile (the derivation aggregates both sides' cards), so it
+        // stays with the winner; if the undo is also returning cards, they
+        // would ride a profile the restored customer doesn't own → REFUSE
+        // ('both' is treated as winner-involved conservatively — the id
+        // cannot follow both sides). Pre-upgrade journals lack the key:
+        // with returned cards the attribution is unknowable → REFUSE
+        // (conservative); without cards, the classic move-back stands.
+        const derivedFrom = Object.prototype.hasOwnProperty.call(recorded, 'stripe_derived_from')
+          ? recorded.stripe_derived_from
+          : undefined;
+        const pmRowsReturned = pmTableKeys.some((k) => {
+          const ids = recorded.tables[k];
+          return Array.isArray(ids) && ids.length > 0;
+        });
+        if (derivedFrom === undefined && pmRowsReturned) {
+          refuse('This merge predates Stripe-derivation records and moved payment methods — which side the transferred profile belongs to cannot be attributed; revert by hand');
+        } else if (derivedFrom === 'winner' || derivedFrom === 'both') {
+          if (pmRowsReturned) {
+            refuse("The transferred Stripe profile was identified from the kept customer's own saved cards — the returned cards would ride a profile the restored customer doesn't own; resolve in Stripe first, then revert");
+          }
+          skipped.push({ key: 'customers.stripe_customer_id', reason: 'stripe_profile_winner_derived' });
+        } else {
+          winnerPatch.stripe_customer_id = null;
+          stripeMovedBack = true;
+        }
       }
     }
     if (backfills.is_primary_profile === true && winner.is_primary_profile === true) {
@@ -2086,16 +2193,6 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // it releases with this undo's commit/rollback.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${winnerId}`]);
       const emailLower = String(backfills.email).trim().toLowerCase();
-      const mergeAt = journal.created_at || null;
-      const journaledIdsFor = (table) => {
-        const set = new Set();
-        for (const [key, ids] of Object.entries(recorded.tables)) {
-          if (key.startsWith(`${table}.`) && Array.isArray(ids)) {
-            for (const id of ids) set.add(id);
-          }
-        }
-        return set;
-      };
       const emailBlockers = [];
       for (const probe of EMAIL_BOUND_SURFACES) {
         let rows = [];
@@ -2103,19 +2200,51 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           let query = trx(probe.table)
             .where(probe.linkColumn, probe.linkValue ? probe.linkValue(winnerId) : winnerId)
             .whereRaw(`lower(${probe.emailColumn}) = ?`, [emailLower])
-            .select('id');
+            .select('id', 'updated_at');
           query = probe.active(query);
-          if (mergeAt) query = query.where('created_at', '>', mergeAt);
+          // Deliberately NO created_at cut (untouched-merges contract):
+          // soft-pointer writers UPDATE old rows in place (capture-intent
+          // re-captures an existing booking intent with post-merge contact
+          // data while its created_at stays pre-merge), so any matching
+          // row outside the journal is activity regardless of age — and a
+          // JOURNALED row whose updated_at moved past the merge is too.
           rows = await query;
         } catch (e) {
           refuse(`Cannot verify ${probe.table} for artifacts bound to the merged-in email (${e.message}) — refusing to revert`);
         }
-        const journaled = journaledIdsFor(probe.table);
-        const found = rows.filter((r) => !journaled.has(r.id));
-        if (found.length) emailBlockers.push(`${found.length} ${probe.label}`);
+        const found = countActivityRows(rows, { journaledIds: journaledIdsFor(probe.table), mergeAt });
+        if (found) emailBlockers.push(`${found} ${probe.label}`);
       }
       if (emailBlockers.length) {
-        refuse(`The kept customer has ${emailBlockers.join(', ')} created after the merge that deliver to the merged-in email — clearing it would orphan them; resolve or re-address those first, then revert`);
+        refuse(`The kept customer has ${emailBlockers.join(', ')} that still deliver to the merged-in email outside this merge's journal — the undo reverts only untouched merges; resolve or re-address them first, then revert`);
+      }
+    }
+    // Inherited billing identity (billing_mode / per_application_fee /
+    // payer_id) clears only on an UNTOUCHED merge: completion billing and
+    // the monthly cron read these LIVE off the customer row, so winner
+    // billing artifacts created or updated since the merge outside the
+    // journal were priced/routed under the inherited values — clearing
+    // them out from under that history is not an exact restoration →
+    // REFUSE. The winner's own pre-merge artifacts are exempt (sinceOnly):
+    // they existed under the winner's original identity.
+    const clearingBillingIdentity = ['billing_mode', 'per_application_fee', 'payer_id']
+      .some((f) => Object.prototype.hasOwnProperty.call(winnerPatch, f) && winnerPatch[f] === null);
+    if (clearingBillingIdentity) {
+      for (const table of ['scheduled_services', 'invoices']) {
+        let rows = [];
+        try {
+          rows = await trx(table)
+            .where({ customer_id: winnerId })
+            .select('id', 'created_at', 'updated_at');
+        } catch (e) {
+          refuse(`Cannot verify ${table} for billing activity since the merge (${e.message}) — refusing to revert`);
+        }
+        const activity = countActivityRows(rows, {
+          journaledIds: journaledIdsFor(table), mergeAt, sinceOnly: true,
+        });
+        if (activity) {
+          refuse(`${activity} ${table} row(s) were created or updated since the merge while the kept customer carried the merged-in billing identity — clearing it now would orphan how they were billed; reconcile billing first, then revert`);
+        }
       }
     }
     // Winner customer-level autopay state the merge overwrote directly (the
@@ -2261,11 +2390,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       });
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      // Email uniqueness tripped (another live row holds it now): restore
-      // everything else and report the email as not restored.
-      const { email: _email, ...rest } = restore;
-      await trx('customers').where({ id: loserId }).update({ ...rest, email: null });
-      skipped.push({ key: 'customers.email', reason: 'email_now_in_use_elsewhere' });
+      // Email uniqueness tripped: another live customer now owns the
+      // address. A null-email partial restoration would leave every
+      // repointed sendable (estimates, contracts, queued runs) targeting
+      // an address that belongs to SOMEONE ELSE — identity cannot be
+      // partially restored. REFUSE the whole transaction (409, zero
+      // writes via rollback). Untouched-merges contract.
+      refuse("The merged-away customer's email address is now used by another live customer — restoring the account without its address would leave its communications targeting someone else's mailbox; resolve the address conflict first, then revert");
     }
 
     await trx('customer_merge_journal').where({ id: journalId }).update({
@@ -2329,6 +2460,7 @@ module.exports = {
   _test: {
     EMAIL_BOUND_SURFACES,
     REPOINT_PK_COLUMNS,
+    countActivityRows,
     phone10,
     normalizeStreetKey,
     namesCompatible,

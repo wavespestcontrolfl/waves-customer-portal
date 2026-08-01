@@ -229,6 +229,7 @@ describe('executeMerge repointed_ids journal record', () => {
     // Polymorphic pointers record ids too.
     expect(recorded.tables['notifications.recipient_id']).toEqual(['note-1']);
     expect(recorded.stripe_transferred_id).toBe(null);
+    expect(recorded.stripe_derived_from).toBe(null);
     // No payment methods, no collisions — clean revertible record.
     expect(recorded.payment_method_flags).toEqual({});
     expect(recorded.collision_handlers).toEqual([]);
@@ -388,6 +389,55 @@ describe('executeMerge repointed_ids journal record', () => {
     expect(recorded.winner_prior_values).toEqual({
       city: 'Sarasota', state: 'FL', zip: '34236',
     });
+  });
+
+  it('journals WHICH side supplied a derived Stripe profile (stripe_derived_from)', async () => {
+    const winner = { id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001', stripe_customer_id: null };
+    const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001', stripe_customer_id: null };
+    const state = { journal: null };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
+      if (table === 'payment_methods') {
+        if (q.called('first')) return null;
+        if (q.called('select')) {
+          const sel = q.args('select');
+          if (sel[0] === 'stripe_customer_id') {
+            // Only the LOSER's cards identify the profile.
+            return q.args('where')[0].customer_id === LOSER
+              ? [{ stripe_customer_id: 'cus_derived' }]
+              : [];
+          }
+          return [];
+        }
+        if (q.called('update')) return 0;
+      }
+      if (q.called('first')) return null;
+      if (q.called('update')) return 0;
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    expect(result.backfills.stripe_customer_id).toBe('cus_derived');
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    expect(recorded.stripe_transferred_id).toBe('cus_derived');
+    // Loser cards alone identified it — the undo may restore it to the
+    // split-out customer. Winner/both attributions make the undo refuse
+    // when cards return on the profile.
+    expect(recorded.stripe_derived_from).toBe('loser');
   });
 
   it('journals customer_refresh_tokens repoints BY JTI (PK override — no id column on that table)', async () => {
@@ -552,6 +602,40 @@ describe('executeMerge repointed_ids journal record', () => {
 });
 
 // ---------------------------------------------------------------------------
+// countActivityRows — the untouched-merges gate (r8)
+// ---------------------------------------------------------------------------
+
+describe('countActivityRows (untouched-merges gate)', () => {
+  const { countActivityRows } = dedupe._test;
+  const MERGE_AT = '2026-07-30T04:00:00Z';
+  const journaledIds = new Set(['j1']);
+
+  it('counts unjournaled rows regardless of age by default; journaled rows only when updated since the merge', () => {
+    const rows = [
+      { id: 'j1' }, // journaled, untouched → not activity
+      { id: 'j1x', updated_at: '2026-07-29T00:00:00Z' }, // unjournaled, old → activity (default)
+      { id: 'new', created_at: '2026-07-30T09:00:00Z' }, // unjournaled, new → activity
+    ];
+    expect(countActivityRows(rows, { journaledIds, mergeAt: MERGE_AT })).toBe(2);
+    // A journaled row TOUCHED after the merge is activity.
+    expect(countActivityRows([{ id: 'j1', updated_at: '2026-07-30T09:00:00Z' }],
+      { journaledIds, mergeAt: MERGE_AT })).toBe(1);
+    // Same-transaction stamps (== mergeAt) are the merge's own writes.
+    expect(countActivityRows([{ id: 'j1', updated_at: MERGE_AT }],
+      { journaledIds, mergeAt: MERGE_AT })).toBe(0);
+  });
+
+  it('sinceOnly exempts unjournaled rows that predate the merge (the winner\'s own history)', () => {
+    const rows = [
+      { id: 'own', created_at: '2026-07-01T00:00:00Z' }, // pre-merge → exempt
+      { id: 'new', created_at: '2026-07-30T09:00:00Z' }, // post-merge → activity
+      { id: 'upd', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-30T09:00:00Z' }, // old row touched → activity
+    ];
+    expect(countActivityRows(rows, { journaledIds, mergeAt: MERGE_AT, sinceOnly: true })).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // EMAIL_BOUND_SURFACES — fanout-registry mirror pins
 // ---------------------------------------------------------------------------
 
@@ -574,7 +658,7 @@ describe('revertMerge', () => {
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
   const JOURNAL = 'cccccccc-0000-0000-0000-000000000001';
 
-  function buildRevertTrx({ journal, winner, loser, tables = {} }) {
+  function buildRevertTrx({ journal, winner, loser, tables = {}, loserEmailConflict = false }) {
     const state = {
       repointedBack: [], winnerPatch: null, loserRestore: null, journalUpdate: null,
       decremented: null, flagRestores: [], propertyDeleted: null, propertyTransferred: null,
@@ -592,6 +676,11 @@ describe('revertMerge', () => {
         if (q.called('update')) {
           const whereArg = q.args('where')?.[0];
           if (whereArg && whereArg.id === winner?.id) { state.winnerPatch = q.args('update')[0]; return 1; }
+          if (loserEmailConflict) {
+            const e = new Error('duplicate key value violates unique constraint "customers_email_unique"');
+            e.code = '23505';
+            throw e;
+          }
           state.loserRestore = q.args('update')[0];
           return 1;
         }
@@ -600,12 +689,21 @@ describe('revertMerge', () => {
       // Row-id verification selects are the only ones using whereIn('id',…)
       // — everything else on these tables is a probe.
       const isIdVerification = q.called('whereIn') && q.args('whereIn')?.[0] === 'id';
-      // The linked-property undo probes for referencing visits (the FK is
-      // ON DELETE SET NULL, so only this probe can catch them) — under
-      // FOR UPDATE since r5.
+      // scheduled_services has TWO probes: referencing visits (selects
+      // customer_id, FOR UPDATE) and the billing-activity gate (selects
+      // created_at/updated_at).
       if (table === 'scheduled_services' && q.called('select') && !isIdVerification) {
-        state.visitProbe = { forUpdate: q.called('forUpdate') };
-        return (tables.scheduled_services && tables.scheduled_services.referencingVisits) || [];
+        const sel = q.args('select') || [];
+        if (sel.includes('customer_id')) {
+          state.visitProbe = { forUpdate: q.called('forUpdate') };
+          return (tables.scheduled_services && tables.scheduled_services.referencingVisits) || [];
+        }
+        return (tables.scheduled_services && tables.scheduled_services.billingRows) || [];
+      }
+      // Consent rows tied to returned cards (whereIn is on
+      // payment_method_id, not id — still a probe).
+      if (table === 'payment_method_consents' && q.called('select')) {
+        return (tables.payment_method_consents && tables.payment_method_consents.rows) || [];
       }
       // Email-bound artifact probes — every EMAIL_BOUND_SURFACES table (the
       // fanout-registry mirror). Status filters may use whereIn — still a
@@ -647,9 +745,9 @@ describe('revertMerge', () => {
           return 1;
         }
         if (q.called('select')) {
-          // Non-whereIn select = the winner's CURRENT payment methods (the
-          // post-merge-cards refusal probe), not a verification pass.
-          if (!q.called('whereIn')) return cfg.winnerCards || [];
+          // Non-whereIn select = a probe (current winner cards, or the
+          // billing-activity gate's rows), not a verification pass.
+          if (!q.called('whereIn')) return cfg.probeRows || cfg.winnerCards || [];
           state.verified.push({ table, forUpdate: q.called('forUpdate') });
           // Rows shaped by the verification's key column ('id', or a
           // REPOINT_PK_COLUMNS override like customer_refresh_tokens.jti).
@@ -673,6 +771,7 @@ describe('revertMerge', () => {
     winner_customer_id: WINNER,
     loser_customer_id: LOSER,
     undone_at: null,
+    created_at: '2026-07-30T04:00:00Z',
     loser_snapshot: {
       id: LOSER, first_name: 'Loser', last_name: null, phone: '5550000001',
       email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only', account_credits: 0,
@@ -681,6 +780,7 @@ describe('revertMerge', () => {
       version: 1,
       tables: { 'leads.customer_id': ['lead-1', 'lead-2'], 'invoices.customer_id': ['inv-1'] },
       stripe_transferred_id: 'cus_only',
+      stripe_derived_from: 'loser',
       payment_method_flags: {},
       collision_handlers: [],
     },
@@ -1163,7 +1263,7 @@ describe('revertMerge', () => {
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
-      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/appointment.*booked for the kept customer after the merge/) });
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/appointment.*would not belong to the restored customer/) });
     // The refusal throw rolls the transaction back — journal never stamped,
     // property neither transferred nor deleted.
     expect(state.journalUpdate).toBe(null);
@@ -1171,12 +1271,42 @@ describe('revertMerge', () => {
     expect(state.propertyDeleted).toBe(null);
   });
 
+  it('refuses (409) when a JOURNALED referencing visit drifted to a THIRD customer (the skip path) — the transfer would strand it', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    journal.repointed_ids.linked_property_id = 'prop-9';
+    // visit-1 is journaled but no longer on the winner (rows_changed skip
+    // path): the reverse repoint leaves it where it drifted, so after the
+    // undo it would reference a property on someone else's account.
+    journal.repointed_ids.tables['scheduled_services.customer_id'] = ['visit-1'];
+    const THIRD = 'dddddddd-0000-0000-0000-000000000009';
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        scheduled_services: {
+          stillOnWinner: [],
+          referencingVisits: [{ id: 'visit-1', customer_id: THIRD }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/would not belong to the restored customer/) });
+    expect(state.journalUpdate).toBe(null);
+    expect(state.propertyTransferred).toBe(null);
+  });
+
   it('still TRANSFERS when the only referencing visits are in the journaled repoint set (they move back anyway)', async () => {
     const journal = baseJournal();
     journal.evidence = { via: 'admin_link_as_property' };
     journal.repointed_ids.linked_property_id = 'prop-9';
     // visit-1 is journaled: it was the loser's, repointed by the merge, and
-    // the undo moves it back — winner-owned at probe time must NOT refuse.
+    // the undo moved it back BEFORE this probe runs — so it reads
+    // loser-owned here and must NOT refuse the transfer.
     journal.repointed_ids.tables['scheduled_services.customer_id'] = ['visit-1'];
     const { trx, state } = buildRevertTrx({
       journal,
@@ -1187,7 +1317,7 @@ describe('revertMerge', () => {
         invoices: { stillOnWinner: ['inv-1'] },
         scheduled_services: {
           stillOnWinner: ['visit-1'],
-          referencingVisits: [{ id: 'visit-1', customer_id: WINNER }],
+          referencingVisits: [{ id: 'visit-1', customer_id: LOSER }],
         },
       },
     });
@@ -1260,6 +1390,213 @@ describe('revertMerge', () => {
     expect(state.winnerPatch.email).toBe(null);
     expect(result.repointedBack['estimates.customer_id']).toBe(1);
     expect(state.journalUpdate.undone_at).toBeTruthy();
+  });
+
+  it('refuses when a JOURNALED email-bound row was UPDATED since the merge (activity on state about to move back)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['estimates.customer_id'] = ['est-1'];
+    const { trx } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        estimates: {
+          stillOnWinner: ['est-1'],
+          // Journaled, but touched after the merge (created 07-30 04:00).
+          emailArtifacts: [{ id: 'est-1', updated_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/1 open estimate.*deliver to the merged-in email/) });
+  });
+
+  it('refuses on an OLD unjournaled email-bound row — soft-pointer writers update in place, so age proves nothing', async () => {
+    const journal = baseJournal();
+    const { trx } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // Pre-merge created_at (07-01) — the r4 created_at cut would have
+        // let this slide even though /capture-intent can have re-pointed
+        // its contact fields at the merged-in email afterwards.
+        booking_intents: { emailArtifacts: [{ id: 'bi-old', created_at: '2026-07-01T00:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/pending booking follow-up.*deliver to the merged-in email/) });
+  });
+
+  it("refuses (409, zero writes) when the loser's email is now used by another live customer — identity is never partially restored", async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+      loserEmailConflict: true,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/email address is now used by another live customer/) });
+    // No null-email partial restoration, journal never stamped.
+    expect(state.loserRestore).toBe(null);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses billing-identity clears when winner billing artifacts were created/updated since the merge (activity gate)', async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = { ...journal.winner_backfills, billing_mode: 'per_application', per_application_fee: '65.00' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), billing_mode: 'per_application', per_application_fee: '65.00' },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: {
+          stillOnWinner: ['inv-1'],
+          // inv-1 is journaled and untouched; inv-new was created after the
+          // merge under the inherited billing identity.
+          probeRows: [{ id: 'inv-1' }, { id: 'inv-new', created_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/invoices row\(s\) were created or updated since the merge/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it("winner's own PRE-MERGE billing artifacts do not block the clear (sinceOnly) — the gate targets post-merge activity", async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = { ...journal.winner_backfills, payer_id: 5 };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), payer_id: 5 },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: {
+          stillOnWinner: ['inv-1'],
+          // Unjournaled but created BEFORE the merge — the winner's own
+          // history under its own identity.
+          probeRows: [{ id: 'inv-own', created_at: '2026-07-01T00:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch.payer_id).toBe(null);
+    expect(result.skipped).toHaveLength(0);
+  });
+
+  it('refuses (409) on unjournaled payment_method_consents tied to a returned card; journaled consents pass', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['payment_methods.customer_id'] = ['pm-1'];
+    journal.repointed_ids.payment_method_flags = { 'pm-1': { is_default: false, autopay_enabled: false } };
+    const cfgWith = (consentRows, extraTables = {}) => ({
+      journal: JSON.parse(JSON.stringify(journal)),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        payment_methods: {
+          stillOnWinner: ['pm-1'],
+          winnerCards: [{ id: 'pm-1', stripe_customer_id: 'cus_only' }],
+        },
+        payment_method_consents: { rows: consentRows },
+        ...extraTables,
+      },
+    });
+    // Unjournaled consent captured post-merge for the winner on the card →
+    // refuse (immutable authorization bound to customer+method).
+    const bad = buildRevertTrx(cfgWith([{ id: 'cons-new' }]));
+    db.transaction.mockImplementation(async (fn) => fn(bad.trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/consent record\(s\) tied to the returned card/) });
+    expect(bad.state.journalUpdate).toBe(null);
+
+    // The loser's own journaled consent moves back with everything else.
+    jest.clearAllMocks();
+    const okCfg = cfgWith([{ id: 'cons-1' }]);
+    okCfg.journal.repointed_ids.tables['payment_method_consents.customer_id'] = ['cons-1'];
+    okCfg.tables.payment_method_consents.rows = [{ id: 'cons-1' }];
+    okCfg.tables.payment_method_consents.stillOnWinner = ['cons-1'];
+    const ok = buildRevertTrx(okCfg);
+    db.transaction.mockImplementation(async (fn) => fn(ok.trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['payment_methods.customer_id']).toBe(1);
+    expect(ok.state.journalUpdate.undone_at).toBeTruthy();
+  });
+
+  it('Stripe derivation side attribution: winner/both-derived stays with the winner; returned cards on it REFUSE; pre-upgrade journals with cards REFUSE', async () => {
+    const build = (derivedFrom, { withCards = true, deleteKey = false } = {}) => {
+      const journal = baseJournal();
+      journal.loser_snapshot.stripe_customer_id = null;
+      journal.repointed_ids.stripe_transferred_id = 'cus_derived';
+      journal.winner_backfills = { stripe_customer_id: 'cus_derived' };
+      if (deleteKey) delete journal.repointed_ids.stripe_derived_from;
+      else journal.repointed_ids.stripe_derived_from = derivedFrom;
+      if (withCards) {
+        journal.repointed_ids.tables['payment_methods.customer_id'] = ['pm-1'];
+        journal.repointed_ids.payment_method_flags = { 'pm-1': { is_default: false, autopay_enabled: false } };
+      }
+      return buildRevertTrx({
+        journal,
+        winner: { ...baseWinner(), email: null, stripe_customer_id: 'cus_derived' },
+        loser: baseLoser(),
+        tables: {
+          leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+          invoices: { stillOnWinner: ['inv-1'] },
+          ...(withCards ? {
+            payment_methods: {
+              stillOnWinner: ['pm-1'],
+              winnerCards: [{ id: 'pm-1', stripe_customer_id: 'cus_derived' }],
+            },
+          } : {}),
+        },
+      });
+    };
+    // winner-derived + returned cards → refuse.
+    const w = build('winner');
+    db.transaction.mockImplementation(async (fn) => fn(w.trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/identified from the kept customer's own saved cards/) });
+
+    // both-derived is winner-involved (conservative) → same refusal.
+    jest.clearAllMocks();
+    const b = build('both');
+    db.transaction.mockImplementation(async (fn) => fn(b.trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409 });
+
+    // winner-derived with NO returned cards: the id stays with the winner
+    // (skip-reported), the loser restores without it.
+    jest.clearAllMocks();
+    const noCards = build('winner', { withCards: false });
+    db.transaction.mockImplementation(async (fn) => fn(noCards.trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.stripeMovedBack).toBe(false);
+    expect(noCards.state.winnerPatch?.stripe_customer_id).toBeUndefined();
+    expect(noCards.state.loserRestore.stripe_customer_id).toBeUndefined();
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customers.stripe_customer_id', reason: 'stripe_profile_winner_derived' }),
+    ]));
+
+    // Pre-upgrade journal (no stripe_derived_from) + returned cards →
+    // attribution unknowable → refuse.
+    jest.clearAllMocks();
+    const pre = build(null, { deleteKey: true });
+    db.transaction.mockImplementation(async (fn) => fn(pre.trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/predates Stripe-derivation records/) });
   });
 
   it('refuses (409, zero writes) when NEW payment methods joined the transferred Stripe profile after the merge', async () => {
@@ -1615,6 +1952,9 @@ describe('revertMerge', () => {
       winner_active: true,
       winner_deleted_at: null,
       winner_stripe_customer_id: null,
+      // r8: the loser row must exist and still be merged-away.
+      loser_row_id: LOSER,
+      loser_row_deleted_at: '2026-07-30T04:40:00Z',
       ...overrides,
     });
     // Purged winner: the left join leaves every winner column null — the
@@ -1649,6 +1989,18 @@ describe('revertMerge', () => {
       expect(resLive.status).toBe(200);
       const bodyLive = await resLive.json();
       expect(bodyLive.merges[0].revertible).toBe(true);
+
+      // r8: a PURGED loser row (left-join nulls) is not revertible — the
+      // snapshot alone is not the live state revertMerge checks.
+      listRows = [journalRow({ loser_row_id: null, loser_row_deleted_at: null })];
+      const resPurgedLoser = await fetch(`${base}/dup/merges`);
+      expect((await resPurgedLoser.json()).merges[0].revertible).toBe(false);
+
+      // r8: a loser row that is ALREADY LIVE again (deleted_at null) has
+      // nothing to undo.
+      listRows = [journalRow({ loser_row_deleted_at: null })];
+      const resLiveLoser = await fetch(`${base}/dup/merges`);
+      expect((await resLiveLoser.json()).merges[0].revertible).toBe(false);
     } finally {
       await new Promise((resolve) => { server.close(resolve); });
     }

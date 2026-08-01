@@ -2892,16 +2892,37 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))
         .orderBy('captured_at', 'desc').first('id');
     }
-    if (open) {
-      // Guard against a stale capture overwriting corrected contact: only apply if
-      // this request's client timestamp is >= the stored one (or either is absent).
-      const upd = db('booking_intents').where({ id: open.id });
-      if (clientTs != null) upd.where((q) => q.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs));
-      const affected = await upd.update(row);
-      return res.json({ ok: true, intent_id: open.id, updated: affected === 1, stale: affected === 0 });
-    }
-    const [created] = await db('booking_intents').insert(row).returning('id');
-    return res.json({ ok: true, intent_id: created?.id || created, created: true });
+    const writeIntent = async (conn) => {
+      if (open) {
+        // Guard against a stale capture overwriting corrected contact: only apply if
+        // this request's client timestamp is >= the stored one (or either is absent).
+        const upd = conn('booking_intents').where({ id: open.id });
+        if (clientTs != null) upd.where((q) => q.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs));
+        const affected = await upd.update(row);
+        return { ok: true, intent_id: open.id, updated: affected === 1, stale: affected === 0 };
+      }
+      const [created] = await conn('booking_intents').insert(row).returning('id');
+      return { ok: true, intent_id: created?.id || created, created: true };
+    };
+    // Customer-linked captures serialize against an in-flight customer-merge
+    // UNDO probing this customer's email-bound rows (customer-dedupe.js
+    // revertMerge email guard): this write UPDATES an existing intent in
+    // place (customer_id untouched), so neither the FK nor the undo's row
+    // locks fence it — both sides take the same per-customer advisory lock,
+    // like the template-run executor's insert path. KEY DERIVATION (must
+    // stay byte-identical to customer-dedupe.js and
+    // email-template-automation-executor.js — extend ALL in the same
+    // commit): pg_advisory_xact_lock(hashtextextended(
+    //   'customer-comms:' || <customer id>, 0)) — transaction-scoped.
+    // Anonymous captures (no customer match) skip the lock: the undo's
+    // probes only match customer-linked rows.
+    const result = row.customer_id
+      ? await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${row.customer_id}`]);
+        return writeIntent(trx);
+      })
+      : await writeIntent(db);
+    return res.json(result);
   } catch (err) {
     logger.error(`[booking:capture-intent] failed: ${err.message}`);
     return res.json({ ok: false }); // fire-and-forget — never block the funnel
