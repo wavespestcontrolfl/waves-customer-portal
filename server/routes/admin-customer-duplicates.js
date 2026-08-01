@@ -234,12 +234,12 @@ router.get('/merges', async (req, res) => {
     // number of queries regardless of merge count:
     //   1. a journaled invoice TOUCHED since the merge (revertMerge's
     //      verification-pass updated_at check on financial rows);
-    //   2. payment children — payments (invoice linkage lives in metadata
+    //   2. invoice children — payments (invoice linkage lives in metadata
     //      jsonb: invoice_id / dispute_invoice_id / waves_invoice_id, the
-    //      same resolution invoice.js uses), customer_credit_ledger and
-    //      payment_plans (real invoice_id columns) — recorded against a
-    //      journaled invoice from OUTSIDE the journal (revertMerge's
-    //      pre-write invoiceChildProbes).
+    //      same resolution invoice.js uses), customer_credit_ledger,
+    //      payment_plans and invoice_followup_sequences (real invoice_id
+    //      columns) — recorded against a journaled invoice from OUTSIDE
+    //      the journal (revertMerge's pre-write invoiceChildProbes).
     // Counting goes through the exported countActivityRows so the predicate
     // can never drift from the endpoint's own. Failed lookups mark affected
     // merges non-revertible (fail closed, same posture as the card/visit
@@ -282,7 +282,7 @@ router.get('/merges', async (req, res) => {
           invoiceIds: [p.linked_invoice_id, p.linked_dispute_invoice_id, p.linked_waves_invoice_id].filter(Boolean),
           row: p,
         })));
-        for (const childTable of ['customer_credit_ledger', 'payment_plans']) {
+        for (const childTable of ['customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences']) {
           const childRows = await db(childTable)
             .whereIn('invoice_id', allJournaledInvoiceIds)
             .select(['id', 'invoice_id', ...activityColumnsFor(childTable)]);
@@ -420,7 +420,7 @@ router.get('/merges', async (req, res) => {
               }) > 0;
               // 2. Payment children outside the journal (invoiceChildProbes).
               if (!invoiceActivityRefuses) {
-                for (const childTable of ['payments', 'customer_credit_ledger', 'payment_plans']) {
+                for (const childTable of ['payments', 'customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences']) {
                   const childRows = (invoiceChildrenByTable.get(childTable) || [])
                     .filter((c) => c.invoiceIds.some((id) => journaledInvoiceIds.has(id)))
                     .map((c) => c.row);
@@ -456,15 +456,16 @@ router.get('/merges', async (req, res) => {
           //
           // MIRRORED activity refusals (batchable — a fixed number of
           // queries per page): journaled-invoice touched-since-merge and
-          // invoice payment-children (payments / credit-ledger entries /
-          // payment plans) outside the journal — invoiceActivityRefuses
-          // above.
+          // invoice children (payments / credit-ledger entries / payment
+          // plans / dunning follow-up sequences) outside the journal —
+          // invoiceActivityRefuses above.
           // DOCUMENTED EXCEPTIONS to the never-offer-a-409 contract (each
           // needs per-merge live probes across many tables or the locked
           // winner/loser row state, too heavy for this list — the revert
           // endpoint 409s with a clear, actionable reason instead):
           // email/name-bound identity artifact probes (EMAIL_BOUND_SURFACES),
-          // the billing-identity and address-clear activity gates,
+          // the billing-identity, address-clear and service-contact-clear
+          // activity gates,
           // non-invoice journaled-row activity (estimates / visits /
           // contracts updated_at), children minted by journaled estimates /
           // visits / contracts, since-merge recipient_optin rows,

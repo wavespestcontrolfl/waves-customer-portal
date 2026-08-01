@@ -1805,6 +1805,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   notification_prefs: ['created_at', 'updated_at'],
   customer_contracts: ['created_at', 'updated_at'],
   booking_intents: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260414000032.
+  invoice_followup_sequences: ['created_at', 'updated_at'],
   newsletter_subscribers: ['created_at', 'updated_at'],
   customer_properties: ['created_at', 'updated_at'],
   // created_at ONLY (20260617120000, 20260401000107, 20260424000014,
@@ -2216,6 +2218,23 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
           label: 'payment plan(s)',
         },
+        // Dunning follow-up sequences (r17): invoice finalization calls
+        // scheduleForInvoice(invoiceId) even when its guarded invoice
+        // UPDATE didn't win (invoice.js — the call sits OUTSIDE the
+        // `if (updated)` block), so a post-merge sequence can appear for a
+        // journaled invoice while the invoice row itself never moves — no
+        // updated_at drift, nothing the other gates watch. The sequence
+        // pauses/drives the invoice's collection path, so moving the
+        // invoice back while a winner-side sequence keeps dunning it splits
+        // collection state across customers. Linkage verified against
+        // 20260414000032: invoice_id uuid FK (unique — one sequence per
+        // invoice), timestamps(true, true).
+        {
+          table: 'invoice_followup_sequences',
+          query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
+          label: 'dunning follow-up sequence(s)',
+          consequence: 'undoing would separate the invoice from the follow-up sequence dunning it',
+        },
       ];
       for (const probe of invoiceChildProbes) {
         let rows = [];
@@ -2229,7 +2248,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           journaledIds: journaledIdsFor(probe.table), mergeAt, table: probe.table,
         });
         if (activity) {
-          refuse(`${activity} ${probe.label} recorded against this merge's invoices are outside its journal — undoing would separate the invoice from the money that settled it; reconcile by hand`);
+          refuse(`${activity} ${probe.label} recorded against this merge's invoices are outside its journal — ${probe.consequence || 'undoing would separate the invoice from the money that settled it'}; reconcile by hand`);
         }
       }
     }
@@ -2374,10 +2393,37 @@ async function revertMerge({ journalId, performedBy, performedById }) {
 
     const repointedBack = {};
     for (const plan of plans) {
+      const repointPayload = { [plan.column]: loserId };
+      // FRESHNESS-INVALIDATING repoint (r17): the FOR UPDATE taken in the
+      // verification pass serializes a concurrent terminal transition, but
+      // serialization alone is not enough for writers that resume AFTER
+      // this undo commits holding a PRE-undo read. The estimate accept
+      // flow's compare-and-swap (estimate-public.js — ms-truncated
+      // updated_at equality, and the bond-switch CAS beside it) only fails
+      // if updated_at MOVED — and a bare customer_id repoint never moves
+      // it, so a blocked acceptance would resume, pass its freshness check
+      // against the repointed row, and mint children for the customer it
+      // read before the undo. Bumping updated_at on every reverse-repointed
+      // ACTIVITY_CHECKED_TABLES row (estimates, and uniformly visits +
+      // contracts — their writers guard by status today, but any future
+      // updated_at freshness check must fail the same way) makes every
+      // stale CAS 0-row → the writer's existing 409/reload recovery.
+      // Financial tables are deliberately NOT bumped: their post-lock
+      // writers re-read state from the locked row (the settlement-
+      // ownership pattern), their exactness contract is count+lock based,
+      // and a bump would make the GET /merges invoice-activity mirror read
+      // this undo itself as activity on other journals sharing the row.
+      // No re-entry hazard: this journal is stamped undone_at below (a
+      // second revert refuses, and the /merges mirrors skip undone rows);
+      // a LATER undo of a DIFFERENT journal that recorded the same row
+      // reads the bump as post-merge activity and refuses — fail-closed,
+      // exactly the untouched-merges contract (an interleaved undo IS
+      // activity).
+      if (ACTIVITY_CHECKED_TABLES.has(plan.table)) repointPayload.updated_at = trx.fn.now();
       const count = await trx(plan.table)
         .whereIn(plan.pkColumn, plan.ids)
         .where(plan.column, winnerId)
-        .update({ [plan.column]: loserId });
+        .update(repointPayload);
       // The update must cover EXACTLY the verified rows. On a financial
       // table any shortfall aborts (throw → transaction rollback → zero
       // writes); elsewhere it is reported like any other moved-on row.
@@ -2724,6 +2770,42 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       });
       if (orphanedVisits) {
         refuse(`${orphanedVisits} appointment(s) booked on the kept customer since the merge render their service address from the customer row (no per-visit address stamp) — changing that address now would re-route them to a different property; stamp or correct their service addresses first, then revert`);
+      }
+    }
+    // Inherited SERVICE-CONTACT clears guard post-merge appointments (r17):
+    // appointment/service-report comms resolve their recipients LIVE from
+    // the customer row at send time (customer-contact.js
+    // getAppointmentContacts reads the service_contact* slots gated by the
+    // service_contacts_consent_* stamp — scheduled_services rows snapshot
+    // NO contact fields), so a visit booked on the winner since the merge
+    // relies on the inherited slots for who gets its reminders and reports
+    // (recent completions still fan service-report emails, so no status
+    // filter). Vacating the slots — or changing the consent stamp that
+    // gates the same fanout — out from under those visits silently
+    // re-routes their comms to the primary only. Same posture as the
+    // address guard above: probe winner-owned visits for since-merge
+    // activity (journaled visits are the loser's — already repointed back
+    // and out of this winner-scoped read) and REFUSE rather than mutate
+    // comms routing mid-undo. The startsWith predicate deliberately covers
+    // the consent columns too: a consent restore only ever rides an undo
+    // that simultaneously vacates loser slots, and failing closed on it is
+    // the activity-gate contract.
+    const clearingInheritedServiceContacts = Object.keys(winnerPatch)
+      .some((f) => f.startsWith('service_contact'));
+    if (clearingInheritedServiceContacts) {
+      let contactVisitRows = [];
+      try {
+        contactVisitRows = await trx('scheduled_services')
+          .where({ customer_id: winnerId })
+          .select(['id', ...activityColumnsFor('scheduled_services')]);
+      } catch (e) {
+        refuse(`Cannot verify scheduled_services for appointments relying on the merged-in service contacts (${e.message}) — refusing to revert`);
+      }
+      const contactOrphans = countActivityRows(contactVisitRows, {
+        journaledIds: journaledIdsFor('scheduled_services'), mergeAt, sinceOnly: true, table: 'scheduled_services',
+      });
+      if (contactOrphans) {
+        refuse(`${contactOrphans} appointment(s) booked on the kept customer since the merge resolve their reminder/report contacts live from the customer row — clearing the merged-in service contacts now would silently re-route those comms; confirm or re-enter the contacts first, then revert`);
       }
     }
     // Cached credit balance: when recorded ledger rows moved back above,

@@ -721,6 +721,7 @@ describe('revertMerge', () => {
     notification_prefs: ['created_at', 'updated_at'],
     customer_contracts: ['created_at', 'updated_at'],
     booking_intents: ['created_at', 'updated_at'],
+    invoice_followup_sequences: ['created_at', 'updated_at'],
     newsletter_subscribers: ['created_at', 'updated_at'],
     customer_properties: ['created_at', 'updated_at'],
     customer_refresh_tokens: ['created_at', 'updated_at'],
@@ -818,7 +819,10 @@ describe('revertMerge', () => {
           state.visitProbe = { forUpdate: q.called('forUpdate') };
           return (tables.scheduled_services && tables.scheduled_services.referencingVisits) || [];
         }
-        return (tables.scheduled_services && tables.scheduled_services.billingRows) || [];
+        // Same id+timestamps shape serves the billing-identity gate and the
+        // r17 service-contact guard — fixtures name whichever they exercise.
+        return (tables.scheduled_services
+          && (tables.scheduled_services.billingRows || tables.scheduled_services.contactVisits)) || [];
       }
       // recipient_optin activity probe (whereIn on customer_id).
       if (table === 'recipient_optin' && q.called('select')) {
@@ -1022,6 +1026,127 @@ describe('revertMerge', () => {
       // History tables still verify lock-free.
       { table: 'leads', forUpdate: false },
     ]));
+
+    // r17: the reverse repoint BUMPS updated_at on activity-checked rows.
+    // The lock alone doesn't invalidate a stale writer: the estimate accept
+    // flow's freshness check is a ms-truncated updated_at EQUALITY
+    // (estimate-public.js accept CAS + the bond-switch CAS), so a writer
+    // that read the row pre-undo, blocked on our lock, and resumed after
+    // commit would still pass it against a bare customer_id repoint — and
+    // mint children for the customer it read before the undo. A bumped
+    // updated_at makes that CAS 0-row → the writer's own 409/reload path.
+    const byTable = Object.fromEntries(state.repointedBack.map((r) => [r.table, r]));
+    expect(byTable.estimates.payload.updated_at).toBe('NOW()');
+    expect(byTable.scheduled_services.payload.updated_at).toBe('NOW()');
+    expect(byTable.customer_contracts.payload.updated_at).toBe('NOW()');
+    // Non-activity-checked repoints stay bare — bumping e.g. invoices would
+    // make the /merges invoice-activity mirror read the undo itself as
+    // activity on other journals sharing the row.
+    expect(byTable.leads.payload).toEqual({ customer_id: LOSER });
+  });
+
+  it('refuses (409) when a dunning follow-up sequence outside the journal keys on a journaled invoice (r17 — finalization schedules even without winning the invoice update)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // invoice.js finalization calls scheduleForInvoice even when its
+        // guarded invoice UPDATE didn't win — the sequence appears with NO
+        // invoice updated_at drift, so this probe is the only signal.
+        invoice_followup_sequences: {
+          invoiceChildren: [{ id: 'seq-post-merge', created_at: '2026-07-30T06:00:00Z', updated_at: '2026-07-30T06:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/dunning follow-up sequence/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('a JOURNALED, untouched dunning sequence still reverts — it moves back with the invoice (control)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['invoice_followup_sequences.customer_id'] = ['seq-1'];
+    const { trx } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        invoice_followup_sequences: {
+          stillOnWinner: ['seq-1'],
+          invoiceChildren: [{ id: 'seq-1', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['invoice_followup_sequences.customer_id']).toBe(1);
+  });
+
+  it('refuses (409) when clearing inherited SERVICE CONTACTS would orphan a since-merge appointment\'s comms routing (r17)', async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = {
+      email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only',
+      service_contact_name: 'Pat Renter', service_contact_phone: '+15550001111',
+    };
+    // Winner still carries the inherited slot; appointment/service-report
+    // comms resolve recipients LIVE from these columns at send time
+    // (getAppointmentContacts — visits snapshot no contact fields), so a
+    // since-merge visit relies on them for who gets its reminders/reports.
+    const winner = { ...baseWinner(), service_contact_name: 'Pat Renter', service_contact_phone: '+15550001111' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner,
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        scheduled_services: {
+          contactVisits: [{ id: 'svc-post-merge', created_at: '2026-07-30T06:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({
+        statusCode: 409,
+        message: expect.stringMatching(/resolve their reminder\/report contacts live from the customer row/),
+      });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('clearing inherited service contacts proceeds when winner appointments are all PRE-merge (control for the r17 guard)', async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = {
+      email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only',
+      service_contact_name: 'Pat Renter', service_contact_phone: '+15550001111',
+    };
+    const winner = { ...baseWinner(), service_contact_name: 'Pat Renter', service_contact_phone: '+15550001111' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner,
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        scheduled_services: {
+          // Booked before the merge — it ran under the winner's own
+          // (contact-less) routing and is not orphaned by the clear.
+          contactVisits: [{ id: 'svc-pre-merge', created_at: '2026-07-29T00:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch.service_contact_name).toBe(null);
+    expect(state.winnerPatch.service_contact_phone).toBe(null);
+    expect(result.skipped).toHaveLength(0);
   });
 
   it('refuses (409) when clearing an inherited address would orphan a since-merge visit that has no service-address stamp (r16)', async () => {
@@ -2912,6 +3037,7 @@ describe('revertMerge', () => {
       payments: [],
       credit_ledger: [],
       payment_plans: [],
+      followup_sequences: [],
       invoicesThrow: false,
     };
     // The batched probes go through the plain db connection; db.raw feeds
@@ -2926,6 +3052,7 @@ describe('revertMerge', () => {
       if (table === 'payments') return state.payments;
       if (table === 'customer_credit_ledger') return state.credit_ledger;
       if (table === 'payment_plans') return state.payment_plans;
+      if (table === 'invoice_followup_sequences') return state.followup_sequences;
       return [];
     });
     const app = express();
@@ -2973,6 +3100,13 @@ describe('revertMerge', () => {
       state.credit_ledger = [{ id: 'ledger-post-merge', invoice_id: 'inv-1', created_at: '2026-07-30T06:00:00Z' }];
       expect(await getFlag(base)).toBe(false);
       state.credit_ledger = [];
+
+      // 4b. Dunning follow-up sequence outside the journal (r17): invoice
+      //     finalization schedules one even when its guarded invoice update
+      //     didn't win, so the invoice row itself shows no drift.
+      state.followup_sequences = [{ id: 'seq-post-merge', invoice_id: 'inv-1', created_at: '2026-07-30T06:00:00Z', updated_at: '2026-07-30T06:00:00Z' }];
+      expect(await getFlag(base)).toBe(false);
+      state.followup_sequences = [];
 
       // 5. Fail closed: an unreadable probe marks the invoice-bearing merge
       //    non-revertible (same posture as the card/visit mirrors).
