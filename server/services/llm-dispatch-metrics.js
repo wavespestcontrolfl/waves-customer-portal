@@ -233,15 +233,30 @@ async function emailAlert(day, exceptions) {
 async function alertRecorderUnreachable(reason) {
   if (!isEnabled()) return { skipped: 'gate_off' };
   try {
-    const db = require('../models/db');
-    await Promise.race([
-      db.raw('SELECT 1'),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('confirm timeout')), 5000)),
-    ]);
-    logger.warn(`[llm-dispatch-metrics] lock acquisition failed (${reason}) but the DB answers a direct query — local pool blip, not an outage; standing down`);
+    // The confirm must NOT ride the shared knex pool: `acquireConnection`
+    // rejecting usually means THIS process's pool is saturated, and a query
+    // queued behind that same pool would time out too — reading a busy-but-
+    // healthy database as an outage (codex #3123 r8, accepted residual then,
+    // fixed here). A dedicated single-use pg.Client answers the only question
+    // that matters: does PostgreSQL itself accept a connection right now?
+    // SSL mirrors server/knexfile.js production settings.
+    const { Client } = require('pg');
+    const probe = new Client({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false },
+      connectionTimeoutMillis: 4000,
+      query_timeout: 4000,
+    });
+    try {
+      await probe.connect();
+      await probe.query('SELECT 1');
+    } finally {
+      await probe.end().catch(() => {});
+    }
+    logger.warn(`[llm-dispatch-metrics] digest tick failed (${reason}) but PostgreSQL accepts a fresh connection — local pool saturation or a transient query failure, not a database outage; standing down`);
     return { skipped: 'db_reachable' };
   } catch (confirmErr) {
-    logger.error(`[llm-dispatch-metrics] DB unreachable confirmed (${reason}; confirm: ${confirmErr.message})`);
+    logger.error(`[llm-dispatch-metrics] DB unreachable confirmed (${reason}; independent-connection probe: ${confirmErr.message})`);
   }
   const { etDateString, addETDays } = require('../utils/datetime-et');
   const day = etDateString(addETDays(new Date(), -1));
@@ -422,6 +437,10 @@ async function runLlmDispatchDigest() {
       kind: 'not_recording',
       detail: `the digest could not read llm_dispatch_log (${reason}). Recording status for ${day} is UNKNOWN — treat this as an outage until it clears, not as a quiet day.`,
     }]);
+    // Tell the scheduler's catch this failure already produced its alert —
+    // otherwise it would fire alertRecorderUnreachable on top and double-email
+    // the same outage.
+    err.alerted = true;
     throw err;
   }
 
