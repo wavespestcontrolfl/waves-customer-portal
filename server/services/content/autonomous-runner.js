@@ -641,9 +641,13 @@ class AutonomousRunner {
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {
         const blocking = guardResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+        // P2 nudges (BLOG_META_MISSING_SOFT_CTA) ride the same redraft
+        // feedback so the second attempt hears them too (Codex r3 P2) —
+        // pass/fail stays P0/P1-only.
+        const advisory = guardResult.findings.filter((f) => f.severity === 'P2').slice(0, 2);
         const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
-          claimToken, skipReason: 'content_guardrails_failed', notes, blocking,
+          claimToken, skipReason: 'content_guardrails_failed', notes, blocking: [...blocking, ...advisory],
         });
       }
     }
@@ -964,11 +968,20 @@ class AutonomousRunner {
         || seoCompletionResult?.error || prePublishVisibilityResult?.error) || qualityInfraFailure;
       if (!gatesPass && !brief.human_review_required && !gateInfraError) {
         const summary = this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief);
+        // Guardrails P2 nudges from the PASSING guardrails run still ride
+        // this redraft's feedback — the refresh quality bundle has no
+        // blog_meta_soft_cta check, so without this a refresh draft's CTA
+        // nudge (BLOG_META_MISSING_SOFT_CTA) never reaches the writer
+        // (Codex r5 P2). Pass/fail semantics unchanged.
+        const guardAdvisory = (run.content_guardrails_result?.findings || []).filter((f) => f.severity === 'P2').slice(0, 2);
+        const notes = guardAdvisory.length
+          ? `${summary} | guardrail nudges (non-blocking): ${guardAdvisory.map((f) => f.code).join(', ')}`
+          : summary;
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken,
           skipReason: autoPublish ? 'auto_publish_gate_fail' : 'gate_fail',
-          notes: summary,
-          blocking: aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }),
+          notes,
+          blocking: [...aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }), ...guardAdvisory],
         });
       }
       // Remaining combinations are genuine human decisions (gate infra
@@ -3178,6 +3191,13 @@ class AutonomousRunner {
       const hard = (qualityResult.hard_failures || []).map((f) => f.name).join(', ');
       const soft = (qualityResult.soft_failures || []).slice(0, 3).map((f) => f.name).join(', ');
       lines.push(`quality: hard=${hard || 'none'} soft=${soft || 'none'} score=${qualityResult.total_score}/${qualityResult.min_total_score}`);
+    } else if ((qualityResult.soft_failures || []).length) {
+      // Weight-0 nudges (blog_meta_soft_cta) ride along even when quality
+      // passes, so a redraft triggered by ANOTHER gate still feeds them to
+      // the writer and the review queue sees them (Codex r3 P2). The
+      // quality gate itself never blocks on these.
+      const soft = qualityResult.soft_failures.slice(0, 3).map((f) => f.name).join(', ');
+      lines.push(`quality nudges (non-blocking): ${soft}`);
     }
     if (seoCompletionResult?.passed === false || seoCompletionResult?.summary?.needs_review) {
       const summary = seoCompletionResult.summary || {};

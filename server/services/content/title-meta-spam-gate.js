@@ -204,12 +204,102 @@ const CTA_SALES_TERMS_RE = /\b(sav(?:e|ing|ings)|deal|offer|price|pricing|discou
 // St. Augustine grass." must keep its CTA sentence intact (St. Augustine is
 // the dominant SWFL turf, so this is the common case, not the edge).
 const ABBREV_DOT_RE = /\b(St|Dr|Mt|Ft|Mr|Mrs|Ms|vs|No)\./gi;
-function endsWithSoftCta(text) {
+// Decimal points in amounts ("$49.99") are NOT sentence boundaries either —
+// splitting there hands downstream checks a bare "99" and hides the money
+// term (Codex r3).
+const DECIMAL_DOT_RE = /(\d)\.(\d)/g;
+// Hostname dots ("booking.wavespestcontrol.com") are not sentence
+// boundaries either — splitting there fragments "Contact site.com for
+// pricing" so no fragment carries the transactional shape (Codex r8/r11).
+// The lookahead masks EVERY label dot on a path to a known TLD, so
+// subdomains stay whole; a dot followed by whitespace never matches.
+const HOSTNAME_DOT_RE = /(\w)\.(?=(?:[\w-]+\.)*(?:com|net|org|io|co|us|biz|info)\b)/gi;
+function metaSentences(text) {
   const t = String(text || '').trim();
-  if (!t) return false;
-  const masked = t.replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'));
-  const sentences = masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
-  const last = sentences[sentences.length - 1] || '';
+  if (!t) return [];
+  // Dotted initialisms ("U.S.") are not boundaries either (Codex r13) —
+  // the pair regex is applied twice so longer runs ("U.S.A.") fully mask.
+  const INITIALISM_RE = /\b([A-Za-z])\.([A-Za-z])\./g;
+  const masked = t
+    .replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'))
+    .replace(DECIMAL_DOT_RE, '$1\u0001$2')
+    .replace(HOSTNAME_DOT_RE, '$1\u0001')
+    .replace(INITIALISM_RE, '$1\u0001$2\u0001')
+    .replace(INITIALISM_RE, '$1\u0001$2\u0001');
+  return masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
+}
+function lastSentence(text) {
+  const sentences = metaSentences(text);
+  return sentences[sentences.length - 1] || '';
+}
+
+// TRANSACTIONAL sales copy in the meta's FINAL sentence stays a HARD
+// contract term even though CTA presence became a soft nudge (owner ruling
+// 2026-07-30). Two shapes qualify (Codex r3: informational grammar like
+// "what quarterly plans offer homeowners" or "an estimate of the damage"
+// must NOT hard-fail — that would recreate the parks the ruling removed):
+//   1. money in the closer — a currency/percent symbol ("…starts at $49.99.")
+//   2. sales terms riding a CTA-shaped sentence ("Learn more about saving
+//      big with Waves.")
+// Transactional sentences that are neither CTA-shaped nor carry a symbol —
+// "Ask Waves for a quote on treatment." / "A treatment estimate is available
+// today." (Codex r4). Two shapes, bounded to the sentence: a solicitation
+// verb reaching a sales noun, or a sales noun with immediate now/today
+// urgency. Plain availability is NOT enough ("a damage estimate is available
+// in the county public record" is informational — Codex r5).
+// Four alternations (each round of Codex adversarial review added one):
+//   1. solicitation verb reaching a sales noun ("Ask Waves for a quote")
+//   2. sales noun with now/today urgency ("estimate is available today")
+//   3. price-marketing frame on a dollar amount ("starts at $49.99",
+//      "for just $99") — bare currency elsewhere is a stat, not a pitch
+//   4. brand-as-subject offering ("Waves offers quarterly plans")
+// Gap classes are [^!?] (dots allowed): these run on ALREADY-SPLIT
+// sentences, so any interior dot is a masked-and-restored abbreviation,
+// decimal, or domain — never a sentence boundary (Codex r8). Five shapes:
+//   1. solicitation verb reaching a sales noun ("Contact site.com for pricing")
+//   2. sales noun + now/today urgency
+//   3. price-marketing frame ("starts at $49.99")
+//   4. brand-as-subject offering ("Waves offers quarterly plans")
+//   5. direct price assertion on a service/estimate noun
+//      ("a treatment estimate costs $99") — "damage costs $2,000" stays a
+//      stat because "damage" is not a sales noun (Codex r10), and
+//      aggregate statistics stay stats two ways (Codex r13): "estimate OF
+//      <thing>" is a measurement not an offer, and $N billion/million
+//      amounts are never service prices
+const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d[\d,.]*(?![\d,.])(?!\s*(?:billion|million|trillion)\b)|\b(waves|we)\s+(offers?|provides?|sells?)\b|\b(quote|estimate|pricing|price|deal|offer|discount|plan|service|treatment)s?\b[^!?]{0,40}?\bavailable\s+from\s+(waves|us)\b|\b(quote|estimate|pricing|price|plan|service|treatment)s?\b(?!\s+of\b)[^!?]{0,30}?\b(?:costs?|runs?|is|starts?)\s+(?:about\s+|around\s+|only\s+|just\s+|from\s+|between\s+)?\$\d[\d,.]*(?![\d,.])(?!\s*(?:billion|million|trillion)\b)/i;
+// EVERY sentence is scanned for the sales shapes — a pitch followed by an
+// informational closer ("Learn more about saving big with Waves. This guide
+// explains…") is still sales copy (Codex r5). There is deliberately NO bare
+// currency/percent check (Codex r7): "$5 billion in property damage" and
+// "40% of lawns" are legitimate stats wherever they sit — dollar amounts
+// only count as sales copy inside a price-marketing frame ("starts at
+// $49.99"), which TRANSACTIONAL_SENTENCE_RE carries.
+// CTA-riding sales terms exclude quote/estimate: "Learn more about a county
+// damage estimate." is informational — a bare sales NOUN inside a CTA
+// sentence is not a pitch unless it's money/deal language ("saving big",
+// "our pricing"). Transactional quote/estimate uses are already caught by
+// TRANSACTIONAL_SENTENCE_RE's verb/urgency/price shapes (Codex r9).
+// deal/offer count only as NOUNS (article/possessive before) — "how
+// homeowners deal with ants" and "what plans offer" are ordinary verbs
+// (Codex r12).
+const CTA_RIDING_SALES_RE = /\b(sav(?:e|ing|ings)|price|pricing|discount|percent)\b|\b(?:a|an|the|our|this|these|new|special|great|best)\s+(?:deal|offer)s?\b|[%$]/i;
+function metaHasSalesCopy(text) {
+  const sentences = metaSentences(text);
+  if (!sentences.length) return false;
+  return sentences.some((s) => TRANSACTIONAL_SENTENCE_RE.test(s) || (SOFT_CTA_RE.test(s) && CTA_RIDING_SALES_RE.test(s)));
+}
+
+// Waves' own number typed WITHOUT separators ("Call 9412972606") slips both
+// the separator-shaped literal-phone regex and the PII scan (known business
+// number). NANP-shaped: optional leading 1, area code and exchange can't
+// start with 0/1 — keeps years, ZIPs, and small counts out (Codex r4).
+// Also matches the space/dot/dash-grouped 3-3-4 shape ("941 297 2606") the
+// separator regex misses when groups use bare spaces (Codex r6).
+const BARE_PHONE_DIGITS_RE = /\b1?[2-9]\d{2}[2-9]\d{6}\b|\b1?[\s.-]?[2-9]\d{2}[\s.-][2-9]\d{2}[\s.-]\d{4}\b/;
+
+function endsWithSoftCta(text) {
+  const last = lastSentence(text);
+  if (!last) return false;
   if (CTA_SALES_TERMS_RE.test(last)) return false;
   return SOFT_CTA_SENTENCE_RE.test(last);
 }
@@ -222,6 +312,8 @@ module.exports = {
   SALESY_META_RE,
   SOFT_CTA_RE,
   endsWithSoftCta,
+  metaHasSalesCopy,
+  BARE_PHONE_DIGITS_RE,
   HYPE_TERMS,
   COMMERCIAL_TERMS,
   _internals: {

@@ -2317,10 +2317,21 @@ describe('validateRewrittenMeta enforces the blog meta contract (owner rule 2026
     expect(r.reason).toMatch(/blog_meta_salesy/);
   });
 
-  test('a rewritten meta without a final soft CTA parks', () => {
+  test('a rewritten meta without a final soft CTA does NOT park (owner ruling 2026-07-30: CTA is a nudge, never a blocker)', () => {
     const r = rem.validateRewrittenMeta('A no-panic Southwest Florida guide to spider identification covering the widow species, the recluse myth, and the harmless mosquito eaters.', CTX);
+    expect(r.ok).toBe(true);
+  });
+
+  test('sales terms in the final sentence still park (Codex P1: not demoted with the CTA)', () => {
+    const r = rem.validateRewrittenMeta('A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more about saving big with Waves.', CTX);
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/blog_meta_missing_soft_cta/);
+    expect(r.reason).toMatch(/blog_meta_sales_copy/);
+  });
+
+  test('bare 10-digit phone in a rewritten meta still parks (Codex r4)', () => {
+    const r = rem.validateRewrittenMeta('A Southwest Florida guide to spider identification covering the widow species and myths. Call 9412972606 for identification help today.', CTX);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/blog_meta_must_not_carry_phone/);
   });
 });
 

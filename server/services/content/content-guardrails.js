@@ -1801,7 +1801,7 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   // source in title-meta-spam-gate) so the enforcement points can't drift.
   // PHONE_TOKEN_RE covers the publisher's full substitution grammar —
   // whitespace-tolerant, and the phone/tel aliases render a phone too.
-  const { SALESY_META_RE, endsWithSoftCta, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE } = require('./title-meta-spam-gate');
+  const { SALESY_META_RE, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, endsWithSoftCta, metaHasSalesCopy, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
   // Runs on refresh drafts (both contracts, changed metas only) AND on any
   // caller that declares a blog target — the legacy BlogWriter/admin/
   // calendar publishAstro path runs ONLY guardrails (no supporting-blog
@@ -1818,14 +1818,13 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   // graded in full.
   if (liveMetaDescription != null && draftTrim === String(liveMetaDescription).trim()) return null;
   if (targetIsBlog) {
-    if (PHONE_TOKEN_RE.test(draftTrim) || LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
+    // BARE_PHONE_DIGITS_RE: separator-less "9412972606" slips the shaped
+    // regex and the PII scan (known business number) — Codex r4.
+    if (PHONE_TOKEN_RE.test(draftTrim) || LITERAL_PHONE_IN_META_RE.test(draftTrim) || BARE_PHONE_DIGITS_RE.test(draftTrim)) {
       return finding('P1', 'BLOG_META_CARRIES_PHONE', 'Blog meta descriptions never carry a phone number (owner rule 2026-07-29: informational summary + soft CTA only).');
     }
-    if (SALESY_META_RE.test(draftTrim)) {
-      return finding('P1', 'BLOG_META_SALESY', 'Blog meta descriptions stay informational — no sales CTAs (owner rule 2026-07-29); end with a soft CTA like "Learn more on the Waves blog."');
-    }
-    if (!endsWithSoftCta(draftTrim)) {
-      return finding('P1', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions must END with a soft CTA like "Learn more on the Waves blog." — the last sentence, not merely a mention (owner rule 2026-07-29).');
+    if (SALESY_META_RE.test(draftTrim) || metaHasSalesCopy(draftTrim)) {
+      return finding('P1', 'BLOG_META_SALESY', 'Blog meta descriptions stay informational — no sales CTAs or money/deal terms in the final sentence (owner rule 2026-07-29).');
     }
   } else {
     // {{cityPhone}} SPECIFICALLY — phone/tel aliases render the generic line.
@@ -1840,6 +1839,15 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   const rendered = renderMetaTokens(draftTrim).trim();
   if (rendered.length > 160) {
     return finding('P1', 'META_OVER_160_RENDERED', `Rewritten meta description renders at ${rendered.length} characters — the cap is 160 (owner rule 2026-07-29).`);
+  }
+  // LAST, after every P1: the soft-CTA ending is a nudge, never a blocker
+  // (owner ruling 2026-07-30) — P2 warns without parking, and the legacy
+  // BlogWriter/admin/calendar publishAstro lanes (which run ONLY guardrails,
+  // no supporting-blog quality bundle) keep the signal. Ordered here so this
+  // single-finding return can never mask a blocking P1 like
+  // META_OVER_160_RENDERED (Codex r2 P1).
+  if (targetIsBlog && !endsWithSoftCta(draftTrim)) {
+    return finding('P2', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions should END with a soft CTA like "Learn more on the Waves blog." (nudge only — owner ruling 2026-07-30: never a publish blocker).');
   }
   return null;
 }
