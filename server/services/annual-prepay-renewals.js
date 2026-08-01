@@ -473,6 +473,30 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd) {
     return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
   }
+  const cols = await scheduledServiceColumns();
+  if (!cols.scheduled_date || !cols.service_type) {
+    return { createdCount: 0, targetDates: [], reason: 'scheduled_columns_missing' };
+  }
+
+  // Only count visits that can actually be stamped prepaid downstream:
+  // attachScheduledServices() / applyPrepaidCoverageForTerm() use the
+  // non-terminal coverage set, so a cancelled / skipped / no-show / rescheduled
+  // visit must NOT consume one of the sold coverageVisitCount slots or suppress
+  // its generated replacement — otherwise the paid term ends up with fewer
+  // covered visits than the admin sold.
+  let existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn);
+
+  // The floor and window-slide below apply ONCE, at first activation. This
+  // function also runs on every schedule-edit refresh of an ACTIVE term, and
+  // an always-on today-floor would compound: each later refresh would see a
+  // new positive lag and extend term_end again, indefinitely postponing
+  // renewal while billing stays suppressed. "Already activated" = a coverage
+  // row is already LINKED to this term (the first activation links its rows
+  // via the seed inserts and attachScheduledServices immediately after) —
+  // from then on this function is a pure gap-filler on the stored window.
+  const alreadyActivated = !!cols.annual_prepay_term_id
+    && existingRows.some((row) => row.annual_prepay_term_id != null && String(row.annual_prepay_term_id) === String(term.id));
+
   // Seeding runs at PAYMENT time, so the past-date floor is today: a term paid
   // days after it was minted must not generate a visit that already happened.
   //
@@ -484,14 +508,17 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // term_end extends by the same lag. Only floor/promise SHIFTS slide the end;
   // a deliberately short custom term (unshifted anchor) still truncates as
   // designed.
-  const anchorOptions = { firstVisitDate: term?.first_visit_date || null, notBefore: today };
+  const anchorOptions = {
+    firstVisitDate: term?.first_visit_date || null,
+    notBefore: alreadyActivated ? null : today,
+  };
   const mintAnchor = coverageSeriesAnchor(termStart, { firstVisitDate: term?.first_visit_date || null }) || termStart;
   const paidAnchor = coverageSeriesAnchor(termStart, anchorOptions) || termStart;
   const anchorLagDays = daysUntil(mintAnchor, paidAnchor);
   let effectiveTermEnd = termEnd;
   // The slide only happens where it can also be PERSISTED — an in-memory-only
   // extension would seed visits the stored window doesn't cover.
-  if (anchorLagDays != null && anchorLagDays > 0 && (await annualPrepayColumns(conn)).term_end) {
+  if (!alreadyActivated && anchorLagDays != null && anchorLagDays > 0 && (await annualPrepayColumns(conn)).term_end) {
     effectiveTermEnd = addDaysYmd(termEnd, anchorLagDays);
     // Never slide into a successor term: a long-pending invoice can be paid
     // after the customer already bought the NEXT year, and overlapping paid
@@ -525,19 +552,11 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   if (!targetDates.length) {
     return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
   }
-
-  const cols = await scheduledServiceColumns();
-  if (!cols.scheduled_date || !cols.service_type) {
-    return { createdCount: 0, targetDates, reason: 'scheduled_columns_missing' };
+  // A slid window can newly cover rows between the old and new end — refetch
+  // so tolerance matching sees them instead of seeding alongside.
+  if (effectiveTermEnd !== termEnd) {
+    existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: effectiveTermEnd }, conn);
   }
-
-  // Only count visits that can actually be stamped prepaid downstream:
-  // attachScheduledServices() / applyPrepaidCoverageForTerm() use the
-  // non-terminal coverage set, so a cancelled / skipped / no-show / rescheduled
-  // visit must NOT consume one of the sold coverageVisitCount slots or suppress
-  // its generated replacement — otherwise the paid term ends up with fewer
-  // covered visits than the admin sold.
-  const existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: effectiveTermEnd }, conn);
 
   // Existing in-window matching visits (e.g. the customer's pre-existing route)
   // already satisfy coverage even when they don't land on the exact generated
@@ -769,12 +788,26 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   const retimeAdoptedRow = async (trx) => {
     const row = adoptedPromisedRow;
     let windowStart = firstVisitWindowStart;
+    let staleAdoption = false;
     try {
       await trx.transaction(async (sp) => {
         // Same late-rung-1 posture as the timed seed: try, never wait.
         const { tryAcquireOccupancyLock } = require('./scheduling/occupancy');
         if (!(await tryAcquireOccupancyLock(sp, promisedTarget))) {
           throw new Error('occupancy date lock unavailable');
+        }
+        // adoptedPromisedRow is a PRE-lock snapshot. A concurrent reschedule
+        // or completion can have moved or closed the row since — updating by
+        // id would then stamp the promised time onto a different date (never
+        // conflict-checked) or rewrite completed history. Re-read under the
+        // lock and abort unless it is still the visit we matched.
+        const fresh = await sp('scheduled_services').where({ id: row.id }).first();
+        if (!fresh
+          || dateOnly(fresh.scheduled_date) !== promisedTarget
+          || PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(fresh.status || '').toLowerCase())
+          || !serviceMatchesCoverage(fresh, coverageServiceType)) {
+          staleAdoption = true;
+          return;
         }
         const conflict = await findVisitWindowConflict(sp, {
           scheduledDate: promisedTarget,
@@ -790,6 +823,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     } catch (err) {
       logger.warn(`[annual-prepay] term ${term.id} adopted-visit window check failed (${err.message}) — leaving visit ${row.id} as-is`);
       windowStart = null;
+    }
+    if (staleAdoption) {
+      logger.warn(`[annual-prepay] term ${term.id} adopted visit ${row.id} changed under the lock (moved/closed) — leaving it untouched`);
+      await fileCoverageException(term, 'adopted_visit_moved',
+        `The visit matching the promised first service on ${promisedTarget} was moved or completed while payment landed. Confirm the schedule with the customer.`);
+      return;
     }
     if (!windowStart) {
       await fileCoverageException(term, 'adopted_window_conflict',

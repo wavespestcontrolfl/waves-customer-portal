@@ -949,10 +949,11 @@ describe('annual prepay renewal helpers', () => {
       window_display: '10:00-11:30 AM',
     };
     const rowsQuery = query({ rows: [adopted] });
+    const lockedReRead = query({ first: adopted }); // row unchanged under the lock
     const conflictQuery = query({ rows: [] }); // clear at 08:00 (row itself excluded)
     const retimeUpdate = query({});
     const laterSeed = query({ returning: [{ id: 'svc-r2', scheduled_date: '2026-11-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, conflictQuery, retimeUpdate, laterSeed] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, lockedReRead, conflictQuery, retimeUpdate, laterSeed] });
 
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-r',
@@ -1093,8 +1094,9 @@ describe('annual prepay renewal helpers', () => {
     const successorQuery = query({ first: undefined }); // no later term to collide with
     const termSlideUpdate = query({});
     const termStampUpdate = query({});
+    const refetchRows = query({ rows: [] }); // slid window still empty
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, ...inserts],
+      scheduled_services: [columnQuery, rowsQuery, refetchRows, ...inserts],
       annual_prepay_terms: [termColsQuery, successorQuery, termSlideUpdate, termStampUpdate],
     });
 
@@ -1122,6 +1124,58 @@ describe('annual prepay renewal helpers', () => {
     // follow inside refreshTermSnapshot.
     expect(term.term_end).toBe('2027-12-30');
     expect(inserts[3].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-09-30' }));
+  });
+
+  test('refreshing an already-activated term never slides the window again (idempotent)', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        technician_id: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    // The term activated months ago: its 4 coverage rows are LINKED. Today is
+    // far past the first visit — an always-on floor would compute a fresh lag
+    // and extend term_end on every schedule-edit refresh, forever.
+    const linked = (id, date) => ({
+      id,
+      customer_id: 'customer-i',
+      scheduled_date: date,
+      service_type: 'Quarterly Pest Control',
+      status: 'pending',
+      annual_prepay_term_id: 'term-i',
+    });
+    const rowsQuery = query({
+      rows: [
+        linked('svc-i1', '2026-08-01'),
+        linked('svc-i2', '2026-11-01'),
+        linked('svc-i3', '2027-02-01'),
+        linked('svc-i4', '2027-05-01'),
+      ],
+    });
+    // NOTE: no annual_prepay_terms queue at all — any slide/stamp query would
+    // throw "Unexpected db table" and fail this test.
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery] });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-i',
+      customer_id: 'customer-i',
+      term_start: '2026-08-01',
+      term_end: '2027-08-01',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+      coverage_cadence: 'quarterly',
+      first_visit_date: '2026-08-01',
+    }, undefined, { today: '2027-03-15' })).resolves.toMatchObject({
+      createdCount: 0,
+      effectiveTermEnd: '2027-08-01',
+    });
   });
 
   test('the effective first visit date prefers the promise, falling back to term start', () => {
