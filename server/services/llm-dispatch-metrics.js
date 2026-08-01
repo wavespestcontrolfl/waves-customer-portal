@@ -150,10 +150,17 @@ function recordDispatch(policy, result) {
  * is broken — which is the only sound basis for a not_recording exception.
  */
 async function probeRecorder() {
+  // The INSERT is the whole test. If it resolves, the recorder can write.
   await insertRow(buildRow({ name: HEARTBEAT_POLICY }, { ok: true }));
-  // Remove it immediately so the heartbeat never shows up as a policy in the
-  // digest's own stats. Retention would catch it eventually anyway.
-  await require('../models/db')('llm_dispatch_log').where({ policy: HEARTBEAT_POLICY }).del();
+  // Cleanup is BEST-EFFORT and must never fail the probe: the write already
+  // succeeded, so reporting "the recorder cannot write" because a delete
+  // blipped would be flatly false. Heartbeat rows are excluded from stats and
+  // pruned by retention, so a survivor is harmless.
+  try {
+    await require('../models/db')('llm_dispatch_log').where({ policy: HEARTBEAT_POLICY }).del();
+  } catch (err) {
+    logger.warn(`[llm-dispatch-metrics] heartbeat cleanup failed (harmless, row is excluded from stats and will be pruned): ${err.message}`);
+  }
 }
 
 /** [startOfDay, startOfNextDay) as real Dates for the ET day N days ago. */
@@ -185,11 +192,11 @@ function detectExceptions(yesterdayStats, priorWeekStats, probeError = null) {
       kind: 'not_recording',
       detail: `the dispatch recorder could not write to llm_dispatch_log (${probeError}). Nothing is being recorded, so a silent digest cannot be read as "healthy" until this clears.`,
     });
-    // Every per-policy gone-silent line would be a duplicate symptom of this
-    // one root cause. Report the cause alone.
-    return exceptions;
   }
 
+  // Per-policy findings below come from rows that DO exist, so they are real
+  // regardless of the probe — a transient probe failure must never suppress a
+  // genuine provider incident that was already recorded.
   for (const s of yesterdayStats) {
     if (s.failed > 0) {
       exceptions.push({
@@ -206,8 +213,12 @@ function detectExceptions(yesterdayStats, priorWeekStats, probeError = null) {
       });
     }
   }
+  // gone-silent is the ONE check a broken recorder fully explains: it fires on
+  // the ABSENCE of rows, which is exactly what a dead write path produces. So
+  // it — and only it — is skipped when the probe failed, or every prior-week
+  // policy would report a duplicate symptom of that single root cause.
   const yesterdayByPolicy = new Map(yesterdayStats.map((s) => [s.policy, s]));
-  for (const w of priorWeekStats) {
+  for (const w of probeError ? [] : priorWeekStats) {
     if (EPISODIC_LANE_RE.test(w.policy)) continue; // one-shot lanes go quiet by design
     if (w.total >= SILENT_MIN_WEEKLY && !yesterdayByPolicy.has(w.policy)) {
       exceptions.push({

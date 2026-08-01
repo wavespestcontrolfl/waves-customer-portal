@@ -259,17 +259,30 @@ describe('llm-dispatch-metrics', () => {
       expect(detectExceptions([], [], null)).toHaveLength(0);
     });
 
-    it('reports the probe failure ALONE, not one gone-silent per policy', () => {
+    it('suppresses gone-silent (an absence signal) when the probe failed, but nothing else', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
       const out = detectExceptions([], [
         { policy: 'report', total: SILENT_MIN_WEEKLY * 3 },
         { policy: 'customerCopy', total: SILENT_MIN_WEEKLY * 3 },
         { policy: 'contentDraft', total: SILENT_MIN_WEEKLY * 3 },
       ], 'connection refused');
-      // Without the early return these three would each fire gone_silent —
-      // three duplicate symptoms of one root cause.
+      // A dead recorder fully explains three absent policies — reporting all
+      // three would be duplicate symptoms of one root cause.
       expect(out).toHaveLength(1);
       expect(out[0].kind).toBe('not_recording');
+    });
+
+    it('still reports REAL provider incidents recorded yesterday when the probe fails', () => {
+      // A transient probe blip must never hide an all-providers-failed or
+      // fallback spike that is sitting in yesterday's rows — those come from
+      // rows that exist, so they are true regardless of recorder health.
+      const { detectExceptions } = load();
+      const out = detectExceptions(
+        [{ policy: 'report', total: 10, fallbacks: 5, failed: 2 }],
+        [],
+        'connection refused'
+      );
+      expect(out.map((e) => e.kind).sort()).toEqual(['all_providers_failed', 'fallback_rate', 'not_recording']);
     });
 
     it('returns nothing on a green day', () => {
@@ -336,6 +349,27 @@ describe('llm-dispatch-metrics', () => {
       expect(out.emailed).toBe(true);
       expect(out.exceptions[0].kind).toBe('not_recording');
       expect(mockEmailSend.mock.calls[0][0].body).toMatch(/relation does not exist/);
+    });
+
+    it('does NOT report a recorder failure when only the heartbeat cleanup blips', async () => {
+      // The insert succeeded, so the recorder demonstrably works. Failing the
+      // probe on a cleanup error would email a flatly false outage.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const prune = makeChain([], 1);
+      const probeInsert = makeChain([], 0);
+      const probeCleanup = makeChain([], 0);
+      probeCleanup.del = jest.fn(() => Promise.reject(new Error('deadlock detected')));
+      mockDb
+        .mockReturnValueOnce(prune)
+        .mockReturnValueOnce(makeChain([]))
+        .mockReturnValueOnce(makeChain([]))
+        .mockReturnValueOnce(probeInsert)
+        .mockReturnValueOnce(probeCleanup);
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(out).toMatchObject({ emailed: false });
+      expect(out.exceptions).toHaveLength(0);
+      expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
     it('stays silent on a quiet day when the probe succeeds (no rows, nothing wrong)', async () => {
