@@ -70,55 +70,201 @@ function blankComments(s) {
 // end the tag, and a naive /<[^>]*>/ left the remainder of that invisible
 // attribute in the text — `<span title="x > Orkin charges a"> $89` then read
 // as attribution (pre-push Codex P0, r7). An unterminated tag is left alone.
-function blankTags(s) {
-  const str = String(s || '');
-  const out = str.split('');
-  for (let i = 0; i < str.length; i += 1) {
-    if (str[i] !== '<' || !/[A-Za-z/]/.test(str[i + 1] || '')) continue;
-    let j = i + 1;
-    let close = -1;
-    while (j < str.length) {
-      const ch = str[j];
+// Tags that START A NEW RENDERED BLOCK — attribution cannot cross one.
+const BLOCK_TAG_RE = /^<\/?(?:p|div|section|article|aside|main|header|footer|nav|figure|figcaption|blockquote|pre|hr|br|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|h[1-6])\b/i;
+
+// Enumerate HTML/JSX tags. Quote-aware AND brace-aware: a ">" inside an
+// attribute value or a JSX expression prop — title={"x" > "y"} — is not the
+// end of the tag, and treating it as one left the rest of the prop in the
+// rendered text (Codex r9 P0). ONE scanner serves every consumer below.
+function* eachTag(text) {
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '<') continue;
+    const m = /^<(\/?)([a-zA-Z][\w-]*)/.exec(text.slice(i, i + 64));
+    if (!m) continue;
+    let j = i + m[0].length;
+    let braceDepth = 0;
+    for (; j < text.length; j += 1) {
+      const ch = text[j];
       if (ch === '"' || ch === "'" || ch === '`') {
         const quote = ch;
         j += 1;
-        while (j < str.length && str[j] !== quote) j += str[j] === '\\' ? 2 : 1;
-        j += 1;
+        while (j < text.length && text[j] !== quote) j += text[j] === '\\' ? 2 : 1;
         continue;
       }
-      if (ch === '>') { close = j; break; }
-      if (ch === '<') break; // unterminated — not a tag
-      j += 1;
+      if (ch === '{') { braceDepth += 1; continue; }
+      if (ch === '}') { braceDepth -= 1; continue; }
+      if (ch === '>' && braceDepth === 0) break;
     }
-    if (close === -1) continue;
-    // A BLOCK-level tag is a rendered boundary. Blanking it to spaces merged
-    // adjacent paragraphs into one clause, so "<p>Other companies
-    // charge</p><p> $89 per visit…</p>" read as attribution even though the
-    // reader sees a bare price in its own paragraph (Codex r8). Emit a
-    // newline — which sentenceAround already treats as a boundary — in the
-    // tag's first position, keeping the blanking length-preserving.
-    const isBlock = BLOCK_TAG_RE.test(s.slice(i, close + 1));
-    for (let k = i; k <= close; k += 1) if (out[k] !== '\n') out[k] = ' ';
-    if (isBlock && out[i] !== '\n') out[i] = '\n';
-    i = close;
+    if (j >= text.length) return;
+    yield {
+      start: i, end: j, name: m[2].toLowerCase(), isClose: m[1] === '/',
+      attrs: text.slice(i + m[0].length, j),
+      selfClosing: text[j - 1] === '/',
+    };
+    i = j;
+  }
+}
+
+// An element whose CONTENT a reader may never see. Conservative by design:
+// what cannot be proven visible must not supply attribution.
+const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript']);
+
+// Visibility is decided by what can be PROVEN from the source, and anything
+// unprovable counts as hidden. Chasing literal forms lost three rounds in a
+// row — `display:none`, then style={{display:"none"}}, then
+// aria-hidden={1===1} and {"no"+"ne"} — because a static reader cannot
+// evaluate expressions at all. So: a visibility-affecting prop whose value is
+// an EXPRESSION is treated as hidden outright, no evaluation attempted
+// (Codex r9 P0 ×3). The cost is only a lost EXEMPTION — the price is still
+// flagged, which is the safe direction.
+function opensHiddenContent(tag) {
+  if (HIDDEN_TAGS.has(tag.name)) return true;
+  const a = tag.attrs || '';
+  if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
+  // aria-hidden in ANY form except a literal false.
+  const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
+  if (ariaM) {
+    const v = ariaM[1].replace(/^[{"']|["'}]$/g, '').trim().toLowerCase();
+    if (v !== 'false') return true;
+  }
+  // ANY styling or class makes visibility unprovable from source. Enumerating
+  // hidden CSS is a losing game — display:none, visibility:hidden, opacity:0,
+  // clip, font-size:0, transparent color, a `.hidden` utility class — so for
+  // ATTRIBUTION ELIGIBILITY the rule is inverted: only unstyled, unclassed
+  // markup counts as proven-visible (Codex r9 P0 ×4). The cost is a lost
+  // EXEMPTION on styled attribution, which parks the draft for review — the
+  // safe direction. Detection is unaffected.
+  if (/(?:^|\s)(?:style|class|className)\s*=/i.test(a)) return true;
+  return false;
+}
+
+// NESTING-AWARE: a regex stopping at the first </span> left the tail of a
+// hidden block visible (Codex r9 P0). Walk to the MATCHING close tag.
+function blankHiddenContent(str) {
+  const text = String(str || '');
+  const out = text.split('');
+  const tags = [...eachTag(text)];
+  for (let t = 0; t < tags.length; t += 1) {
+    const tag = tags[t];
+    if (tag.isClose || tag.selfClosing || !opensHiddenContent(tag)) continue;
+    let depth = 1;
+    let endIdx = -1;
+    for (let u = t + 1; u < tags.length; u += 1) {
+      const other = tags[u];
+      if (other.name !== tag.name || other.selfClosing) continue;
+      if (other.isClose) { depth -= 1; if (depth === 0) { endIdx = other.end; break; } }
+      else depth += 1;
+    }
+    // Never closed → blank to end: unterminated hidden content cannot be
+    // proven visible either.
+    const stop = endIdx === -1 ? text.length - 1 : endIdx;
+    for (let k = tag.start; k <= stop; k += 1) if (out[k] !== '\n') out[k] = ' ';
   }
   return out.join('');
 }
 
-// Quoted strings in JSX must be read ESCAPE-AWARE, the way
-// comparison-table-gate.js:1149-1160 reads them: a label like
-// `Plan called \"Our service\"` ends at the escaped quote under a naive
-// [^"]* and the first-party marker after it is never seen (Codex r8). Same
-// pattern for row VALUES and column HEADERS — a stray escaped quote there
-// shifts which cell owns the amount.
-const QUOTED_STR_SRC = '"((?:[^"\\\\]|\\\\.)*)"|\'((?:[^\'\\\\]|\\\\.)*)\'';
-const unescapeStr = (v) => String(v ?? '').replace(/\\(.)/g, '$1');
+function blankTags(s) {
+  const text = String(s || '');
+  const out = text.split('');
+  for (const tag of eachTag(text)) {
+    const isBlock = BLOCK_TAG_RE.test(text.slice(tag.start, tag.end + 1));
+    for (let k = tag.start; k <= tag.end; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    // A BLOCK-level tag is a rendered boundary; a newline keeps the blanking
+    // length-preserving while still splitting the sentence (Codex r8).
+    if (isBlock && out[tag.start] !== '\n') out[tag.start] = '\n';
+  }
+  return out.join('');
+}
 
-// Tags that START A NEW RENDERED BLOCK — attribution cannot cross one.
-const BLOCK_TAG_RE = /^<\/?(?:p|div|section|article|aside|main|header|footer|nav|figure|figcaption|blockquote|pre|hr|br|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|h[1-6])\b/i;
+// MDX EXPRESSION containers render conditionally and their value cannot be
+// proven statically, so `{show && "Orkin charges a"}` never counts as
+// visible attribution (Codex r9 P0). Quote-aware and balanced.
+function blankExpressions(str) {
+  const text = String(str || '');
+  const out = text.split('');
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '{') continue;
+    let depth = 0;
+    let j = i;
+    for (; j < text.length; j += 1) {
+      const ch = text[j];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        const quote = ch;
+        j += 1;
+        while (j < text.length && text[j] !== quote) j += text[j] === '\\' ? 2 : 1;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') { depth -= 1; if (depth === 0) break; }
+    }
+    if (j >= text.length) break; // unbalanced — leave the rest alone
+    for (let k = i; k <= j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    i = j;
+  }
+  return out.join('');
+}
+
+// A Markdown link's DESTINATION is not rendered text — readers see only the
+// anchor. Leaving the URL in place let an invisible "…/Orkin" supply the
+// attribution for a visible local price (Codex r9 P0). Blank the brackets and
+// the destination, keep the anchor where it is, length-preservingly.
+// A Markdown link's DESTINATION is not rendered text — readers see only the
+// anchor. Leaving the URL in place let an invisible ".../Orkin" attribute a
+// visible local price (Codex r9 P0). A regex could not do this: labels nest
+// brackets and destinations carry balanced parens, and a partial match left
+// the tail of the URL behind as attributable text. This is a balanced,
+// escape-aware scanner; anything malformed blanks WHOLE so no fragment of it
+// can attribute.
+function blankMarkdownLinkDestinations(str) {
+  const text = String(str || '');
+  const out = text.split('');
+  const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '[') continue;
+    const isImage = i > 0 && text[i - 1] === '!';
+    // Balanced label scan.
+    let depth = 0;
+    let j = i;
+    for (; j < text.length; j += 1) {
+      const ch = text[j];
+      if (ch === '\\') { j += 1; continue; }
+      if (ch === '[') depth += 1;
+      else if (ch === ']') { depth -= 1; if (depth === 0) break; }
+      else if (ch === '\n' && text[j + 1] === '\n') break; // paragraph end
+    }
+    if (j >= text.length || text[j] !== ']' || text[j + 1] !== '(') continue;
+    const labelStart = i;
+    const labelEnd = j;
+    // Balanced destination scan.
+    let k = j + 1;
+    let pdepth = 0;
+    for (; k < text.length; k += 1) {
+      const ch = text[k];
+      if (ch === '\\') { k += 1; continue; }
+      if (ch === '(') pdepth += 1;
+      else if (ch === ')') { pdepth -= 1; if (pdepth === 0) break; }
+      else if (ch === '\n' && text[k + 1] === '\n') break;
+    }
+    if (k >= text.length || text[k] !== ')') {
+      // Malformed: blank everything we scanned so no fragment attributes.
+      blank(isImage ? labelStart - 1 : labelStart, Math.min(k, text.length - 1));
+      i = Math.min(k, text.length - 1);
+      continue;
+    }
+    if (isImage) {
+      blank(labelStart - 1, k); // an image renders no text at all
+    } else {
+      blank(labelStart, labelStart);       // "["
+      blank(labelEnd, k);                  // "](destination)"
+    }
+    i = k;
+  }
+  return out.join('');
+}
 
 function blankToRenderedText(s) {
-  return blankTags(blankComments(s));
+  return blankExpressions(blankMarkdownLinkDestinations(blankTags(blankHiddenContent(blankComments(s)))));
 }
 
 /**
@@ -402,7 +548,7 @@ function objectEndIndex(s, from) {
   let depth = 0;
   for (let i = from; i < s.length; i += 1) {
     const ch = s[i];
-    if (ch === '"' || ch === "'") {
+    if (ch === '"' || ch === "'" || ch === '`') {
       const quote = ch;
       i += 1;
       while (i < s.length && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
@@ -442,7 +588,10 @@ function objectStartIndex(s, from, until) {
   const open = [];
   for (let i = Math.max(0, from); i < until; i += 1) {
     const ch = s[i];
-    if (ch === '"' || ch === "'") {
+    // Backticks count: a `{` inside a template literal (including a
+    // `${…}` interpolation) would otherwise stay on the stack and move the
+    // row's start past its own `label:` key (Codex r9 P0).
+    if (ch === '"' || ch === "'" || ch === '`') {
       const quote = ch;
       i += 1;
       while (i < until && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
@@ -462,7 +611,9 @@ function objectStartIndex(s, from, until) {
 function splitTableCells(line) {
   const s = String(line || '');
   const cells = [];
-  let cellStart = s.indexOf('|') + 1;
+  // A leading pipe opens the first cell AFTER it; without one the first cell
+  // starts at the beginning of the line.
+  let cellStart = /^\s*\|/.test(s) ? s.indexOf('|') + 1 : 0;
   for (let i = cellStart; i <= s.length; i += 1) {
     if (s[i] === '\\') { i += 1; continue; }
     if (i === s.length || s[i] === '|') {
@@ -479,6 +630,143 @@ function splitTableCells(line) {
 // `| <span title="Aptive">Local service</span> | $89 |` attributes our amount
 // to an invisible attribute (pre-push Codex P0, r7). Both are blanked
 // length-preservingly, so one index is valid in either.
+// Quoted strings in JSX must be read ESCAPE-AWARE, the way
+// comparison-table-gate.js:1149-1160 reads them: a label like
+// `Plan called \"Our service\"` ends at the escaped quote under a naive
+// [^"]* and the first-party marker after it is never seen (Codex r8).
+const QUOTED_STR_SRC = '"((?:[^"\\\\]|\\\\.)*)"|\'((?:[^\'\\\\]|\\\\.)*)\'';
+const unescapeStr = (v) => String(v ?? '').replace(/\\(.)/g, '$1');
+
+// Index of a TOP-LEVEL prop's value within an opening tag's attribute text.
+// A plain regex matched "columns={[" inside ANOTHER prop's string, so a
+// data-* note containing fake columns could outrank the real prop and
+// launder a Waves price (Codex r9 P0). Depth- and quote-aware; a DUPLICATE
+// top-level prop is unreadable by design and returns -1 (fail closed).
+function topLevelPropValueIndex(attrs, propName) {
+  const a = String(attrs || '');
+  const re = new RegExp(`\\b${propName}\\s*=\\s*`, 'g');
+  let depth = 0;
+  let found = -1;
+  for (let i = 0; i < a.length; i += 1) {
+    const ch = a[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      i += 1;
+      while (i < a.length && a[i] !== quote) i += a[i] === '\\' ? 2 : 1;
+      continue;
+    }
+    if (ch === '{' || ch === '[' || ch === '(') { depth += 1; continue; }
+    if (ch === '}' || ch === ']' || ch === ')') { depth -= 1; continue; }
+    if (depth !== 0) continue;
+    re.lastIndex = i;
+    const m = re.exec(a);
+    if (m && m.index === i) {
+      if (found !== -1) return -1; // duplicate top-level prop — fail closed
+      found = i + m[0].length;
+      i = found - 1;
+    }
+  }
+  return found;
+}
+
+// Parse a JS/JSX array literal of STRINGS starting at `openIdx` (the "[").
+// Returns { elements, close } with one entry per POSITION, or null when the
+// array is unreadable or ANY element is not a plain quoted string. Both the
+// row `values` and the `columns` headers go through this: collecting "just
+// the quoted strings" compressed positions, so a null/expression element
+// shifted the amount onto a neighbouring column and exempted a Waves price
+// (Codex r9, two P0s). Quote- and nesting-aware, so a "]" inside a header
+// no longer ends the array early.
+function parseStringArray(text, openIdx) {
+  const s = String(text || '');
+  if (s[openIdx] !== '[') return null;
+  const elements = [];
+  let depth = 0;
+  let start = openIdx + 1;
+  let close = -1;
+  for (let i = openIdx + 1; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      i += 1;
+      while (i < s.length && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
+      continue;
+    }
+    if (ch === '[' || ch === '{' || ch === '(') { depth += 1; continue; }
+    if (ch === '}' || ch === ')') { depth -= 1; continue; }
+    if (ch === ']') {
+      if (depth === 0) { elements.push({ text: s.slice(start, i), start }); close = i; break; }
+      depth -= 1;
+      continue;
+    }
+    if (ch === ',' && depth === 0) { elements.push({ text: s.slice(start, i), start }); start = i + 1; }
+  }
+  if (close === -1) return null; // unterminated array — fail closed
+  while (elements.length && !elements[elements.length - 1].text.trim()) elements.pop();
+  const wholeStrRe = new RegExp(`^\\s*(?:${QUOTED_STR_SRC})\\s*$`);
+  const out = [];
+  for (const el of elements) {
+    const em = wholeStrRe.exec(el.text);
+    if (!em) return null; // null / numeric / expression cell — fail closed
+    const q = el.text.search(/["'`]/);
+    const abs = el.start + q;
+    out.push({ text: unescapeStr(em[1] ?? em[2]), start: abs, end: abs + el.text.trim().length });
+  }
+  return { elements: out, close };
+}
+
+// What a READER sees in a table cell, for OWNERSHIP decisions only (never
+// for offsets). Three transforms, each a real bypass found in review:
+//   - entities: "O&#117;r quarterly service" renders as "Our …" but the raw
+//     text hides the first-party marker (Codex r9);
+//   - Markdown links: the B1/B3 briefs REQUIRE linked attribution, so
+//     "[Aptive](https://…)" must identify Aptive, not fail the exact-name
+//     test on its brackets and URL (Codex r9);
+//   - backslash escapes, as elsewhere in this file.
+function cellIdentity(v) {
+  return decodeEntitiesForScan(unescapeStr(String(v ?? '')))
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+}
+const cellIsFirstParty = (v) => hasFirstPartyMarker(cellIdentity(v));
+const cellIsThirdParty = (v) => identifiesThirdParty(cellIdentity(v));
+
+// A GFM pipe table may omit the leading/trailing pipe entirely
+// ("Fee | Aptive"), so keying off a leading "|" parked valid sourced tables
+// on optional delimiters (Codex r9). A line is a table row when it carries a
+// pipe AND its contiguous pipe-block contains a --- separator. Header and row
+// must share the SAME leading-pipe convention, or column indexes would be
+// off by one — mixed conventions fail closed.
+const hasLeadingPipe = (line) => /^\s*\|/.test(line);
+const isSeparatorLine = (line) => /^[\s|:\-]+$/.test(line) && line.includes('-');
+function isTableLine(text, lineStart, lineEnd) {
+  const line = text.slice(lineStart, lineEnd);
+  if (!line.includes('|')) return false;
+  // Walk the contiguous block of pipe-bearing lines looking for a separator.
+  let start = lineStart;
+  while (start > 0) {
+    const prevEnd = start - 1;
+    const prevStart = text.lastIndexOf('\n', prevEnd - 1) + 1;
+    const prevLine = text.slice(prevStart, prevEnd);
+    if (!prevLine.includes('|')) break;
+    if (isSeparatorLine(prevLine)) return true;
+    start = prevStart;
+  }
+  let end = lineEnd;
+  while (end < text.length) {
+    const nextStart = end + 1;
+    let nextEnd = text.indexOf('\n', nextStart);
+    if (nextEnd === -1) nextEnd = text.length;
+    const nextLine = text.slice(nextStart, nextEnd);
+    if (!nextLine.includes('|')) break;
+    if (isSeparatorLine(nextLine)) return true;
+    end = nextEnd;
+  }
+  // A single standalone pipe row (no separator anywhere) is still the
+  // long-standing "| Aptive | $199 |" shape — accept it only WITH pipes.
+  return hasLeadingPipe(line);
+}
+
 function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
   const s = String(renderedText || '');
   const lineStart = s.lastIndexOf('\n', amountIndex - 1) + 1;
@@ -492,41 +780,44 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
   // (a) the amount's own cell or the immediately preceding cell, or (b) the
   // table's header row at the same column index. First-party in the owning
   // cell/header blocks; parse failure fails closed.
-  if (/^\s*\|/.test(line)) {
+  if (isTableLine(s, lineStart, lineEnd)) {
     const cells = splitTableCells(line);
     const idx = cells.findIndex((c) => local >= c.start && local < c.end);
     if (idx === -1) return false;
     const own = cells[idx].text;
     const prev = idx > 0 ? cells[idx - 1].text : '';
-    if (hasFirstPartyMarker(own) || hasFirstPartyMarker(prev)) return false;
+    if (cellIsFirstParty(own)) return false;
     // Header-row resolution: walk up contiguous table lines (skipping the
-    // |---| separator) to the topmost row; same column index attributes.
+    // --- separator) to the topmost row; same column index attributes.
     let hStart = lineStart;
     let header = null;
     while (hStart > 0) {
       const prevEnd = hStart - 1;
       const prevStart = s.lastIndexOf('\n', prevEnd - 1) + 1;
       const prevLine = s.slice(prevStart, prevEnd);
-      if (!/^\s*\|/.test(prevLine)) break;
-      if (!/^[\s|:\-]+$/.test(prevLine)) header = prevLine;
+      if (!prevLine.includes('|')) break;
+      if (!isSeparatorLine(prevLine)) header = prevLine;
       hStart = prevStart;
     }
-    // EVERY first-party veto runs BEFORE any adjacency exemption — the owning
-    // column header AND the row's label cell. "| Our quarterly service |
-    // Other companies | $89 per application |" must not exempt on the
-    // neighbouring cell while its own row label names us (pre-push Codex P0,
-    // r7).
+    // Mixed leading-pipe conventions would shift column indexes by one.
+    if (header && hasLeadingPipe(header) !== hasLeadingPipe(line)) return false;
+    // EVERY first-party veto runs BEFORE any exemption — the owning column
+    // header AND the row's label cell. "| Our quarterly service | Other
+    // companies | $89 per application |" must not exempt on a neighbouring
+    // cell while its own row label names us (pre-push Codex P0, r7).
     const ownHeader = header ? splitTableCells(header)[idx]?.text : null;
-    if (ownHeader && hasFirstPartyMarker(ownHeader)) return false;
-    if (cells.length && hasFirstPartyMarker(cells[0].text)) return false;
-    if (identifiesThirdParty(own) || identifiesThirdParty(prev)) return true;
-    if (!header) return false;
-    // ownHeader came from the SAME tokenizer as the row — a raw split('|')
-    // would shift the header indexes on an escaped pipe and map our amount to
-    // a competitor column even though the row parsed correctly (pre-push
-    // Codex P0, r6). First-party headers were already vetoed above.
-    if (!ownHeader) return false;
-    return identifiesThirdParty(ownHeader);
+    if (ownHeader && cellIsFirstParty(ownHeader)) return false;
+    if (cells.length && cellIsFirstParty(cells[0].text)) return false;
+    // When a HEADER exists it OWNS the column and decides alone. Falling
+    // through to neighbour-adjacency here would let a sibling column attribute
+    // an amount its own header does not (Codex r7/r9).
+    if (ownHeader) return cellIsThirdParty(ownHeader);
+    if (header) return false; // header row present but this column is missing
+    // No header row: the amount's own cell or the immediately preceding one
+    // attributes it — "| Other companies | $199 | Local service | $89 |"
+    // exempts only the $199 (pre-push Codex P0).
+    if (cellIsFirstParty(prev)) return false;
+    return cellIsThirdParty(own) || cellIsThirdParty(prev);
   }
   // ComparisonTable values prop (TEXT-scoped — JSX props span lines). Two
   // sanctioned shapes:
@@ -551,18 +842,9 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
     const close = j.indexOf(']', open);
     if (close === -1) continue;
     if (amountIndex <= open || amountIndex >= close) continue;
-    const seg = j.slice(open + 1, close);
-    if (hasFirstPartyMarker(seg)) return false;
-    // Locate the amount's own string in the array — attribution binds
-    // POSITIONALLY, never "any earlier cell in the row": values:["Other
-    // companies","$199","Local service","$89"] must exempt only the $199
-    // (pre-push Codex P0).
-    const cellStrings = [];
-    const strRe = new RegExp(QUOTED_STR_SRC, 'g');
-    let sm;
-    while ((sm = strRe.exec(seg)) !== null) {
-      cellStrings.push({ text: unescapeStr(sm[1] ?? sm[2]), start: open + 1 + sm.index, end: open + 1 + sm.index + sm[0].length });
-    }
+    const parsedValues = parseStringArray(j, open);
+    if (!parsedValues) return false; // unreadable row values — fail closed
+    const cellStrings = parsedValues.elements;
     const idx = cellStrings.findIndex((c) => amountIndex >= c.start && amountIndex < c.end);
     if (idx === -1) return false;
     // The owning ROW's label is part of the row — "label: 'Our quarterly
@@ -597,11 +879,17 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
         const strM = new RegExp(`^(?:${QUOTED_STR_SRC}|\`((?:[^\`\\\\$]|\\\\.)*)\`)`).exec(rest);
         if (!strM) return false; // unsupported label expression
         const label = unescapeStr(strM[1] ?? strM[2] ?? strM[3]);
-        if (label && hasFirstPartyMarker(label)) return false;
+        if (label && cellIsFirstParty(label)) return false;
       }
     }
     const own = cellStrings[idx].text;
     const prev = idx > 0 ? cellStrings[idx - 1].text : '';
+    // The veto is scoped to the cells that could ATTRIBUTE this amount, not
+    // to every sibling value: a normal side-by-side row legitimately
+    // describes Waves in one column and a competitor's fee in another, and a
+    // seg-wide scan blocked exactly the sourced tables this exists to allow
+    // (Codex r9). The owning header below still vetoes our own column.
+    if (cellIsFirstParty(own)) return false;
     // Resolve the amount's own COLUMN first, within this <ComparisonTable>.
     // The nearest PRECEDING tag is not necessarily the OWNING one: after a
     // self-closed table, prose like `Our quarterly service values: ["$89 per
@@ -611,26 +899,38 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
     let header = null;
     const tagEnd = compStart === -1 ? -1 : openingTagEndIndex(j, compStart);
     if (compStart !== -1 && tagEnd !== -1 && vm.index <= tagEnd) {
-      const colsM = /columns\s*=\s*\{?\s*\[/.exec(j.slice(compStart, vm.index));
-      if (colsM) {
-        const colsOpen = compStart + colsM.index + colsM[0].length - 1;
-        const colsClose = j.indexOf(']', colsOpen);
-        if (colsClose !== -1) {
-          const headers = [...j.slice(colsOpen + 1, colsClose).matchAll(new RegExp(QUOTED_STR_SRC, 'g'))]
-            .map((m) => unescapeStr(m[1] ?? m[2]));
-          header = headers[idx + 1] ?? null; // columns[0] is the row-label column
-        }
+      // Search the WHOLE opening tag, not just the text before `values`:
+      // JSX prop order is semantically irrelevant and `rows` may precede
+      // `columns`, which parked valid tables on ordering alone (Codex r9).
+      // Read `columns` as a TOP-LEVEL prop of THIS tag — a regex over the raw
+      // tag text matched fake columns inside another prop's string (Codex r9
+      // P0).
+      const openTag = [...eachTag(j.slice(compStart, tagEnd + 1))][0];
+      const attrsStart = openTag ? compStart + openTag.start + `<${openTag.name}`.length : -1;
+      const propAt = openTag ? topLevelPropValueIndex(openTag.attrs, 'columns') : -1;
+      if (propAt !== -1) {
+        // Skip the optional JSX brace to land on the array's "[".
+        let colsOpen = attrsStart + propAt;
+        while (colsOpen < j.length && /[\s{]/.test(j[colsOpen])) colsOpen += 1;
+        const parsedCols = parseStringArray(j, colsOpen);
+        // A non-string or unreadable header array cannot be trusted to align
+        // with the row, and a wrong alignment exempts OUR price through a
+        // neighbouring competitor column (Codex r9 P0) — fail closed.
+        if (!parsedCols) return false;
+        header = parsedCols.elements[idx + 1]?.text ?? null; // columns[0] labels the row
       }
     }
-    // The OWNING COLUMN VETOES first: a neighbouring "Other companies" value
-    // must not attribute an amount that sits under an "Our service" header
-    // (Codex r7). Adjacency is only consulted once the column is cleared.
-    if (header && hasFirstPartyMarker(header)) return false;
-    // (a) the amount's own cell or the immediately preceding cell.
-    if (identifiesThirdParty(own) || identifiesThirdParty(prev)) return true;
-    // (b) otherwise the column header decides.
-    if (!header) return false;
-    return identifiesThirdParty(header);
+    // The OWNING COLUMN decides when it exists — vetoing on our column and
+    // attributing on a competitor's — so a neighbouring value can neither
+    // launder nor block an amount its own header already answers for
+    // (Codex r7/r9).
+    if (header) {
+      if (cellIsFirstParty(header)) return false;
+      return cellIsThirdParty(header);
+    }
+    // No resolvable header: fall back to same-row adjacency.
+    if (cellIsFirstParty(prev)) return false;
+    return cellIsThirdParty(own) || cellIsThirdParty(prev);
   }
   return false;
 }
@@ -691,7 +991,13 @@ function clauseAround(sentence, localIndex) {
 function isThirdPartyPriceCitation(text, amountIndex) {
   const { text: sentence, offset: sentenceOffset } = sentenceAround(text, amountIndex);
   if (!sentence) return false;
-  if (hasFirstPartyMarker(sentence)) return false;
+  // The first-party VETO reads the sentence DECODED — "O&#117;r service is
+  // different; Orkin charges $89" renders as "Our service…" and the raw text
+  // hid the marker (Codex r9 P0). Decoding is safe here because the sentence
+  // is only pattern-tested, never used for offsets; the clause scan below
+  // deliberately stays on the RAW text, since decoding there would only ever
+  // ADD third-party matches — the permissive direction.
+  if (hasFirstPartyMarker(decodeEntitiesForScan(sentence))) return false;
   const localAmountIndex = amountIndex - sentenceOffset;
   const { text: clause, offset: clauseOffset } = clauseAround(sentence, localAmountIndex);
   if (!clause) return false;

@@ -2452,6 +2452,127 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('<p>Orkin charges a <strong>$199</strong> cancellation fee.</p>', OP)).toBeNull();
   });
 
+  test('entity-encoded first-party labels still veto (r9)', () => {
+    // Renders as "Our quarterly service" — the raw text hid the marker.
+    expect(findHardcodedPrice('| O&#117;r quarterly service | Other companies | $89 per visit |', OP)).not.toBeNull();
+    expect(findHardcodedPrice('<ComparisonTable columns={["What","Other companies"]} rows={[{ label: "O&#117;r service", values: ["$89 per visit"] }]} />', OP)).not.toBeNull();
+  });
+
+  test('entity-encoded first-party markers veto in PROSE too (r9 P0)', () => {
+    expect(findHardcodedPrice('O&#117;r service is different; Orkin charges $89 per visit.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('&#87;aves charges less than Orkin&rsquo;s $199 fee.', OP)).not.toBeNull();
+    // A genuine competitor attribution with no first-party marker still passes.
+    expect(findHardcodedPrice('Orkin charges a $199 cancellation fee.', OP)).toBeNull();
+  });
+
+  test('pipe tables without leading pipes are recognized (r9)', () => {
+    // Valid GFM; keying off a leading "|" parked sourced tables on delimiters.
+    expect(findHardcodedPrice('Fee | Aptive\n--- | ---\nEarly cancellation | $199', OP)).toBeNull();
+    // Our own column in that form is still blocked.
+    expect(findHardcodedPrice('Fee | Our service\n--- | ---\nQuarterly | $89 per visit', OP)).not.toBeNull();
+    // Mixed leading-pipe conventions would shift columns → fail closed.
+    expect(findHardcodedPrice('| Fee | Aptive |\n--- | ---\nEarly cancellation | $199', OP)).not.toBeNull();
+  });
+
+  test('a LINKED competitor cell still identifies the owner (r9)', () => {
+    // The B1/B3 briefs require linked attribution.
+    expect(findHardcodedPrice('| [Aptive](https://www.consumeraffairs.com/x) | $199 |', OP)).toBeNull();
+    // A linked FIRST-PARTY cell still vetoes.
+    expect(findHardcodedPrice('| [Our quarterly service](/pest-control-services/) | $89 per visit |', OP)).not.toBeNull();
+  });
+
+  test('a Waves column does not block a competitor column in the same row (r9)', () => {
+    const jsx = '<ComparisonTable columns={["Feature","Our service","Orkin"]} rows={[{ values: ["Our no-contract guarantee","$199 early-cancel fee"] }]} />';
+    expect(findHardcodedPrice(jsx, OP)).toBeNull();
+    // …but OUR column's own amount is still blocked.
+    const ours = '<ComparisonTable columns={["Feature","Our service","Orkin"]} rows={[{ values: ["$89 per visit","None"] }]} />';
+    expect(findHardcodedPrice(ours, OP)).not.toBeNull();
+  });
+
+  test('a brace inside a BACKTICK label does not hide it (r9 P0)', () => {
+    const jsx = '<ComparisonTable columns={["Fee","Other companies"]} rows={[{ label: `Our {quarterly service`, values:["$89 per visit"] }]} />';
+    expect(findHardcodedPrice(jsx, OP)).not.toBeNull();
+    const interp = '<ComparisonTable columns={["Fee","Other companies"]} rows={[{ label: `Our ${x} service`, values:["$89 per visit"] }]} />';
+    expect(findHardcodedPrice(interp, OP)).not.toBeNull();
+  });
+
+  test('non-rendered attribution never exempts (r9 P0)', () => {
+    for (const body of [
+      '<span hidden>Orkin charges a</span> $89 per visit',
+      '<span aria-hidden="true">Orkin charges a</span> $89 per visit',
+      '<template>Orkin charges a</template> $89 per visit',
+      '{show && "Orkin charges a"} $89 per visit',
+      '<span hidden><span>x</span>Orkin charges a</span> $89 per visit',
+      '<span style="display:none">Orkin charges a</span> $89 per visit',
+      '<span style="visibility:hidden">Orkin charges a</span> $89 per visit',
+      '<span hidden>Orkin charges a $89 per visit',
+      '<span title={"x" > "Orkin charges a"}> $89 per visit</span>',
+      '<span style={{ display: "none" }}>Orkin charges a</span> $89 per visit',
+      '<span style={{ visibility: "hidden" }}>Orkin charges a</span> $89 per visit',
+      '<span aria-hidden={1 === 1}>Orkin charges a</span> $89 per visit',
+      '<span style={{display: "no" + "ne"}}>Orkin charges a</span> $89 per visit',
+      '<span style="opacity:0">Orkin charges a</span> $89 per visit',
+      '<span style="font-size:0">Orkin charges a</span> $89 per visit',
+      '<span class="hidden">Orkin charges a</span> $89 per visit',
+      '<span className="sr-only">Orkin charges a</span> $89 per visit',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).not.toBeNull();
+    }
+    // Visible attribution is untouched, including an explicit aria-hidden=false.
+    expect(findHardcodedPrice('<span>Orkin charges a</span> $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice('<span aria-hidden="false">Orkin charges a</span> $199 cancellation fee.', OP)).toBeNull();
+  });
+
+  test('a link DESTINATION never supplies attribution (r9 P0)', () => {
+    // Readers see "Local plan charges $89" — the competitor name is in a URL.
+    expect(findHardcodedPrice('[Local plan](https://example.com/Orkin) charges $89 per application.', OP)).not.toBeNull();
+    // Balanced parens and nested brackets are valid Markdown — a partial
+    // match would leave the tail of the URL behind as attributable text.
+    expect(findHardcodedPrice('[Local plan](https://www.consumeraffairs.com/foo(x)/Orkin) charges $89 per application.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('[Local [x] plan](https://example.com/Orkin) charges $89 per application.', OP)).not.toBeNull();
+    // Malformed links blank whole, so no fragment can attribute.
+    expect(findHardcodedPrice('[Local plan](https://example.com/Orkin charges $89 per application.', OP)).not.toBeNull();
+    // A visible anchor still attributes normally.
+    expect(findHardcodedPrice('[Orkin](https://orkin.com) charges a $199 cancellation fee.', OP)).toBeNull();
+  });
+
+  test('noscript content is not visible attribution (r9 P0)', () => {
+    expect(findHardcodedPrice('<noscript>Other companies charge</noscript> $89 per application', OP)).not.toBeNull();
+  });
+
+  test('only the REAL top-level columns prop is read (r9 P0)', () => {
+    // Fake columns inside another prop's string must not outrank the real one.
+    const spoofed = '<ComparisonTable data-note="columns={[\\"Fee\\",\\"Aptive\\"]}" columns={["Fee","Our service"]} rows={[{ values:["$89 per visit"] }]} />';
+    expect(findHardcodedPrice(spoofed, OP)).not.toBeNull();
+    // A duplicate top-level columns prop is unreadable → fail closed.
+    const dup = '<ComparisonTable columns={["Fee","Aptive"]} columns={["Fee","Our service"]} rows={[{ values:["$89 per visit"] }]} />';
+    expect(findHardcodedPrice(dup, OP)).not.toBeNull();
+  });
+
+  test('unreadable column arrays fail closed (r9 P0)', () => {
+    // A non-string header compresses positions; a "]" inside a header would
+    // end the array early. Either way the row/header alignment is unproven.
+    expect(findHardcodedPrice('<ComparisonTable columns={["Fee", null, "Our service"]} rows={[{ values:["Aptive","$89 per visit"] }]} />', OP)).not.toBeNull();
+    expect(findHardcodedPrice('<ComparisonTable columns={["Fee","Plan ] tier","Our service"]} rows={[{ values:["Aptive","$89 per visit"] }]} />', OP)).not.toBeNull();
+  });
+
+  test('non-string cells fail the match closed (r9 P0)', () => {
+    // A null/numeric/expression element would compress the index and shift
+    // the amount onto a neighbouring column.
+    for (const values of ['[null,"$199"]', '[0,"$199"]', '[someExpr,"$199"]', '[`tpl`,"$199"]']) {
+      const jsx = `<ComparisonTable columns={["Fee","Aptive","Our service"]} rows={[{ values: ${values} }]} />`;
+      expect(findHardcodedPrice(jsx, OP)).not.toBeNull();
+    }
+    // A trailing comma is not a cell.
+    expect(findHardcodedPrice('<ComparisonTable columns={["Fee","Aptive"]} rows={[{ values: ["$199",] }]} />', OP)).toBeNull();
+  });
+
+  test('JSX prop order does not decide attribution (r9)', () => {
+    expect(findHardcodedPrice('<ComparisonTable rows={[{ label: "Early cancel", values: ["$199"] }]} columns={["Fee","Orkin"]} />', OP)).toBeNull();
+    // Order-independence must not leak the veto either.
+    expect(findHardcodedPrice('<ComparisonTable rows={[{ label: "Early cancel", values: ["$89"] }]} columns={["Fee","Waves"]} />', OP)).not.toBeNull();
+  });
+
   test('MDX/HTML comments cannot attribute a price (r6)', () => {
     // The reader sees only "$89 per visit" — the attribution never renders.
     expect(findHardcodedPrice('{/* other companies charge */} $89 per visit for local quarterly service.', OP)).not.toBeNull();
