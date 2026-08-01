@@ -156,7 +156,7 @@ function deterministicOutOfScope(text) {
 // how the two earlier copies drifted. STREET_TOKEN_ALIASES adds the
 // compare-time directionals (n/north, se/southeast, …) the normalizer's
 // split set deliberately omits.
-const { STREET_SPLIT_SUFFIXES, CITY_PREFIX_TOKENS } = require('../../utils/address-normalizer');
+const { STREET_SPLIT_SUFFIXES, CITY_PREFIX_TOKENS, isStateZipPair } = require('../../utils/address-normalizer');
 
 const ALL_STREET_SUFFIXES = new Set([
   ...STREET_SPLIT_SUFFIXES,
@@ -172,7 +172,6 @@ const ALL_STREET_SUFFIXES = new Set([
 // matches the row's full normalized street (address-compare owns
 // suffix/directional normalization).
 function extractAddressCandidates(text) {
-  const out = [];
   const src = String(text || '');
   // House numbers may be a single digit ("7 Palm Ave") and street names may
   // be numbered ("123 5th Ave") — the full-street confirmation downstream is
@@ -193,10 +192,26 @@ function extractAddressCandidates(text) {
   const re = /\b(\d{1,6})[^\S\r\n]+([A-Za-z0-9][A-Za-z0-9'.-]*(?:[^\S\r\n]+(?:[A-Za-z][A-Za-z0-9'.-]*|(?<=\s(?:us|sr|cr|rte|rt|route|hwy|highway|road|rd)\s+)\d{1,4}\b)){0,6})/gi;
   let m;
   // Structural designators (lot/space/bldg/floor) come from the canonical
-  // set in utils/address-normalizer.js — bare 'fl' is deliberately OMITTED
-  // here (it collides with the FL state marker; 'floor' spelled out works).
+  // set in utils/address-normalizer.js. 'fl' is handled separately below —
+  // it is BOTH the state marker and the floor designator, disambiguated by
+  // the canonical isStateZipPair rule.
   const UNIT_WORD_RE = /^(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor|#)$/i;
-  while (out.length < 3 && (m = re.exec(src)) !== null) {
+  // Candidate-cap semantics: the 3-candidate cap applies to PLAUSIBLE
+  // candidates only — ones whose street words carry a suffix/directional/
+  // route token, or that bound a unit or locality. Numeric quote details
+  // ("99 initial, 49 monthly, 4 quarterly visits") match the grammar but
+  // never look like streets, and an enumerated skip-list can't cover every
+  // pricing noun — under the old first-3 cap they crowded the real address
+  // out. Implausible candidates are kept ONLY as a fallback when a message
+  // yields nothing plausible ('100 Sample' alone still extracts; alongside
+  // a plausible address it is dropped). A hard scan bound keeps the pass
+  // cheap on pathological texts.
+  const plausible = [];
+  const implausible = [];
+  const ROUTE_TOKENS = new Set(['us', 'sr', 'cr', 'rte', 'rt', 'route']);
+  let scanned = 0;
+  while (plausible.length < 3 && scanned < 40 && (m = re.exec(src)) !== null) {
+    scanned += 1;
     // TOKENIZER-level punctuation normalization: trailing periods come off
     // every captured word ('N.' → 'N', 'Apt.' → 'Apt', 'Ste.' → 'Ste') so
     // every downstream consumer — prefixVariants alias expansion, the
@@ -222,9 +237,24 @@ function extractAddressCandidates(text) {
     // designator AFTER the first word. A street-LEADING designator word is
     // street TEXT, not a unit: "100 Space Coast Parkway" / "100 Building B
     // Way" must keep their full street run.
-    const designatorIdx = allWords.findIndex((w, i) => i > 0 && UNIT_WORD_RE.test(w));
-    const words = designatorIdx > 0 ? allWords.slice(0, designatorIdx) : allWords;
     const afterStreet = src.slice(m.index + m[0].length, m.index + m[0].length + 60);
+    // 'fl' is a designator ONLY per the canonical isStateZipPair rule
+    // (address-normalizer): followed by a ZIP-shaped value it is the STATE
+    // marker ("FL 34285"); we additionally require a short floor-number
+    // value (1-3 digits + optional letter) so terminal 'FL' and 'FL <city>'
+    // stay the state marker. The value may live past the capture ('Fl' is
+    // the last captured word, '2' stopped the run) — peek at the tail.
+    const tailFirstToken = (afterStreet.match(/^[^\S\r\n]*#?[^\S\r\n]*([A-Za-z0-9-]{1,8})\b/) || [])[1] || null;
+    const isFlFloor = (i) => {
+      const next = allWords[i + 1] != null ? allWords[i + 1] : tailFirstToken;
+      return !!next && !isStateZipPair('fl', String(next)) && /^\d{1,3}[a-z]?$/i.test(next);
+    };
+    const designatorIdx = allWords.findIndex((w, i) => {
+      if (i === 0) return false;
+      if (/^fl$/i.test(w)) return isFlFloor(i);
+      return UNIT_WORD_RE.test(w);
+    });
+    const words = designatorIdx > 0 ? allWords.slice(0, designatorIdx) : allWords;
     // Unit forms: "Apt 6", "Unit B", "#6", "Lot 6". Two trusted shapes
     // ONLY: a designator swallowed into the street run (value straddles
     // into the tail), or a designator/# that STARTS the tail — an
@@ -256,8 +286,18 @@ function extractAddressCandidates(text) {
         }
       }
     } else {
-      const am = afterStreet.match(/^\s*,?\s*(?:\b(apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)\.?\s*#?\s*|(#)\s*)([A-Za-z0-9-]{1,8})\b/i);
-      if (am) {
+      // Tail 'Fl <floor>' first — kept out of the general alternation
+      // because its value class must exclude ZIP-shaped tokens (', FL
+      // 34285' is the state+ZIP tail, never Floor 34285).
+      const flTail = afterStreet.match(/^[^\S\r\n]*,?[^\S\r\n]*fl\.?[^\S\r\n]+(\d{1,3}[a-z]?)\b(?!\d)/i);
+      const am = (!flTail || isStateZipPair('fl', flTail[1]))
+        ? afterStreet.match(/^\s*,?\s*(?:\b(apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)\.?\s*#?\s*|(#)\s*)([A-Za-z0-9-]{1,8})\b/i)
+        : null;
+      if (flTail && !isStateZipPair('fl', flTail[1])) {
+        unitWordRaw = 'Fl';
+        unitValue = flTail[1];
+        localitySrc = afterStreet.slice(flTail[0].length);
+      } else if (am) {
         unitWordRaw = am[1] || null;
         unitValue = am[3];
         localitySrc = afterStreet.slice(am[0].length);
@@ -360,31 +400,54 @@ function extractAddressCandidates(text) {
         if (hasFl || ALL_STREET_SUFFIXES.has(lastWord)) locality = `, ${zipNC[1]}`;
       }
     }
-    out.push({
+    const candidate = {
       num: m[1],
       firstWord: words[0],
+      // The second street word rides along so the prefix builder can
+      // recognize two-word route designators ('State Road' → SR).
+      secondWord: words[1] || null,
       locality,
       // The EXPLICIT unit the sender stated, surfaced so confirmation can
       // demand exact agreement and the DB query can discriminate on it.
       unit: unitValue ? `${unitWord} ${unitValue}` : null,
       unitValue: unitValue || null,
       variants: words.map((_, i) => `${m[1]} ${words.slice(0, i + 1).join(' ')}${unitSuffix}`),
-    });
+    };
+    // Plausibility: a street token (suffix/directional/route designator),
+    // or a bound unit/locality. See the cap-semantics note above the loop.
+    const looksLikeStreet = words.some((w) => {
+      const t = String(w).toLowerCase();
+      return ALL_STREET_SUFFIXES.has(t) || ROUTE_TOKENS.has(t);
+    }) || !!unitValue || !!locality;
+    (looksLikeStreet ? plausible : implausible).push(candidate);
   }
-  return out;
+  return plausible.length ? plausible : implausible.slice(0, 3);
 }
 
 // ILIKE prefixes for a candidate's first street word, expanded through the
 // suffix/directional alias table — "100 N Palm" must fetch a row stored as
 // "100 North Palm Avenue" (sameStreetAddress normalizes both at confirm
 // time, but a prefix that never fetches the row never gets confirmed).
-function prefixVariants(num, firstWord) {
+function prefixVariants(num, firstWord, secondWord = null) {
   const lower = String(firstWord || '').toLowerCase();
   const words = new Set([firstWord]);
   if (STREET_TOKEN_ALIASES[lower]) words.add(STREET_TOKEN_ALIASES[lower]);
   for (const [long, short] of Object.entries(STREET_TOKEN_ALIASES)) {
     if (short === lower) words.add(long);
   }
+  // Numbered-route designators span SPELLINGS the alias table can't map
+  // token-for-token: '123 State Road 64' must fetch rows stored '123 SR
+  // 64' and vice versa (sameStreetAddress canonicalizes both at confirm
+  // time, but a prefix that never fetches the row never gets confirmed).
+  // Bare 'US' needs nothing — 'US%' already fetches 'US 41' and 'US
+  // Highway 41'.
+  const second = String(secondWord || '').toLowerCase();
+  let routeKey = null;
+  if (lower === 'sr' || (lower === 'state' && ['road', 'rd', 'route'].includes(second))) routeKey = 'sr';
+  else if (lower === 'cr' || (lower === 'county' && ['road', 'rd'].includes(second))) routeKey = 'cr';
+  else if (['route', 'rte', 'rt'].includes(lower)) routeKey = 'rt';
+  const ROUTE_PREFIX_WORDS = { sr: ['SR', 'State'], cr: ['CR', 'County'], rt: ['Rt', 'Rte', 'Route'] };
+  if (routeKey) ROUTE_PREFIX_WORDS[routeKey].forEach((w) => words.add(w));
   return [...words].map((w) => `${num} ${w}%`);
 }
 
@@ -575,9 +638,23 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
         return false;
       }
     });
-    if (matchIdx === -1) distinctBurst.push(c);
-    else if ((c.unit && !distinctBurst[matchIdx].unit) || (c.locality && !distinctBurst[matchIdx].locality)) {
-      distinctBurst[matchIdx] = c;
+    if (matchIdx === -1) {
+      distinctBurst.push(c);
+    } else {
+      // MERGE complementary detail field-wise — the pair already proved
+      // compatible (sameStreetAddress: conflicts in unit or locality would
+      // have kept them distinct), so each field is equal-or-missing. An
+      // 'Apt 6' text plus a 'Venice FL' text is ONE property whose merged
+      // candidate must carry BOTH: keeping just one candidate would run
+      // shorthand grounding without exact-unit enforcement (or without the
+      // locality bind). The unit-bearing candidate's variants carry the
+      // unit suffix, so it anchors the merge.
+      const u = distinctBurst[matchIdx];
+      const base = c.unitValue ? c : u;
+      distinctBurst[matchIdx] = {
+        ...base,
+        locality: u.locality || c.locality || '',
+      };
     }
   }
   let groundingCandidates = [];
@@ -632,7 +709,7 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
 
   for (const cand of groundingCandidates) {
     const label = `Message thread names address "${cand.num} ${cand.firstWord}…" which matches`;
-    const prefixes = prefixVariants(cand.num, cand.firstWord);
+    const prefixes = prefixVariants(cand.num, cand.firstWord, cand.secondWord);
     assertTime();
     const rows = await bounded(discriminate(
       db('customers')

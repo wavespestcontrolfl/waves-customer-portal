@@ -33,12 +33,40 @@ function addressAddsLocality(candidate, baseline) {
 // suffix/directional normalization, then city/ZIP agreement: "123 Palm St" ≠
 // "123 Palm Ave", and the same street in a different city/ZIP is a different
 // parcel (SWFL street names repeat across cities).
+// Numbered-route designators, canonicalized BEFORE the single-token alias
+// map: 'State Road 64', 'State Rd 64', and 'SR 64' are the same route, as
+// are 'US Highway 41' / 'US Hwy 41' / 'US 41' and 'Route 41' / 'Rte 41' /
+// 'Rt 41'. Pair rewrites fire only on the exact designator pairs, so a
+// street NAMED 'State St' or a token like 'us' inside a name is untouched —
+// non-route addresses normalize byte-identically to before. NOTE: this
+// module is shared beyond the estimator (estimate-membership-context,
+// intelligence-bar estimate-tools) — changes here must run those suites.
+const ROUTE_PAIR_REWRITES = [
+  [['state', 'road'], 'sr'], [['state', 'rd'], 'sr'], [['state', 'route'], 'sr'],
+  [['county', 'road'], 'cr'], [['county', 'rd'], 'cr'],
+  [['us', 'highway'], 'us'], [['us', 'hwy'], 'us'],
+];
+const ROUTE_SINGLE_REWRITES = { route: 'rt', rte: 'rt' };
+function canonicalizeRouteTokens(tokens) {
+  const out = [];
+  for (let i = 0; i < tokens.length; i += 1) {
+    const pair = ROUTE_PAIR_REWRITES.find(([[a1, a2]]) => tokens[i] === a1 && tokens[i + 1] === a2);
+    if (pair) {
+      out.push(pair[1]);
+      i += 1;
+      continue;
+    }
+    out.push(ROUTE_SINGLE_REWRITES[tokens[i]] || tokens[i]);
+  }
+  return out;
+}
+
 function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
-  const normSegment = (s) => String(s || '')
+  const normSegment = (s) => canonicalizeRouteTokens(String(s || '')
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter(Boolean)
+    .filter(Boolean))
     .map((t) => STREET_TOKEN_ALIASES[t] || t)
     .join(' ');
   const parsed = (s) => parseRawAddress(String(s || ''));
@@ -55,6 +83,15 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
       && firstSeg.toLowerCase().endsWith(String(line).toLowerCase())) {
       line = firstSeg;
     }
+    // Comma-free NUMBERED ROUTES: the canonical parser splits at the
+    // suffix and exiles the route number into city ('123 State Road 64' →
+    // line1 '123 State Rd', city '64'). A short pure-number "city" is that
+    // route number — re-attach it, it is street, not locality. (A real
+    // trailing ZIP lands in .zip, never here; alphabetic cities are
+    // untouched. Bare trailing unit numbers shift to the conservative
+    // no-match direction, which the duplicate guard tolerates.)
+    const parsedCity = String(parsed(s).city || '').trim();
+    if (/^\d{1,4}$/.test(parsedCity)) line = `${line} ${parsedCity}`;
     const split = splitStreetLineUnit(line);
     return {
       street: normSegment(split.street),
@@ -93,11 +130,18 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   // formatting-dependent state/ZIP tail ("Bradenton FL 34205" when the last
   // comma is missing) — strip those tokens or the same city compares
   // unequal across formats.
-  const cityString = (s) => normSegment(parsed(s).city)
-    .split(' ')
-    .filter(Boolean)
-    .filter((t) => t !== 'fl' && t !== 'florida' && !/^\d{5}(\d{4})?$/.test(t))
-    .join(' ');
+  const cityString = (s) => {
+    const raw = String(parsed(s).city || '').trim();
+    // A short pure-number "city" is a mis-split route number (see the
+    // street re-attach above), never a locality — comparing it against the
+    // other side's real city would reject the same parcel.
+    if (/^\d{1,4}$/.test(raw)) return '';
+    return normSegment(raw)
+      .split(' ')
+      .filter(Boolean)
+      .filter((t) => t !== 'fl' && t !== 'florida' && !/^\d{5}(\d{4})?$/.test(t))
+      .join(' ');
+  };
   const [ca, cb] = [cityString(a), cityString(b)];
   if (ca && cb && ca !== cb) return false;
   return true;

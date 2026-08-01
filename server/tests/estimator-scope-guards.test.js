@@ -380,6 +380,54 @@ describe('extractAddressCandidates', () => {
     expect(withUnit.variants).toContain('100 Space Coast Parkway Apt 6');
   });
 
+  test('Fl is the FLOOR designator before a floor number, the STATE marker otherwise', () => {
+    // Canonical isStateZipPair rule + short-floor-number refinement.
+    const [fl] = extractAddressCandidates('quote for 100 Palm Ave Fl 2 please');
+    expect(fl.variants.every((v) => v.endsWith(' Fl 2'))).toBe(true);
+    expect(fl.unitValue).toBe('2');
+    // Tail form after a comma.
+    const [flTail] = extractAddressCandidates('quote for 100 Palm Ave, Fl 2, Venice FL 34285');
+    expect(flTail.unit).toBe('Fl 2');
+    expect(flTail.locality).toBe(', Venice 34285');
+    // ZIP-shaped next value ⇒ state marker: locality behavior unchanged.
+    const [state] = extractAddressCandidates('quote for 100 Palm Ave Venice FL 34285');
+    expect(state.unit).toBeNull();
+    expect(state.locality).toBe(', Venice 34285');
+    // Terminal FL ⇒ state marker, unchanged.
+    const [term] = extractAddressCandidates('quote for 100 Palm Ave Venice FL');
+    expect(term.unit).toBeNull();
+    expect(term.locality).toBe(', Venice');
+  });
+
+  test('pricing-detail numbers never crowd out the real address (plausibility cap)', () => {
+    const cands = extractAddressCandidates(
+      'Competitor quoted 99 initial, 49 monthly, and 4 quarterly visits; quote service at 100 Palm Ave',
+    );
+    expect(cands).toHaveLength(1);
+    expect(cands[0].variants).toContain('100 Palm Ave');
+  });
+
+  test('a suffix-less candidate emits only when nothing plausible exists', () => {
+    // Alone: still extracted (fallback) — confirmation gates it anyway.
+    const alone = extractAddressCandidates('quote for 100 Sample');
+    expect(alone).toHaveLength(1);
+    expect(alone[0].variants).toContain('100 Sample');
+    // Alongside a plausible address: dropped in its favor.
+    const both = extractAddressCandidates('quote for 100 Sample and also 200 Oak St please');
+    expect(both).toHaveLength(1);
+    expect(both[0].variants).toContain('200 Oak St');
+  });
+
+  test('route-designator spellings expand in the prefix builder (both directions)', () => {
+    const { _private } = require('../services/estimator-engine/scope-guards');
+    expect(_private.prefixVariants('123', 'State', 'Road')).toEqual(expect.arrayContaining(['123 State%', '123 SR%']));
+    expect(_private.prefixVariants('123', 'SR')).toEqual(expect.arrayContaining(['123 SR%', '123 State%']));
+    expect(_private.prefixVariants('123', 'County', 'Road')).toEqual(expect.arrayContaining(['123 County%', '123 CR%']));
+    expect(_private.prefixVariants('55', 'Route')).toEqual(expect.arrayContaining(['55 Route%', '55 Rt%', '55 Rte%']));
+    // Non-route first words are untouched.
+    expect(_private.prefixVariants('100', 'Palm', 'Ave')).toEqual(['100 Palm%']);
+  });
+
   test('trailing-period tokens normalize at the tokenizer (N., Apt., Ste.)', () => {
     // 'Apt.' used to fail the designator cut entirely — no unit captured,
     // exact-unit guard bypassed.
@@ -1090,6 +1138,99 @@ describe('loadThreadTriageContext', () => {
       triggerBody: 'quote for 100 Palm Ave Apt 6 please',
     });
     expect(triage.lines.join('\n')).toContain('booked: Quarterly Pest Control Service 2026-08-05 (pending)');
+  });
+
+  test('a stated FLOOR enforces the exact-unit guard (Fl 2 never grounds Floor 1\'s row)', async () => {
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Floor', last_name: 'One', address_line1: '100 Palm Ave', address_line2: 'Fl 1', city: 'Venice' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Fl 2 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Floor', last_name: 'Two', address_line1: '100 Palm Ave', address_line2: 'Fl 2', city: 'Venice' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Fl 2 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+  });
+
+  test('route spellings ground each other (State Road 64 ↔ SR 64, US Highway ↔ US)', async () => {
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Route', last_name: 'Stored', address_line1: '123 SR 64', city: 'Bradenton' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 123 State Road 64 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+
+    mockState.rows.customers = [
+      { id: 'c-3', first_name: 'Long', last_name: 'Stored', address_line1: '123 State Road 64', city: 'Bradenton' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 123 SR 64 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+
+    mockState.rows.customers = [
+      { id: 'c-4', first_name: 'Us', last_name: 'Stored', address_line1: '6812 US Highway 41', city: 'Venice' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 6812 US 41 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+  });
+
+  test('complementary burst texts MERGE — unit and locality both carry', async () => {
+    // 'Apt 6' in one text, 'Venice FL 34285' in another: one property; the
+    // merged candidate must enforce the unit AND bind the locality.
+    mockState.rows.sms_log = [
+      { message_body: 'about 100 Palm Ave Apt 6', created_at: new Date().toISOString(), direction: 'inbound' },
+      { message_body: 'that is 100 Palm Avenue, Venice FL 34285', created_at: new Date().toISOString(), direction: 'inbound' },
+    ];
+    // A unitless building-level row: the merged unit must reject it.
+    mockState.rows.customers = [
+      { id: 'c-9', first_name: 'Building', last_name: 'Level', address_line1: '100 Palm Ave', address_line2: null, city: 'Venice', zip: '34285' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you quote the same place?',
+    });
+    expect(triage.groundedCustomerId).toBeNull();
+
+    // The Apt 6 row in the stated city grounds.
+    mockState.rows.customers = [
+      { id: 'c-9', first_name: 'Apt', last_name: 'Six', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Venice', zip: '34285' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you quote the same place?',
+    });
+    expect(triage.groundedCustomerId).toBe('c-9');
+    expect(triage.groundedScope).toMatchObject({ line2: 'Apt 6' });
+  });
+
+  test('conflicting units in the burst stay DISTINCT (no grounding)', async () => {
+    mockState.rows.sms_log = [
+      { message_body: 'about 100 Palm Ave Apt 6', created_at: new Date().toISOString(), direction: 'inbound' },
+      { message_body: 'also 100 Palm Ave Apt 7', created_at: new Date().toISOString(), direction: 'inbound' },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-9', first_name: 'Apt', last_name: 'Six', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Venice' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you quote the same place?',
+    });
+    expect(triage.groundedCustomerId).toBeNull();
   });
 
   test('notation variants of ONE address merge for the implicit-reference fallback', async () => {
