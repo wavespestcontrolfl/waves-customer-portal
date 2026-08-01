@@ -2382,6 +2382,60 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice(`<ComparisonTable ${cols} rows={[{ label: \`\${brand} service\`, values: ["$89 per visit"] }]} />`, OP)).not.toBeNull();
   });
 
+  test('the owning column vetoes an adjacent third-party cell (r7)', () => {
+    const md = '| What | Other companies | Our service |\n|---|---|---|\n| Price | Other companies | $89 per visit |';
+    expect(findHardcodedPrice(md, OP)).not.toBeNull();
+    const jsx = '<ComparisonTable columns={["What","Other companies","Our service"]} rows={[{ label: "Price", values: ["Other companies","$89 per visit"] }]} />';
+    expect(findHardcodedPrice(jsx, OP)).not.toBeNull();
+    // The competitor column still attributes its own amount.
+    const ok = '| What | Our service | Aptive |\n|---|---|---|\n| Early cancel | None | $199 |';
+    expect(findHardcodedPrice(ok, OP)).toBeNull();
+  });
+
+  test('quoted values keys are recognized like the table gate does (r7)', () => {
+    const jsx = '<ComparisonTable columns={["Fee","Aptive"]} rows={[{"label":"Early cancel","values":["$199"]}]} />';
+    expect(findHardcodedPrice(jsx, OP)).toBeNull();
+    // …and the first-party poison still applies through the quoted form.
+    const ours = '<ComparisonTable columns={["Fee","Aptive"]} rows={[{"label":"Our quarterly service","values":["$89 per visit"]}]} />';
+    expect(findHardcodedPrice(ours, OP)).not.toBeNull();
+  });
+
+  test('tag attributes are not reader-visible attribution (r7)', () => {
+    expect(findHardcodedPrice('<span class="other companies charge"> $89 per visit for local quarterly service</span>', OP)).not.toBeNull();
+    expect(findHardcodedPrice('<div data-note="Orkin charges"> $89 per visit locally.</div>', OP)).not.toBeNull();
+    // Visible prose inside a tag still attributes normally.
+    expect(findHardcodedPrice('<p>Orkin charges a $199 cancellation fee.</p>', OP)).toBeNull();
+  });
+
+  test('a > inside an attribute does not end the tag (pre-push P0, r7)', () => {
+    expect(findHardcodedPrice('<span title="x > Orkin charges a"> $89 per visit for local quarterly service</span>', OP)).not.toBeNull();
+    // Markdown cells are prose — an invisible attribute cannot attribute them.
+    expect(findHardcodedPrice('| <span title="Aptive">Local service</span> | $89 |', OP)).not.toBeNull();
+  });
+
+  test('a cell must IDENTIFY the owner, not merely mention one (pre-push P0, r7)', () => {
+    // Row label names us — no neighbouring cell may exempt the row.
+    expect(findHardcodedPrice('| Our quarterly service | Other companies | $89 per application |', OP)).not.toBeNull();
+    // Our own comparative copy is not an attribution.
+    expect(findHardcodedPrice('| Quarterly plan | Better than other companies | $89 per application |', OP)).not.toBeNull();
+    expect(findHardcodedPrice('values: ["Cheaper than Aptive", "$89 per application"]', OP)).not.toBeNull();
+    // A cell that IS the party still attributes, with formatting tolerated.
+    expect(findHardcodedPrice('| **Aptive** | $199 |', OP)).toBeNull();
+    expect(findHardcodedPrice("| Aptive's | $199 |", OP)).toBeNull();
+  });
+
+  // PRE-EXISTING on main, documented here because it was found while fixing
+  // the attribute case and it is STRICTLY WIDER than this PR: a price glued
+  // to a tag ("<span>$89") is never DETECTED, on any lane, because
+  // PRICE_RE_SRC requires whitespace/quote/paren before the "$". Widening the
+  // detector is a separate change with a real false-positive blast radius —
+  // this test pins the current behaviour so the gap cannot be mistaken for
+  // something this PR introduced or fixed.
+  test('KNOWN GAP (pre-existing, not this PR): a price glued to a tag is not detected', () => {
+    expect(findHardcodedPrice('<span>$89 per visit</span>', {})).toBeNull();
+    expect(findHardcodedPrice('<span> $89 per visit</span>', {})).toBe('$89');
+  });
+
   test('MDX/HTML comments cannot attribute a price (r6)', () => {
     // The reader sees only "$89 per visit" — the attribution never renders.
     expect(findHardcodedPrice('{/* other companies charge */} $89 per visit for local quarterly service.', OP)).not.toBeNull();

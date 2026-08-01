@@ -50,13 +50,55 @@ function finding(severity, code, message) {
 // let exactly the fabricated-price shapes this covers slip both gates.
 const PRICE_RE_SRC = '(^|[\\s("\'“‘])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\b|\\b(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\s+(?:dollars|bucks)\\b';
 
-// Blank every span the renderer drops — MDX expression comments and HTML
-// comments — with spaces, LENGTH- and NEWLINE-preserving so callers keep
-// using the original indices and sentence boundaries still split.
-const NON_RENDERED_SPAN_RE = /\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g;
-function blankNonRenderedSpans(s) {
-  return String(s || '').replace(NON_RENDERED_SPAN_RE,
-    (span) => span.replace(/[^\n]/g, ' '));
+// Blank every span the renderer drops, with spaces — LENGTH- and
+// NEWLINE-PRESERVING so callers keep using the original indices and sentence
+// boundaries still split.
+//
+// PROSE attribution must read what a READER SEES, so it blanks comments AND
+// tag markup: `class="other companies charge"` is not attribution any
+// customer can see (Codex r7), and neither is a comment (r6). TABLE
+// attribution deliberately reads the JSX structure (columns/rows props), so
+// it gets the comment-blanked text only — blanking tags there would erase the
+// very structure it resolves against.
+const COMMENT_SPAN_RE = /\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g;
+const blankSpan = (span) => span.replace(/[^\n]/g, ' ');
+function blankComments(s) {
+  return String(s || '').replace(COMMENT_SPAN_RE, blankSpan);
+}
+
+// Tag stripping must be QUOTE-AWARE: a `>` inside an attribute value does not
+// end the tag, and a naive /<[^>]*>/ left the remainder of that invisible
+// attribute in the text — `<span title="x > Orkin charges a"> $89` then read
+// as attribution (pre-push Codex P0, r7). An unterminated tag is left alone.
+function blankTags(s) {
+  const str = String(s || '');
+  const out = str.split('');
+  for (let i = 0; i < str.length; i += 1) {
+    if (str[i] !== '<' || !/[A-Za-z/]/.test(str[i + 1] || '')) continue;
+    let j = i + 1;
+    let close = -1;
+    while (j < str.length) {
+      const ch = str[j];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        const quote = ch;
+        j += 1;
+        while (j < str.length && str[j] !== quote) j += str[j] === '\\' ? 2 : 1;
+        j += 1;
+        continue;
+      }
+      if (ch === '>') { close = j; break; }
+      if (ch === '<') break; // unterminated — not a tag
+      j += 1;
+    }
+    if (close === -1) continue;
+    for (let k = i; k <= close; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    i = close;
+  }
+  return out.join('');
+}
+
+function blankToRenderedText(s) {
+  return blankTags(blankComments(s));
 }
 
 /**
@@ -67,12 +109,14 @@ function blankNonRenderedSpans(s) {
  */
 function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
   const s = String(text || '');
-  // Attribution is decided against what READERS SEE. An MDX/HTML comment is
-  // stripped at render, so "{/* other companies charge */} $89 per visit"
+  // Attribution is decided against what READERS SEE. Comments and tag
+  // attributes are stripped at render, so "{/* other companies charge */} $89
+  // per visit" and `<span class="other companies charge">$89 …</span>` both
   // showed the customer a bare first-party price while the guardrail read an
-  // exemption (Codex r6). Detection still runs on the original text — a price
-  // hidden in a comment stays flagged (conservative in both directions).
-  const attributionText = blankNonRenderedSpans(s);
+  // exemption (Codex r6/r7). Detection still runs on the original text — a
+  // price hidden in markup stays flagged (conservative in both directions).
+  const proseText = blankToRenderedText(s);
+  const tableText = blankComments(s);
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
   while ((match = priceRe.exec(s)) !== null) {
@@ -100,8 +144,8 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
     // ("## Other companies charge\n$89 …" read as one sentence, Codex r4).
     const tokenIndex = match.index + (match[1] ? match[1].length : 0);
     if (thirdPartyCitations
-      && (isThirdPartyPriceCitation(attributionText, tokenIndex)
-        || isTableAttributedPrice(attributionText, tokenIndex))) continue;
+      && (isThirdPartyPriceCitation(proseText, tokenIndex)
+        || isTableAttributedPrice(tableText, proseText, tokenIndex))) continue;
     return match[0].trim();
   }
   return null;
@@ -304,6 +348,32 @@ function matchesThirdParty(textPart) {
   return false;
 }
 
+// A table cell attributes an amount only when it IDENTIFIES the price owner —
+// it must BE the party, not merely mention one. "Better than other companies"
+// is our own comparative copy, and letting a substring match exempt it
+// laundered a Waves price (pre-push Codex P0, r7). Articles, possessives and
+// surrounding punctuation are tolerated; anything else fails closed.
+function identifiesThirdParty(cellText) {
+  const trimmed = String(cellText || '')
+    .replace(/[*_`~]/g, '')
+    .trim()
+    .replace(/^(?:the|a|an)\s+/i, '')
+    .replace(/['’]s$/i, '')
+    .replace(/^[\s\-–—:]+|[\s\-–—:.,;]+$/g, '')
+    .trim();
+  if (!trimmed) return false;
+  for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
+    if (!re) continue;
+    const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let m;
+    while ((m = scan.exec(trimmed)) !== null) {
+      if (m.index === 0 && m[0].length === trimmed.length) return true;
+      if (m[0].length === 0) scan.lastIndex += 1;
+    }
+  }
+  return false;
+}
+
 // Index of the `}` closing the object that is already open at `from`, honoring
 // nesting and quoted strings (a brace inside "50% } off" is not a delimiter).
 // -1 = the object never closes, or the enclosing array closes first — either
@@ -383,8 +453,14 @@ function splitTableCells(line) {
   return cells;
 }
 
-function isTableAttributedPrice(text, amountIndex) {
-  const s = String(text || '');
+// `structuralText` keeps JSX markup (the ComparisonTable path resolves
+// columns/rows props against it); `renderedText` has tags blanked. A MARKDOWN
+// table's cells are prose, so they must be read rendered — otherwise
+// `| <span title="Aptive">Local service</span> | $89 |` attributes our amount
+// to an invisible attribute (pre-push Codex P0, r7). Both are blanked
+// length-preservingly, so one index is valid in either.
+function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
+  const s = String(renderedText || '');
   const lineStart = s.lastIndexOf('\n', amountIndex - 1) + 1;
   let lineEnd = s.indexOf('\n', amountIndex);
   if (lineEnd === -1) lineEnd = s.length;
@@ -403,7 +479,6 @@ function isTableAttributedPrice(text, amountIndex) {
     const own = cells[idx].text;
     const prev = idx > 0 ? cells[idx - 1].text : '';
     if (hasFirstPartyMarker(own) || hasFirstPartyMarker(prev)) return false;
-    if (matchesThirdParty(own) || matchesThirdParty(prev)) return true;
     // Header-row resolution: walk up contiguous table lines (skipping the
     // |---| separator) to the topmost row; same column index attributes.
     let hStart = lineStart;
@@ -416,16 +491,22 @@ function isTableAttributedPrice(text, amountIndex) {
       if (!/^[\s|:\-]+$/.test(prevLine)) header = prevLine;
       hStart = prevStart;
     }
-    if (!header) return false;
-    // The row's label cell (cells[0]) is part of the row — a first-party
-    // label poisons every value in it (Codex r4).
+    // EVERY first-party veto runs BEFORE any adjacency exemption — the owning
+    // column header AND the row's label cell. "| Our quarterly service |
+    // Other companies | $89 per application |" must not exempt on the
+    // neighbouring cell while its own row label names us (pre-push Codex P0,
+    // r7).
+    const ownHeader = header ? splitTableCells(header)[idx]?.text : null;
+    if (ownHeader && hasFirstPartyMarker(ownHeader)) return false;
     if (cells.length && hasFirstPartyMarker(cells[0].text)) return false;
-    // The SAME tokenizer as the row — a raw split('|') here would shift the
-    // header indexes on an escaped pipe and map our amount to a competitor
-    // column even though the row parsed correctly (pre-push Codex P0, r6).
-    const headerCell = splitTableCells(header)[idx]?.text;
-    if (!headerCell || hasFirstPartyMarker(headerCell)) return false;
-    return matchesThirdParty(headerCell);
+    if (identifiesThirdParty(own) || identifiesThirdParty(prev)) return true;
+    if (!header) return false;
+    // ownHeader came from the SAME tokenizer as the row — a raw split('|')
+    // would shift the header indexes on an escaped pipe and map our amount to
+    // a competitor column even though the row parsed correctly (pre-push
+    // Codex P0, r6). First-party headers were already vetoed above.
+    if (!ownHeader) return false;
+    return identifiesThirdParty(ownHeader);
   }
   // ComparisonTable values prop (TEXT-scoped — JSX props span lines). Two
   // sanctioned shapes:
@@ -436,14 +517,21 @@ function isTableAttributedPrice(text, amountIndex) {
   //      row). The amount's own column header decides attribution.
   // "These values: [Aptive] show that … is $89" stays prose (amount must be
   // INSIDE the bracket), and parse failure/misalignment fails closed.
-  const valuesRe = /\bvalues\s*[:=]\s*\[/g;
+  // Quoted keys are the valid object-literal form and comparison-table-gate
+  // accepts them, so `{"label":"Early cancel","values":["$199"]}` must be
+  // recognized here too or a compliant sourced table parks purely on
+  // property-key formatting (Codex r7).
+  // The ComparisonTable path reads JSX STRUCTURE, so it works on the
+  // markup-preserving text (tags blanked there would erase columns/rows).
+  const j = String(structuralText || '');
+  const valuesRe = /(?:"values"|'values'|\bvalues\b)\s*[:=]\s*\[/g;
   let vm;
-  while ((vm = valuesRe.exec(s)) !== null) {
+  while ((vm = valuesRe.exec(j)) !== null) {
     const open = vm.index + vm[0].length - 1;
-    const close = s.indexOf(']', open);
+    const close = j.indexOf(']', open);
     if (close === -1) continue;
     if (amountIndex <= open || amountIndex >= close) continue;
-    const seg = s.slice(open + 1, close);
+    const seg = j.slice(open + 1, close);
     if (hasFirstPartyMarker(seg)) return false;
     // Locate the amount's own string in the array — attribution binds
     // POSITIONALLY, never "any earlier cell in the row": values:["Other
@@ -471,13 +559,13 @@ function isTableAttributedPrice(text, amountIndex) {
     // (Codex r6). objectStartIndex ignores braces inside quotes, anchored at
     // the enclosing tag so the scan stays inside JSX (where quotes pair) and
     // never treats an apostrophe in body prose as a string delimiter.
-    const compStart = s.lastIndexOf('<ComparisonTable', vm.index);
-    const rowStart = compStart === -1 ? -1 : objectStartIndex(s, compStart, vm.index);
+    const compStart = j.lastIndexOf('<ComparisonTable', vm.index);
+    const rowStart = compStart === -1 ? -1 : objectStartIndex(j, compStart, vm.index);
     if (rowStart !== -1) {
-      const rowEnd = objectEndIndex(s, close + 1);
+      const rowEnd = objectEndIndex(j, close + 1);
       // Undelimited row object — can't prove the label is third-party.
       if (rowEnd === -1) return false;
-      const rowText = `${s.slice(rowStart, vm.index)} ${s.slice(close + 1, rowEnd)}`;
+      const rowText = `${j.slice(rowStart, vm.index)} ${j.slice(close + 1, rowEnd)}`;
       // Backticks are a real label form too, and ANY label we cannot read as
       // a plain string (a `{expr}`, a template with ${…}) fails closed —
       // an unreadable label must never count as "not first-party"
@@ -492,29 +580,37 @@ function isTableAttributedPrice(text, amountIndex) {
         if (label && hasFirstPartyMarker(label)) return false;
       }
     }
-    // (a) the amount's own cell or the immediately preceding cell.
     const own = cellStrings[idx].text;
     const prev = idx > 0 ? cellStrings[idx - 1].text : '';
-    if (matchesThirdParty(own) || matchesThirdParty(prev)) return true;
-    // (b) resolve the amount's column header within this <ComparisonTable>.
+    // Resolve the amount's own COLUMN first, within this <ComparisonTable>.
     // The nearest PRECEDING tag is not necessarily the OWNING one: after a
     // self-closed table, prose like `Our quarterly service values: ["$89 per
     // application"]` would otherwise borrow that component's headers. Only an
     // occurrence INSIDE the opening tag — where rows/columns live — may
     // resolve against them (pre-push Codex P0, r6).
-    if (compStart === -1) return false;
-    const tagEnd = openingTagEndIndex(s, compStart);
-    if (tagEnd === -1 || vm.index > tagEnd) return false;
-    const colsM = /columns\s*=\s*\{?\s*\[/.exec(s.slice(compStart, vm.index));
-    if (!colsM) return false;
-    const colsOpen = compStart + colsM.index + colsM[0].length - 1;
-    const colsClose = s.indexOf(']', colsOpen);
-    if (colsClose === -1) return false;
-    const headers = [...s.slice(colsOpen + 1, colsClose).matchAll(/"([^"]*)"|'([^']*)'/g)]
-      .map((m) => m[1] ?? m[2]);
-    const header = headers[idx + 1]; // columns[0] is the row-label column
-    if (!header || hasFirstPartyMarker(header)) return false;
-    return matchesThirdParty(header);
+    let header = null;
+    const tagEnd = compStart === -1 ? -1 : openingTagEndIndex(j, compStart);
+    if (compStart !== -1 && tagEnd !== -1 && vm.index <= tagEnd) {
+      const colsM = /columns\s*=\s*\{?\s*\[/.exec(j.slice(compStart, vm.index));
+      if (colsM) {
+        const colsOpen = compStart + colsM.index + colsM[0].length - 1;
+        const colsClose = j.indexOf(']', colsOpen);
+        if (colsClose !== -1) {
+          const headers = [...j.slice(colsOpen + 1, colsClose).matchAll(/"([^"]*)"|'([^']*)'/g)]
+            .map((m) => m[1] ?? m[2]);
+          header = headers[idx + 1] ?? null; // columns[0] is the row-label column
+        }
+      }
+    }
+    // The OWNING COLUMN VETOES first: a neighbouring "Other companies" value
+    // must not attribute an amount that sits under an "Our service" header
+    // (Codex r7). Adjacency is only consulted once the column is cleared.
+    if (header && hasFirstPartyMarker(header)) return false;
+    // (a) the amount's own cell or the immediately preceding cell.
+    if (identifiesThirdParty(own) || identifiesThirdParty(prev)) return true;
+    // (b) otherwise the column header decides.
+    if (!header) return false;
+    return identifiesThirdParty(header);
   }
   return false;
 }
