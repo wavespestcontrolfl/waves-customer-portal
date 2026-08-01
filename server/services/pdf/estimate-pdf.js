@@ -221,25 +221,54 @@ function buildingBlock(ctx, building, y, taxRate) {
   }
 
   // Building subtotal line
-  y += 2;
-  doc.moveTo(COL.rate - 10, y).lineTo(L + W, y).lineWidth(0.5).strokeColor(RULE).stroke();
-  y += 6;
-  doc.fontSize(9).font('Helvetica-Bold').fillColor(MUTED);
   const subtotalParts = [];
-  if (buildingAnnual > 0) subtotalParts.push(`${currency(buildingAnnual)}/yr recurring`);
+  if (buildingAnnual > 0 && !ctx.suppressPlanTotals) subtotalParts.push(`${currency(buildingAnnual)}/yr recurring`);
   if (buildingOneTime > 0) subtotalParts.push(`${currency(buildingOneTime)} one-time`);
-  doc.text(
-    subtotalParts.length ? `Subtotal — ${subtotalParts.join(' + ')}` : 'Subtotal — included',
-    L, y, { width: W, align: 'right' },
-  );
-  y += 22;
+  // A customer-facing estimate with recurring-only lines has no sanctioned
+  // subtotal to print (see totalsBlock) — skip the rule and the row rather
+  // than print a bare "Subtotal — included".
+  if (!ctx.suppressPlanTotals || subtotalParts.length) {
+    y += 2;
+    doc.moveTo(COL.rate - 10, y).lineTo(L + W, y).lineWidth(0.5).strokeColor(RULE).stroke();
+    y += 6;
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(MUTED);
+    doc.text(
+      subtotalParts.length ? `Subtotal — ${subtotalParts.join(' + ')}` : 'Subtotal — included',
+      L, y, { width: W, align: 'right' },
+    );
+    y += 22;
+  }
   return y;
 }
 
 function totalsBlock(ctx, totals, y) {
   const { doc } = ctx;
-  y = ensureSpace(ctx, y, 140);
+  // Combined plan totals ("$X/mo" / "$X/yr") are prohibited on customer-facing
+  // estimate surfaces (AGENTS.md "Per application price copy", owner rule
+  // re-affirmed 2026-07-23); commercial proposals and invoice/prepay surfaces
+  // are the only exemptions. A synthesized proposal IS the customer estimate
+  // PDF, so it prints per-application line items and NO recurring roll-up —
+  // not the monthly-equivalent row, not the annualized row, and not a
+  // first-year total that folds the plan year back in. One-time work is a
+  // single real charge, so its total (and any tax) still prints.
+  const showRecurringTotals = !ctx.suppressPlanTotals && totals.annualRecurring > 0;
+  const showGrandTotal = !ctx.suppressPlanTotals || totals.annualRecurring <= 0;
+  const rows = [];
+  if (showRecurringTotals) {
+    // Commercial boards budget monthly and annually; residential plans bill
+    // per application or annual prepay, never a flat monthly spread.
+    if (ctx.showMonthlyEquivalent) {
+      rows.push(['Recurring (monthly equivalent)', `${currency(totals.monthlyEquivalent)}/mo`]);
+    }
+    rows.push(['Recurring (annualized)', `${currency(totals.annualRecurring)}/yr`]);
+  }
+  if (totals.oneTime > 0) rows.push(['One-time services', currency(totals.oneTime)]);
+  if (totals.hasTax) {
+    rows.push([`${ctx.taxLabel} (${(totals.taxRate * 100).toFixed(2)}%)`, currency(totals.totalTax)]);
+  }
+  if (rows.length === 0 && !showGrandTotal) return y;
 
+  y = ensureSpace(ctx, y, 140);
   doc.moveTo(L, y).lineTo(L + W, y).lineWidth(1).strokeColor(NAVY).stroke();
   y += 12;
 
@@ -252,29 +281,19 @@ function totalsBlock(ctx, totals, y) {
     doc.text(value, valueX, y, { width: 90, align: 'right' });
     y += size + 6;
   };
+  for (const [label, value] of rows) row(label, value);
 
-  if (totals.annualRecurring > 0) {
-    // The monthly-equivalent line is authored-proposal-only (boards budget
-    // monthly/annually). Residential plans bill per application or annual
-    // prepay — never a flat monthly — so a synthesized estimate PDF quoting
-    // "$X/mo" misstates the charge (customer-reported 2026-07-31).
-    if (ctx.showMonthlyEquivalent) {
-      row('Recurring (monthly equivalent)', `${currency(totals.monthlyEquivalent)}/mo`);
-    }
-    row('Recurring (annualized)', `${currency(totals.annualRecurring)}/yr`);
+  if (showGrandTotal) {
+    y += 2;
+    doc.moveTo(labelX - 10, y).lineTo(L + W, y).lineWidth(0.5).strokeColor(RULE).stroke();
+    y += 8;
+    doc.fontSize(13).font('Helvetica-Bold').fillColor(NAVY);
+    // "First-year" only means something beside a recurring roll-up.
+    const grandLabel = totals.annualRecurring > 0 ? 'FIRST-YEAR TOTAL' : 'TOTAL';
+    doc.text(grandLabel, labelX, y, { width: 190, align: 'right', characterSpacing: 1 });
+    doc.text(currency(totals.firstYearTotal), valueX, y, { width: 90, align: 'right' });
+    y += 22;
   }
-  if (totals.oneTime > 0) row('One-time services', currency(totals.oneTime));
-  if (totals.hasTax) {
-    row(`${ctx.taxLabel} (${(totals.taxRate * 100).toFixed(2)}%)`, currency(totals.totalTax));
-  }
-
-  y += 2;
-  doc.moveTo(labelX - 10, y).lineTo(L + W, y).lineWidth(0.5).strokeColor(RULE).stroke();
-  y += 8;
-  doc.fontSize(13).font('Helvetica-Bold').fillColor(NAVY);
-  doc.text('FIRST-YEAR TOTAL', labelX, y, { width: 190, align: 'right', characterSpacing: 1 });
-  doc.text(currency(totals.firstYearTotal), valueX, y, { width: 90, align: 'right' });
-  y += 22;
 
   return y;
 }
@@ -305,7 +324,10 @@ function termsBlock(ctx, proposal, totals, y) {
 }
 
 function generateEstimateProposalPDF(estimate, res) {
-  const proposal = normalizeProposal(estimate);
+  // synthesizePerApplication is opt-in per caller and set ONLY here: the PDF
+  // is a rendering surface, so a per_application line can never round-trip
+  // through the Commercial Proposal editor's save (see normalizeProposal).
+  const proposal = normalizeProposal(estimate, { synthesizePerApplication: true });
   const totals = computeProposalTotals(proposal);
 
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
@@ -321,6 +343,10 @@ function generateEstimateProposalPDF(estimate, res) {
     title: proposal.title,
     taxLabel: proposal.taxLabel,
     showMonthlyEquivalent: proposal.enabled === true,
+    // Authored (commercial) proposals are the documented exemption from the
+    // no-combined-plan-totals rule; a synthesized proposal is the customer's
+    // own estimate PDF and is not.
+    suppressPlanTotals: proposal.enabled !== true,
     tagline: 'Thank you for considering Waves Pest Control',
   };
 
