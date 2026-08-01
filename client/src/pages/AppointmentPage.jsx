@@ -152,7 +152,11 @@ function MessageCard({ title, body }) {
 const STATE_COPY = {
   completed: { title: 'This visit is complete', body: 'Thanks for having us out. Questions about the service? Text or call and our team will help.' },
   cancelled: { title: 'This appointment was cancelled', body: "Want to get back on the calendar? Text or call and we'll find you a time." },
+  // in_progress copy is phase-aware: the server distinguishes en_route from
+  // on_site, and telling someone their tech is "on the way" while he stands
+  // in their driveway reads as stale information.
   in_progress: { title: 'Your technician is on the way', body: "This visit is already underway, so it can't be changed online. Need us? Text or call." },
+  in_progress_on_site: { title: 'Your technician has arrived', body: "This visit is underway, so it can't be changed online. Need us? Text or call." },
   past: { title: "This visit's time has passed", body: "If we missed each other, text or call and we'll get you rescheduled right away." },
   not_available: { title: "We can't show this appointment", body: 'This link may be out of date. Text or call and our team will help.' },
 };
@@ -245,8 +249,14 @@ function PlanNote({ plan }) {
           </>
         ) : (
           <>
+            {/* No guarantee language here: coverage varies by service — some
+                one-time work (e.g. Bora-Care) carries a SIGNED no-retreatment
+                agreement, and this page has no authoritative coverage signal
+                to key on. A blanket "if activity comes back, so do we" would
+                contradict that contract. Neutral copy until the payload
+                carries real per-service coverage. */}
             <strong style={{ color: S.text, fontWeight: 600 }}>One-time treatment.</strong>{' '}
-            Covered by the Waves Guarantee — if activity comes back, so do we.
+            A single scheduled service — your service report will cover what we found and any recommended next steps.
           </>
         )}
       </span>
@@ -358,7 +368,10 @@ export default function AppointmentPage() {
   }
 
   if (data?.state !== 'upcoming') {
-    const copy = STATE_COPY[data?.state] || STATE_COPY.not_available;
+    const stateKey = data?.state === 'in_progress' && data?.phase === 'on_site'
+      ? 'in_progress_on_site'
+      : data?.state;
+    const copy = STATE_COPY[stateKey] || STATE_COPY.not_available;
     return <Page><MessageCard title={copy.title} body={copy.body} /></Page>;
   }
 

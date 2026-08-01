@@ -77,7 +77,7 @@ describe('AppointmentPage upcoming visit', () => {
     expect(screen.getByText(/live tracking link/)).toBeInTheDocument();
   });
 
-  it('shows the plan note for a recurring visit and the guarantee note for a one-time', async () => {
+  it('shows the plan note for a recurring visit and a neutral note for a one-time', async () => {
     stubFetch();
     renderPage();
     expect(await screen.findByText(/Part of your regular plan/)).toBeInTheDocument();
@@ -87,7 +87,12 @@ describe('AppointmentPage upcoming visit', () => {
     stubFetch({ get: jsonResponse(upcomingPayload({ plan: { isRecurring: false, collectiveAnchor: false } })) });
     renderPage();
     expect(await screen.findByText(/One-time treatment/)).toBeInTheDocument();
-    expect(screen.getByText(/Waves Guarantee/)).toBeInTheDocument();
+    // NO guarantee language on one-time visits: coverage varies by service
+    // and some one-time work (Bora-Care) carries a SIGNED no-retreatment
+    // agreement a blanket promise would contradict (codex P1).
+    expect(screen.queryByText(/Guarantee/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/activity comes back/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/service report will cover/)).toBeInTheDocument();
   });
 
   it('shows the storm heads-up only when the forecast is stormy', async () => {

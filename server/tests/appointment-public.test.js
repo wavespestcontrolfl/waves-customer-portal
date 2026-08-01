@@ -115,6 +115,9 @@ describe('link-first SMS bodies', () => {
       first_name: 'Riley',
       service_type: 'quarterly pest control',
       time: '9:00 AM',
+      // The spoken arrival range the reminder body states outright
+      // (spokenArrivalWindow — same shape both senders pass).
+      window: 'between 9:00 AM and 11:00 AM',
       day: 'Sunday',
       date: 'Aug 2',
       appointment_line: `Everything about your visit: ${link}\n\n`,
@@ -139,5 +142,41 @@ describe('link-first SMS bodies', () => {
 describe('storm note threshold', () => {
   test('matches the heavy-rain tier the booking chips use', () => {
     expect(STORM_NOTE_MIN_CHANCE).toBe(50);
+  });
+});
+
+describe('confirm guards (codex r1)', () => {
+  const { buildAppointmentLink } = require('../services/appointment-link');
+  const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+
+  test('pageState carries the in_progress phase so the page can say arrived vs on the way', () => {
+    expect(pageState({ status: 'en_route', scheduled_date: '2026-08-01', window_start: '13:00' }, NOW))
+      .toEqual({ state: 'in_progress', phase: 'en_route' });
+    expect(pageState({ status: 'on_site', scheduled_date: '2026-08-01', window_start: '13:00' }, NOW))
+      .toEqual({ state: 'in_progress', phase: 'on_site' });
+  });
+
+  test('link minting is a no-op while GATE_APPOINTMENT_PAGE is off', async () => {
+    // Gate off (default): the page 404s and the v2 body never renders, so
+    // minting a never-expiring short code for every legacy reminder would
+    // be pure table growth (codex P2).
+    const prev = process.env.GATE_APPOINTMENT_PAGE;
+    delete process.env.GATE_APPOINTMENT_PAGE;
+    try {
+      const out = await buildAppointmentLink('svc-1', { customerId: 'c-1' });
+      expect(out).toEqual({ url: null, line: '' });
+      // and, critically, no DB read/insert happened on the gated path
+      expect(mockDb).not.toHaveBeenCalledWith('short_codes');
+    } finally {
+      if (prev !== undefined) process.env.GATE_APPOINTMENT_PAGE = prev;
+    }
+  });
+
+  test('dispatch-owned pending source actions are the shared invariant list', () => {
+    // The public confirm route and GET `confirmable` flag both key on this
+    // list — pin its members so a rename breaks loudly here.
+    expect(DISPATCH_OWNED_PENDING_SOURCE_ACTIONS).toEqual(
+      expect.arrayContaining(['ai_call_pipeline_followup', 'ai_call_outbound_review'])
+    );
   });
 });

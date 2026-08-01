@@ -64,6 +64,12 @@ const FORECAST_DEADLINE_MS = 1500;
 // Statuses this page will render as a live upcoming visit.
 const UPCOMING_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
 
+// Dispatch-owned pending bookings (call-created follow-ups / outbound-review
+// rows) stay office-owned until reviewed — the customer must not be able to
+// self-confirm them from this token page any more than from the logged-in
+// portal. Shared invariant with routes/schedule.js.
+const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../services/call-booking-source-actions');
+
 function gateOpen() {
   return process.env.GATE_APPOINTMENT_PAGE === 'true';
 }
@@ -114,7 +120,10 @@ function pageState(svc, now = new Date()) {
   const status = String(svc.status || '').toLowerCase();
   if (status === 'completed') return { state: 'completed' };
   if (status === 'cancelled' || status === 'canceled') return { state: 'cancelled' };
-  if (status === 'en_route' || status === 'on_site') return { state: 'in_progress' };
+  // Same page state, but the phase matters to the copy: "on the way" is
+  // stale — and reads as wrong to someone looking at the tech in their
+  // driveway — once the status is on_site.
+  if (status === 'en_route' || status === 'on_site') return { state: 'in_progress', phase: status };
   if (!UPCOMING_STATUSES.has(status)) return { state: 'not_available' };
 
   // Past the quoted arrival window with no terminal status = the visit came
@@ -139,6 +148,7 @@ async function loadByToken(token) {
       's.id', 's.customer_id', 's.technician_id', 's.status', 's.scheduled_date',
       's.window_start', 's.window_end', 's.service_type', 's.is_recurring',
       's.recurring_parent_id', 's.reschedule_token',
+      's.source_action', 's.customer_confirmed',
       'c.first_name as cust_first_name',
       'c.deleted_at as customer_deleted_at',
       't.name as tech_name',
@@ -156,10 +166,20 @@ async function loadByToken(token) {
 async function sameTechAsLastVisit(svc) {
   if (!svc.technician_id || !svc.is_recurring) return false;
   try {
+    // Deterministic recency: two completed visits can share a
+    // scheduled_date (split jobs, add-on same-day work) with different
+    // techs, and date-only ordering leaves Postgres free to return either
+    // row. Tie-break on the completion timestamp, then the visit window,
+    // so "the same technician as your last visit" names the tech who was
+    // actually there last.
     const last = await db('scheduled_services')
       .where({ customer_id: svc.customer_id, status: 'completed' })
       .whereNot('id', svc.id)
-      .orderBy('scheduled_date', 'desc')
+      .orderBy([
+        { column: 'scheduled_date', order: 'desc' },
+        { column: 'updated_at', order: 'desc' },
+        { column: 'window_start', order: 'desc' },
+      ])
       .first('technician_id');
     return !!last?.technician_id && String(last.technician_id) === String(svc.technician_id);
   } catch (err) {
@@ -197,9 +217,12 @@ router.get('/:token', async (req, res, next) => {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
 
-    const { state } = pageState(svc);
+    const { state, phase } = pageState(svc);
     const base = {
       state,
+      // in_progress only: 'en_route' | 'on_site', so the page can say "on
+      // the way" vs "at your property" truthfully.
+      phase: phase || null,
       customerFirstName: svc.cust_first_name || null,
       service: { type: svc.service_type || 'service' },
       appointment: {
@@ -229,6 +252,12 @@ router.get('/:token', async (req, res, next) => {
       // status 'confirmed' is the existing schema value the dispatch board
       // already writes; the page just surfaces it.
       confirmed: String(svc.status).toLowerCase() === 'confirmed',
+      // Drives the Confirm button. Mirrors the POST guard exactly: only a
+      // plain 'pending' visit that is not dispatch-owned (call-created
+      // follow-up / outbound-review awaiting office confirmation) may be
+      // customer-confirmed, so the button never renders into a 409.
+      confirmable: String(svc.status).toLowerCase() === 'pending'
+        && !(DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action) && !svc.customer_confirmed),
       tech: svc.technician_id
         ? { firstName: firstNameOf(svc.tech_name), photoUrl: techPhotoUrl || null, sameAsLastVisit: sameTech }
         : null,
@@ -354,28 +383,53 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       return res.json({ success: true, confirmed: true });
     }
 
+    // A call-created follow-up / outbound-review booking is dispatch-owned
+    // until the office confirms it — the logged-in confirm route refuses
+    // these (routes/schedule.js) and this token route must too, or the link
+    // holder can flip a visit the office hasn't reviewed. Same invariant as
+    // call-booking-source-actions.js; 409 (not 404) because the token IS
+    // valid and the page stays viewable.
+    if (DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(svc.source_action) && !svc.customer_confirmed) {
+      return res.status(409).json({
+        error: "Our office is finalizing this appointment's details — no confirmation needed yet.",
+        code: 'NOT_CONFIRMABLE',
+      });
+    }
+
+    // This route's documented write contract is pending -> confirmed ONLY.
+    // Every other upcoming status (e.g. 'rescheduled', the pending-rebook
+    // marker staff resolve) is not customer-confirmable here.
+    if (String(svc.status).toLowerCase() !== 'pending') {
+      return res.status(409).json({
+        error: "This visit can't be confirmed online anymore.",
+        code: 'NOT_CONFIRMABLE',
+      });
+    }
+
     // Status-only write, guarded on the status we read so a concurrent
     // dispatch change (cancel, en_route) is never overwritten. No date,
     // window, or tech is touched, and nothing is sent to the customer.
-    const updated = await db('scheduled_services')
-      .where({ id: svc.id, status: svc.status })
-      .update({ status: 'confirmed', updated_at: db.fn.now() });
+    // The status flip and its job_status_history row commit atomically —
+    // the history table is the canonical transition audit, so a lost row
+    // must fail the confirm rather than silently succeed without it.
+    let updated = 0;
+    await db.transaction(async (trx) => {
+      updated = await trx('scheduled_services')
+        .where({ id: svc.id, status: 'pending' })
+        .update({ status: 'confirmed', updated_at: trx.fn.now() });
+      if (updated === 0) return;
+      await trx('job_status_history').insert({
+        job_id: svc.id,
+        from_status: 'pending',
+        to_status: 'confirmed',
+        transitioned_by: null,
+      });
+    });
     if (updated === 0) {
       return res.status(409).json({
         error: 'This appointment just changed — please refresh.',
         code: 'CHANGED',
       });
-    }
-
-    try {
-      await db('job_status_history').insert({
-        job_id: svc.id,
-        from_status: svc.status,
-        to_status: 'confirmed',
-        transitioned_by: null,
-      });
-    } catch (err) {
-      logger.warn(`[appointment-public] status-history insert failed for ${svc.id}: ${err.message}`);
     }
 
     return res.json({ success: true, confirmed: true });

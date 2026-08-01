@@ -30,14 +30,21 @@ const TEMPLATES = [
     // resolves to '' for the overwhelming majority of visits that carry no
     // hold. Dropping it from the shorter copy would silently remove a fee
     // disclosure from exactly the bookings that need it.
-    body: 'Hi {first_name} - your {service_type} is tomorrow at {time} (2-hour arrival window).\n\n{appointment_line}Questions? Reply here. Reply STOP to opt out.{card_hold_policy_line}',
-    variables: ['first_name', 'service_type', 'time', 'appointment_line', 'card_hold_policy_line'],
+    // House voice (post-#3121): "Hello {first_name}!" opener, {window}
+    // states the real arrival range instead of explaining the 2-hour
+    // concept, no sign-off boilerplate, and no STOP line — a recurring
+    // operational reminder to an already-consented customer per the
+    // 2026-08-01 opt-out ruling (program entry carries it; this doesn't).
+    body: 'Hello {first_name}! Your {service_type} is tomorrow, {window}.\n\n{appointment_line}{card_hold_policy_line}',
+    variables: ['first_name', 'service_type', 'time', 'window', 'appointment_line', 'card_hold_policy_line'],
     sort_order_after: 'reminder_24h',
   },
   {
     template_key: 'appointment_confirmation_v2',
     name: 'Appointment Confirmation (Link-First)',
-    body: "Hi {first_name} - your {service_type} is booked for {day}, {date} at {time} (2-hour arrival window).\n\n{appointment_line}Questions? Reply here. Reply STOP to opt out.",
+    // Program-entry message: STOP stays (first text of a booking
+    // lifecycle). The window explanation lives on the page this links to.
+    body: "Hello {first_name}! Your {service_type} is booked for {day}, {date} at {time}.\n\n{appointment_line}Reply STOP to opt out.",
     variables: ['first_name', 'service_type', 'day', 'date', 'time', 'appointment_line'],
     sort_order_after: 'appointment_confirmation',
   },

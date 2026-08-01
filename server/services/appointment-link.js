@@ -41,6 +41,13 @@ function smsLineFor(url, label = 'Everything about your visit') {
 
 async function buildAppointmentLink(scheduledServiceId, { customerId = null, label } = {}) {
   try {
+    // Mint nothing while the gate is off: the page this URL points at 404s,
+    // the v2 template that would embed it never renders, and every legacy
+    // confirmation/reminder would otherwise insert a never-expiring
+    // short_codes row for an unreachable destination — permanent table
+    // growth for nothing. Gate here (the single choke point) rather than at
+    // each caller.
+    if (process.env.GATE_APPOINTMENT_PAGE !== 'true') return { url: null, line: '' };
     if (!scheduledServiceId) return { url: null, line: '' };
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
