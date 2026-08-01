@@ -179,20 +179,31 @@ async function renderAndStoreServiceReportPdf(recordId, {
 }
 
 // Durable lawn-PDF correction marker helpers (codex P1 #3093 r30).
+// Version of the stored lawn recommendations — changes on every write
+// (generation, sanitize), so an unchanged value across a render proves the
+// render did not straddle a copy change.
+async function lawnRecommendationVersion(assessmentId, knex = db) {
+  const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at').catch(() => null);
+  if (!row) return null;
+  return crypto.createHash('sha1')
+    .update(`${typeof row.recommendations === 'string' ? row.recommendations : JSON.stringify(row.recommendations || '')}|${row.ai_summary || ''}|${row.updated_at ? new Date(row.updated_at).toISOString() : ''}`)
+    .digest('hex');
+}
+
 async function lawnAssessmentIdForRecord(recordId, knex = db) {
   const row = await knex('lawn_assessments').where({ service_record_id: recordId }).first('id').catch(() => null);
   return row?.id || null;
 }
 
+// ATOMIC key removal (codex P2 #3093 r31): a read-modify-write of the whole
+// structured_notes column can clobber completionSmsStatus / sentSmsBody
+// written concurrently, which would defeat the resend guard.
 async function clearLawnPdfCorrectionMarker(recordId, knex = db) {
-  const row = await knex('service_records').where({ id: recordId }).first('structured_notes');
-  let notes;
-  try {
-    notes = typeof row?.structured_notes === 'string' ? JSON.parse(row.structured_notes) : (row?.structured_notes || {});
-  } catch { notes = {}; }
-  if (!notes || notes.lawnPdfCorrectionPending !== true) return;
-  delete notes.lawnPdfCorrectionPending;
-  await knex('service_records').where({ id: recordId }).update({ structured_notes: JSON.stringify(notes) });
+  await knex('service_records')
+    .where({ id: recordId })
+    .update({
+      structured_notes: knex.raw("(COALESCE(structured_notes::jsonb, '{}'::jsonb) - ?)", ['lawnPdfCorrectionPending']),
+    });
 }
 
 // forceFresh: skip the stored-object lookup and render anew — held email
@@ -219,6 +230,12 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     correctionPending = notes && notes.lawnPdfCorrectionPending === true;
   } catch { correctionPending = false; }
   const mustRenderFresh = forceFresh || correctionPending;
+  // Version captured BEFORE the render: the marker may only be cleared when
+  // the recommendation copy did not change during the render AND no
+  // generation is in flight afterwards — otherwise this render may have
+  // loaded pre-grounding copy (codex P1 r31).
+  const lawnAssessmentId = correctionPending ? await lawnAssessmentIdForRecord(recordId, knex) : null;
+  const recVersionBefore = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
   const pestPressureConfig = await loadActiveConfig(knex).catch(() => null);
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
@@ -243,11 +260,15 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   if (correctionPending && !rendered.storageFailed) {
     try {
       const { treatmentGuard } = require('../knowledge-bridge');
-      const assessmentId = await lawnAssessmentIdForRecord(recordId, knex);
-      const stillGenerating = assessmentId
-        ? await treatmentGuard.isGenerationInFlight(assessmentId, knex)
+      const stillGenerating = lawnAssessmentId
+        ? await treatmentGuard.isGenerationInFlight(lawnAssessmentId, knex)
         : false;
-      if (!stillGenerating) await clearLawnPdfCorrectionMarker(recordId, knex);
+      const recVersionAfter = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
+      const copyStableAcrossRender = recVersionBefore === recVersionAfter;
+      // A generation that settled DURING this render means the render may
+      // have read the pre-grounding copy — keep the marker so the next
+      // render (post-settlement) produces the definitive object.
+      if (!stillGenerating && copyStableAcrossRender) await clearLawnPdfCorrectionMarker(recordId, knex);
     } catch { /* marker clearing is best-effort; a stale marker only costs a re-render */ }
   }
   return {

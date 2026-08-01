@@ -196,6 +196,23 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(dropped).toBe(1);
   });
 
+  test('unrecognized category strings use the all-classes fallback (r31)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Hold off on fungicide until spring.', reason: 'x', timeframe: 'y' }],
+    }, [{ product_name: 'Generic Blend 5', product_category: 'Uncategorized' }]);
+    expect(dropped).toBe(1);
+  });
+
+  test('unrelated negations after a class mention survive (r31)', () => {
+    const { dropped, parsed } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [
+        { priority: 1, action: 'Fungicide was applied today, so extra irrigation is not needed.', reason: 'Label guidance.', timeframe: 'Today' },
+      ],
+    }, APPLIED);
+    expect(dropped).toBe(0);
+    expect(parsed.recommendations).toHaveLength(1);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

@@ -280,18 +280,20 @@ function governedRegexForTerms(termSource) {
     // disease is confirmed" (codex P1 r13). Bound to the apply verb so
     // "wait until today's fungicide has dried" still passes.
     `\\b(?:wait\\s+to|hold\\s+off\\s+on|delay|postpone|refrain\\s+from)\\s+(?:apply(?:ing)?|mak(?:e|ing)|us(?:e|ing))\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
-    // "<class> ... is not needed/warranted/required"
-    `${CLASS}[^.!?]{0,50}\\bnot\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
+    // "<class> ... is not needed/warranted/required" — the gap may not
+    // contain another subject, so "Fungicide was applied today, so extra
+    // irrigation is not needed" stays (codex P2 r31).
+    `${CLASS}(?:(?!\\b(?:irrigation|watering|water|mow\\w*|fertiliz\\w*|seed\\w*|aerat\\w*)\\b)[^.!?]){0,50}\\bnot\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
     // passive deferrals — modal, past-tense, and progressive forms: "should
     // be deferred", "was deferred", "is being postponed" (codex P1 r10+r11)
     `${CLASS}[^.!?]{0,60}\\b(?:should|could|can|may|will|must|would|shall)\\s+(?:be\\s+)?(?:deferred|delayed|postponed|skipped|avoided|withheld|held\\s+off)\\b`,
     `${CLASS}[^.!?]{0,60}\\b(?:is|are|was|were|has\\s+been|have\\s+been|being)\\s+(?:being\\s+)?(?:deferred|delayed|postponed|skipped|withheld|held\\s+off)\\b`,
     // contracted / adverbial negations — "fungicide isn't necessary",
     // "a fungicide is never warranted right now" (codex P1 r11)
-    `${CLASS}[^.!?]{0,50}\\b(?:isn['’]t|aren['’]t|wasn['’]t|weren['’]t|never|no\\s+longer)\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
+    `${CLASS}(?:(?!\\b(?:irrigation|watering|water|mow\\w*|fertiliz\\w*|seed\\w*|aerat\\w*)\\b)[^.!?]){0,50}\\b(?:isn['’]t|aren['’]t|wasn['’]t|weren['’]t|never|no\\s+longer)\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
     // modal negations — "fungicide should not be applied until disease is
     // confirmed", "shouldn't be used" (codex P1 r19)
-    `${CLASS}[^.!?]{0,60}\\b(?:should|must|can|could|may|will|would|shall)\\s+not\\s+(?:be\\s+)?(?:applied|used|made|needed|necessary)\\b`,
+    `${CLASS}(?:(?!\\b(?:irrigation|watering|water|mow\\w*|fertiliz\\w*|seed\\w*|aerat\\w*)\\b)[^.!?]){0,50}\\b(?:should|must|can|could|may|will|would|shall)\\s+not\\s+(?:be\\s+)?(?:applied|used|made|needed|necessary)\\b`,
     `${CLASS}[^.!?]{0,60}\\b(?:shouldn['’]t|mustn['’]t|can['’]t|cannot|won['’]t|wouldn['’]t)\\s+(?:be\\s+)?(?:applied|used|made|needed|necessary)\\b`,
     // "no <class> is needed", "confirm no fungicide is needed"
     `\\b(?:confirm|verify)\\s+(?:that\\s+)?no\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
@@ -360,13 +362,18 @@ function contradictsAppliedProducts(text, appliedProducts) {
 // previously stored value stands (summary/customerTip).
 function appliedTreatmentClasses(appliedProducts) {
   const rows = appliedProducts || [];
-  // A row whose category is unresolved could BE any class — class-phrased
-  // copy ("Hold off on fungicide") must still be caught for it, and neither
-  // the product name nor the generic terms cover that wording (codex P1
-  // r30). Conservatively treat unknown categories as every governed class.
-  if (rows.some((p) => !String(p.product_category || '').trim())) return Object.keys(TREATMENT_CLASSES);
-  return Object.keys(TREATMENT_CLASSES).filter((cls) =>
-    rows.some((p) => TREATMENT_CLASSES[cls].category.test(String(p.product_category || ''))));
+  const keys = Object.keys(TREATMENT_CLASSES);
+  // A row whose category maps to NO governed class — blank, or an arbitrary
+  // string like 'Uncategorized' that admin-inventory accepts — could BE any
+  // class, and class-phrased copy ("Hold off on fungicide") is covered by
+  // neither the product name nor the generic terms (codex P1 r30+r31).
+  // Conservatively treat unrecognized categories as every governed class.
+  const unrecognized = rows.some((p) => {
+    const cat = String(p.product_category || '').trim();
+    return !cat || !keys.some((cls) => TREATMENT_CLASSES[cls].category.test(cat));
+  });
+  if (unrecognized) return keys;
+  return keys.filter((cls) => rows.some((p) => TREATMENT_CLASSES[cls].category.test(String(p.product_category || ''))));
 }
 
 // Applied-product rows with categories recovered from the catalog: legacy
