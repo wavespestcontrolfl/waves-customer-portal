@@ -568,6 +568,21 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[llm-dispatch-metrics] cron failed: ${err.message}`);
+      // runExclusive can also THROW before invoking the job — e.g. the pool
+      // hands out a connection but the pg_try_advisory_lock query dies as the
+      // DB goes down (codex #3123 r8, accepted residual then, fixed here).
+      // Alert unless the digest already emailed for this failure
+      // (err.alerted); alertRecorderUnreachable's independent-connection
+      // probe stands down on transient blips, so this cannot false-alarm a
+      // healthy database.
+      if (!err.alerted) {
+        try {
+          const { alertRecorderUnreachable } = require('./llm-dispatch-metrics');
+          await alertRecorderUnreachable(`digest tick threw: ${err.message}`);
+        } catch (alertErr) {
+          logger.error(`[llm-dispatch-metrics] unreachable-alert itself failed: ${alertErr.message}`);
+        }
+      }
     }
   }, { timezone: 'America/New_York' });
 

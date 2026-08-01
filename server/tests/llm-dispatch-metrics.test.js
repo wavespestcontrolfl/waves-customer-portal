@@ -20,6 +20,17 @@ jest.mock('../models/db', () => {
 });
 const mockEmailSend = jest.fn();
 jest.mock('../services/email', () => ({ send: (...args) => mockEmailSend(...args) }));
+// The reachability confirm uses a DEDICATED pg.Client (never the shared knex
+// pool — pool saturation must not read as a database outage).
+const mockPgConnect = jest.fn();
+const mockPgQuery = jest.fn();
+jest.mock('pg', () => ({
+  Client: jest.fn(() => ({
+    connect: (...a) => mockPgConnect(...a),
+    query: (...a) => mockPgQuery(...a),
+    end: jest.fn(() => Promise.resolve()),
+  })),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const MODELS = require('../config/models');
@@ -62,6 +73,10 @@ describe('llm-dispatch-metrics', () => {
     mockDb.mockImplementation(() => ({ insert: mockInsert }));
     mockDbRaw.mockReset();
     mockDbRaw.mockImplementation((sql) => sql);
+    mockPgConnect.mockReset();
+    mockPgConnect.mockResolvedValue(undefined);
+    mockPgQuery.mockReset();
+    mockPgQuery.mockResolvedValue({ rows: [{ '?column?': 1 }] });
     mockInsert.mockReturnValue(Promise.resolve());
     process.env = { ...ORIGINAL_ENV };
     delete process.env.GATE_LLM_DISPATCH_METRICS;
@@ -330,23 +345,25 @@ describe('llm-dispatch-metrics', () => {
   });
 
   describe('alertRecorderUnreachable', () => {
-    it('emails when the reachability confirm ALSO fails (a genuine outage)', async () => {
+    it('emails when the INDEPENDENT connection probe fails (a genuine outage)', async () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       mockEmailSend.mockResolvedValue({ ok: true });
-      mockDbRaw.mockImplementation((sql) => (sql === 'SELECT 1'
-        ? Promise.reject(new Error('connection refused'))
-        : sql));
+      mockPgConnect.mockRejectedValue(new Error('connection refused'));
       const { alertRecorderUnreachable } = load();
       await expect(alertRecorderUnreachable('no_connection')).resolves.toEqual({ ok: true });
       expect(mockEmailSend.mock.calls[0][0].body).toMatch(/database was unreachable/);
     });
 
-    it('stands down when the DB answers a direct query (local pool blip, not an outage)', async () => {
-      // One replica's acquireConnection timing out under load must not email
-      // an outage while the database is demonstrably fine.
+    it('stands down when a FRESH connection succeeds — pool saturation is not an outage', async () => {
+      // The confirm must bypass the shared knex pool: a saturated pool would
+      // queue (and time out) a pooled SELECT 1 even though PostgreSQL itself
+      // is healthy. The dedicated pg.Client answers the real question.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       const { alertRecorderUnreachable } = load();
       await expect(alertRecorderUnreachable('no_connection')).resolves.toEqual({ skipped: 'db_reachable' });
+      expect(mockPgConnect).toHaveBeenCalled();
+      // And it never touched the shared pool's raw().
+      expect(mockDbRaw).not.toHaveBeenCalledWith('SELECT 1');
       expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
@@ -568,6 +585,46 @@ describe('llm-dispatch-metrics', () => {
       await expect(runLlmDispatchDigest()).rejects.toThrow(/does not exist/);
       expect(mockEmailSend).toHaveBeenCalledTimes(1);
       expect(mockEmailSend.mock.calls[0][0].body).toMatch(/could not read llm_dispatch_log/);
+    });
+
+    it('marks its own already-alerted failures so the scheduler cannot double-email', async () => {
+      // The scheduler catch fires alertRecorderUnreachable for throws that
+      // never produced an alert (advisory-lock query death); failures the
+      // digest ALREADY emailed for must carry err.alerted = true.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
+      armDb({ yesterdayRows: [], priorRows: [], statsError: 'relation gone' });
+      const { runLlmDispatchDigest } = load();
+      const err = await runLlmDispatchDigest().catch((e) => e);
+      expect(err.message).toMatch(/relation gone/);
+      expect(err.alerted).toBe(true);
+    });
+
+    it('does NOT claim alerted when the alert email failed to send — the scheduler retry must stay live', async () => {
+      // DB outage + transient SMTP failure: err.alerted=true here would
+      // suppress the scheduler's alertRecorderUnreachable fallback, losing
+      // the only retry that could still reach the operator (codex #3130 r1).
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: false, error: 'smtp 421' });
+      armDb({ yesterdayRows: [], priorRows: [], statsError: 'relation gone' });
+      const { runLlmDispatchDigest } = load();
+      const err = await runLlmDispatchDigest().catch((e) => e);
+      expect(err.message).toMatch(/relation gone/);
+      expect(err.alerted).toBe(false);
+    });
+
+    it('builds the probe from the LIVE knex connection config, not a URL heuristic', async () => {
+      // 127.0.0.1-style local URLs must not be forced onto SSL by a
+      // "localhost" substring check (codex #3130 r1). With the db mock
+      // exposing no client config, the probe falls back to DATABASE_URL —
+      // and must never inject an ssl option of its own.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const { Client } = require('pg');
+      const { alertRecorderUnreachable } = load();
+      await alertRecorderUnreachable('no_connection');
+      const cfg = Client.mock.calls[Client.mock.calls.length - 1][0];
+      expect(cfg).not.toHaveProperty('ssl');
+      expect(cfg.connectionTimeoutMillis).toBe(4000);
     });
 
     it('stays silent on a quiet day when heartbeats prove the recorder was alive', async () => {
