@@ -234,13 +234,23 @@ async function alertRecorderUnreachable(reason) {
   }]);
 }
 
-/** How many heartbeats landed in a window — the recorder's proof-of-life. */
+/**
+ * How many DISTINCT HOURS of a window the recorder proved itself in.
+ *
+ * Counting rows would overstate coverage: the heartbeat cron runs without the
+ * exclusive lock (a duplicate heartbeat is harmless, a skipped one is not), so
+ * multiple replicas — or old and new instances overlapping at :50 during a
+ * deploy — each insert a row for the same hour. Two replicas covering only the
+ * morning would reach 20 rows and make a half-dead day look fully covered.
+ * Hour buckets are the honest unit. (ET offsets are whole hours, so bucketing
+ * in the session's UTC does not change the count over an ET-day window.)
+ */
 async function countHeartbeats(db, start, end) {
   const row = await db('llm_dispatch_log')
     .where('created_at', '>=', start)
     .andWhere('created_at', '<', end)
     .andWhere('policy', HEARTBEAT_POLICY)
-    .count({ n: '*' })
+    .count({ n: db.raw("DISTINCT date_trunc('hour', created_at)") })
     .first();
   return Number(row?.n || 0);
 }

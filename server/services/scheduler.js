@@ -577,8 +577,9 @@ function initScheduledJobs() {
   // recorder was dead (no heartbeats at all). A probe at digest time cannot:
   // a write path broken all day but recovered overnight would pass it while
   // the whole lost day reported clean. No runExclusive — a duplicate
-  // heartbeat on deploy overlap is harmless, and skipping one is not.
-  // No-ops while GATE_LLM_DISPATCH_METRICS is unset.
+  // heartbeat on deploy overlap is harmless, and skipping one is not; the
+  // digest counts DISTINCT HOURS, so replica duplicates cannot inflate
+  // coverage. No-ops while GATE_LLM_DISPATCH_METRICS is unset.
   cron.schedule('50 * * * *', async () => {
     try {
       await require('./llm-dispatch-metrics').recordHeartbeat();

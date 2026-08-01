@@ -420,6 +420,25 @@ describe('llm-dispatch-metrics', () => {
       expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
+    it('counts DISTINCT HOURS, so replica duplicates cannot inflate coverage', async () => {
+      // Two replicas covering only the morning would produce ~20 heartbeat
+      // ROWS but only ~10 distinct hours — a half-dead day must not read as
+      // fully covered. The query is what enforces this; assert its shape.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const hb = makeChain([], 0, { first: { n: '10' } });
+      mockDb
+        .mockReturnValueOnce(makeChain([], 1))
+        .mockReturnValueOnce(makeChain([]))
+        .mockReturnValueOnce(makeChain([{ policy: 'report', total: '300', fallbacks: '0', failed: '0' }]))
+        .mockReturnValueOnce(hb)
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: '168' } }));
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(hb.count).toHaveBeenCalledWith({ n: expect.stringMatching(/DISTINCT date_trunc\('hour', created_at\)/) });
+      // 10 distinct hours is below MIN_DAY_COVERAGE → absence not judged.
+      expect(out.exceptions).toHaveLength(0);
+    });
+
     it('does not run gone-silent on a PARTIALLY covered day (gate toggled / deploy gap)', async () => {
       // A handful of heartbeats means the window was not covered end to end,
       // so "policy X recorded nothing" says nothing about whether X stopped.
