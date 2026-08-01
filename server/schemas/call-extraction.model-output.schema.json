@@ -924,6 +924,13 @@
           "format": "date-time",
           "description": "ISO 8601 datetime with the Eastern Time offset (never UTC 'Z'). Set when status='confirmed' AND both specific date AND specific time agreed, or when a reschedule concluded with a new agreed date+time (status='reschedule_requested' — carries the NEW slot for the office to move the existing visit to)."
         },
+        "agent_committed_booking": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "true ONLY when OUR agent, in the agent's own words, explicitly committed to the confirmed slot (\"we'll confirm it for noon on Sunday\", \"you're on the schedule\"). The caller requesting, agreeing, or asserting a commitment is never an agent commitment. null when unclear."
+        },
         "requested_date_range_start": {
           "type": [
             "string",
@@ -1097,7 +1104,7 @@
     },
     "evidence": {
       "type": "array",
-      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed.",
+      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote).",
       "items": {
         "type": "object",
         "additionalProperties": false,

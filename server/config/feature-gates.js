@@ -32,6 +32,7 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
+ *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -101,6 +102,15 @@ const gates = {
   // the scheduler tick no-ops and nothing else changes.
   bookingFunnelCanary: process.env.GATE_BOOKING_FUNNEL_CANARY === 'true',
 
+  // LLM dispatch observability (2026-07-31): every dispatchWithFallback chain
+  // logs one llm_dispatch_log row, and a daily cron emails ONLY exceptions
+  // (all-providers-failed, fallback-rate spike, policy gone silent) to the
+  // company inbox. Opt-in in EVERY environment (dev/test must not email or
+  // write metrics rows by accident). Kill switch: unset — recording and the
+  // digest email no-op instantly; the daily retention prune keeps running so
+  // existing rows still age out.
+  llmDispatchMetrics: process.env.GATE_LLM_DISPATCH_METRICS === 'true',
+
   // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
   // IB's search_field_intelligence, plus the nightly knowledge-index sync
   // that embeds corpus chunks (paid OpenAI embedding calls — pennies/run,
@@ -129,12 +139,27 @@ const gates = {
   techArrivedSms: process.env.GATE_TECH_ARRIVED_SMS === 'true',
 
   // Multi-touch review-request cadence (Review Outreach tab). When on, the
-  // processReviewSequences cron advances operator-started Day 0/3/7 SMS+email
+  // processReviewSequences cron advances Day 0/3/4 SMS+email
   // sequences. Customer-facing auto-send → explicit opt-in in EVERY env (off in
   // dev/preview too) so a preview env with real Twilio/SendGrid creds can't
   // text/email real customers. Still subject to twilioSms + per-customer pref.
   // One-off manual sends from the same tab are NOT gated by this.
   reviewSequences: process.env.GATE_REVIEW_SEQUENCES === 'true',
+
+  // Personalized review-ask bodies: cadence SMS touches are drafted from the
+  // customer's own call/SMS history (review-ask-drafter.js) and AUTO-SEND
+  // after deterministic verification, per owner ruling 2026-07-30 (scoped to
+  // this lane — inbound-reply drafts stay approval-gated). Off = cadence
+  // touches send the standard outreach templates. Customer-facing generated
+  // text → explicit opt-in in EVERY env.
+  reviewAskPersonalized: process.env.GATE_REVIEW_ASK_PERSONALIZED === 'true',
+
+  // Review asks link STRAIGHT to the Google review form (via the tracked
+  // /api/rate/:token/go redirect) instead of the 1-10 rate page. Kill switch
+  // for the direct-link rollout: off = every ask body resolves {review_url}
+  // to the tokenized /rate/<token> NPS page exactly as before. The /rate page
+  // itself stays live either way (old links, fallback for unknown locations).
+  reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
 
   // Digital business card — the card.issued email a customer gets after their
   // FIRST completed visit (services/customer-card.js). The card row and the
@@ -545,6 +570,24 @@ const gates = {
   // blocks (out_of_service_area, do_not_contact, caller_not_authorized, spam)
   // stay. Creates real appointments — owner-flip only.
   callFailOpenBooking: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  // Agent-commitment booking authorization: when OUR agent explicitly
+  // committed to the confirmed slot on the call ("we'll confirm it for noon
+  // on Sunday" — evidence-pinned to an AGENT-spoken quote), a third-party
+  // caller (realtor/PM booking for a buyer/tenant) no longer hard-blocks on
+  // caller_not_authorized: the appointment books and the flag files as an
+  // advisory "confirm the account holder" card (book-and-flag). All other
+  // hard blocks stay. Independent of callFailOpenBooking. Creates real
+  // appointments — owner-flip only.
+  callAgentCommitBooking: process.env.GATE_CALL_AGENT_COMMIT_BOOKING === 'true',
+  // Companion trust gate for callAgentCommitBooking: the Agent:/Caller:
+  // transcript labels the commitment-grounding relies on are LLM-inferred
+  // today (labelTranscriptWithOpenAI infers unclear identities; its integrity
+  // check preserves words, not attribution). Flip ONLY when speaker labels
+  // come from a deterministic source (dual-channel recording / channel-
+  // derived diarization) — or when the owner explicitly accepts LLM-label
+  // risk. Without this gate the agent-commitment demotion never fires, even
+  // with GATE_CALL_AGENT_COMMIT_BOOKING on. Owner-flip only.
+  callAgentCommitTrustedLabels: process.env.GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -592,6 +635,16 @@ const gates = {
   // link.
   // Off → cron ticks are no-ops.
   callLogRelink: process.env.GATE_CALL_LOG_RELINK === 'true',
+  // Triage dead-letter drain: a nightly sweep that auto-resolves OPEN
+  // triage_items whose condition is provably moot (customer now has the
+  // address/name the card asked for; the call verifiably produced a booking
+  // via source_call_log_id) and auto-dismisses aged informational flags
+  // (spam 7d, listed advisory codes 30d). Explicit reason-code allowlist —
+  // owed-work cards (quote_promised, cancellation_request, booking holds,
+  // email_bounce_reverify, …) and in_progress cards are NEVER touched.
+  // Born from the 2026-07 backlog: ~1,800 open vs 32 ever resolved.
+  // Off → cron ticks are no-ops.
+  triageAutoResolve: process.env.GATE_TRIAGE_AUTO_RESOLVE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate
@@ -938,6 +991,21 @@ const gates = {
   // switch: unset (or any non-'true' value) — the field is omitted from
   // every payload and the chips disappear.
   bookingRainChips: process.env.GATE_BOOKING_RAIN_CHIPS === 'true',
+
+  // Admin bell policy — the shared admin bell rings ONLY for new leads,
+  // inbound SMS, voicemail callbacks, accepted estimates, and money failures
+  // (payment failures, billing exceptions, disputes, refund failures, PCI
+  // events) plus twilio_failure; everything else is silenced at the
+  // NotificationService chokepoint with a per-category owner override in
+  // Settings → Notifications, and the live dashboard-alert overlay stops
+  // merging into the bell (the dashboard banner is untouched). Changes what
+  // the owner SEES for operational exceptions, so explicit opt-in in EVERY
+  // environment (dev too — a dev bell that silently drops categories would
+  // mask notification regressions during testing). Kill switch: unset (or
+  // any non-'true' value) — every insert and the live overlay revert to
+  // today's behavior byte-for-byte; override rows stay inert in
+  // notification_preferences.
+  adminBellPolicy: process.env.GATE_ADMIN_BELL_POLICY === 'true',
 
   // WaveGuard auto-tier from recurring coverage (owner directive 2026-07-28),
   // BOTH directions: a customer with upcoming recurring qualifying services

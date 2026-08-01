@@ -393,16 +393,20 @@ describe('reschedule route sync→capture→emit ordering (source)', () => {
     expect(seriesBlock).toContain('failed: true, guards: seriesReminderGuards');
   });
 
-  test('single path: capture immediately follows the sync (no awaited work between), broadcast after', () => {
+  test('single path: notice routes through the shared helper after the sync — no inline send, capture, or rearm remains', () => {
+    // The single-reschedule path no longer captures/rearms locally: the
+    // notice (and its guarded snapshot semantics) live inside
+    // sendRescheduleNoticeForVisit, which captures its own guards, rechecks
+    // the slot at the provider handoff, and re-arms on any non-send.
     const single = src.slice(seriesEnd);
     const syncIdx = single.indexOf('await syncRescheduleReminder(req.params.serviceId');
-    const captureIdx = single.indexOf('await captureReminderGuards(req.params.serviceId)');
-    const emitIdx = single.indexOf('emitDispatchJobUpdate(');
+    const helperIdx = single.indexOf('sendRescheduleNoticeForVisit(');
     expect(syncIdx).toBeGreaterThan(-1);
-    expect(captureIdx).toBeGreaterThan(syncIdx);
-    expect(emitIdx).toBeGreaterThan(captureIdx);
-    const between = single.slice(single.indexOf(');', syncIdx), captureIdx);
-    expect(between).not.toContain('emitDispatchJobUpdate');
-    expect(between).not.toMatch(/await\s/);
+    expect(helperIdx).toBeGreaterThan(syncIdx);
+    // The old inline machinery must stay gone — its unguarded send/mark was
+    // the bug the helper replaced.
+    expect(single).not.toContain('await captureReminderGuards(req.params.serviceId)');
+    expect(single).not.toContain('markRescheduleReminderNotified(req.params.serviceId)');
+    expect(single).not.toContain('formatRescheduleTemplateVars(');
   });
 });

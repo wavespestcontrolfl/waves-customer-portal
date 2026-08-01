@@ -2168,13 +2168,47 @@ describe('blog meta contract on refresh (owner rule 2026-07-29 refinement)', () 
   });
 });
 
-describe('blog meta soft-CTA requirement on refresh (owner rule 2026-07-29)', () => {
-  test('blog changed meta without a soft CTA P1s', () => {
+describe('blog meta soft-CTA on refresh (owner ruling 2026-07-30: nudge, never a blocker)', () => {
+  test('blog changed meta without a soft CTA gets a P2 nudge and still PASSES', () => {
     const r = guardrails.evaluate(
       { body: 'Refreshed blog body.', frontmatter: { meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' } },
       { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true },
     );
-    expect(r.findings.some((f) => f.code === 'BLOG_META_MISSING_SOFT_CTA')).toBe(true);
+    const cta = r.findings.find((f) => f.code === 'BLOG_META_MISSING_SOFT_CTA');
+    expect(cta).toBeDefined();
+    expect(cta.severity).toBe('P2');
+    expect(r.pass).toBe(true);
+  });
+
+  test('oversized rendered meta without a CTA gets the blocking P1, not just the P2 nudge (Codex r2 P1)', () => {
+    // Literal 159 chars but {{brandName}} renders +5 → over 160; also no CTA.
+    const over = '{{brandName}} chinch bug guide. '.padEnd(159, 'y');
+    const r = guardrails.evaluate(
+      { body: 'Refreshed blog body.', frontmatter: { meta_description: over } },
+      { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true },
+    );
+    expect(r.findings.some((f) => f.code === 'META_OVER_160_RENDERED' && f.severity === 'P1')).toBe(true);
+    expect(r.pass).toBe(false);
+  });
+
+  test('bare 10-digit phone in a changed blog meta still P1s (Codex r4)', () => {
+    const r = guardrails.evaluate(
+      { body: 'Refreshed blog body.', frontmatter: { meta_description: 'What chinch bug damage looks like in a Southwest Florida lawn this season. Call 9412972606 for treatment details today please.' } },
+      { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true },
+    );
+    expect(r.findings.some((f) => f.code === 'BLOG_META_CARRIES_PHONE' && f.severity === 'P1')).toBe(true);
+    expect(r.pass).toBe(false);
+  });
+
+  test('sales terms in the final sentence still P1 (Codex P1: SALESY_META_RE alone misses the gerund)', () => {
+    const r = guardrails.evaluate(
+      { body: 'Refreshed blog body.', frontmatter: { meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn this season. Learn more about saving big with Waves.' } },
+      { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true },
+    );
+    const salesy = r.findings.find((f) => f.code === 'BLOG_META_SALESY');
+    expect(salesy).toBeDefined();
+    expect(salesy.severity).toBe('P1');
+    expect(r.pass).toBe(false);
   });
 });
 

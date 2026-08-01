@@ -139,6 +139,29 @@ function slotReanchors(data, slotDate) {
   return pullForwardDaysBetween(data?.current?.date, slotDate) >= threshold;
 }
 
+// The recurring-plan note under the hero. Collective anchoring (server gate
+// GATE_COLLECTIVE_SERIES_ANCHOR via payload.collectiveAnchor — owner ruling
+// 2026-07-30): every date move shifts the series, so one steady sentence
+// replaces the legacy conditional pull-forward warning.
+function recurringNoteCopy(data, selectedSlot) {
+  if (data?.collectiveAnchor) {
+    // A same-date selection is a time-only move — the server's
+    // shouldReanchor never shifts the series for it, so the note must not
+    // promise a shift the commit won't perform (codex P1).
+    if (selectedSlot && String(selectedSlot.date) === String(data?.current?.date || '')) {
+      return "Only this visit will move — a same-day time change doesn't shift the rest of your plan.";
+    }
+    // "Re-anchors around the new date", not "shifts by the same amount":
+    // month-based patterns re-derive the ordinal/weekday from the new
+    // anchor (first-Thursday → first-Sunday), so sibling deltas differ from
+    // the anchor's (codex P1) — the promise must describe re-anchoring.
+    return 'This visit is part of your regular plan — moving it to a different day re-anchors your later visits around the new date, so your schedule always follows your last treatment.';
+  }
+  return selectedSlot && slotReanchors(data, selectedSlot.date)
+    ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
+    : 'Only this visit will move — the rest of your regular service schedule stays the same.';
+}
+
 function ReanchorNote() {
   return (
     <div data-glass="soft" style={{
@@ -148,6 +171,191 @@ function ReanchorNote() {
       Heads up — moving this far up shifts your whole plan: your following
       visits will move to match the new date, keeping your regular schedule.
     </div>
+  );
+}
+
+// ── "Moved for weather" banner ──────────────────────────────────────────
+// Renders only when the GET payload carries `weatherMove` (server gate
+// GATE_RAINOUT_MOVE_BANNER + the visit still sits on a recent rain-out
+// move). Anatomy mirrors TrackPage's EnRouteCard: 3px status accent bar,
+// status pill, heading, then matched Was/Now rows — the design spec is the
+// owner-approved mock from the 2026-07-30 session. Weather chips are the
+// rain blue on BOTH rows (owner call: one weather color, sun icon only
+// signals the dry side). The non-weather Quick Move reasons (running late,
+// equipment trouble, emergency, no-show) reuse the same banner with a
+// "Schedule update" pill, an operational heading, and no chips (the server
+// never fetches chances for them).
+
+const WEATHER_MOVE_BLUE = '#0369A1';
+
+const WEATHER_MOVE_LEADS = {
+  weather_rain: 'rain moved your',
+  weather_lightning: 'lightning moved your',
+  weather_wind: 'wind moved your',
+  weather_heat: 'extreme heat moved your',
+};
+
+// The bonding explainer is a RAIN story about exterior liquid PEST sprays —
+// the one service family whose products the owner-approved copy (liquid,
+// microencapsulated) actually describes. FAIL CLOSED (codex r5): a positive
+// allowlist, because a denylist kept letting non-spray work through (rodent
+// exclusion, bed-bug heat/steam, lawn fertilizers). Interior/granular/
+// termite/WDO/inspection/bait still carve out overlaps like "Interior Pest"
+// — same exemption set as the SMS efficacy clause in services/rain-out.js.
+// Mosquito is deliberately NOT listed: those visits can be Bti tablets,
+// stations, or IGR/larval work (protocols.json), not barrier sprays.
+// Cleanouts pass the \bpest\b allowlist by name but run on gel bait,
+// vacuuming, and point-source IGR (roach cleanout protocol) — exempted.
+// Widening the allowlist to another service family is an owner call.
+const WHY_MOVE_LIQUID_SPRAY_SERVICE = /\bpest\b|waveguard/i;
+const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait|cleanout|roach|setup|rodent|appointment/i;
+
+function showsWhyMove(move, serviceType) {
+  const st = String(serviceType || '');
+  return move?.reasonCode === 'weather_rain'
+    && WHY_MOVE_LIQUID_SPRAY_SERVICE.test(st)
+    && !WHY_MOVE_EXEMPT_SERVICE.test(st);
+}
+
+function WeatherMoveChip({ chance }) {
+  if (chance == null || !Number.isFinite(Number(chance))) return null;
+  // Icon follows the FORECAST, not which row it sits on — the rain-out
+  // chooser doesn't guarantee a dry destination, so a sun beside "90% rain"
+  // must be impossible (codex r3 P2). Same ≤40% bar as the dry-heading rule.
+  const sunny = Number(chance) <= 40;
+  return (
+    <span data-glass="chip" data-glass-pill="" style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0,
+      fontSize: 12, fontWeight: 700, color: WEATHER_MOVE_BLUE,
+      background: `${WEATHER_MOVE_BLUE}1A`, padding: '4px 10px', borderRadius: 9999,
+      whiteSpace: 'nowrap',
+    }}>
+      <Icon name={sunny ? 'sun' : 'cloudRain'} size={12} style={{ verticalAlign: '-2px' }} />
+      {' '}{Math.round(Number(chance))}% rain
+    </span>
+  );
+}
+
+function WeatherMoveRow({ label, date, windowStart, chance, isNow }) {
+  return (
+    <div data-glass="soft" style={{
+      display: 'flex', alignItems: 'center', gap: 12,
+      background: isNow ? S.soft : S.page,
+      border: `1px solid ${isNow ? S.softBorder : S.border}`,
+      borderRadius: 8, padding: 14, marginTop: isNow ? 8 : 16,
+    }}>
+      <span style={{
+        fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.11em',
+        width: 40, flexShrink: 0, color: isNow ? '#0E7490' : S.muted,
+      }}>
+        {label}
+      </span>
+      <span style={{
+        flex: 1, fontSize: 16, fontWeight: 600, lineHeight: 1.3,
+        color: isNow ? S.text : S.muted,
+        ...(isNow ? {} : { textDecoration: 'line-through', textDecorationColor: S.border }),
+      }}>
+        {formatDateLabel(date)}
+        {windowStart ? (
+          <small style={{ display: 'block', fontSize: 14, fontWeight: 500, color: isNow ? S.body : S.muted }}>
+            Arrival {arrivalWindowLabel(windowStart)}
+          </small>
+        ) : null}
+      </span>
+      <WeatherMoveChip chance={chance} />
+    </div>
+  );
+}
+
+// Non-weather Quick Move reasons: no "dry/better window" claim, just the
+// honest operational story ahead of the was/now rows. Date-neutral on
+// purpose — this banner can be opened up to 14 days after the move
+// (WEATHER_MOVE_MAX_AGE_DAYS), so "today" would misdate the story; the
+// SMS keeps "today" because it goes out in the moment. The was/now rows
+// right below carry the actual dates.
+const SCHEDULE_MOVE_LEADS = {
+  running_late: 'our schedule ran behind',
+  equipment_issue: 'equipment trouble slowed us down',
+  tech_emergency: 'an emergency came up on our end',
+  customer_noshow: 'we missed you',
+};
+
+function weatherMoveHeading({ move, firstName, serviceType }) {
+  const hi = firstName ? `Hi ${firstName} — ` : '';
+  const svc = (serviceType || 'service').toLowerCase();
+  if (SCHEDULE_MOVE_LEADS[move.reasonCode]) {
+    return `${hi}${SCHEDULE_MOVE_LEADS[move.reasonCode]}, so we moved your ${svc} to a new window.`;
+  }
+  const lead = WEATHER_MOVE_LEADS[move.reasonCode] || 'weather moved your';
+  // "Dry" only when the forecast actually supports it — same ≤40% bar the
+  // SMS better-day clause uses; no forecast coverage means no dry claim
+  // (the rain-out chooser doesn't enforce a dry target, so reasonCode alone
+  // can't promise one).
+  const dry = (move.reasonCode === 'weather_rain' || move.reasonCode === 'weather_lightning')
+    && move.toChance != null && Number(move.toChance) <= 40;
+  return `${hi}${lead} ${svc} to a ${dry ? 'dry' : 'better'} window.`;
+}
+
+function WeatherMovePill({ move }) {
+  return (
+    <div data-glass="chip" data-glass-pill="" style={{
+      display: 'inline-block', fontSize: 12, fontWeight: 700, textTransform: 'uppercase',
+      color: WEATHER_MOVE_BLUE, background: `${WEATHER_MOVE_BLUE}1A`,
+      padding: '6px 12px', borderRadius: 9999,
+    }}>
+      <span style={{
+        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+        background: WEATHER_MOVE_BLUE, marginRight: 8, verticalAlign: 'middle',
+      }} />
+      {SCHEDULE_MOVE_LEADS[move?.reasonCode] ? 'Schedule update' : 'Moved for weather'}
+    </div>
+  );
+}
+
+// `hero` (V2): the pill + heading render as the caller's hero block in the
+// page-title type scale, so the card carries only the rows; classic keeps
+// them in-card at the same 22px scale its sibling headings use.
+function WeatherMoveBanner({ move, firstName, serviceType, hero = false }) {
+  if (!move) return null;
+  return (
+    <Card style={{ borderTop: `3px solid ${WEATHER_MOVE_BLUE}` }}>
+      {hero ? null : (
+        <>
+          <WeatherMovePill move={move} />
+          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 14, lineHeight: 1.3 }}>
+            {weatherMoveHeading({ move, firstName, serviceType })}
+          </div>
+        </>
+      )}
+
+      <WeatherMoveRow label="Was" date={move.from?.date} windowStart={move.from?.windowStart} chance={move.fromChance} isNow={false} />
+      <WeatherMoveRow label="Now" date={move.to?.date} windowStart={move.to?.windowStart} chance={move.toChance} isNow />
+
+      {showsWhyMove(move, serviceType) ? (
+        <details data-glass="soft" style={{
+          marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`, borderRadius: 8,
+        }}>
+          <summary style={{
+            listStyle: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
+            padding: 14, fontSize: 15, fontWeight: 600, color: S.text,
+          }}>
+            Why the move?
+            <Icon name="chevronDown" size={16} style={{ marginLeft: 'auto', color: S.muted }} />
+          </summary>
+          <div style={{ padding: '0 14px 14px', fontSize: 14, color: S.body, lineHeight: 1.5 }}>
+            Our liquid treatments need a dry surface and a few hours to bond after
+            application. Rain during or right after a visit can wash product away before it
+            binds — which means weaker protection for your home. Once a treatment has dried
+            and bonded, rain matters much less: select formulations we use are
+            microencapsulated — the active ingredient rides in microscopic capsules that
+            lock onto treated surfaces and release gradually — adding residual staying power
+            against everyday Southwest Florida rain. No application is weatherproof, though,
+            which is exactly why we re-time visits around heavy rain — always at no charge
+            to you.
+          </div>
+        </details>
+      ) : null}
+    </Card>
   );
 }
 
@@ -1037,11 +1245,23 @@ export default function ReschedulePage() {
           start_time: selectedSlot.start_time,
           end_time: selectedSlot.end_time,
           technician_id: selectedSlot.technician_id || null,
+          // Scope pin: the series behavior this page DISCLOSED, and the
+          // anchor date that promise was framed against. A gate flip or a
+          // dispatch race between render and commit 409s (SCOPE_CHANGED)
+          // instead of silently doing something the customer wasn't told.
+          disclosed_collective: !!data?.collectiveAnchor,
+          disclosed_current_date: data?.current?.date || null,
         }),
       });
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.success) {
         setResult(body);
+        return;
+      }
+      if (body.code === 'SCOPE_CHANGED') {
+        setSelectedSlot(null);
+        await load();
+        setSubmitError('The scheduling details for your plan just updated — here is the latest.');
         return;
       }
       if (body.code === 'SLOT_TAKEN') {
@@ -1085,17 +1305,54 @@ export default function ReschedulePage() {
         <V2FloatingAsk key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
         <div className="rsv2-layout">
           <div className="rsv2-col-left">
+            {/* Weather-move banner carries the greeting + was/now story when
+                present (heading in the page-title scale, owner ask
+                2026-07-30), so the hero below drops its own greeting and
+                reframes as the "different time?" ask — the moved-to slot is
+                already confirmed, the page becomes optional adjustment. */}
+            {data.weatherMove ? (
+              <div className="rsv2-hero" style={{ marginBottom: 12 }}>
+                <WeatherMovePill move={data.weatherMove} />
+                {/* h2, not h1: the glass type ramp sizes headings by tag, and
+                    the owner sized the weather flow one step down (2026-07-30)
+                    — both this heading and the "different time?" hero. */}
+                <h2 className="rsv2-title" style={{ marginTop: 12 }}>
+                  {weatherMoveHeading({
+                    move: data.weatherMove,
+                    firstName: data.customerFirstName,
+                    serviceType: data.service?.type,
+                  })}
+                </h2>
+              </div>
+            ) : null}
+            <WeatherMoveBanner
+              move={data.weatherMove}
+              firstName={data.customerFirstName}
+              serviceType={data.service?.type}
+              hero
+            />
             {/* Hero mirrors the service report's header (owner ask
                 2026-07-14): section eyebrow + serif "Hey {first}, …" title
                 floating on the scene, meta line below — same tokens as
-                ReportViewPage's .section-eyebrow / .sr-title. */}
+                ReportViewPage's .section-eyebrow / .sr-title. The eyebrow
+                drops when the banner already heads the page (owner ask
+                2026-07-30). */}
             <div className="rsv2-hero">
-              <div className="rsv2-eyebrow">Reschedule</div>
-              <h1 className="rsv2-title">
-                Hey {data.customerFirstName || 'there'}, {data.missed ? 'looks like we missed each other' : "let's pick a new time"}
-              </h1>
+              {data.weatherMove ? null : <div className="rsv2-eyebrow">Reschedule</div>}
+              {data.weatherMove ? (
+                <h2 className="rsv2-title">Want a different time instead?</h2>
+              ) : (
+                <h1 className="rsv2-title">
+                  Hey {data.customerFirstName || 'there'}, {data.missed ? 'looks like we missed each other' : "let's pick a new time"}
+                </h1>
+              )}
               <div className="rsv2-hero-meta">
-                {data.missed ? (
+                {data.weatherMove ? (
+                  <>
+                    Your new time is confirmed — nothing else to do. Or pick any
+                    open time below and we'll move it again.
+                  </>
+                ) : data.missed ? (
                   <>
                     Your <strong>{data.service?.type || 'service'}</strong> visit was set
                     for <strong>{formatDateLabel(current.date)}</strong> — pick a new time below
@@ -1114,9 +1371,7 @@ export default function ReschedulePage() {
                   marginTop: 14, background: S.soft, border: `1px solid ${S.softBorder}`,
                   borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
                 }}>
-                  {selectedSlot && slotReanchors(data, selectedSlot.date)
-                    ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
-                    : 'Only this visit will move — the rest of your regular service schedule stays the same.'}
+                  {recurringNoteCopy(data, selectedSlot)}
                 </div>
               ) : null}
             </div>
@@ -1165,7 +1420,7 @@ export default function ReschedulePage() {
                 onConfirm={confirm}
                 submitting={submitting}
                 submitError={submitError}
-                reanchorNote={!!(selectedSlot && slotReanchors(data, selectedSlot.date))}
+                reanchorNote={!!(!data.collectiveAnchor && selectedSlot && slotReanchors(data, selectedSlot.date))}
               />
             )}
             <Card data-glass="soft" style={{ background: S.page }}>
@@ -1182,12 +1437,24 @@ export default function ReschedulePage() {
 
   return (
     <Page>
+      <WeatherMoveBanner
+        move={data.weatherMove}
+        firstName={data.customerFirstName}
+        serviceType={data.service?.type}
+      />
       <Card>
         <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 6 }}>
-          {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time
+          {data.weatherMove
+            ? 'Want a different time instead?'
+            : <>{data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time</>}
         </div>
         <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
-          {data.missed ? (
+          {data.weatherMove ? (
+            <>
+              Your new time is confirmed — nothing else to do. Or pick any open
+              time below and we'll move it again.
+            </>
+          ) : data.missed ? (
             <>
               Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit was set
               for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>, but it looks like
@@ -1206,9 +1473,7 @@ export default function ReschedulePage() {
             marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`,
             borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
           }}>
-            {selectedSlot && slotReanchors(data, selectedSlot.date)
-              ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
-              : 'Only this visit will move — the rest of your regular service schedule stays the same.'}
+            {recurringNoteCopy(data, selectedSlot)}
           </div>
         ) : null}
       </Card>
@@ -1263,7 +1528,7 @@ export default function ReschedulePage() {
             {days.map((day) => (
               <DayGroup key={day.date} day={day} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />
             ))}
-            {selectedSlot && slotReanchors(data, selectedSlot.date) ? (
+            {!data.collectiveAnchor && selectedSlot && slotReanchors(data, selectedSlot.date) ? (
               <div style={{ marginBottom: 10 }}><ReanchorNote /></div>
             ) : null}
             <button

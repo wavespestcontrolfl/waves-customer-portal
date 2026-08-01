@@ -1144,7 +1144,9 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
       'billing',
       `${feeLabel} charged`,
       `${first} — ${feeText} ${feeLabel.toLowerCase()} on a one-time visit.`,
-      { link: `/admin/customers/${customerId}`, metadata: { invoiceId: invoice.id, reason } },
+      // bell: false — a SUCCESSFUL fee charge is a billing FYI, not a money
+      // failure; silenced under GATE_ADMIN_BELL_POLICY.
+      { link: `/admin/customers/${customerId}`, bell: false, metadata: { invoiceId: invoice.id, reason } },
     );
   } catch (e) { logger.warn('[estimate-card-holds] no-show fee admin notify failed', { error: e.message }); }
 }

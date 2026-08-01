@@ -608,9 +608,21 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
   let sent = false;
   let error = null;
   try {
-    const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'service_type');
+    const svc = await db('scheduled_services')
+      .where({ id: serviceId })
+      .first('customer_id', 'service_type', 'status', 'customer_confirmed', 'source_action');
+    // An unreviewed outbound-callback booking must never receive a definitive
+    // reschedule text — the office confirms it first (same guard the dispatch
+    // routes apply before any customer-facing transition).
+    const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+    const unreviewedCallback = svc
+      && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+      && String(svc.status) === 'pending'
+      && !svc.customer_confirmed;
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
-    if (!customer) {
+    if (unreviewedCallback) {
+      error = 'This outbound-callback booking is pending office review — no reschedule text was sent';
+    } else if (!customer) {
       error = 'Customer not found';
     } else {
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
@@ -2124,6 +2136,9 @@ router.get('/', async (req, res, next) => {
         lat: s.visit_lat != null ? Number(s.visit_lat) : null,
         lng: s.visit_lng != null ? Number(s.visit_lng) : null,
         customerConfirmed: s.customer_confirmed,
+        // Lets the sidebar hide actions that the review gate would 409
+        // (unreviewed outbound-callback bookings).
+        sourceAction: s.source_action || null,
         waveguardTier: s.waveguard_tier, monthlyRate: parseFloat(s.monthly_rate || 0),
         isCallback: !!s.is_callback,
         leadScore: s.lead_score, lawnType: s.lawn_type,
@@ -2570,7 +2585,8 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.customer_id',
         'scheduled_services.scheduled_date',
         'scheduled_services.service_type', 'scheduled_services.status',
-        'scheduled_services.window_start', 'scheduled_services.zone',
+        'scheduled_services.window_start', 'scheduled_services.window_end',
+        'scheduled_services.zone',
         'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes',
         'scheduled_services.is_recurring',
         'scheduled_services.recurring_parent_id',
@@ -2617,6 +2633,10 @@ router.get('/month', async (req, res, next) => {
         tier: s.waveguard_tier,
         zone: s.zone || getZone(s.city, s.zip),
         windowStart: s.window_start,
+        // windowEnd is additive: the month-launched RescheduleModal derives
+        // the visit's true occupancy span from the stored window rather than
+        // trusting the fabricated ||30 duration below.
+        windowEnd: s.window_end,
         duration: s.estimated_duration_minutes || 30,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,
@@ -4249,11 +4269,31 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const reminderBefore = await db('appointment_reminders')
                   .where({ scheduled_service_id: id })
                   .first('id', 'confirmation_sent', 'suppressed_by_sibling');
+                // An unreviewed outbound-callback booking never texts (the
+                // office confirms first) — and routing it through the silent
+                // path below also re-arms the pending creation confirmation
+                // the cover call would otherwise claim.
+                const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+                // Own catch, fail-closed: a transient failure here must not
+                // ride the outer empty catch and silently skip both the
+                // reminder sync and the failure report.
+                let reviewFlags = null;
+                let reviewLookupFailed = false;
+                if (bulkNotify) {
+                  try {
+                    reviewFlags = await db('scheduled_services').where({ id }).first('source_action', 'status', 'customer_confirmed');
+                    if (!reviewFlags) reviewLookupFailed = true;
+                  } catch { reviewLookupFailed = true; }
+                }
+                const unreviewedCallback = !!reviewFlags
+                  && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+                  && String(reviewFlags.status) === 'pending'
+                  && !reviewFlags.customer_confirmed;
                 // A sibling-suppressed row's slot OWNER carries the customer
                 // messaging — sending here too would text the customer once
                 // per sibling for one slot. Suppressed rows move silently
                 // (by design, so not a notification failure).
-                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling;
+                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling && !unreviewedCallback && !reviewLookupFailed;
                 await AppointmentReminders.handleReschedule(id, reminderSyncTime, {
                   sendNotification: false,
                   coverDueWindows: notifyThisRow,
@@ -4268,6 +4308,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   if (!notice.sent) {
                     notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
                   }
+                } else if (bulkNotify && reviewLookupFailed) {
+                  notificationFailures.push({ id, reason: 'Could not verify the booking\'s review status — not texted' });
+                } else if (bulkNotify && unreviewedCallback) {
+                  notificationFailures.push({ id, reason: 'Pending office review (outbound-callback booking) — not texted' });
                 } else if (bulkNotify && !reminderBefore) {
                   notificationFailures.push({ id, reason: 'No reminder record for this visit — not texted' });
                 }
@@ -5654,21 +5698,45 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         notificationError = 'No arrival time is set for this visit, so no reschedule text was sent';
       } else {
         const AppointmentReminders = require('../services/appointment-reminders');
-        try {
-          // Cover any already-due reminder window before sending so the
-          // 15-min cron can't fire a day-before reminder in the gap between
-          // the commit above and the notice landing (same coverDueWindows
-          // contract the dispatch reschedule route uses).
-          await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
-            sendNotification: false,
-            coverDueWindows: true,
-          });
-        } catch (e) {
-          logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
+        // Check the review gate BEFORE the cover call — handleReschedule
+        // claims a still-pending creation confirmation, and an unreviewed
+        // outbound-callback booking must keep that confirmation pending
+        // (the office-confirm sender is its customer message).
+        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+        // Best-effort, fail-closed: the edit itself already committed, so a
+        // transient failure here must degrade to "not texted" in the
+        // response — never a 500 that invites a retry of a succeeded edit.
+        const reviewFlags = await db('scheduled_services')
+          .where({ id: req.params.id })
+          .first('source_action', 'status', 'customer_confirmed')
+          .catch(() => undefined);
+        const unreviewedCallback = !!reviewFlags
+          && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+          && String(reviewFlags.status) === 'pending'
+          && !reviewFlags.customer_confirmed;
+        if (!reviewFlags) {
+          notificationSent = false;
+          notificationError = 'Could not verify the booking\'s review status — no reschedule text was sent';
+        } else if (unreviewedCallback) {
+          notificationSent = false;
+          notificationError = 'This outbound-callback booking is pending office review — no reschedule text was sent';
+        } else {
+          try {
+            // Cover any already-due reminder window before sending so the
+            // 15-min cron can't fire a day-before reminder in the gap between
+            // the commit above and the notice landing (same coverDueWindows
+            // contract the dispatch reschedule route uses).
+            await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
+              sendNotification: false,
+              coverDueWindows: true,
+            });
+          } catch (e) {
+            logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
+          }
+          const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+          notificationSent = notice.sent;
+          notificationError = notice.error;
         }
-        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
-        notificationSent = notice.sent;
-        notificationError = notice.error;
       }
     }
 
@@ -7730,11 +7798,22 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
 async function scheduleReviewRequest(svc) {
   try {
     const customer = await db('customers').where({ id: svc.customer_id }).first();
-    if (!customer || !customer.phone) return;
+    if (!customer) return;
+    // Legacy mode is SMS-only: no phone / SMS opt-out ends it here. Cadence
+    // mode (GATE_REVIEW_SEQUENCES) resolves channels itself with an SMS→email
+    // fallback, so an email-only or SMS-opted-out customer must still reach
+    // enrollment (Codex P2, PR #3104 r1) — only the review_request opt-out is
+    // universal.
+    const cadenceEnabled = require('../config/feature-gates').isEnabled('reviewSequences');
+    if (!customer.phone && !cadenceEnabled) return;
 
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-    if (prefs && (prefs.sms_enabled === false || prefs.review_request === false)) {
-      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — SMS/review request disabled`);
+    if (prefs && prefs.review_request === false) {
+      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — review requests disabled`);
+      return;
+    }
+    if (!cadenceEnabled && prefs && prefs.sms_enabled === false) {
+      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — SMS disabled`);
       return;
     }
 
@@ -7772,18 +7851,21 @@ async function scheduleReviewRequest(svc) {
     }
 
     const ReviewService = require('../services/review-request');
-    await ReviewService.create({
+    await ReviewService.enrollPostService({
       customerId: customer.id,
       serviceRecordId,
       triggeredBy: 'auto',
-      delayMinutes: 120,
+      // Historical hardcoded default, not an operator choice — legacy path
+      // only; cadence mode uses the smart send window.
+      legacyDelayMinutes: 120,
       techName,
       serviceType: svc.service_type || null,
       serviceDate: svc.scheduled_date || null,
       technicianId: svc.technician_id || null,
+      completedAt: new Date(),
     });
 
-    logger.info(`[review-auto] Review request queued for customer ${customer.id} (sends in 2h)`);
+    logger.info(`[review-auto] Review request queued for customer ${customer.id}`);
   } catch (err) {
     logger.error(`[review-auto] Failed to queue review request: ${err.message}`);
   }
@@ -8301,7 +8383,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     if (scheduledServiceId) {
       const svc = await db('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id')
+        // is_callback feeds the pressure-suppression rule below — without it
+        // in the projection the flag reads undefined and callback visits on
+        // one-time keys would ground differently than /complete scores them
+        // (codex P2 r2).
+        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => null);
       if (svc && svc.customer_id) {
         const isAdmin = req.techRole === 'admin';
@@ -8321,8 +8407,18 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           // Typed specialty completions (profile.findingsType set) hide Pest
           // Pressure on the real report even though their type can detect to the
           // pest line — suppress the pressure trend in the grounding to match.
+          // One-time-billed untyped profiles (bed_bug post-20260731400000, the
+          // untyped pest family) are suppressed FORM-INDEPENDENTLY, mirroring
+          // the completion path's oneTimePressureExcluded rule: their real
+          // report hides one-time pressure, so the draft prompt must not be
+          // grounded in the customer's unrelated recurring trend (codex P2 r1).
           const completionProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-          groundingSuppressPressure = Boolean(completionProfile && completionProfile.findingsType);
+          groundingSuppressPressure = Boolean(completionProfile && (
+            completionProfile.findingsType
+            || (String(completionProfile.billingType || '').toLowerCase() === 'one_time'
+              && completionProfile.serviceKey !== 'pest_re_service'
+              && !svc.is_callback)
+          ));
         } else {
           logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });
         }
@@ -9395,3 +9491,8 @@ module.exports = router;
 // route-load cycle) by services/recurring-series-extend.js so the dispatch
 // completion routes run the same refill/alert logic as this route's step 4b.
 module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
+// Shared "your appointment moved" notice (arrival-window copy, recipient
+// routing, terminal/slot recheck, guarded reminder close/re-arm) — consumed
+// lazily by the IB move_stops_to_day tool so its opt-in customer texts go
+// through the exact same path as update-details and the bulk reschedule.
+module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;

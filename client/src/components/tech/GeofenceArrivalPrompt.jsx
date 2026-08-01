@@ -230,7 +230,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
 }
 
 // Storm-watch nudge: weather crossing the threshold for an upcoming
-// stop. Review opens the Rain Out sheet pre-loaded for that job (via
+// stop. Review opens the Quick Move sheet pre-loaded for that job (via
 // onStormReview from TechHomePage); the tech still makes the call.
 function StormCard({ n, onReview, onDismiss }) {
   const p = n.payload || {};

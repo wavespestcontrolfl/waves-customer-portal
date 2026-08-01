@@ -1641,6 +1641,24 @@ describe('service report v1', () => {
     expect(liveCompleted.confidence).toBe('high');
   });
 
+  test('typed serviceLabel names the actual service in the completed event; absent label keeps the per-line copy', () => {
+    const base = {
+      service: {
+        status: 'completed',
+        service_line: 'pest',
+        arrived_at: '2026-06-20T14:00:00.000Z',
+        completed_at: '2026-06-20T14:30:00.000Z',
+      },
+      serviceLine: 'pest',
+    };
+    const labeled = buildVisitTimeline({ ...base, serviceLabel: 'Bed Bug Treatment' });
+    expect(labeled.events.find((e) => e.type === 'service_completed').customerDescription)
+      .toBe('Your technician completed your Bed Bug Treatment and finalized the report.');
+    const unlabeled = buildVisitTimeline(base);
+    expect(unlabeled.events.find((e) => e.type === 'service_completed').customerDescription)
+      .toBe('Your technician completed the pest control service and finalized the report.');
+  });
+
   test('visit timeline adds Service completed for completed reports even when Bouncie has no completion event', () => {
     const timeline = buildVisitTimeline({
       service: {

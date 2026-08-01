@@ -418,6 +418,35 @@ finding and warns on P1. Reviewers must return JSON matching
   "Waves Lawn & Pest". The mascot logo artwork carrying the old name is
   current and intentional; do not flag it.
 
+### Implementation defaults
+
+Authoring defaults for any agent writing code in this repo. Reviewers flag
+violations at the severity noted.
+
+- **Choose the simplest implementation that fully meets the current
+  requirements.** No speculative abstraction: no config options nobody
+  asked for, no generic handlers with a single call site, no interfaces
+  with one implementation, no "future-proofing" layers for requirements
+  that aren't in the task. Flag as P2.
+- **No compat shims for code changed in the same PR.** When a change
+  renames or reshapes something internal, migrate every call site in the
+  same PR — no deprecated wrappers, re-export aliases, or dual code paths
+  left behind for callers this repo controls. Flag leftover internal
+  compat scaffolding as P2. The inverse is MANDATORY for anything an
+  external consumer can touch: deployed native apps (iOS WavesPay,
+  Android), in-flight tokenized links (pay / receipt / estimate /
+  contract / report / prep), astro-fleet form posts, webhook payloads,
+  and existing DB rows must keep working — breaking those is P0 (see the
+  public-route, receipt-permanence, and astro-consumer rules).
+- **Use existing dependencies instead of hand-rolling; no new
+  dependencies without owner approval.** Don't write a custom
+  implementation of something a library already in `package.json`
+  provides (date/timezone handling, validation, retries, parsing).
+  Adding a NEW dependency is a supply-chain and upgrade-surface decision:
+  the PR body must name it and why, and it needs Adam's explicit
+  approval. A new `package.json` entry not called out in the PR
+  description is P1.
+
 ### Out of scope (do not flag)
 
 - `client/dist/**` — built bundle, regenerated on deploy.
@@ -921,11 +950,17 @@ finding and warns on P1. Reviewers must return JSON matching
   returns the review-request context by token, POST submits the customer's
   review. No auth beyond the review-request token).
   `/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
-  `/:token/generate-review`) (review-gate; token-scoped customer rating flow
-  from a review-request link — high → the nearest GBP write-a-review URL, low →
-  private feedback capture. No auth beyond the review-request token; picks
-  nearest GBP by geocoded address. The bare `/api/rate` mount is not itself a
-  route — only the token-scoped family is public).
+  `/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
+  rating flow from a review-request link — high → the nearest GBP
+  write-a-review URL, low → private feedback capture. `/:token/go` is the
+  GATE_REVIEW_DIRECT_LINK tracked redirect: 64-hex token format gate, 30
+  req/min per-IP limit, stamps open/click on the review_requests row, stops
+  the customer's active review cadence, and 302s to the location's GBP review
+  URL — every failure path degrades to the /rate page, and the ONLY redirect
+  targets are config/locations.js googleReviewUrl values (never
+  request-derived). No auth beyond the review-request token; picks nearest GBP
+  by geocoded address. The bare `/api/rate` mount is not itself a route — only
+  the token-scoped family is public).
   `/api/reports/project/:token/fdacs-pdf` (read-only; streams the filled, signed
   FDACS-13645 PDF for a WDO report so the public report page can show the official
   form instead of a blank template. Same long-lived report token + format gate as

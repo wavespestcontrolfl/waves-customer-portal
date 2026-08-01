@@ -30,6 +30,14 @@ const COMPANION_EXCLUDED_TYPES = new Set([...V1_EXCLUDED_PROJECT_TYPES, 'pre_tre
 // cut over (#2708), every fully-typed family now completes through the
 // appointment flow only. The mechanism stays for a future exemption.
 const PROJECT_CREATION_KEPT_TYPES = new Set([]);
+// Retired-typed pointers (untype migrations, e.g. bed_bug in
+// 20260731400000): clearing the profile pointer changes the completion
+// FORM, it does not resurrect the retired Projects creation path. Without
+// this code-enforced set, the pointer going NULL would drop the type from
+// appointmentManagedProjectTypes and /admin/projects would re-expose the
+// retired project form as a second, conflicting completion lane
+// (codex P1 r1 on the bed-bug untype).
+const UNTYPED_RETIRED_PROJECT_TYPES = new Set(['bed_bug']);
 // Compliance project types create ONLY from their scheduled visit (owner
 // ruling 2026-07-13: "we don't ever do a WDO or pre-treat without something
 // scheduled"). Creation-side only — completion stays on the project flow
@@ -301,16 +309,26 @@ async function appointmentManagedProjectTypes(knex = db) {
   if (!(await tableAvailable(knex))) return new Set();
   try {
     const stillBacked = await knex('service_completion_profiles')
-      .where({ completion_mode: 'project_required', active: true })
+      .whereIn('completion_mode', ['project_required', 'special_project'])
+      .where({ active: true })
       .whereNotNull('project_type')
-      .distinct('project_type');
-    const backed = new Set(stillBacked.map((row) => row.project_type).filter(Boolean));
+      .distinct(['project_type', 'completion_mode']);
+    // Original partially-cutover semantics stay keyed to project_required
+    // (rows without a completion_mode in test doubles default there too).
+    const backed = new Set(stillBacked
+      .filter((row) => (row.completion_mode || 'project_required') === 'project_required')
+      .map((row) => row.project_type)
+      .filter(Boolean));
+    // The RETIREMENT override is wider: ANY active project-backed mode
+    // (project_required OR special_project — serializeProfile treats both
+    // as project-backed) outranks the code retirement (codex P2 r11).
+    const retirementOverridden = new Set(stillBacked.map((row) => row.project_type).filter(Boolean));
     const rows = await knex('service_completion_profiles')
       .where({ completion_mode: 'service_report', active: true })
       .whereNotNull('project_type')
       .distinct('project_type');
-    return new Set(
-      rows
+    return new Set([
+      ...rows
         .map((row) => row.project_type)
         .filter(Boolean)
         // Partially-cutover types (some keys still project_required) stay
@@ -323,7 +341,14 @@ async function appointmentManagedProjectTypes(knex = db) {
         // Owner-kept documentation types (see PROJECT_CREATION_KEPT_TYPES) —
         // creatable as standalone projects; completion routing untouched.
         .filter((type) => !PROJECT_CREATION_KEPT_TYPES.has(type)),
-    );
+      // Untyped-retired types stay appointment-managed by code — their
+      // pointer is NULL so the query above can no longer see them. But an
+      // ACTIVE project-backed profile (project_required OR special_project)
+      // outranks the retirement (the migration loud-skips drifted rows, and
+      // the surviving profile still requires the Projects lane — codex P2
+      // r7 + r11).
+      ...[...UNTYPED_RETIRED_PROJECT_TYPES].filter((type) => !retirementOverridden.has(type)),
+    ]);
   } catch {
     return new Set();
   }
@@ -351,16 +376,37 @@ function resolveCompletionDeliveryPosture({
   completionMode = null,
   profileDeliveryMode = null,
   specialtyDeliveryDisabled = false,
+  profileCategory = null,
 } = {}) {
   const isInternalOnly = !typedFindingsType && completionMode === 'internal_only';
   let typedDeliveryMode;
   if (typedFindingsType) {
     typedDeliveryMode = specialtyDeliveryDisabled ? 'disabled' : (profileDeliveryMode || 'auto_send');
   } else {
-    typedDeliveryMode = isInternalOnly ? 'disabled' : 'auto_send';
+    // Untyped lanes default to auto_send, but ops kill switches SURVIVE an
+    // untype (bed_bug, 20260731400000): an explicitly suppressing profile
+    // delivery_mode, and the specialty-wide env kill for specialty-category
+    // profiles, must not be bypassed by clearing the typed pointer —
+    // otherwise the next completion mints a public report and sends
+    // customer comms against an active switch (codex P1 r3).
+    // internal_only is preserved as its OWN posture, not collapsed to
+    // disabled: internal_only still mints the staff-reviewable shadow
+    // report token while suppressing customer delivery; disabled mints
+    // nothing (codex P2 r5).
+    const profileMode = String(profileDeliveryMode || '');
+    const suppressedBySpecialtyKill = specialtyDeliveryDisabled && String(profileCategory || '') === 'specialty';
+    if (isInternalOnly || suppressedBySpecialtyKill || profileMode === 'disabled') {
+      typedDeliveryMode = 'disabled';
+    } else if (profileMode === 'internal_only') {
+      typedDeliveryMode = 'internal_only';
+    } else {
+      typedDeliveryMode = 'auto_send';
+    }
   }
-  const suppressCustomerComms = isInternalOnly
-    || (!!typedFindingsType && typedDeliveryMode !== 'auto_send');
+  // Equivalent to the previous expression for every typed input and every
+  // pre-existing untyped input (untyped mode was auto_send unless
+  // isInternalOnly); the suppressing untyped modes above now suppress too.
+  const suppressCustomerComms = isInternalOnly || typedDeliveryMode !== 'auto_send';
   return { typedDeliveryMode, suppressCustomerComms, isInternalOnly };
 }
 

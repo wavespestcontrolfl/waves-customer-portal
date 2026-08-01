@@ -199,6 +199,12 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
               <filter id="tracedMistBlurSoft" x="-80%" y="-80%" width="260%" height="260%">
                 <feGaussianBlur stdDeviation="16" />
               </filter>
+              {/* soft white halo under the mascot emitter — mirrors the
+                  tech-engine's drawHead readability halo */}
+              <radialGradient id="tracedEmitterHalo">
+                <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.6" />
+                <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+              </radialGradient>
             </defs>
             <style>{`
               @keyframes tracedSprayDraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
@@ -276,11 +282,27 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 <circle cx={Math.round(p.x) - 13} cy={Math.round(p.y) + 6} r="17" fill="#0A7EC2" fillOpacity="0.4" />
               </g>
             ))}
-            {/* mist emitter — a glowing spray blob riding the band, no hard marker */}
-            <g className="traced-spray-emitter" filter="url(#tracedMistBlur)">
-              <circle r="26" fill="#7CC7F0" fillOpacity="0.8">
-                <animateMotion dur="7s" repeatCount="indefinite" path={pathD} calcMode="linear" />
-              </circle>
+            {/* Emitter: the Waves mascot rides the spray line — same treatment
+                the tech-side engine gives it (owner 2026-07-29 / report parity
+                owner 2026-07-30): upright, white halo for readability over
+                dark imagery, mist glow trailing underneath. Until the logo
+                paints (loading/404) the blurred glow blob still reads as the
+                emitter, matching the engine's fallback. Spray variant only —
+                lawn never gets the mascot (owner ruling #3075). */}
+            <g>
+              <animateMotion dur="7s" repeatCount="indefinite" path={pathD} calcMode="linear" />
+              {/* the mist glow breathes; the mascot itself stays solid, like
+                  the tech-engine render */}
+              <circle className="traced-spray-emitter" r="26" fill="#7CC7F0" fillOpacity="0.8" filter="url(#tracedMistBlur)" />
+              <circle r="52" fill="url(#tracedEmitterHalo)" />
+              <image
+                href="/waves-logo.png"
+                x="-38"
+                y="-38"
+                width="76"
+                height="76"
+                preserveAspectRatio="xMidYMid meet"
+              />
             </g>
           </svg>
         )}

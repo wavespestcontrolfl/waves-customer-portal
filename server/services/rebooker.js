@@ -149,7 +149,7 @@ function parseWindow(w) {
 }
 
 class SmartRebooker {
-  async findRescheduleOptions(serviceId, reason) {
+  async findRescheduleOptions(serviceId, reason, opts = {}) {
     const service = await db('scheduled_services')
       .where('scheduled_services.id', serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -217,6 +217,52 @@ class SmartRebooker {
       if (candidateDate.getDay() === new Date(service.scheduled_date).getDay()) score += 8; // Same day of week
 
       const window = this.findBestWindow(service);
+
+      // Skip candidates whose committed block would deterministically 409:
+      // the picker submits window.start + the visit's own duration, so test
+      // exactly that span with the same tech-blind occupancy predicate
+      // reschedule() enforces. Without this, busy days surface suggestions
+      // that can never be selected.
+      const effDuration = (() => {
+        // Callers that book a DIFFERENT span than the visit's own block
+        // (rain-out commits a one-hour slot) pass probeSpanMinutes so the
+        // probe tests exactly what they will submit.
+        const forced = parseInt(opts.probeSpanMinutes, 10);
+        if (Number.isInteger(forced) && forced > 0) return forced;
+        // Stored span FIRST, then the duration estimate — the same order
+        // the RescheduleModal uses to build the window it submits, so the
+        // probe tests exactly the block Select will commit.
+        if (service.window_start && service.window_end) {
+          const [h1, m1] = String(service.window_start).split(':').map(Number);
+          const [h2, m2] = String(service.window_end).split(':').map(Number);
+          const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
+          if (span > 0) return span;
+        }
+        const d = parseInt(service.estimated_duration_minutes, 10);
+        if (Number.isInteger(d) && d > 0) return d;
+        return 60;
+      })();
+      const startMin = (() => {
+        const [h, m] = String(window.start).split(':').map(Number);
+        return h * 60 + (m || 0);
+      })();
+      const endTotal = Math.min(startMin + effDuration, 23 * 60 + 59);
+      const candidateEnd = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
+      try {
+        const clash = await findConflictingVisits({
+          db,
+          date: dateStr,
+          windowStart: window.start,
+          windowEnd: candidateEnd,
+          excludeServiceIds: [String(serviceId)],
+          excludeStatuses: ['cancelled', 'completed'],
+        });
+        if (clash.length) continue;
+      } catch (err) {
+        // Occupancy probe failure keeps the candidate (legacy behavior) —
+        // the commit-time check still rejects a genuine clash.
+        logger.warn(`[rebooker] suggestion occupancy probe failed for ${dateStr}: ${err.message}`);
+      }
 
       options.push({
         date: dateStr,

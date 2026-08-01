@@ -75,6 +75,29 @@ function validateTemplateBody(body, variables, templateKey = null) {
   };
 }
 
+// Owner directive 2026-08-01: drop "https://" from OUR portal links in SMS.
+// It is 8 characters on every link and SMS clients autolink a bare domain.
+//
+// Deliberately scoped to hosts we own. Third-party links keep their scheme:
+// a Google review link (g.page) rendered scheme-less relies on the client
+// recognising an unfamiliar bare host, and those templates are single-segment
+// already, so there is nothing to win and a tappable link to lose.
+//
+// SMS ONLY — this runs inside the SMS renderer. Email and PDF surfaces build
+// their URLs elsewhere and keep the full scheme.
+const SCHEMELESS_SMS_HOSTS = [
+  'portal.wavespestcontrol.com',
+  'waves-customer-portal-production.up.railway.app',
+];
+const PORTAL_SCHEME_RE = new RegExp(
+  `https://(?=(?:${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})[/\\s]|(?:${SCHEMELESS_SMS_HOSTS.map((h) => h.replace(/\./g, '\\.')).join('|')})$)`,
+  'g'
+);
+
+function stripPortalUrlScheme(body) {
+  return String(body).replace(PORTAL_SCHEME_RE, '');
+}
+
 function auditSmsTemplateIssue(templateKey, eventType, reason, details = {}) {
   auditNotificationTemplateIssue({
     channel: 'sms',
@@ -405,7 +428,14 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
       });
       return null;
     }
-    return body;
+    // Whitespace tidy-up. Optional clause variables (reschedule_line,
+    // track_clause, reentry_line, card_hold_policy_line...) carry their own
+    // trailing "\n\n" so they read correctly when copy follows them. When
+    // such a clause is last — or resolves to '' between two blank lines —
+    // that leaves the message ending in blank lines or containing a gap.
+    // Twilio counts every one of those toward the segment budget, so this is
+    // billable whitespace as well as sloppy output.
+    return stripPortalUrlScheme(body).replace(/\n{3,}/g, '\n\n').trim();
   } catch (err) {
     auditSmsTemplateIssue(templateKey, 'render_error', err.message || 'template render failed', context);
     return null;

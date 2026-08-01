@@ -677,7 +677,8 @@ ${lastService ? `Last service: ${lastService.service_type} on ${lastService.serv
 ${nextService ? `Next service: ${nextService.service_type} on ${nextService.scheduled_date}` : ''}
 ${input.context ? `Additional context: ${input.context}` : ''}
 
-Keep it friendly, concise, and action-oriented. Sign as "— Waves Pest Control" only if there's room.
+Keep it friendly, concise, and action-oriented. Sign as "- Waves Pest Control" only if there's room.
+Plain keyboard punctuation only: straight quotes and hyphens, never curly quotes, em dashes, or the ellipsis character (they force UCS-2 encoding and multiply SMS segments).
 Return ONLY the SMS text, nothing else.`
     }],
   });

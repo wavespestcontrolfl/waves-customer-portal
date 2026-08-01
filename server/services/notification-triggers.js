@@ -318,39 +318,6 @@ const TRIGGER_REGISTRY = {
       link: p.invoiceId ? `/admin/invoices?invoice=${p.invoiceId}` : '/admin/revenue',
     }),
   },
-  appointment_cancelled: {
-    label: 'Appointment cancelled',
-    category: 'schedule',
-    priority: 'high',
-    group: 'Field Operations',
-    build: (p) => ({
-      title: 'Appointment cancelled',
-      body: `${p.customerName || 'Customer'} — ${p.scheduledDate || ''}${p.cancelledBy ? ' (by ' + p.cancelledBy + ')' : ''}`,
-      link: '/admin/schedule',
-    }),
-  },
-  review_received: {
-    label: 'New review (4–5 star)',
-    category: 'review',
-    priority: 'normal',
-    group: 'Reviews',
-    build: (p) => ({
-      title: `New ${p.stars || 5}-star review`,
-      body: `${p.author || 'Anonymous'}: ${(p.text || '').slice(0, 120)}`,
-      link: '/admin/reviews',
-    }),
-  },
-  low_review: {
-    label: 'Low review (1–3 star)',
-    category: 'review',
-    priority: 'urgent',
-    group: 'Reviews',
-    build: (p) => ({
-      title: `${p.stars || 1}-star review — needs response`,
-      body: `${p.author || 'Anonymous'}: ${(p.text || '').slice(0, 120)}`,
-      link: '/admin/reviews',
-    }),
-  },
   job_complete: {
     label: 'Tech marked job complete',
     category: 'service',
@@ -360,28 +327,6 @@ const TRIGGER_REGISTRY = {
       title: 'Job complete',
       body: `${p.techName || 'Tech'} finished ${p.serviceName || 'service'} at ${p.customerName || 'customer'}`,
       link: p.serviceId ? `/admin/schedule?service=${p.serviceId}` : '/admin/schedule',
-    }),
-  },
-  low_inventory: {
-    label: 'Low inventory alert',
-    category: 'system',
-    priority: 'high',
-    group: 'Inventory',
-    build: (p) => ({
-      title: 'Low inventory',
-      body: `${p.productName || 'Product'} — ${p.remaining || 0} ${p.unit || 'left'}`,
-      link: '/admin/inventory',
-    }),
-  },
-  churn_risk: {
-    label: 'Customer churn risk detected',
-    category: 'churn_risk',
-    priority: 'high',
-    group: 'Customer Success',
-    build: (p) => ({
-      title: 'Churn risk detected',
-      body: `${p.customerName || 'Customer'} — ${p.reason || 'risk score elevated'}`,
-      link: p.customerId ? `/admin/customers?customerId=${p.customerId}` : '/admin/customers?view=health',
     }),
   },
   estimate_expired: {
@@ -680,15 +625,17 @@ async function triggerNotification(triggerKey, payload = {}) {
         // Write a single bell entry for "admin" recipients (existing model is shared)
         try {
           // NotificationService.create catches insert errors and returns null
-          // (deliberate suppression returns a truthy sentinel) — bellWritten
-          // must reflect the actual outcome, not that the call returned.
+          // (deliberate suppression — internal test customer or the admin
+          // bell policy — returns a truthy sentinel with suppressed: true) —
+          // bellWritten must reflect the actual outcome, not that the call
+          // returned.
           const created = await NotificationService.notifyAdmin(
             trigger.category,
             built.title,
             built.body,
             { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload } }
           );
-          if (created) bellWritten = true;
+          if (created && !created.suppressed) bellWritten = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
         }

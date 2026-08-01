@@ -1388,9 +1388,17 @@ function EstimateToolView() {
       return;
     }
     if (key === "__custom__") {
+      // Mirrors EstimateToolViewV2: "Custom…" is a sentinel with no catalog
+      // row to source a type from, and leaving the type at its "NONE" default
+      // silently dropped the operator's amount. Seed PERCENT, preserving a
+      // type already chosen.
       setForm((f) => ({
         ...f,
         manualDiscountPreset: key,
+        manualDiscountType:
+          f.manualDiscountType && f.manualDiscountType !== "NONE"
+            ? f.manualDiscountType
+            : "PERCENT",
         manualDiscountEligibilityConfirmed: false,
         manualDiscountEligibilityOverrideReason: "",
       }));
@@ -1870,6 +1878,13 @@ function EstimateToolView() {
         const selectedManualPreset = discountPresets.find(
           (x) => x.discount_key === form.manualDiscountPreset,
         );
+        // An amount with no type is the silent-drop case (mirrors V2).
+        if (manualDiscountType === "NONE" && manualDiscountValue > 0) {
+          alert(
+            "Pick a discount type (Percent % or Dollar $) — a discount amount with no type is not applied.",
+          );
+          return null;
+        }
         if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
           alert("Manual discount amount must be greater than zero.");
           return null;
@@ -2196,6 +2211,13 @@ function EstimateToolView() {
     const selectedManualPreset = discountPresets.find(
       (x) => x.discount_key === form.manualDiscountPreset,
     );
+    // An amount with no type is the silent-drop case (mirrors V2).
+    if (manualDiscountType === "NONE" && manualDiscountValue > 0) {
+      alert(
+        "Pick a discount type (Percent % or Dollar $) — a discount amount with no type is not applied.",
+      );
+      return null;
+    }
     if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
       alert("Manual discount amount must be greater than zero.");
       return;

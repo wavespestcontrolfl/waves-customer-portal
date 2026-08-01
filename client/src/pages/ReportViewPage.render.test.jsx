@@ -274,7 +274,7 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
     expect(screen.getAllByText(/Follow-up complete/)).toHaveLength(1); // the h2 only
   });
 
-  it('without Pest V2 the narrative renders in Visit Summary and the ratified body stays on the card', async () => {
+  it('without Pest V2 the bed-bug narrative owns the single summary surface (owner 2026-07-31)', async () => {
     const NARRATIVE = 'Bed bug activity was very low today, and we inspected the mattress encasements and monitors installed at your last visit.';
     const TEMPLATE = 'We completed the scheduled follow-up inspection today.';
     renderReport(typedPestPayload({
@@ -282,6 +282,22 @@ describe('ReportViewPage — typed pest reports compose Pest V2 WITH the Activit
       summary: NARRATIVE,
       summarySource: 'typed_narrative',
       typedReport: { type: 'bed_bug', todaysResult: { headline: 'Follow-up complete.', body: TEMPLATE } },
+    }));
+    // The narrative rides the Today's Result card as the report's ONE summary —
+    // the legacy Visit Summary card and the ratified template body both yield.
+    await screen.findByText(NARRATIVE);
+    expect(screen.queryByText('Visit Summary')).toBeNull();
+    expect(screen.queryByText(TEMPLATE)).toBeNull();
+  });
+
+  it('without Pest V2 a non-bed-bug typed narrative still renders in Visit Summary (bed-bug-only override)', async () => {
+    const NARRATIVE = 'Roach activity was very low today, and we serviced the monitors placed at your last visit.';
+    const TEMPLATE = 'We completed the scheduled follow-up inspection today.';
+    renderReport(typedPestPayload({
+      pestReportV2: null,
+      summary: NARRATIVE,
+      summarySource: 'typed_narrative',
+      typedReport: { type: 'cockroach', todaysResult: { headline: 'Follow-up complete.', body: TEMPLATE } },
     }));
     await screen.findByText('Visit Summary');
     await screen.findByText(NARRATIVE);

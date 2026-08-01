@@ -394,7 +394,7 @@ function MonthDayCell({ day, di, onDateClick, onViewCustomer }) {
   );
 }
 
-export function MonthViewV2({ date, onDateClick, onViewCustomer }) {
+export function MonthViewV2({ date, onDateClick, onViewCustomer, refreshKey = 0 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -427,7 +427,9 @@ export function MonthViewV2({ date, onDateClick, onViewCustomer }) {
   useEffect(() => {
     setLoading(true);
     reload();
-  }, [reload]);
+    // refreshKey: host page bumps it after out-of-band reschedules (e.g. the
+    // sidebar's Reschedule modal) so the month payload doesn't go stale.
+  }, [reload, refreshKey]);
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 

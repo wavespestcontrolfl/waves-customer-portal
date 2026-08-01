@@ -583,31 +583,39 @@ async function rescueSpamFolder(now = new Date()) {
           // known-looking sender (the message stays in Spam) — a failed
           // insert PROPAGATES to the per-message failure count so the
           // watermark holds and a later sweep retries the alert.
-          await db('notifications').insert({
-            recipient_type: 'admin',
-            category: 'email_rescue_review',
-            title: 'Spam-foldered mail claims a known sender (unverified)',
-            body: `A message claiming to be ${full.from_name || fromAddress} ("${(full.subject || '(no subject)').slice(0, 60)}") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.`,
-            icon: '⚠️',
-            link: '/admin/email',
-            metadata: JSON.stringify({ gmail_message_id: m.id }),
-            created_at: new Date(),
-          });
+          // Through NotificationService so the admin bell policy chokepoint
+          // covers this bell; notifyAdmin swallows insert errors into null,
+          // so rethrow to keep that propagation (intentional policy
+          // suppression is a truthy sentinel and reads as delivered).
+          const reviewBell = await require('../notification-service').notifyAdmin(
+            'email_rescue_review',
+            'Spam-foldered mail claims a known sender (unverified)',
+            `A message claiming to be ${full.from_name || fromAddress} ("${(full.subject || '(no subject)').slice(0, 60)}") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.`,
+            {
+              icon: '⚠️',
+              link: '/admin/email',
+              metadata: { gmail_message_id: m.id },
+            },
+          );
+          if (!reviewBell) throw new Error('email_rescue_review notification insert failed');
           continue;
         }
         await gmailClient.modifyLabels(m.id, ['INBOX', 'IMPORTANT'], ['SPAM']);
         counts.rescued += 1;
         if (verdict.kind === 'customer') {
           counts.customers += 1;
-          await db('notifications').insert({
-            recipient_type: 'admin',
-            category: 'email_rescue',
-            title: 'Customer email rescued from Spam',
-            body: `${full.from_name || fromAddress}: "${(full.subject || '(no subject)').slice(0, 80)}" was in Gmail Spam — moved back to the inbox and marked important.`,
-            icon: '\u{1F6DF}',
-            link: '/admin/email',
-            created_at: new Date(),
-          }).catch(() => {});
+          // Through NotificationService so the admin bell policy chokepoint
+          // covers this bell (was a raw insert; failures stay non-critical —
+          // notifyAdmin never throws).
+          await require('../notification-service').notifyAdmin(
+            'email_rescue',
+            'Customer email rescued from Spam',
+            `${full.from_name || fromAddress}: "${(full.subject || '(no subject)').slice(0, 80)}" was in Gmail Spam — moved back to the inbox and marked important.`,
+            {
+              icon: '\u{1F6DF}',
+              link: '/admin/email',
+            },
+          );
         }
         logger.info(`[inbox-hygiene] rescued ${verdict.kind} email from spam (${m.id})`);
       } catch (e) {
