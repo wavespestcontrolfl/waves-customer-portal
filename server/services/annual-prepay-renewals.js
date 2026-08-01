@@ -318,6 +318,14 @@ function splitCoverageAmount(totalDollars, visitCount) {
 // `firstVisitDate` (an operator-promised first service date)
 // wins when present; either way the anchor moves forward to `notBefore`
 // (today) as far as the term window allows.
+// The date the customer is actually expecting the first visit: the operator's
+// promise when one was captured, otherwise the term start (legacy behavior).
+// Payment reminders and the coverage anchor must agree on this or the unpaid
+// reminder names a date the schedule will never use.
+function effectiveFirstVisitDate(term) {
+  return dateOnly(term?.first_visit_date) || dateOnly(term?.term_start);
+}
+
 function coverageSeriesAnchor(termStart, visitCount, cadence, termEnd, { firstVisitDate = null, notBefore = null } = {}) {
   const normalizedStart = dateOnly(termStart);
   if (!normalizedStart) return null;
@@ -327,7 +335,12 @@ function coverageSeriesAnchor(termStart, visitCount, cadence, termEnd, { firstVi
   // whose promise no longer fits simply truncates at term_end below, the same
   // way a short custom term already renders fewer visits.)
   const promised = dateOnly(firstVisitDate);
-  if (promised && promised > normalizedStart) return promised;
+  const promiseFloor = dateOnly(notBefore);
+  // A promise still in the future is honored exactly. A promise that has
+  // ALREADY PASSED by the time payment lands cannot be kept — seeding it would
+  // recreate the past-dated visit this function exists to prevent — so it falls
+  // through to the forward shift below (the seeder logs the missed promise).
+  if (promised && promised > normalizedStart && (!promiseFloor || promised >= promiseFloor)) return promised;
 
   let anchor = promised || normalizedStart;
   const floor = dateOnly(notBefore);
@@ -515,6 +528,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   if (firstTargetDate && firstTargetDate < today) {
     logger.warn(`[annual-prepay] term ${term.id} seeded coverage starting ${firstTargetDate}, before today (${today}) — term window too short to absorb the payment lag; visits need rescheduling`);
   }
+  // The operator promised a date that had already passed by the time payment
+  // landed. The series moved forward instead of seeding a visit that can't be
+  // serviced, but somebody has to tell the customer the new date.
+  const promisedFirstVisit = dateOnly(term?.first_visit_date);
+  if (promisedFirstVisit && firstTargetDate && promisedFirstVisit < today && firstTargetDate !== promisedFirstVisit) {
+    logger.warn(`[annual-prepay] term ${term.id} promised first visit ${promisedFirstVisit} had already passed at payment (${today}) — coverage starts ${firstTargetDate} instead; customer needs the new date`);
+  }
 
   const buildInsert = (scheduledDate, windowStart) => {
     const insertData = {
@@ -555,18 +575,26 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
     try {
-      const { acquireOccupancyLock } = require('./scheduling/occupancy');
-      await acquireOccupancyLock(trx, scheduledDate);
-      const conflict = await findVisitWindowConflict(trx, {
-        scheduledDate,
-        windowStart,
-        durationMinutes: baseDuration,
-        adoptableFor: { customerId: term.customer_id, coverageServiceType },
+      // SAVEPOINT: Postgres aborts the whole transaction on any statement
+      // error, so catching a failed lock/conflict query on `trx` directly would
+      // leave it poisoned and take the surrounding payment activation with it.
+      // A nested transaction rolls back just this probe. The advisory lock is
+      // held by the OUTER transaction once the savepoint commits, so it still
+      // covers the insert below.
+      await trx.transaction(async (sp) => {
+        const { acquireOccupancyLock } = require('./scheduling/occupancy');
+        await acquireOccupancyLock(sp, scheduledDate);
+        const conflict = await findVisitWindowConflict(sp, {
+          scheduledDate,
+          windowStart,
+          durationMinutes: baseDuration,
+          adoptableFor: { customerId: term.customer_id, coverageServiceType },
+        });
+        if (conflict) {
+          logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
+          windowStart = null;
+        }
       });
-      if (conflict) {
-        logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
-        windowStart = null;
-      }
     } catch (err) {
       // Fail CLOSED: an unverifiable window must not become an overlapping
       // timed promise. The visit still seeds on the right date, windowless.
@@ -3023,7 +3051,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       {
         first_name: customer.first_name || 'there',
         amount_text: amountText,
-        first_visit_date: formatDateLabel(claimedTerm.term_start),
+        first_visit_date: formatDateLabel(effectiveFirstVisitDate(claimedTerm)),
         pay_link: payUrl,
       },
       { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
@@ -3112,7 +3140,12 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
       .where(function paymentClaimAvailable() {
         this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
       })
-      .where('term_start', target)
+      .where(function firstVisitOn() {
+        // Match the date the customer was actually promised. COALESCE keeps
+        // legacy terms (no first_visit_date) firing off term_start.
+        if (cols.first_visit_date) this.whereRaw('COALESCE(first_visit_date, term_start) = ?', [target]);
+        else this.where('term_start', target);
+      })
       .select('*');
 
     for (const term of terms) {
@@ -3235,6 +3268,7 @@ module.exports = {
     splitCoverageAmount,
     coverageScheduleDates,
     coverageSeriesAnchor,
+    effectiveFirstVisitDate,
     normalizeWindowStart,
     addMinutesHHMM,
     normalizeCoverageCadence,

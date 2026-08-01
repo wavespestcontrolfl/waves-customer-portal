@@ -861,6 +861,27 @@ describe('annual prepay renewal helpers', () => {
     )).toEqual(['2026-08-01', '2026-11-01', '2027-02-01', '2027-05-01']);
   });
 
+  test('a promised first visit that has already passed does NOT seed a past visit', () => {
+    // The promise is honored only while it is still keepable. Payment landing
+    // after the promised date must not recreate the past-dated visit this
+    // whole change exists to prevent.
+    expect(_private.coverageScheduleDates(
+      '2026-07-30',
+      4,
+      'quarterly',
+      '2027-07-30',
+      { firstVisitDate: '2026-08-01', notBefore: '2026-08-05' },
+    )).toEqual(['2026-08-05', '2026-11-05', '2027-02-05', '2027-05-05']);
+  });
+
+  test('the effective first visit date prefers the promise, falling back to term start', () => {
+    expect(_private.effectiveFirstVisitDate({ term_start: '2026-07-30', first_visit_date: '2026-08-01' }))
+      .toBe('2026-08-01');
+    expect(_private.effectiveFirstVisitDate({ term_start: '2026-07-30', first_visit_date: null }))
+      .toBe('2026-07-30');
+    expect(_private.effectiveFirstVisitDate({ term_start: '2026-07-30' })).toBe('2026-07-30');
+  });
+
   test('shifts as far forward as the term window allows, never dropping a paid visit', () => {
     // Paid 5 months late: shifting all the way to today would push visit 4 past
     // term_end, and out-of-window visits are never linked or stamped prepaid —
