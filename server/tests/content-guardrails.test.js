@@ -2361,6 +2361,12 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     // hub, so keeping the spoke host would publish a dead link.
     const spoke = repairInventedInternalRoutes('[services](https://sarasotafllawncare.com/pest-control/)');
     expect(spoke.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
+    // Schemes are case-insensitive, like the gate's own URL matcher.
+    for (const scheme of ['HTTPS', 'HtTpS']) {
+      const mixed = repairInventedInternalRoutes(`[services](${scheme}://www.wavespestcontrol.com/pest-control/)`);
+      expect(mixed.repairs[0]).toMatchObject({ from: '/pest-control/', action: 'aliased' });
+      expect(mixed.body).toContain('/pest-control-services/');
+    }
   });
 
   test('every alias target is a real allowlisted route (module-load contract)', () => {

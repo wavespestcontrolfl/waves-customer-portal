@@ -1468,7 +1468,11 @@ const INVENTED_ROUTE_ALIASES = Object.freeze({
 // draft, which is the exact outcome this repair exists to prevent (Codex r3).
 // Each alternation branch consumes ≥1 char and they are disjoint on their
 // first character, so there is no backtracking ambiguity.
-const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\])*)\]\(\s*(<?)\s*((?:\/(?!\/)|https?:\/\/)[^)\s>]*)\s*(>?)\s*("[^"]*"|'[^']*'|\([^)]*\))?\s*\)/g;
+// `i` because URL schemes are case-insensitive and HUB_URL_CANDIDATE_RE
+// already matches that way — without it "HTTPS://…" skipped the repair and
+// was then parked by evaluate(), the divergence this repair exists to close
+// (pre-push Codex r3).
+const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\])*)\]\(\s*(<?)\s*((?:\/(?!\/)|https?:\/\/)[^)\s>]*)\s*(>?)\s*("[^"]*"|'[^']*'|\([^)]*\))?\s*\)/gi;
 
 /**
  * repairInventedInternalRoutes(body, allowedInternalLinks, options)
