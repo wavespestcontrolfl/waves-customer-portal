@@ -562,6 +562,22 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY at :50 — LLM dispatch recorder heartbeat. Writes one row through
+  // the same insert path real recording uses, so the digest can tell a
+  // genuinely quiet day (heartbeats present, no dispatches) from a day the
+  // recorder was dead (no heartbeats at all). A probe at digest time cannot:
+  // a write path broken all day but recovered overnight would pass it while
+  // the whole lost day reported clean. No runExclusive — a duplicate
+  // heartbeat on deploy overlap is harmless, and skipping one is not.
+  // No-ops while GATE_LLM_DISPATCH_METRICS is unset.
+  cron.schedule('50 * * * *', async () => {
+    try {
+      await require('./llm-dispatch-metrics').recordHeartbeat();
+    } catch (err) {
+      logger.error(`[llm-dispatch-metrics] heartbeat failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Month-end capture: fire on days 28–31 at 11:50pm ET, but only on the ACTUAL
   // final day (tomorrow ET is the 1st). Records the current (ending) month so it
   // freezes near its true end, capturing same-final-day conversions/churn/rate

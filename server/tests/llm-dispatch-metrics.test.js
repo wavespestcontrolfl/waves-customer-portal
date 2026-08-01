@@ -29,14 +29,17 @@ function load() {
 
 // Thenable knex-chain stub: every builder method returns the chain, awaiting
 // it resolves `rows`, and .del() resolves `delCount` for the prune call.
-function makeChain(rows, delCount = 0, { insertError = null } = {}) {
+function makeChain(rows, delCount = 0, { insertError = null, first = null, selectError = null } = {}) {
   const chain = {};
   for (const m of ['where', 'andWhere', 'whereNot', 'groupBy', 'select', 'count', 'sum']) {
     chain[m] = jest.fn(() => chain);
   }
   chain.del = jest.fn(() => Promise.resolve(delCount));
   chain.insert = jest.fn(() => (insertError ? Promise.reject(new Error(insertError)) : Promise.resolve([1])));
-  chain.then = (onResolve, onReject) => Promise.resolve(rows).then(onResolve, onReject);
+  chain.first = jest.fn(() => (selectError ? Promise.reject(new Error(selectError)) : Promise.resolve(first)));
+  chain.then = (onResolve, onReject) => (selectError
+    ? Promise.reject(new Error(selectError)).then(onResolve, onReject)
+    : Promise.resolve(rows).then(onResolve, onReject));
   return chain;
 }
 
@@ -295,24 +298,44 @@ describe('llm-dispatch-metrics', () => {
     });
   });
 
+  describe('recordHeartbeat', () => {
+    it('is a no-op while the gate is off', async () => {
+      const { recordHeartbeat } = load();
+      await expect(recordHeartbeat()).resolves.toEqual({ skipped: 'gate_off' });
+      expect(mockDb).not.toHaveBeenCalled();
+    });
+
+    it('writes one heartbeat row through the real insert path', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const chain = makeChain([]);
+      mockDb.mockReturnValueOnce(chain);
+      const { recordHeartbeat, HEARTBEAT_POLICY } = load();
+      await expect(recordHeartbeat()).resolves.toEqual({ ok: true });
+      expect(chain.insert).toHaveBeenCalledWith(expect.objectContaining({ policy: HEARTBEAT_POLICY, ok: true }));
+    });
+
+    it('throws on failure so the cron logs it (not the hot path)', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockDb.mockReturnValueOnce(makeChain([], 0, { insertError: 'disk full' }));
+      const { recordHeartbeat } = load();
+      await expect(recordHeartbeat()).rejects.toThrow(/disk full/);
+    });
+  });
+
   describe('runLlmDispatchDigest', () => {
-    // db() is called three times per run: the retention prune FIRST (it must
-    // run even when the gate is off), then yesterday stats, then prior-week
-    // stats.
-    // Call order in runLlmDispatchDigest: retention prune, yesterday stats,
-    // prior-week stats, then the recorder probe (heartbeat insert + cleanup
-    // delete). `probeInsertError` simulates a dead write path.
-    function armDb({ yesterdayRows, priorRows, delCount = 3, probeInsertError = null }) {
+    // db() call order in runLlmDispatchDigest: retention prune FIRST (it runs
+    // even when the gate is off), then yesterday stats, prior-week stats, and
+    // the heartbeat count for the day being summarized. `heartbeats` defaults
+    // to a healthy day; 0 means the recorder was dead during that day.
+    function armDb({ yesterdayRows, priorRows, delCount = 3, heartbeats = 24, pruneError = null }) {
       const prune = makeChain([], delCount);
-      const probeInsert = makeChain([], 0, { insertError: probeInsertError });
-      const probeCleanup = makeChain([], 1);
+      if (pruneError) prune.del = jest.fn(() => Promise.reject(new Error(pruneError)));
       mockDb
         .mockReturnValueOnce(prune)
         .mockReturnValueOnce(makeChain(yesterdayRows))
         .mockReturnValueOnce(makeChain(priorRows))
-        .mockReturnValueOnce(probeInsert)
-        .mockReturnValueOnce(probeCleanup);
-      return { prune, probeInsert, probeCleanup };
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: String(heartbeats) } }));
+      return { prune };
     }
 
     it('skips stats and email while the gate is off, but STILL prunes retention', async () => {
@@ -338,43 +361,48 @@ describe('llm-dispatch-metrics', () => {
       expect(prune.del).toHaveBeenCalled();
     });
 
-    it('emails not_recording when the write path is dead, even with zero rows', async () => {
-      // End-to-end version of the gap this lane closes: no rows AND a broken
-      // recorder must produce an email, where before it produced silence.
+    it('emails not_recording when the day had NO heartbeats, even with zero rows', async () => {
+      // The gap this lane closes: a day the recorder was dead must produce an
+      // email, where before it produced silence.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       mockEmailSend.mockResolvedValue({ ok: true });
-      armDb({ yesterdayRows: [], priorRows: [], probeInsertError: 'relation does not exist' });
+      armDb({ yesterdayRows: [], priorRows: [], heartbeats: 0 });
       const { runLlmDispatchDigest } = load();
       const out = await runLlmDispatchDigest();
       expect(out.emailed).toBe(true);
       expect(out.exceptions[0].kind).toBe('not_recording');
-      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/relation does not exist/);
+      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/no heartbeat rows were recorded/);
     });
 
-    it('does NOT report a recorder failure when only the heartbeat cleanup blips', async () => {
-      // The insert succeeded, so the recorder demonstrably works. Failing the
-      // probe on a cleanup error would email a flatly false outage.
+    it('an overnight recovery cannot hide a lost day', async () => {
+      // Recorder broken all day, healthy again by 06:25. A digest-time probe
+      // would pass and report the lost day clean; heartbeats from the day
+      // itself are what make this detectable.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
-      const prune = makeChain([], 1);
-      const probeInsert = makeChain([], 0);
-      const probeCleanup = makeChain([], 0);
-      probeCleanup.del = jest.fn(() => Promise.reject(new Error('deadlock detected')));
-      mockDb
-        .mockReturnValueOnce(prune)
-        .mockReturnValueOnce(makeChain([]))
-        .mockReturnValueOnce(makeChain([]))
-        .mockReturnValueOnce(probeInsert)
-        .mockReturnValueOnce(probeCleanup);
+      mockEmailSend.mockResolvedValue({ ok: true });
+      armDb({ yesterdayRows: [], priorRows: [{ policy: 'report', total: 300 }], heartbeats: 0 });
       const { runLlmDispatchDigest } = load();
       const out = await runLlmDispatchDigest();
-      expect(out).toMatchObject({ emailed: false });
-      expect(out.exceptions).toHaveLength(0);
-      expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(out.emailed).toBe(true);
+      expect(out.exceptions.map((e) => e.kind)).toContain('not_recording');
     });
 
-    it('stays silent on a quiet day when the probe succeeds (no rows, nothing wrong)', async () => {
+    it('EMAILS when the table itself is unreadable, then fails the job', async () => {
+      // The worst case must not be silent: if the retention DELETE throws
+      // (missing table / dead DB) the alert has to go out over SMTP, which
+      // does not depend on the database being reported on.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
-      armDb({ yesterdayRows: [], priorRows: [] });
+      mockEmailSend.mockResolvedValue({ ok: true });
+      armDb({ yesterdayRows: [], priorRows: [], pruneError: 'relation "llm_dispatch_log" does not exist' });
+      const { runLlmDispatchDigest } = load();
+      await expect(runLlmDispatchDigest()).rejects.toThrow(/does not exist/);
+      expect(mockEmailSend).toHaveBeenCalledTimes(1);
+      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/could not read llm_dispatch_log/);
+    });
+
+    it('stays silent on a quiet day when heartbeats prove the recorder was alive', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      armDb({ yesterdayRows: [], priorRows: [], heartbeats: 24 });
       const { runLlmDispatchDigest } = load();
       const out = await runLlmDispatchDigest();
       expect(out).toMatchObject({ emailed: false });

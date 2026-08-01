@@ -11,14 +11,21 @@
  * llm_dispatch_log, and a daily cron emails ONLY exceptions to the company
  * inbox. Green days send nothing (hands-off + exception-based).
  *
- * Silence is load-bearing here, so each digest run PROVES the recorder works
- * by writing a heartbeat row through the same insert path and deleting it. A
- * failed write is reported as an exception; without it, a dead write path
- * (insert failures are swallowed at debug level by design) would look exactly
- * like a healthy day. Note the probe is required precisely BECAUSE volume
- * cannot stand in for it: the SMS canary uses bare `dispatch` (no row) and
- * every other instrumented job is candidate-driven, so a quiet ET day
- * legitimately records nothing.
+ * Silence is load-bearing here, so recorder health is proven rather than
+ * assumed. An hourly cron writes a heartbeat row through the same insert path
+ * real recording uses; the digest then asks whether heartbeats exist for the
+ * day it is summarizing. Three things make that necessary:
+ *   - insert failures are swallowed at debug level by design (metrics must
+ *     never cascade into the LLM call they observe), so a dead write path is
+ *     otherwise invisible;
+ *   - traffic volume cannot stand in for health — the SMS canary uses bare
+ *     `dispatch` (writes no row) and every other instrumented job is
+ *     candidate-driven, so a quiet ET day legitimately records nothing;
+ *   - a probe at digest time would only prove the recorder works at 6:25am,
+ *     so a write path broken all day but recovered overnight would pass while
+ *     the entire lost day reported clean.
+ * And because a dead database takes out the digest's own reads, DB failures
+ * are caught and emailed over SMTP rather than throwing silently.
  *
  * Dark until GATE_LLM_DISPATCH_METRICS=true. Kill switch: unset — recording
  * and the digest both no-op instantly; existing rows just age out.
@@ -149,18 +156,50 @@ function recordDispatch(policy, result) {
  * Resolves on success; rejects with the underlying error when the write path
  * is broken — which is the only sound basis for a not_recording exception.
  */
-async function probeRecorder() {
-  // The INSERT is the whole test. If it resolves, the recorder can write.
+/**
+ * Write one heartbeat row through the SAME insert path recordDispatch uses.
+ * Called hourly by the scheduler while the gate is on, and deliberately NOT
+ * deleted: the rows are the durable evidence that the recorder was alive
+ * DURING a given ET day. A digest-time probe could only prove the recorder
+ * works at 6:25am — a write path that was broken all day but recovered
+ * overnight would pass it, and the whole lost day would report as a healthy
+ * quiet day. Heartbeats are excluded from policy stats and pruned by
+ * retention like any other row.
+ *
+ * Throws on failure so the cron logs it (this is not the hot path).
+ */
+async function recordHeartbeat() {
+  if (!isEnabled()) return { skipped: 'gate_off' };
   await insertRow(buildRow({ name: HEARTBEAT_POLICY }, { ok: true }));
-  // Cleanup is BEST-EFFORT and must never fail the probe: the write already
-  // succeeded, so reporting "the recorder cannot write" because a delete
-  // blipped would be flatly false. Heartbeat rows are excluded from stats and
-  // pruned by retention, so a survivor is harmless.
-  try {
-    await require('../models/db')('llm_dispatch_log').where({ policy: HEARTBEAT_POLICY }).del();
-  } catch (err) {
-    logger.warn(`[llm-dispatch-metrics] heartbeat cleanup failed (harmless, row is excluded from stats and will be pruned): ${err.message}`);
-  }
+  return { ok: true };
+}
+
+/**
+ * Render and send the exception email. Shared by the normal path and the
+ * DB-failure path, which must be able to alert over SMTP precisely when the
+ * database it reports on is unreadable.
+ */
+function emailExceptions(day, exceptions) {
+  const items = exceptions
+    .map((e) => `<li style="margin:0 0 10px 0;"><strong>${e.policy}</strong> — ${e.detail}</li>`)
+    .join('');
+  return require('./email').send({
+    to: DIGEST_TO,
+    subject: `LLM dispatch exceptions — ${day}`,
+    heading: 'AI dispatch exceptions',
+    body: `${exceptions.length === 1 ? 'One exception' : `${exceptions.length} exceptions`} on ${day}:<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is never reported — this email only sends when something degraded, or when nothing was recorded at all.`,
+  });
+}
+
+/** How many heartbeats landed in a window — the recorder's proof-of-life. */
+async function countHeartbeats(db, start, end) {
+  const row = await db('llm_dispatch_log')
+    .where('created_at', '>=', start)
+    .andWhere('created_at', '<', end)
+    .andWhere('policy', HEARTBEAT_POLICY)
+    .count({ n: '*' })
+    .first();
+  return Number(row?.n || 0);
 }
 
 /** [startOfDay, startOfNextDay) as real Dates for the ET day N days ago. */
@@ -256,46 +295,59 @@ async function loadStats(db, start, end) {
 async function runLlmDispatchDigest() {
   const db = require('../models/db');
 
-  // Retention pruning runs regardless of the gate: turning the kill switch
-  // off must stop recording and emailing, not leave accumulated rows parked
-  // forever past the promised 30-day window (codex r2 P2). On an empty
-  // table this is a cheap indexed no-op DELETE.
-  const cutoff = etDayWindow(RETENTION_DAYS).start;
-  const pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
-
-  if (!isEnabled()) return { skipped: 'gate_off', pruned };
   const { etDateString, addETDays } = require('../utils/datetime-et');
+  const day = etDateString(addETDays(new Date(), -1));
 
-  const yesterday = etDayWindow(1);
-  const weekBefore = etDayWindow(8);
-  const [yesterdayStats, priorWeekStats] = await Promise.all([
-    loadStats(db, yesterday.start, yesterday.end),
-    loadStats(db, weekBefore.start, yesterday.start),
-  ]);
-
-  // Prove the write path works rather than inferring it from traffic volume.
-  let probeError = null;
+  // EVERY table read/write below can throw — a missing table or a dead DB
+  // takes out the retention DELETE and the stats SELECTs before any analysis
+  // runs. The alert must not depend on the thing it is alerting about, so a
+  // DB failure is caught here and emailed over SMTP, then rethrown so
+  // cron-lock job health records the failed run too. Without this, the single
+  // worst case (table gone) produced silence — the exact failure this whole
+  // lane exists to eliminate.
+  let pruned = 0;
+  let yesterdayStats;
+  let priorWeekStats;
+  let heartbeats = 0;
   try {
-    await probeRecorder();
+    // Retention pruning runs regardless of the gate: turning the kill switch
+    // off must stop recording and emailing, not leave accumulated rows parked
+    // forever past the promised 30-day window (codex r2 P2). On an empty
+    // table this is a cheap indexed no-op DELETE.
+    const cutoff = etDayWindow(RETENTION_DAYS).start;
+    pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
+
+    if (!isEnabled()) return { skipped: 'gate_off', pruned };
+
+    const yesterday = etDayWindow(1);
+    const weekBefore = etDayWindow(8);
+    [yesterdayStats, priorWeekStats, heartbeats] = await Promise.all([
+      loadStats(db, yesterday.start, yesterday.end),
+      loadStats(db, weekBefore.start, yesterday.start),
+      countHeartbeats(db, yesterday.start, yesterday.end),
+    ]);
   } catch (err) {
-    probeError = err.message || String(err);
-    logger.error(`[llm-dispatch-metrics] recorder probe FAILED: ${probeError}`);
+    const reason = err.message || String(err);
+    logger.error(`[llm-dispatch-metrics] digest could not read llm_dispatch_log: ${reason}`);
+    await emailExceptions(day, [{
+      policy: '(recorder)',
+      kind: 'not_recording',
+      detail: `the digest could not read llm_dispatch_log (${reason}). Recording status for ${day} is UNKNOWN — treat this as an outage until it clears, not as a quiet day.`,
+    }]).catch((mailErr) => logger.error(`[llm-dispatch-metrics] could not email the DB failure: ${mailErr.message}`));
+    throw err;
   }
 
-  const exceptions = detectExceptions(yesterdayStats, priorWeekStats, probeError);
+  // Recorder health is judged from the DAY BEING SUMMARIZED, via heartbeats
+  // written hourly during it — not from a probe at digest time, which an
+  // overnight recovery would pass while the lost day reported clean.
+  const recorderError = heartbeats === 0
+    ? `no heartbeat rows were recorded during ${day} (expected roughly one per hour), so the recorder was not writing that day`
+    : null;
+
+  const exceptions = detectExceptions(yesterdayStats, priorWeekStats, recorderError);
   let sendError = null;
   if (exceptions.length) {
-    const day = etDateString(addETDays(new Date(), -1));
-    const items = exceptions
-      .map((e) => `<li style="margin:0 0 10px 0;"><strong>${e.policy}</strong> — ${e.detail}</li>`)
-      .join('');
-    const email = require('./email');
-    const sent = await email.send({
-      to: DIGEST_TO,
-      subject: `LLM dispatch exceptions — ${day}`,
-      heading: 'AI dispatch exceptions',
-      body: `${exceptions.length === 1 ? 'One exception' : `${exceptions.length} exceptions`} on ${day}:<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is never reported — this email only sends when something degraded, or when nothing was recorded at all.`,
-    });
+    const sent = await emailExceptions(day, exceptions);
     if (!sent.ok) sendError = sent.error || 'unknown email error';
   }
 
@@ -314,10 +366,12 @@ async function runLlmDispatchDigest() {
 
 module.exports = {
   recordDispatch,
+  recordHeartbeat,
   runLlmDispatchDigest,
   detectExceptions,
   policyLabel,
   runAsReplay,
+  HEARTBEAT_POLICY,
   FALLBACK_RATE_THRESHOLD,
   FALLBACK_MIN_VOLUME,
   SILENT_MIN_WEEKLY,
