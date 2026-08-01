@@ -585,9 +585,13 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   test('demoted caller_not_authorized survives a block by another gate as failedOpenFlags (round-4 P2)', () => {
-    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'prior_complaint_unresolved']), opts());
+    // The "other gate" was prior_complaint_unresolved until 2026-07-31, when
+    // the owner ruling made it advisory (a returning customer re-booking is
+    // a booking, not a dispute). Swapped for a flag that still hard-blocks
+    // so this keeps testing what it was written to test.
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'hoa_common_area_requires_approval']), opts());
     expect(r.allowed).toBe(false);
-    expect(r.appointmentBlockingFlags).toContain('prior_complaint_unresolved');
+    expect(r.appointmentBlockingFlags).toContain('hoa_common_area_requires_approval');
     expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
