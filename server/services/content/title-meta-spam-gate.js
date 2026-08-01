@@ -258,7 +258,7 @@ function lastSentence(text) {
 //   5. direct price assertion on a service/estimate noun
 //      ("a treatment estimate costs $99") — "damage costs $2,000" stays a
 //      stat because "damage" is not a sales noun (Codex r10)
-const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b|\b(quote|estimate|pricing|price|plan|service|treatment)s?\b[^!?]{0,30}?\b(?:costs?|runs?|is|starts?)\s+(?:about\s+|around\s+|only\s+|just\s+|from\s+|between\s+)?\$\d/i;
+const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b|\b(quote|estimate|pricing|price|deal|offer|discount|plan|service|treatment)s?\b[^!?]{0,40}?\bavailable\s+from\s+(waves|us)\b|\b(quote|estimate|pricing|price|plan|service|treatment)s?\b[^!?]{0,30}?\b(?:costs?|runs?|is|starts?)\s+(?:about\s+|around\s+|only\s+|just\s+|from\s+|between\s+)?\$\d/i;
 // EVERY sentence is scanned for the sales shapes — a pitch followed by an
 // informational closer ("Learn more about saving big with Waves. This guide
 // explains…") is still sales copy (Codex r5). There is deliberately NO bare
@@ -271,7 +271,10 @@ const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|sch
 // sentence is not a pitch unless it's money/deal language ("saving big",
 // "our pricing"). Transactional quote/estimate uses are already caught by
 // TRANSACTIONAL_SENTENCE_RE's verb/urgency/price shapes (Codex r9).
-const CTA_RIDING_SALES_RE = /\b(sav(?:e|ing|ings)|deal|offer|price|pricing|discount|percent)\b|[%$]/i;
+// deal/offer count only as NOUNS (article/possessive before) — "how
+// homeowners deal with ants" and "what plans offer" are ordinary verbs
+// (Codex r12).
+const CTA_RIDING_SALES_RE = /\b(sav(?:e|ing|ings)|price|pricing|discount|percent)\b|\b(?:a|an|the|our|this|these|new|special|great|best)\s+(?:deal|offer)s?\b|[%$]/i;
 function metaHasSalesCopy(text) {
   const sentences = metaSentences(text);
   if (!sentences.length) return false;

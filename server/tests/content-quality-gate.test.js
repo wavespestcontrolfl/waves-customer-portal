@@ -1007,12 +1007,18 @@ describe('meta contract round-3 hardening (Codex findings)', () => {
   const PAGE = { target_page_type: 'page' };
 
   test('soft CTA must END the meta — a mid-meta mention flags the SOFT check only (never the hard contract)', () => {
-    const draft = { meta_description: 'Learn more about chinch bugs. Professional lawn treatment is available from Waves whenever you need a local turf expert in Southwest Florida.' };
+    const draft = { meta_description: 'Learn more about chinch bugs. Damage from these insects shows up first in the sunniest strips of a Southwest Florida lawn each summer season.' };
     expect(checkBlogMetaContract(draft).ok).toBe(true);
     const { checkBlogMetaSoftCta } = require('../services/content/content-quality-gate')._internals;
     const soft = checkBlogMetaSoftCta(draft, BLOG);
     expect(soft.ok).toBe(false);
     expect(soft.reason).toBe('blog_meta_missing_soft_cta');
+  });
+
+  test('a mid-meta brand-availability pitch is sales copy even with an informational closer (r12)', () => {
+    const r = checkBlogMetaContract({ meta_description: 'Learn more about chinch bugs. Professional lawn treatment is available from Waves whenever you need a local turf expert in Southwest Florida.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
   });
 
   test('literal phone in a publishable title fails on every lane', () => {
@@ -1061,6 +1067,17 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
       expect(r.ok).toBe(false);
       expect(r.reason).toBe('blog_meta_sales_copy');
     }
+  });
+
+  test('ordinary verb "deal" in a CTA is NOT sales copy (r12: "how homeowners deal with ants")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about how homeowners deal with ants.` });
+    expect(r.ok).toBe(true);
+  });
+
+  test('brand-backed availability HARD-fails (r12: "plans are available from Waves")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Quarterly pest plans are available from Waves for Southwest Florida homeowners.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
   });
 
   test('ranged direct-price assertions HARD-fail (r11: "estimate runs from $99 to $149")', () => {
