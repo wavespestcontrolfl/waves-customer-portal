@@ -2213,7 +2213,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     // a thrown error here is a real DB failure — a 500 the admin retries,
     // never a 200 that silently skipped the report-side correction.
     const serviceRecordCols = await db('service_records').columnInfo().catch(() => ({}));
-    const { record: resolvedRecord, ambiguous: recordAmbiguous } = await require('../services/job-costing')
+    const { record: resolvedRecord, viaFk: recordViaFk, ambiguous: recordAmbiguous } = await require('../services/job-costing')
       .resolveServiceRecord(db, svc, serviceRecordCols);
     const record = recordAmbiguous ? null : resolvedRecord;
     if (recordAmbiguous) {
@@ -2273,6 +2273,14 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
           }
         }
         if (recordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;
+        // FK-heal (codex P2 #3152 round 3): a pre-FK record found through the
+        // legacy soft-join gets its scheduled_service_id stamped in the same
+        // update, so every later lookup — this endpoint, job costing's marker
+        // read — is tuple-independent and a subsequent date/service-type edit
+        // can no longer orphan the corrected record.
+        if (!recordViaFk && recordCols.scheduled_service_id) {
+          recordUpdate.scheduled_service_id = svc.id;
+        }
         await trx('service_records').where({ id: record.id }).update(recordUpdate);
         recordUpdated = true;
       }
@@ -4773,6 +4781,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // unknown; row-backed start timestamps or none. See
           // applyBackfillDurationPolicy.
           if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, effectiveTimeOnSite, svc);
+          // Live admin override (codex P2 #3152 round 3): the shared helper
+          // prefers a ROW-BACKED end stamp over its `at` argument, so a row
+          // that already carries one (a legacy operational completion being
+          // finalized later) would keep the stale end while the duration
+          // columns took the typed minutes — and every start→end pair reader
+          // would still derive the inflated span. Force the kept end fields
+          // onto the adjusted instant; the pair must equal the operator's
+          // statement exactly (same posture as backfillCompletionEndInstant's
+          // real-start branch).
+          if (!isBackfillCompletion && adjustedEndedAt) {
+            lifecycleUpdates.actual_end_time = adjustedEndedAt;
+            lifecycleUpdates.check_out_time = adjustedEndedAt;
+          }
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —

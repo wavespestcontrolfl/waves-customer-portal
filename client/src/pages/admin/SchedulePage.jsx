@@ -1625,12 +1625,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // say exactly that, matching the notification partial-failure above.
       if (timeOnSiteDirty) {
         try {
-          await adminFetch(`/admin/dispatch/${service.id}/time-on-site`, {
-            method: "PATCH",
-            body: JSON.stringify({
-              minutes: Math.round(Number(String(timeOnSiteMinutes).trim())),
-            }),
-          });
+          const patchResult = await adminFetch(
+            `/admin/dispatch/${service.id}/time-on-site`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({
+                minutes: Math.round(Number(String(timeOnSiteMinutes).trim())),
+              }),
+            },
+          );
+          // The record leg can be skipped server-side (ambiguous legacy
+          // match, or no report record found) — the appointment's duration
+          // still corrected, but the customer report did not. Silence here
+          // would read as a full success (codex P2 round 3).
+          if (patchResult?.recordUpdated === false) {
+            alert(
+              patchResult?.recordAmbiguous
+                ? "Duration corrected on the appointment, but several legacy report records match this visit — the customer report was NOT changed and needs a manual fix."
+                : "Duration corrected on the appointment, but no report record was found for this visit — the customer report was not changed.",
+            );
+          }
         } catch (patchErr) {
           alert(
             `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,

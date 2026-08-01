@@ -248,6 +248,26 @@ describe('live override composed with buildCompletionLifecycleUpdates', () => {
     expect(updates.actual_start_time).toEqual(new Date(NOW.getTime() - 45 * 60000));
   });
 
+  test('a row that ALREADY carries an end stamp: the helper keeps the stale end — the route must force the adjusted instant (codex P2 round 3)', () => {
+    // Hazard proof: buildCompletionLifecycleUpdates prefers a row-backed end
+    // over its `at` argument, so a legacy operational completion being
+    // finalized later would keep its inflated end while the duration columns
+    // took the typed minutes — and every start→end pair reader would still
+    // derive the stale span.
+    const staleEnd = '2026-07-19T18:19:05Z';
+    const withEnd = { ...CHECKED_IN, actual_end_time: staleEnd, check_out_time: staleEnd };
+    const adjusted = adjustedCompletionEndInstant(withEnd, 45, NOW);
+    const updates = buildCompletionLifecycleUpdates(withEnd, adjusted, { elapsed: 45 });
+    expect(updates.actual_end_time).toEqual(new Date(staleEnd)); // the hazard
+    // The route's live-adjusted branch forces the kept end fields:
+    updates.actual_end_time = adjusted;
+    updates.check_out_time = adjusted;
+    expect(updates.actual_end_time).toEqual(new Date('2026-07-19T16:45:00Z'));
+    expect(Math.round((updates.actual_end_time - new Date(withEnd.actual_start_time)) / 60000)).toBe(45);
+    // And the route wiring pins the force to the live-adjusted branch only.
+    expect(source).toMatch(/if \(!isBackfillCompletion && adjustedEndedAt\) \{\s*\n\s*lifecycleUpdates\.actual_end_time = adjustedEndedAt;\s*\n\s*lifecycleUpdates\.check_out_time = adjustedEndedAt;\s*\n\s*\}/);
+  });
+
   test('the live sanitizer and the backfill sanitizer are the same 1..720 rule', () => {
     expect(backfillTimeOnSiteMinutes(45)).toBe(45);
     expect(backfillTimeOnSiteMinutes(721)).toBeNull();
@@ -443,6 +463,9 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(notesRaw.sql).toMatch(/jsonb_build_object\('timeOnSitePrior', COALESCE\(structured_notes::jsonb -> 'timeOnSite', 'null'::jsonb\)\)/);
     expect(notesRaw.bindings).toEqual([JSON.stringify({ timeOnSite: 45, timeOnSiteAdjusted: true })]);
 
+    // An FK-linked record needs no heal — the linkage column stays untouched.
+    expect(recUpdate.updatePayload.scheduled_service_id).toBeUndefined();
+
     expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1');
     const audit = dbMock.calls.find((c) => c.table === 'activity_log');
     expect(audit.insertPayload.action).toBe('time_on_site_adjusted');
@@ -604,6 +627,10 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(recUpdate.whereCriteria).toEqual({ id: 'rec-legacy' });
     expect(recUpdate.updatePayload.pdf_storage_key).toBeNull();
     expect(recUpdate.updatePayload.structured_notes.__raw).toBe(true);
+    // FK-heal (codex P2 round 3): the soft-join resolution stamps the FK in
+    // the same update, so a later date/service-type edit can no longer
+    // orphan the corrected record.
+    expect(recUpdate.updatePayload.scheduled_service_id).toBe('svc-1');
   });
 
   test('an AMBIGUOUS legacy match is left untouched — scheduled_services corrects, the record leg is skipped', async () => {
@@ -651,6 +678,19 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     expect((source.match(/structured_notes: serializeJsonb\(/g) || []).length).toBe(5);
     // And the converted side-effect writers all go through the merge helper.
     expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(11);
+  });
+
+  test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {
+    // finalizeLawnReportSynthesis runs post-commit on auto-send lawn
+    // completions — a whole-column write from its stale snapshot erased any
+    // key that landed in between (the admin correction included).
+    const gateSource = fs.readFileSync(
+      path.join(__dirname, '../services/service-report/lawn-report-write-gate.js'),
+      'utf8',
+    );
+    expect(gateSource).toMatch(/COALESCE\(structured_notes::jsonb, '\{\}'::jsonb\) \|\| \?::jsonb/);
+    expect(gateSource).toMatch(/JSON\.stringify\(\{ lawnReportV2: frozen \}\)/);
+    expect(gateSource).not.toMatch(/structured_notes: JSON\.stringify\(merged\)/);
   });
 });
 
