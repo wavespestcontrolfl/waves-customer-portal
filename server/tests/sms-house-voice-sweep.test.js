@@ -141,3 +141,32 @@ describe('rendered-output whitespace hygiene', () => {
     expect(tidy(raw)).toBe(raw);
   });
 });
+
+describe('scheme-less portal links in SMS', () => {
+  // Mirror of stripPortalUrlScheme in routes/admin-sms-templates.js.
+  const HOSTS = ['portal.wavespestcontrol.com', 'waves-customer-portal-production.up.railway.app'];
+  const esc = (h) => h.replace(/\./g, '\\.');
+  const RE = new RegExp(
+    `https://(?=(?:${HOSTS.map(esc).join('|')})[/\\s]|(?:${HOSTS.map(esc).join('|')})$)`, 'g'
+  );
+  const strip = (s) => s.replace(RE, '');
+
+  test('drops the scheme from our own portal links', () => {
+    expect(strip('Track live: https://portal.wavespestcontrol.com/l/adwy9'))
+      .toBe('Track live: portal.wavespestcontrol.com/l/adwy9');
+    expect(strip('Visit https://portal.wavespestcontrol.com'))
+      .toBe('Visit portal.wavespestcontrol.com');
+    expect(strip('Pay: https://waves-customer-portal-production.up.railway.app/l/x9'))
+      .toBe('Pay: waves-customer-portal-production.up.railway.app/l/x9');
+  });
+
+  test('leaves third-party links (Google review) with their scheme', () => {
+    const google = 'Review us: https://g.page/r/abc/review';
+    expect(strip(google)).toBe(google);
+  });
+
+  test('does not match a foreign URL that merely contains our host in its path', () => {
+    const spoof = 'https://example.com/portal.wavespestcontrol.com/fake';
+    expect(strip(spoof)).toBe(spoof);
+  });
+});
