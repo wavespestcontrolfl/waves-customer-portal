@@ -164,7 +164,7 @@ describe('annual prepay is a per-ESTIMATE fact, not the customer lane', () => {
   it('a prepay CUSTOMER with no term on this estimate still gets per-application copy', async () => {
     stubTables({ customer: { ...perAppCustomer, billing_mode: 'annual_prepay' }, prepayTerm: undefined });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true, livePricing: { bundle: LIVE_BUNDLE, defaultCandidate: REBUILT } });
+      .toEqual({ billsPerApplication: true, livePricing: { bundle: LIVE_BUNDLE, defaultCandidate: REBUILT, snapshotHit: false } });
   });
 
   it('is status-blind — a refunded term still just means "leave the document alone"', async () => {
@@ -178,7 +178,7 @@ describe('resolveProposalBillingContext', () => {
   it('reports the lane', async () => {
     stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 0, billing_mode: 'per_application' } });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true, livePricing: { bundle: LIVE_BUNDLE, defaultCandidate: REBUILT } });
+      .toEqual({ billsPerApplication: true, livePricing: { bundle: LIVE_BUNDLE, defaultCandidate: REBUILT, snapshotHit: false } });
   });
 });
 
@@ -207,7 +207,7 @@ describe('pricing authority', () => {
     stubTables({ customer: perAppCustomer });
     const estimate = { id: 'e1', customer_id: 'c1', status: 'sent' };
     const ctx = await resolveProposalBillingContext(estimate);
-    expect(ctx.livePricing).toEqual({ bundle: LIVE_BUNDLE, defaultCandidate: REBUILT });
+    expect(ctx.livePricing).toEqual({ bundle: LIVE_BUNDLE, defaultCandidate: REBUILT, snapshotHit: false });
     expect(mockBuildPricingBundle).toHaveBeenCalledWith(estimate);
   });
 
@@ -253,11 +253,28 @@ describe('pricing authority', () => {
       .toEqual(REBUILT);
   });
 
-  it('falls back to frozen pricing when the rebuild fails', async () => {
+  // #3120 r8: a failed rebuild must NOT read as "frozen" — that would quote the
+  // very snapshot buildPricingBundle exists to reject.
+  it('reports UNRESOLVED (not frozen) when the rebuild fails', async () => {
     stubTables({ customer: perAppCustomer });
     mockBuildPricingBundle.mockRejectedValue(new Error('pricing engine down'));
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true, livePricing: null });
+      .toEqual({ billsPerApplication: true, livePricing: { unresolved: true } });
+  });
+
+  it('marks a snapshot-served bundle so stale-total matching stays valid', async () => {
+    stubTables({ customer: perAppCustomer });
+    mockBuildPricingBundle.mockResolvedValue({ ...LIVE_BUNDLE, snapshotHit: true });
+    expect((await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' })).livePricing.snapshotHit)
+      .toBe(true);
+  });
+
+  // A DECLINED estimate is terminal but still downloadable — freeze it too.
+  it('treats a declined estimate as frozen', async () => {
+    stubTables({ customer: perAppCustomer });
+    const ctx = await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1', status: 'declined' });
+    expect(ctx.livePricing).toBeNull();
+    expect(mockBuildPricingBundle).not.toHaveBeenCalled();
   });
 
   it('does not rebuild at all for a legacy lane', async () => {

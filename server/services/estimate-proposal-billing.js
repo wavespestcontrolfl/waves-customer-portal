@@ -122,6 +122,11 @@ async function estimateSoldAsAnnualPrepay(estimate) {
   }
 }
 
+// An unlocked estimate whose pricing could not be resolved. Distinct from null,
+// which means "frozen — use the accepted pricing": conflating the two let a
+// transient rebuild failure quote the very snapshot the route rejects (#3120 r8).
+const UNRESOLVED_PRICING = Object.freeze({ unresolved: true });
+
 // Acceptance freezes the price: both accept flows stamp price_locked_at and
 // pricing_authority 'LOCKED' in the same atomic update that writes
 // monthly_total / annual_total / accepted_frequency_key, and /:token/pdf stays
@@ -130,8 +135,14 @@ async function estimateSoldAsAnnualPrepay(estimate) {
 // today's policy. Same predicate reconcileFrozenMembershipSnapshot uses for
 // exactly the same reason (estimate-public.js) — this is the line the codebase
 // already draws between "committed" and "still selling".
+// DECLINED is terminal too: the link stays customer-viewable and its PDF stays
+// downloadable, but the estimate can never be accepted, so rebuilding it under
+// today's floors and cadences would restate a quote the customer already turned
+// down. Frozen, like accepted (#3120 r8).
+const FROZEN_DOCUMENT_STATUSES = new Set(['accepted', 'declined']);
 function estimateIsPriceLocked(estimate) {
-  return estimate?.status === 'accepted' || !!estimate?.price_locked_at;
+  return FROZEN_DOCUMENT_STATUSES.has(String(estimate?.status || '').trim().toLowerCase())
+    || !!estimate?.price_locked_at;
 }
 
 // An OUTSTANDING quote is described from the bundle the PAGE is selling, not
@@ -167,21 +178,24 @@ async function resolveLivePricing(estimate) {
       defaultFrequencyFromList,
       reconcileFrozenMembershipSnapshot,
     } = require('../routes/estimate-public');
-    if (typeof buildPricingBundle !== 'function') return null;
+    if (typeof buildPricingBundle !== 'function') return UNRESOLVED_PRICING;
     if (typeof reconcileFrozenMembershipSnapshot === 'function') {
       await reconcileFrozenMembershipSnapshot(estimate);
     }
     const bundle = await buildPricingBundle(estimate);
-    if (!bundle || typeof bundle !== 'object') return null;
+    if (!bundle || typeof bundle !== 'object') return UNRESOLVED_PRICING;
     const sellable = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])
       .filter((entry) => entry && entry.quoteRequired !== true);
     const defaultCandidate = typeof defaultFrequencyFromList === 'function'
       ? defaultFrequencyFromList(sellable)
       : null;
-    return { bundle, defaultCandidate: defaultCandidate || null };
+    // snapshotHit tells the synthesis whether the stored columns still describe
+    // this bundle: the route stamps it only on the fast path, so its ABSENCE
+    // means the snapshot was rejected and rebuilt.
+    return { bundle, defaultCandidate: defaultCandidate || null, snapshotHit: bundle.snapshotHit === true };
   } catch (err) {
     logger.warn(`[estimate-proposal-billing] live pricing failed for estimate ${estimate?.id}: ${err.message}`);
-    return null;
+    return UNRESOLVED_PRICING;
   }
 }
 

@@ -136,45 +136,60 @@ function sectionKeyForRow(row = {}, candidate = {}) {
 // mis-picked cadence can never reach the document.
 //
 // ── PRICING AUTHORITY ───────────────────────────────────────────────────────
-// Which numbers this document is allowed to quote depends on where the estimate
-// sits between send and acceptance. Enumerated once, here, because fixing these
-// one at a time is what produced four rounds of review findings on #3120:
+// Which numbers this document may quote depends on where the estimate sits
+// between send and acceptance. Enumerated once, here, because fixing these one
+// at a time is what produced four rounds of review findings on #3120:
 //
 //   OUTSTANDING (caller passes livePricing)
-//     valid snapshot     live bundle == the snapshot   anchor: stored totals
-//     lapsed membership  reconciled, then live bundle  anchor: reconciled totals
-//     invalid snapshot   live bundle (rebuilt)         anchor: the live default
-//                                                      candidate's OWN annual,
-//                                                      because the route's fast
-//                                                      path requires the stored
-//                                                      totals to match, so a
-//                                                      rejected snapshot's
-//                                                      columns are stale by
-//                                                      construction
+//     snapshot served   live bundle == the snapshot   anchor: stored totals
+//     lapsed member     reconciled, then live bundle  anchor: reconciled totals
+//     snapshot REBUILT  live bundle                   anchor: the default
+//                                                     candidate's OWN annual;
+//                                                     stored-total matching is
+//                                                     SKIPPED, because the
+//                                                     route's fast path
+//                                                     requires those columns to
+//                                                     match, so a rejected
+//                                                     snapshot's columns are
+//                                                     stale and any "match"
+//                                                     against them is a
+//                                                     coincidence (#3120 r8)
+//     rebuild failed    none — legacy document        (livePricing.unresolved:
+//                                                     never silently fall back
+//                                                     to the snapshot the route
+//                                                     just refused to serve)
 //
-//   LOCKED (caller passes no livePricing — accepted / price_locked_at)
-//     snapshot matches   frozen send snapshot          anchor: frozen totals
-//     snapshot stale     accept-time customerSelection anchor: its annualTotal
+//   FROZEN (caller passes no livePricing — accepted, price-locked, declined)
+//     snapshot matches  frozen send snapshot          anchor: frozen totals
+//     snapshot stale    NONE — see below
 //
-// The locked-stale row is the one with no bundle anywhere: acceptance prices
-// from a rebuilt bundle and discards it (buildEstimateSendSnapshot, at SEND
-// time, is the only writer of sendSnapshot.pricingBundle), so the frozen
-// snapshot can describe a plan the accepted totals never matched. What
-// acceptance DOES persist is customerSelection.billingAmount /
-// billingIntervalMonths / annualTotal — the exact interval charge, cadence and
-// annual it committed to — which describes the accepted plan without
-// re-pricing anything. That is read as a last resort rather than persisting a
-// bundle inside the accept transaction (#3120 r7).
+// The frozen-stale case has no authority anywhere and deliberately prints no
+// recurring pricing. Acceptance prices from a rebuilt bundle and discards it
+// (buildEstimateSendSnapshot, at SEND time, is the only writer of
+// sendSnapshot.pricingBundle), so the frozen snapshot can describe a plan the
+// accepted totals never matched. customerSelection looks like it should fill
+// the gap and does NOT: for lawn / tree&shrub / mosquito TIER plans the accept
+// path resolves billingFrequencyKey 'monthly' with visits != 12, so
+// billingAmount is the monthly DISPLAY rate, not a per-application charge
+// (estimate-public.js, T&S audit 2026-07-18 P1). Deriving 12 applications from
+// it prints $45 x 12 for a plan that charges $90 x 6 — and reconciling that
+// back to the annual total still passes, because an arithmetic identity cannot
+// validate billing semantics (#3120 r8). Closing this row needs acceptance to
+// persist a per-application cadence; until then, no line beats a wrong one.
 //
 // Returns null — legacy monthly synthesis, i.e. today's rendering — whenever
 // the plan can't be described this way with confidence: no bundle, a row with
 // an unprovable cadence, or lines that don't reconcile. Failing to the old
 // document beats asserting a billing cadence the customer isn't on.
 function perApplicationRecurringLines(estimate = {}, estimateData = {}, livePricing = null) {
+  // An UNLOCKED estimate whose rebuild failed must not silently fall back to
+  // the send snapshot — that snapshot may be exactly the retired / below-floor
+  // / stale-membership bundle buildPricingBundle exists to reject. Absence of
+  // live pricing means "frozen"; unresolved means "unknown", and unknown
+  // renders the legacy document (#3120 r8).
+  if (livePricing?.unresolved === true) return null;
   const bundle = livePricing?.bundle || estimateData?.sendSnapshot?.pricingBundle;
-  if (!bundle || typeof bundle !== 'object') {
-    return acceptedSelectionLines(estimate, estimateData, livePricing);
-  }
+  if (!bundle || typeof bundle !== 'object') return null;
 
   const frequencies = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])
     .filter((entry) => entry && entry.quoteRequired !== true);
@@ -203,7 +218,13 @@ function perApplicationRecurringLines(estimate = {}, estimateData = {}, livePric
   // and on top-level frequencies; buildServiceCadenceCombos omits it from
   // combo entries, whose annual is nonetheless net of it (codex #3120 r2).
   const bundleCredit = num(bundle.manualDiscount?.recurringAmount ?? bundle.manualDiscount?.amount);
-  for (const candidate of ordered) {
+  // A REBUILT bundle (the route refused to fast-path the snapshot) leaves the
+  // stored columns describing the rejected plan, so any candidate "matching"
+  // them matches a stale number by coincidence — two lawn tiers pinned to the
+  // same floor is enough. Acceptance with no selectedFrequency takes the
+  // default cadence, so that is the only defensible pick here (#3120 r8).
+  const orderedForBundle = livePricing && livePricing.snapshotHit !== true ? [] : ordered;
+  for (const candidate of orderedForBundle) {
     const lines = perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bundleCredit });
     if (lines) return lines;
   }
@@ -220,48 +241,9 @@ function perApplicationRecurringLines(estimate = {}, estimateData = {}, livePric
     });
     if (lines) return lines;
   }
-  // LOCKED + stale snapshot: the frozen bundle describes a plan the accepted
-  // totals never matched. Fall back to what acceptance itself committed.
-  return acceptedSelectionLines(estimate, estimateData, livePricing);
+  return null;
 }
 
-// The plan AS ACCEPTED, read from the fields the accept transaction persists
-// rather than from any bundle: billingAmount is resolveBillingCadence().amount
-// (the exact interval charge — quarterly $98.00 derived from the annual, not
-// the rounded monthly), billingIntervalMonths is the cadence, and annualTotal
-// is the frozen accepted annual. Nothing here re-prices: every number was
-// written at acceptance.
-//
-// Only for LOCKED estimates. An outstanding quote has no accepted selection to
-// read, and letting it fall through here would describe a cadence the customer
-// has not chosen — so the presence of livePricing (which the caller supplies
-// only for unlocked rows) disqualifies it.
-//
-// One blended line rather than per-service rows: acceptance commits a single
-// interval charge, and inventing a per-service split it never recorded is the
-// kind of derivation this module exists to avoid.
-function acceptedSelectionLines(estimate = {}, estimateData = {}, livePricing = null) {
-  if (livePricing) return null;
-  const selection = estimateData?.customerSelection;
-  if (!selection || typeof selection !== 'object') return null;
-  const perApplication = num(selection.billingAmount);
-  const intervalMonths = Math.round(num(selection.billingIntervalMonths));
-  const annual = num(selection.annualTotal) || num(estimate.annual_total);
-  if (!(perApplication > 0) || !(intervalMonths > 0) || !(annual > 0)) return null;
-  const visits = Math.round(12 / intervalMonths);
-  if (!(visits > 0)) return null;
-  // Same reconcile contract as every other path: the line must add up to the
-  // authoritative annual for the plan, which here is the accepted one.
-  if (Math.abs(roundMoney(perApplication * visits) - annual) > 0.05) return null;
-  const name = String(estimate.service_interest || '').trim() || 'Recurring service plan';
-  return [normalizeLineItem({
-    description: `${name} — ${visits} applications/yr`,
-    unitPrice: perApplication,
-    frequency: 'per_application',
-    visitsPerYear: visits,
-    taxable: false,
-  })];
-}
 
 // One candidate cadence (a top-level frequency or a serviceCadenceCombo) →
 // its per-application lines, or null if it can't be described or priced.

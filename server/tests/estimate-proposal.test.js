@@ -452,13 +452,6 @@ describe('pricing authority by estimate state', () => {
     expect(out[0].visitsPerYear).toBe(6);
   });
 
-  it('OUTSTANDING: a stored-total match still beats the default candidate', () => {
-    const out = perApplicationRecurringLines(base, base.estimate_data, {
-      bundle: { frequencies: [retiredSnapshot, rebuilt] },
-      defaultCandidate: rebuilt,
-    });
-    expect(out[0].unitPrice).toBe(60);
-  });
 
   it('OUTSTANDING: rejects a default candidate that does not add up to its own annual', () => {
     const incoherent = { ...rebuilt, annual: 700 };
@@ -474,9 +467,13 @@ describe('pricing authority by estimate state', () => {
     expect(out[0].visitsPerYear).toBe(4);
   });
 
-  // The r7 hole: acceptance priced from a rebuild and discarded the bundle, so
-  // the frozen snapshot describes a plan the accepted totals never matched.
-  describe('LOCKED + stale snapshot', () => {
+  // #3120 r8: for lawn / tree&shrub / mosquito TIER plans acceptance resolves
+  // billingFrequencyKey 'monthly' with visits != 12, so customerSelection's
+  // billingAmount is the monthly DISPLAY rate, not a per-application charge.
+  // Deriving 12 applications from it would print $45 x 12 for a plan that
+  // charges $90 x 6 — and reconciling THAT back to the annual still passes, so
+  // the guard cannot catch it. No line beats a wrong one.
+  it('FROZEN + stale snapshot: prints no recurring line rather than inventing one', () => {
     const accepted = {
       ...base,
       status: 'accepted',
@@ -485,46 +482,36 @@ describe('pricing authority by estimate state', () => {
       estimate_data: {
         sendSnapshot: { pricingBundle: { frequencies: [retiredSnapshot] } },  // ...snapshot still retired
         customerSelection: {
-          frequencyKey: 'standard',
-          annualTotal: 540,
-          billingAmount: 90,
-          billingIntervalMonths: 2,
+          frequencyKey: 'standard', annualTotal: 540,
+          billingAmount: 45, billingIntervalMonths: 1,   // the tier trap
         },
       },
     };
+    expect(perApplicationRecurringLines(accepted, accepted.estimate_data)).toBeNull();
+  });
 
-    it('quotes the plan acceptance actually committed to', () => {
-      const out = perApplicationRecurringLines(accepted, accepted.estimate_data);
-      expect(out).toHaveLength(1);
-      expect(out[0].unitPrice).toBe(90);
-      expect(out[0].visitsPerYear).toBe(6);
-      expect(out[0].description).toContain('6 applications/yr');
+  it('OUTSTANDING + rebuilt: skips stale-total matching entirely', () => {
+    // A non-default live cadence that coincidentally matches the stale columns
+    // must NOT win — acceptance with no selectedFrequency takes the default.
+    const coincidental = { ...retiredSnapshot, key: 'other_tier' };
+    const out = perApplicationRecurringLines(base, base.estimate_data, {
+      bundle: { frequencies: [coincidental, rebuilt] },
+      defaultCandidate: rebuilt,
+      snapshotHit: false,
     });
+    expect(out[0].unitPrice).toBe(90);
+  });
 
-    it('does not suppress recurring pricing on the accepted document', () => {
-      const p = normalizeProposal(accepted, { recurringMode: 'per_application' });
-      expect(p.buildings[0].lineItems.map((i) => i.frequency)).toContain('per_application');
-      expect(computeProposalTotals(p).annualRecurring).toBe(540);
+  it('OUTSTANDING + snapshot served: stored-total matching still applies', () => {
+    const out = perApplicationRecurringLines(base, base.estimate_data, {
+      bundle: { frequencies: [retiredSnapshot, rebuilt] },
+      defaultCandidate: rebuilt,
+      snapshotHit: true,
     });
+    expect(out[0].unitPrice).toBe(60);
+  });
 
-    it('rejects a selection whose charge does not reconcile to its own annual', () => {
-      const bad = { ...accepted.estimate_data,
-        customerSelection: { ...accepted.estimate_data.customerSelection, billingAmount: 75 } };
-      expect(perApplicationRecurringLines(accepted, bad)).toBeNull();
-    });
-
-    it('is never used for an OUTSTANDING estimate — it has accepted nothing', () => {
-      // Same data, but the caller supplied live pricing => not locked.
-      const emptyLive = { bundle: { frequencies: [] }, defaultCandidate: null };
-      expect(perApplicationRecurringLines(accepted, accepted.estimate_data, emptyLive)).toBeNull();
-    });
-
-    it('needs both the charge and the cadence', () => {
-      for (const missing of [{ billingAmount: 0 }, { billingIntervalMonths: 0 }]) {
-        const d = { ...accepted.estimate_data,
-          customerSelection: { ...accepted.estimate_data.customerSelection, ...missing } };
-        expect(perApplicationRecurringLines({ ...accepted, estimate_data: d }, d)).toBeNull();
-      }
-    });
+  it('UNRESOLVED: never falls back to the snapshot the route refused to serve', () => {
+    expect(perApplicationRecurringLines(base, base.estimate_data, { unresolved: true })).toBeNull();
   });
 });
