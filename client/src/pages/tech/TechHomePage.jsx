@@ -421,7 +421,7 @@ export default function TechHomePage() {
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
       <GeofenceArrivalPrompt
         onStormReview={(payload) => {
-          // Storm-watch nudge → open the Rain Out sheet for that job.
+          // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a
           // minimal object (the sheet fetches its options server-side,
           // so only id + display label matter here).
@@ -593,7 +593,7 @@ export default function TechHomePage() {
               if (addr) window.open(`https://maps.google.com/?q=${encodeURIComponent(addr)}`, '_blank');
             }} />
             <ActionBtn label="Protocol" icon="📖" onClick={() => navigate('/tech/protocols')} />
-            <ActionBtn label="Rain Out" icon="⛈️" onClick={() => setRainOutService(nextStop)} />
+            <ActionBtn label="Quick Move" icon="⛈️" onClick={() => setRainOutService(nextStop)} />
             <ActionBtn
               label={enRouteState.pendingId === nextStop.id ? 'Sending…' : 'En Route'}
               icon="🚗"
@@ -1144,18 +1144,35 @@ function StatCard({ label, value, color }) {
   );
 }
 
-// Weather reschedule sheet. Storm rolls in mid-route → the tech picks
-// where this visit (or the rest of today's route) goes. "Later today"
-// options lead because SWFL cells usually pass within a couple hours;
-// day options carry NWS rain % so the tech doesn't reschedule into
-// tomorrow's storms. The server moves the job(s) immediately and texts
-// the customer a reply-1-confirm / reply-2-switch message.
+// Quick Move sheet. Storm rolls in mid-route (or the day runs long) →
+// the tech picks where this visit (or the rest of today's route) goes.
+// "Later today" options lead because SWFL cells usually pass within a
+// couple hours; day options carry NWS rain % so the tech doesn't
+// reschedule into tomorrow's storms. The server moves the job(s)
+// immediately and texts the customer a self-serve reschedule link.
+// The non-weather reasons render only when the options payload says
+// GATE_QUICKMOVE_EXTRA_REASONS is on (server enforces). "No-show" is the
+// SOFT path — visit rebooked + texted; the terminal no-show (fee/notice)
+// lives on the admin appointment detail sheet.
 const RAIN_REASONS = [
   { code: 'weather_rain', label: 'Rain' },
   { code: 'weather_lightning', label: 'Lightning' },
   { code: 'weather_wind', label: 'Wind' },
   { code: 'weather_heat', label: 'Heat' },
 ];
+const EXTRA_REASONS = [
+  { code: 'running_late', label: 'Running late' },
+  { code: 'equipment_issue', label: 'Equipment trouble' },
+  { code: 'tech_emergency', label: 'Emergency' },
+  { code: 'customer_noshow', label: 'No-show' },
+];
+const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
+
+// Friendly copy for the server's structured rejections.
+const EXTRA_REASON_ERROR_COPY = {
+  noshow_route_scope: 'No-show moves apply to this stop only.',
+  target_not_later: 'Running late needs a time after the current window — pick a later slot.',
+};
 
 function RainOutSheet({ service, onClose, onDone }) {
   const [options, setOptions] = useState(null);
@@ -1190,7 +1207,34 @@ function RainOutSheet({ service, onClose, onDone }) {
 
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
-  const selected = allOptions.find((opt) => keyOf(opt) === selectedKey) || null;
+  // "Running behind" can only push a same-day visit LATER — hide same-day
+  // presets at/before the current window (server rejects target_not_later).
+  const hhmmMin = (v) => {
+    const m = String(v || '').match(/^(\d{1,2}):(\d{2})/);
+    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+  };
+  const currentStartMin = hhmmMin(options?.service?.window?.start);
+  const optionVisibleFor = (opt, reasonCode) => {
+    if (reasonCode !== 'running_late' || opt.kind !== 'same_day' || currentStartMin == null) return true;
+    const startMin = hhmmMin(opt.window?.start);
+    return startMin != null && startMin > currentStartMin;
+  };
+  const visibleOptions = allOptions.filter((opt) => optionVisibleFor(opt, reason));
+  const selected = visibleOptions.find((opt) => keyOf(opt) === selectedKey) || null;
+
+  // Reason side effects: no-show is single-stop only (server rejects route
+  // scope); running late may hide the highlighted same-day preset.
+  const pickReason = (code) => {
+    setReason(code);
+    if (code === 'customer_noshow') setScope('job');
+    if (selectedKey) {
+      const stillVisible = allOptions.some((opt) => keyOf(opt) === selectedKey && optionVisibleFor(opt, code));
+      if (!stillVisible) {
+        const first = allOptions.find((opt) => optionVisibleFor(opt, code));
+        setSelectedKey(first ? keyOf(first) : null);
+      }
+    }
+  };
 
   const handleCommit = async () => {
     if (!selected || busy) return;
@@ -1213,11 +1257,18 @@ function RainOutSheet({ service, onClose, onDone }) {
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(EXTRA_REASON_ERROR_COPY[data.error] || data.error || `HTTP ${res.status}`);
       const failures = data.failedCount ? `, ${data.failedCount} failed — check dispatch` : '';
-      onDone(`Moved ${data.movedCount} ${data.movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notify ? ', customer texted' : ''}${failures}`);
+      // Report what actually HAPPENED, not the request flag — a disabled
+      // template or missing phone moves the visit without an SMS.
+      const movedCount = data.movedCount || 0;
+      const texted = (data.results || []).filter((r) => r.ok && r.smsSent).length;
+      const notifyClause = !notify ? ''
+        : texted === movedCount ? (movedCount === 1 ? ', customer texted' : ', customers texted')
+          : `, ${texted}/${movedCount} texted — follow up on the rest`;
+      onDone(`Moved ${movedCount} ${movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notifyClause}${failures}`);
     } catch (err) {
-      setError(err.message || 'Rain out failed');
+      setError(err.message || 'Quick Move failed');
       setBusy(false);
     }
   };
@@ -1249,7 +1300,7 @@ function RainOutSheet({ service, onClose, onDone }) {
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
           <div style={{ fontSize: 17, fontWeight: 800, color: DARK.text, fontFamily: "'Montserrat', sans-serif" }}>
-            ⛈️ Weather Reschedule
+            ⛈️ Quick Move Appointment
           </div>
           <button type="button" onClick={onClose} aria-label="Close" style={{
             background: 'transparent', border: 'none', color: DARK.muted, fontSize: 24, cursor: 'pointer', padding: '0 6px',
@@ -1275,10 +1326,10 @@ function RainOutSheet({ service, onClose, onDone }) {
 
         {options && (
           <>
-            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>WEATHER</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-              {RAIN_REASONS.map((r) => (
-                <button key={r.code} type="button" onClick={() => setReason(r.code)} style={chip(reason === r.code)}>
+              {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
+                <button key={r.code} type="button" onClick={() => pickReason(r.code)} style={chip(reason === r.code)}>
                   {r.label}
                 </button>
               ))}
@@ -1286,10 +1337,10 @@ function RainOutSheet({ service, onClose, onDone }) {
 
             <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
-              {allOptions.length === 0 && (
+              {visibleOptions.length === 0 && (
                 <div style={{ fontSize: 13, color: DARK.muted }}>No slots available — call dispatch.</div>
               )}
-              {allOptions.map((opt) => {
+              {visibleOptions.map((opt) => {
                 const key = keyOf(opt);
                 const active = key === selectedKey;
                 return (
@@ -1306,7 +1357,7 @@ function RainOutSheet({ service, onClose, onDone }) {
                   >
                     <span>
                       {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
-                      {opt.kind === 'same_day' && (
+                      {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && (
                         <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
                       )}
                     </span>
@@ -1323,7 +1374,7 @@ function RainOutSheet({ service, onClose, onDone }) {
               })}
             </div>
 
-            {options.remainingRouteCount > 0 && (
+            {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && (
               <>
                 <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>APPLY TO</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>

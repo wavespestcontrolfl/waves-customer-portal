@@ -36,6 +36,35 @@ const WEATHER_PHRASES = {
   weather_heat: 'extreme heat',
 };
 
+// Non-weather "Quick Move" reasons: the same move-first flow and SMS
+// machinery, but the lead states the real operational cause and the copy
+// makes no weather claims (no forecast fetch, no forecast link, no
+// better-day/efficacy clauses — those already gate on rain/lightning).
+// customer_noshow here is the SOFT path — visit rebooked + texted; the
+// terminal no_show status flip (card-hold fee, invoice void, missed-you
+// notice) stays on the appointment detail sheet. The rebooker's
+// reschedule_log row (reason_code customer_noshow, customer_id) feeds the
+// 2-in-90-days missed-appointment outreach counter automatically
+// (workflows/missed-appointment.js counts rows by that reason code).
+// All four are dark until the owner flips GATE_QUICKMOVE_EXTRA_REASONS:
+// the chips are hidden in both sheets (options payload flag) and commit()
+// rejects the codes, so the kill switch is a plain unset.
+const EXTRA_REASON_LEADS = {
+  running_late: "we're running behind schedule today",
+  equipment_issue: 'we had equipment trouble today',
+  tech_emergency: 'an emergency came up on our end',
+  customer_noshow: 'we missed you today',
+};
+function extraReasonsEnabled() {
+  return process.env.GATE_QUICKMOVE_EXTRA_REASONS === 'true';
+}
+function isExtraReason(reasonCode) {
+  return Object.prototype.hasOwnProperty.call(EXTRA_REASON_LEADS, reasonCode);
+}
+function isValidReason(reasonCode) {
+  return !!WEATHER_PHRASES[reasonCode] || (isExtraReason(reasonCode) && extraReasonsEnabled());
+}
+
 // Customer-facing lead for the moved SMS, grounded in what we actually know
 // instead of a fixed "heavy rain rolled through" claim (owner call,
 // 2026-07-18). A same-day push means the tech is standing in the weather —
@@ -43,6 +72,7 @@ const WEATHER_PHRASES = {
 // degrades to an honest generic when we don't (NWS is fail-open). Non-rain
 // reasons state the real operational constraint rather than a weather label.
 function composeWeatherLead({ reasonCode, isSameDay, hour, todayChance }) {
+  if (EXTRA_REASON_LEADS[reasonCode]) return EXTRA_REASON_LEADS[reasonCode];
   if (reasonCode === 'weather_wind') return 'winds are too high to spray safely today';
   if (reasonCode === 'weather_lightning') return "there's lightning in the area";
   if (reasonCode === 'weather_heat') return "today's heat is too extreme to treat safely";
@@ -382,6 +412,9 @@ async function getOptions(serviceId) {
     sameDay,
     days,
     remainingRouteCount: route.length,
+    // Both sheets render the non-weather reason chips only when the gate is
+    // on — the server is still the enforcer (commit() rejects the codes).
+    extraReasonsEnabled: extraReasonsEnabled(),
   };
 }
 
@@ -406,7 +439,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   const lng = job.lng ?? customer.longitude;
   const zip = job.service_address_zip || customer.zip;
 
-  const forecastLink = forecastLinkForZip(zip);
+  // A non-weather move makes no weather claims: no forecast link and no
+  // NWS decoration below — the fixed operational lead is the whole story.
+  const forecastLink = isExtraReason(reasonCode) ? null : forecastLinkForZip(zip);
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
 
   // Forecast decoration is fail-open (same rule as the options sheet):
@@ -421,7 +456,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   const isSameDay = String(chosen.date) === todayStr;
   let outlook = null;
   let hourly = null;
-  if (lat != null && lng != null && !forecastHealth.degraded) {
+  if (lat != null && lng != null && !forecastHealth.degraded && !isExtraReason(reasonCode)) {
     const fetched = await Promise.race([
       Promise.all([
         getDailyRainOutlook(lat, lng).catch(() => null),
@@ -475,8 +510,12 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     body = await renderSmsTemplate('rain_out_moved_v3', {
       ...sharedVars,
       weather_lead: weatherLead,
+      // "forecast" only when the page's banner will actually show one —
+      // a non-weather move renders the banner without weather chips.
       link_clause: rescheduleUrl
-        ? ` New time, forecast & other options: ${rescheduleUrl}`
+        ? (isExtraReason(reasonCode)
+          ? ` New time & other options: ${rescheduleUrl}`
+          : ` New time, forecast & other options: ${rescheduleUrl}`)
         : ' Need a different time? Reply to this message.',
     }, renderContext);
     if (body) {
@@ -504,7 +543,12 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   }
   if (!body) {
     const v2Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v2' }).first('id');
-    if (!v2Row) {
+    // The legacy body's grammar is weather-only ("{weather_phrase} rolled
+    // through your area") — a non-weather move can't render it honestly,
+    // so that edge (v2 migration rolled back) falls through to the
+    // missing-template path: visit moved, sheet reports the customer was
+    // NOT texted, operator follows up manually.
+    if (!v2Row && !isExtraReason(reasonCode)) {
       body = await renderSmsTemplate('rain_out_moved', {
         ...sharedVars,
         ...longFormVars,
@@ -555,6 +599,8 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
  * @param {string} args.serviceId       the job the tech is acting on
  * @param {string} args.technicianId    acting tech (route scope filter)
  * @param {string} args.reasonCode      weather_rain | weather_wind | weather_lightning | weather_heat
+ *                                       | running_late | equipment_issue | tech_emergency
+ *                                       | customer_noshow (extra reasons need GATE_QUICKMOVE_EXTRA_REASONS)
  * @param {string} args.scope           'job' | 'route' (this job + the rest of today's route)
  * @param {object} args.target          { date, window: {start, end} } — the ANCHOR books exactly
  *                                       this window (what the tech saw). On a same-day route push
@@ -568,9 +614,36 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
 async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, initiatedBy = 'tech' }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
-  if (!WEATHER_PHRASES[reasonCode]) return { ok: false, reason: 'bad_reason' };
+  if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
+  }
+  // A no-show is about THIS customer only — route scope would move every
+  // remaining stop, text each unrelated customer "we missed you", and stamp
+  // each with a customer_noshow log row that counts toward the
+  // missed-appointment outreach threshold (codex P1). The sheets hide the
+  // scope toggle for this reason; the server is the enforcer.
+  if (reasonCode === 'customer_noshow' && scope === 'route') {
+    return { ok: false, reason: 'noshow_route_scope' };
+  }
+  // "Running behind" can only push a same-day visit LATER. The generic
+  // same-day options are now+2h/+4h with no regard for the current window,
+  // so a morning Quick Move on an afternoon visit could otherwise pull it
+  // earlier while the SMS claims we ran behind (codex P2). Day moves are
+  // exempt — landing earlier on a DIFFERENT day contradicts nothing. The
+  // sheets filter their same-day presets to match; this is the enforcer.
+  if (reasonCode === 'running_late') {
+    const currentDateStr = service.scheduled_date
+      ? String(service.scheduled_date instanceof Date
+          ? service.scheduled_date.toISOString()
+          : service.scheduled_date).slice(0, 10)
+      : null;
+    const currentStartMin = hhmmToMinutes(service.window_start);
+    const targetStartMin = hhmmToMinutes(target.window.start);
+    if (currentDateStr && String(target.date) === currentDateStr
+        && currentStartMin != null && targetStartMin != null && targetStartMin <= currentStartMin) {
+      return { ok: false, reason: 'target_not_later' };
+    }
   }
 
   const todayStr = etDateString();
@@ -851,6 +924,25 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         }
       }
     }
+
+    // Soft no-show: the rebooker just logged the occurrence (reason_code
+    // customer_noshow with the missed slot's original_date/window), but
+    // only the terminal path and nightly sweep ever ran the outreach
+    // threshold — two soft no-shows would accumulate without the promised
+    // 2-in-90-days task (codex r2). Evaluate WITHOUT inserting a second
+    // occurrence row. Best-effort: never fails the committed move.
+    if (reasonCode === 'customer_noshow') {
+      try {
+        const MissedAppointment = require('./workflows/missed-appointment');
+        await MissedAppointment.evaluateThreshold(
+          job.customer_id || service.cust_id || service.customer_id,
+          'quick_move_no_show',
+        );
+      } catch (err) {
+        logger.warn(`[rain-out] no-show outreach evaluation failed for ${job.id}: ${err.message}`);
+      }
+    }
+
     const chosen = { date: target.date, window: newWindow };
     let sms = { sent: false, reason: 'not_requested' };
     if (notifyCustomer) {
@@ -887,5 +979,6 @@ module.exports = {
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
+    EXTRA_REASON_LEADS, isValidReason,
   },
 };
