@@ -2198,6 +2198,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // retracted. Reconcile recommendation-derived copy against today's
   // applications in-memory as the last line of defense (pure, no DB/LLM);
   // storage is healed separately by the completion pipeline.
+  // Guard outcome, consulted again after the narrative overlay (codex P1 r28).
+  let lawnTreatmentGuard = null;
   if (serviceLine === 'lawn' && lawnAssessment?.scores) {
     try {
       const { treatmentGuard } = require('../knowledge-bridge');
@@ -2226,6 +2228,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           categoriesVerified = false;
         }
       }
+      lawnTreatmentGuard = { verified: categoriesVerified, guardProducts, treatmentGuard };
       if (!categoriesVerified) {
         const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
         const NEUTRAL_RECS = {
@@ -3016,11 +3019,50 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       }
 
       if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
-        reportV2 = await applyLawnReportNarrative(reportV2, {
-          grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
-          observations: lawnAssessment?.observations || '',
-          customerConcern: structuredCustomerConcern(structured),
-        }).catch(() => reportV2);
+        // The overlay rewrites customer-facing prose and validates only
+        // banned-copy + rain-window rules — it can reintroduce advice that
+        // contradicts today's applications (codex P1 r28). Skip it entirely
+        // when treatment data is unverifiable, and reconcile its output
+        // against the guard otherwise, restoring the deterministic string
+        // for any field it contradicted.
+        if (lawnTreatmentGuard && !lawnTreatmentGuard.verified) {
+          console.warn('[report-data] lawn narrative overlay skipped — treatment data unverifiable');
+        } else {
+          const preOverlay = JSON.parse(JSON.stringify(reportV2));
+          reportV2 = await applyLawnReportNarrative(reportV2, {
+            grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
+            observations: lawnAssessment?.observations || '',
+            customerConcern: structuredCustomerConcern(structured),
+          }).catch(() => reportV2);
+          if (lawnTreatmentGuard?.guardProducts?.length) {
+            const { treatmentGuard: tg, guardProducts: gp } = lawnTreatmentGuard;
+            const bad = (text) => tg.contradictsAppliedProducts(text, gp);
+            const restore = (host, prev, key) => {
+              if (host && prev && typeof host[key] === 'string' && bad(host[key])) host[key] = prev[key];
+            };
+            restore(reportV2.snapshot, preOverlay.snapshot, 'statusHeadline');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'mainWatch');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'customerAction');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'rootCause');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'wavesNext');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'treatmentSummary');
+            restore(reportV2.water, preOverlay.water, 'explanation');
+            restore(reportV2.mowing, preOverlay.mowing, 'recommendation');
+            restore(reportV2.treatment, preOverlay.treatment, 'summary');
+            restore(reportV2, preOverlay, 'todaysResult');
+            restore(reportV2, preOverlay, 'smsSummary');
+            (reportV2.diagnosis || []).forEach((d, i) => {
+              const prev = preOverlay.diagnosis?.[i];
+              restore(d, prev, 'explanation');
+              restore(d, prev, 'customerExplanation');
+            });
+            (reportV2.insights || []).forEach((ins, i) => {
+              const prev = preOverlay.insights?.[i];
+              ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'].forEach((k) => restore(ins, prev, k));
+            });
+            if (reportV2.followUp && preOverlay.followUp) restore(reportV2.followUp, preOverlay.followUp, 'reason');
+          }
+        }
       }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.

@@ -150,6 +150,25 @@ function wikiIlikeQuery(term, trustedOnly, limit) {
 // generateAssessmentRecommendations for why runs must be serialized.
 const _recommendationRuns = new Map();
 
+// In-flight generation fence (codex P1 r28): Phase A stamps a marker so a
+// held email delivery cannot treat its own sanitize as final while an LLM
+// call is still able to write different grounded copy afterwards. The
+// marker carries a runId (only the owning run clears it) and an expiry (a
+// crashed process can never strand the email).
+const GENERATION_FENCE_MS = 15 * 60 * 1000;
+function parseStoredRecommendations(value) {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch { return null; }
+}
+function generationInFlight(stored) {
+  const until = stored?._generationInFlightUntil;
+  if (!until) return false;
+  const ts = Date.parse(until);
+  return Number.isFinite(ts) && ts > Date.now();
+}
+
 // Persist-time guard (codex P1 #3093 r5): the applied-today prompt rule is
 // an instruction, not a guarantee. Text that advises against/defers a product
 // class the technician ALREADY applied on the visit must never be stored —
@@ -688,6 +707,12 @@ const KnowledgeBridge = {
       // retrying rather than treating this as sanitized.
       if (!assessment) return { changed: false, dropped: 0, error: 'assessment not found' };
       if (!assessment.service_record_id) return { changed: false, dropped: 0, error: 'assessment not linked to a service record' };
+      // A generation that can still write AFTER this sanitize means the
+      // result is not final — unverified, so held sends keep deferring
+      // (codex P1 r28).
+      if (generationInFlight(parseStoredRecommendations(assessment.recommendations))) {
+        return { changed: false, dropped: 0, error: 'recommendation generation in flight' };
+      }
       const appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
       let stored;
       try {
@@ -698,7 +723,6 @@ const KnowledgeBridge = {
       // ai_summary is persisted independently of the recommendations payload
       // — a missing/unparseable payload must not skip the summary check
       // (codex P1 r17).
-      const appliedClasses = appliedTreatmentClasses(appliedProducts);
       const summaryContradicts = contradictsAppliedProducts(assessment.ai_summary, appliedProducts);
       let parsed = stored && typeof stored === 'object' ? stored : null;
       let dropped = 0;
@@ -806,6 +830,7 @@ const KnowledgeBridge = {
     // in the write phase instead of lock order: an ungrounded (confirm-time)
     // result can never overwrite a grounded (completion-time) one, so
     // interleavings across instances are harmless.
+    const runId = `${process.pid}-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     const phaseA = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
       const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
@@ -814,6 +839,13 @@ const KnowledgeBridge = {
       if (assessment.service_record_id) {
         appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
       }
+      // Stamp the fence BEFORE releasing the lock so no held delivery can
+      // finalize while this run's LLM call is still able to write.
+      const stored = parseStoredRecommendations(assessment.recommendations) || {};
+      stored._generationInFlightUntil = new Date(Date.now() + GENERATION_FENCE_MS).toISOString();
+      stored._generationRunId = runId;
+      await trx('lawn_assessments').where({ id: assessmentId })
+        .update({ recommendations: JSON.stringify(stored), updated_at: new Date() });
       return { assessment, appliedProducts };
     }).catch((err) => {
       // A transient read/enrichment failure FAILS the run as ungrounded —
@@ -823,10 +855,27 @@ const KnowledgeBridge = {
       return undefined;
     });
     if (!phaseA) return null;
-    return this._generateAssessmentRecommendationsUnlocked(assessmentId, phaseA, context);
+    const result = await this._generateAssessmentRecommendationsUnlocked(assessmentId, phaseA, context, runId)
+      .catch((err) => { logger.error(`[knowledge-bridge] recommendation generation failed: ${err.message}`); return null; });
+    // Failure after Phase A must LIFT the fence (Phase B clears it on
+    // success by writing a fresh payload) — only the owning run clears it,
+    // so a concurrent run's marker survives.
+    if (!result) {
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+        const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+        const stored = parseStoredRecommendations(row?.recommendations);
+        if (!stored || stored._generationRunId !== runId) return;
+        delete stored._generationInFlightUntil;
+        delete stored._generationRunId;
+        await trx('lawn_assessments').where({ id: assessmentId })
+          .update({ recommendations: JSON.stringify(stored), updated_at: new Date() });
+      }).catch((clearErr) => logger.warn(`[knowledge-bridge] generation fence clear failed for ${assessmentId}: ${clearErr.message}`));
+    }
+    return result;
   },
 
-  async _generateAssessmentRecommendationsUnlocked(assessmentId, { assessment, appliedProducts }, context) {
+  async _generateAssessmentRecommendationsUnlocked(assessmentId, { assessment, appliedProducts }, context, runId) {
     try {
       const { customer, grassType, grassTrack, protocolEntries, outcomeEntries } = context;
 
@@ -898,7 +947,7 @@ Return a JSON object with:
 
         // Model output advising against a product class applied today must
         // never persist (codex P1 r5) — the prompt rule is not a guarantee.
-        const { parsed, dropped, appliedClasses } = sanitizeRecommendationsAgainstTreatment(raw, appliedProducts);
+        const { parsed, dropped } = sanitizeRecommendationsAgainstTreatment(raw, appliedProducts);
         if (dropped) {
           logger.warn(`[knowledge-bridge] dropped ${dropped} treatment-contradicting field(s) from recommendations for assessment ${assessmentId}`);
         }
@@ -913,14 +962,16 @@ Return a JSON object with:
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
           const fresh = await trx('lawn_assessments').where({ id: assessmentId }).first();
           if (!fresh) return null;
-          let existingGrounded = false;
-          try {
-            const existing = typeof fresh.recommendations === 'string'
-              ? JSON.parse(fresh.recommendations) : fresh.recommendations;
-            existingGrounded = !!(existing && existing._groundedInApplications);
-          } catch { existingGrounded = false; }
+          const existing = parseStoredRecommendations(fresh.recommendations);
+          const existingGrounded = !!(existing && existing._groundedInApplications);
           if (existingGrounded && !iAmGrounded) {
             logger.info(`[knowledge-bridge] ungrounded recommendation result for ${assessmentId} discarded — grounded copy already stored`);
+            if (existing && existing._generationRunId === runId) {
+              delete existing._generationInFlightUntil;
+              delete existing._generationRunId;
+              await trx('lawn_assessments').where({ id: assessmentId })
+                .update({ recommendations: JSON.stringify(existing), updated_at: new Date() });
+            }
             return null;
           }
           // When the replacement summary was stripped, "keep the stored one"
