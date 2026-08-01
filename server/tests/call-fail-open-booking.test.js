@@ -4,7 +4,6 @@
 // garbled-email name_email_mismatch; low confidence on a short familiar call).
 const {
   canAutoRoute, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, SMS_ONLY_FLAGS,
-  isAvLocalizedInAreaPremise,
 } = require('../services/call-triage-flags');
 const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-gates');
 
@@ -692,14 +691,16 @@ describe('checkTcpaConsent inbound implied consent', () => {
   });
 });
 
-describe('canAutoRoute unknown-relationship + AV-localized address (owner ruling 2026-07-31)', () => {
+describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)', () => {
   // Live miss 2026-07-31 (call log a771fa15): an inbound caller requested
   // service, gave their info, and agreed a 2:00 PM slot — the booking parked
   // in triage on caller_not_authorized (they never STATED they own the
-  // house; relationship arrived 'unknown') plus address_unverified (AV
-  // missing_component on a premise-proximity match that WAS in the service
-  // area). Names/addresses here are synthetic.
-  const AV_LOCALIZED = {
+  // house; relationship arrived 'unknown'). Names/addresses are synthetic.
+  //
+  // That call ALSO carried address_unverified. The address block is
+  // deliberately NOT demoted (codex round-2 P1) — see the regression block
+  // at the bottom of this file. Only the relationship demotion lives here.
+  const AV_UNVERIFIABLE = {
     status: 'missing_component',
     granularity: 'PREMISE_PROXIMITY',
     inServiceArea: true,
@@ -730,45 +731,40 @@ describe('canAutoRoute unknown-relationship + AV-localized address (owner ruling
     }
   });
 
-  test('AV premise-proximity in-area match demotes address_unverified on a confirmed booking', () => {
-    const r = canAutoRoute(extraction(['address_unverified']), { addressValidation: AV_LOCALIZED });
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['address_unverified']));
-  });
-
-  test('the full live-miss shape books: both flags + sms-only consent flag, one advisory card each', () => {
+  test('the full live-miss shape: relationship demotes, the ADDRESS still blocks (codex round-2 P1)', () => {
+    // The 2026-07-31 call carried both flags. Only caller_not_authorized is
+    // safe to demote; address_unverified means Google could not verify the
+    // premise, so this call still parks for the office — correctly.
     const ex = extraction(['no_sms_consent_captured', 'caller_not_authorized', 'address_unverified']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
-    const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized', 'address_unverified']));
+    const r = canAutoRoute(ex, { addressValidation: AV_UNVERIFIABLE });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('address_unverified');
+    expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
-  test('PRODUCTION shape: the MODEL flag address_unverifiable demotes alongside the deterministic one', () => {
-    // The model emits `address_unverifiable` (schema enum) on nearly every
-    // call while deterministic AV handling emits `address_unverified` — a
-    // real extraction usually carries BOTH. Demoting only one would leave
-    // the other blocking exactly the case this targets (codex P1).
-    const ex = extraction(['address_unverifiable', 'address_unverified', 'caller_not_authorized']);
+  test('a clean AV acceptance + unknown relationship books (the shape that SHOULD auto-route)', () => {
+    const ex = extraction(['caller_not_authorized']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
-    const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+    const r = canAutoRoute(ex, {
+      addressValidation: { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' },
+    });
     expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'address_unverified']));
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
-  test('OFF-HOUR confirmed start keeps BOTH demotions blocked (window_start is always HH:00)', () => {
+  test('OFF-HOUR confirmed start keeps the relationship demotion blocked (windows start on the hour)', () => {
     // The booking path copies confirmed_start_at's wall clock into
     // window_start unchanged, so demoting a :30 slot would auto-create a
     // prohibited off-hour start (AGENTS.md owner rule). It parks instead.
     for (const off of ['2026-07-11T09:30:00-04:00', '2026-07-11T09:00:30-04:00']) {
-      const ex = extraction(['caller_not_authorized', 'address_unverified']);
+      const ex = extraction(['caller_not_authorized']);
       ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
       ex.scheduling.confirmed_start_at = off;
-      const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+      const r = canAutoRoute(ex, {});
       expect(r.allowed).toBe(false);
-      expect(r.appointmentBlockingFlags).toEqual(
-        expect.arrayContaining(['caller_not_authorized', 'address_unverified'])
-      );
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
     }
   });
 
@@ -778,35 +774,41 @@ describe('canAutoRoute unknown-relationship + AV-localized address (owner ruling
     const ex = extraction(['caller_not_authorized']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
     ex.scheduling.confirmed_start_at = '2026-07-11T19:00:00+05:30';
-    const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+    const r = canAutoRoute(ex, {});
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
-  test('AMBIGUOUS AV keeps the block — adopting one of several candidates would dispatch to a guess', () => {
-    const r = canAutoRoute(extraction(['address_unverified']), {
-      addressValidation: { ...AV_LOCALIZED, status: 'ambiguous' },
-    });
-    expect(r.allowed).toBe(false);
-    expect(r.appointmentBlockingFlags).toContain('address_unverified');
-  });
-
-  test('CONTRACT: the routing predicate is the one the processor adopts addresses with', () => {
-    // Routing demotes the address block on isAvLocalizedInAreaPremise and the
-    // processor adopts the AV-normalized address on the SAME predicate. If
-    // these ever diverge, a booking routes on Google's address but dispatches
-    // to the raw transcript spelling (codex P1) — so pin the predicate's
-    // contract here rather than restating its conditions in two places.
-    expect(isAvLocalizedInAreaPremise(AV_LOCALIZED)).toBe(true);
-    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, status: 'ambiguous' })).toBe(false);
-    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, status: 'api_unavailable' })).toBe(false);
-    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, inServiceArea: false })).toBe(false);
-    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, granularity: 'ROUTE' })).toBe(false);
-    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, normalized: { city: 'Bradenton' } })).toBe(false);
-    expect(isAvLocalizedInAreaPremise(null)).toBe(false);
-    // A clean acceptance is NOT this predicate's job — the processor already
-    // adopts those, and canAutoRoute never needed a demotion for them.
-    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, status: 'validated_accept' })).toBe(false);
+  test('REGRESSION: an unverifiable AV verdict is NEVER demoted, in any shape (codex round-2 P1)', () => {
+    // address-validation/index.js derives confirm_needed and missing_component
+    // PRECISELY when the address cannot be verified: missing_component fires
+    // when granularity is not PREMISE/SUB_PREMISE (PREMISE_PROXIMITY means
+    // Google did NOT resolve a building), and confirm_needed fires on
+    // hasUnconfirmedComponents ("Never auto-route these — hand to a human").
+    // An earlier revision of this PR demoted the address block on exactly
+    // these verdicts; it would have dispatched a tech to an address Google
+    // could not confirm. Pin the contract so it is not re-attempted.
+    const shapes = [
+      { status: 'missing_component', granularity: 'PREMISE_PROXIMITY' },
+      { status: 'missing_component', granularity: 'PREMISE' },
+      { status: 'confirm_needed', granularity: 'PREMISE' },
+      { status: 'confirm_needed', granularity: 'SUB_PREMISE', hasUnconfirmed: true },
+      { status: 'ambiguous', granularity: 'PREMISE' },
+    ];
+    for (const shape of shapes) {
+      const av = {
+        inServiceArea: true,
+        normalized: { street_line_1: '100 Example Court', city: 'Bradenton', postal_code: '34211' },
+        ...shape,
+      };
+      for (const flag of ['address_unverified', 'address_unverifiable']) {
+        const ex = extraction([flag]);
+        ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+        const r = canAutoRoute(ex, { addressValidation: av });
+        expect(r.allowed).toBe(false);
+        expect(r.appointmentBlockingFlags).toContain(flag);
+      }
+    }
   });
 
   test('a demoted flag still rides a scheduling-blocked return so its advisory card files (codex P2)', () => {
@@ -825,7 +827,7 @@ describe('canAutoRoute unknown-relationship + AV-localized address (owner ruling
 
   test('coarse AV granularity (ROUTE) keeps the address hard block', () => {
     const r = canAutoRoute(extraction(['address_unverified']), {
-      addressValidation: { ...AV_LOCALIZED, granularity: 'ROUTE' },
+      addressValidation: { ...AV_UNVERIFIABLE, granularity: 'ROUTE' },
     });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('address_unverified');
@@ -833,7 +835,7 @@ describe('canAutoRoute unknown-relationship + AV-localized address (owner ruling
 
   test('AV match without a normalized street line keeps the address hard block', () => {
     const r = canAutoRoute(extraction(['address_unverified']), {
-      addressValidation: { ...AV_LOCALIZED, normalized: { city: 'Bradenton', postal_code: '34211' } },
+      addressValidation: { ...AV_UNVERIFIABLE, normalized: { city: 'Bradenton', postal_code: '34211' } },
     });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('address_unverified');
@@ -841,7 +843,7 @@ describe('canAutoRoute unknown-relationship + AV-localized address (owner ruling
 
   test('out-of-area AV verdict keeps the address hard block', () => {
     const r = canAutoRoute(extraction(['address_unverified']), {
-      addressValidation: { ...AV_LOCALIZED, inServiceArea: false },
+      addressValidation: { ...AV_UNVERIFIABLE, inServiceArea: false },
     });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('address_unverified');
@@ -850,7 +852,7 @@ describe('canAutoRoute unknown-relationship + AV-localized address (owner ruling
   test('an UNCONFIRMED booking keeps the address hard block even when AV localized it', () => {
     const ex = extraction(['address_unverified']);
     ex.scheduling = { status: 'tentative' };
-    const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+    const r = canAutoRoute(ex, { addressValidation: AV_UNVERIFIABLE });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('address_unverified');
   });

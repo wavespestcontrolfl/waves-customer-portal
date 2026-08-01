@@ -839,34 +839,27 @@ function confirmedStartOnTheHour(confirmedStartAt) {
     && !!wall && wall.slice(14, 16) === '00';
 }
 
-/**
- * True when Google Address Validation localized the stated address to ONE
- * real, in-service-area premise even though its status was not a clean
- * acceptance — i.e. `confirm_needed` or `missing_component`: "we found the
- * house, something is incomplete or wants a read-back."
- *
- * `ambiguous` is deliberately EXCLUDED: it means Google could not choose
- * between candidate premises, so adopting one would dispatch to a guess.
- * That case keeps the hard block. `out_of_service_area`, `api_unavailable`
- * and `not_attempted` are excluded for the same reason (AGENTS.md: AV
- * unreachable → hold for review, never silent auto-route).
- *
- * This is the single predicate shared by the two consumers that must never
- * disagree: `canAutoRoute` demotes the address block on it, and the call
- * processor adopts the SAME normalized address for dispatch on it. If only
- * routing used it, a booking would route on Google's address but dispatch
- * to the raw transcript spelling (codex P1).
- */
-const AV_LOCALIZED_STATUSES = new Set(['confirm_needed', 'missing_component']);
-
-function isAvLocalizedInAreaPremise(addressValidation) {
-  const av = addressValidation || null;
-  if (!av || av.inServiceArea !== true) return false;
-  if (!AV_LOCALIZED_STATUSES.has(String(av.status || ''))) return false;
-  const premise = ['PREMISE', 'SUB_PREMISE', 'PREMISE_PROXIMITY']
-    .includes(String(av.granularity || '').toUpperCase());
-  return premise && !!String(av.normalized?.street_line_1 || '').trim();
-}
+// NO address-flag demotion lives here, deliberately (codex round-2 P1,
+// 2026-08-01). An earlier revision of this PR demoted address_unverified /
+// address_unverifiable when AV returned confirm_needed or missing_component
+// with a normalized street at "premise-ish" granularity. That was unsound:
+// address-validation/index.js derives those two statuses PRECISELY when the
+// address is NOT verifiable — `missing_component` fires when granularity is
+// not PREMISE/SUB_PREMISE (PREMISE_PROXIMITY means Google did NOT resolve a
+// building), and `confirm_needed` fires on hasUnconfirmedComponents, whose
+// own comment reads "Genuinely unverifiable ... Never auto-route these —
+// hand to a human."
+//
+// There is also no narrower version worth writing: a verdict that IS a
+// confirmed in-area premise already carries status validated_accept or
+// corrected, neither of which raises an address block in the first place —
+// so any such predicate is dead code by construction.
+//
+// An unverifiable address therefore keeps its hard block and reaches the
+// office. The sanctioned way to rescue one is address-validation/recovery.js:
+// when it confirms exactly ONE real premise the processor adopts it and files
+// the advisory `address_recovered` read-back card. Do not re-add a
+// routing-side demotion here.
 
 function canAutoRoute(extraction, opts = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
@@ -967,28 +960,6 @@ function canAutoRoute(extraction, opts = {}) {
   if (!explicitlyNonOwner && confirmedWithStart && startOnTheHour) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
-      return true;
-    });
-  }
-
-  // AV-localized in-area premise doesn't hold a CONFIRMED booking (same
-  // owner ruling): the address flags fire on AV confirm_needed/
-  // missing_component/ambiguous, but when AV still localized the stated
-  // street to an in-service-area premise (normalized street line present,
-  // premise-level granularity), the worst case is a read-back correction —
-  // not a phantom dispatch. BOTH spellings demote together: the model emits
-  // `address_unverifiable` (schema enum) on nearly every call while the
-  // deterministic AV handling emits `address_unverified`; demoting only one
-  // would leave the other blocking the exact production shape this targets.
-  // The processor adopts the SAME AV-normalized address under the SAME
-  // predicate (isAvLocalizedInAreaPremise) before dispatch, so routing and
-  // the booked address can never disagree. A coarse localization
-  // (ROUTE/LOCALITY — no premise), an out-of-area verdict, an off-hour or
-  // unconfirmed booking keeps the hard block; out_of_service_area and
-  // missing_service_address are untouched.
-  if (confirmedWithStart && startOnTheHour && isAvLocalizedInAreaPremise(opts.addressValidation)) {
-    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
-      if (f === 'address_unverified' || f === 'address_unverifiable') { failedOpenFlags.push(f); return false; }
       return true;
     });
   }
@@ -1327,7 +1298,6 @@ module.exports = {
   ADVISORY_TRIAGE_FLAGS,
   BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
-  isAvLocalizedInAreaPremise,
   confirmedStartOnTheHour,
   FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS,
   hasCanonicalWriteBlock,

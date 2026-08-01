@@ -84,7 +84,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, isAvLocalizedInAreaPremise } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -5449,19 +5449,8 @@ const CallRecordingProcessor = {
           // street name reached lead rows). The gate and flag computation
           // above already consumed the AV verdict, so adopting here changes
           // what gets SAVED, not what routes.
-          // isAvLocalizedInAreaPremise (codex P1, 2026-07-31): canAutoRoute
-          // now demotes the address block when AV localized the stated street
-          // to ONE real in-area premise despite a confirm_needed/
-          // missing_component status. Routing on Google's address while
-          // dispatching to the raw transcript spelling would send a tech to
-          // an unverified address — so the SAME predicate adopts the SAME
-          // normalized address here, before both the dispatch stamp and the
-          // customer/lead writes. Sharing the predicate (not a copy of its
-          // conditions) is what guarantees routing and dispatch can't drift.
           if (addressValidation?.normalized
-            && (addressValidation.status === 'validated_accept'
-              || addressValidation.status === 'corrected'
-              || isAvLocalizedInAreaPremise(addressValidation))) {
+            && (addressValidation.status === 'validated_accept' || addressValidation.status === 'corrected')) {
             const n = addressValidation.normalized;
             v2Extraction.property = v2Extraction.property || {};
             v2Extraction.property.service_address = {
