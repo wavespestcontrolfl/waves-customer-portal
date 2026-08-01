@@ -169,36 +169,6 @@ describe('Customer 360 billing-pause banner', () => {
     expect(screen.getByText(/Billing paused since May 2, 2026/i)).toBeInTheDocument();
   });
 
-  it('reports the other guards that still stop dues once the pause clears', async () => {
-    let paused = true;
-    vi.stubGlobal('fetch', vi.fn((url) => {
-      const path = String(url);
-      if (path.endsWith('/admin/payers')) return response({ payers: [] });
-      if (path.endsWith('/timeline')) return response({ timeline: [] });
-      if (path.endsWith('/resume-service')) {
-        paused = false;
-        return response({ success: true, resumed: true, blockers: ['autopay_disabled'] });
-      }
-      if (path.endsWith('/admin/customers/customer-a')) {
-        return response(customerDetail(paused
-          ? { servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02', servicePauseReason: 'autopay_final_failure' }
-          : {}));
-      }
-      return response({});
-    }));
-
-    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
-    await screen.findByText(/Billing paused since May 2, 2026/i);
-
-    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
-
-    // The banner is gone (the pause really did clear) but dues still will not
-    // run, which is the whole reason someone clicked.
-    expect(await screen.findByText(/dues still will not run: autopay disabled/i)).toBeInTheDocument();
-    await waitFor(() => {
-      expect(screen.queryByText(/Billing paused since/i)).not.toBeInTheDocument();
-    });
-  });
 
   it('does not report a successful resume as failed when only the reload breaks', async () => {
     // The money-moving half already landed. Telling an admin it failed
@@ -210,7 +180,7 @@ describe('Customer 360 billing-pause banner', () => {
       if (path.endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/resume-service')) {
         resumed = true;
-        return response({ success: true, resumed: true, blockers: [] });
+        return response({ success: true, resumed: true });
       }
       if (path.endsWith('/admin/customers/customer-a')) {
         if (resumed) return response({ error: 'Profile unavailable' }, 503);
@@ -229,6 +199,51 @@ describe('Customer 360 billing-pause banner', () => {
 
     expect(await screen.findByText(/Billing was resumed\. Refreshing this profile failed/i)).toBeInTheDocument();
     expect(screen.queryByText(/^Resume failed$/i)).not.toBeInTheDocument();
+  });
+
+  it('a superseded attempt on the SAME customer never writes its outcome', async () => {
+    // A -> B -> A, then click again: a customerId check alone would let the
+    // first, still-in-flight response land on the second attempt's result.
+    const gates = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/resume-service')) {
+        let release;
+        const gate = new Promise((r) => { release = r; });
+        gates.push(release);
+        return gate.then(() => response({ error: 'first attempt failed' }, 500));
+      }
+      if (path.endsWith('/admin/customers/customer-a') || path.endsWith('/admin/customers/customer-b')) {
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'autopay_final_failure',
+        }));
+      }
+      return response({});
+    }));
+
+    const { rerender } = render(
+      <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />,
+    );
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
+
+    // Navigating away and back re-enables the button (the customer-switch
+    // reset), so a second attempt can start while the first is still in
+    // flight — this is the only way to get two live attempts for one
+    // customer, and it is exactly the reported path.
+    rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
+    rerender(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+    fireEvent.click(await screen.findByRole('button', { name: /Resume billing/i }));
+
+    gates[0]();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The superseded attempt's failure must not surface as the live result.
+    expect(screen.queryByText(/first attempt failed/i)).not.toBeInTheDocument();
   });
 
   it('never writes one customer\'s resume outcome onto another\'s record', async () => {
@@ -258,7 +273,7 @@ describe('Customer 360 billing-pause banner', () => {
           },
         });
       }
-      if (path.endsWith('/admin/customers/customer-a')) {
+      if (path.endsWith('/admin/customers/customer-a') || path.endsWith('/admin/customers/customer-b')) {
         return response(customerDetail({
           servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
           servicePauseReason: 'autopay_final_failure',

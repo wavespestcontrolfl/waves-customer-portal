@@ -18,17 +18,6 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
 const CustomerCredit = require('../services/customer-credit');
-// The monthly cron's own predicates — reused, not restated, so the resume
-// endpoint's "will dues actually run now?" answer cannot drift from what
-// processMonthlyBilling does. resolveBillingLane is the single billing-lane
-// authority (billing-cron GUARD 3c): it also covers NULL billing_mode rows,
-// which infer to per_visit and are skipped just like an explicit one.
-const {
-  isPaused: isAutopayPaused,
-  customerOnAutopay,
-} = require('../services/autopay-eligibility');
-const { resolveBillingLane } = require('../services/billing-lane');
-const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -3077,15 +3066,15 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
  * should silently restart recurring billing is an owner policy call, not a
  * default this endpoint gets to make.
  *
- * `blockers` is a BEST-EFFORT operator hint, not a guarantee. It reuses the
- * cron's canonical predicates (customerOnAutopay, resolveBillingLane, the two
- * annual-prepay id sets) rather than restating their logic, but
- * processMonthlyBilling is a long guard chain and this is not a second
- * implementation of it. An EMPTY array therefore means "nothing known is
- * stopping dues", never "dues will run" — which is why the UI renders a
- * warning when the list is non-empty and says NOTHING when it is empty. Any
- * future consumer must keep that asymmetry: a missed guard then degrades to
- * silence instead of a false all-clear.
+ * Scope: this clears the pause and says NOTHING about whether dues will now
+ * collect. An earlier revision returned a `blockers` array enumerating the
+ * cron's other guards (autopay, lane, annual-prepay coverage...). That was a
+ * second implementation of processMonthlyBilling's guard chain, and review
+ * found a further missed guard on three consecutive rounds — evidence about
+ * the approach, not just the code. The response no longer claims anything
+ * about future collection, so it cannot be wrong about it; the cron's own
+ * autopay_log skip reasons remain the authority on why a customer was not
+ * charged.
  */
 router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
   try {
@@ -3126,8 +3115,7 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
         interaction_type: 'note',
         subject: 'Billing resumed',
         body: `Billing pause cleared (paused ${pausedSince}${pauseReason ? `, reason: ${pauseReason}` : ''}). `
-          + 'Monthly dues resume on the next billing day; no back-billing for the paused months.'
-          + (req.body?.notes ? `\n\n${req.body.notes}` : ''),
+          + 'Monthly dues resume on the next billing day; no back-billing for the paused months.',
         admin_user_id: req.technicianId,
       });
 
@@ -3158,59 +3146,9 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
     // customer silently unbilled for a different reason. Reuse the cron's
     // predicates (isPaused, the billing-mode list) rather than restating
     // them, so this can't drift from what actually runs.
-    // Read the row AFTER the transaction, not the snapshot taken before it:
-    // active status, rate, autopay and lane can all have moved while this
-    // request ran, and a stale read would report blockers: [] on a customer
-    // whose dues still cannot run. Falls back to the snapshot only if the
-    // re-read fails, which is strictly better than reporting nothing.
-    const fresh = await db('customers').where({ id: req.params.id }).first()
-      .catch(() => null) || customer;
+    logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`);
 
-    const blockers = [];
-    if (fresh.active !== true) blockers.push('customer_inactive');
-    if (!(Number(fresh.monthly_rate) > 0)) blockers.push('no_monthly_rate');
-
-    // autopay_enabled=true is not the same as collectible: the enrolled card
-    // can be missing, non-default or expired, and an unverified ACH method is
-    // refused too. customerOnAutopay is the repo's canonical answer to "will
-    // autopay collect for this customer" (it folds in disabled, paused,
-    // method eligibility and ach_status), so gate on IT and use the narrower
-    // checks only to label WHICH part failed for the operator.
-    try {
-      if (!(await customerOnAutopay(fresh, { db }))) {
-        if (fresh.autopay_enabled === false) blockers.push('autopay_disabled');
-        else if (isAutopayPaused(fresh)) blockers.push('autopay_paused_until');
-        else blockers.push('no_chargeable_autopay_method');
-      }
-    } catch (autopayErr) {
-      logger.warn(`[customers] autopay eligibility check failed for ${req.params.id}: ${autopayErr.message}`);
-    }
-
-    // Not a check against a list of explicit modes: an unclassified customer
-    // (NULL billing_mode, no real tier or no rate) INFERS to per_visit and the
-    // cron skips them exactly the same way. Checking only explicit modes would
-    // hand those rows an empty list and remove their only warning.
-    const lane = resolveBillingLane(fresh);
-    if (lane.mode !== 'monthly_membership') blockers.push(`billing_lane_${lane.mode}`);
-
-    // GUARD 4 / 4b: annual-prepay coverage and a pending annual invoice both
-    // suppress dues for customers who otherwise resolve monthly. Same two
-    // canonical id-set predicates the cron itself calls.
-    try {
-      const [coveredIds, pendingIds] = await Promise.all([
-        AnnualPrepayRenewals.getActivelyCoveredCustomerIds(etDateString()),
-        AnnualPrepayRenewals.getPaymentPendingCustomerIds(),
-      ]);
-      if (coveredIds?.has?.(String(fresh.id))) blockers.push('annual_prepay_covered');
-      if (pendingIds?.has?.(String(fresh.id))) blockers.push('annual_prepay_payment_pending');
-    } catch (prepayErr) {
-      logger.warn(`[customers] annual-prepay suppression check failed for ${req.params.id}: ${prepayErr.message}`);
-    }
-
-    logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`
-      + (blockers.length ? ` — dues still blocked by: ${blockers.join(', ')}` : ''));
-
-    res.json({ success: true, resumed: true, pausedSince, pauseReason, servicePausedAt: null, blockers });
+    res.json({ success: true, resumed: true, pausedSince, pauseReason, servicePausedAt: null });
   } catch (err) { next(err); }
 });
 

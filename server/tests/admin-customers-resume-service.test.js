@@ -52,11 +52,6 @@ const mockState = {
   rolledBack: false,
 };
 
-jest.mock('../services/annual-prepay-renewals', () => ({
-  getActivelyCoveredCustomerIds: jest.fn(async () => new Set(mockState.annualPrepayCovered)),
-  getPaymentPendingCustomerIds: jest.fn(async () => new Set(mockState.annualPrepayPending)),
-}));
-
 jest.mock('../services/audit-log', () => ({
   recordAuditEvent: jest.fn(async (event) => { mockState.auditEvents.push(event); }),
 }));
@@ -225,7 +220,7 @@ describe('POST /admin/customers/:id/resume-service', () => {
   test('records an audit note carrying the original pause date and reason', async () => {
     mockState.customer = { ...PAUSED };
 
-    await resumeService('cust-1', { notes: 'card updated by phone' });
+    await resumeService('cust-1');
 
     const note = mockState.interactions[0];
     expect(note).toBeTruthy();
@@ -235,7 +230,6 @@ describe('POST /admin/customers/:id/resume-service', () => {
     // The no-back-billing promise is what makes this safe to click, so it
     // belongs in the record and not only in the UI.
     expect(note.body).toContain('no back-billing');
-    expect(note.body).toContain('card updated by phone');
     expect(note.admin_user_id).toBe('admin-1');
   });
 
@@ -274,156 +268,14 @@ describe('POST /admin/customers/:id/resume-service', () => {
     expect(mockState.auditEvents[0].metadata.paused_since).toBe('2026-05-02');
   });
 
-  test('reports the OTHER cron guards that still stop dues after the pause clears', async () => {
-    // Clearing the pause is necessary, not sufficient: processMonthlyBilling
-    // has its own guards, and each one also means no dues. Claiming "resumed"
-    // while removing the only warning would leave a customer silently
-    // unbilled for a different reason.
-    mockState.customer = {
-      ...PAUSED,
-      active: false,
-      monthly_rate: '0',
-      autopay_enabled: false,
-      autopay_paused_until: '2099-01-01',
-      billing_mode: 'per_visit',
-    };
 
-    const res = await resumeService('cust-1');
 
-    expect(res.body.resumed).toBe(true);
-    expect(res.body.blockers).toEqual(expect.arrayContaining([
-      'customer_inactive',
-      'no_monthly_rate',
-      // ONE autopay label, not one per failing sub-check: customerOnAutopay
-      // is the gate, and these narrower reads only name which part failed.
-      'autopay_disabled',
-      'billing_lane_per_visit',
-    ]));
-    expect(res.body.blockers).not.toContain('autopay_paused_until');
-  });
 
-  test('a live autopay_paused_until is labelled as such', async () => {
-    mockState.customer = {
-      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
-      autopay_paused_until: '2099-01-01', billing_mode: 'monthly_membership',
-    };
 
-    const res = await resumeService('cust-1');
 
-    expect(res.body.blockers).toContain('autopay_paused_until');
-  });
 
-  test('annual-prepay coverage and a pending annual invoice both suppress dues', async () => {
-    // GUARD 4 / 4b: a legacy monthly-lane customer can resolve monthly and
-    // still be suppressed by prepaid coverage.
-    mockState.customer = {
-      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
-      autopay_paused_until: null, billing_mode: 'monthly_membership',
-    };
-    mockState.annualPrepayCovered = ['cust-1'];
-    mockState.annualPrepayPending = ['cust-1'];
 
-    const res = await resumeService('cust-1');
 
-    expect(res.body.blockers).toEqual(expect.arrayContaining([
-      'annual_prepay_covered',
-      'annual_prepay_payment_pending',
-    ]));
-  });
-
-  test('an UNCLASSIFIED customer is reported too — NULL billing_mode infers per_visit', async () => {
-    // The cron resolves the lane (GUARD 3c) rather than reading billing_mode
-    // directly, so a NULL-mode row with no real tier is skipped exactly like
-    // an explicit per_visit one. Checking only explicit modes would hand this
-    // customer blockers: [] and remove their only warning.
-    mockState.customer = {
-      ...PAUSED,
-      active: true,
-      monthly_rate: '55.00',
-      autopay_enabled: true,
-      autopay_paused_until: null,
-      billing_mode: null,
-      waveguard_tier: null,
-    };
-
-    const res = await resumeService('cust-1');
-
-    expect(res.body.resumed).toBe(true);
-    expect(res.body.blockers).toContain('billing_lane_per_visit');
-  });
-
-  test('a NULL-mode customer with a real tier and rate resolves monthly — no blocker', async () => {
-    // The other side of the inference: this row IS the cron's customer.
-    mockState.customer = {
-      ...PAUSED,
-      active: true,
-      monthly_rate: '55.00',
-      autopay_enabled: true,
-      autopay_paused_until: null,
-      billing_mode: null,
-      waveguard_tier: 'Silver',
-    };
-
-    const res = await resumeService('cust-1');
-
-    expect(res.body).toMatchObject({ resumed: true, blockers: [] });
-  });
-
-  test('reports no blockers for a customer the cron will actually bill', async () => {
-    mockState.customer = {
-      ...PAUSED,
-      active: true,
-      monthly_rate: '55.00',
-      autopay_enabled: true,
-      autopay_paused_until: null,
-      billing_mode: 'monthly_membership',
-    };
-
-    const res = await resumeService('cust-1');
-
-    expect(res.body).toMatchObject({ resumed: true, blockers: [] });
-  });
-
-  test('autopay_enabled is not the same as chargeable — an expired card is reported', async () => {
-    // The next run would reach stripe.charge and fail while the UI had
-    // already removed the only warning.
-    mockState.customer = {
-      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
-      autopay_paused_until: null, billing_mode: 'monthly_membership',
-    };
-    mockState.autopayMethod = { ...CHARGEABLE_METHOD, exp_month: 1, exp_year: 2020 };
-
-    const res = await resumeService('cust-1');
-
-    expect(res.body.blockers).toContain('no_chargeable_autopay_method');
-  });
-
-  test('no default autopay method at all is reported', async () => {
-    mockState.customer = {
-      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
-      autopay_paused_until: null, billing_mode: 'monthly_membership',
-    };
-    mockState.autopayMethod = undefined;
-
-    const res = await resumeService('cust-1');
-
-    expect(res.body.blockers).toContain('no_chargeable_autopay_method');
-  });
-
-  test('blockers come from a POST-transaction read, not the stale snapshot', async () => {
-    mockState.customer = {
-      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
-      autopay_paused_until: null, billing_mode: 'monthly_membership',
-    };
-    // The customer was deactivated while this request was in flight. Reporting
-    // from the snapshot would claim dues are collectible when they are not.
-    mockState.freshCustomer = { ...mockState.customer, active: false };
-
-    const res = await resumeService('cust-1');
-
-    expect(res.body.resumed).toBe(true);
-    expect(res.body.blockers).toContain('customer_inactive');
-  });
 
   test('billing-pause fields never reach a technician payload', async () => {
     // Same class as monthlyRate/billingMode. A tech opening Customer 360 for

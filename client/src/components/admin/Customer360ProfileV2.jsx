@@ -4643,6 +4643,7 @@ export default function Customer360ProfileV2({
   const [resumingBilling, setResumingBilling] = useState(false);
   const [resumeBillingErr, setResumeBillingErr] = useState("");
   const [resumeBillingNote, setResumeBillingNote] = useState("");
+  const resumeSeqRef = useRef(0);
 
   // These three are shared component state, so switching customers has to
   // clear them: an in-flight resume for A whose response is discarded (see
@@ -4655,12 +4656,18 @@ export default function Customer360ProfileV2({
   }, [customerId]);
 
   const resumeBilling = async () => {
-    // Everything below writes shared component state, so pin the customer
-    // this click belongs to: an admin who starts a resume for A and switches
-    // to B before it settles must not see A's outcome on B's record.
+    // Everything below writes shared component state, so pin THIS attempt:
+    // an admin who starts a resume for A and switches to B must not see A's
+    // outcome on B. A customerId check alone is not enough — going A → B → A
+    // and clicking again would let the first, still-in-flight response land
+    // on the second attempt's result. The sequence number makes each click
+    // the only writer of its own outcome.
+    resumeSeqRef.current += 1;
+    const seq = resumeSeqRef.current;
     const forCustomerId = customerId;
     const stillViewing = () =>
-      String(customerIdRef.current) === String(forCustomerId);
+      resumeSeqRef.current === seq
+      && String(customerIdRef.current) === String(forCustomerId);
 
     setResumingBilling(true);
     setResumeBillingErr("");
@@ -4686,13 +4693,6 @@ export default function Customer360ProfileV2({
         );
       } else {
         resumeLanded = true;
-        // A non-empty list is a warning; an empty one says NOTHING, because
-        // the server computes it best-effort and it is never an all-clear.
-        if (Array.isArray(result?.blockers) && result.blockers.length) {
-          setResumeBillingNote(
-            `Pause cleared, but dues still will not run: ${result.blockers.join(", ").replace(/_/g, " ")}.`,
-          );
-        }
       }
     } catch (err) {
       if (!stillViewing()) return;
