@@ -2095,8 +2095,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
     : Promise.resolve(null);
+  // The render-time treatment guard must know when this load FAILED versus
+  // legitimately returned no rows — an outage-empty product list would let
+  // stale recommendation copy publish unreconciled (codex P1 r25).
+  let productsLoadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
-    knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
+    knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
@@ -2209,7 +2213,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       // product_id get one direct catalog lookup — an ERROR there means the
       // applied classes are UNKNOWN, and recommendation-derived copy is
       // suppressed outright rather than trusted.
-      let categoriesVerified = true;
+      let categoriesVerified = !productsLoadFailed;
       const unresolvedIds = [...new Set(guardProducts.filter((p) => !p.product_category && p.product_id).map((p) => String(p.product_id)))];
       if (unresolvedIds.length) {
         try {
