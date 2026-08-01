@@ -63,8 +63,11 @@ const FILLS = [
   // Pythium ROOT ROT is an ornamental/nursery use on these labels, and since
   // the classifier reads any "pythium" target as turf, listing it here would
   // have put a root-rot claim on lawn reports (pre-push P1).
+  // Banol is propamocarb — Pythium only.
   ['Banol Fungicide', ['Pythium blight', 'Pythium damping-off']],
-  ['Subdue Maxx Fungicide', ['Pythium blight', 'Pythium damping-off']],
+  // Subdue Maxx is mefenoxam, and the turf rate on the Syngenta label covers
+  // yellow tuft alongside the two Pythium entries, so it gets all three.
+  ['Subdue Maxx Fungicide', ['Pythium blight', 'Pythium damping-off', 'Yellow tuft (downy mildew)']],
 
   // ---- Turf herbicide ------------------------------------------------
   ['Barricade 4FL', ['Crabgrass (pre-emergent)', 'Goosegrass (pre-emergent)', 'Annual bluegrass (Poa annua)']],

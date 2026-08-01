@@ -84,7 +84,22 @@ describe('fill empty product target_pests migration', () => {
     oomycete.forEach(([, targets]) => {
       expect(targets.some((t) => /root rot/i.test(t))).toBe(false);
       expect(targets).toContain('Pythium blight');
+      expect(targets).toContain('Pythium damping-off');
     });
+  });
+
+  test('Subdue Maxx carries the yellow tuft its turf rate covers', () => {
+    // The Syngenta turf directions group "Pythium blight / Pythium damping-off
+    // / Yellow tuft (downy mildew)" under one rate. Asserted on the persisted
+    // fill, not just on the classifier — classifying a target the migration
+    // never writes is a capability nothing uses.
+    const [, subdue] = FILLS.find(([n]) => /Subdue Maxx/i.test(n));
+    expect(subdue).toContain('Yellow tuft (downy mildew)');
+    // Within the 3-target prefill cap, so a lawn visit actually sees it.
+    expect(subdue.slice(0, 3)).toContain('Yellow tuft (downy mildew)');
+    // Banol is propamocarb — Pythium only, no yellow tuft.
+    const [, banol] = FILLS.find(([n]) => /Banol/i.test(n));
+    expect(banol.some((t) => /yellow tuft/i.test(t))).toBe(false);
   });
 
   test('no product is filled twice and no list is empty', () => {
