@@ -65,7 +65,7 @@ describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)
     // before the residential "Priced per application" arm.
     const heroStart = src.indexOf('const recurringHeroPriceHtml');
     const hero = src.slice(heroStart, src.indexOf('Priced per application', heroStart));
-    const gate = hero.indexOf('commercialManualAccept ? `');
+    const gate = hero.indexOf('commercialRecurringEstimate ? `');
     expect(gate).toBeGreaterThan(-1);
     const beforeGate = hero.slice(0, gate);
     expect(beforeGate).not.toMatch(/id="monthly-display"/);

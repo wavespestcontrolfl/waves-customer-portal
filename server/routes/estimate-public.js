@@ -4051,13 +4051,19 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // billed like a residential WaveGuard plan). Detected off the priced
   // commercial recurring line; pest-only commercial is quoteRequired (manual
   // proposal) and handled by the commercialProposal copy above.
-  const commercialManualAccept = !locked && (
+  // The commercial IDENTITY of the estimate — used by the hero fork, which
+  // must hold after acceptance too: a reopened accepted commercial link still
+  // shows the monthly contract it approved (codex #3128 r5; locked makes
+  // commercialManualAccept false by design, but the plan is no less
+  // commercial for having been accepted).
+  const commercialRecurringEstimate = (
     estData?.commercialEstimatedPricing === true
     || recurring.some((s) => {
       const k = String(recurringServiceKey(s) || s.service || s.name || '').toLowerCase();
       return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest') || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
     })
   );
+  const commercialManualAccept = !locked && commercialRecurringEstimate;
 
   // Termite trenching review gate: a trenching job is a high-liability structural
   // service (concrete drilling, a chemical soil barrier, and a warranty/retreat
@@ -4590,7 +4596,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
     ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
       ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
-    ` : commercialManualAccept ? `
+    ` : commercialRecurringEstimate ? `
       <div class="big-price" data-mode-only="recurring">
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
         <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
@@ -18488,6 +18494,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // "inspection required" quote-required copy — and is channel-aware
         // about whether the PDF was actually emailed.
         commercialProposal: quoteRequirement.reason === 'commercial_proposal',
+        // Auto-priced commercial (no quote-required proposal): React needs the
+        // commercial identity too — its bundle card keeps the monthly contract
+        // price, mirroring the SSR fork (codex #3128 r5).
+        commercialAutoPriced: isCommercialAutoAcceptEstimate(estimate),
         proposalPdfEmailed: estimateDataForIntelligence?.proposalDelivery?.pdfEmailed === true,
       },
       meta: {

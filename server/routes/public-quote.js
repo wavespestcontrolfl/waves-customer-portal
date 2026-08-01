@@ -1441,15 +1441,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? 'Manual review needed'
       : isOneTimeOnly
         ? `$${oneTimeTotal.toFixed(2)} one-time`
-        : emailPerApp
-          ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
-          : emailMultiRecurring
-            ? 'Priced per application — full breakdown inside'
-            // Commercial proposals keep their monthly figure — the proposal
-            // contract is explicitly monthly and commercial is the documented
-            // exemption (codex #3128 r4).
-            : commercialDetected
-              ? `$${monthly.toFixed(2)}/mo`
+        // Commercial contract check FIRST (codex #3128 r5): commercial
+        // pricers emit perApp + visit counts and the wizard supports
+        // multi-service commercial selections, so both residential branches
+        // below would otherwise describe a pay-monthly proposal per
+        // application. Commercial is the documented exemption.
+        : commercialDetected
+          ? `$${monthly.toFixed(2)}/mo`
+          : emailPerApp
+            ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
+            : emailMultiRecurring
+              ? 'Priced per application — full breakdown inside'
               // Last resort: a residential recurring line whose
               // per-application price could not be derived. Recurring work is
               // never described as a flat monthly charge (audit 2026-08-01) —

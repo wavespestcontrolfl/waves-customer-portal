@@ -5068,6 +5068,11 @@ function EstimateViewPageInner() {
   })();
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
+  // Commercial identity for pricing display: formal proposals OR auto-priced
+  // commercial estimates (cta.commercialAutoPriced) — the bundle card keeps
+  // the monthly contract price for both, mirroring the SSR fork (codex #3128
+  // r5: commercialProposal alone covered only quote-required proposals).
+  const isCommercialEstimate = isCommercialProposal || cta?.commercialAutoPriced === true;
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
 
   // Service/price cards — shared by the live configurator (below) and the
@@ -5136,7 +5141,7 @@ function EstimateViewPageInner() {
                 key={section.key}
                 section={section}
                 servicesLength={services.length}
-                commercialProposal={isCommercialProposal}
+                commercialProposal={isCommercialEstimate}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}
