@@ -238,10 +238,34 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // failure/backoff path instead of emailing possibly-stale copy (codex P1
   // #3093 r17).
   const heldPayload = (delivery.payload && typeof delivery.payload === 'object') ? delivery.payload : {};
+  const heldForGrounding = !!(heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id);
   let lawnFenceCheck = null;
   let lawnSealRenewTimer = null;
   let releaseLawnSeal = null;
-  if (heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id) {
+
+  // EVERY lawn-report delivery gets the fence, not only delayed ones (issue
+  // #3135). A completion whose regeneration settled inside the hold window
+  // enqueues a normal job, and that path previously ran no version check and
+  // took no send seal — so an admin regeneration starting mid-render could
+  // overwrite the linked report while the older attachment was already on its
+  // way. The payload carries the assessment id now; falling back to the
+  // record backlink also covers jobs enqueued before that shipped. A record
+  // with no lawn assessment (pest, termite, …) resolves to null and is
+  // unaffected.
+  let fencedAssessmentId = heldPayload.lawn_assessment_id || null;
+  if (!fencedAssessmentId) {
+    fencedAssessmentId = await knex('lawn_assessments')
+      .where({ service_record_id: delivery.service_record_id })
+      .orderBy('created_at', 'desc')
+      .first('id')
+      .then((row) => row?.id || null)
+      .catch((lookupErr) => {
+        logger.warn(`[delivery-queue] lawn assessment lookup failed for record ${delivery.service_record_id}: ${lookupErr.message}`);
+        return null;
+      });
+  }
+
+  if (heldForGrounding) {
     const KnowledgeBridge = require('../knowledge-bridge');
     // Backlink recovery (codex P1 r40): a completion that crashed before
     // writing service_record_id leaves the assessment unlinked, and
@@ -258,10 +282,14 @@ async function processServiceReportDelivery(delivery, knex = db) {
       const status = await markDeliveryFailed(delivery, new Error(`grounding readiness unverified: ${sanitized.error}`), knex);
       return { status, error: sanitized.error };
     }
+  }
+
+  if (fencedAssessmentId) {
+    const KnowledgeBridge = require('../knowledge-bridge');
     // Capture the settled copy's version NOW and re-verify it after the
     // attachment renders, right before dispatch (codex P1 r36): a run that
     // starts after this one-time check must defer the send, not race it.
-    const assessmentId = heldPayload.lawn_assessment_id;
+    const assessmentId = fencedAssessmentId;
     let versionAtCheck = null;
     try {
       const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
@@ -313,7 +341,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
       token: delivery.report_token,
       reportUrl: delivery.report_url,
       pdfUrl: delivery.pdf_url,
-      forceFreshPdf: !!(heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id),
+      forceFreshPdf: heldForGrounding,
       verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {

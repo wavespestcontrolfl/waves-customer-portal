@@ -8310,7 +8310,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // The delivery worker enforces grounding readiness itself for
               // held jobs (elapsed time is not proof the settlement ran —
               // codex P1 r17).
-              ...(emailHoldMs ? { awaiting_grounding: true, lawn_assessment_id: completedLawnAssessmentId } : {}),
+              // The assessment identity rides on EVERY lawn-report delivery,
+              // not just held ones (issue #3135). When regeneration settles
+              // inside the hold window the job is enqueued normally, and
+              // without this the worker had no assessment to fence — that
+              // delivery dispatched with no version check and no send seal.
+              // awaiting_grounding stays hold-only: it means "sanitize before
+              // sending", which is a held-path obligation.
+              ...(completedLawnAssessmentId ? { lawn_assessment_id: completedLawnAssessmentId } : {}),
+              ...(emailHoldMs ? { awaiting_grounding: true } : {}),
             },
           });
           if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {

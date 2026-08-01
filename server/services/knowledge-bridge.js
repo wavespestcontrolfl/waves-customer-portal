@@ -1204,6 +1204,26 @@ Return a JSON object with:
           // payload this write produces (codex P1 r29).
           const remainingRuns = activeGenerationRuns(existing);
           delete remainingRuns[runId];
+          // The send seal OUTRANKS grounding (issue #3135). Only new-run
+          // registration consulted the seal, so a run whose lease expired
+          // mid-flight could still land here while a dispatch is reading this
+          // exact copy — and an emailed attachment is unrecallable. Discard
+          // this result rather than defer it: deferring only moves the
+          // divergence later, leaving the permanent report disagreeing with
+          // what the customer was already mailed. The fence entry still
+          // clears, and updated_at is deliberately NOT bumped because it
+          // participates in the sealing caller's version.
+          if (sendSealActive(existing)) {
+            logger.warn(`[knowledge-bridge] recommendation write for ${assessmentId} discarded — send seal active (an attachment is dispatching from the settled copy)`);
+            const kept = { ...(existing || {}) };
+            if (Object.keys(remainingRuns).length) kept._generationRuns = remainingRuns;
+            else delete kept._generationRuns;
+            delete kept._generationInFlightUntil;
+            delete kept._generationRunId;
+            await trx('lawn_assessments').where({ id: assessmentId })
+              .update({ recommendations: JSON.stringify(kept) });
+            return null;
+          }
           if (existingGrounded && !iAmGrounded) {
             logger.info(`[knowledge-bridge] ungrounded recommendation result for ${assessmentId} discarded — grounded copy already stored`);
             const kept = { ...existing };
@@ -1415,7 +1435,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid };
+module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;
