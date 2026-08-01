@@ -56,19 +56,41 @@ describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
 
-  test('the uncovered-total hero names the billing unit — combined totals only behind the commercial gate', () => {
+  test('the uncovered-total hero names the billing unit — combined totals only behind the monthly-billed gate', () => {
     expect(src).toContain('Priced per application');
-    // The combined cadence total may render ONLY inside the
-    // commercialManualAccept arm (commercial proposals are the documented
-    // exemption — their contract IS "Approve & pay monthly"; codex #3128 r3).
-    // Every interpolation of the combined total must sit after that gate and
-    // before the residential "Priced per application" arm.
+    // The combined cadence total may render ONLY inside the monthly-billed
+    // arm. Two identities qualify and nothing else: commercial (their
+    // contract IS "Approve & pay monthly"; codex #3128 r3) and a preserved
+    // monthly member (accept keeps membership dues; codex #3128 r6). Every
+    // interpolation of the combined total must sit after that gate and before
+    // the residential "Priced per application" arm.
     const heroStart = src.indexOf('const recurringHeroPriceHtml');
     const hero = src.slice(heroStart, src.indexOf('Priced per application', heroStart));
-    const gate = hero.indexOf('commercialRecurringEstimate ? `');
+    const gate = hero.indexOf('recurringBilledMonthly ? `');
     expect(gate).toBeGreaterThan(-1);
     const beforeGate = hero.slice(0, gate);
     expect(beforeGate).not.toMatch(/id="monthly-display"/);
+  });
+
+  test('the monthly-billed identity is exactly commercial OR a preserved monthly member', () => {
+    expect(src).toContain('const recurringBilledMonthly = commercialRecurringEstimate || monthlyBilledEstimate;');
+    // The residential half is resolved LIVE from the customer lane by the
+    // route (never a stored field), through the SAME predicate that strips
+    // billedPerApplication flags — a divergent source is how the SSR hero and
+    // the pricing bundle disagreed in the first place.
+    expect(src).toContain('opts.monthlyBilledEstimate === true');
+    expect(src).toMatch(/monthlyBilledEstimate = !\(await perApplicationBillingColumnsExist\(\)\)\s*\|\| await estimateCustomerPreservesMonthlyBilling\(estimate\)/);
+  });
+
+  test('the per-application service cards never render for a monthly-billed plan', () => {
+    // The cards say "$X / application" on every row, so the monthly gate has
+    // to come FIRST in the hero chain — a commercial or preserved-monthly
+    // plan whose rows happen to reconcile to the total would otherwise be
+    // quoted in a unit it is not billed in (codex #3128 r6).
+    const heroStart = src.indexOf('const recurringHeroPriceHtml');
+    const hero = src.slice(heroStart, src.indexOf('Priced per application', heroStart));
+    expect(hero.indexOf('recurringBilledMonthly ? `'))
+      .toBeLessThan(hero.indexOf('serviceCardsCoverRecurringTotal ? `'));
   });
 
   test('preference rows quote the per-application amount, not a cadence spread', () => {

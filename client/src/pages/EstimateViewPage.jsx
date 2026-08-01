@@ -3364,7 +3364,10 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
 export function ServiceSection({
   section,
   servicesLength = 1,
-  commercialProposal = false,
+  // The plan is charged BY THE MONTH — commercial (proposal or auto-priced) or
+  // a current monthly member whose accept preserves membership billing. Either
+  // way the bundle card keeps its combined total (codex #3128 r6).
+  billsMonthly = false,
   selectedFrequencyKey,
   selectedAddOns = new Set(),
   onFrequencyChange,
@@ -3520,11 +3523,12 @@ export function ServiceSection({
             // is a plan total the estimate surface must not carry ("per
             // month" audit 2026-08-01) — its headline now names the billing
             // unit and the itemized rows carry the per-application prices.
-            // Commercial proposals are the documented exemption (approval is
-            // explicitly monthly and rows may carry no application count), so
-            // their bundle keeps the price — mirroring the SSR
-            // commercialManualAccept fork (codex #3128 r4).
-            suppressCombinedTotal={section.key === 'bundle' && !commercialProposal}
+            // Monthly-billed plans are the exemption: commercial approval is
+            // explicitly monthly (and rows may carry no application count),
+            // and a preserved monthly member's accept keeps monthly dues —
+            // for both, the combined total IS the charge. Mirrors the SSR
+            // recurringBilledMonthly fork (codex #3128 r4/r6).
+            suppressCombinedTotal={section.key === 'bundle' && !billsMonthly}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -5073,6 +5077,13 @@ function EstimateViewPageInner() {
   // the monthly contract price for both, mirroring the SSR fork (codex #3128
   // r5: commercialProposal alone covered only quote-required proposals).
   const isCommercialEstimate = isCommercialProposal || cta?.commercialAutoPriced === true;
+  // The second monthly-billed identity (codex #3128 r6): a current monthly
+  // member keeps membership billing at accept, so their bundle's combined
+  // total is the real charge — suppressing it would replace a true monthly
+  // amount with a per-application headline the account never bills. Resolved
+  // server-side from the live customer lane (the same predicate that strips
+  // billedPerApplication flags); absent → false → today's behavior.
+  const billsMonthly = isCommercialEstimate || cta?.monthlyBilled === true;
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
 
   // Service/price cards — shared by the live configurator (below) and the
@@ -5141,7 +5152,7 @@ function EstimateViewPageInner() {
                 key={section.key}
                 section={section}
                 servicesLength={services.length}
-                commercialProposal={isCommercialEstimate}
+                billsMonthly={billsMonthly}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}

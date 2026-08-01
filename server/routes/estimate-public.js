@@ -4064,6 +4064,15 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     })
   );
   const commercialManualAccept = !locked && commercialRecurringEstimate;
+  // The OTHER identity that bills monthly: a current monthly member whose
+  // accept preserves membership billing (#2978 — the audience buildPricingBundle
+  // strips every billedPerApplication flag for). Resolved live by the route and
+  // passed in; false when the route couldn't resolve it, which keeps the
+  // per-application default (codex #3128 r6).
+  const monthlyBilledEstimate = opts.monthlyBilledEstimate === true;
+  // Either identity means the plan is charged by the month, so neither may
+  // render the per-application service cards or the per-application fallback.
+  const recurringBilledMonthly = commercialRecurringEstimate || monthlyBilledEstimate;
 
   // Termite trenching review gate: a trenching job is a high-liability structural
   // service (concrete drilling, a chemical soil barrier, and a warranty/retreat
@@ -4594,17 +4603,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
       <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
-    ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
-      ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
-    ` : commercialRecurringEstimate ? `
+    ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (recurringBilledMonthly ? `
       <div class="big-price" data-mode-only="recurring">
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
         <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
         <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
-        <span class="tier-lbl">Commercial</span>
+        <span class="tier-lbl">${commercialRecurringEstimate ? 'Commercial' : `WaveGuard ${escapeHtml(tier)}`}</span>
       </div>
       ${manualDiscountHtml}
       ${supplementalServiceSummaryHtml}
+    ` : serviceCardsCoverRecurringTotal ? `
+      ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
     ` : `
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:34px">Priced per application</span>
@@ -7550,6 +7559,25 @@ async function handleEstimateView(req, res, next) {
       ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true })
       : 0;
 
+    // Does accepting this estimate bill MONTHLY? (codex #3128 r6) The
+    // per-application hero is the residential default, but a current monthly
+    // member keeps monthly membership billing at accept — the exact audience
+    // buildPricingBundle strips every billedPerApplication flag for — so
+    // labelling their plan "Priced per application" misstates a real charge.
+    // Same two conditions, same order, as buildPricingBundle: no
+    // per-application columns means every accept bills monthly, otherwise the
+    // live lane decides. Async, so resolve here and pass into the (sync)
+    // renderPage. Fail-closed on error: the identity goes UNRESOLVED and the
+    // page keeps today's per-application copy rather than inventing a monthly
+    // amount.
+    let monthlyBilledEstimate = false;
+    try {
+      monthlyBilledEstimate = !(await perApplicationBillingColumnsExist())
+        || await estimateCustomerPreservesMonthlyBilling(estimate);
+    } catch (e) {
+      logger.warn(`[estimate-view] monthly-billing identity unresolved for estimate ${estimate.id}: ${e.message}`);
+    }
+
     // Display-only: fill contact gaps from the linked customer/lead so the
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
@@ -7600,7 +7628,7 @@ async function handleEstimateView(req, res, next) {
       // Same PUBLIC boundary as /data: renderPage only reads whitelisted
       // fields today, but projecting here keeps a future SSR embed from
       // shipping the staff account context to the unauthenticated page.
-    }, estData, publicMembershipView(membership), { showYourWork, prepayBaseRate });
+    }, estData, publicMembershipView(membership), { showYourWork, prepayBaseRate, monthlyBilledEstimate });
   } catch (err) { next(err); }
 }
 
@@ -18498,6 +18526,21 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // commercial identity too — its bundle card keeps the monthly contract
         // price, mirroring the SSR fork (codex #3128 r5).
         commercialAutoPriced: isCommercialAutoAcceptEstimate(estimate),
+        // The non-commercial monthly identity (codex #3128 r6): a current
+        // monthly member's accept preserves membership billing, so their
+        // bundle's combined total is the real charge and must not be replaced
+        // by a per-application headline. Same two conditions, same order, as
+        // buildPricingBundle's flag stripping; a lookup failure resolves false
+        // and keeps the per-application default.
+        monthlyBilled: await (async () => {
+          try {
+            return !(await perApplicationBillingColumnsExist())
+              || await estimateCustomerPreservesMonthlyBilling(estimate);
+          } catch (e) {
+            logger.warn(`[estimate-data] monthly-billing identity unresolved for estimate ${estimate.id}: ${e.message}`);
+            return false;
+          }
+        })(),
         proposalPdfEmailed: estimateDataForIntelligence?.proposalDelivery?.pdfEmailed === true,
       },
       meta: {
