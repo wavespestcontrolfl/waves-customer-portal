@@ -118,7 +118,18 @@ export function ConfirmEvidence({ payload }) {
     // it's being asked to verify (or save to the account).
     p.caller_phone && { label: "Caller dialed from", value: p.caller_phone },
     p.caller_phone && p.matched_customer_name && { label: "Linked to", value: p.matched_customer_name },
-    p.caller_phone && { label: "On file", value: p.on_file_phone || "no primary phone" },
+    // "On file" only makes sense on the phone-mismatch card (matched customer
+    // present) — the dropped-call card also carries caller_phone but has no
+    // account to compare against.
+    p.caller_phone && p.matched_customer_name && { label: "On file", value: p.on_file_phone || "no primary phone" },
+    // call_dropped_mid_intake: whether the automated address-request text
+    // went out, so the office knows to watch for a reply vs. call back cold.
+    p.address_request_sms && {
+      label: "Address text",
+      value: p.address_request_sms === "sent"
+        ? "sent — watch for their reply"
+        : `not sent (${String(p.address_request_sms).replace(/_/g, " ")}) — call them back`,
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

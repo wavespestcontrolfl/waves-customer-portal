@@ -588,6 +588,7 @@ const CONFIRM_REASON_TEXT = {
   email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
   secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
+  call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — call the prospect back',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -7019,6 +7020,58 @@ const CallRecordingProcessor = {
             });
           } catch (smsErr) {
             logger.warn(`[call-proc] voicemail text-back failed (non-blocking): ${smsErr.message}`);
+          }
+        }
+
+        // Dropped-call detector (owner directive 2026-08-01): a LIVE intake
+        // conversation (not a voicemail) that ran MIN_CALL_SECONDS+, ended
+        // with no farewell in the transcript tail, and left the service
+        // address uncaptured is a drop-mid-intake — an engaged caller who got
+        // cut off (the 2026-07-27 Juan case: 12 minutes, dropped at the
+        // address exchange, no callback ever happened). Always opens a
+        // call-back review card; when the caller is a genuine NEW prospect
+        // (valid V2 extraction whose call_nature is a sales inquiry, no
+        // linked customer, not spam) the gated one-shot address-request text
+        // also goes out — all send-side gates (feature gate, quiet hours,
+        // one-per-phone claim, landline, STOP suppression, template kill
+        // switch) live in the service. Best-effort: a detector or text
+        // failure never breaks call processing.
+        if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam && transcription) {
+          try {
+            const DroppedCallSms = require('./dropped-call-sms');
+            const droppedMidIntake = Number(call.duration_seconds) >= DroppedCallSms.MIN_CALL_SECONDS
+              && !String(extracted.address_line1 || '').trim()
+              && DroppedCallSms.endedAbruptly(transcription);
+            if (droppedMidIntake) {
+              let smsOutcome = { sent: false, skipped: 'not_eligible' };
+              const genuineNewProspect = !customerId
+                && v2Result?.status === 'valid'
+                && !v2NonCustomerCallNature;
+              if (genuineNewProspect) {
+                smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({ leadId, extracted, call, phone });
+              }
+              await db('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag: 'call_dropped_mid_intake',
+                  extraction: (v2Result?.status === 'valid' && v2Result.extraction) || null,
+                  extraPayload: {
+                    caller_phone: phone || null,
+                    dropped_after_seconds: Number(call.duration_seconds) || null,
+                    address_request_sms: smsOutcome.sent ? 'sent' : (smsOutcome.skipped || 'not_sent'),
+                  },
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore();
+              // Mirror into the bridge list so the finalizer stamps
+              // review_status='open' and the lead timeline names the reason.
+              if (!bridgeNeedsConfirmation.includes('call_dropped_mid_intake')) {
+                bridgeNeedsConfirmation.push('call_dropped_mid_intake');
+              }
+              logger.info(`[call-proc] Dropped call mid-intake detected for ${maskSid(callSid)} — review card opened (sms: ${smsOutcome.sent ? 'sent' : smsOutcome.skipped || 'skipped'})`);
+            }
+          } catch (dropErr) {
+            logger.warn(`[call-proc] dropped-call detector failed (non-blocking): ${dropErr.message}`);
           }
         }
       } catch (leadErr) {
