@@ -46,6 +46,7 @@ const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = requir
 const { validateNoCustomerEmoji } = require('./validators/voice');
 const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
+const { normalizeGsmPunctuation } = require('./gsm-normalize');
 const { persistAudit } = require('./audit');
 const { sendViaTwilio } = require('./providers/twilio-sms');
 const { isEnabled } = require('../../config/feature-gates');
@@ -142,6 +143,16 @@ async function sendCustomerMessage(input) {
   const { preDispatchCheck, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
+  // Typographic punctuation (curly quotes, em dashes, real ellipses) forces
+  // the whole body into UCS-2 — 67 chars/segment instead of 153 — silently
+  // multiplying segment count, and multi-segment texts have failed to reach
+  // handsets that still ACK delivery. Normalizing at this choke point covers
+  // every source at once: templates, hardcoded builders, interpolated
+  // variables, AI drafts, and manual admin sends. Before countSegments so
+  // the audit row records what actually goes to the provider.
+  if (sendInput.channel === 'sms' && typeof sendInput.body === 'string') {
+    sendInput.body = normalizeGsmPunctuation(sendInput.body);
+  }
 
   // 4. Load contact state once (consent + suppression share the lookup)
   let contactState = await loadContactState(sendInput);
