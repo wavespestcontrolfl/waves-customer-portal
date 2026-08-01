@@ -228,6 +228,20 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     }
   });
 
+  test('marketed tokens in manufacturer-prefixed names are guarded (r35)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Hold off on Stonewall until fall.', reason: 'x', timeframe: 'y' }],
+    }, [{ product_name: 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', product_category: 'herbicide' }]);
+    expect(dropped).toBe(1);
+  });
+
+  test('generic catalog words do not become product identities (r35)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Hold off on liquid feeding until the lawn greens up.', reason: 'x', timeframe: 'y' }],
+    }, [{ product_name: 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', product_category: 'herbicide' }]);
+    expect(dropped).toBe(0);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

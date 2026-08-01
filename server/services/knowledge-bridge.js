@@ -323,12 +323,32 @@ function productNameTermSource(name) {
   for (const token of base.split(/\s+/)) {
     if (/^[A-Z]{3,}$/.test(token)) variants.add(esc(token));
   }
+  // Distinctive MARKETED tokens inside manufacturer-prefixed names —
+  // "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide"
+  // shortens naturally to "Stonewall" (codex P1 r33). 4+ alpha chars, minus
+  // the generic descriptors that would collide with ordinary lawn copy.
+  for (const token of base.split(/\s+/)) {
+    const word = token.replace(/[^A-Za-z-]/g, '');
+    if (!/^[A-Za-z][A-Za-z-]{3,}$/.test(word)) continue;
+    if (GENERIC_NAME_TOKENS.has(word.toLowerCase())) continue;
+    variants.add(esc(word));
+  }
   for (const m of clean.matchAll(/\(([^)]+)\)/g)) {
     const alias = m[1].trim();
     if (/^[A-Za-z][\w-]{3,}$/.test(alias)) variants.add(esc(alias));
   }
   return [...variants].join('|');
 }
+
+// Words that appear in catalog names but are far too generic to guard as a
+// product identity — "Hold off on liquid feeding" must not match a product
+// merely named "... Liquid ...".
+const GENERIC_NAME_TOKENS = new Set([
+  'liquid', 'granular', 'turf', 'lawn', 'grass', 'professional', 'premium', 'select',
+  'ultra', 'plus', 'formula', 'brand', 'blend', 'spray', 'concentrate', 'control',
+  'herbicide', 'fungicide', 'insecticide', 'fertilizer', 'micronutrient', 'weed',
+  'pre-emergent', 'emergent', 'ornamental', 'with', 'and', 'for',
+]);
 
 // Generic fallback terms for applied rows whose category is genuinely
 // unresolved (admin-inventory stores null categories as supported input) —
@@ -778,13 +798,31 @@ const KnowledgeBridge = {
       if (parsed) {
         ({ parsed, dropped } = sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts));
       }
-      if (!dropped && !summaryContradicts) return { changed: false, dropped: 0 };
+      // SANITATION-FINAL marker (codex P1 r35): when the applied set was
+      // authoritatively read and the stored copy is reconciled, that copy is
+      // FINAL — a resumed completion must not re-run the nondeterministic
+      // LLM and overwrite a report whose attachment already went out.
+      // Persisted on BOTH the clean-return and changed paths.
+      if (!dropped && !summaryContradicts) {
+        const already = parsed && parsed._sanitizationFinal === true;
+        if (!already) {
+          const marked = { ...(parsed || {}), _sanitizationFinal: true };
+          await trx('lawn_assessments').where({ id: assessmentId })
+            .update({ recommendations: JSON.stringify(marked), updated_at: new Date() });
+        }
+        return { changed: false, dropped: 0 };
+      }
       const update = { updated_at: new Date() };
       if (summaryContradicts) {
         update.ai_summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
         if (parsed) parsed.summary = update.ai_summary;
       }
-      if (parsed && dropped) update.recommendations = JSON.stringify(parsed);
+      if (parsed) {
+        parsed._sanitizationFinal = true;
+        update.recommendations = JSON.stringify(parsed);
+      } else {
+        update.recommendations = JSON.stringify({ _sanitizationFinal: true });
+      }
       await trx('lawn_assessments').where({ id: assessmentId }).update(update);
       logger.warn(`[knowledge-bridge] stored recommendations sanitized for assessment ${assessmentId} (${dropped} field(s) dropped${summaryContradicts ? ', summary neutralized' : ''})`);
       return { changed: true, dropped };

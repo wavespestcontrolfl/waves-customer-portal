@@ -5646,7 +5646,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const priorRow = await db('lawn_assessments').where({ id: completedAssessment.id }).first('recommendations');
           const prior = typeof priorRow?.recommendations === 'string'
             ? JSON.parse(priorRow.recommendations) : (priorRow?.recommendations || null);
-          alreadyGrounded = !!(prior && typeof prior === 'object' && !Array.isArray(prior) && prior._groundedInApplications);
+          // Sanitation-final copy counts as final too (codex P1 r35): the
+          // deterministic pass ran against an authoritative application
+          // read, and its result may already be in a customer's hands.
+          alreadyGrounded = !!(prior && typeof prior === 'object' && !Array.isArray(prior)
+            && (prior._groundedInApplications || prior._sanitizationFinal));
         } catch { alreadyGrounded = false; }
         if (alreadyGrounded) {
           lawnRecRegenGrounded = true;
