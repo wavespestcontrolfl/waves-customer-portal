@@ -155,8 +155,24 @@ function estimateIsPriceLocked(estimate) {
 async function resolveLivePricing(estimate) {
   if (estimateIsPriceLocked(estimate)) return null;
   try {
-    const { buildPricingBundle, defaultFrequencyFromList } = require('../routes/estimate-public');
+    const {
+      buildPricingBundle,
+      defaultFrequencyFromList,
+      reconcileFrozenMembershipSnapshot,
+    } = require('../routes/estimate-public');
     if (typeof buildPricingBundle !== 'function') return null;
+    // The page reconciles a lapsed membership BEFORE it builds the bundle: a
+    // snapshot frozen while the customer was still a member keeps prior-service
+    // artifacts and a member-priced pricingBundle that the fast path would
+    // happily serve. Reconciling drops those artifacts, reprices, refreshes the
+    // row's totals in place and invalidates the stale bundle — so calling it
+    // first is what makes this resolution identical to the page's, rather than
+    // quoting a discount the accept path will not honour (codex #3120 r7).
+    // Its own first guard is the same price-lock predicate used above, so a
+    // committed deal is never retroactively repriced by this call.
+    if (typeof reconcileFrozenMembershipSnapshot === 'function') {
+      await reconcileFrozenMembershipSnapshot(estimate);
+    }
     const bundle = await buildPricingBundle(estimate);
     if (!bundle || typeof bundle !== 'object') return null;
     const sellable = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])

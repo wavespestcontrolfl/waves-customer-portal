@@ -13,9 +13,14 @@ const mockMatchByPhone = jest.fn();
 // An OUTSTANDING quote is described from the bundle the page renders; a
 // price-LOCKED one from the pricing it was accepted at (codex #3120 r4 + r6).
 const mockBuildPricingBundle = jest.fn();
+// The page reconciles a lapsed membership before building the bundle; the PDF
+// must resolve through the same order or it quotes a stale member discount
+// (codex #3120 r7).
+const mockReconcileMembership = jest.fn();
 jest.mock('../routes/estimate-public', () => ({
   matchAcceptCustomerByPhone: mockMatchByPhone,
   buildPricingBundle: mockBuildPricingBundle,
+  reconcileFrozenMembershipSnapshot: mockReconcileMembership,
   // Real implementation — selected → recommended → first.
   defaultFrequencyFromList: (list = []) => list.find((f) => f?.selected || f?.isSelected)
     || list.find((f) => f?.recommended || f?.isRecommended)
@@ -185,6 +190,23 @@ describe('pricing authority: locked estimates keep their accepted pricing', () =
     const ctx = await resolveProposalBillingContext(estimate);
     expect(ctx.livePricing).toEqual({ bundle: LIVE_BUNDLE, defaultCandidate: REBUILT });
     expect(mockBuildPricingBundle).toHaveBeenCalledWith(estimate);
+  });
+
+  it('reconciles a lapsed membership BEFORE building the bundle', async () => {
+    stubTables({ customer: perAppCustomer });
+    const order = [];
+    mockReconcileMembership.mockImplementation(async () => { order.push('reconcile'); });
+    mockBuildPricingBundle.mockImplementation(async () => { order.push('build'); return LIVE_BUNDLE; });
+    const estimate = { id: 'e1', customer_id: 'c1', status: 'sent' };
+    await resolveProposalBillingContext(estimate);
+    expect(order).toEqual(['reconcile', 'build']);
+    expect(mockReconcileMembership).toHaveBeenCalledWith(estimate);
+  });
+
+  it('never reconciles a locked estimate — that deal is committed', async () => {
+    stubTables({ customer: perAppCustomer });
+    await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1', status: 'accepted' });
+    expect(mockReconcileMembership).not.toHaveBeenCalled();
   });
 
   it('never rebuilds for an ACCEPTED estimate', async () => {
