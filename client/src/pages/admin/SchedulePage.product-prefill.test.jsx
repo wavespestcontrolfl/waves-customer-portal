@@ -3,13 +3,47 @@ import { describe, expect, it } from "vitest";
 import {
   allowedTargetLinesForServiceType,
   allowedTargetLinesForVisit,
+  ALL_TARGET_LINES,
   defaultApplicationMethod,
   derivedTotalAmount,
   filterLabelTargetsForLine,
+  labelTargetLines,
   MAX_LABEL_TARGET_PREFILL,
   productControlsTargets,
   productTargetsNutrition,
 } from "./SchedulePage.jsx";
+
+// Every distinct products_catalog.target_pests value in prod on 2026-08-01.
+// Classification fails CLOSED — an unclassified target prefills nowhere — so
+// this fixture is the tripwire: add a target the patterns don't recognize and
+// this test fails instead of the prefill quietly going empty in the field.
+const CATALOG_TARGETS = [
+  "Aedes mosquitoes (container breeders)", "American cockroaches",
+  "Annual bluegrass (Poa annua)", "Anthracnose", "Aphids", "Bed bugs",
+  "Big-headed ants", "Billbugs", "Broad mites", "Brown patch",
+  "Brown patch / large patch", "Calcium deficiency", "Carpenter ants",
+  "Caterpillars", "Chamberbitter", "Chickweed", "Chilli thrips", "Clover",
+  "Color & density", "Crabgrass", "Crabgrass (pre-emergent)", "Crazy ants",
+  "Crickets", "Darkling beetles", "Deep green color", "Dollar spot",
+  "Dollarweed", "Doveweed", "Drain flies", "Drywood termites", "Fairy ring",
+  "Fall armyworms", "Ficus whitefly", "Fire ants", "Fleas", "Formosan termites",
+  "Foxtail", "German cockroaches", "Ghost ants", "Goosegrass",
+  "Goosegrass (pre-emergent)", "Gray leaf spot", "Green kyllinga",
+  "House flies", "House mice", "Iron chlorosis (yellowing turf)", "Kyllinga",
+  "Large patch", "Leafminers", "Leaf spot", "Mealybugs", "Mosquitoes",
+  "mosquito larvae", "Mosquito larvae (standing water)", "Nitrogen green-up",
+  "Norway rats", "Pantry moths & beetles", "Paper wasps", "Pharaoh ants",
+  "Poa annua", "Potassium deficiency", "Potassium root support",
+  "Purple nutsedge", "Rice flatsedge", "Roof rats",
+  "Root strength & stress tolerance", "Rugose spiraling whitefly",
+  "Scale insects", "Scorpions", "Silverfish", "Smokybrown cockroaches",
+  "Soft scale insects", "Southern chinch bugs", "Spider mites", "Spurge",
+  "subterranean termites", "Subterranean termites", "Summer patch",
+  "Take-all root rot", "Tawny mole crickets", "Ticks", "Torpedograss",
+  "Tropical sod webworms", "Twospotted spider mites", "Whiteflies",
+  "White-footed ants", "White grubs", "Widow spiders", "Wolf spiders",
+  "Wood borers", "Wood-boring beetles", "Yellow nutsedge",
+];
 
 describe("defaultApplicationMethod", () => {
   it("routes liquid fertilizers to broadcast spray, not granular", () => {
@@ -159,6 +193,63 @@ describe("allowedTargetLinesForVisit", () => {
     expect(allowedTargetLinesForVisit({})).toEqual(
       allowedTargetLinesForServiceType(undefined),
     );
+  });
+});
+
+describe("labelTargetLines", () => {
+  it("classifies every target in the live catalog", () => {
+    const unclassified = CATALOG_TARGETS.filter((t) => labelTargetLines(t).length === 0);
+    expect(unclassified).toEqual([]);
+  });
+
+  it("fails closed on a target no pattern recognizes", () => {
+    // The old behaviour passed these on EVERY line, which is how a pest visit
+    // ended up prefilling "Chickweed" after its real weeds were filtered out.
+    expect(labelTargetLines("Glyptotendipes paripes")).toEqual([]);
+    expect(filterLabelTargetsForLine(["Glyptotendipes paripes"], lines("Quarterly Pest Control")))
+      .toEqual([]);
+  });
+
+  it("keeps lawn weeds and turf diseases off a pest visit", () => {
+    // Every one of these used to fail open.
+    const wasFailOpen = [
+      "Chickweed",
+      "Foxtail",
+      "Rice flatsedge",
+      "Anthracnose",
+      "Summer patch",
+      "Leaf spot",
+    ];
+    wasFailOpen.forEach((t) => expect(labelTargetLines(t)).toEqual(["lawn"]));
+    expect(filterLabelTargetsForLine(wasFailOpen, lines("Quarterly Pest Control"))).toEqual([]);
+    // SpeedZone Southern on a pest visit now prefills nothing at all, rather
+    // than dropping its three real weeds and keeping the unrecognized one.
+    expect(
+      filterLabelTargetsForLine(
+        ["Dollarweed", "Clover", "Spurge", "Chickweed"],
+        lines("Quarterly Pest Control"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("still distinguishes ornamental leaf spot from the turf one", () => {
+    expect(labelTargetLines("Fungal leaf spot")).toEqual(["tree_shrub"]);
+    expect(labelTargetLines("Gray leaf spot")).toEqual(["lawn"]);
+    expect(labelTargetLines("Leaf spot")).toEqual(["lawn"]);
+  });
+
+  it("passes nutrition goals on every line", () => {
+    // A fertilizer gets applied to turf and to palms alike.
+    ["Nitrogen green-up", "Potassium deficiency", "Color & density"].forEach((t) =>
+      expect(labelTargetLines(t)).toEqual(ALL_TARGET_LINES),
+    );
+    // But an explicitly turf-worded goal stays on the lawn line.
+    expect(labelTargetLines("Iron chlorosis (yellowing turf)")).toEqual(["lawn"]);
+  });
+
+  it("reads darkling beetles as a structural pest", () => {
+    // Elector PSP carries it next to house flies.
+    expect(labelTargetLines("Darkling beetles")).toEqual(["pest"]);
   });
 });
 

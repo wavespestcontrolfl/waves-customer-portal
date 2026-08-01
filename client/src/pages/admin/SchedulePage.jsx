@@ -15632,18 +15632,34 @@ function normalizeLabelTargets(value) {
   return v.map((t) => String(t).trim()).filter(Boolean);
 }
 
+// Every service line a label target can be classified onto.
+export const ALL_TARGET_LINES = ["pest", "lawn", "tree_shrub", "termite", "mosquito"];
+
 // Turf-only label targets that must not prefill on a structural-pest (or any
 // non-lawn) visit: turf insects, turf diseases, and weeds. Matching is
 // substring-loose because catalog target_pests values are free text pulled
 // from labels ("Southern Chinch Bugs", "sod webworm", "chinch bug (southern)").
 const LAWN_ONLY_TARGET_RE =
-  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|kyllinga|dollarweed|doveweed|chamberbitter|spurge|clover|nutsedge|\bsedge\b|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|gray leaf spot|take-?all|fairy ring|pythium|turf/i;
+  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|turf/i;
 
 // Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
 // borers, and foliar issues. Checked BEFORE the structural set so "Spider
 // mites" classifies as ornamental instead of matching the spider pattern.
 const ORNAMENTAL_ONLY_TARGET_RE =
   /whitefl|spiraling|scale insect|soft scale|mealybug|aphid|thrips|\bmites?\b|leafminer|\bborer|weevil|sooty mold|powdery mildew|fungal leaf spot/i;
+
+// "Fungal leaf spot" is ornamental, but bare "Leaf spot" (and "Gray leaf
+// spot") come off turf fungicide labels — Medallion SC and Armada 50 WDG both
+// carry it alongside brown patch. The lawn pattern claims a bare "leaf spot",
+// so the ornamental form needs claiming first.
+const ORNAMENTAL_LEAF_SPOT_RE = /fungal leaf spot/i;
+
+// Nutrition goals, not pests: what a feeding is meant to correct or stimulate.
+// Fertilizer-family products get applied on turf AND on palms/ornamentals, so
+// these read on every line. Checked AFTER the turf pattern so an explicitly
+// turf-worded goal ("Iron chlorosis (yellowing turf)") stays a lawn target.
+const NUTRITION_TARGET_RE =
+  /deficiency|green-?up|deep green|color & density|root support|root strength|balanced feeding|slow-release|micronutrient|winter hardiness|chlorosis/i;
 
 // Caterpillars feed on both turf (sod webworms, armyworms are caterpillars —
 // Conserve SC is labeled for all three) and ornamentals, so a bare
@@ -15668,16 +15684,24 @@ const FLEA_TICK_TARGET_RE = /\bfleas?\b|\bticks?\b/i;
 // ant species, roaches, spiders (mites already claimed above), the usual
 // occasional invaders, stingers, biters, and rodents.
 const STRUCTURAL_ONLY_TARGET_RE =
-  /\bants?\b|roach|spider|silverfish|earwig|centipede|millipede|springtail|booklice|cricket|wasp|mud dauber|yellowjacket|hornet|\bfl(y|ies)\b|flea|tick|bed bug|pantry|scorpion|\brats?\b|\bmouse\b|\bmice\b|rodent/i;
+  /\bants?\b|roach|spider|silverfish|earwig|centipede|millipede|springtail|booklice|cricket|wasp|mud dauber|yellowjacket|hornet|\bfl(y|ies)\b|flea|tick|bed bug|pantry|darkling beetle|scorpion|\brats?\b|\bmouse\b|\bmice\b|rodent/i;
 
-// Which service lines a label target belongs on. Returns null for targets no
-// pattern claims (nutrition goals, oddballs like "Darkling beetles") — those
-// pass on every line rather than silently vanishing from the picker.
-// Precedence matters: turf before structural ("Tawny mole crickets" is a lawn
-// pest, not a cricket), ornamental before structural ("Spider mites" is not a
-// spider), termite/carpenter-ant before the generic ant pattern.
-function labelTargetLines(target) {
+// Every service line a label target belongs on. Precedence matters: turf
+// before structural ("Tawny mole crickets" is a lawn pest, not a cricket),
+// ornamental before structural ("Spider mites" is not a spider),
+// termite/carpenter-ant before the generic ant pattern.
+//
+// Returns [] for a target no pattern claims, which drops it from the prefill
+// (codex P2 r2). This used to fail OPEN — an unclassified target passed on
+// every line, which recreated exactly the cross-line prefills this filtering
+// exists to remove: "Chickweed" is a lawn weed no pattern matched, so a pest
+// visit dropped SpeedZone's three recognized weeds and prefilled Chickweed
+// alone. Failing closed can only ever under-fill, and the picker stays
+// free-text, so the tech can add anything by hand. Every target currently in
+// the catalog classifies — the contract test below fails if a new one doesn't.
+export function labelTargetLines(target) {
   if (/fire ant/i.test(target)) return ["pest", "lawn"];
+  if (ORNAMENTAL_LEAF_SPOT_RE.test(target)) return ["tree_shrub"];
   if (LAWN_ONLY_TARGET_RE.test(target)) return ["lawn"];
   if (CATERPILLAR_TARGET_RE.test(target)) return ["tree_shrub", "lawn"];
   if (ORNAMENTAL_ONLY_TARGET_RE.test(target)) return ["tree_shrub"];
@@ -15686,7 +15710,9 @@ function labelTargetLines(target) {
   if (MOSQUITO_TARGET_RE.test(target)) return ["mosquito"];
   if (FLEA_TICK_TARGET_RE.test(target)) return ["pest", "lawn"];
   if (STRUCTURAL_ONLY_TARGET_RE.test(target)) return ["pest"];
-  return null;
+  // Nutrition goals apply wherever a fertilizer does — turf and palms alike.
+  if (NUTRITION_TARGET_RE.test(target)) return ALL_TARGET_LINES;
+  return [];
 }
 
 // The service lines whose targets may prefill on this visit. The primary line
@@ -15777,10 +15803,7 @@ export function filterLabelTargetsForLine(targets, allowedLines) {
       ? allowedLines
       : new Set(["pest"]);
   return targets
-    .filter((t) => {
-      const lines = labelTargetLines(t);
-      return !lines || lines.some((line) => allowed.has(line));
-    })
+    .filter((t) => labelTargetLines(t).some((line) => allowed.has(line)))
     .slice(0, MAX_LABEL_TARGET_PREFILL);
 }
 

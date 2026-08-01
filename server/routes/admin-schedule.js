@@ -3968,6 +3968,11 @@ router.get('/list', async (req, res, next) => {
       customerName: `${s.first_name || ''} ${s.last_name || ''}`.trim(),
       scheduledDate: s.scheduled_date instanceof Date ? s.scheduled_date.toISOString().split('T')[0] : String(s.scheduled_date).split('T')[0],
       serviceType: normalizeServiceType(s.service_type),
+      // The list detail sheet's Complete action forwards this row straight to
+      // CompletionPanel, so it needs the raw name for the same reason the
+      // day/week/month payloads do — the normalized one loses a combined
+      // visit's second service line.
+      serviceTypeRaw: s.service_type,
       status: s.status,
       windowStart: s.window_start,
       windowEnd: s.window_end,
