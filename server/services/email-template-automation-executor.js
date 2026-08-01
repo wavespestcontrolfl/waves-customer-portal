@@ -550,42 +550,51 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
     return { run: existing, deduped: true };
   }
 
-  let run;
-  try {
-    [run] = await conn('email_template_automation_runs').insert({
-      automation_id: automation.id || null,
-      automation_key: automation.automation_key,
+  // A trigger replay can commit the same idempotency_key between the read
+  // above and this insert. That race must NEVER surface as a raised unique
+  // violation: when conn is the locked transaction (createRun's customer
+  // path, r14), a raised 23505 ABORTS the transaction — every later
+  // statement fails 25P02 until rollback, so a catch-then-select recovery
+  // can never run there. ON CONFLICT (idempotency_key) DO NOTHING absorbs
+  // the race inside the statement instead: zero rows back means a
+  // concurrent replay won, and the recovery fetch + audit event run on a
+  // still-healthy connection. Any OTHER error still throws and rolls the
+  // transaction back as before.
+  const [run] = await conn('email_template_automation_runs').insert({
+    automation_id: automation.id || null,
+    automation_key: automation.automation_key,
+    trigger_event_key: triggerEventKey,
+    trigger_event_id: triggerEventId || null,
+    entity_type: entityType || null,
+    entity_id: entityId || null,
+    template_key: automation.template_key,
+    template_version_id: automation.active_version_id || automation.template_version_id || null,
+    recipient_type: recipient.type || null,
+    recipient_id: recipient.id || null,
+    recipient_email: recipient.email,
+    idempotency_key: idempotencyKey,
+    status,
+    run_after: runAfter,
+    max_attempts: retryPolicy.maxAttempts,
+    exit_reason: exitReason || null,
+    payload: JSON.stringify(payload || {}),
+    context: JSON.stringify(context || {}),
+    completed_at: status === 'skipped' ? new Date() : null,
+  }).onConflict('idempotency_key').ignore().returning('*');
+  if (!run) {
+    const replayed = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
+    if (!replayed) {
+      // Conflicted yet unreadable — a replay claimed the key and vanished
+      // (only a concurrent hard delete can produce this). Surface it; the
+      // caller's transaction rolls back cleanly.
+      throw new Error(`Automation run insert conflicted on idempotency key but the winning row is gone (${idempotencyKey})`);
+    }
+    await logRunEvent(replayed.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
       trigger_event_key: triggerEventKey,
       trigger_event_id: triggerEventId || null,
-      entity_type: entityType || null,
-      entity_id: entityId || null,
-      template_key: automation.template_key,
-      template_version_id: automation.active_version_id || automation.template_version_id || null,
-      recipient_type: recipient.type || null,
-      recipient_id: recipient.id || null,
-      recipient_email: recipient.email,
-      idempotency_key: idempotencyKey,
-      status,
-      run_after: runAfter,
-      max_attempts: retryPolicy.maxAttempts,
-      exit_reason: exitReason || null,
-      payload: JSON.stringify(payload || {}),
-      context: JSON.stringify(context || {}),
-      completed_at: status === 'skipped' ? new Date() : null,
-    }).returning('*');
-  } catch (err) {
-    if (err.code === '23505' || /email_template_automation_runs.*idempotency_key|idempotency_key.*unique/i.test(err.message || '')) {
-      const replayed = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
-      if (replayed) {
-        await logRunEvent(replayed.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
-          trigger_event_key: triggerEventKey,
-          trigger_event_id: triggerEventId || null,
-          race_recovered: true,
-        }, conn);
-        return { run: replayed, deduped: true };
-      }
-    }
-    throw err;
+      race_recovered: true,
+    }, conn);
+    return { run: replayed, deduped: true };
   }
   // The parent run row was just inserted through `conn`; when conn is a
   // transaction this event MUST ride it (FK to an uncommitted parent).

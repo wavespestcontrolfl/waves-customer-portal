@@ -2845,7 +2845,15 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   if (!customer.zip && extracted.zip) updates.zip = extracted.zip;
   if (Object.keys(updates).length === 0) return customer;
   updates.updated_at = new Date();
-  await db('customers').where({ id: customerId }).update(updates);
+  // Email backfills serialize with a concurrent merge-undo's claim check
+  // via the shared normalized-email advisory lock (r16). Proceed-with-
+  // fresh-read: only the email column is ever dropped (filled concurrently
+  // / owned by another live customer) — the rest of the backfill always
+  // lands, and the extraction/triage records keep the heard address for
+  // office review either way.
+  const guarded = await require('./customer-email-fanout')
+    .applyCustomerUpdatesWithEmailClaimGuard({ customerId, updates, source: 'call-appointment-contact-backfill' });
+  if (updates.email && !guarded.emailApplied) delete updates.email;
   return { ...customer, ...updates };
 }
 
@@ -5917,7 +5925,14 @@ const CallRecordingProcessor = {
           if (extracted.zip) updates.zip = extracted.zip;
         }
         if (Object.keys(updates).length > 0) {
-          await db('customers').where({ id: customerId }).update(updates);
+          // Email backfills serialize with a concurrent merge-undo's claim
+          // check via the shared normalized-email advisory lock (r16).
+          // Proceed-with-fresh-read: only the email column is ever dropped
+          // (filled concurrently / owned by another live customer) — the
+          // address backfill still lands, and the call extraction keeps the
+          // heard address for office review either way.
+          await require('./customer-email-fanout')
+            .applyCustomerUpdatesWithEmailClaimGuard({ customerId, updates, source: 'call-extraction-backfill' });
         }
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer

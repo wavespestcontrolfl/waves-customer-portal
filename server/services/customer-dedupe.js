@@ -2104,12 +2104,33 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         // read updated_at: a journaled financial row TOUCHED since the
         // merge is activity, and moving it back would unwind state the
         // touch depends on (untouched-merges contract).
+        //
+        // ACTIVITY_CHECKED_TABLES rows take the SAME lock (r16): their
+        // terminal transitions MINT children — an estimate accept holds a
+        // card, may take a deposit, and books a visit (estimate-public.js
+        // accept transaction), a completed visit stamps an invoice
+        // (admin-dispatch), a signed/cancelled contract appends event rows
+        // (contracts-public.js). Without the lock, a transition could
+        // COMMIT between this probe and the reverse repoint below: the
+        // updated_at check and the minted-children probes further down all
+        // read clean, then the repoint strands the freshly minted
+        // winner-owned children. LOCK ORDERING: none of those writers take
+        // an explicit FOR UPDATE on the row first — but their state change
+        // is an UPDATE to this same row, and an UPDATE takes the identical
+        // row lock, so the two serialize either way: the transition either
+        // commits FIRST (its updated_at bump / minted children trip the
+        // probes below and the undo refuses) or it BLOCKS here until this
+        // undo commits and then re-evaluates its own WHERE guards against
+        // the repointed row (estimate acceptance additionally 409s on its
+        // updated_at compare-and-swap). Neither side can deadlock: the
+        // writers hold no lock this transaction ever requests before their
+        // row UPDATE.
         let verifyQuery = trx(table).whereIn(pkColumn, ids).where(column, winnerId);
-        if (isFinancial) verifyQuery = verifyQuery.forUpdate();
         // Activity-checked tables read their REAL timestamp columns only
         // (TABLE_TIMESTAMP_COLUMNS) — selecting one a table lacks would
         // 409 the whole undo.
         const activityChecked = isFinancial || ACTIVITY_CHECKED_TABLES.has(table);
+        if (activityChecked) verifyQuery = verifyQuery.forUpdate();
         const verified = await verifyQuery.select(
           activityChecked ? [pkColumn, ...activityColumnsFor(table)] : [pkColumn],
         );
@@ -2670,6 +2691,41 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
       }
     }
+    // Inherited ADDRESS clears/restores guard their unstamped visits (r16):
+    // a visit booked on the winner since the merge (e.g. the public /book
+    // flow) carries NO service_address_* stamp of its own — dispatch and
+    // the schedule board render it via COALESCE(scheduled_services.
+    // service_address_line1, customers.address_line1). The merge-side sweep
+    // stamps only the LOSER's pre-merge visits, so a since-merge winner
+    // visit relies on the customer row live — vacating the inherited
+    // address (or restoring the winner's pre-merge tuple) out from under it
+    // re-renders the visit at a different property and can dispatch the
+    // tech to the wrong door. Probe winner-owned visits with a NULL stamp
+    // for since-merge activity and REFUSE (activity-gate posture — same
+    // contract as the billing-identity clear above: the undo reverts only
+    // untouched merges, and stamping addresses onto visits mid-undo would
+    // be a write the journal never records). Journaled visits are exempt
+    // twice over: the merge stamped the loser's unstamped visits BEFORE
+    // repointing them, and they move back to the loser here anyway.
+    const clearingInheritedAddress = ['address_line1', 'address_line2', 'city', 'state', 'zip']
+      .some((f) => Object.prototype.hasOwnProperty.call(winnerPatch, f));
+    if (clearingInheritedAddress) {
+      let unstampedRows = [];
+      try {
+        unstampedRows = await trx('scheduled_services')
+          .where({ customer_id: winnerId })
+          .whereNull('service_address_line1')
+          .select(['id', ...activityColumnsFor('scheduled_services')]);
+      } catch (e) {
+        refuse(`Cannot verify scheduled_services for unstamped service addresses (${e.message}) — refusing to revert`);
+      }
+      const orphanedVisits = countActivityRows(unstampedRows, {
+        journaledIds: journaledIdsFor('scheduled_services'), mergeAt, sinceOnly: true, table: 'scheduled_services',
+      });
+      if (orphanedVisits) {
+        refuse(`${orphanedVisits} appointment(s) booked on the kept customer since the merge render their service address from the customer row (no per-visit address stamp) — changing that address now would re-route them to a different property; stamp or correct their service addresses first, then revert`);
+      }
+    }
     // Cached credit balance: when recorded ledger rows moved back above,
     // RECOMPUTE both caches from the ledgers post-move so cache == ledger
     // holds on BOTH sides (customer-credit.js invariant) — and refuse when
@@ -2784,7 +2840,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // writers: the Customer 360 edit (routes/admin-customers.js) and the
       // Intelligence Bar's update_customer tool
       // (services/intelligence-bar/tools.js) — the operator-driven paths
-      // that can realistically assign an address while an undo runs.
+      // that can realistically assign an address while an undo runs — plus
+      // (r16) the AUTOMATED backfill writers that fill an EXISTING
+      // customer's empty email from intake data, all through
+      // customer-email-fanout.js applyCustomerUpdatesWithEmailClaimGuard:
+      // the lead webhook (routes/lead-webhook.js), the public quote flow
+      // (routes/public-quote.js), and the call pipeline's two contact
+      // backfills (services/call-recording-processor.js). Those sites are
+      // proceed-with-fresh-read: they re-check the claim under the lock and
+      // DROP only the email fill when it is claimed — they are never
+      // blocked into failing the intake write.
       // DELIBERATELY NOT locked: customer CREATION paths (signup, intake,
       // booking) — locking every insert that carries an email is out of
       // proportion to the risk, and a brand-new signup claiming exactly the
@@ -2876,6 +2941,13 @@ module.exports = {
   // drift from the revert endpoint's own count-only refusals.
   REVERT_FINANCIAL_TABLES,
   CONSENT_CRITICAL_TABLES,
+  // Activity predicate + per-table timestamp columns, exported so the
+  // route's BATCHED activity mirrors (journaled-invoice touch, invoice
+  // payment-children) count rows with the exact semantics revertMerge's own
+  // probes use — journaled rows count when updated after the merge,
+  // unjournaled rows count on presence.
+  countActivityRows,
+  activityColumnsFor,
   // exported for tests
   _test: {
     EMAIL_BOUND_SURFACES,

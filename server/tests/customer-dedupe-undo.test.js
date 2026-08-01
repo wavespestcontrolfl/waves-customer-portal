@@ -801,6 +801,14 @@ describe('revertMerge', () => {
       if (q.called('whereIn') && ['estimate_id', 'source_estimate_id'].includes(q.args('whereIn')?.[0])) {
         return (tables[table] && tables[table].fromEstimates) || [];
       }
+      // The r16 address-clear guard probes UNSTAMPED winner visits
+      // (whereNull on service_address_line1) — checked before the generic
+      // scheduled_services branches below.
+      if (table === 'scheduled_services' && q.called('whereNull')
+        && q.args('whereNull')?.[0] === 'service_address_line1') {
+        state.addressProbeRan = true;
+        return (tables.scheduled_services && tables.scheduled_services.unstampedVisits) || [];
+      }
       // scheduled_services has TWO probes: referencing visits (selects
       // customer_id, FOR UPDATE) and the billing-activity gate (selects
       // created_at/updated_at).
@@ -976,6 +984,109 @@ describe('revertMerge', () => {
     // ONE admin bell, post-commit.
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(notifyAdmin.mock.calls[0][0]).toBe('customer');
+  });
+
+  it('verifies ACTIVITY-CHECKED journaled rows (estimates/visits/contracts) under FOR UPDATE — terminal transitions serialize against the undo instead of racing the probe-to-repoint window (r16)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables = {
+      'leads.customer_id': ['lead-1'],
+      'estimates.customer_id': ['est-1'],
+      'scheduled_services.customer_id': ['svc-1'],
+      'customer_contracts.customer_id': ['ct-1'],
+    };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1'] },
+        estimates: { stillOnWinner: ['est-1'] },
+        scheduled_services: { stillOnWinner: ['svc-1'] },
+        customer_contracts: { stillOnWinner: ['ct-1'] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+
+    // An estimate accept / visit completion / contract signing is an UPDATE
+    // to the journaled row, so it conflicts with this FOR UPDATE: the
+    // transition either commits first (its updated_at bump / minted
+    // children trip the probes) or blocks until the undo commits. Without
+    // the lock it could commit BETWEEN the clean probe and the repoint,
+    // stranding freshly minted winner-owned children.
+    expect(state.verified).toEqual(expect.arrayContaining([
+      { table: 'estimates', forUpdate: true },
+      { table: 'scheduled_services', forUpdate: true },
+      { table: 'customer_contracts', forUpdate: true },
+      // History tables still verify lock-free.
+      { table: 'leads', forUpdate: false },
+    ]));
+  });
+
+  it('refuses (409) when clearing an inherited address would orphan a since-merge visit that has no service-address stamp (r16)', async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = {
+      email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only',
+      address_line1: '9 Inherited Ln', city: 'Sampleville',
+    };
+    // Winner still carries the inherited tuple, so the undo would vacate it
+    // — and a visit booked on the winner SINCE the merge renders its
+    // address via COALESCE(service_address_line1, customers.address_line1):
+    // no per-visit stamp, so the clear re-routes it to a different property.
+    const winner = { ...baseWinner(), address_line1: '9 Inherited Ln', city: 'Sampleville' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner,
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        scheduled_services: {
+          unstampedVisits: [{ id: 'svc-post-merge', created_at: '2026-07-30T06:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({
+        statusCode: 409,
+        message: expect.stringMatching(/render their service address from the customer row/),
+      });
+    expect(state.addressProbeRan).toBe(true);
+    // Transaction rollback semantics: the journal was never stamped undone.
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('clearing an inherited address proceeds when unstamped visits are all PRE-merge (control for the r16 guard)', async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = {
+      email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only',
+      address_line1: '9 Inherited Ln', city: 'Sampleville',
+    };
+    const winner = { ...baseWinner(), address_line1: '9 Inherited Ln', city: 'Sampleville' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner,
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        scheduled_services: {
+          // Existed before the merge — it was booked under the winner's own
+          // pre-merge address state and is not orphaned by the clear.
+          unstampedVisits: [{ id: 'svc-pre-merge', created_at: '2026-07-29T00:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.addressProbeRan).toBe(true);
+    expect(state.winnerPatch.address_line1).toBe(null);
+    expect(state.winnerPatch.city).toBe(null);
+    expect(result.skipped).toHaveLength(0);
   });
 
   it('refuses (409) when the merge was already undone', async () => {
@@ -2756,6 +2867,135 @@ describe('revertMerge', () => {
       expect((await resLoserDerived.json()).merges[0].revertible).toBe(true);
     } finally {
       await new Promise((resolve) => { server.close(resolve); });
+    }
+  });
+
+  it('GET /merges: invoice-activity mirrors (r16) — a touched journaled invoice or an outside-journal payment child reads revertible:false, batched per page and fail-closed', async () => {
+    const express = require('express');
+    const MERGE_AT = '2026-07-30T04:00:00Z';
+    const journalRow = (overrides = {}) => ({
+      id: JOURNAL,
+      winner_customer_id: WINNER,
+      loser_customer_id: LOSER,
+      tier: 'manual',
+      performed_by: 'admin:test',
+      created_at: MERGE_AT,
+      undone_at: null,
+      undone_by: null,
+      loser_snapshot: JSON.stringify({ id: LOSER, first_name: 'Loser', last_name: null }),
+      repointed_ids: JSON.stringify({
+        version: 1,
+        tables: {
+          'leads.customer_id': ['lead-1'],
+          'invoices.customer_id': ['inv-1'],
+          // Journaled pre-merge children of inv-1 (they move back with it).
+          'payments.customer_id': ['pay-journaled'],
+          'payment_plans.customer_id': ['plan-journaled'],
+        },
+        stripe_transferred_id: null,
+        payment_method_flags: {},
+        collision_handlers: [],
+      }),
+      evidence: JSON.stringify({}),
+      winner_first_name: 'Winner',
+      winner_last_name: 'Testcase',
+      winner_active: true,
+      winner_deleted_at: null,
+      winner_stripe_customer_id: null,
+      loser_row_id: LOSER,
+      loser_row_deleted_at: '2026-07-30T04:40:00Z',
+      ...overrides,
+    });
+    const state = {
+      listRows: [journalRow()],
+      invoices: [{ id: 'inv-1', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:00:00Z' }],
+      payments: [],
+      credit_ledger: [],
+      payment_plans: [],
+      invoicesThrow: false,
+    };
+    // The batched probes go through the plain db connection; db.raw feeds
+    // the payments metadata-extraction select.
+    db.raw = jest.fn((sql) => sql);
+    installDb((table) => {
+      if (table === 'customer_merge_journal as j') return state.listRows;
+      if (table === 'invoices') {
+        if (state.invoicesThrow) throw new Error('relation is unreadable');
+        return state.invoices;
+      }
+      if (table === 'payments') return state.payments;
+      if (table === 'customer_credit_ledger') return state.credit_ledger;
+      if (table === 'payment_plans') return state.payment_plans;
+      return [];
+    });
+    const app = express();
+    app.use('/dup', require('../routes/admin-customer-duplicates'));
+    const server = await new Promise((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const getFlag = async (base) => (await (await fetch(`${base}/dup/merges`)).json()).merges[0].revertible;
+    try {
+      const base = `http://127.0.0.1:${server.address().port}`;
+
+      // Control: untouched journaled invoice, no outside-journal children.
+      expect(await getFlag(base)).toBe(true);
+
+      // 1. Journaled invoice TOUCHED since the merge — revertMerge's
+      //    verification pass refuses, so the mirror must too.
+      state.invoices = [{ id: 'inv-1', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-30T06:00:00Z' }];
+      expect(await getFlag(base)).toBe(false);
+      state.invoices = [{ id: 'inv-1', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:00:00Z' }];
+
+      // 2. Payment child OUTSIDE the journal recorded against the journaled
+      //    invoice (metadata linkage, as invoice.js resolves applied money).
+      state.payments = [{
+        id: 'pay-post-merge', created_at: '2026-07-30T06:00:00Z', updated_at: '2026-07-30T06:00:00Z',
+        linked_invoice_id: 'inv-1', linked_dispute_invoice_id: null, linked_waves_invoice_id: null,
+      }];
+      expect(await getFlag(base)).toBe(false);
+      // ...while a JOURNALED, untouched child stays revertible.
+      state.payments = [{
+        id: 'pay-journaled', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-01T00:00:00Z',
+        linked_invoice_id: 'inv-1', linked_dispute_invoice_id: null, linked_waves_invoice_id: null,
+      }];
+      expect(await getFlag(base)).toBe(true);
+      state.payments = [];
+
+      // 3. Outside-journal payment PLAN on the journaled invoice — the r9
+      //    payment_plans gap: plan creation touches nothing else the gates
+      //    watch, so the child probe is the only signal.
+      state.payment_plans = [{ id: 'plan-post-merge', invoice_id: 'inv-1', created_at: '2026-07-30T06:00:00Z', updated_at: '2026-07-30T06:00:00Z' }];
+      expect(await getFlag(base)).toBe(false);
+      state.payment_plans = [];
+
+      // 4. Credit-ledger child outside the journal (created_at ONLY — the
+      //    select must not touch updated_at, the r9 regression class).
+      state.credit_ledger = [{ id: 'ledger-post-merge', invoice_id: 'inv-1', created_at: '2026-07-30T06:00:00Z' }];
+      expect(await getFlag(base)).toBe(false);
+      state.credit_ledger = [];
+
+      // 5. Fail closed: an unreadable probe marks the invoice-bearing merge
+      //    non-revertible (same posture as the card/visit mirrors).
+      state.invoicesThrow = true;
+      expect(await getFlag(base)).toBe(false);
+      state.invoicesThrow = false;
+
+      // A merge with NO journaled invoices never pays for the probes and is
+      // unaffected by a failing invoices table.
+      state.invoicesThrow = true;
+      state.listRows = [journalRow({
+        repointed_ids: JSON.stringify({
+          version: 1,
+          tables: { 'leads.customer_id': ['lead-1'] },
+          stripe_transferred_id: null,
+          payment_method_flags: {},
+          collision_handlers: [],
+        }),
+      })];
+      expect(await getFlag(base)).toBe(true);
+    } finally {
+      await new Promise((resolve) => { server.close(resolve); });
+      delete db.raw;
     }
   });
 

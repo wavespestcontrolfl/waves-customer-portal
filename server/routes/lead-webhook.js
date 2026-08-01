@@ -365,7 +365,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (!existing.zip && normalizedAddress.zip) updates.zip = normalizedAddress.zip;
       if (existing.lead_intake_status) updates.lead_intake_status = null;
 
-      await db('customers').where({ id: existing.id }).update(updates);
+      // Email backfills serialize with a concurrent merge-undo's claim
+      // check via the shared normalized-email advisory lock (r16). Proceed-
+      // with-fresh-read: only the email column is ever dropped (filled
+      // concurrently / owned by another live customer) — the rest of this
+      // update always lands, and the lead row below still carries the
+      // submitted address for staff either way.
+      await require('../services/customer-email-fanout')
+        .applyCustomerUpdatesWithEmailClaimGuard({ customerId: existing.id, updates, source: 'lead-webhook' });
 
       await db('customer_interactions').insert({
         customer_id: existing.id, interaction_type: 'note',

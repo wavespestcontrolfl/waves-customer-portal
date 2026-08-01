@@ -2082,7 +2082,15 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
         // that over-collects the now-applied credit. Re-clamp the balance to the FRESH
         // amount due and re-validate the installment against it.
         const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-        const lockedAmountDue = lockedInvoice ? invoiceAmountDue(lockedInvoice) : amountDue;
+        // The invoice can vanish between the pre-transaction read and this
+        // lock (hard delete during a cleanup) — refuse rather than insert a
+        // plan attributed from a stale snapshot of a row that no longer
+        // exists.
+        if (!lockedInvoice) {
+          const e = new Error('Invoice no longer exists');
+          e.statusCode = 409; throw e;
+        }
+        const lockedAmountDue = invoiceAmountDue(lockedInvoice);
         const lockedTotalBalance = Math.min(totalBalance, lockedAmountDue);
         if (!(lockedTotalBalance > 0)) {
           const e = new Error('Invoice has no remaining balance after applied account credit — no payment plan needed');
@@ -2094,7 +2102,13 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
         }
         const [createdPlan] = await trx('payment_plans')
           .insert({
-            customer_id: invoice.customer_id,
+            // Attribute from the LOCKED row, never the pre-transaction read:
+            // this insert runs after WAITING on the invoice row lock, and a
+            // customer merge/undo can repoint invoices.customer_id in that
+            // window — a plan pinned to the stale owner would govern the
+            // invoice's collection path under the wrong customer (same bug
+            // class as the settlement-ownership fix in stripe-webhook.js).
+            customer_id: lockedInvoice.customer_id,
             invoice_id: invoice.id,
             payment_method_id: paymentMethodId,
             total_balance: lockedTotalBalance,
@@ -2129,13 +2143,16 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       throw err;
     }
 
+    // Post-commit attribution rides the CREATED plan row (returning('*')),
+    // which carries the locked-row customer_id the plan was inserted with.
+    const planCustomerId = paymentPlan.customer_id || invoice.customer_id;
     const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
     const emailResult = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
-      customerId: invoice.customer_id,
+      customerId: planCustomerId,
       paymentPlanId: paymentPlan.id,
       paymentMethodId,
       plan: paymentPlan,
-      idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${invoice.customer_id}`,
+      idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
     }).catch((err) => ({ ok: false, error: err.message }));
 
     try {
@@ -2149,7 +2166,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     }
 
     await db('activity_log').insert({
-      customer_id: invoice.customer_id,
+      customer_id: planCustomerId,
       action: 'payment_plan_created',
       description: `Payment plan created for invoice ${invoice.invoice_number || invoice.id}: `
         + `$${paymentAmount.toFixed(2)} ${paymentFrequency} toward $${Number(paymentPlan.total_balance).toFixed(2)} — ${createdBy}`,

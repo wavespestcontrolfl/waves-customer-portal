@@ -25,6 +25,8 @@ function chain({ result = [], first, returning } = {}) {
     'select',
     'orderBy',
     'limit',
+    'onConflict',
+    'ignore',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -274,6 +276,81 @@ describe('email template automation executor', () => {
     // only through the transaction (opTrace records trx accesses).
     expect(globalDbAccesses).not.toContain('email_template_automation_run_events');
     expect(opTrace).toContain('table:email_template_automation_run_events');
+  });
+
+  test('a trigger replay racing the insert inside the locked transaction recovers the existing run WITHOUT aborting the trx', async () => {
+    // Postgres semantics modeled faithfully (r16): a raised unique
+    // violation ABORTS the enclosing transaction — every later statement on
+    // it fails 25P02 ("current transaction is aborted") until rollback. The
+    // r14 conversion of createRun to a locked transaction therefore broke
+    // the old catch-23505-then-select recovery on this path: the catch's
+    // replay .first() and its 'deduped' audit insert both ran on the
+    // aborted trx and could never succeed. The insert must not RAISE at
+    // all — ON CONFLICT (idempotency_key) DO NOTHING resolves to zero rows
+    // and the replay fetch runs on a healthy transaction. The stub raises
+    // real 23505/25P02 behavior whenever the insert lacks the ON CONFLICT
+    // clause, so a regression to a raising insert fails this test the same
+    // way it fails in production.
+    const existingRun = run();
+    let trxAborted = false;
+    const abortedTrxError = () => {
+      const err = new Error('current transaction is aborted, commands ignored until end of transaction block');
+      err.code = '25P02';
+      return err;
+    };
+    const existingRunQuery = chain({ first: null }); // pre-insert idempotency read: not there yet
+    const insertRunQuery = chain({});
+    insertRunQuery.returning = jest.fn(async () => {
+      // A concurrent replay committed the row between the read and the
+      // insert. With ON CONFLICT DO NOTHING the conflict is swallowed
+      // (zero rows back); without it, Postgres raises and the trx aborts.
+      if (insertRunQuery.onConflict.mock.calls.length && insertRunQuery.ignore.mock.calls.length) return [];
+      trxAborted = true;
+      const err = new Error('duplicate key value violates unique constraint "email_template_automation_runs_idempotency_key_unique"');
+      err.code = '23505';
+      throw err;
+    });
+    const guardAborted = (fn) => jest.fn(async (...args) => {
+      if (trxAborted) throw abortedTrxError();
+      return fn(...args);
+    });
+    const replayQuery = chain({});
+    replayQuery.first = guardAborted(async () => existingRun);
+    const dedupedLogQuery = chain({});
+    dedupedLogQuery.returning = guardAborted(async () => [{ id: 'event-1' }]);
+
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+      email_template_automation_runs: [existingRunQuery, insertRunQuery, replayQuery],
+      email_template_automation_run_events: [dedupedLogQuery],
+    });
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    expect(result.results[0].deduped).toBe(true);
+    expect(result.results[0].run.id).toBe('run-1');
+    // The conflict was absorbed by the insert itself, never raised.
+    expect(insertRunQuery.onConflict).toHaveBeenCalledWith('idempotency_key');
+    expect(insertRunQuery.ignore).toHaveBeenCalled();
+    // The race-recovery audit event landed on the (healthy) transaction.
+    expect(dedupedLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      event_type: 'deduped',
+    }));
   });
 
   test('a stale pre-undo recipient address (now owned by another live customer) is recorded SKIPPED, never queued', async () => {
