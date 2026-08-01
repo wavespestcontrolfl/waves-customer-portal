@@ -1532,6 +1532,13 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     // hand evaluate() an allowlisted path and let a link that cannot render
     // pass the gate, so leave it for the gate to park (Codex r3).
     if (Boolean(open) !== Boolean(close)) return whole;
+    // Markdown permits BALANCED parentheses in a destination, but this
+    // pattern stops at the first ")" — so "/pest-library/ants_(insects)/"
+    // matches only a prefix, and rewriting on that partial match would leave
+    // the tail behind as corrupted prose ("guide/)"). An unbalanced capture
+    // means the real destination extends past the match: leave it entirely
+    // alone and let the fail-closed gate park it (pre-push Codex r3).
+    if ((dest.match(/\(/g) || []).length !== (dest.match(/\)/g) || []).length) return whole;
     const path = toPath(dest);
     if (path === null) return whole; // absolute URL on someone else's host
     // Resolve dot segments the way the gate does, so "/images/../x/" and the

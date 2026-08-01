@@ -2399,6 +2399,15 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(repairInventedInternalRoutes('[x](/pest-services/)').body).toContain('/pest-control-services/');
   });
 
+  test('parenthesised destinations are never partially rewritten (r3)', () => {
+    // Rewriting on a partial match would leave the tail as corrupted prose.
+    const body = 'See the [guide](/pest-library/ants_(insects)/) here.';
+    const r = repairInventedInternalRoutes(body);
+    expect(r.body).toBe(body);
+    expect(r.body).not.toContain('guide/)');
+    expect(r.repairs).toEqual([]);
+  });
+
   test('mismatched angle delimiters are left for the gate (r3)', () => {
     // Repairing malformed Markdown would hand evaluate() an allowlisted path
     // and pass a link that cannot render.
