@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   allowedTargetLinesForServiceType,
+  allowedTargetLinesForVisit,
   defaultApplicationMethod,
   derivedTotalAmount,
   filterLabelTargetsForLine,
@@ -123,6 +124,44 @@ describe("allowedTargetLinesForServiceType", () => {
   });
 });
 
+describe("allowedTargetLinesForVisit", () => {
+  it("unions a scheduled add-on's line into the visit's set", () => {
+    // A quarterly pest visit with a mosquito add-on really does treat for
+    // mosquitoes — In2Care must keep its targets there (codex P2 r2).
+    expect(
+      allowedTargetLinesForVisit({
+        serviceType: "Quarterly Pest Control",
+        extraServiceTypes: ["One-Time Mosquito Treatment"],
+      }),
+    ).toEqual(new Set(["pest", "mosquito"]));
+    // serviceAddons objects work too — the week/month payloads carry both.
+    expect(
+      allowedTargetLinesForVisit({
+        serviceType: "Quarterly Pest Control",
+        serviceAddons: [{ serviceName: "Lawn Care Program" }],
+      }),
+    ).toEqual(new Set(["pest", "lawn"]));
+  });
+
+  it("still prefers the raw name over the normalized one", () => {
+    expect(
+      allowedTargetLinesForVisit({
+        serviceType: "Tree & Shrub Care", // week view's normalized value
+        serviceTypeRaw: "Lawn + Tree & Shrub",
+      }),
+    ).toEqual(new Set(["lawn", "tree_shrub"]));
+  });
+
+  it("tolerates a bare row with no add-on fields", () => {
+    expect(allowedTargetLinesForVisit({ serviceType: "Lawn Care Program" })).toEqual(
+      new Set(["lawn"]),
+    );
+    expect(allowedTargetLinesForVisit({})).toEqual(
+      allowedTargetLinesForServiceType(undefined),
+    );
+  });
+});
+
 const lines = (serviceType) => allowedTargetLinesForServiceType(serviceType);
 
 describe("filterLabelTargetsForLine", () => {
@@ -156,6 +195,21 @@ describe("filterLabelTargetsForLine", () => {
       "Fire ants",
       "Southern chinch bugs",
     ]);
+  });
+
+  it("keeps fleas and ticks on a lawn visit — the turf insecticides carry them", () => {
+    // Topchoice Granular is turf insect control; its label targets are all
+    // yard work, so a lawn visit gets the full cap, not two (codex P2 r2).
+    const TOPCHOICE = ["Fire ants", "Tawny mole crickets", "Fleas", "Ticks"];
+    expect(filterLabelTargetsForLine(TOPCHOICE, lines("Lawn Care Program"))).toEqual([
+      "Fire ants",
+      "Tawny mole crickets",
+      "Fleas",
+    ]);
+    // They still read on the pest line — mole crickets are the turf-only one.
+    expect(
+      filterLabelTargetsForLine(TOPCHOICE, lines("Quarterly Pest Control")),
+    ).toEqual(["Fire ants", "Fleas", "Ticks"]);
   });
 
   it("prefills nothing ornamental-appropriate from a structural label on tree & shrub", () => {

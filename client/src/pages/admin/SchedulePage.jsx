@@ -10673,19 +10673,18 @@ export function CompletionPanel({
         // visit drops Talstar's chinch bugs, a lawn visit drops its ants and
         // roaches; the tech can still add any target by hand. Keyed to the
         // detected service lines, not the panel's `isLawn` (false for typed
-        // lawn visits — codex P2), and classified from serviceTypeRaw when
-        // present: the day view normalizes "Lawn + Tree & Shrub" to "Tree &
-        // Shrub Care", and a combined visit must keep BOTH lines' targets
-        // (codex P1 r1).
+        // lawn visits — codex P2). The lines come from the whole visit, not
+        // just its primary name: serviceTypeRaw survives the normalization
+        // that collapses "Lawn + Tree & Shrub" to "Tree & Shrub Care" (codex
+        // P1 r1), and scheduled add-ons contribute their own lines (codex P2
+        // r2) so a pest visit with a mosquito add-on keeps In2Care's targets.
         targets: filterLabelTargetsForLine(
           normalizeLabelTargets(
             product.target_pests
               ?? product.targetPests
               ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
           ),
-          allowedTargetLinesForServiceType(
-            service.serviceTypeRaw || service.serviceType,
-          ),
+          allowedTargetLinesForVisit(service),
         ),
       },
     ]);
@@ -15658,6 +15657,13 @@ const CARPENTER_ANT_RE = /carpenter ant/i;
 
 const MOSQUITO_TARGET_RE = /mosquito/i;
 
+// Fleas and ticks are yard pests as much as indoor ones — the turf insecticides
+// carry them on the label right alongside mole crickets (Topchoice Granular:
+// fire ants, tawny mole crickets, fleas, ticks), and the yard is where the
+// life cycle actually breaks. So they read on both lines, like fire ants
+// (codex P2 r2).
+const FLEA_TICK_TARGET_RE = /\bfleas?\b|\bticks?\b/i;
+
 // Structural/household pests — the general-pest line. Broad on purpose: any
 // ant species, roaches, spiders (mites already claimed above), the usual
 // occasional invaders, stingers, biters, and rodents.
@@ -15678,6 +15684,7 @@ function labelTargetLines(target) {
   if (TERMITE_TARGET_RE.test(target)) return ["termite"];
   if (CARPENTER_ANT_RE.test(target)) return ["termite", "pest"];
   if (MOSQUITO_TARGET_RE.test(target)) return ["mosquito"];
+  if (FLEA_TICK_TARGET_RE.test(target)) return ["pest", "lawn"];
   if (STRUCTURAL_ONLY_TARGET_RE.test(target)) return ["pest"];
   return null;
 }
@@ -15728,6 +15735,28 @@ export function allowedTargetLinesForServiceType(rawServiceType) {
     lines.add("termite");
   }
   if (/\bpest\b/.test(s)) lines.add("pest");
+  return lines;
+}
+
+// Same question, asked of the whole visit rather than one name. A scheduled
+// add-on is a real service line on the appointment — a quarterly pest visit
+// with a One-Time Mosquito Treatment add-on genuinely treats for mosquitoes,
+// so In2Care must keep its mosquito targets there. The schedule payloads carry
+// those companion lines in serviceAddons/extraServiceTypes; union them into
+// the allowed set (codex P2 r2).
+export function allowedTargetLinesForVisit(service) {
+  const lines = allowedTargetLinesForServiceType(
+    service?.serviceTypeRaw || service?.serviceType,
+  );
+  const addonNames = [
+    ...(Array.isArray(service?.extraServiceTypes) ? service.extraServiceTypes : []),
+    ...(Array.isArray(service?.serviceAddons)
+      ? service.serviceAddons.map((a) => a?.serviceName)
+      : []),
+  ].filter(Boolean);
+  addonNames.forEach((name) => {
+    allowedTargetLinesForServiceType(name).forEach((line) => lines.add(line));
+  });
   return lines;
 }
 

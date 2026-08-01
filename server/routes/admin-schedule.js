@@ -2458,6 +2458,11 @@ router.get('/week', async (req, res, next) => {
           serviceTypeDisplay,
           serviceAddons,
           extraServiceTypes: serviceAddons.map((a) => a.serviceName).filter(Boolean),
+          // Completion opens straight off this row on mobile, and the target
+          // prefill classifies the visit's service lines from the RAW name —
+          // normalizeServiceType collapses "Lawn + Tree & Shrub" to
+          // "Tree & Shrub Care", which would drop every lawn target.
+          serviceTypeRaw: s.service_type,
           serviceCategory: detectServiceCategory(svcType),
           status: s.status,
           techName: s.tech_name, zone: s.zone,
@@ -2626,6 +2631,9 @@ router.get('/month', async (req, res, next) => {
         serviceTypeDisplay: formatServiceDisplay(svcType, serviceAddons),
         serviceAddons,
         extraServiceTypes: serviceAddons.map((a) => a.serviceName).filter(Boolean),
+        // Raw name for the same reason as the day/week payloads — the combined
+        // display name carries service lines the normalized one loses.
+        serviceTypeRaw: s.service_type,
         serviceCategory: category,
         status: s.status,
         techName: s.tech_name,
