@@ -1586,6 +1586,18 @@ router.put('/:id/proposal', async (req, res, next) => {
       return res.status(400).json({ error: 'Proposal line items cannot have negative quantities or unit prices.' });
     }
 
+    // per_application is a RENDERING-only cadence (the estimate PDF's
+    // synthesized lines). It must never be persisted here: the editor payload
+    // carries no visitsPerYear, so such a line annualizes to $0 and the UPDATE
+    // below would write that into the estimate's authoritative annual_total
+    // (codex #3120 r1, re-flagged pre-push r5 at the normalizer level).
+    const hasRenderingOnlyCadence = incoming.buildings.some((b) => Array.isArray(b?.lineItems || b?.line_items)
+      && (b.lineItems || b.line_items).some((i) => String(i?.frequency || '')
+        .trim().toLowerCase().replace(/[\s-]+/g, '_') === 'per_application'));
+    if (hasRenderingOnlyCadence) {
+      return res.status(400).json({ error: 'Proposal line items cannot use the per-application cadence. Pick a billing cadence for each line.' });
+    }
+
     // Normalize through the shared model so what we store matches what the
     // PDF and totals read. Force enabled:true — an explicit PUT means the
     // operator is authoring a real proposal (not the synthesized fallback).
@@ -1648,7 +1660,10 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    generateEstimateProposalPDF(estimate, res);
+    // Same live billing lane the customer-facing download resolves, so the
+    // operator's copy and the customer's copy stay byte-identical.
+    const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    generateEstimateProposalPDF(estimate, res, await resolveProposalBillingContext(estimate));
   } catch (err) { next(err); }
 });
 

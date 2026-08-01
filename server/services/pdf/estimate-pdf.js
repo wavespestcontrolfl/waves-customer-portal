@@ -21,7 +21,8 @@ const {
   WAVES_FDACS_LICENSE_NUMBER,
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
-const { normalizeProposal, computeProposalTotals } = require('../estimate-proposal');
+const { normalizeProposal, computeProposalTotals, annualizedAmount } = require('../estimate-proposal');
+const { resolveProposalBillingContext } = require('../estimate-proposal-billing');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -217,29 +218,63 @@ function buildingBlock(ctx, building, y, taxRate) {
     y += rowH;
 
     if (item.frequency === 'one_time') buildingOneTime += item.amount;
-    else buildingAnnual += item.amount * ({ monthly: 12, bimonthly: 6, quarterly: 4, annual: 1 }[item.frequency] || 0);
+    else buildingAnnual += annualizedAmount(item);
   }
 
   // Building subtotal line
-  y += 2;
-  doc.moveTo(COL.rate - 10, y).lineTo(L + W, y).lineWidth(0.5).strokeColor(RULE).stroke();
-  y += 6;
-  doc.fontSize(9).font('Helvetica-Bold').fillColor(MUTED);
   const subtotalParts = [];
-  if (buildingAnnual > 0) subtotalParts.push(`${currency(buildingAnnual)}/yr recurring`);
+  if (buildingAnnual > 0 && !ctx.suppressPlanTotals) subtotalParts.push(`${currency(buildingAnnual)}/yr recurring`);
   if (buildingOneTime > 0) subtotalParts.push(`${currency(buildingOneTime)} one-time`);
-  doc.text(
-    subtotalParts.length ? `Subtotal — ${subtotalParts.join(' + ')}` : 'Subtotal — included',
-    L, y, { width: W, align: 'right' },
-  );
-  y += 22;
+  // A customer-facing estimate with recurring-only lines has no sanctioned
+  // subtotal to print (see totalsBlock) — skip the rule and the row rather
+  // than print a bare "Subtotal — included".
+  if (!ctx.suppressPlanTotals || subtotalParts.length) {
+    y += 2;
+    doc.moveTo(COL.rate - 10, y).lineTo(L + W, y).lineWidth(0.5).strokeColor(RULE).stroke();
+    y += 6;
+    doc.fontSize(9).font('Helvetica-Bold').fillColor(MUTED);
+    doc.text(
+      subtotalParts.length ? `Subtotal — ${subtotalParts.join(' + ')}` : 'Subtotal — included',
+      L, y, { width: W, align: 'right' },
+    );
+    y += 22;
+  }
   return y;
+}
+
+function quotesPerApplication(proposal) {
+  return (proposal.buildings || []).some((building) => (building.lineItems || [])
+    .some((item) => item.frequency === 'per_application'));
 }
 
 function totalsBlock(ctx, totals, y) {
   const { doc } = ctx;
-  y = ensureSpace(ctx, y, 140);
+  // Combined plan totals ("$X/mo" / "$X/yr") are prohibited on customer-facing
+  // estimate surfaces (AGENTS.md "Per application price copy", owner rule
+  // re-affirmed 2026-07-23); commercial proposals and invoice/prepay surfaces
+  // are the only exemptions. A synthesized proposal IS the customer estimate
+  // PDF, so it prints per-application line items and NO recurring roll-up —
+  // not the monthly-equivalent row, not the annualized row, and not a
+  // first-year total that folds the plan year back in. One-time work is a
+  // single real charge, so its total (and any tax) still prints.
+  const showRecurringTotals = !ctx.suppressPlanTotals && totals.annualRecurring > 0;
+  const showGrandTotal = !ctx.suppressPlanTotals || totals.annualRecurring <= 0;
+  const rows = [];
+  if (showRecurringTotals) {
+    // Commercial boards budget monthly and annually; residential plans bill
+    // per application or annual prepay, never a flat monthly spread.
+    if (ctx.showMonthlyEquivalent) {
+      rows.push(['Recurring (monthly equivalent)', `${currency(totals.monthlyEquivalent)}/mo`]);
+    }
+    rows.push(['Recurring (annualized)', `${currency(totals.annualRecurring)}/yr`]);
+  }
+  if (totals.oneTime > 0) rows.push(['One-time services', currency(totals.oneTime)]);
+  if (totals.hasTax) {
+    rows.push([`${ctx.taxLabel} (${(totals.taxRate * 100).toFixed(2)}%)`, currency(totals.totalTax)]);
+  }
+  if (rows.length === 0 && !showGrandTotal) return y;
 
+  y = ensureSpace(ctx, y, 140);
   doc.moveTo(L, y).lineTo(L + W, y).lineWidth(1).strokeColor(NAVY).stroke();
   y += 12;
 
@@ -252,23 +287,19 @@ function totalsBlock(ctx, totals, y) {
     doc.text(value, valueX, y, { width: 90, align: 'right' });
     y += size + 6;
   };
+  for (const [label, value] of rows) row(label, value);
 
-  if (totals.annualRecurring > 0) {
-    row('Recurring (monthly equivalent)', `${currency(totals.monthlyEquivalent)}/mo`);
-    row('Recurring (annualized)', `${currency(totals.annualRecurring)}/yr`);
+  if (showGrandTotal) {
+    y += 2;
+    doc.moveTo(labelX - 10, y).lineTo(L + W, y).lineWidth(0.5).strokeColor(RULE).stroke();
+    y += 8;
+    doc.fontSize(13).font('Helvetica-Bold').fillColor(NAVY);
+    // "First-year" only means something beside a recurring roll-up.
+    const grandLabel = totals.annualRecurring > 0 ? 'FIRST-YEAR TOTAL' : 'TOTAL';
+    doc.text(grandLabel, labelX, y, { width: 190, align: 'right', characterSpacing: 1 });
+    doc.text(currency(totals.firstYearTotal), valueX, y, { width: 90, align: 'right' });
+    y += 22;
   }
-  if (totals.oneTime > 0) row('One-time services', currency(totals.oneTime));
-  if (totals.hasTax) {
-    row(`${ctx.taxLabel} (${(totals.taxRate * 100).toFixed(2)}%)`, currency(totals.totalTax));
-  }
-
-  y += 2;
-  doc.moveTo(labelX - 10, y).lineTo(L + W, y).lineWidth(0.5).strokeColor(RULE).stroke();
-  y += 8;
-  doc.fontSize(13).font('Helvetica-Bold').fillColor(NAVY);
-  doc.text('FIRST-YEAR TOTAL', labelX, y, { width: 190, align: 'right', characterSpacing: 1 });
-  doc.text(currency(totals.firstYearTotal), valueX, y, { width: 90, align: 'right' });
-  y += 22;
 
   return y;
 }
@@ -298,8 +329,23 @@ function termsBlock(ctx, proposal, totals, y) {
   return y;
 }
 
-function generateEstimateProposalPDF(estimate, res) {
-  const proposal = normalizeProposal(estimate);
+/**
+ * @param {object} estimate
+ * @param {object} res  stream sink
+ * @param {{ billsPerApplication?: boolean }} [billing]
+ *   Resolved by services/estimate-proposal-billing.js — the LIVE billing lane,
+ *   because persisted snapshot flags freeze at send time (codex #3120 r2).
+ *   Defaults false, which renders exactly as this document did before the
+ *   per-application work: a caller that cannot establish the lane must never
+ *   have a billing cadence invented for it.
+ */
+function generateEstimateProposalPDF(estimate, res, billing = {}) {
+  // recurringMode is set ONLY here — the PDF is a rendering surface, so these
+  // lines can never round-trip through the Commercial Proposal editor's save
+  // (see normalizeProposal). Anything but a confirmed per-application lane
+  // (monthly member, annual prepay, unknown) keeps the legacy rendering.
+  const recurringMode = billing?.billsPerApplication === true ? 'per_application' : 'legacy';
+  const proposal = normalizeProposal(estimate, { recurringMode });
   const totals = computeProposalTotals(proposal);
 
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
@@ -314,6 +360,14 @@ function generateEstimateProposalPDF(estimate, res) {
     doc,
     title: proposal.title,
     taxLabel: proposal.taxLabel,
+    showMonthlyEquivalent: proposal.enabled === true,
+    // Keyed off what the document ACTUALLY quotes, not what was requested: the
+    // no-combined-plan-totals rule targets per-application plans, and its
+    // exemptions (commercial proposals, prepay) plus true monthly-billed
+    // legacy plans all keep their roll-up. A per-application derivation that
+    // fell back to monthly lines therefore keeps its totals too, exactly as
+    // this document rendered before (codex #3120 r3).
+    suppressPlanTotals: proposal.enabled !== true && quotesPerApplication(proposal),
     tagline: 'Thank you for considering Waves Pest Control',
   };
 
@@ -352,8 +406,13 @@ function streamToBuffer(streamFn) {
   });
 }
 
-async function buildEstimateProposalPDFBuffer(estimate) {
-  return streamToBuffer((sink) => generateEstimateProposalPDF(estimate, sink));
+// Async entry points resolve the live billing lane themselves, so every copy
+// of the document (download, admin download, email attachment) describes the
+// same billing. `billing` is injectable for tests and for callers that
+// already resolved it.
+async function buildEstimateProposalPDFBuffer(estimate, billing = null) {
+  const resolved = billing || await resolveProposalBillingContext(estimate);
+  return streamToBuffer((sink) => generateEstimateProposalPDF(estimate, sink, resolved));
 }
 
 // SendGrid / EmailTemplateLibrary attachment shape (base64 content).
