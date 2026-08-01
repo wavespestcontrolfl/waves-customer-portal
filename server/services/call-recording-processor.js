@@ -2849,7 +2849,15 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   // wrong account before the office gets the review the advisory card
   // promises (codex P1). The rest of the backfill still runs.
   if (!customer.phone && (extracted.phone || callerPhone) && !suppressPhone) updates.phone = extracted.phone || callerPhone;
-  if (!customer.email && extracted.email) updates.email = extracted.email;
+  // A GARBLED stored email counts as absent (codex round-12 P2): the first
+  // call can persist an EMAIL_RE-failing capture; treating that truthy value
+  // as "has an email" would block the later call's VALID capture from ever
+  // replacing it — and the customer_email_missing card would sit open with
+  // no path to the fix. Only an invalid stored value is replaceable; a valid
+  // stored email is never overwritten by a call capture.
+  const storedEmailInvalid = customer.email && !EMAIL_RE.test(String(customer.email).trim().toLowerCase());
+  const extractedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
+  if ((!customer.email || storedEmailInvalid) && extractedEmailValid) updates.email = extracted.email;
   if (!customer.address_line1 && extracted.address_line1) updates.address_line1 = extracted.address_line1;
   if (!customer.city && extracted.city) updates.city = extracted.city;
   if (!customer.state && extracted.state) updates.state = extracted.state;
@@ -5951,7 +5959,12 @@ const CallRecordingProcessor = {
         customerId = existing.id;
         // Update with any new info
         const updates = {};
-        if (!existing.email && extracted.email) updates.email = extracted.email;
+        // Same garbled-stored-email rule as the appointment backfill
+        // (codex round-12 P2): invalid stored value is replaceable by a
+        // VALID capture; a valid stored email is never overwritten.
+        const existingEmailInvalid = existing.email && !EMAIL_RE.test(String(existing.email).trim().toLowerCase());
+        const capturedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
+        if ((!existing.email || existingEmailInvalid) && capturedEmailValid) updates.email = extracted.email;
         if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
           updates.address_line1 = extracted.address_line1;
           if (extracted.city) updates.city = extracted.city;

@@ -629,6 +629,9 @@ function avVerdictForExtraction(storedAv, verdictExtraction, candidateExtraction
   const b = candidateExtraction.property?.service_address || {};
   const key = (sa) => [
     helpers.streetCompareKey ? helpers.streetCompareKey(sa.street_line_1 || '') : String(sa.street_line_1 || '').toLowerCase(),
+    // Unit rides in the key too (codex round-12 P1): AV sends street_line_2
+    // to Google, so Apt A's verdict must not transfer to Apt B.
+    String(sa.street_line_2 || '').toLowerCase().trim(),
     String(sa.city || '').toLowerCase().trim(),
     String(sa.postal_code || '').trim(),
   ].join('|');
@@ -892,7 +895,21 @@ async function replayCall(call, context) {
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
-  const storedAv = parseJson(call.ai_address_validation, null);
+  const storedAvRaw = parseJson(call.ai_address_validation, null);
+  // Effective-verdict reconstruction (codex round-12 P2, mirroring the
+  // readiness script): a recovered address routed on the recovery's ACCEPTING
+  // verdict while the ORIGINAL unresolvable one was persisted — the
+  // address_recovered card is the durable trace. Recovery adopts only after
+  // confirming exactly ONE real in-area premise, and it REPERSISTED the
+  // recovered address into the enriched extraction, so 'corrected' against
+  // the persisted address is the faithful production input.
+  const recoveredCard = await db('triage_items')
+    .where({ call_log_id: call.id, reason_code: 'address_recovered' })
+    .first('id')
+    .catch(() => null);
+  const storedAv = (recoveredCard && storedAvRaw)
+    ? { status: 'corrected', inServiceArea: true, county: storedAvRaw.county || null, normalized: storedAvRaw.normalized || null, reconstructed_from: 'address_recovered' }
+    : storedAvRaw;
   // The verdict was computed for the persisted (prior) extraction — it always
   // applies to priorV2 by construction.
   const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv) : null;

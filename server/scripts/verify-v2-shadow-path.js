@@ -30,7 +30,8 @@ async function main() {
       .where('processing_status', 'processed')
       .orderBy('created_at', 'desc')
       .limit(N)
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched');
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched',
+        db.raw("exists(select 1 from triage_items ti where ti.call_log_id = call_log.id and ti.reason_code = 'address_recovered') as has_address_recovered"));
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);
@@ -70,10 +71,16 @@ async function main() {
       const pj = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : (v || null); } catch { return null; } };
       const rawAv = pj(r.ai_address_validation);
       const priorEnriched = pj(r.ai_extraction_enriched);
-      const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
-      const storedAv = (rawAv && priorEnriched
+      const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.street_line_2 || '').toLowerCase().trim(), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
+      // Recovery reconstruction (codex round-12 P2): a recovered call routed
+      // on the recovery's accepting verdict, not the persisted unresolvable
+      // one — the address_recovered card marks it (flag rode in on the dump).
+      const effectiveAv = (r.has_address_recovered && rawAv)
+        ? { status: 'corrected', inServiceArea: true, county: rawAv.county || null, normalized: rawAv.normalized || null, reconstructed_from: 'address_recovered' }
+        : rawAv;
+      const storedAv = (effectiveAv && priorEnriched
         && addrKey(priorEnriched.property?.service_address) === addrKey(e.property?.service_address))
-        ? rawAv : null;
+        ? effectiveAv : null;
       const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e, { contactPhone, addressValidation: storedAv }));
       const route = canAutoRoute(e, { contactPhone, addressValidation: storedAv });
       // No customer PII (names/addresses) in logs — non-PII signals only.

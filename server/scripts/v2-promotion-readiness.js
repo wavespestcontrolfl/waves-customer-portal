@@ -102,7 +102,7 @@ async function main() {
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
-    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model', 'ai_address_validation');
+    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model', 'ai_address_validation', 'customer_id');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -149,6 +149,18 @@ async function main() {
     .whereIn('call_log_id', boundedRouteRows.map((r) => r.id))
     .where({ reason_code: 'address_recovered' })
     .select('call_log_id')).map((t) => t.call_log_id));
+
+  // On-file-address fail-open context (codex round-12 P2): production routes
+  // established customers with failOpen + callerAni + knownCustomer
+  // { hasAddress } (call-recording-processor ~5356), letting a caller who
+  // did not restate their on-file address auto-route. Auditing without that
+  // context scores those production auto-creates as blocked. Mirror the same
+  // env gate production reads; hasAddress from the linked customer row.
+  const auditFailOpen = process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true';
+  const linkedCustomerIds = [...new Set(boundedRouteRows.map((r) => r.customer_id).filter(Boolean))];
+  const customersWithAddress = new Set(linkedCustomerIds.length
+    ? (await db('customers').whereIn('id', linkedCustomerIds).whereNotNull('address_line1').where('address_line1', '!=', '').select('id')).map((c) => c.id)
+    : []);
 
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
@@ -232,7 +244,16 @@ async function main() {
     const effectiveAv = recoveredCallIds.has(r.id)
       ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
       : storedAv;
-    const routing = canAutoRoute(v2, { contactPhone, addressValidation: effectiveAv });
+    const knownCustomer = (r.customer_id && customersWithAddress.has(r.customer_id))
+      ? { hasAddress: true }
+      : (r.customer_id ? {} : null);
+    const routing = canAutoRoute(v2, {
+      contactPhone,
+      addressValidation: effectiveAv,
+      failOpen: auditFailOpen,
+      callerAni: contactPhone,
+      knownCustomer,
+    });
     const v2WouldCreate = routing.allowed;
     const v1DidCreate = v1CreatedSid.has(r.twilio_call_sid);
 
