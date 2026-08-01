@@ -746,7 +746,9 @@ describe('revertMerge', () => {
     }
   };
 
-  function buildRevertTrx({ journal, winner, loser, tables = {}, loserEmailConflict = false }) {
+  function buildRevertTrx({
+    journal, winner, loser, tables = {}, loserEmailConflict = false, emailClaimant = null,
+  }) {
     const state = {
       repointedBack: [], winnerPatch: null, loserRestore: null, journalUpdate: null,
       decremented: null, flagRestores: [], propertyDeleted: null, propertyTransferred: null,
@@ -763,6 +765,13 @@ describe('revertMerge', () => {
       }
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser].filter(Boolean);
+        // The explicit email-claim check (r13): lower(email) = ? against
+        // OTHER live customers. customers.email has no unique constraint,
+        // so this query — not a 23505 catch — is the guard.
+        if (q.called('whereRaw') && q.called('whereNotIn')) {
+          state.emailClaimProbe = { where: q.args('whereRaw'), notIn: q.args('whereNotIn') };
+          return emailClaimant;
+        }
         if (q.called('decrement')) { state.decremented = q.args('decrement'); return 1; }
         if (q.called('update')) {
           const whereArg = q.args('where')?.[0];
@@ -1941,19 +1950,56 @@ describe('revertMerge', () => {
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/pending booking follow-up.*deliver to the merged-in email/) });
   });
 
-  it("refuses (409, zero writes) when the loser's email is now used by another live customer — identity is never partially restored", async () => {
+  it("refuses (409, zero writes) when a THIRD live customer holds the loser's email — explicit check, not a unique violation", async () => {
+    // customers.email has NO unique constraint (20260417000010 dropped
+    // customers_email_unique; 20260504000008 replaced it with a NON-unique
+    // index), so the pre-r13 23505 catch could never fire — the stub
+    // therefore raises NO error here and the refusal must come from the
+    // explicit claim query alone.
     const { trx, state } = buildRevertTrx({
       journal: baseJournal(),
       winner: baseWinner(),
       loser: baseLoser(),
       tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
-      loserEmailConflict: true,
+      emailClaimant: { id: 'dddddddd-0000-0000-0000-000000000009' },
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/email address is now used by another live customer/) });
-    // No null-email partial restoration, journal never stamped.
+    // Zero writes: no partial restoration, journal never stamped.
     expect(state.loserRestore).toBe(null);
+    expect(state.journalUpdate).toBe(null);
+    // The probe excludes BOTH merge participants — the winner holds the
+    // address only because this merge backfilled it.
+    expect(state.emailClaimProbe.notIn[1]).toEqual([LOSER, WINNER]);
+  });
+
+  it('restores normally when nobody else claims the email (the claim probe finds no row)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+      emailClaimant: null,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.loserRestore.email).toBe('loser.testcase@example.com');
+    expect(state.journalUpdate.undone_at).toBeTruthy();
+    expect(result.skipped).toHaveLength(0);
+  });
+
+  it('still refuses if a unique constraint is ever restored (belt-and-braces 23505 path)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+      loserEmailConflict: true, // simulates a re-added unique index
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/email address is now used by another live customer/) });
     expect(state.journalUpdate).toBe(null);
   });
 

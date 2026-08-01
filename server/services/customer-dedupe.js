@@ -2145,6 +2145,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     //     metadata jsonb (invoice_id / dispute_invoice_id /
     //     waves_invoice_id), exactly as invoice.js resolves applied money.
     //   customer_credit_ledger — real invoice_id column.
+    //
+    // SERIALIZATION vs concurrent settlement (no extra lock needed): the
+    // verification pass above already took FOR UPDATE on every journaled
+    // invoice, and stripe-webhook.js's succeeded-PI handler locks the same
+    // invoice row FOR UPDATE before touching it. So either it commits
+    // first and this probe sees its payment (refusing), or it blocks here
+    // and — because it reads the invoice's owner from that POST-lock row,
+    // never its pre-lock copy — inserts the payment against whoever owns
+    // the invoice after this undo commits. Settlement is never blocked
+    // into failure by a lock we introduce.
     // (payment_plans and annual_prepay_terms also key on invoices, but they
     // are themselves REVERT_FINANCIAL_TABLES: an unjournaled plan for the
     // winner is not repointed and does not follow the invoice, while a
@@ -2695,19 +2705,45 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // back) deliberately still restores NO id.
       restore.stripe_customer_id = snapshot.stripe_customer_id;
     }
+    // EXPLICIT claim check — NOT an exception guard. customers.email has NO
+    // unique constraint: 20260417000010 ("allow_duplicate_customer_emails")
+    // dropped customers_email_unique and 20260504000008 dropped it again
+    // and put a NON-unique index in its place, so the restore below can
+    // never raise 23505 and an exception-based guard silently passes. If
+    // another LIVE customer now holds this address, restoring it would
+    // leave every repointed sendable (estimates, contracts, queued runs)
+    // targeting a mailbox that belongs to someone else — identity is never
+    // partially restored, so REFUSE (409, zero writes). The winner is
+    // excluded: it holds the address only because this merge backfilled
+    // it, and the winner-side patch above vacates it in this same
+    // transaction.
+    if (restore.email) {
+      let claimant = null;
+      try {
+        claimant = await trx('customers')
+          .whereRaw('lower(email) = ?', [String(restore.email).trim().toLowerCase()])
+          .whereNotIn('id', [loserId, winnerId])
+          .where('active', true)
+          .whereNull('deleted_at')
+          .first('id');
+      } catch (e) {
+        refuse(`Cannot verify whether the merged-away customer's email is now claimed elsewhere (${e.message}) — refusing to revert`);
+      }
+      if (claimant) {
+        refuse("The merged-away customer's email address is now used by another live customer — restoring the account with it would leave its communications targeting someone else's mailbox; resolve the address conflict first, then revert");
+      }
+    }
     try {
       await trx.transaction(async (sp) => {
         await sp('customers').where({ id: loserId }).update(restore);
       });
     } catch (e) {
+      // Belt-and-braces only: no unique constraint on customers.email
+      // exists today (see above), so this cannot fire — but if one is ever
+      // restored, fail the same way the explicit check does rather than
+      // half-restoring the identity.
       if (!(e && e.code === '23505')) throw e;
-      // Email uniqueness tripped: another live customer now owns the
-      // address. A null-email partial restoration would leave every
-      // repointed sendable (estimates, contracts, queued runs) targeting
-      // an address that belongs to SOMEONE ELSE — identity cannot be
-      // partially restored. REFUSE the whole transaction (409, zero
-      // writes via rollback). Untouched-merges contract.
-      refuse("The merged-away customer's email address is now used by another live customer — restoring the account without its address would leave its communications targeting someone else's mailbox; resolve the address conflict first, then revert");
+      refuse("The merged-away customer's email address is now used by another live customer — restoring the account with it would leave its communications targeting someone else's mailbox; resolve the address conflict first, then revert");
     }
 
     await trx('customer_merge_journal').where({ id: journalId }).update({
