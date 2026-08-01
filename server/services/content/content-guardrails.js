@@ -50,6 +50,15 @@ function finding(severity, code, message) {
 // let exactly the fabricated-price shapes this covers slip both gates.
 const PRICE_RE_SRC = '(^|[\\s("\'“‘])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\b|\\b(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\s+(?:dollars|bucks)\\b';
 
+// Blank every span the renderer drops — MDX expression comments and HTML
+// comments — with spaces, LENGTH- and NEWLINE-preserving so callers keep
+// using the original indices and sentence boundaries still split.
+const NON_RENDERED_SPAN_RE = /\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g;
+function blankNonRenderedSpans(s) {
+  return String(s || '').replace(NON_RENDERED_SPAN_RE,
+    (span) => span.replace(/[^\n]/g, ' '));
+}
+
 /**
  * findHardcodedPrice(text) → the offending price string, or null. Applies the
  * calculator/quote-framing and regulatory-fine exemptions, so callers share
@@ -58,6 +67,12 @@ const PRICE_RE_SRC = '(^|[\\s("\'“‘])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5}
  */
 function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
   const s = String(text || '');
+  // Attribution is decided against what READERS SEE. An MDX/HTML comment is
+  // stripped at render, so "{/* other companies charge */} $89 per visit"
+  // showed the customer a bare first-party price while the guardrail read an
+  // exemption (Codex r6). Detection still runs on the original text — a price
+  // hidden in a comment stays flagged (conservative in both directions).
+  const attributionText = blankNonRenderedSpans(s);
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
   while ((match = priceRe.exec(s)) !== null) {
@@ -85,7 +100,8 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
     // ("## Other companies charge\n$89 …" read as one sentence, Codex r4).
     const tokenIndex = match.index + (match[1] ? match[1].length : 0);
     if (thirdPartyCitations
-      && (isThirdPartyPriceCitation(s, tokenIndex) || isTableAttributedPrice(s, tokenIndex))) continue;
+      && (isThirdPartyPriceCitation(attributionText, tokenIndex)
+        || isTableAttributedPrice(attributionText, tokenIndex))) continue;
     return match[0].trim();
   }
   return null;
@@ -309,6 +325,64 @@ function objectEndIndex(s, from) {
   return -1;
 }
 
+// Index of the `>` that terminates a JSX OPENING tag begun at `from`,
+// skipping quoted strings and nested braces (so a `>` inside a prop value or
+// expression is not mistaken for the end). -1 = never terminated.
+function openingTagEndIndex(s, from) {
+  let depth = 0;
+  for (let i = from; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      i += 1;
+      while (i < s.length && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
+      continue;
+    }
+    if (ch === '{') depth += 1;
+    else if (ch === '}') depth -= 1;
+    else if (ch === '>' && depth <= 0) return i;
+  }
+  return -1;
+}
+
+// Index of the `{` that is still open at `until`, scanning forward from
+// `from` so quoted strings are skipped rather than searched backward into.
+// -1 = nothing open there.
+function objectStartIndex(s, from, until) {
+  const open = [];
+  for (let i = Math.max(0, from); i < until; i += 1) {
+    const ch = s[i];
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      i += 1;
+      while (i < until && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
+      continue;
+    }
+    if (ch === '{') open.push(i);
+    else if (ch === '}') open.pop();
+  }
+  return open.length ? open[open.length - 1] : -1;
+}
+
+// Cells of one Markdown table line, with offsets. `\|` is an ESCAPED literal
+// pipe inside a cell, not a delimiter — treating it as one shifts every later
+// value onto the wrong column, so "| Plan \| cadence | $89 per visit |" would
+// read our amount as belonging to a third-party column (Codex r6). Rows and
+// HEADERS must share this, or the two disagree on where a column starts.
+function splitTableCells(line) {
+  const s = String(line || '');
+  const cells = [];
+  let cellStart = s.indexOf('|') + 1;
+  for (let i = cellStart; i <= s.length; i += 1) {
+    if (s[i] === '\\') { i += 1; continue; }
+    if (i === s.length || s[i] === '|') {
+      cells.push({ text: s.slice(cellStart, i), start: cellStart, end: i });
+      cellStart = i + 1;
+    }
+  }
+  return cells;
+}
+
 function isTableAttributedPrice(text, amountIndex) {
   const s = String(text || '');
   const lineStart = s.lastIndexOf('\n', amountIndex - 1) + 1;
@@ -323,14 +397,7 @@ function isTableAttributedPrice(text, amountIndex) {
   // table's header row at the same column index. First-party in the owning
   // cell/header blocks; parse failure fails closed.
   if (/^\s*\|/.test(line)) {
-    const cells = [];
-    let cellStart = line.indexOf('|') + 1;
-    for (let ci = cellStart; ci <= line.length; ci += 1) {
-      if (ci === line.length || line[ci] === '|') {
-        cells.push({ text: line.slice(cellStart, ci), start: cellStart, end: ci });
-        cellStart = ci + 1;
-      }
-    }
+    const cells = splitTableCells(line);
     const idx = cells.findIndex((c) => local >= c.start && local < c.end);
     if (idx === -1) return false;
     const own = cells[idx].text;
@@ -353,8 +420,10 @@ function isTableAttributedPrice(text, amountIndex) {
     // The row's label cell (cells[0]) is part of the row — a first-party
     // label poisons every value in it (Codex r4).
     if (cells.length && hasFirstPartyMarker(cells[0].text)) return false;
-    const headerCells = header.split('|').slice(1);
-    const headerCell = headerCells[idx];
+    // The SAME tokenizer as the row — a raw split('|') here would shift the
+    // header indexes on an escaped pipe and map our amount to a competitor
+    // column even though the row parsed correctly (pre-push Codex P0, r6).
+    const headerCell = splitTableCells(header)[idx]?.text;
     if (!headerCell || hasFirstPartyMarker(headerCell)) return false;
     return matchesThirdParty(headerCell);
   }
@@ -395,16 +464,31 @@ function isTableAttributedPrice(text, amountIndex) {
     // order-insensitively and tolerates quoted keys, so
     // `{ values:["$89 per visit"], "label":"Our quarterly service" }` is a
     // valid row whose label a backward-only scan never sees (Codex r5).
-    const rowStart = s.lastIndexOf('{', vm.index);
+    // A RAW backward `lastIndexOf('{')` lands inside string literals: a label
+    // carrying the ordinary `{{brandName}}` token would set rowStart to a
+    // brace INSIDE that token, so the slice began after `label:` and the
+    // first-party poison never fired — on the very token that marks us
+    // (Codex r6). objectStartIndex ignores braces inside quotes, anchored at
+    // the enclosing tag so the scan stays inside JSX (where quotes pair) and
+    // never treats an apostrophe in body prose as a string delimiter.
+    const compStart = s.lastIndexOf('<ComparisonTable', vm.index);
+    const rowStart = compStart === -1 ? -1 : objectStartIndex(s, compStart, vm.index);
     if (rowStart !== -1) {
       const rowEnd = objectEndIndex(s, close + 1);
       // Undelimited row object — can't prove the label is third-party.
       if (rowEnd === -1) return false;
       const rowText = `${s.slice(rowStart, vm.index)} ${s.slice(close + 1, rowEnd)}`;
-      const labelRe = /["']?label["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)')/g;
-      let lm;
-      while ((lm = labelRe.exec(rowText)) !== null) {
-        const label = lm[1] ?? lm[2];
+      // Backticks are a real label form too, and ANY label we cannot read as
+      // a plain string (a `{expr}`, a template with ${…}) fails closed —
+      // an unreadable label must never count as "not first-party"
+      // (pre-push Codex P0, r6).
+      const labelKeyRe = /["'`]?label["'`]?\s*[:=]\s*/g;
+      let km;
+      while ((km = labelKeyRe.exec(rowText)) !== null) {
+        const rest = rowText.slice(km.index + km[0].length);
+        const strM = /^(?:"([^"]*)"|'([^']*)'|`([^`$]*)`)/.exec(rest);
+        if (!strM) return false; // unsupported label expression
+        const label = strM[1] ?? strM[2] ?? strM[3];
         if (label && hasFirstPartyMarker(label)) return false;
       }
     }
@@ -413,8 +497,14 @@ function isTableAttributedPrice(text, amountIndex) {
     const prev = idx > 0 ? cellStrings[idx - 1].text : '';
     if (matchesThirdParty(own) || matchesThirdParty(prev)) return true;
     // (b) resolve the amount's column header within this <ComparisonTable>.
-    const compStart = s.lastIndexOf('<ComparisonTable', vm.index);
+    // The nearest PRECEDING tag is not necessarily the OWNING one: after a
+    // self-closed table, prose like `Our quarterly service values: ["$89 per
+    // application"]` would otherwise borrow that component's headers. Only an
+    // occurrence INSIDE the opening tag — where rows/columns live — may
+    // resolve against them (pre-push Codex P0, r6).
     if (compStart === -1) return false;
+    const tagEnd = openingTagEndIndex(s, compStart);
+    if (tagEnd === -1 || vm.index > tagEnd) return false;
     const colsM = /columns\s*=\s*\{?\s*\[/.exec(s.slice(compStart, vm.index));
     if (!colsM) return false;
     const colsOpen = compStart + colsM.index + colsM[0].length - 1;
@@ -435,11 +525,25 @@ function isTableAttributedPrice(text, amountIndex) {
 // "charges $199 and $89 is the local rate" is TWO clauses — the second
 // amount must not inherit the attribution (pre-push Codex P0), so
 // amount-after-conjunction alone is NOT enough.
-const RANGE_ANCHOR_RE = /\b(?:between|from)\s+\$[\d,.]*\s*$/i;
+// The anchor must also PAIR with its conjunction ("between … and", "from …
+// to") and what follows must be the range's ENDPOINT, not a fresh predicate:
+// "Aptive charges from $49 and $89 is the local quarterly rate" is two
+// claims, and reading it as one range laundered the second, first-party
+// amount (pre-push Codex P0, r6). Unrecognized range grammar fails closed —
+// the amount is simply scanned as its own clause.
+const RANGE_ANCHOR_RE = /\b(between|from)\s+\$[\d,.]*\s*$/i;
+const RANGE_PAIRS = { between: /^and$/i, from: /^to$/i };
+const PREDICATE_AFTER_ENDPOINT_RE = /^\s*\$[\d,.]+(?:\s+(?:per|a|an|each)\s+[\w-]+)?\s+(?:is|are|was|were|costs?|starts?|runs?|remains?|covers?|includes?|buys?|gets?)\b/i;
 function isRangeConjunction(s, m) {
-  if (!/^(?:and|or|to)$/i.test(m[0].trim())) return false;
-  if (!/^\s*\$\d/.test(s.slice(m.index + m[0].length))) return false;
-  return RANGE_ANCHOR_RE.test(s.slice(0, m.index));
+  const conj = m[0].trim();
+  if (!/^(?:and|or|to)$/i.test(conj)) return false;
+  const after = s.slice(m.index + m[0].length);
+  if (!/^\s*\$\d/.test(after)) return false;
+  const anchor = RANGE_ANCHOR_RE.exec(s.slice(0, m.index));
+  if (!anchor) return false;
+  const pair = RANGE_PAIRS[anchor[1].toLowerCase()];
+  if (!pair || !pair.test(conj)) return false;
+  return !PREDICATE_AFTER_ENDPOINT_RE.test(after);
 }
 
 function clauseAround(sentence, localIndex) {

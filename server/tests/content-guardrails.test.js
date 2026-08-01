@@ -2332,6 +2332,64 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('<ComparisonTable columns={["Fee","Aptive"]} rows={[{ values: ["$199"]', OP)).not.toBeNull();
   });
 
+  test('a brace inside a row label does not hide the label (r6)', () => {
+    // The {{brandName}} token IS the first-party marker — a raw backward
+    // lastIndexOf('{') landed inside it and skipped past `label:`.
+    const jsx = '<ComparisonTable columns={["What","Other companies"]} rows={[{ label:"{{brandName}} quarterly service", values:["$89 per visit"] }]} />';
+    expect(findHardcodedPrice(jsx, OP)).not.toBeNull();
+    // Same token AFTER values (r5 path) must also still poison the row.
+    const after = '<ComparisonTable columns={["What","Other companies"]} rows={[{ values:["$89 per visit"], label:"{{brandName}} quarterly service" }]} />';
+    expect(findHardcodedPrice(after, OP)).not.toBeNull();
+    // An apostrophe in surrounding prose must not desync the scan.
+    const prose = "Florida's renewal law is strict. <ComparisonTable columns={[\"Fee\",\"Aptive\"]} rows={[{ label: \"Early cancel\", values: [\"$199\"] }]} />";
+    expect(findHardcodedPrice(prose, OP)).toBeNull();
+  });
+
+  test('escaped pipes do not shift markdown cell columns (r6)', () => {
+    const md = '| What | Our service | Other companies |\n|---|---|---|\n| Plan \\| cadence | $89 per visit | Varies |';
+    expect(findHardcodedPrice(md, OP)).not.toBeNull();
+    // The competitor column still attributes correctly alongside an escape.
+    const ok = '| What | Our service | Aptive |\n|---|---|---|\n| Plan \\| cadence | None | $199 |';
+    expect(findHardcodedPrice(ok, OP)).toBeNull();
+  });
+
+  test('escaped pipes in the HEADER row do not shift columns (pre-push P0, r6)', () => {
+    const md = '| Fee | Note \\| Aptive | Local service |\n|---|---|---|\n| Quarterly | Varies | $89 per application |';
+    expect(findHardcodedPrice(md, OP)).not.toBeNull();
+  });
+
+  test('a range endpoint followed by a new predicate is not a range (pre-push P0, r6)', () => {
+    // "from … and" is not range grammar, and "$89 is …" is a second claim.
+    expect(findHardcodedPrice('Aptive charges from $49 and $89 is the local quarterly rate.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Aptive charges between $49 and $89 is the local quarterly rate.', OP)).not.toBeNull();
+    // The canonical pairings still read as ONE attributed range.
+    expect(findHardcodedPrice('Aptive charges from $49 to $99 per month for comparable plans.', OP)).toBeNull();
+    expect(findHardcodedPrice('Aptive charges between $49 and $99 for the same coverage.', OP)).toBeNull();
+  });
+
+  test('prose after a closed table cannot borrow its headers (pre-push P0, r6)', () => {
+    const body = '<ComparisonTable columns={["Fee","Other companies"]} rows={[]} />\n\nOur quarterly service values: ["$89 per application"]';
+    expect(findHardcodedPrice(body, OP)).not.toBeNull();
+  });
+
+  test('unreadable row labels fail closed (pre-push P0, r6)', () => {
+    const cols = 'columns={["What","Other companies"]}';
+    // Backtick label — a real form the quoted-only check missed.
+    expect(findHardcodedPrice(`<ComparisonTable ${cols} rows={[{ label: \`Our quarterly service\`, values: ["$89 per visit"] }]} />`, OP)).not.toBeNull();
+    // A label we cannot read as a plain string must never be treated as
+    // "not first-party".
+    expect(findHardcodedPrice(`<ComparisonTable ${cols} rows={[{ label: someExpr, values: ["$89 per visit"] }]} />`, OP)).not.toBeNull();
+    expect(findHardcodedPrice(`<ComparisonTable ${cols} rows={[{ label: \`\${brand} service\`, values: ["$89 per visit"] }]} />`, OP)).not.toBeNull();
+  });
+
+  test('MDX/HTML comments cannot attribute a price (r6)', () => {
+    // The reader sees only "$89 per visit" — the attribution never renders.
+    expect(findHardcodedPrice('{/* other companies charge */} $89 per visit for local quarterly service.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('<!-- Orkin charges --> $89 per visit for local quarterly service.', OP)).not.toBeNull();
+    // A genuine visible attribution is unaffected by a comment elsewhere.
+    expect(findHardcodedPrice('{/* sourced 2026 */}\nOrkin charges a $199 cancellation fee.', OP)).toBeNull();
+  });
+
   test('a newline consumed by the price match is still a boundary (r4)', () => {
     expect(findHardcodedPrice('## Other companies charge\n$89 per visit for local quarterly service', OP)).not.toBeNull();
   });
