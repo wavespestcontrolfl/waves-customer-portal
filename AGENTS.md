@@ -897,6 +897,23 @@ violations at the severity noted.
   `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
   to the report / receipt / rate surfaces. Treat the track token and any change
   to its payload, in any state, as security-critical).
+  `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
+  + `POST /:token/confirm`; the destination the 24h reminder and booking
+  confirmation texts link to. Gated by `scheduled_services.reschedule_token`
+  — the SAME secret /reschedule uses, deliberately reused rather than
+  minting a second one — plus a 60 req/min router limit and 10 req/min on
+  the confirm. **Every route 404s unless `GATE_APPOINTMENT_PAGE=true`.**
+  GET returns the visit summary (customer first name, service type, date +
+  window_start, plan/one-time flag, confirmed flag) plus decorations that
+  are each individually fail-open: assigned tech first name + TTL-presigned
+  photo, a same-tech-as-last-visit flag, and the day's NWS rain chance.
+  window_end is never returned — customer surfaces quote start + 2h only.
+  The ONLY write is the confirm: a status-only `pending -> confirmed`
+  transition guarded on the status that was read, plus a
+  `job_status_history` row. It never touches date/window/tech and sends
+  NOTHING to the customer. calendar.ics is a read-only RFC 5545 file for
+  the same visit, UID-stable per visit so re-downloading updates rather
+  than duplicates).
   `/api/public/reschedule/:token` (GET + POST, plus `POST /:token/find-slots`;
   customer self-serve reschedule linked from appointment
   confirmation/72h/24h texts + reminder emails.
