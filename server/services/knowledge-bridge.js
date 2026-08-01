@@ -885,7 +885,12 @@ const KnowledgeBridge = {
       const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
       if (!assessment) return null;
       let appliedProducts = [];
-      if (assessment.service_record_id) {
+      // "Verified" = we authoritatively read the visit's application set,
+      // even when that set is legitimately EMPTY (a completed lawn visit may
+      // record no products). Grounding must represent a successful read, not
+      // a non-empty list (codex P1 r33).
+      const applicationsVerified = !!assessment.service_record_id;
+      if (applicationsVerified) {
         appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
       }
       // Register THIS run in the fence before releasing the lock — other
@@ -898,7 +903,7 @@ const KnowledgeBridge = {
       delete stored._generationRunId;
       await trx('lawn_assessments').where({ id: assessmentId })
         .update({ recommendations: JSON.stringify(stored), updated_at: new Date() });
-      return { assessment, appliedProducts };
+      return { assessment, appliedProducts, applicationsVerified };
     }).catch((err) => {
       // A transient read/enrichment failure FAILS the run as ungrounded —
       // proceeding blind to today's treatments would release every gate
@@ -935,7 +940,7 @@ const KnowledgeBridge = {
     return result;
   },
 
-  async _generateAssessmentRecommendationsUnlocked(assessmentId, { assessment, appliedProducts }, context, runId) {
+  async _generateAssessmentRecommendationsUnlocked(assessmentId, { assessment, appliedProducts, applicationsVerified }, context, runId) {
     try {
       const { customer, grassType, grassTrack, protocolEntries, outcomeEntries } = context;
 
@@ -1026,7 +1031,9 @@ Return a JSON object with:
         // grounded one, regardless of which instance's LLM call finished
         // last (codex P1 r8+r27). The stale-summary check runs against the
         // FRESH row inside the lock.
-        const iAmGrounded = appliedProducts.length > 0;
+        // Grounded = the application set was authoritatively read (empty
+        // counts); an unlinked assessment is not (codex P1 r33).
+        const iAmGrounded = !!applicationsVerified;
         return await db.transaction(async (trx) => {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
           const fresh = await trx('lawn_assessments').where({ id: assessmentId }).first();

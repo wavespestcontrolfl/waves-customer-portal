@@ -182,8 +182,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
 // Version of the stored lawn recommendations — changes on every write
 // (generation, sanitize), so an unchanged value across a render proves the
 // render did not straddle a copy change.
+// Both helpers THROW on a query error so callers can distinguish "no lawn
+// assessment exists" (safe to clear the marker) from "we could not read"
+// (must retain it) — swallowing the error made two nulls compare equal and
+// cleared the marker after a raced render (codex P1 #3093 r33).
 async function lawnRecommendationVersion(assessmentId, knex = db) {
-  const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at').catch(() => null);
+  const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
   if (!row) return null;
   return crypto.createHash('sha1')
     .update(`${typeof row.recommendations === 'string' ? row.recommendations : JSON.stringify(row.recommendations || '')}|${row.ai_summary || ''}|${row.updated_at ? new Date(row.updated_at).toISOString() : ''}`)
@@ -191,7 +195,7 @@ async function lawnRecommendationVersion(assessmentId, knex = db) {
 }
 
 async function lawnAssessmentIdForRecord(recordId, knex = db) {
-  const row = await knex('lawn_assessments').where({ service_record_id: recordId }).first('id').catch(() => null);
+  const row = await knex('lawn_assessments').where({ service_record_id: recordId }).first('id');
   return row?.id || null;
 }
 
@@ -234,8 +238,18 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   // the recommendation copy did not change during the render AND no
   // generation is in flight afterwards — otherwise this render may have
   // loaded pre-grounding copy (codex P1 r31).
-  const lawnAssessmentId = correctionPending ? await lawnAssessmentIdForRecord(recordId, knex) : null;
-  const recVersionBefore = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
+  let lawnAssessmentId = null;
+  let recVersionBefore = null;
+  let fenceReadOk = true;
+  if (correctionPending) {
+    try {
+      lawnAssessmentId = await lawnAssessmentIdForRecord(recordId, knex);
+      recVersionBefore = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
+    } catch (fenceErr) {
+      fenceReadOk = false;
+      logger.warn(`[pdf-queue] correction-fence pre-read failed for ${recordId} — marker retained: ${fenceErr.message}`);
+    }
+  }
   const pestPressureConfig = await loadActiveConfig(knex).catch(() => null);
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
@@ -257,19 +271,22 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   });
   // A completed fresh render satisfies the pending correction — but only
   // once the copy can no longer change (no generation in flight).
-  if (correctionPending && !rendered.storageFailed) {
+  if (correctionPending && !rendered.storageFailed && fenceReadOk) {
     try {
       const { treatmentGuard } = require('../knowledge-bridge');
       const stillGenerating = lawnAssessmentId
         ? await treatmentGuard.isGenerationInFlight(lawnAssessmentId, knex)
         : false;
+      // Throws on a read error → the catch retains the marker.
       const recVersionAfter = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
       const copyStableAcrossRender = recVersionBefore === recVersionAfter;
       // A generation that settled DURING this render means the render may
       // have read the pre-grounding copy — keep the marker so the next
       // render (post-settlement) produces the definitive object.
       if (!stillGenerating && copyStableAcrossRender) await clearLawnPdfCorrectionMarker(recordId, knex);
-    } catch { /* marker clearing is best-effort; a stale marker only costs a re-render */ }
+    } catch (clearErr) {
+      logger.warn(`[pdf-queue] correction-marker clear skipped for ${recordId} — retained: ${clearErr.message}`);
+    }
   }
   return {
     pdf: rendered.pdf,
