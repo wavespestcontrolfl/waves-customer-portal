@@ -2298,6 +2298,11 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       }
     });
 
+    // A failed recalc is SURFACED, not swallowed (codex P2 #3152 round 9):
+    // the correction itself stands (costing is derived state any later
+    // recalc heals from the durable stamp), but the response says so and
+    // the client warns instead of promising updated job costing.
+    let costingUpdated = false;
     try {
       const JobCosting = require('../services/job-costing');
       // NO request-local minutes here (codex P2 #3152 round 7): concurrent
@@ -2309,8 +2314,11 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       // durable time_on_site_adjusted_minutes stamp committed above (round
       // 5), so whichever recalc runs last converges on the newest committed
       // correction, and any interleaving self-heals on the next recalc —
-      // no request-local state involved.
+      // no request-local state involved. A staleSkipped result still counts
+      // as updated: it means a NEWER correction owns the costing and its
+      // own recalculation lands (or landed) the truth.
       await JobCosting.calculateJobCost(svc.id);
+      costingUpdated = true;
     } catch (err) {
       logger.warn(`[time-on-site] job costing recalc failed for service ${svc.id}: ${err.message}`);
     }
@@ -2336,6 +2344,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       timeOnSiteMinutes: plan.minutes,
       endStampsRewritten: !!plan.newEnd,
       recordUpdated,
+      costingUpdated,
       ...(recordAmbiguous ? { recordAmbiguous: true } : {}),
     });
   } catch (err) { next(err); }

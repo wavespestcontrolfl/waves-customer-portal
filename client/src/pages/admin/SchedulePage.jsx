@@ -1645,6 +1645,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 : "Duration corrected on the appointment, but no report record was found for this visit — the customer report was not changed.",
             );
           }
+          // The costing refresh is derived state — a failure there must not
+          // read as full success (codex P2 round 9). Any later recalc heals
+          // from the durable stamp, but the admin should know it's pending.
+          if (patchResult?.costingUpdated === false) {
+            alert(
+              "Duration corrected, but the job-cost refresh failed — costs may show the old labor until the next recalculation (Job Costs → Recalculate, or re-save this correction).",
+            );
+          }
         } catch (patchErr) {
           alert(
             `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,

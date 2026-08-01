@@ -435,6 +435,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       timeOnSiteMinutes: 45,
       endStampsRewritten: true,
       recordUpdated: true,
+      costingUpdated: true,
     });
 
     const svcUpdate = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload);
@@ -511,6 +512,27 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // real PostgreSQL 16, including the JSON-null-prior shape).
     expect(notesRaw.bindings).toEqual([JSON.stringify({ timeOnSite: 50, timeOnSiteAdjusted: true })]);
     expect(notesRaw.sql).toMatch(/-> 'timeOnSitePrior' IS NOT NULL/);
+  });
+
+  test('a FAILED costing recalc is surfaced, never silent success (codex P2 round 9)', async () => {
+    // The correction stands (costing is derived state that any later recalc
+    // heals from the durable stamp) — but the response must say the refresh
+    // failed so the client can warn instead of promising updated costs.
+    JobCosting.calculateJobCost.mockRejectedValueOnce(new Error('transient db error'));
+    const dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: RECORD, recordCols: RECORD_COLS });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.costingUpdated).toBe(false);
+    // The correction and audit trail still landed.
+    expect(dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload)).toBeTruthy();
+    expect(dbMock.calls.find((c) => c.table === 'activity_log')).toBeTruthy();
   });
 
   test('a columnInfo FAILURE propagates — a degraded schema must not strip the FK lookup or the record-update legs (codex P2 round 4)', async () => {
@@ -828,12 +850,14 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
         orderBy: () => chain,
         limit: () => chain,
         count: () => chain,
+        forUpdate: () => chain,
         columnInfo: async () => ({ scheduled_service_id: {}, revenue: {} }),
         select: async () => [],
         async first() {
           if (table === 'scheduled_services') {
             svcReads += 1;
-            // First read: A's view (45). Fence re-read: B already stamped 60.
+            // First read: A's view (45). Locked fence re-read: B already
+            // stamped 60.
             return svcReads === 1 ? svcAtRead : { ...svcAtRead, time_on_site_adjusted_minutes: 60 };
           }
           return null;
@@ -844,16 +868,21 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
       chain.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
       return chain;
     };
+    dbFence.transaction = async (fn) => fn(dbFence);
     const res = await realCalculateJobCost('svc-1', dbFence);
     expect(res.staleSkipped).toBe(true);
     expect(writes.jobCosts).toEqual([]);
     expect(writes.recordUpdates).toEqual([]);
-    // Wiring: the fence sits between the financial computation and the
-    // job_costs ledger write.
+    // Wiring (round 9): the fence read holds the scheduled_services row
+    // lock in the SAME transaction as both financial writes — no window
+    // between check and write remains.
+    expect(costingSource).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n\s*const rowNow = await trx\('scheduled_services'\)\.where\(\{ id: scheduledServiceId \}\)\.forUpdate\(\)\.first\(\);/);
     const fenceAt = costingSource.indexOf('correction stamp moved during recalculation');
-    const ledgerAt = costingSource.indexOf('// 1. job_costs ledger');
+    const jobCostsWriteAt = costingSource.indexOf("await trx('job_costs').insert(row);");
+    const writeThroughAt = costingSource.indexOf("await trx('service_records').where({ id: record.id }).update(upd);");
     expect(fenceAt).toBeGreaterThan(-1);
-    expect(ledgerAt).toBeGreaterThan(fenceAt);
+    expect(jobCostsWriteAt).toBeGreaterThan(fenceAt);
+    expect(writeThroughAt).toBeGreaterThan(jobCostsWriteAt);
   });
 
   test('an ambiguous legacy match contributes NOTHING to costing — nulled at resolution, not just at the write-through (codex P2 round 6)', () => {

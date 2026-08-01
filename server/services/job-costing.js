@@ -484,27 +484,6 @@ async function calculateJobCost(scheduledServiceId, db, {
     revenue, laborHours, laborCost, productsCost, driveCost, expensesCost,
   });
 
-  // Correction-stamp fence (codex P2 #3152 round 8): the durable
-  // time_on_site_adjusted_minutes stamp was read ONCE with the svc row, and
-  // several async reads ran since — a recalculation that straddled a NEWER
-  // correction would land stale labor last. Re-read the stamp just before
-  // the financial writes; if it moved, skip them entirely — the newer
-  // correction's own recalculation (reading the newer stamp) owns the truth.
-  // Full-row read on purpose: selecting the column by name would throw in an
-  // environment that predates migration 20260801400000, while a missing
-  // property compares null === null and proceeds.
-  {
-    const rowNow = await db('scheduled_services').where({ id: scheduledServiceId }).first();
-    const norm = (v) => (v == null ? null : Number(v));
-    if (norm(rowNow?.time_on_site_adjusted_minutes) !== norm(svc.time_on_site_adjusted_minutes)) {
-      logger.warn(
-        `[job-costing] ${scheduledServiceId} — correction stamp moved during recalculation `
-        + `(${norm(svc.time_on_site_adjusted_minutes)} → ${norm(rowNow?.time_on_site_adjusted_minutes)}); skipping stale financial writes`,
-      );
-      return { ...fin, laborHours: fin.labor_hours, serviceRecordId: null, staleSkipped: true };
-    }
-  }
-
   // 1. job_costs ledger (existing consumers: admin-job-costs, equipment).
   const row = {
     service_record_id: record?.id || null,
@@ -524,42 +503,73 @@ async function calculateJobCost(scheduledServiceId, db, {
     products_used: JSON.stringify(breakdown),
   };
 
-  const existing = await db('job_costs').where({ scheduled_service_id: scheduledServiceId }).first();
-  if (existing) {
-    await db('job_costs').where({ id: existing.id }).update(row);
-  } else {
-    await db('job_costs').insert(row);
-  }
-
-  // 2. Write-through to service_records — the table the Dashboard + /admin/revenue
-  //    actually read. Each column is guarded by columnInfo so an environment
-  //    missing the 20260401000027 financial columns is a no-op, not a crash.
-  //    Skipped for ambiguous legacy soft-join matches (multiple same-day visits
-  //    collapsing onto one record) — writing would clobber it and blank the rest.
-  //    Also skipped when the record itself isn't completed: office-handoff visits
-  //    are stored status='incomplete' while their scheduled_service stays
-  //    'completed', and the dashboard counts any non-null revenue — an incomplete
-  //    visit must not surface revenue/margin.
-  // (`ambiguous` here is belt-and-braces — an ambiguous match is already
-  // nulled out at resolution above, so it can't reach this write.)
-  const recordCompleted = !srCols.status || record?.status === 'completed';
+  // Correction-stamp fence, ATOMIC with the financial writes (codex P2
+  // #3152 rounds 8+9): the durable time_on_site_adjusted_minutes stamp was
+  // read ONCE with the svc row, and several async reads ran since — a
+  // recalculation that straddled a NEWER correction would land stale labor
+  // last. Round 8's standalone re-read still left a window between check
+  // and write, so the fence now takes the scheduled_services row lock (FOR
+  // UPDATE) in the SAME transaction as both financial writes: a correction
+  // commits its stamp through an UPDATE on that row, so it either commits
+  // before the lock is granted (fence sees the new stamp → skip) or blocks
+  // until these writes commit (its own follow-up recalc then lands the
+  // truth). Full-row read on purpose: selecting the column by name would
+  // throw in an environment that predates migration 20260801400000, while
+  // a missing property compares null === null and proceeds. If the caller
+  // passed a transaction handle, this nests as a savepoint.
   let wroteThrough = false;
-  if (record?.id && !ambiguous && recordCompleted) {
-    const upd = {};
-    const set = (col, val) => { if (srCols[col]) upd[col] = val; };
-    set('revenue', fin.revenue);
-    set('material_cost', fin.material_cost);
-    set('labor_hours', fin.labor_hours);
-    set('labor_cost', fin.labor_cost);
-    set('drive_cost', fin.drive_cost);
-    set('total_job_cost', fin.total_job_cost);
-    set('gross_profit', fin.gross_profit);
-    set('gross_margin_pct', fin.gross_margin_pct);
-    set('revenue_per_man_hour', fin.revenue_per_man_hour);
-    if (Object.keys(upd).length) {
-      await db('service_records').where({ id: record.id }).update(upd);
-      wroteThrough = true;
+  let staleSkipped = false;
+  await db.transaction(async (trx) => {
+    const rowNow = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first();
+    const norm = (v) => (v == null ? null : Number(v));
+    if (norm(rowNow?.time_on_site_adjusted_minutes) !== norm(svc.time_on_site_adjusted_minutes)) {
+      logger.warn(
+        `[job-costing] ${scheduledServiceId} — correction stamp moved during recalculation `
+        + `(${norm(svc.time_on_site_adjusted_minutes)} → ${norm(rowNow?.time_on_site_adjusted_minutes)}); skipping stale financial writes`,
+      );
+      staleSkipped = true;
+      return;
     }
+
+    const existing = await trx('job_costs').where({ scheduled_service_id: scheduledServiceId }).first();
+    if (existing) {
+      await trx('job_costs').where({ id: existing.id }).update(row);
+    } else {
+      await trx('job_costs').insert(row);
+    }
+
+    // 2. Write-through to service_records — the table the Dashboard + /admin/revenue
+    //    actually read. Each column is guarded by columnInfo so an environment
+    //    missing the 20260401000027 financial columns is a no-op, not a crash.
+    //    Skipped for ambiguous legacy soft-join matches (multiple same-day visits
+    //    collapsing onto one record) — writing would clobber it and blank the rest.
+    //    Also skipped when the record itself isn't completed: office-handoff visits
+    //    are stored status='incomplete' while their scheduled_service stays
+    //    'completed', and the dashboard counts any non-null revenue — an incomplete
+    //    visit must not surface revenue/margin.
+    // (`ambiguous` here is belt-and-braces — an ambiguous match is already
+    // nulled out at resolution above, so it can't reach this write.)
+    const recordCompleted = !srCols.status || record?.status === 'completed';
+    if (record?.id && !ambiguous && recordCompleted) {
+      const upd = {};
+      const set = (col, val) => { if (srCols[col]) upd[col] = val; };
+      set('revenue', fin.revenue);
+      set('material_cost', fin.material_cost);
+      set('labor_hours', fin.labor_hours);
+      set('labor_cost', fin.labor_cost);
+      set('drive_cost', fin.drive_cost);
+      set('total_job_cost', fin.total_job_cost);
+      set('gross_profit', fin.gross_profit);
+      set('gross_margin_pct', fin.gross_margin_pct);
+      set('revenue_per_man_hour', fin.revenue_per_man_hour);
+      if (Object.keys(upd).length) {
+        await trx('service_records').where({ id: record.id }).update(upd);
+        wroteThrough = true;
+      }
+    }
+  });
+  if (staleSkipped) {
+    return { ...fin, laborHours: fin.labor_hours, serviceRecordId: null, staleSkipped: true };
   }
 
   logger.info(
