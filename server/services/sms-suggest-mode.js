@@ -598,7 +598,12 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
 
 /** Pure verdict for a send derived from a reviewed draft: verbatim or edited. */
 function classifySendVerdict(sentBody, suggestedMessage) {
-  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  // GSM canonicalization on both sides: the send path normalizes what
+  // actually goes out (curly quotes → straight, em dash → hyphen), so a
+  // crash-recovered sms_log body would byte-differ from an UNCHANGED
+  // smart-punctuation suggestion and be misclassified as 'corrected'.
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  const normalize = (value) => normalizeGsmPunctuation(String(value || '')).replace(/\s+/g, ' ').trim();
   return normalize(sentBody) === normalize(suggestedMessage) ? 'accepted' : 'corrected';
 }
 

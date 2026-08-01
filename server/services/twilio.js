@@ -4,6 +4,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const { shortenOrPassthrough } = require("./short-url");
+const { normalizeGsmPunctuation } = require("./messaging/gsm-normalize");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
 const { publicPortalUrl } = require("../utils/portal-url");
 
@@ -322,6 +323,20 @@ const TwilioService = {
     try {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
       if (internalRedirect) return internalRedirect;
+
+      // GSM-7 normalization at the true Twilio boundary: legacy callers
+      // reach sendSMS directly without going through sendCustomerMessage,
+      // and one typographic character (curly quote, em dash) flips the
+      // whole body to UCS-2 — 67 chars/segment instead of 153. AFTER the
+      // internal-redirect check on purpose: a bell/push notification is not
+      // an SMS, so redirected internal alerts keep their original bullets
+      // and punctuation. Media sends (MMS) are exempt — MMS is not
+      // segment-encoded, so a human-authored caption stays verbatim.
+      // Idempotent, so bodies already normalized upstream pass through
+      // unchanged.
+      const sendIsMms = (Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0)
+        || !!options.mediaUrl;
+      if (!sendIsMms) body = normalizeGsmPunctuation(body);
 
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.
