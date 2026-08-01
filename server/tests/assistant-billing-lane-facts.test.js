@@ -149,8 +149,21 @@ describe('active autopay is not proof a dues charge is running', () => {
   });
 
   test('autopay off is distinct from paused', async () => {
-    expect(await resolveDuesCollectionState({ id: 'c1', active: true }, { on: false, paused: false }))
-      .toBe('autopay_off');
+    expect(await resolveDuesCollectionState(
+      { id: 'c1', active: true }, { on: false, paused: false }, { pointerChargeable: false },
+    )).toBe('autopay_off');
+  });
+
+  test('a chargeable enrollment pointer claims neither way', async () => {
+    // customerOnAutopay requires a DEFAULT row; stripe.charge honors the
+    // pointer first and will charge a legacy pointer-only account the
+    // predicate calls inactive. "Not auto-collecting" would be as wrong as
+    // promising a charge, so the state is unconfirmed (codex #3141 r5).
+    expect(await resolveDuesCollectionState(
+      { id: 'c1', active: true, autopay_payment_method_id: 'pm-1' },
+      { on: false, paused: false },
+      { pointerChargeable: true },
+    )).toBe('unknown');
   });
 
   test('an unreadable autopay state never claims a collection', async () => {

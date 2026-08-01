@@ -313,7 +313,31 @@ async function resolveAnnualCoverageState(customer) {
   }
 }
 
-async function resolveDuesCollectionState(customer, autopayState) {
+// Could the ENROLLMENT POINTER still collect on its own? customerOnAutopay
+// requires a default row, but stripe.charge honors a valid enabled
+// autopay_payment_method_id before it ever looks for one (stripe.js:1690-1737)
+// — so in the supported legacy state where the pointer is chargeable and no
+// default row remains, the cron really does charge an account the predicate
+// calls inactive (codex #3141 r5). Unreadable counts as "cannot rule it out".
+async function pointerCouldStillCollect(customer) {
+  if (!customer?.autopay_payment_method_id) return false;
+  try {
+    const row = await db('payment_methods')
+      .where({
+        id: customer.autopay_payment_method_id,
+        customer_id: customer.id,
+        processor: 'stripe',
+        autopay_enabled: true,
+      })
+      .whereNotNull('stripe_payment_method_id')
+      .first('id');
+    return !!row;
+  } catch {
+    return true;
+  }
+}
+
+async function resolveDuesCollectionState(customer, autopayState, opts = {}) {
   // Eligibility itself was unreadable — never speak to collection at all.
   if (!autopayState) return 'unknown';
   // The cron's SELECT is the first gate, and it filters on more than the
@@ -329,7 +353,17 @@ async function resolveDuesCollectionState(customer, autopayState) {
   if (customer?.active !== true || customer?.deleted_at) return 'account_inactive';
   if (customer?.service_paused_at) return 'service_paused';
   if (autopayState.paused) return 'autopay_paused';
-  if (autopayState.on !== true) return 'autopay_off';
+  if (autopayState.on !== true) {
+    // "Not auto-collecting" is a claim too, and it is wrong for a legacy
+    // pointer-only account the cron still charges (codex #3141 r5). When a
+    // pointer could collect on its own, claim NEITHER: no charge total is
+    // published, and the copy says the collection state is unconfirmed
+    // rather than asserting nothing collects.
+    const pointerChargeable = opts.pointerChargeable !== undefined
+      ? opts.pointerChargeable
+      : await pointerCouldStillCollect(customer);
+    return pointerChargeable ? 'unknown' : 'autopay_off';
+  }
   try {
     const AnnualPrepayRenewals = require('./annual-prepay-renewals');
     const id = String(customer.id);
