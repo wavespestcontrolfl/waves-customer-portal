@@ -38,6 +38,11 @@ const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql } = require('../services/stamped-address');
+const {
+  arrivalWindowRange,
+  formatSmsTimeRange,
+  ARRIVAL_WINDOW_MINUTES,
+} = require('../utils/sms-time-format');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -46,8 +51,20 @@ const TOKEN_RE = /^[a-f0-9]{64}$/;
 
 // The customer-quoted arrival window is ALWAYS window_start + 2 hours
 // (owner rule; window_end is the internal job-duration block and never
-// reaches a customer surface).
-const ARRIVAL_PROMISE_MINUTES = 120;
+// reaches a customer surface). The duration and the range derivation both
+// come from sms-time-format so this page can never drift from the
+// reminders, reports, and dispatch surfaces that quote the same window.
+const ARRIVAL_PROMISE_MINUTES = ARRIVAL_WINDOW_MINUTES;
+
+// '09:00' -> '9:00 AM - 11:00 AM', or null when the start is missing or
+// malformed. Computed server-side so the page never carries a second
+// implementation of the window rule.
+function arrivalWindowLabel(start) {
+  const range = arrivalWindowRange(start);
+  if (!range) return null;
+  const formatted = formatSmsTimeRange(range);
+  return formatted === range ? null : formatted;
+}
 
 // Day-level NWS chance at or above which the page shows the storm
 // heads-up. Matches the "heavy" tier the booking rain chips already use —
@@ -272,6 +289,7 @@ router.get('/:token', async (req, res, next) => {
       appointment: {
         date: apptDateStr(svc.scheduled_date),
         windowStart: hhmm(svc.window_start),
+        arrivalWindow: arrivalWindowLabel(hhmm(svc.window_start)),
       },
     };
     if (state !== 'upcoming') return res.json({ ...base, tech: null, plan: null, weather: null });
@@ -523,6 +541,7 @@ router._test = {
   icsStamp,
   STORM_NOTE_MIN_CHANCE,
   ARRIVAL_PROMISE_MINUTES,
+  arrivalWindowLabel,
 };
 
 module.exports = router;

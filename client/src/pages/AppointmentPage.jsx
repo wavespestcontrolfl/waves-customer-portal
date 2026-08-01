@@ -107,25 +107,11 @@ function formatDateLabel(dateStr) {
   }
 }
 
-function formatTimeLabel(hhmm) {
-  if (!hhmm) return '';
-  const [h, m] = String(hhmm).split(':').map(Number);
-  if (Number.isNaN(h)) return hhmm;
-  const suffix = h >= 12 ? 'PM' : 'AM';
-  return `${h % 12 || 12}:${String(m || 0).padStart(2, '0')} ${suffix}`;
-}
-
-// The quoted arrival window is ALWAYS start + 2 hours (owner rule) — the
-// server never sends window_end to a customer surface.
-const ARRIVAL_WINDOW_MINUTES = 120;
-
-function arrivalWindowLabel(start) {
-  const [h, m] = String(start || '').split(':').map(Number);
-  if (Number.isNaN(h)) return '';
-  const total = (h * 60 + (m || 0) + ARRIVAL_WINDOW_MINUTES) % (24 * 60);
-  const end = `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
-  return `${formatTimeLabel(start)}–${formatTimeLabel(end)}`;
-}
+// The quoted arrival window (start + 2 hours, owner rule) is derived
+// SERVER-side by arrivalWindowRange() in sms-time-format and arrives on the
+// payload as `appointment.arrivalWindow`. Do not recompute it here — a
+// second implementation is how this page drifts from the reminders and
+// reports that quote the same window.
 
 function SkeletonCard() {
   return (
@@ -413,18 +399,23 @@ export default function AppointmentPage() {
         }}>
           <span style={{ flex: 1, fontSize: 16, fontWeight: 600, color: S.text, lineHeight: 1.3 }}>
             {formatDateLabel(appt.date)}
-            {appt.windowStart ? (
+            {appt.arrivalWindow ? (
               <small style={{ display: 'block', fontSize: 14, fontWeight: 500, color: S.body }}>
-                2-hour arrival window · {arrivalWindowLabel(appt.windowStart)}
+                2-hour arrival window · {appt.arrivalWindow}
               </small>
             ) : null}
           </span>
           <WeatherChip weather={data.weather} />
         </div>
 
-        <div style={{ fontSize: 15, color: S.body, lineHeight: 1.5, marginTop: 12 }}>
-          Your technician arrives any time inside this 2-hour window — no waiting on a whole morning.
-        </div>
+        {/* Only speak to "this window" when one is actually on the card —
+            the canonical helper returns null for a missing or malformed
+            start, and the sentence dangles without a range above it. */}
+        {appt.arrivalWindow ? (
+          <div style={{ fontSize: 15, color: S.body, lineHeight: 1.5, marginTop: 12 }}>
+            Your technician arrives any time inside this 2-hour window — no waiting on a whole morning.
+          </div>
+        ) : null}
 
         {data.weather?.stormy ? (
           <div data-glass="soft" style={{

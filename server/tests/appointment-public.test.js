@@ -14,7 +14,11 @@ jest.mock('../services/tech-photo', () => ({
 }));
 
 const appointmentRouter = require('../routes/appointment-public');
-const { pageState, confirmRaceVerdict, icsEscape, icsFold, STORM_NOTE_MIN_CHANCE } = appointmentRouter._test;
+const {
+  pageState, confirmRaceVerdict, icsEscape, icsFold, STORM_NOTE_MIN_CHANCE,
+  ARRIVAL_PROMISE_MINUTES, arrivalWindowLabel,
+} = appointmentRouter._test;
+const { ARRIVAL_WINDOW_MINUTES, arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { smsLineFor } = require('../services/appointment-link');
 const { TEMPLATES } = require('../models/migrations/20260801000010_appointment_page_sms_templates')._test;
 const { detectEncoding, countSegments } = require('../services/messaging/segment-counter');
@@ -62,6 +66,24 @@ describe('appointment page state', () => {
     expect(pageState({
       status: 'confirmed', scheduled_date: '2026-08-01', window_start: '15:00:00',
     }, NOW).state).toBe('upcoming');
+  });
+
+  test('the arrival range is the canonical helper, not a second implementation', () => {
+    // AGENTS.md pins customer-facing arrival copy to arrivalWindowRange();
+    // the page previously recomputed start+120 in the client, where the
+    // formatting and the malformed-input handling could drift from the
+    // reminders quoting the same window.
+    expect(ARRIVAL_PROMISE_MINUTES).toBe(ARRIVAL_WINDOW_MINUTES);
+    expect(arrivalWindowLabel('09:00')).toBe(formatSmsTimeRange(arrivalWindowRange('09:00')));
+    expect(arrivalWindowLabel('09:00')).toBe('9:00 AM - 11:00 AM');
+    expect(arrivalWindowLabel('13:30')).toBe('1:30 PM - 3:30 PM');
+    // Wraps midnight the same way the canonical helper does.
+    expect(arrivalWindowLabel('23:00')).toBe('11:00 PM - 1:00 AM');
+    // Missing/malformed starts yield null, so the card omits the line
+    // entirely rather than rendering a half-built range.
+    for (const bad of [null, '', 'soon', '25:00']) {
+      expect(arrivalWindowLabel(bad)).toBeNull();
+    }
   });
 
   test('a windowless visit stays live until the end of its day', () => {

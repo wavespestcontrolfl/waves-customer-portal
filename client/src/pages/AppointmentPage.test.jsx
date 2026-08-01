@@ -19,7 +19,9 @@ function upcomingPayload(overrides = {}) {
     state: 'upcoming',
     customerFirstName: 'Pat',
     service: { type: 'Quarterly Pest Control' },
-    appointment: { date: '2026-08-05', windowStart: '09:00' },
+    // arrivalWindow is derived SERVER-side by the canonical helper; the page
+    // renders it verbatim and must not recompute it from windowStart.
+    appointment: { date: '2026-08-05', windowStart: '09:00', arrivalWindow: '9:00 AM - 11:00 AM' },
     confirmed: false,
     confirmable: true,
     tech: { firstName: 'Adam', photoUrl: null, sameAsLastVisit: true },
@@ -57,14 +59,31 @@ function stubFetch({ get, post } = {}) {
 }
 
 describe('AppointmentPage upcoming visit', () => {
-  it('quotes the 2-hour arrival window from the start, never the job block', async () => {
+  it('renders the server-derived arrival window verbatim, never the job block', async () => {
     stubFetch();
 
     renderPage();
 
-    // windowStart 09:00 -> the promise is 9:00-11:00 AM.
-    expect(await screen.findByText(/2-hour arrival window · 9:00 AM–11:00 AM/)).toBeInTheDocument();
+    // The server sends the canonical range; the page prints what it is given.
+    expect(await screen.findByText(/2-hour arrival window · 9:00 AM - 11:00 AM/)).toBeInTheDocument();
     expect(screen.getByText(/no waiting on a whole morning/)).toBeInTheDocument();
+  });
+
+  it('omits the window line and its promise when the server sends no range', async () => {
+    // A missing or malformed window_start yields arrivalWindow: null. The
+    // page must not fall back to computing one, and "inside this 2-hour
+    // window" must not dangle with no window on the card.
+    stubFetch({
+      get: jsonResponse(upcomingPayload({
+        appointment: { date: '2026-08-05', windowStart: null, arrivalWindow: null },
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/Wednesday, August 5/)).toBeInTheDocument();
+    expect(screen.queryByText(/2-hour arrival window/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/no waiting on a whole morning/)).not.toBeInTheDocument();
   });
 
   it('names the service in the heading and shows the tech with the tracking promise', async () => {
