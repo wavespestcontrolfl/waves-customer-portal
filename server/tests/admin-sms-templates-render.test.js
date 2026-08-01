@@ -31,7 +31,9 @@ describe('admin SMS template renderer', () => {
       track_url: 'https://portal.wavespestcontrol.com/l/abc23',
     });
 
-    expect(body).toBe('Hello Sam! Track: https://portal.wavespestcontrol.com/l/abc23');
+    // House-voice rule (2026-08-01): SMS portal links are sent BARE — no
+    // https:// — for tappable one-segment sends (g.page links keep it).
+    expect(body).toBe('Hello Sam! Track: portal.wavespestcontrol.com/l/abc23');
   });
 
   test('returns null instead of leaking unresolved placeholders', async () => {

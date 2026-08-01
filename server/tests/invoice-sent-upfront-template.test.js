@@ -59,7 +59,9 @@ describe('invoice_sent_upfront copy contract', () => {
     });
 
     expect(body).toContain('Sam');
-    expect(body).toContain('https://portal.wavespestcontrol.com/l/abc23');
+    // House-voice rule (2026-08-01): portal links render bare (no https://).
+    expect(body).toContain('portal.wavespestcontrol.com/l/abc23');
+    expect(body).not.toContain('https://portal.wavespestcontrol.com');
     expect(body).not.toMatch(/completed on/i);
     expect(body).not.toMatch(/\{\w+\}/); // no unresolved placeholders
   });

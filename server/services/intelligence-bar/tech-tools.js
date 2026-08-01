@@ -477,7 +477,13 @@ async function searchKnowledgeBase(query) {
 
 async function getWeatherConditions() {
   try {
-    const res = await fetch('https://api.open-meteo.com/v1/forecast?latitude=27.40&longitude=-82.40&current=temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,weather_code&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America/New_York');
+    // Hard 6s budget: a hanging weather API must degrade to the error shape,
+    // not dangle the tool — in the field that hang is a tech staring at a
+    // spinner, and in CI it blows the contract smoke's 10s budget and reds
+    // the whole server check (2026-08-01).
+    const res = await fetch('https://api.open-meteo.com/v1/forecast?latitude=27.40&longitude=-82.40&current=temperature_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,weather_code&temperature_unit=fahrenheit&wind_speed_unit=mph&timezone=America/New_York', {
+      signal: AbortSignal.timeout(6000),
+    });
     if (!res.ok) return { error: 'Weather API unavailable' };
     const data = await res.json();
     const c = data.current || {};
