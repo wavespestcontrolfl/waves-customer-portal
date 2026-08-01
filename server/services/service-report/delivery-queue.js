@@ -301,19 +301,28 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // for, which is the row that was grounded and sanitized above.
   if (!fencedAssessmentId && heldForGrounding) fencedAssessmentId = heldPayload.lawn_assessment_id;
 
-  if (fencedAssessmentId) {
+  // The fence is installed for EVERY delivery, including ones whose canonical
+  // selection is currently null (codex P1 #3143 r3). Gating installation on a
+  // resolved assessment left the null -> id race wide open on ordinary
+  // deliveries: with no assessment yet, no check ran at all, so one confirmed
+  // while the remote PDF rendered became the page's selection and was mailed
+  // unfenced. A record that genuinely has no lawn assessment resolves null both
+  // times, costs one extra lookup, and sends exactly as before.
+  {
     const KnowledgeBridge = require('../knowledge-bridge');
     // Capture the settled copy's version NOW and re-verify it after the
     // attachment renders, right before dispatch (codex P1 r36): a run that
     // starts after this one-time check must defer the send, not race it.
     const assessmentId = fencedAssessmentId;
     let versionAtCheck = null;
-    try {
-      const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
-      versionAtCheck = row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null;
-    } catch (verErr) {
-      const status = await markDeliveryFailed(delivery, new Error(`grounding version unreadable: ${verErr.message}`), knex);
-      return { status, error: verErr.message };
+    if (assessmentId) {
+      try {
+        const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+        versionAtCheck = row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null;
+      } catch (verErr) {
+        const status = await markDeliveryFailed(delivery, new Error(`grounding version unreadable: ${verErr.message}`), knex);
+        return { status, error: verErr.message };
+      }
     }
     // ATOMIC SEAL (codex P1 r39): a plain re-read left an await boundary
     // between the check and sendTemplate where a generator could register.
@@ -330,7 +339,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
         // that row held still while it rendered — defer and let the retry fence
         // the now-current assessment. A null id means the render produced no
         // lawn assessment at all, so there is nothing to diverge from.
-        if (renderedAssessmentId && String(renderedAssessmentId) !== String(assessmentId)) {
+        if (assessmentId && renderedAssessmentId && String(renderedAssessmentId) !== String(assessmentId)) {
           logger.warn(`[delivery-queue] rendered assessment ${renderedAssessmentId} differs from fenced ${assessmentId} for record ${delivery.service_record_id} — deferring send`);
           return false;
         }
@@ -368,9 +377,14 @@ async function processServiceReportDelivery(delivery, knex = db) {
           ? await loadLinkedLawnAssessment(serviceNow, knex, { failClosed: true })
           : null;
         if (String(linkedNow?.id || '') !== String(canonicalAtResolve || '')) {
-          logger.warn(`[delivery-queue] lawn assessment selection changed across render for record ${delivery.service_record_id} (was ${canonicalAtResolve || 'none'}, now ${linkedNow?.id || 'none'}, fenced ${assessmentId}) — deferring send`);
+          logger.warn(`[delivery-queue] lawn assessment selection changed across render for record ${delivery.service_record_id} (was ${canonicalAtResolve || 'none'}, now ${linkedNow?.id || 'none'}, fenced ${assessmentId || 'none'}) — deferring send`);
           return false;
         }
+        // Selection-only mode: no assessment resolved, so there is nothing to
+        // seal. The re-check above is the whole guarantee — it proved the
+        // answer was null before the render and still null after, so the page
+        // rendered no lawn section either way.
+        if (!assessmentId) return true;
         const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
         if (sealed) {
           // The base TTL equals SendGrid's own request timeout, so a slow
@@ -387,11 +401,15 @@ async function processServiceReportDelivery(delivery, knex = db) {
         return false; // unreadable fence state = defer, never send blind
       }
     };
-    releaseLawnSeal = async () => {
-      if (lawnSealRenewTimer) { clearInterval(lawnSealRenewTimer); lawnSealRenewTimer = null; }
-      await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId)
-        .catch((relErr) => logger.warn(`[delivery-queue] send-seal release failed for ${assessmentId} (expires by TTL): ${relErr.message}`));
-    };
+    // Only a delivery that can SEAL needs a release; selection-only mode never
+    // takes one.
+    if (assessmentId) {
+      releaseLawnSeal = async () => {
+        if (lawnSealRenewTimer) { clearInterval(lawnSealRenewTimer); lawnSealRenewTimer = null; }
+        await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId)
+          .catch((relErr) => logger.warn(`[delivery-queue] send-seal release failed for ${assessmentId} (expires by TTL): ${relErr.message}`));
+      };
+    }
   }
 
   try {

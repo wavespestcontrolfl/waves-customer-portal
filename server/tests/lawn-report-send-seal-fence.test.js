@@ -122,8 +122,15 @@ describe('#3135 — every lawn-report delivery is fenced, not just held ones', (
     expect(typeof opts.verifyBeforeSend).toBe('function');
   });
 
-  test('a record with no lawn assessment is unaffected — no fence, no seal', async () => {
+  test('a record with no lawn assessment sends, sealing nothing (selection-only mode)', async () => {
+    // The check is still INSTALLED — that is what closes the null -> id race
+    // (#3143 r3) — but with nothing resolved there is nothing to seal or
+    // release, and an unchanged null answer sends exactly as before.
     loadLinkedLawnAssessment.mockResolvedValue(null);
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend();
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
     const knex = makeKnex();
     const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
 
@@ -131,9 +138,30 @@ describe('#3135 — every lawn-report delivery is fenced, not just held ones', (
     expect(out.status).toBe('sent');
 
     const opts = sendServiceReportV1Email.mock.calls[0][1];
-    expect(opts.verifyBeforeSend).toBeNull();
+    expect(typeof opts.verifyBeforeSend).toBe('function');
+    expect(opts.forceFreshPdf).toBe(false); // nothing fenced ⇒ no forced render
     expect(KnowledgeBridge.sealRecommendationsForSend).not.toHaveBeenCalled();
     expect(KnowledgeBridge.releaseRecommendationSendSeal).not.toHaveBeenCalled();
+  });
+
+  test('#3143 r3: a NORMAL null-selection delivery defers when a row is confirmed mid-render', async () => {
+    // The hole this round closes: with no assessment resolved the fence used
+    // not to be installed at all, so one confirmed while the remote PDF
+    // rendered became the page's selection and was mailed unfenced.
+    loadLinkedLawnAssessment
+      .mockResolvedValueOnce(null) // pre-render
+      .mockResolvedValueOnce({ id: 'assess-NEWLY-CONFIRMED' }); // post-render
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend();
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    expect(out.status).not.toBe('sent');
+    expect(KnowledgeBridge.sealRecommendationsForSend).not.toHaveBeenCalled();
   });
 
   test('an unsealable fence defers the send retryably instead of mailing', async () => {
