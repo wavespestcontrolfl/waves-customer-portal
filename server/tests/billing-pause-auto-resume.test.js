@@ -1,0 +1,205 @@
+/**
+ * Automatic billing-pause clear on payment (owner ruling 2026-08-01:
+ * "billing goes back to normal once they pay").
+ *
+ * Contract, mirroring the manual resume-service endpoint:
+ *   - only 'autopay_final_failure' pauses auto-clear — a pause an operator
+ *     set by hand stays until a human clears it
+ *   - compare-and-swap on the exact pause read, so a newer pause applied
+ *     between read and write is never wiped
+ *   - clear + timeline note + critical audit event share one transaction
+ *   - NEVER throws — a bookkeeping failure must not bubble into the webhook
+ */
+jest.mock('../services/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+}));
+
+const mockState = {
+  customer: null,
+  storedPausedAt: undefined,
+  updates: [],
+  interactions: [],
+  auditEvents: [],
+  auditShouldFail: false,
+  customerReadShouldFail: false,
+  rolledBack: false,
+};
+
+jest.mock('../services/audit-log', () => ({
+  recordAuditEvent: jest.fn(async (event) => {
+    if (mockState.auditShouldFail) throw new Error('audit exploded');
+    mockState.auditEvents.push(event);
+  }),
+}));
+
+jest.mock('../models/db', () => {
+  const builder = (table) => {
+    const q = { _table: table, _where: {}, _null: [] };
+    q.where = (criteria) => { Object.assign(q._where, criteria); return q; };
+    q.whereNull = (col) => { q._null.push(col); return q; };
+    q.first = async () => {
+      if (mockState.customerReadShouldFail) throw new Error('db read exploded');
+      if (table !== 'customers' || !mockState.customer) return null;
+      if (q._null.includes('deleted_at') && mockState.customer.deleted_at) return null;
+      return mockState.customer;
+    };
+    q.update = async (patch) => {
+      mockState.updates.push({ table, where: { ...q._where }, nullChecks: [...q._null], patch });
+      if (table === 'customers') {
+        const stored = mockState.storedPausedAt === undefined
+          ? mockState.customer?.service_paused_at
+          : mockState.storedPausedAt;
+        if ('service_paused_at' in q._where && q._where.service_paused_at !== stored) return 0;
+      }
+      return 1;
+    };
+    q.insert = async (row) => { mockState.interactions.push(row); return [1]; };
+    return q;
+  };
+  const db = jest.fn(builder);
+  db.transaction = async (fn) => {
+    try {
+      return await fn(jest.fn(builder));
+    } catch (err) {
+      mockState.rolledBack = true;
+      mockState.updates = mockState.updates.filter((u) => u.table !== 'customers');
+      mockState.interactions = [];
+      mockState.auditEvents = [];
+      throw err;
+    }
+  };
+  return db;
+});
+
+const { maybeResumeBillingPauseOnPayment, AUTO_CLEARABLE_REASON } = require('../services/billing-pause');
+
+beforeEach(() => {
+  mockState.customer = null;
+  mockState.storedPausedAt = undefined;
+  mockState.updates = [];
+  mockState.interactions = [];
+  mockState.auditEvents = [];
+  mockState.auditShouldFail = false;
+  mockState.customerReadShouldFail = false;
+  mockState.rolledBack = false;
+});
+
+const PAUSED = {
+  id: 'cust-1',
+  service_paused_at: '2026-05-02T12:00:00Z',
+  service_pause_reason: 'autopay_final_failure',
+};
+
+describe('maybeResumeBillingPauseOnPayment', () => {
+  test('clears an autopay_final_failure pause when a payment settles', async () => {
+    mockState.customer = { ...PAUSED };
+
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_1' });
+
+    expect(res).toMatchObject({ resumed: true });
+    const update = mockState.updates.find((u) => u.table === 'customers');
+    expect(update.patch).toEqual({ service_paused_at: null, service_pause_reason: null });
+    // CAS on THIS pause, not merely "some pause".
+    expect(update.where).toMatchObject({ id: 'cust-1', service_paused_at: PAUSED.service_paused_at });
+  });
+
+  test('a MANUAL pause never auto-clears — a payment does not overrule a human', async () => {
+    mockState.customer = { ...PAUSED, service_pause_reason: 'owner_hold_pending_dispute' };
+
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_1' });
+
+    expect(res).toMatchObject({ resumed: false, reason: 'manual_pause' });
+    expect(mockState.updates).toHaveLength(0);
+    expect(mockState.interactions).toHaveLength(0);
+  });
+
+  test('a pause reapplied between read and write is NOT wiped', async () => {
+    mockState.customer = { ...PAUSED };
+    mockState.storedPausedAt = '2026-06-01T09:00:00Z';
+
+    const res = await maybeResumeBillingPauseOnPayment('cust-1');
+
+    expect(res).toMatchObject({ resumed: false, reason: 'pause_changed' });
+    expect(mockState.interactions).toHaveLength(0);
+    expect(mockState.auditEvents).toHaveLength(0);
+  });
+
+  test('writes the system audit event inside the transaction, carrying the PI', async () => {
+    mockState.customer = { ...PAUSED };
+
+    await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_42', source: 'stripe_webhook' });
+
+    expect(mockState.auditEvents).toHaveLength(1);
+    expect(mockState.auditEvents[0]).toMatchObject({
+      actor_type: 'system',
+      action: 'customer.billing_pause_cleared',
+      resource_type: 'customer',
+      resource_id: 'cust-1',
+      critical: true,
+    });
+    expect(mockState.auditEvents[0].metadata).toMatchObject({
+      trigger: 'payment_succeeded',
+      payment_intent_id: 'pi_42',
+    });
+    expect(mockState.auditEvents[0].trx).toBeTruthy();
+    // Timeline note claims only what the action guarantees — the #3148 rule.
+    expect(mockState.interactions[0].subject).toBe('Billing pause cleared');
+    expect(mockState.interactions[0].body).toContain('automatically');
+    expect(mockState.interactions[0].body).toContain('other billing guards');
+    expect(mockState.interactions[0].body).toContain('not back-billed');
+  });
+
+  test('NEVER throws — a failed audit rolls back the clear and returns an error result', async () => {
+    mockState.customer = { ...PAUSED };
+    mockState.auditShouldFail = true;
+
+    await expect(maybeResumeBillingPauseOnPayment('cust-1')).resolves.toMatchObject({ resumed: false, reason: 'error' });
+
+    // The pause stays — the manual button covers it.
+    expect(mockState.rolledBack).toBe(true);
+    expect(mockState.updates.filter((u) => u.table === 'customers')).toHaveLength(0);
+  });
+
+  test('NEVER throws — even the initial read failing resolves to an error result', async () => {
+    mockState.customerReadShouldFail = true;
+    await expect(maybeResumeBillingPauseOnPayment('cust-1')).resolves.toMatchObject({ resumed: false, reason: 'error' });
+  });
+
+  test('not-paused and missing-customer are quiet no-ops', async () => {
+    mockState.customer = { id: 'cust-1', service_paused_at: null };
+    expect(await maybeResumeBillingPauseOnPayment('cust-1')).toMatchObject({ resumed: false, reason: 'not_paused' });
+
+    mockState.customer = null;
+    expect(await maybeResumeBillingPauseOnPayment('cust-1')).toMatchObject({ resumed: false, reason: 'not_paused' });
+
+    expect(await maybeResumeBillingPauseOnPayment(null)).toMatchObject({ resumed: false, reason: 'no_customer' });
+  });
+
+  test('the auto-clearable reason is pinned to the ladder-exhaustion value billing-cron writes', () => {
+    expect(AUTO_CLEARABLE_REASON).toBe('autopay_final_failure');
+  });
+});
+
+describe('stripe-webhook wiring', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
+
+  test('handlePaymentIntentSucceeded calls the auto-clear after the non-arrears early returns', () => {
+    const fnStart = src.indexOf('async function handlePaymentIntentSucceeded');
+    expect(fnStart).toBeGreaterThan(-1);
+    const callIdx = src.indexOf('maybeResumeBillingPauseOnPayment', fnStart);
+    expect(callIdx).toBeGreaterThan(fnStart);
+    // After the statement / deposit / no-show routes (which are not the
+    // customer's arrears money) but before the ledger-routing branches.
+    const between = src.slice(fnStart, callIdx);
+    expect(between).toContain('waves_statement_id');
+    expect(between).toContain('estimate_deposit');
+    expect(between).toContain('card_hold_no_show_fee');
+    expect(between).toContain('findInvoiceForPaymentIntent');
+    // Falls back to the invoice's customer when the PI has no metadata id.
+    const callBlock = src.slice(callIdx - 600, callIdx + 300);
+    expect(callBlock).toContain('waves_customer_id');
+    expect(callBlock).toContain('invoiceForTenderGuard?.customer_id');
+  });
+});

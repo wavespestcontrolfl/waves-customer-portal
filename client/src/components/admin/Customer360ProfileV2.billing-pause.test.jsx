@@ -104,6 +104,9 @@ describe('Customer 360 billing-pause banner', () => {
     // The three facts that make this actionable rather than alarming.
     expect(screen.getByText(/autopay failed three times/i)).toBeInTheDocument();
     expect(screen.getByText(/Visits are unaffected/i)).toBeInTheDocument();
+    // The automatic path (owner ruling 2026-08-01): paying clears the pause
+    // without anyone clicking anything.
+    expect(screen.getByText(/clears on its own\s+when a payment/i)).toBeInTheDocument();
     expect(screen.getByText(/never back-billed/i)).toBeInTheDocument();
     // Must NOT promise collection resumes — other cron guards still apply.
     expect(screen.getByText(/other billing guards/i)).toBeInTheDocument();

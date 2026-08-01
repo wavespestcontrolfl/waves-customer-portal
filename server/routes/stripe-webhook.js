@@ -910,6 +910,29 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   const chargedTotal = chargedCents > 0 ? Math.round((chargedCents / 100) * 100) / 100 : null;
   const details = await paymentDetailsFromIntent(paymentIntent);
   const invoiceForTenderGuard = await findInvoiceForPaymentIntent(paymentIntent);
+
+  // Auto-clear a billing pause on the customer's OWN settled money (owner
+  // ruling 2026-08-01: billing goes back to normal once they pay). Placed
+  // after the non-arrears early returns (statement = payer money, estimate
+  // deposit, no-show fee) and BEFORE the ledger-routing branches below: even
+  // a payment that ends up quarantined or orphaned is real settled money
+  // from a working tender, which is exactly what the exhausted-retry pause
+  // was waiting on. The helper never throws, only clears
+  // 'autopay_final_failure' pauses, and compare-and-swaps so a newer pause
+  // is never wiped.
+  {
+    const pausedCustomerId = paymentIntent.metadata?.waves_customer_id
+      || invoiceForTenderGuard?.customer_id
+      || null;
+    if (pausedCustomerId) {
+      const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+      await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
+        paymentIntentId: piId,
+        source: 'stripe_webhook',
+      });
+    }
+  }
+
   const savedCardAttemptForTenderGuard = invoiceForTenderGuard
     ? await findMatchingSavedCardAttempt(db, invoiceForTenderGuard, paymentIntent, {
       allowResolvedSucceeded: true,
