@@ -249,7 +249,6 @@ async function processServiceReportDelivery(delivery, knex = db) {
     // Capture the settled copy's version NOW and re-verify it after the
     // attachment renders, right before dispatch (codex P1 r36): a run that
     // starts after this one-time check must defer the send, not race it.
-    const { treatmentGuard } = KnowledgeBridge;
     const assessmentId = heldPayload.lawn_assessment_id;
     let versionAtCheck = null;
     try {
@@ -259,12 +258,16 @@ async function processServiceReportDelivery(delivery, knex = db) {
       const status = await markDeliveryFailed(delivery, new Error(`grounding version unreadable: ${verErr.message}`), knex);
       return { status, error: verErr.message };
     }
+    // ATOMIC SEAL (codex P1 r39): a plain re-read left an await boundary
+    // between the check and sendTemplate where a generator could register.
+    // sealForSend verifies no-active-run + version under the SAME advisory
+    // lock generators register through and persists a short seal;
+    // registration refuses while it is unexpired, so nothing can start
+    // between this check and the dispatch.
+    const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
     lawnFenceCheck = async () => {
       try {
-        if (await treatmentGuard.isGenerationInFlight(assessmentId, knex)) return false;
-        const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
-        const versionNow = row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null;
-        return versionNow === versionAtCheck;
+        return await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
       } catch {
         return false; // unreadable fence state = defer, never send blind
       }

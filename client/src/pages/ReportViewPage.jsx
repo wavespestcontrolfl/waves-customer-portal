@@ -1132,10 +1132,13 @@ function conditionInterpretation(conditions = {}) {
     return 'Wind was elevated, so treatment was adjusted to match label and site conditions.';
   }
   if (Number.isFinite(rain) && rain > 0.25) {
-    return 'Recent rainfall was noted. Treatment decisions were adjusted for site conditions.';
+    return 'Rainfall in the 24 hours before treatment was noted. Treatment decisions were adjusted for site conditions.';
   }
   if (hasRain && hasWind && rain <= 0.1 && wind <= 10) {
-    return 'Weather was suitable for treatment. Low rainfall and moderate wind supported exterior application.';
+    // rain_24h_in is a point-in-time 24-hour capture — a wet week can end
+    // in a dry final day, and unqualified "low rainfall" beside the weekly
+    // "Rain this week" row reads as a contradiction (codex P2 r39).
+    return 'Weather was suitable for treatment. Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
   }
   if ((!hasRain || rain <= 0.1) && (!hasWind || wind <= 10)) {
     return 'Weather was marked suitable for treatment.';

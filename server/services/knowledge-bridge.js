@@ -200,11 +200,42 @@ function generationInFlight(stored) {
 }
 // Locked read-modify-write of the run registry. `mutate(liveRuns)` returns
 // the registry to persist; everything else in the payload is preserved.
-async function updateGenerationRuns(assessmentId, mutate) {
+const SEND_SEAL_MS = 2 * 60 * 1000;
+
+// Atomically seal the current copy for an imminent send (codex P1 r39):
+// under the same advisory lock generators register through, verify no
+// active run + the version the caller settled on, then persist a short
+// seal. Generation registration refuses while the seal is unexpired, so no
+// generation can START between the pre-send check and the dispatch.
+async function sealForSend(assessmentId, expectedVersion, computeVersion) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+    const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+    if (!row) return false;
+    const stored = parseStoredRecommendations(row.recommendations) || {};
+    if (generationInFlight(stored)) return false;
+    if (computeVersion(row) !== expectedVersion) return false;
+    stored._sendSealUntil = new Date(Date.now() + SEND_SEAL_MS).toISOString();
+    // updated_at participates in the caller's version — do NOT touch it here.
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ recommendations: JSON.stringify(stored) });
+    return true;
+  });
+}
+
+function sendSealActive(stored) {
+  const t = Date.parse(stored?._sendSealUntil);
+  return Number.isFinite(t) && t > Date.now();
+}
+
+async function updateGenerationRuns(assessmentId, mutate, { respectSendSeal = false } = {}) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
     const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
     const stored = parseStoredRecommendations(row?.recommendations) || {};
+    if (respectSendSeal && sendSealActive(stored)) {
+      throw new Error('send seal active — an attachment is being dispatched from the settled copy');
+    }
     const next = mutate(activeGenerationRuns(stored));
     if (next && Object.keys(next).length) stored._generationRuns = next;
     else delete stored._generationRuns;
@@ -894,7 +925,7 @@ const KnowledgeBridge = {
       await updateGenerationRuns(assessmentId, (runs) => ({
         ...runs,
         [runId]: new Date(Date.now() + GENERATION_LEASE_MS).toISOString(),
-      }));
+      }), { respectSendSeal: true });
     } catch (regErr) {
       logger.warn(`[knowledge-bridge] generation fence registration failed for ${assessmentId} — failing run: ${regErr.message}`);
       return null;
@@ -1119,7 +1150,11 @@ Return a JSON object with:
           const fresh = await trx('lawn_assessments').where({ id: assessmentId }).first();
           if (!fresh) return null;
           const existing = parseStoredRecommendations(fresh.recommendations);
-          const existingGrounded = !!(existing && existing._groundedInApplications);
+          // Sanitation-final copy has the same precedence as grounded
+          // (codex P1 r39): it was reconciled against the authoritative
+          // application set, and a late ungrounded confirm-time result
+          // must not replace it after the lease expired.
+          const existingGrounded = !!(existing && (existing._groundedInApplications || existing._sanitizationFinal));
           // Runs still active besides this one keep the fence up on the
           // payload this write produces (codex P1 r29).
           const remainingRuns = activeGenerationRuns(existing);
@@ -1338,6 +1373,7 @@ module.exports = KnowledgeBridge;
 module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
+module.exports.sealRecommendationsForSend = sealForSend;
 module.exports.treatmentGuard = {
   sanitizeRecommendationsAgainstTreatment,
   contradictsAppliedTreatment,

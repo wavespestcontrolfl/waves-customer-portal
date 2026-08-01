@@ -303,10 +303,20 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
       // Throws on a read error → the catch retains the marker.
       const recVersionAfter = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
       const copyStableAcrossRender = recVersionBefore === recVersionAfter;
-      // A generation that settled DURING this render means the render may
-      // have read the pre-grounding copy — keep the marker so the next
-      // render (post-settlement) produces the definitive object.
-      if (!stillGenerating && copyStableAcrossRender) await clearLawnPdfCorrectionMarker(recordId, knex);
+      // The copy must also be SETTLED — grounded or sanitation-final
+      // (codex P1 r39): between grounded-generation failure and a sanitize
+      // retry there is no live lease, so "stable and not generating" can
+      // hold while the copy is still awaiting correction. No assessment at
+      // all (non-lawn record with a stray marker) counts as settled.
+      let copySettled = true;
+      if (lawnAssessmentId) {
+        const freshRow = await knex('lawn_assessments').where({ id: lawnAssessmentId }).first('recommendations');
+        let payload = freshRow?.recommendations;
+        if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+        copySettled = !!(payload && typeof payload === 'object' && !Array.isArray(payload)
+          && (payload._groundedInApplications || payload._sanitizationFinal));
+      }
+      if (!stillGenerating && copyStableAcrossRender && copySettled) await clearLawnPdfCorrectionMarker(recordId, knex);
     } catch (clearErr) {
       logger.warn(`[pdf-queue] correction-marker clear skipped for ${recordId} — retained: ${clearErr.message}`);
     }
