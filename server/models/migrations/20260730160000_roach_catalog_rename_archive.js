@@ -373,10 +373,15 @@ exports.up = async function up(knex) {
     // updated_at (every live writer stamps it): any concurrent edit moves
     // updated_at, the update hits zero rows, and nothing is claimed —
     // stronger than the previous locked read, with no deadlock surface.
+    // The CAS token is updated_at::text — the pg driver returns timestamptz
+    // as a millisecond-precision JS Date while Postgres stores microseconds,
+    // so a Date round-trip can never equality-match the stored value
+    // (codex #3108 r14). The text form round-trips exactly.
     const drafts = await knex('invoices')
       .whereIn('scheduled_service_id', snapshotVisitIds)
       .whereIn('status', ['draft', 'scheduled'])
-      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id', 'updated_at');
+      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id',
+        knex.raw('updated_at::text AS updated_at_cas'));
     // A draft already accrued to a FROZEN payer statement (anything not
     // 'open' is a finalized/issued billing document) stays untouched —
     // statement lines load live from invoices.service_type, so relabeling
@@ -390,10 +395,13 @@ exports.up = async function up(knex) {
       // status to 'sending' and delivers — that invoice is history, codex
       // #3108 r10); updated_at predicate rejects any interleaved edit; the
       // record only claims an invoice the update actually hit.
-      const count = await knex('invoices')
-        .where({ id: inv.id, updated_at: inv.updated_at })
-        .whereIn('status', ['draft', 'scheduled'])
-        .update({ ...result.patch, updated_at: knex.fn.now() });
+      let casQuery = knex('invoices')
+        .where({ id: inv.id })
+        .whereIn('status', ['draft', 'scheduled']);
+      casQuery = inv.updated_at_cas == null
+        ? casQuery.whereNull('updated_at')
+        : casQuery.whereRaw('updated_at::text = ?', [inv.updated_at_cas]);
+      const count = await casQuery.update({ ...result.patch, updated_at: knex.fn.now() });
       if (!count) continue;
       // Per-field ownership: rollback reverts only these fields/item-indexes.
       state.relabeledInvoices[inv.id] = {
@@ -545,7 +553,8 @@ exports.down = async function down(knex) {
     const drafts = await knex('invoices')
       .whereIn('id', invoiceIds)
       .whereIn('status', ['draft', 'scheduled'])
-      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id', 'updated_at');
+      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id',
+        knex.raw('updated_at::text AS updated_at_cas'));
     // Same frozen-statement rule on the way back: a draft that accrued to a
     // finalized statement since up() is part of an issued document now.
     const frozenStatementIds = await frozenPayerStatementIds(knex, drafts);
@@ -556,10 +565,13 @@ exports.down = async function down(knex) {
       if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
       const patch = rollbackInvoiceSnapshot(inv, rec, NEW_NAME, OLD_NAME);
       if (!patch) continue;
-      await knex('invoices')
-        .where({ id: inv.id, updated_at: inv.updated_at })
-        .whereIn('status', ['draft', 'scheduled'])
-        .update({ ...patch, updated_at: knex.fn.now() });
+      let casQuery = knex('invoices')
+        .where({ id: inv.id })
+        .whereIn('status', ['draft', 'scheduled']);
+      casQuery = inv.updated_at_cas == null
+        ? casQuery.whereNull('updated_at')
+        : casQuery.whereRaw('updated_at::text = ?', [inv.updated_at_cas]);
+      await casQuery.update({ ...patch, updated_at: knex.fn.now() });
     }
   }
 

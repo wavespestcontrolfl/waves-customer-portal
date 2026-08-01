@@ -71,6 +71,7 @@ function seedDb() {
         status: 'draft',
         title: OLD_NAME,
         service_type: OLD_NAME,
+        updated_at: 'inv-t0',
         line_items: JSON.stringify([
           { description: OLD_NAME, category: OLD_NAME, quantity: 1, unit_price: 350, amount: 350 },
         ]),
@@ -80,6 +81,7 @@ function seedDb() {
         scheduled_service_id: 'v-open-2',
         status: 'sent',
         title: OLD_NAME,
+        updated_at: 'inv-t0',
         line_items: JSON.stringify([{ description: OLD_NAME, category: OLD_NAME, amount: 350 }]),
       },
       // Draft on the ADD-ON parent: only the add-on line matches.
@@ -89,6 +91,7 @@ function seedDb() {
         status: 'draft',
         title: 'Quarterly Pest Control Service',
         service_type: 'Quarterly Pest Control Service',
+        updated_at: 'inv-t0',
         line_items: JSON.stringify([
           { description: 'Quarterly Pest Control Service', category: 'General Pest', amount: 150 },
           { description: OLD_NAME, category: OLD_NAME, amount: 350 },
@@ -104,11 +107,14 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     const filters = [];
     const inClauses = [];
     const notInClauses = [];
+    const rawWheres = [];
     const rowsNow = () => db[table] || [];
     const rowMatch = (r) => (
       inClauses.every((c) => c.vals.includes(r[c.col]))
       && notInClauses.every((c) => !c.vals.includes(r[c.col]))
       && filters.every((cond) => Object.entries(cond).every(([k, v]) => r[k] === v))
+      // Emulates only the migration's CAS form: 'updated_at::text = ?'.
+      && rawWheres.every((rw) => String(r.updated_at) === String(rw.bindings[0]))
     );
     // Real knex accepts a query builder as the whereIn value (subquery) —
     // resolve any thenable value lists before filtering, extracting the
@@ -126,13 +132,26 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       whereNotIn(col, vals) { notInClauses.push({ col, vals }); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
       whereNot(col, val) { notInClauses.push({ col, vals: [val] }); return q; },
+      whereRaw(sql, bindings) {
+        if (!/updated_at::text\s*=\s*\?/.test(sql)) throw new Error(`fake whereRaw: unsupported sql ${sql}`);
+        rawWheres.push({ sql, bindings });
+        return q;
+      },
       forUpdate() { return q; },
       async select(...cols) {
         await resolveSubqueries();
         return rowsNow().filter(rowMatch).map((r) => {
           if (!cols.length) return { ...r };
           const out = {};
-          cols.forEach((c) => { out[c] = r[c]; });
+          cols.forEach((c) => {
+            if (c && typeof c === 'object' && c.__raw) {
+              // Emulates only the migration's CAS projection.
+              if (!/updated_at::text AS updated_at_cas/i.test(c.__raw)) throw new Error(`fake raw select: unsupported ${c.__raw}`);
+              out.updated_at_cas = r.updated_at == null ? null : String(r.updated_at);
+              return;
+            }
+            out[c] = r[c];
+          });
           return out;
         });
       },
@@ -173,6 +192,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
     hasTable: async (t) => !missingTables.includes(t) && t in db,
   };
   knex.fn = { now: () => 'NOW' };
+  knex.raw = (sql, bindings) => ({ __raw: sql, bindings });
   return knex;
 }
 
@@ -553,6 +573,7 @@ describe('20260730160000 roach catalog rename + archive', () => {
       status: 'scheduled',
       title: OLD_NAME,
       service_type: OLD_NAME,
+      updated_at: 'inv-t0',
       line_items: JSON.stringify([{ description: OLD_NAME, category: OLD_NAME, amount: 350 }]),
     });
     const knex = fakeKnex(db);
@@ -578,6 +599,7 @@ describe('20260730160000 roach catalog rename + archive', () => {
       title: OLD_NAME,
       service_type: OLD_NAME,
       payer_statement_id: 'stmt-open',
+      updated_at: 'inv-t0',
       line_items: JSON.stringify([{ description: OLD_NAME, category: OLD_NAME, amount: 350 }]),
     });
     const knex = fakeKnex(db);
