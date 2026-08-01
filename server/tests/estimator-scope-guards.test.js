@@ -1057,6 +1057,64 @@ describe('loadThreadTriageContext', () => {
     expect(triage.groundedConflict).toBe(false);
   });
 
+  test('a STATED locality must be verifiable against the row, else the manual lane', async () => {
+    // The prefix-matched row's profile carries only a street — no city, no
+    // ZIP. sameStreetAddress is missing-value TOLERANT (right for duplicate
+    // detection, wrong for identity), so this used to ground and hand the
+    // draft that customer's id, parcel data, and membership pricing even
+    // though the row may belong to a different city entirely.
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
+    mockState.rows.customers = [
+      { id: 'c-9', first_name: 'Pat', last_name: 'Homeowner', address_line1: '100 Palm Ave', city: '', zip: '' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'quote for 100 Palm Ave, Venice FL 34285 please',
+    });
+    expect(triage.groundedCustomerId).toBeNull();
+    // Not silently dropped either — dropping it would draft an unlinked
+    // prospect on what may well be that customer's parcel.
+    expect(triage.groundedUnverifiableLocality).toBe(true);
+
+    // Stored city present → the comparison proves something and grounds.
+    mockState.rows.customers = [
+      { id: 'c-9', first_name: 'Pat', last_name: 'Homeowner', address_line1: '100 Palm Ave', city: 'Venice', zip: '' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'quote for 100 Palm Ave, Venice FL 34285 please',
+    });
+    expect(triage.groundedCustomerId).toBe('c-9');
+    expect(triage.groundedUnverifiableLocality).toBe(false);
+
+    // Sender stated NO locality → nothing to verify, today's behavior.
+    mockState.rows.customers = [
+      { id: 'c-9', first_name: 'Pat', last_name: 'Homeowner', address_line1: '100 Palm Ave', city: '', zip: '' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'quote for 100 Palm Ave please',
+    });
+    expect(triage.groundedCustomerId).toBe('c-9');
+    expect(triage.groundedUnverifiableLocality).toBe(false);
+  });
+
+  test('candidateRowVerdict separates no-match from unverifiable-locality', () => {
+    const { _private } = require('../services/estimator-engine/scope-guards');
+    const cand = { num: '100', firstWord: 'Palm', variants: ['100 Palm Ave'], locality: ', Venice 34285', unitValue: null };
+    // Street matches, row has a comparable ZIP → verified.
+    expect(_private.candidateRowVerdict(cand, { address_line1: '100 Palm Ave', city: '', zip: '34285' })).toBe('match');
+    // Street matches, row locality blank → cannot be proven.
+    expect(_private.candidateRowVerdict(cand, { address_line1: '100 Palm Ave', city: '', zip: '' })).toBe('unverifiable');
+    // A ZIP-only statement cannot be checked against a city-only row.
+    expect(_private.candidateRowVerdict(
+      { ...cand, locality: ', 34285' },
+      { address_line1: '100 Palm Ave', city: 'Venice', zip: '' },
+    )).toBe('unverifiable');
+    // Different street is plain no-match, never the ambiguity lane.
+    expect(_private.candidateRowVerdict(cand, { address_line1: '100 Palm St', city: '', zip: '' })).toBe('no');
+  });
+
   test('groundedScope carries the matched property stamp; sender-only grounding has none', async () => {
     // Primary-address match → scope with isPrimary true.
     mockState.rows.customers = [

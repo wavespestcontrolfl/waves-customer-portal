@@ -377,6 +377,7 @@ router.post('/sms', async (req, res) => {
     // DOMAIN TRACKING — new lead from a domain-specific number
     if ((numberConfig.type === 'domain_tracking' || numberConfig.type === 'van_tracking') && !customer) {
       const leadSource = TWILIO_NUMBERS.getLeadSourceFromNumber(To);
+      const { CREATED_VIA } = require('../services/customer-stages');
       const { resolveLocation } = require('../config/locations');
       const loc = resolveLocation(numberConfig.area || leadSource.area || '');
       const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');
@@ -405,6 +406,12 @@ router.post('/sms', async (req, res) => {
           lead_source_area: numberConfig.area || '', lead_source_channel: 'organic',
           nearest_location_id: numberConfig.location || loc.id,
           pipeline_stage: 'new_lead', pipeline_stage_changed_at: new Date(),
+          // PROVENANCE stamp — this row is a placeholder minted for a number
+          // nobody has identified yet. Consumers (estimator SMS context)
+          // must be able to tell it from a genuine fresh lead, and row
+          // shape cannot do that: a form submitted without an address
+          // produces the same blank street/ZIP new_lead row.
+          created_via: CREATED_VIA.TWILIO_TRACKING_SHELL,
           last_contact_date: new Date(), last_contact_type: Body ? 'sms_inbound' : 'call_inbound',
           member_since: etDateString(),
           crm_notes: `Inbound ${Body ? 'SMS' : 'call'} from ${numberConfig.domain || 'van wrap'}. ${Body ? 'Message: ' + Body : ''}`,

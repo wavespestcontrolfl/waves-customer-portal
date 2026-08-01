@@ -556,14 +556,62 @@ function prefixVariants(num, firstWord, secondWord = null) {
   return [...words].map((w) => `${num} ${w}%`);
 }
 
+// What locality the SENDER actually stated, split into the two kinds that
+// can be checked against a row ("Venice FL 34285" → city Venice, ZIP 34285).
+function candidateStatedLocality(candidate) {
+  const bare = String(candidate.locality || '').replace(/^\s*,\s*/, '').trim();
+  if (!bare) return { city: '', zip: '' };
+  const zip = bare.match(/\b(\d{5})\b/);
+  const city = bare
+    .replace(/\b\d{5}(?:-\d{4})?\b/g, ' ')
+    .replace(/\b(?:fl|florida)\b/gi, ' ')
+    .replace(/[^A-Za-z .'-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return { city, zip: zip ? zip[1] : '' };
+}
+
+// IDENTITY grounding may not inherit the duplicate detector's
+// missing-value tolerance. sameStreetAddress compares city only when BOTH
+// sides have one and ZIP only when both have one — correct for dedupe (one
+// blank field is not proof of two properties), wrong here: a customer row
+// whose profile carries only "100 Palm Ave" with no city and no ZIP would
+// satisfy "100 Palm Ave, Venice FL 34285" and hand that customer's id,
+// parcel data, and membership pricing to a draft for a house in another
+// city. When the sender STATED a locality, the row must carry the same KIND
+// of locality so the comparison proves something; otherwise the match is
+// unverifiable and belongs in the manual lane, never silently accepted.
+function localityVerifiableAgainstRow(candidate, row) {
+  const stated = candidateStatedLocality(candidate);
+  if (!stated.city && !stated.zip) return true;
+  if (stated.zip && String(row.zip || '').trim()) return true;
+  if (stated.city && String(row.city || '').trim()) return true;
+  return false;
+}
+
+// 'match' | 'unverifiable' | 'no'. The middle verdict is a row whose STREET
+// matches but whose locality cannot be checked against the stated one — the
+// caller routes it to the ambiguity red lane rather than grounding on it or
+// silently ignoring it (ignoring would draft an unlinked prospect on what
+// may well be an existing customer's parcel).
+function candidateRowVerdict(candidate, row) {
+  if (!candidateStreetMatchesRow(candidate, row)) return 'no';
+  return localityVerifiableAgainstRow(candidate, row) ? 'match' : 'unverifiable';
+}
+
+function candidateMatchesRow(candidate, row) {
+  return candidateRowVerdict(candidate, row) === 'match';
+}
+
 // A prefix-fetched row only counts as "this customer's property" when the
 // message's street run truly matches the row's full normalized street —
 // "100 Palm Ave" must not ground against a customer at "100 Palm St" — and,
-// when the message states a locality, in the row's city/ZIP too. Compare
-// both sides WITH their known localities: sameStreetAddress treats a
-// missing city/ZIP as conservatively equal and a stated disagreement as a
-// mismatch, which is exactly the wanted asymmetry.
-function candidateMatchesRow(candidate, row) {
+// when the message states a locality the row can be checked against, in the
+// row's city/ZIP too. Compare both sides WITH their known localities:
+// sameStreetAddress treats a stated disagreement as a mismatch. Its
+// tolerance for a MISSING row locality is handled by
+// localityVerifiableAgainstRow above, not here.
+function candidateStreetMatchesRow(candidate, row) {
   // address_line2 carries the row's unit — include it so an explicit
   // candidate unit ("Apt 6") is compared against the row's explicit unit
   // ("Apt 1") instead of matching conservatively on the bare street.
@@ -785,6 +833,11 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // It must never read as "no customer" and fall through to a prospect draft.
   const ADDRESS_ROW_CAP = 25;
   let groundingOvercap = false;
+  // A row whose STREET matched but whose locality could not be checked
+  // against the locality the sender stated (candidateRowVerdict →
+  // 'unverifiable'). Neither grounding on it nor ignoring it is safe, so it
+  // takes the same red exit as the other ambiguity signals.
+  let groundingUnverifiableLocality = false;
   // Locality the sender stated, if any (", Venice 34285" / ", 34285").
   const localityOf = (cand) => {
     const m = String(cand.locality || '').match(/^,\s*(.*?)\s*(\d{5})?\s*$/);
@@ -846,7 +899,9 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
       continue;
     }
     for (const row of rows) {
-      if (candidateMatchesRow(cand, row)) {
+      const verdict = candidateRowVerdict(cand, row);
+      if (verdict === 'unverifiable') groundingUnverifiableLocality = true;
+      if (verdict === 'match') {
         const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
         addEntry(row, label, shown, {
           address: row.address_line1, line2: row.address_line2, city: row.city, zip: row.zip, isPrimary: true,
@@ -885,7 +940,9 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
         propRows.length = 0;
       }
       for (const row of propRows) {
-        if (candidateMatchesRow(cand, row)) {
+        const verdict = candidateRowVerdict(cand, row);
+        if (verdict === 'unverifiable') groundingUnverifiableLocality = true;
+        if (verdict === 'match') {
           const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
           addEntry(
             { id: row.id, first_name: row.first_name, last_name: row.last_name },
@@ -1089,6 +1146,11 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
     // over-cap fetch must never read as "no customer" and let the request
     // fall through to an unlinked prospect draft on somebody's property.
     groundedOvercap: groundingOvercap,
+    // A same-street row the sender's stated city/ZIP could not be checked
+    // against. Same red lane: grounding on it would attach a stranger's
+    // customer id and pricing, and dropping it silently would draft an
+    // unlinked prospect on what may be that customer's parcel.
+    groundedUnverifiableLocality: groundingUnverifiableLocality,
     recentTexts,
     vetoTexts,
   };
@@ -1126,6 +1188,6 @@ module.exports = {
   VETO_BURST_MINUTES,
   loadThreadTriageContext,
   _private: {
-    OUT_OF_SCOPE_RE, IN_SCOPE_RE, candidateMatchesRow, loadTriageInner, TRIAGE_TIMEOUT_MS, prefixVariants, unitTokenPatterns,
+    OUT_OF_SCOPE_RE, IN_SCOPE_RE, candidateMatchesRow, candidateRowVerdict, loadTriageInner, TRIAGE_TIMEOUT_MS, prefixVariants, unitTokenPatterns,
   },
 };

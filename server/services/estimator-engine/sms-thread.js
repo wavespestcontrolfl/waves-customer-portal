@@ -198,6 +198,7 @@ async function runThreadDraft({
   phone, digits, triggerBody, origin, dryRun,
   groundedCustomerId = null, groundedConflict = false, groundedScope = null,
   groundedMultiScope = false, groundedOvercap = false,
+  groundedUnverifiableLocality = false,
 }) {
   const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
@@ -211,6 +212,7 @@ async function runThreadDraft({
       groundedScope,
       groundedMultiScope,
       groundedOvercap,
+      groundedUnverifiableLocality,
     });
     if (context.error) {
       result.lane = 'red';
@@ -440,6 +442,7 @@ async function startSmsThreadDraft({
       groundedScope: triage?.groundedScope || null,
       groundedMultiScope: triage?.groundedMultiScope === true,
       groundedOvercap: triage?.groundedOvercap === true,
+      groundedUnverifiableLocality: triage?.groundedUnverifiableLocality === true,
     })
       .catch((err) => {
         logger.error(`[estimator-sms] detached draft failed: ${err.message}`);

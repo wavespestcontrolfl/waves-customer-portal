@@ -4,6 +4,7 @@ const {
   listOpenEstimatesByPhone,
   phoneLookupValues,
   automatedEstimateLockKeys,
+  withAutomatedEstimateDedupeLocks,
   withAutomatedEstimatePhoneLock,
   withAutomatedEstimatePhoneLocks,
 } = require('../services/estimate-automation-duplicates');
@@ -100,13 +101,52 @@ describe('estimate automation duplicate guard', () => {
   test('multi-phone lock keys are unique and ASCENDING regardless of input order', () => {
     // The sort IS the deadlock guard: two runs that share a phone pair must
     // never grab the two locks in opposite orders.
-    expect(automatedEstimateLockKeys(['+1 (941) 555-9999', '941.555.0101']))
+    const keyOf = (k) => k.key;
+    expect(automatedEstimateLockKeys(['+1 (941) 555-9999', '941.555.0101']).map(keyOf))
       .toEqual(['9415550101', '9415559999']);
-    expect(automatedEstimateLockKeys(['941.555.0101', '+1 (941) 555-9999']))
+    expect(automatedEstimateLockKeys(['941.555.0101', '+1 (941) 555-9999']).map(keyOf))
       .toEqual(['9415550101', '9415559999']);
     // Same number in two formats collapses to one key; unusable input drops.
-    expect(automatedEstimateLockKeys(['+19415550101', '941-555-0101', 'not a phone']))
+    expect(automatedEstimateLockKeys(['+19415550101', '941-555-0101', 'not a phone']).map(keyOf))
       .toEqual(['9415550101']);
+  });
+
+  test('identity keys join the SAME canonical order, in their own namespace', () => {
+    // Two service contacts of one customer share no phone key at all, so
+    // identity is the only key that can serialize them.
+    const keys = automatedEstimateLockKeys({
+      customerIds: ['cust-b'], phones: ['+1 (941) 555-9999', '941.555.0101'],
+    });
+    expect(keys).toEqual([
+      { namespace: 'estimate_automation_duplicate', key: '9415550101' },
+      { namespace: 'estimate_automation_duplicate', key: '9415559999' },
+      { namespace: 'estimate_automation_duplicate_customer', key: 'cust-b' },
+    ]);
+    // Input order cannot change the acquisition order.
+    expect(automatedEstimateLockKeys({
+      phones: ['941.555.0101', '+1 (941) 555-9999'], customerIds: ['cust-b'],
+    })).toEqual(keys);
+    // A bare array still reads as phones (single-phone callers unchanged).
+    expect(automatedEstimateLockKeys('941.555.0101'))
+      .toEqual([{ namespace: 'estimate_automation_duplicate', key: '9415550101' }]);
+  });
+
+  test('a customer identity alone still serializes (no usable phone anywhere)', async () => {
+    const trx = { raw: jest.fn(async () => {}) };
+    const database = jest.fn();
+    database.transaction = jest.fn(async (callback) => callback(trx));
+
+    await withAutomatedEstimateDedupeLocks(
+      { phones: [null], customerIds: ['cust-b'] },
+      async () => 'ran',
+      { database }
+    );
+
+    expect(database.transaction).toHaveBeenCalledTimes(1);
+    expect(trx.raw).toHaveBeenCalledWith(
+      'select pg_advisory_xact_lock(hashtext(?), hashtext(?))',
+      ['estimate_automation_duplicate_customer', 'cust-b']
+    );
   });
 
   test('locks EVERY dedupe phone in one transaction before the callback runs', async () => {

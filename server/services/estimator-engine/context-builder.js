@@ -90,7 +90,8 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
         // active: consumed by the scope-guards triage (an inactive/former
         // customer texting a NEW quote must read as a prospect there).
         // created_at: the webhook-shell recency marker below.
-        'property_type', 'company_name', 'active', 'created_at')
+        // created_via: the webhook shell's PROVENANCE stamp (below).
+        'property_type', 'company_name', 'active', 'created_at', 'created_via')
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
       .limit(5);
@@ -117,28 +118,35 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
     // contact-slot match, pickCustomerMatch calls it ambiguous, and the SMS
     // build red-lanes a perfectly valid add-on request.
     //
-    // The shortcut applies ONLY to rows that are provably that webhook
-    // shell (see routes/twilio-webhook.js domain/van tracking branch, which
-    // inserts pipeline_stage 'new_lead' with address_line1 '' and zip ''
-    // moments before this runs). pipeline_stage alone is NOT enough: a
+    // The shortcut applies ONLY to rows the webhook itself STAMPED as that
+    // placeholder (customers.created_via, written by the domain/van
+    // tracking branch moments before this runs). Row shape is not proof: a
     // phone can legitimately carry an established customer AND a real
     // separate lead, and silently handing that lead's quote the
     // established customer's id, saved property, and membership pricing is
-    // exactly the failure this guard must not create. Anything that is not
-    // a fresh, address-less, non-customer-stage row keeps today's
-    // ambiguity.
+    // exactly the failure this guard must not create. Anything unstamped
+    // keeps today's ambiguity.
     if (includeServiceContacts && rows.length > 1) {
-      const { CUSTOMER_STAGES } = require('../customer-stages');
+      const { CUSTOMER_STAGES, CREATED_VIA } = require('../customer-stages');
       const isReal = (r) => r.active === true && CUSTOMER_STAGES.includes(r.pipeline_stage);
-      // Every field the shell insert PROVABLY blanks (twilio-webhook.js
-      // domain/van branch: address_line1 '' AND zip ''), plus the stage and
-      // recency markers. city is NOT checked — the insert populates it from
-      // numberConfig.area, so it is not a shell signal. Requiring the blank
-      // ZIP is what separates the shell from a genuine recent new_lead that
-      // has a locality but no street yet; misreading that one as a shell
-      // discards real ambiguity and attaches the established customer's
-      // id, property, and membership pricing to the lead's quote.
-      const isWebhookShell = (r) => !isReal(r)
+      // PROVENANCE, not row shape. The shell is identified by the stamp the
+      // Twilio webhook writes on the row it mints (customers.created_via —
+      // see routes/twilio-webhook.js domain/van branch and the CREATED_VIA
+      // constant). Shape cannot carry this decision: routes/lead-webhook.js
+      // creates an active new_lead with a blank address_line1 AND blank zip
+      // when a form arrives without an address, so an address-less recent
+      // new_lead is NOT proof of a webhook shell — and misreading a genuine
+      // lead as one discards real ambiguity and attaches the established
+      // customer's id, property, and membership pricing to the lead's quote.
+      // The remaining conditions are not provenance tests, they are
+      // conservatism: an unstamped row (created before the stamp shipped,
+      // or by any other path) never qualifies, a row that has since become
+      // a real customer or acquired an address/ZIP is no longer a bare
+      // placeholder, and the recency window keeps the shortcut to the
+      // webhook's own request. Anything else keeps today's ambiguity, which
+      // red-lanes for a human.
+      const isWebhookShell = (r) => r.created_via === CREATED_VIA.TWILIO_TRACKING_SHELL
+        && !isReal(r)
         && !CUSTOMER_STAGES.includes(r.pipeline_stage)
         && !String(r.address_line1 || '').trim()
         && !String(r.zip || '').trim()
@@ -500,6 +508,7 @@ async function buildSmsThreadContext({
   phone, triggerAt = new Date(), triggerBody = '',
   groundedCustomerId = null, groundedConflict = false, groundedScope = null,
   groundedMultiScope = false, groundedOvercap = false,
+  groundedUnverifiableLocality = false,
 }) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
   // SMS path only: a service-contact sender (spouse/tenant/manager on the
@@ -523,12 +532,18 @@ async function buildSmsThreadContext({
   //    their confirmed properties — linking them would price the primary
   //    parcel and silently pick one of the properties named;
   //  - groundedOvercap: too many same-street rows to attribute the named
-  //    address to one of them (a large condo, a prefix spanning cities).
+  //    address to one of them (a large condo, a prefix spanning cities);
+  //  - groundedUnverifiableLocality: a same-street row whose city/ZIP could
+  //    not be checked against the locality the sender stated (blank stored
+  //    locality) — the street alone cannot prove it is the same parcel, so
+  //    linking that customer could hand a stranger's id, parcel data and
+  //    membership pricing to the draft.
   // One unified exit for all three: a machine-readable error the caller
   // bells red on (runThreadDraft red-lanes any context.error and names it
   // in the bell body), so a human resolves which property/customer is
   // meant. Gate off, no signal ever flows and this is unreachable.
-  if (guardsOn && (groundedConflict === true || groundedMultiScope === true || groundedOvercap === true)) {
+  if (guardsOn && (groundedConflict === true || groundedMultiScope === true
+    || groundedOvercap === true || groundedUnverifiableLocality === true)) {
     return { error: 'ambiguous_grounding' };
   }
   const customerMatch = await loadCustomerByPhone(

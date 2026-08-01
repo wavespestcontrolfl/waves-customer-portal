@@ -528,7 +528,8 @@ describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)
     property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family', company_name: null,
   };
   // The webhook's first-contact shell, exactly as twilio-webhook.js writes
-  // it: non-customer stage, EMPTY address_line1, created seconds ago.
+  // it: PROVENANCE-STAMPED (created_via), non-customer stage, EMPTY
+  // address_line1, created seconds ago.
   const SHELL = {
     ...BASE,
     id: 'shell-1',
@@ -539,6 +540,7 @@ describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)
     pipeline_stage: 'new_lead',
     active: true,
     created_at: new Date().toISOString(),
+    created_via: 'twilio_tracking_shell',
   };
   const REAL = {
     ...BASE, id: 'cust-1', first_name: 'Pat', last_name: 'Member', pipeline_stage: 'active_customer', active: true,
@@ -582,13 +584,30 @@ describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)
   });
 
   test('gate ON: a recent blank-street lead with a POPULATED ZIP is not a shell', async () => {
-    // The real webhook insert blanks BOTH address_line1 and zip. A lead
-    // that has a locality but no street yet is a genuine separate lead —
-    // treating it as a shell discarded its ambiguity and attached the
-    // established customer's id, property, and membership pricing.
+    // Belt-and-braces on top of the stamp: a row that has a locality but no
+    // street yet is not a bare placeholder.
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [{ ...SHELL, id: 'lead-cust-4', zip: '34205' }, REAL];
     const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
+  });
+
+  test('gate ON: an UNSTAMPED lead with the shell SHAPE stays ambiguous (provenance, not shape)', async () => {
+    // routes/lead-webhook.js creates an active new_lead with address_line1
+    // AND zip blank when a form arrives without an address. It satisfies
+    // every shape signal the old predicate used; only the webhook's own
+    // created_via stamp separates the two, and without it this must stay
+    // ambiguous rather than attaching the established customer's id,
+    // parcel, and membership pricing to the lead's quote.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    const FORM_LEAD = { ...SHELL, id: 'lead-cust-5', created_via: null };
+    mockCustomerRows = [FORM_LEAD, REAL];
+    let context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
+
+    // A stamp from some OTHER path is not this webhook's placeholder either.
+    mockCustomerRows = [{ ...FORM_LEAD, created_via: 'import' }, REAL];
+    context = await buildSmsThreadContext(SMS_ARGS);
     expect(context.error).toBe('ambiguous_phone');
   });
 
