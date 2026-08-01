@@ -418,6 +418,35 @@ finding and warns on P1. Reviewers must return JSON matching
   "Waves Lawn & Pest". The mascot logo artwork carrying the old name is
   current and intentional; do not flag it.
 
+### Implementation defaults
+
+Authoring defaults for any agent writing code in this repo. Reviewers flag
+violations at the severity noted.
+
+- **Choose the simplest implementation that fully meets the current
+  requirements.** No speculative abstraction: no config options nobody
+  asked for, no generic handlers with a single call site, no interfaces
+  with one implementation, no "future-proofing" layers for requirements
+  that aren't in the task. Flag as P2.
+- **No compat shims for code changed in the same PR.** When a change
+  renames or reshapes something internal, migrate every call site in the
+  same PR — no deprecated wrappers, re-export aliases, or dual code paths
+  left behind for callers this repo controls. Flag leftover internal
+  compat scaffolding as P2. The inverse is MANDATORY for anything an
+  external consumer can touch: deployed native apps (iOS WavesPay,
+  Android), in-flight tokenized links (pay / receipt / estimate /
+  contract / report / prep), astro-fleet form posts, webhook payloads,
+  and existing DB rows must keep working — breaking those is P0 (see the
+  public-route, receipt-permanence, and astro-consumer rules).
+- **Use existing dependencies instead of hand-rolling; no new
+  dependencies without owner approval.** Don't write a custom
+  implementation of something a library already in `package.json`
+  provides (date/timezone handling, validation, retries, parsing).
+  Adding a NEW dependency is a supply-chain and upgrade-surface decision:
+  the PR body must name it and why, and it needs Adam's explicit
+  approval. A new `package.json` entry not called out in the PR
+  description is P1.
+
 ### Out of scope (do not flag)
 
 - `client/dist/**` — built bundle, regenerated on deploy.
