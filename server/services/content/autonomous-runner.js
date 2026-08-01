@@ -642,6 +642,9 @@ class AutonomousRunner {
         {
           checkedExistingRoutes: Array.isArray(draft.checked_existing_routes) ? draft.checked_existing_routes : [],
           refreshPriorBody: guardOptions.isRefresh ? guardOptions.priorBody : null,
+          // Alias targets are HUB pages; on spoke content a relative alias
+          // would resolve against the spoke and publish dead (Codex r3).
+          targetDomains: Array.isArray(guardOptions.domains) ? guardOptions.domains : [],
         },
       );
       if (routeRepair.repairs.length) {

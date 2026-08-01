@@ -2369,6 +2369,18 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     }
   });
 
+  test('relative aliases go absolute on spoke content (r3)', () => {
+    // On a spoke, a relative hub path resolves against the SPOKE — the repair
+    // would turn a link the gate parks into a dead link it accepts.
+    const spoke = repairInventedInternalRoutes('[services](/pest-control/)', [], { targetDomains: ['sarasotafllawncare.com'] });
+    expect(spoke.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
+    // Hub content (or no domain context) keeps relative paths.
+    expect(repairInventedInternalRoutes('[services](/pest-control/)', [], { targetDomains: ['www.wavespestcontrol.com'] }).body)
+      .toBe('[services](/pest-control-services/)');
+    expect(repairInventedInternalRoutes('[services](/pest-control/)').body)
+      .toBe('[services](/pest-control-services/)');
+  });
+
   test('generic sources never alias to service-specific pages (r3)', () => {
     // A lawn article must not be silently sent to a pest page; lawn has no
     // hub page at all, so unlinking is the only honest repair.

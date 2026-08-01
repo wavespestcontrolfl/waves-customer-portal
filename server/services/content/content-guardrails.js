@@ -1509,6 +1509,14 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     const norm = path === null ? null : normalizeInternalPath(path);
     if (norm) allowed.add(norm);
   }
+  // Does this draft publish to a spoke? Alias targets are HUB pages, so a
+  // relative alias is only safe when the publishing domain IS the hub.
+  const targetsSpoke = (Array.isArray(options.targetDomains) ? options.targetDomains : [])
+    .some((d) => {
+      const host = String(d || '').toLowerCase()
+        .replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').replace(/^www\./, '');
+      return Boolean(host) && !isHubHost(host);
+    });
   // Countdown map — each grandfathered occurrence is spent once.
   const exemptLeft = new Map();
   const priorBody = typeof options.refreshPriorBody === 'string' ? options.refreshPriorBody : '';
@@ -1551,12 +1559,20 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       // re-emitting the spoke host would publish a dead spoke link. Spoke
       // absolutes are re-pointed at the hub (pre-push Codex r3).
       let origin = '';
+      let isAbsolute = false;
       try {
         const u = new URL(dest);
+        isAbsolute = true;
         if (hubHosts.has(u.hostname.toLowerCase())) {
           origin = isHubHost(u.hostname) ? u.origin : hubOrigin();
         }
-      } catch { /* relative destination — no origin to preserve */ }
+      } catch { /* relative destination */ }
+      // A RELATIVE alias resolves against the PUBLISHING domain. On spoke
+      // content that is the spoke, where this hub-only target does not exist
+      // — so a bare relative alias would turn a link the gate PARKS into a
+      // dead link it ACCEPTS. Spoke content gets the absolute hub URL, which
+      // is what the spoke contract wants for a handoff anyway (Codex r3).
+      if (!isAbsolute && targetsSpoke) origin = hubOrigin();
       return `[${anchorText}](${open}${origin}${alias}${close}${titlePart})`;
     }
     repairs.push({ from: norm, to: null, action: 'unlinked' });
