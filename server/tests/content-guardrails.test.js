@@ -2369,9 +2369,44 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     }
   });
 
+  test('generic sources never alias to service-specific pages (r3)', () => {
+    // A lawn article must not be silently sent to a pest page; lawn has no
+    // hub page at all, so unlinking is the only honest repair.
+    for (const [body, from] of [
+      ['[lawn services](/services/)', '/services/'],
+      ['[our services](/our-services/)', '/our-services/'],
+      ['[get a quote](/get-a-quote/)', '/get-a-quote/'],
+      ['[free quote](/free-quote/)', '/free-quote/'],
+      ['[deals](/deals/)', '/deals/'],
+      ['[specials](/specials/)', '/specials/'],
+    ]) {
+      const r = repairInventedInternalRoutes(body);
+      expect(r.repairs[0]).toMatchObject({ from, to: null, action: 'unlinked' });
+    }
+    // Pest-explicit sources still alias.
+    expect(repairInventedInternalRoutes('[x](/pest-services/)').body).toContain('/pest-control-services/');
+  });
+
+  test('mismatched angle delimiters are left for the gate (r3)', () => {
+    // Repairing malformed Markdown would hand evaluate() an allowlisted path
+    // and pass a link that cannot render.
+    for (const body of ['[x](</pest-control/)', '[x](/pest-control/>)']) {
+      const r = repairInventedInternalRoutes(body);
+      expect(r.body).toBe(body);
+      expect(r.repairs).toEqual([]);
+    }
+    // Correctly paired angles still repair.
+    expect(repairInventedInternalRoutes('[x](</pest-control/>)').body).toBe('[x](</pest-control-services/>)');
+  });
+
   test('every alias target is a real allowlisted route (module-load contract)', () => {
-    const r = repairInventedInternalRoutes('[x](/get-a-quote/) [y](/faq/) [z](/waveguard/)');
-    expect(r.repairs.length).toBe(3);
+    // Drive EVERY alias in the map, so a bad target can't hide behind a
+    // hand-picked sample. (/get-a-quote/ etc. are deliberately no longer
+    // aliased — see the generic-source rule above.)
+    const sources = Object.keys(guardrails._internals.INVENTED_ROUTE_ALIASES);
+    expect(sources.length).toBeGreaterThan(5);
+    const r = repairInventedInternalRoutes(sources.map((s, i) => `[x${i}](${s})`).join(' '));
+    expect(r.repairs.length).toBe(sources.length);
     for (const rep of r.repairs) {
       expect(rep.to).not.toBeNull();
       expect(guardrails.evaluate({ body: `[a](${rep.to})` }, {}).findings

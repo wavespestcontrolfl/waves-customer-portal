@@ -1408,31 +1408,30 @@ function isKnownGoodInternalRoute(dest) {
 // The repair runs BEFORE the gate and returns what it changed; callers log
 // it, so a writer that keeps inventing routes stays visible instead of
 // silently "passing".
+// ONE RULE decides membership: a GENERIC source may only alias to a
+// SERVICE-AGNOSTIC target. A generic source pointed at a pest-specific page
+// silently mis-sends non-pest content — a lawn article's
+// "[lawn services](/services/)" would become a pest-control link, and lawn
+// has no hub page at all (SERVICE_HUB_LINKS). A wrong destination is worse
+// than the unlink these now fall through to, which keeps the words and loses
+// only the link. Deliberately ABSENT for that reason (Codex r2/r3):
+//   /inspection/, /services/, /our-services/, /get-a-quote/, /free-quote/,
+//   /deals/, /specials/
+// Each entry below is either pest-explicit at BOTH ends or agnostic at both.
 const INVENTED_ROUTE_ALIASES = Object.freeze({
   '/pest-control/': '/pest-control-services/',
   '/pest-services/': '/pest-control-services/',
-  '/services/': '/pest-control-services/',
-  '/our-services/': '/pest-control-services/',
   '/pests/': '/pest-library/',
   '/pest-guide/': '/pest-library/',
   '/library/': '/pest-library/',
   '/areas/': '/service-areas/',
   '/areas-we-serve/': '/service-areas/',
   '/locations/': '/service-areas/',
-  '/get-a-quote/': '/pest-control-quote/',
-  '/free-quote/': '/pest-control-quote/',
   '/memberships/': '/waveguard-memberships/',
   '/waveguard/': '/waveguard-memberships/',
   '/guarantee/': '/waves-guarantee/',
   '/faq/': '/faqs/',
-  // NO bare '/inspection/' alias: it is service-AMBIGUOUS. A termite draft's
-  // "schedule an inspection" CTA belongs on /termite-inspection/, and a
-  // context-free alias would silently publish a WRONG destination — worse
-  // than the unlink this falls through to, which keeps the words and loses
-  // only the link (Codex r2).
   '/termite-inspections/': '/termite-inspection/',
-  '/deals/': '/pest-control-deals/',
-  '/specials/': '/pest-control-deals/',
 });
 
 // Fail LOUD at module load if an alias target isn't a real allowlisted page:
@@ -1521,6 +1520,10 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
   const repairs = [];
   const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, bang, anchorText, open, dest, close, title) => {
     if (bang) return whole; // image embed — never rewrite
+    // Mismatched angle delimiters are MALFORMED Markdown. Repairing one would
+    // hand evaluate() an allowlisted path and let a link that cannot render
+    // pass the gate, so leave it for the gate to park (Codex r3).
+    if (Boolean(open) !== Boolean(close)) return whole;
     const path = toPath(dest);
     if (path === null) return whole; // absolute URL on someone else's host
     // Resolve dot segments the way the gate does, so "/images/../x/" and the
@@ -2229,5 +2232,5 @@ module.exports = {
   PAGE_CITY_SLUGS,
   OUT_OF_AREA_CITY_CANDIDATES,
   outOfAreaCities,
-  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
+  _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, INVENTED_ROUTE_ALIASES },
 };
