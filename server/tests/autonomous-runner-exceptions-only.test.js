@@ -126,6 +126,9 @@ describe('hard-gate failure: one feedback redraft, then silent skip', () => {
       pass: false,
       findings: [{ severity: 'P0', code: 'HARDCODED_PRICE', message: 'body contains $199' }],
     }),
+    // The runner repairs invented routes before evaluating; a double without
+    // it throws TypeError before either gate-disposition assertion runs.
+    repairInventedInternalRoutes: jest.fn((body) => ({ body, repairs: [] })),
   };
   const makeBriefBuilder = () => ({
     compose: jest.fn().mockResolvedValue({

@@ -2278,6 +2278,60 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
       .some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 
+  test('image embeds are never rewritten (r1: repair must not delete images)', () => {
+    const body = 'Damage: ![Chinch bug damage](/images/blog/chinch-bugs/damage.webp) in July.';
+    const r = repairInventedInternalRoutes(body);
+    expect(r.body).toBe(body);
+    expect(r.repairs).toEqual([]);
+    // Dot segments resolving into /images/ are assets too, not routes.
+    const dotted = '![x](/images/../images/blog/a.webp)';
+    expect(repairInventedInternalRoutes(dotted).body).toBe(dotted);
+  });
+
+  test('protocol-relative links stay for the external gate (r1: security)', () => {
+    // Unlinking this would erase the evidence for DISALLOWED_EXTERNAL_LINK
+    // and let injected spam publish as plain text.
+    const body = 'See [sponsor](//evil.example/path) here.';
+    const r = repairInventedInternalRoutes(body);
+    expect(r.body).toBe(body);
+    expect(r.repairs).toEqual([]);
+    expect(guardrails.evaluate({ body: r.body }, {}).findings
+      .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+  });
+
+  test('all destination forms the gate recognizes are repaired (r1)', () => {
+    // Absolute same-site URL, angle-bracketed, and an optional link title.
+    const abs = repairInventedInternalRoutes('[ants](https://www.wavespestcontrol.com/pest-library/ants/)');
+    expect(abs.repairs[0]).toMatchObject({ from: '/pest-library/ants/', action: 'unlinked' });
+    const angled = repairInventedInternalRoutes('[svc](</pest-control/>)');
+    expect(angled.body).toContain('/pest-control-services/');
+    const titled = repairInventedInternalRoutes('[svc](/pest-control/ "Guide")');
+    expect(titled.body).toContain('(/pest-control-services/');
+    expect(titled.body).toContain('"Guide"');
+    // Off-site absolute URLs are not ours to touch.
+    const offsite = '[epa](https://www.epa.gov/pesticides/)';
+    expect(repairInventedInternalRoutes(offsite).body).toBe(offsite);
+  });
+
+  test('routes verified via check_existing_content are preserved (r1)', () => {
+    const body = 'See [that post](/some-existing-blog/).';
+    const r = repairInventedInternalRoutes(body, [], { checkedExistingRoutes: ['/some-existing-blog/'] });
+    expect(r.body).toBe(body);
+    expect(r.repairs).toEqual([]);
+    // Without the allowance it is unlinked — the allowance is what saves it.
+    expect(repairInventedInternalRoutes(body).repairs.length).toBe(1);
+  });
+
+  test('refresh grandfathering preserves legacy links but not NEW ones (r1)', () => {
+    const prior = 'Legacy [old](/legacy-page/) link.';
+    // One occurrence preserved…
+    const one = repairInventedInternalRoutes('Kept [old](/legacy-page/) link.', [], { refreshPriorBody: prior });
+    expect(one.repairs).toEqual([]);
+    // …but a SECOND occurrence is an addition and is still repaired.
+    const two = repairInventedInternalRoutes('[old](/legacy-page/) and [again](/legacy-page/)', [], { refreshPriorBody: prior });
+    expect(two.repairs.length).toBe(1);
+  });
+
   test('every alias target is a real allowlisted route (module-load contract)', () => {
     const r = repairInventedInternalRoutes('[x](/get-a-quote/) [y](/faq/) [z](/waveguard/)');
     expect(r.repairs.length).toBe(3);

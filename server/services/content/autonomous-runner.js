@@ -632,9 +632,17 @@ class AutonomousRunner {
       // the real page; anything else is unlinked to plain text — a dead
       // internal link is strictly worse than the same words unlinked. Repairs
       // are recorded so a writer that keeps inventing stays visible.
+      // The repair must honor exactly what the GATE would allow, or it
+      // destroys links the prompt mandated: routes the writer verified via
+      // check_existing_content, and (on a refresh) the legacy links the prior
+      // body already carried, which the gate grandfathers by count (Codex r1).
       const routeRepair = contentGuardrails.repairInventedInternalRoutes(
         draft.body,
         brief.internal_links_to_add || [],
+        {
+          checkedExistingRoutes: Array.isArray(draft.checked_existing_routes) ? draft.checked_existing_routes : [],
+          refreshPriorBody: guardOptions.isRefresh ? guardOptions.priorBody : null,
+        },
       );
       if (routeRepair.repairs.length) {
         draft.body = routeRepair.body;
@@ -3262,7 +3270,13 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
       uniqueness_gate_result: JSON.stringify(run.uniqueness_gate_result || {}),
       quality_gate_result: JSON.stringify(run.quality_gate_result || {}),
       claims_ledger_result: JSON.stringify(run.claims_ledger_result || {}),
-      content_guardrails_result: JSON.stringify(run.content_guardrails_result || {}),
+      // Route repairs ride the guardrails audit field (they ARE a guardrails
+      // action) so the claimed per-run audit trail actually survives the
+      // process — without this it existed only in memory (Codex r1 P2).
+      content_guardrails_result: JSON.stringify({
+        ...(run.content_guardrails_result || {}),
+        ...(run.internal_route_repairs?.length ? { internal_route_repairs: run.internal_route_repairs } : {}),
+      }),
       comparison_table_result: JSON.stringify(run.comparison_table_result || {}),
       seo_completion_gate_result: JSON.stringify(run.seo_completion_gate_result || {}),
       facts_sufficiency: JSON.stringify(run.facts_sufficiency || {}),

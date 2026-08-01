@@ -1423,34 +1423,88 @@ const INVENTED_ROUTE_ALIASES = Object.freeze({
   }
 }
 
-// Markdown links only. Bare prose URLs and HTML anchors are left alone —
-// rewriting those needs a real parser, and the gate still catches them.
-const MD_INTERNAL_LINK_RE = /\[([^\]\n]*)\]\((\s*)(\/[^)\s]*)(\s*)\)/g;
+// Markdown INLINE links only. Bare prose URLs, HTML anchors, and reference
+// definitions are left alone — rewriting those needs a real parser, and the
+// gate still catches them. Within inline links this must recognize every
+// destination form the gate does, or the repair silently misses routes that
+// still hard-fail (Codex r1): site-relative, angle-bracketed (<...>),
+// absolute same-site URLs, and an optional link title.
+//
+// Two destination classes are deliberately EXCLUDED (Codex r1):
+//   - a leading "!" is an IMAGE embed — unlinking it would delete the image,
+//     and /images/ embeds are explicitly permitted by the guardrail contract;
+//   - "//host/path" is protocol-relative and therefore EXTERNAL. Unlinking it
+//     here would erase the evidence for the P0 DISALLOWED_EXTERNAL_LINK that
+//     exists to surface injected spam/backlinks, so it must reach the gate
+//     untouched. `\/(?!\/)` enforces this.
+const MD_INTERNAL_LINK_RE = /(!)?\[([^\]\n]*)\]\(\s*(<?)\s*((?:\/(?!\/)|https?:\/\/)[^)\s>]*)\s*(>?)\s*("[^"]*"|'[^']*'|\([^)]*\))?\s*\)/g;
 
-function repairInventedInternalRoutes(body, allowedInternalLinks = []) {
+/**
+ * repairInventedInternalRoutes(body, allowedInternalLinks, options)
+ *
+ * options.checkedExistingRoutes — routes the writer VERIFIED through
+ *   check_existing_content. The gate allows them (internalRouteFinding), so
+ *   the repair must too or it destroys a link the prompt mandated (Codex r1).
+ * options.refreshPriorBody — the live prior body of a refresh. Grandfathering
+ *   is derived from it here, by occurrence COUNT, using the same collector
+ *   evaluate() uses: the refresh contract polices ADDITIONS while preserving
+ *   legacy links the writer merely carried over, so without this the repair
+ *   unlinks them before evaluate() can grandfather them (Codex r1). Counts
+ *   are consumed, so a refresh still cannot ADD occurrences of a dead route.
+ */
+function repairInventedInternalRoutes(body, allowedInternalLinks = [], options = {}) {
   const text = String(body || '');
   if (!text) return { body: text, repairs: [] };
-  const allowed = new Set(ALLOWED_INTERNAL_LINKS);
-  for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
-    let candidate = String(link || '');
+  const hubHosts = hubHostSet();
+  const toPath = (value) => {
+    let candidate = String(value || '');
     try {
       const u = new URL(candidate);
-      if (hubHostSet().has(u.hostname.toLowerCase())) candidate = u.pathname || '/';
+      if (!hubHosts.has(u.hostname.toLowerCase())) return null; // off-site: not ours
+      candidate = u.pathname || '/';
     } catch { /* relative already */ }
-    const norm = normalizeInternalPath(candidate);
+    return candidate;
+  };
+  const allowed = new Set(ALLOWED_INTERNAL_LINKS);
+  const declared = [
+    ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
+    ...(Array.isArray(options.checkedExistingRoutes) ? options.checkedExistingRoutes : []),
+  ];
+  for (const link of declared) {
+    const path = toPath(link);
+    const norm = path === null ? null : normalizeInternalPath(path);
     if (norm) allowed.add(norm);
   }
+  // Countdown map — each grandfathered occurrence is spent once.
+  const exemptLeft = new Map();
+  const priorBody = typeof options.refreshPriorBody === 'string' ? options.refreshPriorBody : '';
+  if (priorBody.trim()) {
+    for (const { norm } of collectInternalDestinations(priorBody)) {
+      exemptLeft.set(norm, (exemptLeft.get(norm) || 0) + 1);
+    }
+  }
   const repairs = [];
-  const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, anchorText, lead, dest, trail) => {
-    const norm = normalizeInternalPath(dest);
+  const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, bang, anchorText, open, dest, close, title) => {
+    if (bang) return whole; // image embed — never rewrite
+    const path = toPath(dest);
+    if (path === null) return whole; // absolute URL on someone else's host
+    // Resolve dot segments the way the gate does, so "/images/../x/" and the
+    // /images/ exemption agree with collectInternalDestinations.
+    let resolved = path;
+    try { resolved = new URL(path, 'https://resolve.invalid').pathname || path; } catch { /* keep raw */ }
+    if (resolved.startsWith('/images/')) return whole; // an asset, not a route
+    const norm = normalizeInternalPath(resolved);
     if (!norm) return whole;
     if (allowed.has(norm)) return whole;
     const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
     if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) return whole;
+    const left = exemptLeft.get(norm) || 0;
+    if (left > 0) { exemptLeft.set(norm, left - 1); return whole; } // preserved legacy
     const alias = INVENTED_ROUTE_ALIASES[norm];
     if (alias) {
       repairs.push({ from: norm, to: alias, action: 'aliased' });
-      return `[${anchorText}](${lead}${alias}${trail})`;
+      const titlePart = title ? ` ${title}` : '';
+      return `[${anchorText}](${open}${alias}${close}${titlePart})`;
     }
     repairs.push({ from: norm, to: null, action: 'unlinked' });
     return anchorText;
