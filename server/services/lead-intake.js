@@ -205,28 +205,61 @@ async function notifyAdam(customer, interest, estimate) {
 // the customer leaves the state machine only once a manual-task artifact
 // exists. Any handoff failure falls back to the shell path — the supersede
 // must never lose a lead.
-async function engineDraftHandoff(customer, body, reason) {
+// Returns { drafted, terminal }:
+//  - drafted: the engine owns this reply; the caller is done.
+//  - terminal: the engine's SCOPE GUARDS refused the request (out-of-scope
+//    work, or coordination on an already-booked job). That is a decision,
+//    NOT an operational failure — the shell fallback must not run, or
+//    "power wash my yard" still produces an estimate and an owner alert.
+//    Anything else (gate off, cooldown, bell failure, exception) is
+//    operational and keeps the fallback so a lead is never lost.
+// scopeCheckOnly: with an open shell present the engine must not draft
+// (the duplicate guard would block it), but the SCOPE GUARDS still get
+// their say — otherwise 'power wash my yard' with an open form shell
+// patches the shell, stamps estimate_drafted, and alerts the owner.
+// The engine runs only its veto ladder (no bell, no draft) and reports
+// terminal refusals; anything else lets the legacy shell path proceed.
+async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = false, precomputedTriage } = {}) {
   try {
     const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
-    if (!smsThreadDraftsEnabled()) return false;
+    if (!smsThreadDraftsEnabled()) return { drafted: false, terminal: false };
     const started = await startSmsThreadDraft({
       phone: customer.phone,
       triggerBody: body,
       skipIntentGate: true,
+      ...(scopeCheckOnly ? { scopeCheckOnly: true } : {}),
+      // Threads the pre-check's triage into the real run so the awaited
+      // veto/triage/classifier ladder executes exactly ONCE per reply —
+      // the Twilio webhook awaits this handler, and a doubled ladder
+      // doubled its latency.
+      ...(precomputedTriage !== undefined ? { precomputedTriage } : {}),
     });
+    if (scopeCheckOnly) {
+      // Scope verdict only — NEVER a draft or a status stamp, whatever the
+      // engine returned. The triage rides back for reuse.
+      if (started?.terminal) {
+        logger.info(`[lead-intake] scope check refused as out-of-scope (${started.skipped})`);
+        return { drafted: false, terminal: true, triage: started?.triage };
+      }
+      return { drafted: false, terminal: false, triage: started?.triage };
+    }
     if (!started?.started) {
+      if (started?.terminal) {
+        logger.info(`[lead-intake] engine handoff refused as out-of-scope (${started.skipped}) — no shell fallback`);
+        return { drafted: false, terminal: true };
+      }
       logger.warn(`[lead-intake] engine handoff not started (${started?.skipped || 'unknown'}) — falling back to shell`);
-      return false;
+      return { drafted: false, terminal: false };
     }
     await db('customers').where({ id: customer.id }).update({
       lead_intake_status: 'estimate_drafted',
       updated_at: new Date(),
     });
     logger.info(`[lead-intake] Engine handoff for customer ${customer.id} — ${reason}`);
-    return true;
+    return { drafted: true, terminal: false };
   } catch (e) {
     logger.error(`[lead-intake] engine handoff failed (falling back to shell): ${e.message}`);
-    return false;
+    return { drafted: false, terminal: false };
   }
 }
 
@@ -242,6 +275,25 @@ async function handleIntakeReply(customer, body) {
       // Couldn't classify — fall through to AI draft / human inbox.
       return { handled: false };
     }
+
+    // TERMINAL SCOPE CHECK before ANYTHING records or advances: the scope
+    // refusal used to live inside the hasAddress branch, so an
+    // address-LESS 'power wash my yard' recorded a lawn interest, advanced
+    // to awaiting_address, and parked an address clarification — for work
+    // Waves does not do. A terminal veto refuses regardless of address
+    // presence: no interest recorded, no stage advance, no clarify parked.
+    // Operational outcomes (gate off, engine trouble) proceed unchanged;
+    // the downstream handoff keeps its own check as defense in depth.
+    const scopePreCheck = await engineDraftHandoff(
+      customer, body, 'scope pre-check (awaiting_service)', { scopeCheckOnly: true },
+    );
+    // terminal:true = consumed for DRAFTING only. NOTHING was said to the
+    // customer and no state advanced, so the webhook must NOT treat this as
+    // a fully handled reply: it still owes the message the normal inbound
+    // bell/push/owner-forward. Suppressing the quote was right; suppressing
+    // the notification would bury real service instructions ("this is for
+    // Friday's visit, please treat the backyard") in the comms log.
+    if (scopePreCheck.terminal) return { handled: true, terminal: true, next: status };
 
     await db('customers').where({ id: customer.id }).update({
       lead_service_interest: cls.interest,
@@ -298,9 +350,22 @@ async function handleIntakeReply(customer, body) {
         })
         .orderBy('created_at', 'desc')
         .first();
-      if (!existingShell && await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
-        return { handled: true, next: 'estimate_drafted' };
-      }
+      // The scope verdict already rendered in the pre-check above — the
+      // shell branch needs nothing further, and the full handoff reuses
+      // the pre-check's triage so the ladder never runs twice.
+      const handoff = existingShell
+        ? { drafted: false, terminal: false }
+        : await engineDraftHandoff(
+          customer, body, `service selected (${cls.interest})`,
+          { precomputedTriage: scopePreCheck.triage },
+        );
+      if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
+      // Scope-refused: handled, but nothing was drafted and nothing is
+      // owed. The state stays put (an 'estimate_drafted' stamp would be a
+      // lie) so a genuine in-scope follow-up still gets the machine.
+      // Same contract as the pre-check above: no draft, nothing said, so
+      // the inbound message still flows into normal notification handling.
+      if (handoff.terminal) return { handled: true, terminal: true, next: status };
       const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
       await db('customers').where({ id: customer.id }).update({
         lead_intake_status: 'estimate_drafted',
@@ -345,6 +410,21 @@ async function handleIntakeReply(customer, body) {
       return { handled: false };
     }
 
+    // TERMINAL SCOPE CHECK before ANY persist — same before-writes
+    // contract as the awaiting_service branch: '100 Palm Ave — actually
+    // looking for power washing' must not write address_line1 and stamp
+    // the clarify answered on its way to a refusal.
+    const scopePreCheck = await engineDraftHandoff(
+      customer, body, 'scope pre-check (awaiting_address)', { scopeCheckOnly: true },
+    );
+    // terminal:true = consumed for DRAFTING only. NOTHING was said to the
+    // customer and no state advanced, so the webhook must NOT treat this as
+    // a fully handled reply: it still owes the message the normal inbound
+    // bell/push/owner-forward. Suppressing the quote was right; suppressing
+    // the notification would bury real service instructions ("this is for
+    // Friday's visit, please treat the backyard") in the comms log.
+    if (scopePreCheck.terminal) return { handled: true, terminal: true, next: status };
+
     const address = body.trim();
     await db('customers').where({ id: customer.id }).update({
       address_line1: address,
@@ -380,9 +460,20 @@ async function handleIntakeReply(customer, body) {
       })
       .orderBy('created_at', 'desc')
       .first();
-    if (!existingShell && await engineDraftHandoff(customer, body, `address captured (${interest})`)) {
-      return { handled: true, next: 'estimate_drafted' };
-    }
+    // Verdict already rendered in the pre-check above; the full handoff
+    // reuses its triage so the ladder never runs twice.
+    const handoff = existingShell
+      ? { drafted: false, terminal: false }
+      : await engineDraftHandoff(
+        customer, body, `address captured (${interest})`,
+        { precomputedTriage: scopePreCheck.triage },
+      );
+    if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
+    // Scope-refused — same contract as the awaiting_service branch above:
+    // handled, no estimate, no owner alert, state unchanged.
+    // Same contract as the pre-check above: no draft, nothing said, so
+    // the inbound message still flows into normal notification handling.
+    if (handoff.terminal) return { handled: true, terminal: true, next: status };
 
     const estimate = await createOrUpdateDraftEstimate(customer, interest);
     await db('customers').where({ id: customer.id }).update({
