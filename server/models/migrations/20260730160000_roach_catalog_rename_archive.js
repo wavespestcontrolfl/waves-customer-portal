@@ -349,22 +349,36 @@ exports.up = async function up(knex) {
   const snapshotVisitIds = [...new Set([...state.backfilledVisitIds, ...state.addonParentVisitIds])];
 
   if (snapshotVisitIds.length && (await knex.schema.hasTable('invoices'))) {
-    // FOR UPDATE: patches derive from these reads — locking the invoice
-    // rows serializes a concurrent admin edit (which also locks the row in
-    // InvoiceService.update) behind our commit, so a patch can never
-    // overwrite an interleaved edit's title/line_items (codex #3108 r11).
-    const drafts = await knex('invoices')
+    // Lock ORDER matters (codex #3108 r12): voidInvoice and the other
+    // statement writers take the STATEMENT lock first, then the invoice —
+    // taking invoice locks first here is a textbook AB/BA deadlock, and a
+    // deadlock abort of a migration fails the whole deploy. So: unlocked
+    // pre-read to learn the statement links → lock statements → THEN lock
+    // and re-read the invoices (patches derive from the locked read; a
+    // concurrent InvoiceService.update also locks the row, codex r11).
+    const preRead = await knex('invoices')
       .whereIn('scheduled_service_id', snapshotVisitIds)
       .whereIn('status', ['draft', 'scheduled'])
-      .forUpdate()
-      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id');
+      .select('id', 'payer_statement_id');
     // A draft already accrued to a FROZEN payer statement (anything not
     // 'open' is a finalized/issued billing document) stays untouched —
     // statement lines load live from invoices.service_type, so relabeling
     // would change a rendered issued document (codex #3108 r8).
-    const frozenStatementIds = await frozenPayerStatementIds(knex, drafts);
+    const frozenStatementIds = await frozenPayerStatementIds(knex, preRead);
+    const drafts = preRead.length
+      ? await knex('invoices')
+        .whereIn('id', preRead.map((r) => r.id))
+        .whereIn('status', ['draft', 'scheduled'])
+        .forUpdate()
+        .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id')
+      : [];
+    const checkedStmtIds = new Set(preRead.map((r) => r.payer_statement_id).filter(Boolean));
     for (const inv of drafts) {
-      if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
+      // Skip frozen-statement invoices AND any that accrued to a statement
+      // in the pre-read → locked-read gap (that statement isn't locked or
+      // status-checked — conservative skip).
+      if (inv.payer_statement_id
+        && (frozenStatementIds.has(inv.payer_statement_id) || !checkedStmtIds.has(inv.payer_statement_id))) continue;
       const result = relabelInvoiceSnapshot(inv, OLD_NAME, NEW_NAME);
       if (!result) continue;
       // Status rechecked ON the update (a scheduled-send claim flips the
@@ -445,11 +459,13 @@ exports.down = async function down(knex) {
   // expected value rides in the update predicate — same concurrent-admin
   // race guard as up() (codex #3108 r9).
   const row = await knex('services').where({ service_key: RENAME_KEY }).first();
+  let catalogNameReverted = false;
   if (row) {
     if ((state.renamedFields || []).includes('name') && row.name === NEW_NAME) {
-      await knex('services')
+      const count = await knex('services')
         .where({ service_key: RENAME_KEY, name: NEW_NAME })
         .update({ name: OLD_NAME, updated_at: knex.fn.now() });
+      catalogNameReverted = count > 0;
     }
     if ((state.renamedFields || []).includes('short_name') && row.short_name === NEW_NAME) {
       await knex('services')
@@ -479,7 +495,12 @@ exports.down = async function down(knex) {
   // the one it wrote AND the visit is still open — a visit completed since
   // up() is history now, and rewriting its label would desync it from the
   // service_records / typed-report snapshots its completion copied.
-  const ids = Array.isArray(state.backfilledVisitIds) ? state.backfilledVisitIds : [];
+  // Snapshot reversals run ONLY when the catalog name itself reverted
+  // (codex #3108 r12): when an admin pre-renamed the catalog (or re-renamed
+  // it after up()), the catalog keeps its name through rollback — reverting
+  // the visit/invoice/reminder/profile snapshots underneath it would desync
+  // completion reports (dispatch prefers completionProfile.serviceName).
+  const ids = catalogNameReverted && Array.isArray(state.backfilledVisitIds) ? state.backfilledVisitIds : [];
   if (ids.length && (await knex.schema.hasTable('scheduled_services'))) {
     await knex('scheduled_services')
       .whereIn('id', ids)
@@ -494,7 +515,7 @@ exports.down = async function down(knex) {
   // a visit completed since up() keeps its new label (visit rollback above
   // skips terminal rows), and its deliberately-still-draft invoice must
   // agree with the completed visit and report, not flip back.
-  const relabeledInvoices = state.relabeledInvoices && typeof state.relabeledInvoices === 'object'
+  const relabeledInvoices = catalogNameReverted && state.relabeledInvoices && typeof state.relabeledInvoices === 'object'
     ? state.relabeledInvoices
     : {};
   const invoiceIds = Object.keys(relabeledInvoices);
@@ -510,20 +531,30 @@ exports.down = async function down(knex) {
           .select('id', 'status')).filter((v) => TERMINAL_VISIT_STATUSES.includes(v.status)).map((v) => v.id)
         : []
     );
-    // Same row lock as up(): reversal patches derive from these reads.
-    const drafts = await knex('invoices')
+    // Same statement-before-invoice lock ORDER as up() (codex r12 — the
+    // reverse order deadlocks against voidInvoice), then the same row locks
+    // for patch derivation.
+    const preRead = await knex('invoices')
       .whereIn('id', invoiceIds)
       .whereIn('status', ['draft', 'scheduled'])
-      .forUpdate()
-      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id');
+      .select('id', 'payer_statement_id');
     // Same frozen-statement rule on the way back: a draft that accrued to a
     // finalized statement since up() is part of an issued document now.
-    const frozenStatementIds = await frozenPayerStatementIds(knex, drafts);
+    const frozenStatementIds = await frozenPayerStatementIds(knex, preRead);
+    const checkedStmtIds = new Set(preRead.map((r) => r.payer_statement_id).filter(Boolean));
+    const drafts = preRead.length
+      ? await knex('invoices')
+        .whereIn('id', preRead.map((r) => r.id))
+        .whereIn('status', ['draft', 'scheduled'])
+        .forUpdate()
+        .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id')
+      : [];
     for (const inv of drafts) {
       const rec = relabeledInvoices[inv.id];
       if (!rec) continue;
       if (terminalVisitIds.has(rec.scheduled_service_id) || terminalVisitIds.has(inv.scheduled_service_id)) continue;
-      if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
+      if (inv.payer_statement_id
+        && (frozenStatementIds.has(inv.payer_statement_id) || !checkedStmtIds.has(inv.payer_statement_id))) continue;
       const patch = rollbackInvoiceSnapshot(inv, rec, NEW_NAME, OLD_NAME);
       if (!patch) continue;
       await knex('invoices')
@@ -536,7 +567,7 @@ exports.down = async function down(knex) {
   // Revert the recorded self-booking relabels — only rows still carrying
   // what up() wrote, and only while the linked visit is still open (the
   // visit rollback above keeps terminal rows on the new label).
-  const selfBookingIds = Array.isArray(state.relabeledSelfBookingIds) ? state.relabeledSelfBookingIds : [];
+  const selfBookingIds = catalogNameReverted && Array.isArray(state.relabeledSelfBookingIds) ? state.relabeledSelfBookingIds : [];
   if (selfBookingIds.length && (await knex.schema.hasTable('self_booked_appointments'))
     && (await knex.schema.hasTable('scheduled_services'))) {
     const openLinkedSb = new Set(
@@ -558,7 +589,7 @@ exports.down = async function down(knex) {
   // Revert the recorded add-on relabels — same policy as visits: a parent
   // that went terminal since up() completed under the new label, and its
   // add-on snapshot stays with it.
-  const addonIds = Array.isArray(state.relabeledAddonIds) ? state.relabeledAddonIds : [];
+  const addonIds = catalogNameReverted && Array.isArray(state.relabeledAddonIds) ? state.relabeledAddonIds : [];
   if (addonIds.length && (await knex.schema.hasTable('scheduled_service_addons'))) {
     const addons = await knex('scheduled_service_addons')
       .whereIn('id', addonIds)
@@ -586,7 +617,7 @@ exports.down = async function down(knex) {
 
   // Restore reminder labels to their recorded prior value — only where the
   // row still carries exactly what up() wrote.
-  const relabeledReminders = state.relabeledReminders && typeof state.relabeledReminders === 'object'
+  const relabeledReminders = catalogNameReverted && state.relabeledReminders && typeof state.relabeledReminders === 'object'
     ? state.relabeledReminders
     : {};
   if (Object.keys(relabeledReminders).length && (await knex.schema.hasTable('appointment_reminders'))) {
@@ -598,7 +629,7 @@ exports.down = async function down(knex) {
     }
   }
 
-  if (state.profileSnapshotUpdated && (await knex.schema.hasTable('service_completion_profiles'))) {
+  if (catalogNameReverted && state.profileSnapshotUpdated && (await knex.schema.hasTable('service_completion_profiles'))) {
     await knex('service_completion_profiles')
       .where({ service_key: RENAME_KEY, service_name_snapshot: NEW_NAME })
       .update({ service_name_snapshot: OLD_NAME });

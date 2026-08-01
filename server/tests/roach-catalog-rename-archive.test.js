@@ -484,11 +484,25 @@ describe('20260730160000 roach catalog rename + archive', () => {
   test('backfills still run when the admin pre-renamed to exactly the intended name', async () => {
     const db = seedDb();
     byKey(db, 'cockroach_control').name = NEW_NAME;
+    const knex = fakeKnex(db);
 
-    await migration.up(fakeKnex(db));
+    await migration.up(knex);
 
     expect(visit(db, 'v-open-1').service_type).toBe(NEW_NAME);
     expect(db.service_completion_profiles[0].service_name_snapshot).toBe(NEW_NAME);
+
+    // Rollback does NOT restore the catalog name (up() never owned it), so
+    // the snapshots must keep the new name too — reverting them under a
+    // still-new catalog would desync completion reports, which prefer
+    // completionProfile.serviceName (codex #3108 r12).
+    await migration.down(knex);
+    expect(byKey(db, 'cockroach_control').name).toBe(NEW_NAME);
+    expect(visit(db, 'v-open-1').service_type).toBe(NEW_NAME);
+    expect(db.service_completion_profiles[0].service_name_snapshot).toBe(NEW_NAME);
+    expect(db.appointment_reminders.find((r) => r.id === 'rem-1').service_type).toBe(NEW_NAME);
+    expect(invoiceById(db, 'inv-draft').title).toBe(NEW_NAME);
+    // The archive half is independent of the catalog name and still reverts.
+    expect(byKey(db, 'pest_initial_palmetto_knockdown')).toMatchObject(LIVE);
   });
 
   test('NULL catalog flags are recorded and restored verbatim, never coerced (codex #3108 r2)', async () => {
