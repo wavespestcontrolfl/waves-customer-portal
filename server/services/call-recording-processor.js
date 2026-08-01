@@ -7515,6 +7515,28 @@ const CallRecordingProcessor = {
               scheduledDate = null;
             }
 
+            // Hourly-start rule enforced in the COMMON creation path (codex
+            // round-5 P1). window_start is always HH:00:00 (AGENTS.md, owner
+            // 2026-07-27) and this is the code that writes it — but
+            // canAutoRoute's central gate only runs inside the
+            // CALL_EXTRACTION_V2_DRIVES_ROUTING enforce branch, so in shadow
+            // or legacy mode nothing checked it. That gap became reachable
+            // when this PR made a missing email advisory: a 09:30 call with
+            // no email used to stop at missing_required_customer_fields and
+            // now gets this far. Guarding here covers enforce, shadow and
+            // legacy alike, at the single place window_start is derived.
+            if (scheduledDate && windowStart && !/^\d{2}:00(:00)?$/.test(windowStart)) {
+              logger.warn(`[call-proc] Confirmed start ${windowStart} is not on the hour; holding booking for the office to place on an hour boundary`);
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'off_hour_start',
+              };
+              scheduledDate = null;
+            }
+
             const callDateET = etDateString(call.created_at || new Date());
             if (scheduledDate && scheduledDate < callDateET) {
               logger.warn(

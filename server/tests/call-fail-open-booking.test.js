@@ -7,6 +7,13 @@ const {
 } = require('../services/call-triage-flags');
 const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-gates');
 
+// Auto-routing requires a positively validated address (AGENTS.md: "auto-create
+// only when ... the address validates"), enforced at the common exit since
+// 2026-08-01. Tests whose subject is flag classification or the fail-open
+// machinery pass this clean verdict so they isolate their own subject; the
+// known-customer cases below instead satisfy the gate via the on-file address.
+const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+
 // A confirmed booking with a high-enough confidence; flags injected per test.
 function extraction(flags, overall = 0.9) {
   return {
@@ -26,7 +33,7 @@ describe('canAutoRoute fail-open booking', () => {
 
   test('Robin case: fail-open books when the ANI is present (phone) and clears name_email_mismatch', () => {
     const r = canAutoRoute(extraction(['caller_phone_missing', 'name_email_mismatch']), {
-      failOpen: true, callerAni: '+19419603120',
+      failOpen: true, callerAni: '+19419603120', addressValidation: AV_CLEAN,
     });
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_phone_missing', 'name_email_mismatch']));
@@ -208,7 +215,13 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   }
   // Call Thursday 7/30; committed slot Sunday 8/2 — inside the 7-day window
   // that makes a spoken weekday a unique calendar date.
-  const opts = (extra = {}) => ({ agentCommitFailOpen: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT, callStartedAt: '2026-07-30T15:50:00-04:00', ...extra });
+  const opts = (extra = {}) => ({
+    agentCommitFailOpen: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT,
+    callStartedAt: '2026-07-30T15:50:00-04:00',
+    // The subject here is the commitment machinery, not the address gate.
+    addressValidation: AV_CLEAN,
+    ...extra,
+  });
 
   test('agent commitment demotes caller_not_authorized to failedOpenFlags and books', () => {
     const r = canAutoRoute(agentCommitted(), opts());
@@ -644,7 +657,12 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   });
 
   test('other hard blocks are untouched — out_of_service_area still vetoes an agent-committed booking', () => {
-    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'out_of_service_area']), opts());
+    // NOT the shared clean verdict here: a decisive in-area acceptance
+    // deliberately SUPPRESSES a stale model out_of_service_area
+    // (suppressAddressFlagsForAV), which would defeat the point of this test.
+    // A genuinely out-of-area call carries an out-of-area verdict.
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'out_of_service_area']),
+      opts({ addressValidation: { status: 'out_of_service_area', inServiceArea: false } }));
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('out_of_service_area');
     expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
@@ -710,7 +728,7 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
   // A positively validated address is REQUIRED before the authorization
   // demotion lifts (codex round-3 P1) — it is the last block on the path, so
   // everything it incidentally backstopped must be satisfied another way.
-  const AV_OK = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+  const AV_OK = AV_CLEAN;
 
   test('unknown relationship demotes caller_not_authorized and books (advisory card kept)', () => {
     const ex = extraction(['caller_not_authorized']);
@@ -757,17 +775,22 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     }
   });
 
-  test('the full live-miss shape: relationship demotes, the ADDRESS still blocks (codex round-2 P1)', () => {
-    // The 2026-07-31 call carried both flags. Only caller_not_authorized is
-    // safe to demote; address_unverified means Google could not verify the
-    // premise, so this call still parks for the office — correctly.
+  test('the full live-miss shape still parks — BOTH blocks stand (codex rounds 2-4)', () => {
+    // The 2026-07-31 call carried both flags against an AV verdict of
+    // missing_component. After the review rounds neither is lifted:
+    // address_unverified means Google could not verify the premise, and the
+    // authorization demotion itself now requires a POSITIVELY validated
+    // address — which this call does not have. So the call reaches the
+    // office, which is the correct outcome for an unverifiable address.
     const ex = extraction(['no_sms_consent_captured', 'caller_not_authorized', 'address_unverified']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
     const r = canAutoRoute(ex, { addressValidation: AV_UNVERIFIABLE });
     expect(r.allowed).toBe(false);
-    expect(r.appointmentBlockingFlags).toContain('address_unverified');
-    expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+    expect(r.appointmentBlockingFlags).toEqual(
+      expect.arrayContaining(['address_unverified', 'caller_not_authorized'])
+    );
+    // The SMS-only flag never blocked and still doesn't.
+    expect(r.appointmentBlockingFlags).not.toContain('no_sms_consent_captured');
   });
 
   test('a clean AV acceptance + unknown relationship books (the shape that SHOULD auto-route)', () => {
@@ -965,7 +988,7 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
   test('prior_complaint_unresolved is advisory — a returning customer re-booking is not held', () => {
     // "Last time the ants came back — can you come Tuesday at 10" books; the
     // card tells the office to review the history before the visit.
-    const r = canAutoRoute(extraction(['prior_complaint_unresolved']), {});
+    const r = canAutoRoute(extraction(['prior_complaint_unresolved']), { addressValidation: AV_CLEAN });
     expect(r.allowed).toBe(true);
     expect(r.flags).toContain('prior_complaint_unresolved');
     expect(r.appointmentBlockingFlags || []).not.toContain('prior_complaint_unresolved');
@@ -974,7 +997,7 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
   test('a flag OUTSIDE every known set is advisory-by-default, never a silent block', () => {
     // New prompt vocabulary / model drift: unknown names ride failedOpenFlags
     // (card files, booking proceeds) instead of holding the appointment.
-    const r = canAutoRoute(extraction(['brand_new_model_flag']), {});
+    const r = canAutoRoute(extraction(['brand_new_model_flag']), { addressValidation: AV_CLEAN });
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['brand_new_model_flag']));
   });

@@ -95,7 +95,22 @@ function buildRouteDecision({
       ? (scheduling.status === 'confirmed' ? 'auto_create_appointment' : 'upsert_customer_only')
       : 'needs_review',
     final_action_taken: action,
-    blocked_reasons: JSON.stringify(finalTriageFlags.length > 0 ? finalTriageFlags : (routingResult?.reason ? [routingResult.reason] : [])),
+    // The REAL veto must survive into the audit record (codex round-5 P2).
+    // The central gates return reasons that are not triage flags —
+    // address_not_validated / off_hour_start — and a held call can carry
+    // ADVISORY flags at the same time (prior_complaint_unresolved,
+    // competing_quotes_active, an unknown model flag). Preferring
+    // finalTriageFlags alone recorded the advisory as the reason the call was
+    // held, which is actively misleading to the admin queue and to anything
+    // reasoning over route_decisions. Union them, veto first.
+    blocked_reasons: JSON.stringify(
+      routingResult?.allowed
+        ? []
+        : [
+          ...(routingResult?.reason && routingResult.reason !== 'triage_flags' ? [routingResult.reason] : []),
+          ...finalTriageFlags.filter((f) => f !== routingResult?.reason),
+        ],
+    ),
     allowed_reasons: JSON.stringify(routingResult?.allowed ? ['all_gates_passed'] : []),
     ai_validation_model: extraction?.meta?.extraction_model || null,
     ai_validation_prompt_version: extraction?.meta?.extraction_prompt_version || null,
