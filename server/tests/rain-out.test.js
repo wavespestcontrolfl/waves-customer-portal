@@ -774,7 +774,11 @@ describe('rain-out service', () => {
       // Siblings re-arm silently; the anchor is left to the calling route.
       expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(2);
       expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith(
-        'sib-1', '2026-09-12T09:00', { sendNotification: false },
+        'sib-1', '2026-09-12T09:00',
+        {
+          sendNotification: false,
+          expectSchedule: { date: '2026-09-12', windowStart: '09:00' },
+        },
       );
       // The kept-tech double-book parked for reassignment.
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -1414,6 +1418,10 @@ describe('rain-out service', () => {
       const options = await RainOut.getOptions('svc-1');
 
       expect(options.ok).toBe(true);
+      // Offers probe the same one-hour block commit() books (codex P2).
+      expect(SmartRebooker.findRescheduleOptions).toHaveBeenCalledWith(
+        'svc-1', 'weather_rain', { probeSpanMinutes: 60 },
+      );
       expect(options.days).toHaveLength(2);
       expect(options.days[0]).toMatchObject({ date: '2026-06-12', rainChance: 65 });
       expect(options.days[1]).toMatchObject({ date: '2026-06-13', rainChance: 20 });

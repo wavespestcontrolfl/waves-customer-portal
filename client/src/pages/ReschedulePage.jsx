@@ -151,7 +151,11 @@ function recurringNoteCopy(data, selectedSlot) {
     if (selectedSlot && String(selectedSlot.date) === String(data?.current?.date || '')) {
       return "Only this visit will move — a same-day time change doesn't shift the rest of your plan.";
     }
-    return 'This visit is part of your regular plan — moving it to a different day shifts your later visits by the same amount, so your schedule always follows your last treatment.';
+    // "Re-anchors around the new date", not "shifts by the same amount":
+    // month-based patterns re-derive the ordinal/weekday from the new
+    // anchor (first-Thursday → first-Sunday), so sibling deltas differ from
+    // the anchor's (codex P1) — the promise must describe re-anchoring.
+    return 'This visit is part of your regular plan — moving it to a different day re-anchors your later visits around the new date, so your schedule always follows your last treatment.';
   }
   return selectedSlot && slotReanchors(data, selectedSlot.date)
     ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'

@@ -365,7 +365,11 @@ async function getOptions(serviceId) {
   const { isBlackoutDate } = require('./scheduling/blackout-dates');
   const sameDay = (await isBlackoutDate(todayStr)) ? [] : sameDayOptions();
 
-  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain');
+  // probeSpanMinutes: 60 — the sheet OFFERS what commit() actually BOOKS
+  // (the on-the-hour one-hour block), not the visit's stored span: a 2h
+  // stored window would hide bookable options and a sub-hour one would
+  // offer slots the commit then SLOT_TAKENs (codex P2).
+  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', { probeSpanMinutes: 60 });
 
   // Rain badges — best effort, never blocking. Customer coords first,
   // falling back to nothing (options render without percentages).
@@ -879,7 +883,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           await AppointmentReminders.handleReschedule(
             occ.id,
             `${String(occ.date).split('T')[0]}T${toHHMM(occ.windowStart) || newWindow.start}`,
-            { sendNotification: false }
+            {
+              sendNotification: false,
+              // Atomic stale-guard (codex P1): another actor can re-move a
+              // sibling between the series trx commit and this sequential
+              // loop — the re-arm must no-op unless the row still holds the
+              // slot we shifted it to, or the customer gets a reminder for
+              // the wrong appointment.
+              expectSchedule: {
+                date: String(occ.date).split('T')[0],
+                windowStart: toHHMM(occ.windowStart) || null,
+              },
+            }
           );
         } catch (err) {
           logger.error(`[rain-out] series reminder sync failed for ${occ.id}: ${err.message}`);
