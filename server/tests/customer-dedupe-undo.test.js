@@ -235,6 +235,8 @@ describe('executeMerge repointed_ids journal record', () => {
     // Autopay untouched and nothing deliberately nulled on the winner.
     expect(recorded.winner_autopay_before).toBe(null);
     expect(recorded.winner_prior_values).toEqual({});
+    // No winner cards pre-merge — empty exemption list, still journaled.
+    expect(recorded.winner_premerge_pm_ids).toEqual([]);
   });
 
   it("journals the winner's ORIGINAL autopay state and the consent stamps the merge deliberately nulled", async () => {
@@ -420,10 +422,11 @@ describe('executeMerge repointed_ids journal record', () => {
       if (table === 'payment_methods') {
         if (q.called('first')) return null; // winner has no default card
         if (q.called('select')) {
-          // stripe-profile probe vs the flags capture select.
-          return q.args('select')[0] === 'stripe_customer_id'
-            ? []
-            : [{ id: 'pm-1', is_default: true, autopay_enabled: true }];
+          const sel = q.args('select');
+          // stripe-profile probe vs winner-ids capture vs loser-flags capture.
+          if (sel[0] === 'stripe_customer_id') return [];
+          if (sel.length === 1 && sel[0] === 'id') return [{ id: 'pm-winner-own' }];
+          return [{ id: 'pm-1', is_default: true, autopay_enabled: true }];
         }
         if (q.called('update')) return 1;
       }
@@ -462,6 +465,9 @@ describe('executeMerge repointed_ids journal record', () => {
     expect(recorded.payment_method_flags).toEqual({
       'pm-1': { is_default: true, autopay_enabled: true },
     });
+    // The winner's OWN pre-merge card ids journaled — the undo's new-card
+    // guard exempts them (derived-profile case).
+    expect(recorded.winner_premerge_pm_ids).toEqual(['pm-winner-own']);
   });
 });
 
@@ -501,18 +507,28 @@ describe('revertMerge', () => {
       // — everything else on these tables is a probe.
       const isIdVerification = q.called('whereIn') && q.args('whereIn')?.[0] === 'id';
       // The linked-property undo probes for referencing visits (the FK is
-      // ON DELETE SET NULL, so only this probe can catch them).
+      // ON DELETE SET NULL, so only this probe can catch them) — under
+      // FOR UPDATE since r5.
       if (table === 'scheduled_services' && q.called('select') && !isIdVerification) {
+        state.visitProbe = { forUpdate: q.called('forUpdate') };
         return (tables.scheduled_services && tables.scheduled_services.referencingVisits) || [];
       }
-      // Email-bound artifact probes (open estimates, active automation
-      // enrollments, active newsletter subscriptions). The estimates probe
-      // filters status via whereIn — still a probe, not a verification.
-      if (['estimates', 'automation_enrollments', 'newsletter_subscribers'].includes(table)
+      // Email-bound artifact probes — every EMAIL_BOUND_SURFACES table (the
+      // fanout-registry mirror). Status filters may use whereIn — still a
+      // probe, not an id verification.
+      if (['leads', 'estimates', 'automation_enrollments', 'email_template_automation_runs',
+        'referral_promoters', 'notification_prefs', 'customer_contracts', 'booking_intents',
+        'newsletter_subscribers'].includes(table)
         && q.called('select') && !isIdVerification) {
         return (tables[table] && tables[table].emailArtifacts) || [];
       }
       if (table === 'customer_properties') {
+        if (q.called('first')) {
+          // The r5 lock-order read: property row FOR UPDATE before the
+          // visit probe.
+          state.propertyLock = { where: q.args('where')[0], forUpdate: q.called('forUpdate') };
+          return { id: q.args('where')[0].id };
+        }
         if (q.called('del')) { state.propertyDeleted = q.args('where')[0]; return 1; }
         if (q.called('update')) {
           state.propertyTransferred = { where: q.args('where')[0], payload: q.args('update')[0] };
@@ -1014,6 +1030,12 @@ describe('revertMerge', () => {
     expect(state.propertyTransferred.payload.customer_id).toBe(LOSER);
     expect(result.repointedBack['customer_properties.linked_property_transferred']).toBe(1);
     expect(result.repointedBack['customer_properties.linked_property_removed']).toBeUndefined();
+    // r5 lock order: the property row is locked FOR UPDATE before the visit
+    // probe, and the probe itself locks the referencing visits — a booking
+    // inserted between probe and delete/transfer must block on the property
+    // lock, never slip through to be property-stripped by the SET NULL FK.
+    expect(state.propertyLock).toEqual({ where: { id: 'prop-9', customer_id: WINNER }, forUpdate: true });
+    expect(state.visitProbe).toEqual({ forUpdate: true });
   });
 
   it('refuses (409) when a WINNER-owned post-merge appointment references the linked property (transfer would strand it)', async () => {
@@ -1160,6 +1182,106 @@ describe('revertMerge', () => {
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/new payment method.*strand/) });
     expect(state.repointedBack).toHaveLength(0);
     expect(state.flagRestores).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it("exempts the winner's OWN pre-merge cards from the new-card refusal (derived-profile case) — but a genuinely new card still refuses", async () => {
+    const journal = baseJournal();
+    journal.loser_snapshot.stripe_customer_id = null;
+    journal.repointed_ids.stripe_transferred_id = 'cus_derived';
+    journal.repointed_ids.tables = { 'payment_methods.customer_id': ['pm-1'] };
+    journal.repointed_ids.payment_method_flags = { 'pm-1': { is_default: false, autopay_enabled: false } };
+    journal.repointed_ids.winner_premerge_pm_ids = ['pm-w1'];
+    journal.winner_backfills = { email: 'loser.testcase@example.com', stripe_customer_id: 'cus_derived' };
+    const winnerCfg = (cards) => ({
+      journal,
+      winner: { ...baseWinner(), stripe_customer_id: 'cus_derived' },
+      loser: baseLoser(),
+      tables: { payment_methods: { stillOnWinner: ['pm-1'], winnerCards: cards } },
+    });
+    // The winner's own pre-merge card on the derived profile: the undo
+    // returns the winner to exactly its pre-merge state — revertible.
+    const ok = buildRevertTrx(winnerCfg([
+      { id: 'pm-1', stripe_customer_id: 'cus_derived' },
+      { id: 'pm-w1', stripe_customer_id: 'cus_derived' },
+    ]));
+    db.transaction.mockImplementation(async (fn) => fn(ok.trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['payment_methods.customer_id']).toBe(1);
+    expect(ok.state.journalUpdate.undone_at).toBeTruthy();
+
+    // A card that is neither journaled nor pre-merge — saved after the
+    // merge — still refuses.
+    jest.clearAllMocks();
+    const bad = buildRevertTrx(winnerCfg([
+      { id: 'pm-1', stripe_customer_id: 'cus_derived' },
+      { id: 'pm-w1', stripe_customer_id: 'cus_derived' },
+      { id: 'pm-new', stripe_customer_id: 'cus_derived' },
+    ]));
+    db.transaction.mockImplementation(async (fn) => fn(bad.trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/new payment method/) });
+    expect(bad.state.journalUpdate).toBe(null);
+  });
+
+  it("restores the loser's SHARED Stripe id from the snapshot when nothing was transferred (both rows named the same profile)", async () => {
+    const journal = baseJournal();
+    // Shared profile: no transfer recorded; the retire cleared the loser's
+    // copy and the winner keeps the profile.
+    journal.repointed_ids.stripe_transferred_id = null;
+    journal.loser_snapshot.stripe_customer_id = 'cus_shared';
+    journal.winner_backfills = { email: 'loser.testcase@example.com' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), stripe_customer_id: 'cus_shared' },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // The winner KEEPS the shared profile; the loser gets its own copy
+    // back so its returned cards aren't stranded.
+    expect(result.stripeMovedBack).toBe(false);
+    expect(state.winnerPatch?.stripe_customer_id).toBeUndefined();
+    expect(state.loserRestore.stripe_customer_id).toBe('cus_shared');
+  });
+
+  it('refuses (409, zero writes) when recipient_optin rows were journaled count-only — a missing consent row means "allowed to text"', async () => {
+    const journal = baseJournal();
+    // Composite PK (customer_id, phone_key), no id column — the merge can
+    // only ever journal these count-only.
+    journal.repointed_ids.tables['recipient_optin.customer_id'] = { count: 2 };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/recipient_optin.*comms consent/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('the email-clear refusal covers the full fanout registry — an open contract on the merged-in email refuses too', async () => {
+    const journal = baseJournal();
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // customer_contracts is in customer-email-fanout's registry but was
+        // absent from the r4 three-table allowlist — the regression class
+        // this pin guards.
+        customer_contracts: { emailArtifacts: [{ id: 'ct-new' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/1 open contract.*deliver to the merged-in email/) });
     expect(state.journalUpdate).toBe(null);
   });
 

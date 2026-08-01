@@ -19,6 +19,7 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   findDuplicateGroups, executeMerge, revertMerge, recordLinkedProperty,
+  REVERT_FINANCIAL_TABLES, CONSENT_CRITICAL_TABLES,
 } = require('../services/customer-dedupe');
 
 const router = express.Router();
@@ -238,6 +239,15 @@ router.get('/merges', async (req, res) => {
             && (!recorded.payment_method_flags || ids.some((id) => !recorded.payment_method_flags[id])));
         const linkedPropertyUnrecorded = evidence?.via === 'admin_link_as_property'
           && !(recorded && 'linked_property_id' in recorded);
+        // Count-only journal records on tables the revert endpoint refuses
+        // outright: financial (money ownership must revert exactly) and
+        // consent-critical (recipient_optin — composite PK journals
+        // count-only ALWAYS, and a skipped restoration widens texting
+        // consent). Pure journal data, no live query.
+        const countOnlyRefused = Boolean(recorded?.tables) && Object.entries(recorded.tables)
+          .some(([key, ids]) => !Array.isArray(ids)
+            && (REVERT_FINANCIAL_TABLES.has(key.slice(0, key.indexOf('.')))
+              || CONSENT_CRITICAL_TABLES.has(key.slice(0, key.indexOf('.')))));
         // Transferred Stripe id no longer on the winner + moved saved cards:
         // revertMerge refuses (the repointed cards would reference a Stripe
         // profile the restored customer doesn't have).
@@ -262,8 +272,15 @@ router.get('/merges', async (req, res) => {
                 for (const id of ids) journaledPmIds.add(id);
               }
             }
+            // Winner pre-merge cards are exempt (derived-profile case: they
+            // legitimately sat on the transferred profile before the merge);
+            // pre-upgrade journals lack the key → conservative refusal.
+            const winnerPremergePmIds = new Set(
+              Array.isArray(recorded.winner_premerge_pm_ids) ? recorded.winner_premerge_pm_ids : [],
+            );
             postMergeCardsStrand = (pmByWinner.get(row.winner_customer_id) || [])
               .some((pm) => !journaledPmIds.has(pm.id)
+                && !winnerPremergePmIds.has(pm.id)
                 && (!pm.stripe_customer_id || pm.stripe_customer_id === recorded.stripe_transferred_id));
           }
         }
@@ -319,6 +336,7 @@ router.get('/merges', async (req, res) => {
             && !collisionHandled
             && !pmMovedWithoutFlags
             && !linkedPropertyUnrecorded
+            && !countOnlyRefused
             && !stripeDriftStrandsCards
             && !postMergeCardsStrand
             && !postMergeVisitStrand,

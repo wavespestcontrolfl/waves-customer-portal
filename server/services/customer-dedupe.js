@@ -904,6 +904,16 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     const loserCards = await trx('payment_methods')
       .where({ customer_id: loserId }).select('id', 'is_default', 'autopay_enabled');
     const loserCardIds = loserCards.map((r) => r.id);
+    // The winner's OWN pre-merge cards, journaled so the undo's
+    // new-card-on-transferred-profile guard can tell them apart from cards
+    // saved AFTER the merge: in the derived-profile case the derivation
+    // aggregates BOTH sides' cards, so a pre-merge winner card legitimately
+    // sits on the transferred profile — the undo returns the winner to
+    // exactly its pre-merge state (cards on that profile, row naming none),
+    // which is restoration-exact, not a strand. Pre-upgrade journals lack
+    // the key and keep the conservative refusal.
+    const winnerPremergePmIds = (await trx('payment_methods')
+      .where({ customer_id: winnerId }).select('id')).map((r) => r.id);
     const paymentMethodFlags = {};
     for (const card of loserCards) {
       paymentMethodFlags[card.id] = {
@@ -1316,6 +1326,9 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         // rows) — the revert restores them, and REFUSES journals that moved
         // payment_methods rows without this record.
         payment_method_flags: paymentMethodFlags,
+        // The winner's own pre-merge card ids — exempt from the undo's
+        // new-card-on-transferred-profile refusal (see the capture above).
+        winner_premerge_pm_ids: winnerPremergePmIds,
         // Tables whose unique-collision handler ran: those rows were
         // folded/merged/dropped, not plainly repointed, so the merge is not
         // auto-revertible (the revert endpoint 409s when any are listed).
@@ -1524,6 +1537,98 @@ const REVERT_FINANCIAL_TABLES = new Set([
   'invoices', 'payments', 'customer_credit_ledger', 'payment_methods',
 ]);
 
+// Comms-CONSENT tables where a MISSING row semantically means "allowed":
+// recipient_optin has a composite PK (customer_id, phone_key) and no id
+// column, so its repoints always journal count-only — and a skipped
+// restoration there doesn't merely lose history, it WIDENS consent
+// (recipient-optin.js: no row = grandfathered/allowed, so a pending or
+// declined contact would start receiving texts after the split). Count-only
+// journal records for these tables REFUSE the undo exactly like the
+// financial set. Add future composite-PK consent tables here.
+const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin']);
+
+// The undo's email-clear guard probes every surface that delivers to a
+// denormalized copy of the customer email. This table MIRRORS the canonical
+// registry in server/services/customer-email-fanout.js (:108-244 — leads,
+// open estimates incl. 'sending', active automation enrollments, queued
+// template runs, referral promoters, billing prefs, open contracts, pending
+// booking follow-ups, newsletter subscribers). That module exports functions
+// and a disclosure string, not a machine-readable surface list, so the
+// mirror is BY HAND: extend BOTH in the same commit (same rule as its own
+// EMAIL_FANOUT_DISCLOSURE). Each entry: winner-link column (linkValue maps
+// the id — template runs store recipient_id as text), the email column, and
+// the "still delivers" predicate, matched to the fan-out's own filters.
+const EMAIL_BOUND_SURFACES = [
+  {
+    table: 'leads',
+    emailColumn: 'email',
+    linkColumn: 'customer_id',
+    active: (q) => q.whereNull('deleted_at')
+      .where((w) => w.whereNull('status').orWhereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'])),
+    label: 'open lead(s)',
+  },
+  {
+    table: 'estimates',
+    emailColumn: 'customer_email',
+    linkColumn: 'customer_id',
+    active: (q) => q.whereIn('status', ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed'])
+      .whereNull('archived_at'),
+    label: 'open estimate(s)',
+  },
+  {
+    table: 'automation_enrollments',
+    emailColumn: 'email',
+    linkColumn: 'customer_id',
+    active: (q) => q.where({ status: 'active' }),
+    label: 'active automation enrollment(s)',
+  },
+  {
+    table: 'email_template_automation_runs',
+    emailColumn: 'recipient_email',
+    linkColumn: 'recipient_id',
+    linkValue: (id) => String(id),
+    active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled']),
+    label: 'queued template send(s)',
+  },
+  {
+    table: 'referral_promoters',
+    emailColumn: 'customer_email',
+    linkColumn: 'customer_id',
+    active: (q) => q,
+    label: 'referral promoter row(s)',
+  },
+  {
+    table: 'notification_prefs',
+    emailColumn: 'billing_email',
+    linkColumn: 'customer_id',
+    active: (q) => q,
+    label: 'billing email preference(s)',
+  },
+  {
+    table: 'customer_contracts',
+    emailColumn: 'recipient_email',
+    linkColumn: 'customer_id',
+    active: (q) => q.whereNotIn('status', ['signed', 'cancelled', 'voided']),
+    label: 'open contract(s)',
+  },
+  {
+    table: 'booking_intents',
+    emailColumn: 'email',
+    linkColumn: 'customer_id',
+    active: (q) => q.whereRaw('followup_email_sent IS NOT TRUE')
+      .whereRaw('suppressed IS NOT TRUE')
+      .whereNull('converted_at'),
+    label: 'pending booking follow-up(s)',
+  },
+  {
+    table: 'newsletter_subscribers',
+    emailColumn: 'email',
+    linkColumn: 'customer_id',
+    active: (q) => q.where({ status: 'active' }),
+    label: 'active newsletter subscription(s)',
+  },
+];
+
 // Winner backfills the generic clearing loop must NOT touch: the Stripe id
 // has its own provably-still-there guard, and is_primary_profile is a
 // boolean demotion, not a null-out.
@@ -1676,10 +1781,19 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         const ids = recorded.tables[key];
         if (Array.isArray(ids)) for (const id of ids) journaledPmIds.add(id);
       }
+      // The winner's OWN pre-merge cards are exempt: in the derived-profile
+      // case they legitimately sat on the transferred profile before the
+      // merge, and the undo returns the winner to exactly that pre-merge
+      // state — not a strand. Pre-upgrade journals lack the key (empty set)
+      // and keep the conservative refusal.
+      const winnerPremergePmIds = new Set(
+        Array.isArray(recorded.winner_premerge_pm_ids) ? recorded.winner_premerge_pm_ids : [],
+      );
       const winnerCards = await trx('payment_methods')
         .where({ customer_id: winnerId })
         .select('id', 'stripe_customer_id');
       const postMergeCards = winnerCards.filter((card) => !journaledPmIds.has(card.id)
+        && !winnerPremergePmIds.has(card.id)
         && (!card.stripe_customer_id || card.stripe_customer_id === transferredStripe));
       if (postMergeCards.length) {
         refuse(`The kept customer saved ${postMergeCards.length} new payment method(s) on the transferred Stripe profile after the merge — moving the profile back to the restored customer would strand them; detach or move the new card(s) in Stripe first, then revert`);
@@ -1699,6 +1813,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         // Count-only record (no plain id PK / over cap / mid-merge race).
         if (REVERT_FINANCIAL_TABLES.has(table)) {
           refuse(`${table} rows were repointed without row-level records — revert by hand from the journal`);
+        }
+        // Consent tables refuse too: skipping a recipient_optin restoration
+        // doesn't lose history, it WIDENS consent — the table's semantics
+        // treat a missing row as "allowed", so a pending/declined contact
+        // left on the winner would start receiving texts after the split.
+        if (CONSENT_CRITICAL_TABLES.has(table)) {
+          refuse(`${table} rows (comms consent — a missing row means "allowed to text") were repointed without row-level records and cannot be exactly restored — revert by hand from the journal`);
         }
         skipped.push({ key, reason: 'no_row_ids_recorded' });
         continue;
@@ -1778,9 +1899,25 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       const transferToLoser = async () => trx('customer_properties')
         .where(propWhere)
         .update({ customer_id: loserId, updated_at: trx.fn.now() });
-      const referencingVisits = await trx('scheduled_services')
-        .where({ property_id: recorded.linked_property_id })
-        .select('id', 'customer_id');
+      // LOCK ORDER — property row FIRST (FOR UPDATE), THEN its referencing
+      // visits. A booking insert must take a KEY SHARE lock on the parent
+      // property row for its FK, which conflicts with our FOR UPDATE: a
+      // concurrent booking therefore either commits BEFORE our lock (and
+      // the probe below sees its visit) or blocks until this transaction
+      // ends (and then errors on the FK if we deleted the row) — it can
+      // never slip between probe and delete to be silently property-
+      // stripped by the SET NULL FK. The visits lock is the belt: a probed
+      // visit's customer_id can't change under the classification below.
+      const lockedProperty = await trx('customer_properties')
+        .where(propWhere)
+        .forUpdate()
+        .first('id');
+      const referencingVisits = lockedProperty
+        ? await trx('scheduled_services')
+          .where({ property_id: recorded.linked_property_id })
+          .forUpdate()
+          .select('id', 'customer_id')
+        : [];
       // A visit booked for the WINNER after the merge (references the
       // property, still winner-owned, absent from the journaled repoint set
       // — journaled visits were the loser's and moved back above) would be
@@ -1802,7 +1939,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       }
       let removed = 0;
       let transferred = 0;
-      if (referencingVisits.length) {
+      if (!lockedProperty) {
+        // Row already gone or re-owned — nothing to act on (and nothing was
+        // locked); report it like any moved-on state.
+      } else if (referencingVisits.length) {
         transferred = await transferToLoser();
         if (transferred) {
           repointedBack['customer_properties.linked_property_transferred'] = transferred;
@@ -1867,10 +2007,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     // Email-bound artifacts created AFTER the merge: the merge backfilled
     // the loser's email onto the winner, and comms/billing surfaces created
-    // since then deliver to it — open estimates (estimates.customer_email),
-    // active automation enrollments (denormalized email), and active
-    // newsletter subscriptions. Clearing the email out from under them
-    // orphans their delivery target, and re-pointing or rotating them has
+    // since then deliver to it. The probe set is EMAIL_BOUND_SURFACES — the
+    // hand-mirror of customer-email-fanout.js's canonical registry (see the
+    // constant's comment). Clearing the email out from under any of them
+    // orphans its delivery target, and re-pointing or rotating them has
     // comms side effects we must not automate — REFUSE (409, zero writes).
     // Journaled rows are pre-merge (they move back with the undo) and the
     // created_at cut excludes them too. Only runs when the undo would
@@ -1890,17 +2030,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         }
         return set;
       };
-      const EMAIL_BOUND_PROBES = [
-        { table: 'estimates', emailColumn: 'customer_email', active: (q) => q.whereIn('status', ['draft', 'sent', 'viewed']), label: 'open estimate(s)' },
-        { table: 'automation_enrollments', emailColumn: 'email', active: (q) => q.where({ status: 'active' }), label: 'active automation enrollment(s)' },
-        { table: 'newsletter_subscribers', emailColumn: 'email', active: (q) => q.where({ status: 'active' }), label: 'active newsletter subscription(s)' },
-      ];
       const emailBlockers = [];
-      for (const probe of EMAIL_BOUND_PROBES) {
+      for (const probe of EMAIL_BOUND_SURFACES) {
         let rows = [];
         try {
           let query = trx(probe.table)
-            .where({ customer_id: winnerId })
+            .where(probe.linkColumn, probe.linkValue ? probe.linkValue(winnerId) : winnerId)
             .whereRaw(`lower(${probe.emailColumn}) = ?`, [emailLower])
             .select('id');
           query = probe.active(query);
@@ -2023,7 +2158,19 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // Guarded as elsewhere: stripeMovedBack is only true when the id
     // provably still sat on the winner (drift and post-merge-cards
     // refusals above).
-    if (stripeMovedBack) restore.stripe_customer_id = transferredStripe;
+    if (stripeMovedBack) {
+      restore.stripe_customer_id = transferredStripe;
+    } else if (!transferredStripe && snapshot.stripe_customer_id) {
+      // SHARED-profile case: both rows named the SAME Stripe customer
+      // pre-merge (a differing pair is refused at merge time), so nothing
+      // was transferred (stripe_transferred_id null) and the retire cleared
+      // the loser's copy. Restoring the snapshot's own id is safe — the
+      // winner keeps the shared profile, and without it the loser's
+      // returned cards would reference a Stripe customer its row doesn't
+      // have. The drift-skip case (transferredStripe set but not moved
+      // back) deliberately still restores NO id.
+      restore.stripe_customer_id = snapshot.stripe_customer_id;
+    }
     try {
       await trx.transaction(async (sp) => {
         await sp('customers').where({ id: loserId }).update(restore);
@@ -2090,6 +2237,10 @@ module.exports = {
   runRedPairAutoDismissSweep,
   revertMerge,
   recordLinkedProperty,
+  // Refuse-policy sets, exported so GET /merges' revertible mirror can never
+  // drift from the revert endpoint's own count-only refusals.
+  REVERT_FINANCIAL_TABLES,
+  CONSENT_CRITICAL_TABLES,
   // exported for tests
   _test: {
     phone10,
