@@ -57,13 +57,20 @@ existing lane**, not a new system.
 ### Option A — flip what's built, no code (card-hold posture)
 Light `APPOINTMENT_CARD_REQUEST` + activate the SMS template (and optionally
 `GATE_APPOINTMENT_PAGE`). First-time customers with priced one-time visits get
-"add a card to finish booking"; card saved + Auto Pay enrolled; completion charges
-the card; $49 covers a late cancel/no-show.
+"add a card to finish booking"; card saved + Auto Pay enrolled.
 
-- Pros: zero build; lower customer friction; consistent with the 2026-07-12
-  "charge at services rendered" philosophy; go-live runbook already written.
-- Cons: no money in hand before the trip; a ghosting customer yields $49, not $75;
-  weaker commitment signal than cash down.
+- Pros: zero build; lowest customer friction; consistent with the 2026-07-12
+  "charge at services rendered" philosophy; go-live runbook already written; this
+  is verbatim the Orkin/Terminix online-booking model (§2b).
+- Cons (verified 2026-08-01): for office/AI-booked one-time visits the lane is a
+  commitment device **without an automatic enforcement rail** — the no-show/late-
+  cancel fee auto-charge exists only for estimate-accept card-hold bookings
+  (`chargeNoShowFee` requires an `estimate_card_holds` row), and the completion
+  auto-charge fires only for `per_application` billing-mode customers
+  (`admin-dispatch.js:7222`). A one-time customer's completion invoice goes out as
+  a pay link; the disclosed $49 fee has no automated charge path on this lane.
+  The saved card + v10 consent still permit a manual office charge per disclosed
+  terms.
 
 ### Option B — deposit variant on the same lane (the build)
 Appointments flagged "deposit required, $X" send the same `/secure` link, but the
@@ -71,13 +78,74 @@ page shows **"$X deposit due today to confirm your visit — applied to your bil
 and runs a PaymentIntent (face value, `setup_future_usage:'off_session'`) instead of
 a SetupIntent. One submit = deposit paid + card saved + consent + Auto Pay enrolled.
 Visit stays `pending` until the deposit lands; payment flips it `confirmed`.
+Self-enforcing (money in hand pre-trip), but the highest-friction option (§2b) and
+a model no researched pest brand uses for residential one-time work.
 
-### Recommendation: hybrid, phased
-Flip Option A now — it is finished, protects every one-time booking immediately, and
-its funnel telemetry was the launch-metrics bet. Build Option B as an increment on
-the same lane for the slice Adam wants cash down on (speculative one-offs like the
-fly inspection). One funnel, one link, one page; deposit is a per-appointment
-parameter the office (or later the AI rules) sets.
+### Option C — price the visit + close the enforcement gaps (small build)
+Treat the speculative one-off as a **priced inspection/service-call fee** (e.g.
+$75, credited toward treatment if the customer proceeds) rather than a deposit on
+an otherwise-free visit, and make the existing card lane self-enforcing:
+
+1. Book the fly-inspection-type visit with `estimated_price` = the inspection fee
+   (the card-request funnel already requires a priced visit — no change).
+2. Extend the no-show/late-cancel fee rail to visits secured via
+   `appointment_card_requests` (sibling of `chargeNoShowFee`, charging the
+   consented enrolled method; fee + window frozen at consent, same
+   disclosure copy the lane already sends).
+3. Extend the completion auto-charge to `one_time`/`per_visit` customers whose
+   card came through this lane, hard-capped at the visit's stamped
+   `estimated_price` (+ disclosed tax/surcharge) — same above-quote guardrail
+   posture as the per-application rail.
+4. "Credited toward treatment" runs as business process initially (discount the
+   treatment estimate by the inspection fee); no new machinery.
+
+### Recommendation (revised 2026-08-01 after industry analysis — §2b)
+**Option A + Option C. Skip the deposit build** unless a specific lane proves it
+out later (the FL WDO/real-estate report is the one documented pay-at-booking
+precedent and would be its own narrow decision). Price the speculative one-off,
+require the card to book, auto-charge fee/completion against the consented card.
+This matches the national-brand playbook exactly, carries near-zero booking
+friction, and per ServiceTitan's 1M-job dataset a priced fee up to ~$89 does not
+hurt booking rates (a $0 visit actually books worse). Option B stays on the shelf
+as the escalation if no-show data after launch says the card isn't commitment
+enough.
+
+## 2b. Industry analysis (researched 2026-08-01; citations in session log)
+
+**What the big pest brands do.** Orkin's online checkout: *"Add payment to secure
+your time slot. You will not be charged until after your first appointment."*
+Terminix buy-online: card captured at booking, *"charged at the time of service."*
+That is precisely the built `/secure` lane. **No researched national/regional pest
+brand takes a booking deposit for residential one-time work or inspections**
+(Massey and Truly Nolen — the direct FL competitors — book free inspections by
+phone with no card at all). The industry exception pattern is the point: for
+speculative, high-cost diagnostics (bed bugs), Orkin charges a ~$95–$150
+**inspection fee credited toward treatment**, and Hawx ~$100 same-shape — i.e. the
+majors solve "tire-kicker inspections" by pricing the inspection, not by taking
+deposits. FL WDO/real-estate reports are paid inspections ($75–$300; some
+operators collect at scheduling). Appointment-level no-show fees are absent from
+the majors' public terms; smaller operators use $25–$50 with a 24–48h window.
+
+**What the wider service trades do.** HVAC/plumbing/electrical run the
+diagnostic/service-call fee model ($75–$150 typical, disclosed at booking,
+collected on site, credited toward the repair). ServiceTitan's analysis of 1M+
+residential jobs: booking rates with a fee of $0.01–$49.99 are **3–10 points
+higher than at $0**, and hold steady up to ~$89.99. Deposits belong to
+project/contract work (10–25% of large jobs), not small visits.
+
+**Friction and effectiveness evidence.** Card-on-file and deposits land in the
+same no-show-reduction band in the only comparable datasets (both ~65% in platform
+cohort data; all vendor-reported). The behavioral literature says most of the
+effect comes from *any* credible financial commitment; deposits are the stronger
+loss-frame but carry real prepayment friction — hotels must discount 5–15% to get
+prepay accepted, while card-guarantee is treated as near-zero friction and is the
+default across hotels/restaurants/salons. Two cautions that shaped Option C:
+small fees can backfire ("A Fine Is a Price" — a cheap fee becomes a purchasable
+permission to flake), so the committed amount must feel substantial and be
+reliably collected; and non-refundable prepay framing measurably hurts first-time
+conversion. Reminder copy that states the concrete cost of a miss adds a further
+~25% relative reduction (Hallsworth RCT) — the card-lane reminder policy line
+already does this.
 
 ## 3. Proposed design for the deposit variant (Option B)
 
@@ -173,12 +241,17 @@ env flip + runbook smoke test, no code.
 
 ## 6. Owner decisions (nothing proceeds without these)
 
-| # | Decision | Recommended default |
+| # | Decision | Recommended default (revised 2026-08-01) |
 |---|---|---|
-| 1 | Deposit for one-time appointments at all (revises card-on-file spec §5 D5 for this slice) — or card-hold-only (Option A alone)? | Hybrid: A now, B for office-flagged speculative one-offs |
-| 2 | Default amount + who may override per appointment | $75 default in `pricing_config`, office-editable at send |
-| 3 | Surcharge posture on the deposit | Same as estimate-deposit ruling 2026-07-13 (card surcharges, wallets face) |
-| 4 | No-show/late-cancel: forfeit deposit vs $49 fee vs both | Forfeit replaces the fee; card-hold window rules |
-| 5 | Confirmation gating: visit stays `pending` + SMS copy variant until deposit paid? | Yes, as designed in §3 |
-| 6 | AI call flow auto-deposit rule (Phase 2) vs office-manual only | Office-manual first |
-| 7 | Keep first-time-customer-only + priced-visit-only guards for deposit asks? | Keep both |
+| 1 | Route: deposit build (B) vs priced-visit + card-on-file with enforcement (A + C)? | **A + C**; B shelved pending post-launch no-show data |
+| 2 | Inspection/service-call fee amount for speculative one-offs (pricing value — owner's call, pricing-config skill applies) | ~$75 (ServiceTitan safe band tops at ~$89); credited toward treatment if customer proceeds |
+| 3 | No-show/late-cancel fee amount + window for card-lane visits (Option C rail) | Match card-hold config ($49 / 24h) — but consider whether $49 is "substantial" enough per the fine-is-a-price caution, vs full visit price on no-show (smaller-operator precedent exists for both) |
+| 4 | Completion auto-charge for one-time visits with a lane-consented card, capped at stamped price? | Yes (Option C.3) |
+| 5 | Confirmation gating: keep free confirm, or treat card-on-file completion as the confirm for these visits? | Card completion counts as confirmed; no money gate |
+| 6 | AI call flow: auto-send card link for one-time bookings (already wired) — also auto-price inspections per service catalog? | Yes, catalog-priced |
+| 7 | Keep first-time-customer-only + priced-visit-only guards? | Keep both |
+| 8 | WDO/real-estate reports: adopt pay-at-scheduling (the one documented deposit-like precedent)? | Defer — separate narrow decision |
+
+If Adam chooses the deposit anyway, the §3 design and the original decision set
+(default amount, surcharge posture per the 2026-07-13 ruling, forfeit-replaces-fee,
+pending-until-paid gating) stand as scoped.
