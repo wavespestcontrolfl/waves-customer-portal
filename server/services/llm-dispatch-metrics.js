@@ -11,10 +11,14 @@
  * llm_dispatch_log, and a daily cron emails ONLY exceptions to the company
  * inbox. Green days send nothing (hands-off + exception-based).
  *
- * Silence is load-bearing here, so the digest also checks its OWN recording
- * health: a day with zero rows is reported as an exception rather than read
- * as "nothing wrong". Without that, a dead write path (insert failures are
- * swallowed at debug level by design) would look exactly like a healthy day.
+ * Silence is load-bearing here, so each digest run PROVES the recorder works
+ * by writing a heartbeat row through the same insert path and deleting it. A
+ * failed write is reported as an exception; without it, a dead write path
+ * (insert failures are swallowed at debug level by design) would look exactly
+ * like a healthy day. Note the probe is required precisely BECAUSE volume
+ * cannot stand in for it: the SMS canary uses bare `dispatch` (no row) and
+ * every other instrumented job is candidate-driven, so a quiet ET day
+ * legitimately records nothing.
  *
  * Dark until GATE_LLM_DISPATCH_METRICS=true. Kill switch: unset — recording
  * and the digest both no-op instantly; existing rows just age out.
@@ -38,6 +42,11 @@ const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
 // failure/fallback exceptions still report. Convention: episodic lanes tag
 // one of these suffixes on their policy name.
 const EPISODIC_LANE_RE = /:(?:sealed|backfill|replay)$/;
+
+// Synthetic policy used only by the write-path probe; inserted and deleted
+// within probeRecorder, and excluded from stats so a failed cleanup can never
+// masquerade as a real policy in the digest.
+const HEARTBEAT_POLICY = '__heartbeat__';
 
 // Ambient replay context. Eval harnesses replay fixed fixtures through the
 // SAME live service functions real traffic uses (call extraction, email
@@ -93,33 +102,58 @@ function isEnabled() {
  * hot path: never throws, never blocks, logs at debug on insert failure so a
  * DB blip can't cascade into the LLM call it was only supposed to observe.
  */
+function buildRow(policy, result) {
+  const failures = Array.isArray(result?.failures) ? result.failures : [];
+  return {
+    policy: applyReplayLane(policyLabel(policy)).slice(0, 120),
+    ok: !!result?.ok,
+    provider: result?.ok ? result.provider || null : null,
+    model: result?.ok ? result.model || null : null,
+    fallback_used: !!result?.fallbackUsed,
+    failure_reasons: failures.length
+      ? JSON.stringify(failures.map((f) => ({
+        provider: f.provider,
+        model: f.model,
+        // Reasons are short codes or validator messages — cap length so a
+        // pathological error string can't bloat the row.
+        reason: String(f.reason || '').slice(0, 300),
+      })))
+      : null,
+  };
+}
+
+// The single write path. The heartbeat probe goes through it too, so the
+// probe genuinely exercises what real recording does rather than a lookalike.
+function insertRow(row) {
+  return require('../models/db')('llm_dispatch_log').insert(row);
+}
+
 function recordDispatch(policy, result) {
   if (!isEnabled()) return;
   try {
-    const db = require('../models/db');
-    const failures = Array.isArray(result?.failures) ? result.failures : [];
-    const row = {
-      policy: applyReplayLane(policyLabel(policy)).slice(0, 120),
-      ok: !!result?.ok,
-      provider: result?.ok ? result.provider || null : null,
-      model: result?.ok ? result.model || null : null,
-      fallback_used: !!result?.fallbackUsed,
-      failure_reasons: failures.length
-        ? JSON.stringify(failures.map((f) => ({
-          provider: f.provider,
-          model: f.model,
-          // Reasons are short codes or validator messages — cap length so a
-          // pathological error string can't bloat the row.
-          reason: String(f.reason || '').slice(0, 300),
-        })))
-        : null,
-    };
-    void db('llm_dispatch_log').insert(row).catch((err) => {
+    void insertRow(buildRow(policy, result)).catch((err) => {
       logger.debug(`[llm-dispatch-metrics] insert failed: ${err.message}`);
     });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] record skipped: ${err.message}`);
   }
+}
+
+/**
+ * Prove the recorder can actually write, by writing. Business volume can NOT
+ * stand in for this: the 6-hourly SMS canary uses bare `dispatch` (no row),
+ * and every other instrumented job is candidate-driven, so a genuinely quiet
+ * ET day legitimately records zero rows. Inferring breakage from an empty day
+ * would email a recorder-failure alarm every quiet weekend.
+ *
+ * Resolves on success; rejects with the underlying error when the write path
+ * is broken — which is the only sound basis for a not_recording exception.
+ */
+async function probeRecorder() {
+  await insertRow(buildRow({ name: HEARTBEAT_POLICY }, { ok: true }));
+  // Remove it immediately so the heartbeat never shows up as a policy in the
+  // digest's own stats. Retention would catch it eventually anyway.
+  await require('../models/db')('llm_dispatch_log').where({ policy: HEARTBEAT_POLICY }).del();
 }
 
 /** [startOfDay, startOfNextDay) as real Dates for the ET day N days ago. */
@@ -135,29 +169,24 @@ function etDayWindow(daysAgo) {
  * aggregated per policy: { policy, total, fallbacks, failed } plus the
  * prior-7-day totals { policy, total }.
  */
-function detectExceptions(yesterdayStats, priorWeekStats) {
+function detectExceptions(yesterdayStats, priorWeekStats, probeError = null) {
   const exceptions = [];
 
   // Recording health FIRST — without it, "no email" is ambiguous between
   // "nothing was wrong" and "nothing was recorded at all". recordDispatch
   // swallows insert failures at debug level (deliberate: metrics must never
   // cascade into the LLM call it observes), so a dead write path is otherwise
-  // invisible, and an empty table trivially yields zero exceptions. This
-  // portal runs AI work on daily crons alone, so a full ET day with zero
-  // dispatches means the recorder broke, not that the business went quiet.
-  const yesterdayTotal = yesterdayStats.reduce((n, s) => n + s.total, 0);
-  const priorWeekTotal = priorWeekStats.reduce((n, s) => n + s.total, 0);
-  if (yesterdayTotal === 0) {
+  // invisible. `probeError` comes from actually attempting a write (see
+  // probeRecorder) — NOT from an empty day, which is a legitimate quiet-day
+  // state, not evidence of breakage.
+  if (probeError) {
     exceptions.push({
-      policy: '(all policies)',
+      policy: '(recorder)',
       kind: 'not_recording',
-      detail: priorWeekTotal > 0
-        ? `ZERO dispatches recorded yesterday after ${priorWeekTotal} over the prior week — the RECORDER is the likely fault, not the providers. Until this clears, a silent digest cannot be read as "healthy".`
-        : 'ZERO dispatches recorded yesterday and none in the prior week — either the recorder is broken or GATE_LLM_DISPATCH_METRICS was only just enabled.',
+      detail: `the dispatch recorder could not write to llm_dispatch_log (${probeError}). Nothing is being recorded, so a silent digest cannot be read as "healthy" until this clears.`,
     });
-    // Every per-policy gone-silent finding would be a duplicate symptom of
-    // this one root cause, and no fallback/failure rows can exist with an
-    // empty day. Report the cause alone.
+    // Every per-policy gone-silent line would be a duplicate symptom of this
+    // one root cause. Report the cause alone.
     return exceptions;
   }
 
@@ -195,6 +224,7 @@ async function loadStats(db, start, end) {
   const rows = await db('llm_dispatch_log')
     .where('created_at', '>=', start)
     .andWhere('created_at', '<', end)
+    .whereNot('policy', HEARTBEAT_POLICY)
     .groupBy('policy')
     .select('policy')
     .count({ total: '*' })
@@ -232,7 +262,16 @@ async function runLlmDispatchDigest() {
     loadStats(db, weekBefore.start, yesterday.start),
   ]);
 
-  const exceptions = detectExceptions(yesterdayStats, priorWeekStats);
+  // Prove the write path works rather than inferring it from traffic volume.
+  let probeError = null;
+  try {
+    await probeRecorder();
+  } catch (err) {
+    probeError = err.message || String(err);
+    logger.error(`[llm-dispatch-metrics] recorder probe FAILED: ${probeError}`);
+  }
+
+  const exceptions = detectExceptions(yesterdayStats, priorWeekStats, probeError);
   let sendError = null;
   if (exceptions.length) {
     const day = etDateString(addETDays(new Date(), -1));

@@ -29,12 +29,13 @@ function load() {
 
 // Thenable knex-chain stub: every builder method returns the chain, awaiting
 // it resolves `rows`, and .del() resolves `delCount` for the prune call.
-function makeChain(rows, delCount = 0) {
+function makeChain(rows, delCount = 0, { insertError = null } = {}) {
   const chain = {};
-  for (const m of ['where', 'andWhere', 'groupBy', 'select', 'count', 'sum']) {
+  for (const m of ['where', 'andWhere', 'whereNot', 'groupBy', 'select', 'count', 'sum']) {
     chain[m] = jest.fn(() => chain);
   }
   chain.del = jest.fn(() => Promise.resolve(delCount));
+  chain.insert = jest.fn(() => (insertError ? Promise.reject(new Error(insertError)) : Promise.resolve([1])));
   chain.then = (onResolve, onReject) => Promise.resolve(rows).then(onResolve, onReject);
   return chain;
 }
@@ -45,6 +46,12 @@ describe('llm-dispatch-metrics', () => {
     // the registry must reset per test or the first test's gate value caches.
     jest.resetModules();
     jest.clearAllMocks();
+    // clearAllMocks does NOT drain a mockReturnValueOnce queue. A test whose
+    // digest short-circuits (gate off, or a probe insert that throws before
+    // its cleanup delete) leaves queued chains behind, and they would shift
+    // every db() call in the NEXT test by one. mockReset drains the queue.
+    mockDb.mockReset();
+    mockDb.mockImplementation(() => ({ insert: mockInsert }));
     mockInsert.mockReturnValue(Promise.resolve());
     process.env = { ...ORIGINAL_ENV };
     delete process.env.GATE_LLM_DISPATCH_METRICS;
@@ -235,29 +242,30 @@ describe('llm-dispatch-metrics', () => {
       expect(out.map((e) => e.kind).sort()).toEqual(['all_providers_failed', 'fallback_rate']);
     });
 
-    it('reports a zero-row day as not_recording — silence must not read as healthy', () => {
+    it('reports a FAILED WRITE PROBE as not_recording — silence must not read as healthy', () => {
       const { detectExceptions } = load();
-      const out = detectExceptions([], [{ policy: 'report', total: 200 }]);
+      const out = detectExceptions([], [{ policy: 'report', total: 200 }], 'permission denied for table');
       expect(out).toHaveLength(1);
       expect(out[0]).toMatchObject({ kind: 'not_recording' });
-      expect(out[0].detail).toMatch(/RECORDER is the likely fault/);
+      expect(out[0].detail).toMatch(/permission denied for table/);
     });
 
-    it('distinguishes a never-recorded table from a recorder that stopped', () => {
+    it('does NOT alarm on a genuinely quiet day when the probe succeeded', () => {
+      // The SMS canary uses bare dispatch (writes no row) and every other
+      // instrumented job is candidate-driven, so an empty day is a legitimate
+      // quiet-day state — not evidence the recorder broke. Inferring breakage
+      // from volume would email a false alarm every quiet weekend.
       const { detectExceptions } = load();
-      const out = detectExceptions([], []);
-      expect(out).toHaveLength(1);
-      expect(out[0]).toMatchObject({ kind: 'not_recording' });
-      expect(out[0].detail).toMatch(/only just enabled/);
+      expect(detectExceptions([], [], null)).toHaveLength(0);
     });
 
-    it('reports the zero-row root cause ALONE, not one gone-silent per policy', () => {
+    it('reports the probe failure ALONE, not one gone-silent per policy', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
       const out = detectExceptions([], [
         { policy: 'report', total: SILENT_MIN_WEEKLY * 3 },
         { policy: 'customerCopy', total: SILENT_MIN_WEEKLY * 3 },
         { policy: 'contentDraft', total: SILENT_MIN_WEEKLY * 3 },
-      ]);
+      ], 'connection refused');
       // Without the early return these three would each fire gone_silent —
       // three duplicate symptoms of one root cause.
       expect(out).toHaveLength(1);
@@ -278,13 +286,20 @@ describe('llm-dispatch-metrics', () => {
     // db() is called three times per run: the retention prune FIRST (it must
     // run even when the gate is off), then yesterday stats, then prior-week
     // stats.
-    function armDb({ yesterdayRows, priorRows, delCount = 3 }) {
+    // Call order in runLlmDispatchDigest: retention prune, yesterday stats,
+    // prior-week stats, then the recorder probe (heartbeat insert + cleanup
+    // delete). `probeInsertError` simulates a dead write path.
+    function armDb({ yesterdayRows, priorRows, delCount = 3, probeInsertError = null }) {
       const prune = makeChain([], delCount);
+      const probeInsert = makeChain([], 0, { insertError: probeInsertError });
+      const probeCleanup = makeChain([], 1);
       mockDb
         .mockReturnValueOnce(prune)
         .mockReturnValueOnce(makeChain(yesterdayRows))
-        .mockReturnValueOnce(makeChain(priorRows));
-      return { prune };
+        .mockReturnValueOnce(makeChain(priorRows))
+        .mockReturnValueOnce(probeInsert)
+        .mockReturnValueOnce(probeCleanup);
+      return { prune, probeInsert, probeCleanup };
     }
 
     it('skips stats and email while the gate is off, but STILL prunes retention', async () => {
@@ -308,6 +323,28 @@ describe('llm-dispatch-metrics', () => {
       expect(mockEmailSend).toHaveBeenCalledTimes(1);
       expect(mockEmailSend.mock.calls[0][0].to).toBe('contact@wavespestcontrol.com');
       expect(prune.del).toHaveBeenCalled();
+    });
+
+    it('emails not_recording when the write path is dead, even with zero rows', async () => {
+      // End-to-end version of the gap this lane closes: no rows AND a broken
+      // recorder must produce an email, where before it produced silence.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
+      armDb({ yesterdayRows: [], priorRows: [], probeInsertError: 'relation does not exist' });
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(out.emailed).toBe(true);
+      expect(out.exceptions[0].kind).toBe('not_recording');
+      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/relation does not exist/);
+    });
+
+    it('stays silent on a quiet day when the probe succeeds (no rows, nothing wrong)', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      armDb({ yesterdayRows: [], priorRows: [] });
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(out).toMatchObject({ emailed: false });
+      expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
     it('stays silent on a green day', async () => {
