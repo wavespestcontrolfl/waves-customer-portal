@@ -4665,6 +4665,11 @@ export default function Customer360ProfileV2({
     setResumingBilling(true);
     setResumeBillingErr("");
     setResumeBillingNote("");
+    // Tracked separately from the try/catch because the profile reload below
+    // must not be able to report itself as a failed resume: the money-moving
+    // half already succeeded, and telling an admin otherwise invites a second
+    // click on an action they believe did not happen.
+    let resumeLanded = false;
     try {
       const result = await adminFetch(
         `/admin/customers/${forCustomerId}/resume-service`,
@@ -4679,16 +4684,33 @@ export default function Customer360ProfileV2({
         setResumeBillingErr(
           "Billing was not resumed — the pause changed while you were looking at it. Reloading the current state.",
         );
-      } else if (Array.isArray(result?.blockers) && result.blockers.length) {
-        // Pause cleared, but a different cron guard still stops dues.
-        setResumeBillingNote(
-          `Pause cleared, but dues still will not run: ${result.blockers.join(", ").replace(/_/g, " ")}.`,
-        );
+      } else {
+        resumeLanded = true;
+        // A non-empty list is a warning; an empty one says NOTHING, because
+        // the server computes it best-effort and it is never an all-clear.
+        if (Array.isArray(result?.blockers) && result.blockers.length) {
+          setResumeBillingNote(
+            `Pause cleared, but dues still will not run: ${result.blockers.join(", ").replace(/_/g, " ")}.`,
+          );
+        }
       }
-      await reloadCustomer();
     } catch (err) {
       if (!stillViewing()) return;
       setResumeBillingErr(err.message || "Resume failed");
+      setResumingBilling(false);
+      return;
+    }
+
+    try {
+      await reloadCustomer();
+    } catch {
+      if (stillViewing()) {
+        setResumeBillingNote(
+          resumeLanded
+            ? "Billing was resumed. Refreshing this profile failed — reload the page to see the current state."
+            : "Refreshing this profile failed — reload the page to see the current state.",
+        );
+      }
     } finally {
       if (stillViewing()) setResumingBilling(false);
     }

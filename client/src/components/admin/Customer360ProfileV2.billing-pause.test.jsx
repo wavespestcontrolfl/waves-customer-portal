@@ -200,6 +200,37 @@ describe('Customer 360 billing-pause banner', () => {
     });
   });
 
+  it('does not report a successful resume as failed when only the reload breaks', async () => {
+    // The money-moving half already landed. Telling an admin it failed
+    // invites a second click on an action they believe did not happen.
+    let resumed = false;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/resume-service')) {
+        resumed = true;
+        return response({ success: true, resumed: true, blockers: [] });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        if (resumed) return response({ error: 'Profile unavailable' }, 503);
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'autopay_final_failure',
+        }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+
+    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
+
+    expect(await screen.findByText(/Billing was resumed\. Refreshing this profile failed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Resume failed$/i)).not.toBeInTheDocument();
+  });
+
   it('never writes one customer\'s resume outcome onto another\'s record', async () => {
     // Start a resume for A, switch to B before it settles.
     let releaseResume;
