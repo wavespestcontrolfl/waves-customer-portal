@@ -183,12 +183,9 @@ function recurringQuoteLines(estimate) {
 // One recurring line → the price the customer is actually charged each time
 // we treat, or null when this line can't be expressed that way.
 function perApplicationForLine(line) {
-  // Mosquito engine lines expose perVisit/visits, not perApp/visitsPerYear
-  // (codex 2642 r3) — accept both shapes.
-  const perAppRaw = Number(line.perApp) > 0
-    ? Number(line.perApp)
-    : (Number(line.perVisit) > 0 ? Number(line.perVisit) : 0);
-  if (!(perAppRaw > 0)) return null;
+  // Cadence first: it is the one field every recurring shape carries.
+  // Mosquito lines expose visits, lawn lines a numeric frequency, pest lines
+  // visitsPerYear with a STRING frequency (codex 2642 r1/r3).
   const visits = Number(line.visitsPerYear) > 0
     ? Number(line.visitsPerYear)
     : Number(line.visits) > 0
@@ -199,9 +196,16 @@ function perApplicationForLine(line) {
   if (!visits) return null;
   // Exact cents (codex 2642 r1: whole-dollar rounding drifted the headline
   // from the monthly/annual math), preferring the DISCOUNTED annual over the
-  // list per-application rate.
+  // list per-application rate. Rodent-bait lines carry an authoritative
+  // annual + cadence but NO redundant perApp/perVisit, so the annual path
+  // must stand on its own — requiring perApp first dropped rodent-only quotes
+  // and every bundle containing one (codex #3124 r1).
   const discountedAnnual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual) || 0;
+  const perAppRaw = Number(line.perApp) > 0
+    ? Number(line.perApp)
+    : (Number(line.perVisit) > 0 ? Number(line.perVisit) : 0);
   const exact = discountedAnnual > 0 ? discountedAnnual / visits : perAppRaw;
+  if (!(exact > 0)) return null;
   return {
     amount: Math.round(exact * 100) / 100,
     visitsPerYear: visits,
@@ -212,6 +216,41 @@ function derivePerApplication(estimate) {
   const recurring = recurringQuoteLines(estimate);
   if (recurring.length !== 1) return null;
   return perApplicationForLine(recurring[0]);
+}
+
+// Customer-facing name per recurring engine service key. The raw rows from
+// pricePestControl / priceLawnCare / priceRodentBait carry only a `service`
+// key ('pest_control', 'rodent_bait') and no name — echoing that key would
+// print "pest_control" on the quote widget, or force the external consumer to
+// invent its own mapping (codex #3124 r1). Shapes match the existing
+// customer-facing copy in BOOKING_FUNNEL_SERVICE_LABELS / UPSELL_LABELS.
+const RECURRING_LINE_LABELS = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  mosquito: 'Mosquito & No-See-Um Control',
+  tree_shrub: 'Tree & Shrub Care',
+  rodent_bait: 'Rodent Bait Stations',
+  foam_recurring: 'Recurring Foam Treatment',
+  termite_bait: 'Termite Bait Monitoring',
+  termite_station_rental: 'Termite Station Monitoring',
+  termite_bond: 'Termite Bond',
+  trap_only_retainer: 'Rodent Trapping Retainer',
+  commercial_pest: 'Commercial Pest Control',
+  commercial_lawn: 'Commercial Lawn Care',
+  commercial_mosquito: 'Commercial Mosquito Control',
+  commercial_tree_shrub: 'Commercial Tree & Shrub Care',
+  commercial_rodent_bait: 'Commercial Rodent Bait Stations',
+  commercial_termite_bait: 'Commercial Termite Bait Monitoring',
+};
+
+// An engine-supplied display name wins; otherwise the service key must map to
+// server-owned copy. Returns '' for an unrecognized key so the breakdown is
+// dropped entirely rather than leaking an internal identifier.
+function recurringLineDisplayLabel(line) {
+  const supplied = String(line.name || line.label || line.displayName || '').trim();
+  if (supplied) return supplied;
+  const key = String(line.service || '').trim();
+  return RECURRING_LINE_LABELS[key] || '';
 }
 
 // Per-service per-application breakdown, so a MULTI-service quote can be
@@ -229,7 +268,7 @@ function derivePerApplicationBreakdown(estimate) {
   for (const line of recurring) {
     const perApp = perApplicationForLine(line);
     if (!perApp) return null;
-    const label = String(line.name || line.label || line.displayName || line.service || '').trim();
+    const label = recurringLineDisplayLabel(line);
     if (!label) return null;
     lines.push({
       label,

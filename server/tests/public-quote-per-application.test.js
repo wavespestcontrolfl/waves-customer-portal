@@ -560,6 +560,43 @@ describe('derivePerApplicationBreakdown', () => {
     expect(derivePerApplicationBreakdown(estimate)).toBeNull();
   });
 
+  // Codex #3124 r1: raw engine rows carry a service KEY and no name, so the
+  // key must resolve to server-owned copy — never echo 'pest_control'.
+  test('resolves customer-facing labels from the engine service key', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', tier: 'enhanced' },
+      },
+    });
+    const labels = derivePerApplicationBreakdown(estimate).map((l) => l.label);
+    expect(labels).toEqual(expect.arrayContaining(['Pest Control', 'Lawn Care']));
+    for (const label of labels) expect(label).not.toMatch(/_/);
+  });
+
+  test('drops the breakdown for an unrecognized service key rather than leaking it', () => {
+    const estimate = {
+      lineItems: [{ service: 'some_new_engine_key', monthly: 39, perApp: 117, visitsPerYear: 4 }],
+    };
+    expect(derivePerApplicationBreakdown(estimate)).toBeNull();
+  });
+
+  // Codex #3124 r1: rodent-bait lines carry annual + cadence but no perApp,
+  // so requiring perApp dropped rodent-only quotes and every bundle with one.
+  test('derives rodent bait from its annual amount and cadence', () => {
+    const estimate = {
+      lineItems: [{ service: 'rodent_bait', name: '', monthly: 45, annual: 540, visitsPerYear: 6 }],
+    };
+    const lines = derivePerApplicationBreakdown(estimate);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].label).toBe('Rodent Bait Stations');
+    expect(lines[0].per_application).toBe(90); // 540 / 6
+    expect(lines[0].visits_per_year).toBe(6);
+    // ...and the single-service helper now answers for it too.
+    expect(derivePerApplication(estimate)).toEqual({ amount: 90, visitsPerYear: 6 });
+  });
+
   test('one-time-only and empty estimates return null', () => {
     expect(derivePerApplicationBreakdown({ lineItems: [{ service: 'bed_bug', price: 850 }] })).toBeNull();
     expect(derivePerApplicationBreakdown({ lineItems: [] })).toBeNull();
