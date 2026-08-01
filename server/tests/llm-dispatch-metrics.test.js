@@ -322,19 +322,40 @@ describe('llm-dispatch-metrics', () => {
     });
   });
 
+  describe('alertRecorderUnreachable', () => {
+    it('emails without touching the database (the DB is the thing that is down)', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
+      const { alertRecorderUnreachable } = load();
+      await expect(alertRecorderUnreachable('no_connection')).resolves.toEqual({ ok: true });
+      expect(mockDb).not.toHaveBeenCalled();
+      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/database was unreachable/);
+    });
+
+    it('honors the kill switch', async () => {
+      const { alertRecorderUnreachable } = load();
+      await expect(alertRecorderUnreachable('no_connection')).resolves.toEqual({ skipped: 'gate_off' });
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+  });
+
   describe('runLlmDispatchDigest', () => {
     // db() call order in runLlmDispatchDigest: retention prune FIRST (it runs
     // even when the gate is off), then yesterday stats, prior-week stats, and
     // the heartbeat count for the day being summarized. `heartbeats` defaults
     // to a healthy day; 0 means the recorder was dead during that day.
-    function armDb({ yesterdayRows, priorRows, delCount = 3, heartbeats = 24, pruneError = null }) {
+    function armDb({
+      yesterdayRows, priorRows, delCount = 3,
+      heartbeats = 24, priorHeartbeats = 168, pruneError = null,
+    }) {
       const prune = makeChain([], delCount);
       if (pruneError) prune.del = jest.fn(() => Promise.reject(new Error(pruneError)));
       mockDb
         .mockReturnValueOnce(prune)
         .mockReturnValueOnce(makeChain(yesterdayRows))
         .mockReturnValueOnce(makeChain(priorRows))
-        .mockReturnValueOnce(makeChain([], 0, { first: { n: String(heartbeats) } }));
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: String(heartbeats) } }))
+        .mockReturnValueOnce(makeChain([], 0, { first: { n: String(priorHeartbeats) } }));
       return { prune };
     }
 
@@ -385,6 +406,55 @@ describe('llm-dispatch-metrics', () => {
       const out = await runLlmDispatchDigest();
       expect(out.emailed).toBe(true);
       expect(out.exceptions.map((e) => e.kind)).toContain('not_recording');
+    });
+
+    it('does NOT false-alarm before heartbeat coverage exists (first deploy / gate was off)', async () => {
+      // recordHeartbeat no-ops while dark, so yesterday legitimately has none.
+      // Reporting an outage here would make the FIRST digest after merge a
+      // false alarm.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      armDb({ yesterdayRows: [], priorRows: [], heartbeats: 0, priorHeartbeats: 0 });
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(out).toMatchObject({ emailed: false });
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    it('does not run gone-silent on an unjudgeable day', async () => {
+      // No coverage means absence proves nothing — prior-week policies must
+      // not each fire gone_silent just because the day recorded nothing.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      armDb({
+        yesterdayRows: [],
+        priorRows: [{ policy: 'report', total: '300', fallbacks: '0', failed: '0' }],
+        heartbeats: 0,
+        priorHeartbeats: 0,
+      });
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(out.exceptions).toHaveLength(0);
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    it('respects the kill switch even when the prune throws', async () => {
+      // Gate off + dead table must stay silent — the documented kill switch is
+      // absolute, and the prune runs before the gate check.
+      armDb({ yesterdayRows: [], priorRows: [], pruneError: 'connection terminated' });
+      const { runLlmDispatchDigest } = load();
+      await expect(runLlmDispatchDigest()).rejects.toThrow(/connection terminated/);
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    it('logs when the DB-failure alert itself cannot be delivered', async () => {
+      // email.send resolves { ok: false } rather than throwing, so an
+      // unchecked result would silently lose the alert.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: false, error: 'smtp unconfigured' });
+      const logger = require('../services/logger');
+      armDb({ yesterdayRows: [], priorRows: [], pruneError: 'relation does not exist' });
+      const { runLlmDispatchDigest } = load();
+      await expect(runLlmDispatchDigest()).rejects.toThrow(/relation does not exist/);
+      expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/ALERT UNDELIVERED.*smtp unconfigured/));
     });
 
     it('EMAILS when the table itself is unreadable, then fails the job', async () => {

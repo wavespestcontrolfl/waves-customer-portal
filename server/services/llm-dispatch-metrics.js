@@ -191,6 +191,42 @@ function emailExceptions(day, exceptions) {
   });
 }
 
+/**
+ * Send an alert and NEVER let its own failure be silent. `email.send` resolves
+ * `{ ok: false }` instead of rejecting, so a bare `.catch()` would miss an
+ * undelivered alert entirely — the precise way this feature could lose the
+ * message it exists to deliver. Used by the paths that cannot throw onward.
+ */
+async function emailAlert(day, exceptions) {
+  try {
+    const sent = await emailExceptions(day, exceptions);
+    if (!sent?.ok) {
+      logger.error(`[llm-dispatch-metrics] ALERT UNDELIVERED (${sent?.error || 'unknown email error'}): ${exceptions.map((e) => e.detail).join(' | ')}`);
+      return { ok: false };
+    }
+    return { ok: true };
+  } catch (err) {
+    logger.error(`[llm-dispatch-metrics] ALERT UNDELIVERED (${err.message}): ${exceptions.map((e) => e.detail).join(' | ')}`);
+    return { ok: false };
+  }
+}
+
+/**
+ * Alert that the recorder could not even be reached — used when the cron lock
+ * cannot acquire a DB connection, so runLlmDispatchDigest never runs at all.
+ * Deliberately touches NO database.
+ */
+async function alertRecorderUnreachable(reason) {
+  if (!isEnabled()) return { skipped: 'gate_off' };
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const day = etDateString(addETDays(new Date(), -1));
+  return emailAlert(day, [{
+    policy: '(recorder)',
+    kind: 'not_recording',
+    detail: `the digest could not run at all — the database was unreachable (${reason}). Recording status for ${day} is UNKNOWN; treat this as an outage, not a quiet day.`,
+  }]);
+}
+
 /** How many heartbeats landed in a window — the recorder's proof-of-life. */
 async function countHeartbeats(db, start, end) {
   const row = await db('llm_dispatch_log')
@@ -215,7 +251,7 @@ function etDayWindow(daysAgo) {
  * aggregated per policy: { policy, total, fallbacks, failed } plus the
  * prior-7-day totals { policy, total }.
  */
-function detectExceptions(yesterdayStats, priorWeekStats, probeError = null) {
+function detectExceptions(yesterdayStats, priorWeekStats, probeError = null, absenceJudgeable = true) {
   const exceptions = [];
 
   // Recording health FIRST — without it, "no email" is ambiguous between
@@ -254,10 +290,12 @@ function detectExceptions(yesterdayStats, priorWeekStats, probeError = null) {
   }
   // gone-silent is the ONE check a broken recorder fully explains: it fires on
   // the ABSENCE of rows, which is exactly what a dead write path produces. So
-  // it — and only it — is skipped when the probe failed, or every prior-week
-  // policy would report a duplicate symptom of that single root cause.
+  // it — and only it — is skipped when the recorder was down, or every
+  // prior-week policy would report a duplicate symptom of that root cause.
+  // It is likewise skipped when the day has no heartbeat coverage at all
+  // (first deploy / gate previously off), where absence proves nothing.
   const yesterdayByPolicy = new Map(yesterdayStats.map((s) => [s.policy, s]));
-  for (const w of probeError ? [] : priorWeekStats) {
+  for (const w of (probeError || !absenceJudgeable) ? [] : priorWeekStats) {
     if (EPISODIC_LANE_RE.test(w.policy)) continue; // one-shot lanes go quiet by design
     if (w.total >= SILENT_MIN_WEEKLY && !yesterdayByPolicy.has(w.policy)) {
       exceptions.push({
@@ -309,6 +347,7 @@ async function runLlmDispatchDigest() {
   let yesterdayStats;
   let priorWeekStats;
   let heartbeats = 0;
+  let priorHeartbeats = 0;
   try {
     // Retention pruning runs regardless of the gate: turning the kill switch
     // off must stop recording and emailing, not leave accumulated rows parked
@@ -321,30 +360,47 @@ async function runLlmDispatchDigest() {
 
     const yesterday = etDayWindow(1);
     const weekBefore = etDayWindow(8);
-    [yesterdayStats, priorWeekStats, heartbeats] = await Promise.all([
+    [yesterdayStats, priorWeekStats, heartbeats, priorHeartbeats] = await Promise.all([
       loadStats(db, yesterday.start, yesterday.end),
       loadStats(db, weekBefore.start, yesterday.start),
       countHeartbeats(db, yesterday.start, yesterday.end),
+      countHeartbeats(db, weekBefore.start, yesterday.start),
     ]);
   } catch (err) {
     const reason = err.message || String(err);
     logger.error(`[llm-dispatch-metrics] digest could not read llm_dispatch_log: ${reason}`);
-    await emailExceptions(day, [{
-      policy: '(recorder)',
-      kind: 'not_recording',
-      detail: `the digest could not read llm_dispatch_log (${reason}). Recording status for ${day} is UNKNOWN — treat this as an outage until it clears, not as a quiet day.`,
-    }]).catch((mailErr) => logger.error(`[llm-dispatch-metrics] could not email the DB failure: ${mailErr.message}`));
+    // The kill switch is absolute: while the gate is unset this feature sends
+    // NOTHING, including its own failure alerts. The prune above runs before
+    // the gate check, so without this guard a dark deployment would still
+    // email on a DB outage.
+    if (isEnabled()) {
+      await emailAlert(day, [{
+        policy: '(recorder)',
+        kind: 'not_recording',
+        detail: `the digest could not read llm_dispatch_log (${reason}). Recording status for ${day} is UNKNOWN — treat this as an outage until it clears, not as a quiet day.`,
+      }]);
+    }
     throw err;
   }
 
   // Recorder health is judged from the DAY BEING SUMMARIZED, via heartbeats
   // written hourly during it — not from a probe at digest time, which an
   // overnight recovery would pass while the lost day reported clean.
-  const recorderError = heartbeats === 0
+  //
+  // But a day with no heartbeats is only an OUTAGE if coverage was actually
+  // running: on first deploy, or after the gate was off, recordHeartbeat
+  // no-opped and the day is simply unjudgeable. priorHeartbeats > 0 is the
+  // evidence that coverage existed.
+  const recorderError = (heartbeats === 0 && priorHeartbeats > 0)
     ? `no heartbeat rows were recorded during ${day} (expected roughly one per hour), so the recorder was not writing that day`
     : null;
+  if (heartbeats === 0 && priorHeartbeats === 0) {
+    logger.info(`[llm-dispatch-metrics] no heartbeat coverage for ${day} yet — absence signals not judged`);
+  }
 
-  const exceptions = detectExceptions(yesterdayStats, priorWeekStats, recorderError);
+  // With zero heartbeats we cannot tell "policy stopped running" from
+  // "nothing was recorded", so absence-based checks are not judgeable.
+  const exceptions = detectExceptions(yesterdayStats, priorWeekStats, recorderError, heartbeats > 0);
   let sendError = null;
   if (exceptions.length) {
     const sent = await emailExceptions(day, exceptions);
@@ -368,6 +424,7 @@ module.exports = {
   recordDispatch,
   recordHeartbeat,
   runLlmDispatchDigest,
+  alertRecorderUnreachable,
   detectExceptions,
   policyLabel,
   runAsReplay,

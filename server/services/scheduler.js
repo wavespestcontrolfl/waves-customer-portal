@@ -556,7 +556,16 @@ function initScheduledJobs() {
   // overlap doesn't double-email the same day.
   cron.schedule('25 6 * * *', async () => {
     try {
-      await runExclusive('llm-dispatch-digest', () => require('./llm-dispatch-metrics').runLlmDispatchDigest());
+      const metrics = require('./llm-dispatch-metrics');
+      const res = await runExclusive('llm-dispatch-digest', () => metrics.runLlmDispatchDigest());
+      // runExclusive returns { skipped, reason } WITHOUT calling the job when
+      // it cannot acquire a DB connection — so on a full database outage the
+      // digest never runs and its own DB-failure alert never fires. Alert from
+      // here instead, over SMTP, touching no database. 'lease_held' is a
+      // normal overlap and is not an outage.
+      if (res && res.skipped && res.reason === 'no_connection') {
+        await metrics.alertRecorderUnreachable(res.reason);
+      }
     } catch (err) {
       logger.error(`[llm-dispatch-metrics] cron failed: ${err.message}`);
     }
