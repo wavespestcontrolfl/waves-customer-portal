@@ -596,6 +596,14 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       // Both columns still have to be SELECTED — the variant decision reads them.
       expect(sql).toContain('"pp"."irrigation_system"');
       expect(sql).toContain('"pp"."irrigation_inches_per_week"');
+      // Tech-recorded schedules are read too, so the email agrees with the
+      // lawn report (codex r1 P2) — but ONLY confirmed assessments, since
+      // confirmed_by_tech defaults false and a draft must never drive
+      // customer email (codex r2 P1). The latest reading wins INCLUDING a
+      // zero, so a newer "they stopped watering" row can't be skipped.
+      expect(sql).toContain('la.confirmed_by_tech = true');
+      expect(sql).not.toMatch(/la\.irrigation_inches_per_week\s*>\s*0/);
+      expect(sql).toMatch(/ORDER BY la\.service_date DESC NULLS LAST/);
       // Real customers only (owner 2026-07-09): pipeline_stage separates
       // customers from leads — customers.active is TRUE on lead rows.
       expect(sql).toContain('"c"."pipeline_stage" in (?, ?, ?)');

@@ -570,10 +570,17 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       // newer "they stopped watering" row and resurrect an older positive
       // schedule; buildIrrigationAdvice already reads zero as a missing
       // profile, which correctly routes them to a setup email.
+      // …and only CONFIRMED assessments (codex #3138 r2 P1). `confirmed_by_tech`
+      // defaults false, so an in-progress draft would otherwise drive customer
+      // email. Every other customer-facing read gates on it the same way
+      // (routes/lawn-health.js:191,358). This is a VALIDITY filter, not a value
+      // filter — unconfirmed rows are not readings yet, so removing them before
+      // ORDER BY is correct and does not reintroduce the skipped-newer-zero bug.
       db.raw(`(
         SELECT la.irrigation_inches_per_week
           FROM lawn_assessments la
          WHERE la.customer_id = c.id
+           AND la.confirmed_by_tech = true
            AND la.irrigation_inches_per_week IS NOT NULL
          ORDER BY la.service_date DESC NULLS LAST, la.created_at DESC
          LIMIT 1
