@@ -67,8 +67,14 @@ function checkTcpaConsent(extraction, opts = {}) {
 // producer and same-run outcome update take V2_DECISION_VERSION (they own
 // only rows this code writes); history-spanning readers (admin review
 // queues) take V2_DECISION_VERSIONS so pre-bump rows stay visible.
-const V2_DECISION_VERSION = 'v2-1.1.0';
-const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0'];
+// v2-1.2.0: unknown-relationship callers no longer hard-block on
+// caller_not_authorized, and an AV-localized in-area premise no longer
+// hard-blocks a confirmed booking on address_unverified (owner ruling
+// 2026-07-31) — both change what canAutoRoute can decide, so reprocessing
+// must write a new decision row instead of onConflict-ignoring into the
+// pre-rule one.
+const V2_DECISION_VERSION = 'v2-1.2.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0'];
 
 function buildRouteDecision({
   callLogId,
@@ -165,6 +171,9 @@ function buildTriageItem({
     // the same contact-confirm job as the two name_review flags above.
     email_unverified: 'name_review',
     email_invalid: 'name_review',
+    // Booking proceeded WITHOUT an email (advisory, owner ruling 2026-07-31)
+    // — the office collects it on the confirmation touch.
+    customer_email_missing: 'name_review',
     voicemail: 'service_unknown',
     // Shadow address/identity bridge reasons (deriveCallReviewBridge).
     missing_last_name: 'name_review',

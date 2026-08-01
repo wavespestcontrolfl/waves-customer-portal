@@ -84,7 +84,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, isAvLocalizedInAreaPremise } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -2819,13 +2819,23 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   if (!String(merged.firstName || '').trim()) missing.push('first_name');
   if (!String(merged.lastName || '').trim()) missing.push('last_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
-  if (!EMAIL_RE.test(String(merged.email || '').trim().toLowerCase())) missing.push('email');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
   if (!String(merged.state || '').trim()) missing.push('state');
   if (!String(merged.zip || '').trim()) missing.push('zip');
 
-  return { ok: missing.length === 0, missing, details: merged };
+  // Email is ADVISORY, not required (owner ruling 2026-07-31): a caller who
+  // books but never gives an email must still book — most confirmations go
+  // by SMS, and the office collects the email via the advisory card the call
+  // site files. A stored/extracted email that fails EMAIL_RE also lands here
+  // (garbled capture ≈ no capture). PERSISTED-OR-REVIEW above still governs
+  // WHICH emails count when one exists.
+  const advisory = [];
+  if (!EMAIL_RE.test(String(merged.email || '').trim().toLowerCase())) {
+    advisory.push('email');
+  }
+
+  return { ok: missing.length === 0, missing, advisory, details: merged };
 }
 
 async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
@@ -5439,8 +5449,19 @@ const CallRecordingProcessor = {
           // street name reached lead rows). The gate and flag computation
           // above already consumed the AV verdict, so adopting here changes
           // what gets SAVED, not what routes.
+          // isAvLocalizedInAreaPremise (codex P1, 2026-07-31): canAutoRoute
+          // now demotes the address block when AV localized the stated street
+          // to ONE real in-area premise despite a confirm_needed/
+          // missing_component status. Routing on Google's address while
+          // dispatching to the raw transcript spelling would send a tech to
+          // an unverified address — so the SAME predicate adopts the SAME
+          // normalized address here, before both the dispatch stamp and the
+          // customer/lead writes. Sharing the predicate (not a copy of its
+          // conditions) is what guarantees routing and dispatch can't drift.
           if (addressValidation?.normalized
-            && (addressValidation.status === 'validated_accept' || addressValidation.status === 'corrected')) {
+            && (addressValidation.status === 'validated_accept'
+              || addressValidation.status === 'corrected'
+              || isAvLocalizedInAreaPremise(addressValidation))) {
             const n = addressValidation.normalized;
             v2Extraction.property = v2Extraction.property || {};
             v2Extraction.property.service_address = {
@@ -7339,6 +7360,22 @@ const CallRecordingProcessor = {
               customerValidation.missing.join(', ')
             );
           } else {
+            // Email advisory (owner ruling 2026-07-31): the booking proceeds
+            // without an email — file the "collect the email" card so the
+            // office asks for it on the confirmation touch. Card failure
+            // never holds the booking.
+            if (customerValidation.advisory?.includes('email')) {
+              await db('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag: 'customer_email_missing',
+                  extraction: v2ApprovedExtraction || undefined,
+                  severity: 'advisory',
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore()
+                .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
+            }
             const firstName = customerValidation.details.firstName || '';
             const serviceType = callBookingCatalogRow?.name || serviceResolution.service;
             // Price: transcript-quoted (what the agent and caller agreed)

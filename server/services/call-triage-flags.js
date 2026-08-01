@@ -306,6 +306,49 @@ const ADVISORY_TRIAGE_FLAGS = new Set([
   // A second contact (buyer/tenant/spouse) was named on the call — the office
   // confirms their info; never holds the appointment.
   'secondary_contact_captured',
+  // Prior-complaint mention (owner ruling 2026-07-31): a returning customer
+  // saying "last time the ants came back — can you come Tuesday at 10" is a
+  // BOOKING, not a dispute. The card tells the office to review the history
+  // before the visit; it never holds the appointment.
+  'prior_complaint_unresolved',
+  // Caller is also shopping competitor quotes — a SALES signal, not a safety
+  // one: if they agreed to a time, book it and tell the office there's
+  // competitive pressure. Advisory in the pre-refactor design too (the old
+  // call-triage-safety.js ADVISORY set); blocking here was an unintended
+  // regression, now pinned by the schema-classification contract test.
+  'competing_quotes_active',
+]);
+
+// Explicit allowlist of flags allowed to HOLD an appointment (owner ruling
+// 2026-07-31): the model's triage_flags vocabulary evolves with the prompt/
+// schema, and the previous advisory-blocklist design meant any NEW (or
+// hallucinated) flag name silently blocked bookings. Flags outside every
+// known set now demote to failedOpenFlags in canAutoRoute — advisory card
+// files, booking proceeds. Sources of truth: the deterministic emitters
+// above + the model-output schema triage_flags enum.
+const BLOCKING_TRIAGE_FLAGS = new Set([
+  'out_of_service_area',
+  'hoa_common_area_requires_approval',
+  'commercial_requires_quote',
+  'caller_not_authorized',
+  'do_not_contact_requested',
+  'address_unverifiable',
+  'address_unverified',
+  'missing_service_address',
+  'low_confidence_address',
+  'address_validation_unavailable',
+  'low_extraction_confidence',
+  'ambiguous_pest_or_service',
+  'spam_or_wrong_number',
+  'after_hours_emergency',
+  'cancellation_request',
+  'manual_review_requested',
+  'ambiguous_scheduling',
+  'reschedule_or_cancel',
+  'existing_appointment_coordination',
+  'voicemail',
+  'caller_phone_missing',
+  'name_email_mismatch',
 ]);
 
 // Flags that mean "this is not a customer we should write to canonical tables."
@@ -776,13 +819,69 @@ function hasAgentCommittedEvidence(extraction, transcript, callStartedAt) {
   ));
 }
 
+/**
+ * True when `confirmed_start_at` lands exactly on an hour boundary (owner
+ * rule: window_start is ALWAYS HH:00:00 — never :15/:30/:45). The booking
+ * path copies this wall clock into window_start unchanged, so every gate
+ * that newly ALLOWS a booking must check it.
+ *
+ * BOTH representations must be on the hour: the raw string's minutes AND
+ * seconds (a schema-valid "T10:00:30" would copy a :30-second start), and
+ * the canonical ET wall clock (a foreign offset like "+05:30" can carry raw
+ * ":00" minutes yet book a ":30" ET wall time — the wall clock is what
+ * booking writes, so it is the one that must be exact).
+ */
+function confirmedStartOnTheHour(confirmedStartAt) {
+  const raw = String(confirmedStartAt || '').match(/T\d{2}:(\d{2})(?::(\d{2}))?/);
+  const wall = etWallClockOfConfirmedStart(confirmedStartAt);
+  return !!raw && raw[1] === '00'
+    && (!raw[2] || raw[2] === '00')
+    && !!wall && wall.slice(14, 16) === '00';
+}
+
+/**
+ * True when Google Address Validation localized the stated address to ONE
+ * real, in-service-area premise even though its status was not a clean
+ * acceptance — i.e. `confirm_needed` or `missing_component`: "we found the
+ * house, something is incomplete or wants a read-back."
+ *
+ * `ambiguous` is deliberately EXCLUDED: it means Google could not choose
+ * between candidate premises, so adopting one would dispatch to a guess.
+ * That case keeps the hard block. `out_of_service_area`, `api_unavailable`
+ * and `not_attempted` are excluded for the same reason (AGENTS.md: AV
+ * unreachable → hold for review, never silent auto-route).
+ *
+ * This is the single predicate shared by the two consumers that must never
+ * disagree: `canAutoRoute` demotes the address block on it, and the call
+ * processor adopts the SAME normalized address for dispatch on it. If only
+ * routing used it, a booking would route on Google's address but dispatch
+ * to the raw transcript spelling (codex P1).
+ */
+const AV_LOCALIZED_STATUSES = new Set(['confirm_needed', 'missing_component']);
+
+function isAvLocalizedInAreaPremise(addressValidation) {
+  const av = addressValidation || null;
+  if (!av || av.inServiceArea !== true) return false;
+  if (!AV_LOCALIZED_STATUSES.has(String(av.status || ''))) return false;
+  const premise = ['PREMISE', 'SUB_PREMISE', 'PREMISE_PROXIMITY']
+    .includes(String(av.granularity || '').toUpperCase());
+  return premise && !!String(av.normalized?.street_line_1 || '').trim();
+}
+
 function canAutoRoute(extraction, opts = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
 
   const modelFlags = suppressAddressFlagsForAV(extraction.triage_flags || [], opts.addressValidation);
   const deterministicFlags = computeDeterministicTriageFlags(extraction, opts);
   const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags);
-  let appointmentBlockingFlags = finalFlags.filter(f => !SMS_ONLY_FLAGS.has(f) && !ADVISORY_TRIAGE_FLAGS.has(f));
+  // Allowlist, not blocklist (owner ruling 2026-07-31): only flags in
+  // BLOCKING_TRIAGE_FLAGS may hold the appointment. Flags outside every
+  // known set (new prompt vocabulary, model drift, hallucinated names) are
+  // advisory-by-default — carried on failedOpenFlags below so a review card
+  // still files while the booking proceeds.
+  let appointmentBlockingFlags = finalFlags.filter((f) => BLOCKING_TRIAGE_FLAGS.has(f));
+  const unknownFlags = finalFlags.filter((f) => !BLOCKING_TRIAGE_FLAGS.has(f)
+    && !SMS_ONLY_FLAGS.has(f) && !ADVISORY_TRIAGE_FLAGS.has(f));
 
   // Fail-open booking (opts.failOpen): a CONFIRMED appointment must not die over
   // recoverable contact-field flags. Grounded in live misses (2026-07-10):
@@ -799,6 +898,9 @@ function canAutoRoute(extraction, opts = {}) {
   // the blocked branch still files the contact/address/name review cards
   // that protect the customer/lead writes — not just the time card.
   const failedOpenFlags = [];
+  for (const f of unknownFlags) {
+    if (!failedOpenFlags.includes(f)) failedOpenFlags.push(f);
+  }
   const confirmedWithStart = extraction.scheduling?.status === 'confirmed'
     && !!extraction.scheduling?.confirmed_start_at;
   if (opts.failOpen && confirmedWithStart) {
@@ -839,6 +941,58 @@ function canAutoRoute(extraction, opts = {}) {
     });
   }
 
+  // Both demotions below newly ALLOW bookings that used to park, so each is
+  // additionally guarded on an on-the-hour start (AGENTS.md: window_start is
+  // always HH:00:00, owner 2026-07-27). The booking path copies
+  // confirmed_start_at's wall clock into window_start unchanged, so demoting
+  // an off-hour slot would auto-create a prohibited :15/:30 start. Off-hour
+  // confirmations keep the block and reach the office, which places them on
+  // an hour boundary — the same guard the agent-commitment path uses.
+  // (The wider gap — that ANY already-routable off-hour call books as-is —
+  // predates this change and is the owner's call, not widened here.)
+  const startOnTheHour = confirmedStartOnTheHour(extraction.scheduling?.confirmed_start_at);
+
+  // Unknown relationship is NOT non-owner (owner ruling 2026-07-31, call
+  // log a771fa15): most homeowners never STATE "it's my house", so
+  // relationship_to_property arrives 'unknown' and on_site_authorization
+  // false — and the hard block held a caller who requested service, gave
+  // their info, and agreed a start time. The hard block now applies only
+  // when the caller is EXPLICITLY a non-owner (tenant/realtor/
+  // property_manager/...) — those still route through the agent-commitment
+  // demotion below. The flag moves to failedOpenFlags so the office still
+  // gets the "confirm the account holder" advisory card — book-and-flag,
+  // never book-and-hide.
+  const callerRelationship = String(extraction.caller?.relationship_to_property || 'unknown').trim() || 'unknown';
+  const explicitlyNonOwner = callerRelationship !== 'owner' && callerRelationship !== 'unknown';
+  if (!explicitlyNonOwner && confirmedWithStart && startOnTheHour) {
+    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
+      if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
+      return true;
+    });
+  }
+
+  // AV-localized in-area premise doesn't hold a CONFIRMED booking (same
+  // owner ruling): the address flags fire on AV confirm_needed/
+  // missing_component/ambiguous, but when AV still localized the stated
+  // street to an in-service-area premise (normalized street line present,
+  // premise-level granularity), the worst case is a read-back correction —
+  // not a phantom dispatch. BOTH spellings demote together: the model emits
+  // `address_unverifiable` (schema enum) on nearly every call while the
+  // deterministic AV handling emits `address_unverified`; demoting only one
+  // would leave the other blocking the exact production shape this targets.
+  // The processor adopts the SAME AV-normalized address under the SAME
+  // predicate (isAvLocalizedInAreaPremise) before dispatch, so routing and
+  // the booked address can never disagree. A coarse localization
+  // (ROUTE/LOCALITY — no premise), an out-of-area verdict, an off-hour or
+  // unconfirmed booking keeps the hard block; out_of_service_area and
+  // missing_service_address are untouched.
+  if (confirmedWithStart && startOnTheHour && isAvLocalizedInAreaPremise(opts.addressValidation)) {
+    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
+      if (f === 'address_unverified' || f === 'address_unverifiable') { failedOpenFlags.push(f); return false; }
+      return true;
+    });
+  }
+
   // Agent-commitment authorization (opts.agentCommitFailOpen ←
   // GATE_CALL_AGENT_COMMIT_BOOKING): when OUR agent explicitly committed to
   // the confirmed slot on this call ("we'll confirm it for noon on Sunday"),
@@ -866,15 +1020,13 @@ function canAutoRoute(extraction, opts = {}) {
   // Full time-component check (codex round-4 P1): minutes AND seconds must
   // be zero — a schema-valid "T10:00:30" would otherwise copy a :30-second
   // start into window_start unchanged. Absent seconds count as zero.
-  const commitStartMinute = String(extraction.scheduling?.confirmed_start_at || '').match(/T\d{2}:(\d{2})(?::(\d{2}))?/);
   // BOTH the raw string AND the canonical ET wall clock must be on the hour
   // (codex round-7h): a foreign offset like "+05:30" can carry raw ":00"
   // minutes yet book a ":30" ET wall time — the wall clock is what booking
-  // writes, so it is the one that must be exact.
-  const commitWall = etWallClockOfConfirmedStart(extraction.scheduling?.confirmed_start_at);
-  const commitStartOnTheHour = !!commitStartMinute && commitStartMinute[1] === '00'
-    && (!commitStartMinute[2] || commitStartMinute[2] === '00')
-    && !!commitWall && commitWall.slice(14, 16) === '00';
+  // writes, so it is the one that must be exact. Shared with the two
+  // 2026-07-31 demotions via confirmedStartOnTheHour so all three gates
+  // enforce the identical rule.
+  const commitStartOnTheHour = startOnTheHour;
   // opts.transcriptLabelsTrusted (codex round-2 P1): the Agent:/Caller:
   // prefixes the grounding relies on are themselves produced by an LLM
   // labeling pass that is explicitly told to INFER unclear identities, and
@@ -917,13 +1069,29 @@ function canAutoRoute(extraction, opts = {}) {
     return { allowed: false, reason: 'low_confidence', overall: confidence.overall, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
   }
 
+  // failedOpenFlags rides these returns too (codex P2): a demoted flag whose
+  // call then blocks on scheduling must still reach the office as an
+  // advisory card — the processor's blocked branch files cards from
+  // failedOpenFlags, so omitting it here made the promised advisory vanish
+  // exactly when the call needed review. Mirrors the low_confidence and
+  // do_not_contact returns, which already carry it.
   const scheduling = extraction.scheduling || {};
   if (scheduling.status !== 'confirmed') {
-    return { allowed: false, reason: 'not_confirmed', schedulingStatus: scheduling.status };
+    return {
+      allowed: false,
+      reason: 'not_confirmed',
+      schedulingStatus: scheduling.status,
+      failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined,
+    };
   }
 
   if (!scheduling.confirmed_start_at) {
-    return { allowed: false, reason: 'confirmed_without_start_time', schedulingStatus: scheduling.status };
+    return {
+      allowed: false,
+      reason: 'confirmed_without_start_time',
+      schedulingStatus: scheduling.status,
+      failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined,
+    };
   }
 
   if (extraction.consent?.do_not_contact_request === true) {
@@ -1157,7 +1325,10 @@ module.exports = {
   canAutoRoute,
   SMS_ONLY_FLAGS,
   ADVISORY_TRIAGE_FLAGS,
+  BLOCKING_TRIAGE_FLAGS,
   CANONICAL_WRITE_BLOCKING_FLAGS,
+  isAvLocalizedInAreaPremise,
+  confirmedStartOnTheHour,
   FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS,
   hasCanonicalWriteBlock,
   hasNameEmailMismatch,

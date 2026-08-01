@@ -2,7 +2,10 @@
 // misses: confirmed bookings blocked over recoverable contact-field flags
 // (ANI present but caller_phone_missing; existing customer's on-file address;
 // garbled-email name_email_mismatch; low confidence on a short familiar call).
-const { canAutoRoute } = require('../services/call-triage-flags');
+const {
+  canAutoRoute, BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, SMS_ONLY_FLAGS,
+  isAvLocalizedInAreaPremise,
+} = require('../services/call-triage-flags');
 const { checkTcpaConsent, buildTriageItem } = require('../services/call-routing-gates');
 
 // A confirmed booking with a high-enough confidence; flags injected per test.
@@ -148,7 +151,13 @@ describe('canAutoRoute fail-open booking', () => {
 
   test('hard blocks are NEVER failed open', () => {
     for (const hard of ['out_of_service_area', 'caller_not_authorized', 'spam_or_wrong_number']) {
-      const r = canAutoRoute(extraction([hard]), { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });
+      const ex = extraction([hard]);
+      // caller_not_authorized hard-blocks only for an EXPLICIT non-owner
+      // (unknown relationship demotes — owner ruling 2026-07-31).
+      if (hard === 'caller_not_authorized') {
+        ex.caller = { relationship_to_property: 'tenant', on_site_authorization: false };
+      }
+      const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19419603120', knownCustomer: { hasAddress: true } });
       expect(r.allowed).toBe(false);
     }
   });
@@ -185,6 +194,10 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
 
   function agentCommitted(flags = ['caller_not_authorized'], { claim = true, speaker = 'agent', quote = AGENT_COMMIT_QUOTE } = {}) {
     const ex = extraction(flags);
+    // The arranger scenario is an EXPLICIT non-owner — with the relationship
+    // unstated ('unknown') the flag demotes before this machinery runs
+    // (owner ruling 2026-07-31), and these tests would stop exercising it.
+    ex.caller = { relationship_to_property: 'real_estate_agent', on_site_authorization: false };
     // Slot must match the committed quote ("noon on Sunday") — 2026-08-02 is
     // a Sunday; slot binding rejects a quote↔confirmed_start_at mismatch.
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-04:00';
@@ -672,5 +685,213 @@ describe('checkTcpaConsent inbound implied consent', () => {
     expect(checkTcpaConsent({}, { impliedConsent: true }).reason).toBe('implied_consent_inbound');
     expect(checkTcpaConsent({ consent: { sms_consent_given: true } }, { impliedConsent: true }).reason)
       .toBe('sms_consent_given');
+  });
+});
+
+describe('canAutoRoute unknown-relationship + AV-localized address (owner ruling 2026-07-31)', () => {
+  // Live miss 2026-07-31 (call log a771fa15): an inbound caller requested
+  // service, gave their info, and agreed a 2:00 PM slot — the booking parked
+  // in triage on caller_not_authorized (they never STATED they own the
+  // house; relationship arrived 'unknown') plus address_unverified (AV
+  // missing_component on a premise-proximity match that WAS in the service
+  // area). Names/addresses here are synthetic.
+  const AV_LOCALIZED = {
+    status: 'missing_component',
+    granularity: 'PREMISE_PROXIMITY',
+    inServiceArea: true,
+    normalized: { street_line_1: '100 Example Court', city: 'Bradenton', postal_code: '34211' },
+  };
+
+  test('unknown relationship demotes caller_not_authorized and books (advisory card kept)', () => {
+    const ex = extraction(['caller_not_authorized']);
+    ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+    const r = canAutoRoute(ex, {});
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('absent caller block counts as unknown and demotes too', () => {
+    const r = canAutoRoute(extraction(['caller_not_authorized']), {});
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('an EXPLICIT non-owner without authorization still hard-blocks', () => {
+    for (const rel of ['tenant', 'property_manager', 'real_estate_agent', 'neighbor']) {
+      const ex = extraction(['caller_not_authorized']);
+      ex.caller = { relationship_to_property: rel, on_site_authorization: false };
+      const r = canAutoRoute(ex, {});
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    }
+  });
+
+  test('AV premise-proximity in-area match demotes address_unverified on a confirmed booking', () => {
+    const r = canAutoRoute(extraction(['address_unverified']), { addressValidation: AV_LOCALIZED });
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['address_unverified']));
+  });
+
+  test('the full live-miss shape books: both flags + sms-only consent flag, one advisory card each', () => {
+    const ex = extraction(['no_sms_consent_captured', 'caller_not_authorized', 'address_unverified']);
+    ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+    const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized', 'address_unverified']));
+  });
+
+  test('PRODUCTION shape: the MODEL flag address_unverifiable demotes alongside the deterministic one', () => {
+    // The model emits `address_unverifiable` (schema enum) on nearly every
+    // call while deterministic AV handling emits `address_unverified` — a
+    // real extraction usually carries BOTH. Demoting only one would leave
+    // the other blocking exactly the case this targets (codex P1).
+    const ex = extraction(['address_unverifiable', 'address_unverified', 'caller_not_authorized']);
+    ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+    const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['address_unverifiable', 'address_unverified']));
+  });
+
+  test('OFF-HOUR confirmed start keeps BOTH demotions blocked (window_start is always HH:00)', () => {
+    // The booking path copies confirmed_start_at's wall clock into
+    // window_start unchanged, so demoting a :30 slot would auto-create a
+    // prohibited off-hour start (AGENTS.md owner rule). It parks instead.
+    for (const off of ['2026-07-11T09:30:00-04:00', '2026-07-11T09:00:30-04:00']) {
+      const ex = extraction(['caller_not_authorized', 'address_unverified']);
+      ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+      ex.scheduling.confirmed_start_at = off;
+      const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toEqual(
+        expect.arrayContaining(['caller_not_authorized', 'address_unverified'])
+      );
+    }
+  });
+
+  test('a foreign offset that lands off-hour in ET keeps the block (wall clock, not raw minutes)', () => {
+    // "+05:30" carries raw :00 minutes but books a :30 ET wall time — the
+    // wall clock is what the booking writes.
+    const ex = extraction(['caller_not_authorized']);
+    ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+    ex.scheduling.confirmed_start_at = '2026-07-11T19:00:00+05:30';
+    const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('AMBIGUOUS AV keeps the block — adopting one of several candidates would dispatch to a guess', () => {
+    const r = canAutoRoute(extraction(['address_unverified']), {
+      addressValidation: { ...AV_LOCALIZED, status: 'ambiguous' },
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('address_unverified');
+  });
+
+  test('CONTRACT: the routing predicate is the one the processor adopts addresses with', () => {
+    // Routing demotes the address block on isAvLocalizedInAreaPremise and the
+    // processor adopts the AV-normalized address on the SAME predicate. If
+    // these ever diverge, a booking routes on Google's address but dispatches
+    // to the raw transcript spelling (codex P1) — so pin the predicate's
+    // contract here rather than restating its conditions in two places.
+    expect(isAvLocalizedInAreaPremise(AV_LOCALIZED)).toBe(true);
+    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, status: 'ambiguous' })).toBe(false);
+    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, status: 'api_unavailable' })).toBe(false);
+    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, inServiceArea: false })).toBe(false);
+    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, granularity: 'ROUTE' })).toBe(false);
+    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, normalized: { city: 'Bradenton' } })).toBe(false);
+    expect(isAvLocalizedInAreaPremise(null)).toBe(false);
+    // A clean acceptance is NOT this predicate's job — the processor already
+    // adopts those, and canAutoRoute never needed a demotion for them.
+    expect(isAvLocalizedInAreaPremise({ ...AV_LOCALIZED, status: 'validated_accept' })).toBe(false);
+  });
+
+  test('a demoted flag still rides a scheduling-blocked return so its advisory card files (codex P2)', () => {
+    // Guarded on confirmedWithStart, the demotion no longer runs for an
+    // unconfirmed call — the flag stays in appointmentBlockingFlags and the
+    // card files from there. Belt-and-braces: the scheduling returns now
+    // carry failedOpenFlags too, matching low_confidence / do_not_contact.
+    const ex = extraction(['caller_not_authorized']);
+    ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+    ex.scheduling = { status: 'tentative' };
+    const r = canAutoRoute(ex, {});
+    expect(r.allowed).toBe(false);
+    const surfaced = [...(r.appointmentBlockingFlags || []), ...(r.failedOpenFlags || [])];
+    expect(surfaced).toContain('caller_not_authorized');
+  });
+
+  test('coarse AV granularity (ROUTE) keeps the address hard block', () => {
+    const r = canAutoRoute(extraction(['address_unverified']), {
+      addressValidation: { ...AV_LOCALIZED, granularity: 'ROUTE' },
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('address_unverified');
+  });
+
+  test('AV match without a normalized street line keeps the address hard block', () => {
+    const r = canAutoRoute(extraction(['address_unverified']), {
+      addressValidation: { ...AV_LOCALIZED, normalized: { city: 'Bradenton', postal_code: '34211' } },
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('address_unverified');
+  });
+
+  test('out-of-area AV verdict keeps the address hard block', () => {
+    const r = canAutoRoute(extraction(['address_unverified']), {
+      addressValidation: { ...AV_LOCALIZED, inServiceArea: false },
+    });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('address_unverified');
+  });
+
+  test('an UNCONFIRMED booking keeps the address hard block even when AV localized it', () => {
+    const ex = extraction(['address_unverified']);
+    ex.scheduling = { status: 'tentative' };
+    const r = canAutoRoute(ex, { addressValidation: AV_LOCALIZED });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('address_unverified');
+  });
+
+  test('prior_complaint_unresolved is advisory — a returning customer re-booking is not held', () => {
+    // "Last time the ants came back — can you come Tuesday at 10" books; the
+    // card tells the office to review the history before the visit.
+    const r = canAutoRoute(extraction(['prior_complaint_unresolved']), {});
+    expect(r.allowed).toBe(true);
+    expect(r.flags).toContain('prior_complaint_unresolved');
+    expect(r.appointmentBlockingFlags || []).not.toContain('prior_complaint_unresolved');
+  });
+
+  test('a flag OUTSIDE every known set is advisory-by-default, never a silent block', () => {
+    // New prompt vocabulary / model drift: unknown names ride failedOpenFlags
+    // (card files, booking proceeds) instead of holding the appointment.
+    const r = canAutoRoute(extraction(['brand_new_model_flag']), {});
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['brand_new_model_flag']));
+  });
+
+  test('allowlist sanity: known hard flags still block without any rescue', () => {
+    for (const hard of ['after_hours_emergency', 'cancellation_request', 'ambiguous_pest_or_service', 'voicemail']) {
+      const r = canAutoRoute(extraction([hard]), {});
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain(hard);
+    }
+  });
+
+  test('CONTRACT: every model-schema triage_flag is explicitly classified', () => {
+    // Drift guard for the allowlist. Advisory-by-default is the safe
+    // direction for an unknown flag, but a NEW enum value MEANT to block
+    // would silently book instead. Adding a triage_flag to the schema must
+    // be a deliberate three-way choice: BLOCKING / ADVISORY / SMS_ONLY.
+    const schema = require('../schemas/call-extraction.model-output.schema.json');
+    const enumValues = schema.properties.triage_flags.items.enum;
+    expect(Array.isArray(enumValues)).toBe(true);
+    expect(enumValues.length).toBeGreaterThan(0);
+
+    const sets = [BLOCKING_TRIAGE_FLAGS, ADVISORY_TRIAGE_FLAGS, SMS_ONLY_FLAGS];
+    const unclassified = enumValues.filter((f) => !sets.some((s) => s.has(f)));
+    expect(unclassified).toEqual([]);
+
+    // A flag must not carry two classifications at once.
+    const doubled = enumValues.filter((f) => sets.filter((s) => s.has(f)).length > 1);
+    expect(doubled).toEqual([]);
   });
 });
