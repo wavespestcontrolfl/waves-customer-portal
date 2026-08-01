@@ -42,6 +42,8 @@ const mockState = {
   customer: null,
   freshCustomer: null,
   autopayMethod: CHARGEABLE_METHOD,
+  annualPrepayCovered: [],
+  annualPrepayPending: [],
   storedPausedAt: undefined,
   updates: [],
   interactions: [],
@@ -49,6 +51,11 @@ const mockState = {
   insertShouldFail: false,
   rolledBack: false,
 };
+
+jest.mock('../services/annual-prepay-renewals', () => ({
+  getActivelyCoveredCustomerIds: jest.fn(async () => new Set(mockState.annualPrepayCovered)),
+  getPaymentPendingCustomerIds: jest.fn(async () => new Set(mockState.annualPrepayPending)),
+}));
 
 jest.mock('../services/audit-log', () => ({
   recordAuditEvent: jest.fn(async (event) => { mockState.auditEvents.push(event); }),
@@ -138,6 +145,8 @@ beforeEach(() => {
   mockState.customer = null;
   mockState.freshCustomer = null;
   mockState.autopayMethod = CHARGEABLE_METHOD;
+  mockState.annualPrepayCovered = [];
+  mockState.annualPrepayPending = [];
   mockState.storedPausedAt = undefined;
   mockState.updates = [];
   mockState.interactions = [];
@@ -285,9 +294,40 @@ describe('POST /admin/customers/:id/resume-service', () => {
     expect(res.body.blockers).toEqual(expect.arrayContaining([
       'customer_inactive',
       'no_monthly_rate',
+      // ONE autopay label, not one per failing sub-check: customerOnAutopay
+      // is the gate, and these narrower reads only name which part failed.
       'autopay_disabled',
-      'autopay_paused_until',
       'billing_lane_per_visit',
+    ]));
+    expect(res.body.blockers).not.toContain('autopay_paused_until');
+  });
+
+  test('a live autopay_paused_until is labelled as such', async () => {
+    mockState.customer = {
+      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
+      autopay_paused_until: '2099-01-01', billing_mode: 'monthly_membership',
+    };
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body.blockers).toContain('autopay_paused_until');
+  });
+
+  test('annual-prepay coverage and a pending annual invoice both suppress dues', async () => {
+    // GUARD 4 / 4b: a legacy monthly-lane customer can resolve monthly and
+    // still be suppressed by prepaid coverage.
+    mockState.customer = {
+      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
+      autopay_paused_until: null, billing_mode: 'monthly_membership',
+    };
+    mockState.annualPrepayCovered = ['cust-1'];
+    mockState.annualPrepayPending = ['cust-1'];
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body.blockers).toEqual(expect.arrayContaining([
+      'annual_prepay_covered',
+      'annual_prepay_payment_pending',
     ]));
   });
 
