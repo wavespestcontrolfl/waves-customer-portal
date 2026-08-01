@@ -644,7 +644,13 @@ class AutonomousRunner {
           refreshPriorBody: guardOptions.isRefresh ? guardOptions.priorBody : null,
           // Alias targets are HUB pages; on spoke content a relative alias
           // would resolve against the spoke and publish dead (Codex r3).
-          targetDomains: Array.isArray(guardOptions.domains) ? guardOptions.domains : [],
+          // Same effective-domain resolution evaluate() uses (see
+          // content-guardrails.js:2115): guardOptions.domains is null for a
+          // NEW page without brief.target_sites, and the draft's own
+          // frontmatter is what identifies the spoke in that case.
+          targetDomains: Array.isArray(guardOptions.domains)
+            ? guardOptions.domains
+            : (Array.isArray(draft.frontmatter?.domains) ? draft.frontmatter.domains : []),
         },
       );
       if (routeRepair.repairs.length) {
