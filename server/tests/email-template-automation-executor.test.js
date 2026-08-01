@@ -94,8 +94,20 @@ function run(overrides = {}) {
 }
 
 describe('email template automation executor', () => {
+  // createRun wraps its insert in a transaction that first takes the
+  // per-customer comms advisory lock (serializing against a customer-merge
+  // undo probing this recipient's queued sends). The trx delegates table
+  // calls back to db so the per-table queues keep working; raw() captures
+  // the lock for the pin below.
+  const advisoryLockCalls = [];
   beforeEach(() => {
     jest.clearAllMocks();
+    advisoryLockCalls.length = 0;
+    db.transaction = jest.fn(async (fn) => {
+      const trx = (table) => db(table);
+      trx.raw = jest.fn(async (...args) => { advisoryLockCalls.push(args); return { rows: [] }; });
+      return fn(trx);
+    });
   });
 
   test('maps a trigger to an immediate send with a durable idempotency key', async () => {
@@ -154,6 +166,12 @@ describe('email template automation executor', () => {
       recipient_email: 'sam@example.com',
       idempotency_key: 'estimate.extension_notice:est-1:2026-06-01',
     }));
+    // The insert ran inside a transaction that first took the per-customer
+    // comms advisory lock — the same key customer-dedupe.js's revertMerge
+    // takes before probing queued sends, so a run created here can never
+    // race an in-flight undo of this customer.
+    expect(advisoryLockCalls.some(([sql, bindings]) => String(sql).includes('pg_advisory_xact_lock')
+      && Array.isArray(bindings) && bindings[0] === 'customer-comms:cust-1')).toBe(true);
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'estimate.extension_notice',
       versionId: 'version-1',

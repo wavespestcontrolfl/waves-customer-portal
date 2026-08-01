@@ -1107,7 +1107,18 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         ? `${winnerVal}\n\n[From merged duplicate ${String(loserId).slice(0, 8)}]: ${loserVal}`
         : loserVal;
     }
+    // Journal the winner's PRIOR notes alongside the applied concatenation
+    // ({ before, applied }, same shape as winner_autopay_before) so the undo
+    // can put the winner's own notes back when still the merge-written text
+    // — the loser's snapshot restores ITS originals, but without this the
+    // folded copy stayed on the winner silently. Pre-upgrade journals lack
+    // the key and keep today's behavior (folded text stays).
+    let winnerNoteAppends = null;
     if (Object.keys(noteAppends).length) {
+      winnerNoteAppends = { before: {}, applied: noteAppends };
+      for (const col of Object.keys(noteAppends)) {
+        winnerNoteAppends.before[col] = winner[col] === undefined ? null : winner[col];
+      }
       await trx('customers').where({ id: winnerId })
         .update({ ...noteAppends, updated_at: trx.fn.now() });
       repointed['customers.notes_appended'] = Object.keys(noteAppends).join(', ');
@@ -1329,6 +1340,10 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         // The winner's own pre-merge card ids — exempt from the undo's
         // new-card-on-transferred-profile refusal (see the capture above).
         winner_premerge_pm_ids: winnerPremergePmIds,
+        // The winner's pre-fold notes + the applied concatenations
+        // ({ before, applied }) — the undo restores the winner's own notes
+        // while still the merge-written text; null when nothing was folded.
+        winner_note_appends: winnerNoteAppends,
         // Tables whose unique-collision handler ran: those rows were
         // folded/merged/dropped, not plainly repointed, so the merge is not
         // auto-revertible (the revert endpoint 409s when any are listed).
@@ -1535,6 +1550,12 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
 // refusing the whole undo.
 const REVERT_FINANCIAL_TABLES = new Set([
   'invoices', 'payments', 'customer_credit_ledger', 'payment_methods',
+  // The rest of the service's own billing blockers (AUTO_BLOCKER_TABLES):
+  // deposits and card holds move real held money, prepay terms drive the
+  // annual biller, and an assigned discount changes what invoices charge —
+  // all repoint with plain uuid `id` PKs + customer_id, so they verify
+  // under FOR UPDATE and refuse on drift exactly like invoices/payments.
+  'estimate_deposits', 'estimate_card_holds', 'annual_prepay_terms', 'customer_discounts',
 ]);
 
 // Comms-CONSENT tables where a MISSING row semantically means "allowed":
@@ -2019,6 +2040,18 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // artifact we can't check is an artifact we can't clear from under.
     if (backfills.email && winnerPatch.email === null
       && Object.prototype.hasOwnProperty.call(winnerPatch, 'email')) {
+      // Serialize against concurrent email-queue inserts BEFORE probing:
+      // the template-run executor writes email_template_automation_runs
+      // keyed by recipient_id — a STRING customer id with no FK — so none
+      // of the row locks above can fence its insert path; a run queued
+      // between probe and commit would deliver to the email this undo is
+      // clearing. Both sides take the same per-customer advisory lock.
+      // KEY DERIVATION (must stay byte-identical to
+      // email-template-automation-executor.js createRun — extend BOTH in
+      // the same commit): pg_advisory_xact_lock(hashtextextended(
+      //   'customer-comms:' || <customer id>, 0)) — transaction-scoped, so
+      // it releases with this undo's commit/rollback.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${winnerId}`]);
       const emailLower = String(backfills.email).trim().toLowerCase();
       const mergeAt = journal.created_at || null;
       const journaledIdsFor = (table) => {
@@ -2065,6 +2098,24 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         if (mergeWrittenValueUnchanged(winner[col], appliedVal)) {
           winnerPatch[col] = Object.prototype.hasOwnProperty.call(autopayBefore.before, col)
             ? autopayBefore.before[col]
+            : null;
+        } else {
+          skipped.push({ key: `customers.${col}`, reason: 'winner_value_changed_since_merge' });
+        }
+      }
+    }
+    // The merge folded the loser's crm/technician notes into the winner;
+    // the loser's originals restore from its snapshot, and the winner's own
+    // pre-fold notes restore here while the current value is still the
+    // merge-written concatenation — an operator who edited the notes since
+    // keeps their edit, REPORTED as skipped (never silent). Pre-upgrade
+    // journals lack winner_note_appends: the folded text stays.
+    const noteAppendsRecorded = recorded.winner_note_appends || null;
+    if (noteAppendsRecorded && noteAppendsRecorded.applied && noteAppendsRecorded.before) {
+      for (const [col, appliedVal] of Object.entries(noteAppendsRecorded.applied)) {
+        if (mergeWrittenValueUnchanged(winner[col], appliedVal)) {
+          winnerPatch[col] = Object.prototype.hasOwnProperty.call(noteAppendsRecorded.before, col)
+            ? noteAppendsRecorded.before[col]
             : null;
         } else {
           skipped.push({ key: `customers.${col}`, reason: 'winner_value_changed_since_merge' });

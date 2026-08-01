@@ -410,27 +410,44 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
 
   let run;
   try {
-    [run] = await db('email_template_automation_runs').insert({
-      automation_id: automation.id || null,
-      automation_key: automation.automation_key,
-      trigger_event_key: triggerEventKey,
-      trigger_event_id: triggerEventId || null,
-      entity_type: entityType || null,
-      entity_id: entityId || null,
-      template_key: automation.template_key,
-      template_version_id: automation.active_version_id || automation.template_version_id || null,
-      recipient_type: recipient.type || null,
-      recipient_id: recipient.id || null,
-      recipient_email: recipient.email,
-      idempotency_key: idempotencyKey,
-      status,
-      run_after: runAfter,
-      max_attempts: retryPolicy.maxAttempts,
-      exit_reason: exitReason || null,
-      payload: JSON.stringify(payload || {}),
-      context: JSON.stringify(context || {}),
-      completed_at: status === 'skipped' ? new Date() : null,
-    }).returning('*');
+    run = await db.transaction(async (trx) => {
+      // Serialize against an in-flight customer-merge UNDO probing this
+      // recipient's queued sends (customer-dedupe.js revertMerge, email
+      // guard): runs are keyed by recipient_id — a STRING customer id with
+      // no FK — so no row lock can fence this insert against that probe.
+      // Both sides take the same per-customer advisory lock; behavior is
+      // otherwise identical (the lock only blocks while an undo of THIS
+      // customer is mid-transaction). KEY DERIVATION (must stay
+      // byte-identical to customer-dedupe.js — extend BOTH in the same
+      // commit): pg_advisory_xact_lock(hashtextextended(
+      //   'customer-comms:' || <customer id>, 0)) — transaction-scoped.
+      // No recipient id = unlinked run; the undo probe never matches those.
+      if (recipient.id) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${recipient.id}`]);
+      }
+      const [row] = await trx('email_template_automation_runs').insert({
+        automation_id: automation.id || null,
+        automation_key: automation.automation_key,
+        trigger_event_key: triggerEventKey,
+        trigger_event_id: triggerEventId || null,
+        entity_type: entityType || null,
+        entity_id: entityId || null,
+        template_key: automation.template_key,
+        template_version_id: automation.active_version_id || automation.template_version_id || null,
+        recipient_type: recipient.type || null,
+        recipient_id: recipient.id || null,
+        recipient_email: recipient.email,
+        idempotency_key: idempotencyKey,
+        status,
+        run_after: runAfter,
+        max_attempts: retryPolicy.maxAttempts,
+        exit_reason: exitReason || null,
+        payload: JSON.stringify(payload || {}),
+        context: JSON.stringify(context || {}),
+        completed_at: status === 'skipped' ? new Date() : null,
+      }).returning('*');
+      return row;
+    });
   } catch (err) {
     if (err.code === '23505' || /email_template_automation_runs.*idempotency_key|idempotency_key.*unique/i.test(err.message || '')) {
       const replayed = await db('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();

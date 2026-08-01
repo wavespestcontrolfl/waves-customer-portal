@@ -237,6 +237,48 @@ describe('executeMerge repointed_ids journal record', () => {
     expect(recorded.winner_prior_values).toEqual({});
     // No winner cards pre-merge — empty exemption list, still journaled.
     expect(recorded.winner_premerge_pm_ids).toEqual([]);
+    // No notes folded — no note-append record.
+    expect(recorded.winner_note_appends).toBe(null);
+  });
+
+  it("journals the winner's PRE-FOLD notes with the applied concatenation when the merge appends loser notes", async () => {
+    const winner = {
+      id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001',
+      crm_notes: 'Winner note', technician_notes: null,
+    };
+    const loser = {
+      id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001',
+      crm_notes: 'Loser note', technician_notes: 'Gate code 0000',
+    };
+    const state = { journal: null };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
+      if (q.called('first')) return null;
+      if (q.called('update')) return 0;
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    const expectedCrm = `Winner note\n\n[From merged duplicate ${LOSER.slice(0, 8)}]: Loser note`;
+    expect(recorded.winner_note_appends).toEqual({
+      before: { crm_notes: 'Winner note', technician_notes: null },
+      applied: { crm_notes: expectedCrm, technician_notes: 'Gate code 0000' },
+    });
   });
 
   it("journals the winner's ORIGINAL autopay state and the consent stamps the merge deliberately nulled", async () => {
@@ -484,7 +526,7 @@ describe('revertMerge', () => {
     const state = {
       repointedBack: [], winnerPatch: null, loserRestore: null, journalUpdate: null,
       decremented: null, flagRestores: [], propertyDeleted: null, propertyTransferred: null,
-      verified: [],
+      verified: [], rawCalls: [],
     };
     const route = (table, q) => {
       if (table === 'customer_merge_journal') {
@@ -563,6 +605,8 @@ describe('revertMerge', () => {
     const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
     trx.transaction = jest.fn(async (fn) => fn(trx));
     trx.fn = { now: () => 'NOW()' };
+    // Captures the per-customer comms advisory lock (r6).
+    trx.raw = jest.fn(async (...args) => { state.rawCalls.push(args); return { rows: [] }; });
     return { trx, state };
   }
 
@@ -629,6 +673,11 @@ describe('revertMerge', () => {
     expect(state.journalUpdate.undone_by).toBe('admin:test');
     expect(result.stripeMovedBack).toBe(true);
     expect(result.skipped).toHaveLength(0);
+    // The email clear takes the per-customer comms advisory lock BEFORE
+    // probing — the executor's insert path takes the same key, so a run
+    // queued mid-undo blocks instead of racing the probe.
+    expect(state.rawCalls.some(([sql, bindings]) => String(sql).includes('pg_advisory_xact_lock')
+      && Array.isArray(bindings) && bindings[0] === `customer-comms:${WINNER}`)).toBe(true);
     // ONE admin bell, post-commit.
     expect(notifyAdmin).toHaveBeenCalledTimes(1);
     expect(notifyAdmin.mock.calls[0][0]).toBe('customer');
@@ -1260,6 +1309,71 @@ describe('revertMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/recipient_optin.*comms consent/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it("restores the winner's PRE-FOLD notes while still the merge-written concatenation; an edited note stays and reports", async () => {
+    const journal = baseJournal();
+    const foldedCrm = `Winner note\n\n[From merged duplicate ${LOSER.slice(0, 8)}]: Loser note`;
+    journal.repointed_ids.winner_note_appends = {
+      before: { crm_notes: 'Winner note', technician_notes: null },
+      applied: { crm_notes: foldedCrm, technician_notes: 'Gate code 0000' },
+    };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: {
+        ...baseWinner(),
+        crm_notes: foldedCrm, // still the merge-written fold → prior restored
+        technician_notes: 'Operator rewrote this since', // edited → stays, reported
+      },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch.crm_notes).toBe('Winner note');
+    expect(state.winnerPatch.technician_notes).toBeUndefined();
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customers.technician_notes', reason: 'winner_value_changed_since_merge' }),
+    ]));
+  });
+
+  it('pre-upgrade journal without winner_note_appends: the folded text stays, no refusal (documented behavior)', async () => {
+    const journal = baseJournal(); // no winner_note_appends key
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), crm_notes: 'Winner note\n\n[From merged duplicate x]: Loser note' },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch?.crm_notes).toBeUndefined();
+    expect(result.skipped).toHaveLength(0);
+  });
+
+  it('refuses (409) when an estimate_deposits row no longer belongs to the winner — held money is all-or-nothing like invoices', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['estimate_deposits.customer_id'] = ['dep-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        estimate_deposits: { stillOnWinner: [] }, // moved on since the merge
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/estimate_deposits row/) });
+    // Financial verification runs under FOR UPDATE, and the refusal landed
+    // in the pre-write verification pass.
+    expect(state.verified).toEqual(expect.arrayContaining([
+      { table: 'estimate_deposits', forUpdate: true },
+    ]));
     expect(state.repointedBack).toHaveLength(0);
     expect(state.journalUpdate).toBe(null);
   });
