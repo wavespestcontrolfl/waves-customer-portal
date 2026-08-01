@@ -27,8 +27,21 @@ jest.mock('../services/logger', () => ({
 // Programmable per-test state. `storedPausedAt` is what the row holds at
 // UPDATE time — the compare-and-swap reads it, so a test can simulate
 // billing-cron re-pausing between the SELECT and the UPDATE.
+const CHARGEABLE_METHOD = {
+  id: 'pm-1',
+  processor: 'stripe',
+  method_type: 'card',
+  stripe_payment_method_id: 'pm_stripe_1',
+  is_default: true,
+  autopay_enabled: true,
+  exp_month: 12,
+  exp_year: 2099,
+};
+
 const mockState = {
   customer: null,
+  freshCustomer: null,
+  autopayMethod: CHARGEABLE_METHOD,
   storedPausedAt: undefined,
   updates: [],
   interactions: [],
@@ -48,8 +61,13 @@ jest.mock('../models/db', () => {
     q.whereNull = (col) => { q._null.push(col); return q; };
     q.whereNotNull = (col) => { (q._notNull = q._notNull || []).push(col); return q; };
     q.first = async () => {
+      if (table === 'payment_methods') return mockState.autopayMethod;
       if (table !== 'customers' || !mockState.customer) return null;
-      if (q._null.includes('deleted_at') && mockState.customer.deleted_at) return null;
+      // The initial read carries .whereNull('deleted_at'); the post-transaction
+      // re-read does not, so this distinguishes them and lets a test move the
+      // row underneath the request.
+      if (!q._null.includes('deleted_at')) return mockState.freshCustomer || mockState.customer;
+      if (mockState.customer.deleted_at) return null;
       return mockState.customer;
     };
     q.update = async (patch) => {
@@ -118,6 +136,8 @@ async function resumeService(id, body = {}) {
 
 beforeEach(() => {
   mockState.customer = null;
+  mockState.freshCustomer = null;
+  mockState.autopayMethod = CHARGEABLE_METHOD;
   mockState.storedPausedAt = undefined;
   mockState.updates = [];
   mockState.interactions = [];
@@ -322,6 +342,47 @@ describe('POST /admin/customers/:id/resume-service', () => {
     const res = await resumeService('cust-1');
 
     expect(res.body).toMatchObject({ resumed: true, blockers: [] });
+  });
+
+  test('autopay_enabled is not the same as chargeable — an expired card is reported', async () => {
+    // The next run would reach stripe.charge and fail while the UI had
+    // already removed the only warning.
+    mockState.customer = {
+      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
+      autopay_paused_until: null, billing_mode: 'monthly_membership',
+    };
+    mockState.autopayMethod = { ...CHARGEABLE_METHOD, exp_month: 1, exp_year: 2020 };
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body.blockers).toContain('no_chargeable_autopay_method');
+  });
+
+  test('no default autopay method at all is reported', async () => {
+    mockState.customer = {
+      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
+      autopay_paused_until: null, billing_mode: 'monthly_membership',
+    };
+    mockState.autopayMethod = undefined;
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body.blockers).toContain('no_chargeable_autopay_method');
+  });
+
+  test('blockers come from a POST-transaction read, not the stale snapshot', async () => {
+    mockState.customer = {
+      ...PAUSED, active: true, monthly_rate: '55.00', autopay_enabled: true,
+      autopay_paused_until: null, billing_mode: 'monthly_membership',
+    };
+    // The customer was deactivated while this request was in flight. Reporting
+    // from the snapshot would claim dues are collectible when they are not.
+    mockState.freshCustomer = { ...mockState.customer, active: false };
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body.resumed).toBe(true);
+    expect(res.body.blockers).toContain('customer_inactive');
   });
 
   test('billing-pause fields never reach a technician payload', async () => {

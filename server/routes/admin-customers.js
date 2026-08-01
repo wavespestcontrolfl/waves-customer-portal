@@ -23,7 +23,11 @@ const CustomerCredit = require('../services/customer-credit');
 // processMonthlyBilling does. resolveBillingLane is the single billing-lane
 // authority (billing-cron GUARD 3c): it also covers NULL billing_mode rows,
 // which infer to per_visit and are skipped just like an explicit one.
-const { isPaused: isAutopayPaused } = require('../services/autopay-eligibility');
+const {
+  isPaused: isAutopayPaused,
+  getChargeableAutopayMethod,
+  isChargeableAutopayMethod,
+} = require('../services/autopay-eligibility');
 const { resolveBillingLane } = require('../services/billing-lane');
 const {
   normalizeContactName,
@@ -3144,16 +3148,34 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
     // customer silently unbilled for a different reason. Reuse the cron's
     // predicates (isPaused, the billing-mode list) rather than restating
     // them, so this can't drift from what actually runs.
+    // Read the row AFTER the transaction, not the snapshot taken before it:
+    // active status, rate, autopay and lane can all have moved while this
+    // request ran, and a stale read would report blockers: [] on a customer
+    // whose dues still cannot run. Falls back to the snapshot only if the
+    // re-read fails, which is strictly better than reporting nothing.
+    const fresh = await db('customers').where({ id: req.params.id }).first()
+      .catch(() => null) || customer;
+
     const blockers = [];
-    if (customer.active !== true) blockers.push('customer_inactive');
-    if (!(Number(customer.monthly_rate) > 0)) blockers.push('no_monthly_rate');
-    if (customer.autopay_enabled === false) blockers.push('autopay_disabled');
-    if (isAutopayPaused(customer)) blockers.push('autopay_paused_until');
+    if (fresh.active !== true) blockers.push('customer_inactive');
+    if (!(Number(fresh.monthly_rate) > 0)) blockers.push('no_monthly_rate');
+    if (fresh.autopay_enabled === false) blockers.push('autopay_disabled');
+    if (isAutopayPaused(fresh)) blockers.push('autopay_paused_until');
+    // autopay_enabled=true is not the same as chargeable: the enrolled card
+    // can be missing, non-default, or expired, in which case the next run
+    // reaches stripe.charge and fails. Same canonical pair customerOnAutopay
+    // uses, so this cannot drift from what the charge path accepts.
+    try {
+      const method = await getChargeableAutopayMethod(fresh, db);
+      if (!isChargeableAutopayMethod(method)) blockers.push('no_chargeable_autopay_method');
+    } catch (methodErr) {
+      logger.warn(`[customers] autopay method check failed for ${req.params.id}: ${methodErr.message}`);
+    }
     // Not a check against a list of explicit modes: an unclassified customer
     // (NULL billing_mode, no real tier or no rate) INFERS to per_visit and the
     // cron skips them exactly the same way. Checking only explicit modes would
     // hand those rows blockers: [] and remove their only warning.
-    const lane = resolveBillingLane(customer);
+    const lane = resolveBillingLane(fresh);
     if (lane.mode !== 'monthly_membership') blockers.push(`billing_lane_${lane.mode}`);
 
     logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`
