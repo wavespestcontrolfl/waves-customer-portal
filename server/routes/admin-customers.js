@@ -3115,7 +3115,8 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
         interaction_type: 'note',
         subject: 'Billing resumed',
         body: `Billing pause cleared (paused ${pausedSince}${pauseReason ? `, reason: ${pauseReason}` : ''}). `
-          + 'Monthly dues resume on the next billing day; no back-billing for the paused months.',
+          + 'This removes the pause block only — other billing guards (autopay state, '
+          + 'plan type, prepaid coverage) still apply. The paused months are not back-billed.',
         admin_user_id: req.technicianId,
       });
 

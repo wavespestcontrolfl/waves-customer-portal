@@ -4689,14 +4689,14 @@ export default function Customer360ProfileV2({
       // reappears on the next load with no explanation.
       if (result?.resumed === false) {
         setResumeBillingErr(
-          "Billing was not resumed — the pause changed while you were looking at it. Reloading the current state.",
+          "The pause was not cleared — it changed while you were looking at it. Reloading the current state.",
         );
       } else {
         resumeLanded = true;
       }
     } catch (err) {
       if (!stillViewing()) return;
-      setResumeBillingErr(err.message || "Resume failed");
+      setResumeBillingErr(err.message || "Could not clear the billing pause");
       setResumingBilling(false);
       return;
     }
@@ -4707,7 +4707,7 @@ export default function Customer360ProfileV2({
       if (stillViewing()) {
         setResumeBillingNote(
           resumeLanded
-            ? "Billing was resumed. Refreshing this profile failed — reload the page to see the current state."
+            ? "The billing pause was cleared. Refreshing this profile failed — reload the page to see the current state."
             : "Refreshing this profile failed — reload the page to see the current state.",
         );
       }
@@ -5871,9 +5871,10 @@ export default function Customer360ProfileV2({
                         {c.servicePauseReason === "autopay_final_failure"
                           ? " — autopay failed three times"
                           : ""}
-                        . Visits are unaffected. Resuming collects on the next
-                        billing day only; the paused months are not
-                        back-billed.
+                        . Visits are unaffected. Clearing the pause removes
+                        this block only — other billing guards (autopay
+                        state, plan type, prepaid coverage) still apply — and
+                        the paused months are never back-billed.
                       </div>
                       {isAdmin && (
                         <Button
@@ -5883,7 +5884,7 @@ export default function Customer360ProfileV2({
                           onClick={resumeBilling}
                           disabled={resumingBilling}
                         >
-                          {resumingBilling ? "Resuming…" : "Resume billing"}
+                          {resumingBilling ? "Clearing…" : "Clear billing pause"}
                         </Button>
                       )}
                       {resumeBillingErr && (

@@ -81,7 +81,7 @@ describe('Customer 360 billing-pause banner', () => {
     expect(await screen.findAllByText('Avery Customer')).not.toHaveLength(0);
 
     expect(screen.queryByText(/Billing paused since/i)).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Resume billing/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Clear billing pause/i })).not.toBeInTheDocument();
   });
 
   it('shows why dues stopped, that visits are unaffected, and that nothing is back-billed', async () => {
@@ -104,7 +104,9 @@ describe('Customer 360 billing-pause banner', () => {
     // The three facts that make this actionable rather than alarming.
     expect(screen.getByText(/autopay failed three times/i)).toBeInTheDocument();
     expect(screen.getByText(/Visits are unaffected/i)).toBeInTheDocument();
-    expect(screen.getByText(/not\s+back-billed/i)).toBeInTheDocument();
+    expect(screen.getByText(/never back-billed/i)).toBeInTheDocument();
+    // Must NOT promise collection resumes — other cron guards still apply.
+    expect(screen.getByText(/other billing guards/i)).toBeInTheDocument();
   });
 
   it('resumes billing and clears the banner', async () => {
@@ -130,7 +132,7 @@ describe('Customer 360 billing-pause banner', () => {
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findByText(/Billing paused since May 2, 2026/i);
 
-    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
 
     await waitFor(() => {
       expect(screen.queryByText(/Billing paused since/i)).not.toBeInTheDocument();
@@ -163,9 +165,9 @@ describe('Customer 360 billing-pause banner', () => {
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findByText(/Billing paused since May 2, 2026/i);
 
-    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
 
-    expect(await screen.findByText(/pause changed while you were looking at it/i)).toBeInTheDocument();
+    expect(await screen.findByText(/pause was not cleared/i)).toBeInTheDocument();
     expect(screen.getByText(/Billing paused since May 2, 2026/i)).toBeInTheDocument();
   });
 
@@ -195,10 +197,10 @@ describe('Customer 360 billing-pause banner', () => {
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findByText(/Billing paused since May 2, 2026/i);
 
-    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
 
-    expect(await screen.findByText(/Billing was resumed\. Refreshing this profile failed/i)).toBeInTheDocument();
-    expect(screen.queryByText(/^Resume failed$/i)).not.toBeInTheDocument();
+    expect(await screen.findByText(/billing pause was cleared\. Refreshing this profile failed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Could not clear the billing pause$/i)).not.toBeInTheDocument();
   });
 
   it('a superseded attempt on the SAME customer never writes its outcome', async () => {
@@ -228,7 +230,7 @@ describe('Customer 360 billing-pause banner', () => {
       <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />,
     );
     await screen.findByText(/Billing paused since May 2, 2026/i);
-    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
 
     // Navigating away and back re-enables the button (the customer-switch
     // reset), so a second attempt can start while the first is still in
@@ -237,7 +239,7 @@ describe('Customer 360 billing-pause banner', () => {
     rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
     rerender(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findByText(/Billing paused since May 2, 2026/i);
-    fireEvent.click(await screen.findByRole('button', { name: /Resume billing/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Clear billing pause/i }));
 
     gates[0]();
     await new Promise((r) => setTimeout(r, 20));
@@ -286,7 +288,7 @@ describe('Customer 360 billing-pause banner', () => {
       <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />,
     );
     await screen.findByText(/Billing paused since May 2, 2026/i);
-    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
 
     rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
     await screen.findByText(/Billing paused since Jun 1, 2026/i);
@@ -296,7 +298,7 @@ describe('Customer 360 billing-pause banner', () => {
 
     // B must not inherit A's failure.
     expect(screen.queryByText(/Customer A blew up/i)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Resume billing/i })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: /Clear billing pause/i })).not.toBeDisabled();
   });
 
   it('surfaces a failed resume instead of pretending it worked', async () => {
@@ -317,7 +319,7 @@ describe('Customer 360 billing-pause banner', () => {
     render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
     await screen.findByText(/Billing paused since May 2, 2026/i);
 
-    fireEvent.click(screen.getByRole('button', { name: /Resume billing/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
 
     expect(await screen.findByText(/Customer not found/i)).toBeInTheDocument();
     // The pause is still real, so the banner must stay.

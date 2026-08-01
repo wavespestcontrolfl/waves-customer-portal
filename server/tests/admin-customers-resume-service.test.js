@@ -229,7 +229,9 @@ describe('POST /admin/customers/:id/resume-service', () => {
     expect(note.body).toContain('autopay_final_failure');
     // The no-back-billing promise is what makes this safe to click, so it
     // belongs in the record and not only in the UI.
-    expect(note.body).toContain('no back-billing');
+    expect(note.body).toContain('not back-billed');
+    // The note must not promise collection resumes — other guards still apply.
+    expect(note.body).toContain('other billing guards');
     expect(note.admin_user_id).toBe('admin-1');
   });
 
