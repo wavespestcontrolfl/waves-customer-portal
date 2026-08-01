@@ -10668,19 +10668,20 @@ export function CompletionPanel({
         // control and trims rather than typing from scratch. Editable as before.
         // Protocol-added products (addProduct(action.product)) are serialized
         // without target_pests, so fall back to the loaded catalog row by id.
-        // Broad-label products (Bifen etc.) carry turf pests on the label —
-        // on a non-lawn visit those prefills read wrong on the report (owner
-        // 2026-07-30), so they're dropped here; the tech can still add any
-        // target by hand. Keyed to the detected service CATEGORY, not the
-        // panel's `isLawn` (which is false for typed lawn visits — codex P2:
-        // a typed lawn treatment must keep its turf targets).
+        // Only targets belonging to THIS visit's service line prefill, capped
+        // at MAX_LABEL_TARGET_PREFILL (owner 2026-08-01) — a pest visit drops
+        // Talstar's chinch bugs, a lawn visit drops its ants and roaches; the
+        // tech can still add any target by hand. Keyed to the detected service
+        // CATEGORY, not the panel's `isLawn` (which is false for typed lawn
+        // visits — codex P2: a typed lawn treatment must keep its turf
+        // targets).
         targets: filterLabelTargetsForLine(
           normalizeLabelTargets(
             product.target_pests
               ?? product.targetPests
               ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
           ),
-          { isLawn: detectServiceCategory(service.serviceType) === "lawn" },
+          detectServiceCategory(service.serviceType),
         ),
       },
     ]);
@@ -15635,9 +15636,61 @@ function normalizeLabelTargets(value) {
 const LAWN_ONLY_TARGET_RE =
   /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|kyllinga|dollarweed|doveweed|chamberbitter|spurge|clover|nutsedge|\bsedge\b|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|gray leaf spot|take-?all|fairy ring|pythium|turf/i;
 
-function filterLabelTargetsForLine(targets, { isLawn } = {}) {
-  if (isLawn) return targets;
-  return targets.filter((t) => !LAWN_ONLY_TARGET_RE.test(t));
+// Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
+// borers, and foliar issues. Checked BEFORE the structural set so "Spider
+// mites" classifies as ornamental instead of matching the spider pattern.
+const ORNAMENTAL_ONLY_TARGET_RE =
+  /whitefl|spiraling|scale insect|soft scale|mealybug|aphid|thrips|\bmites?\b|leafminer|\bborer|caterpillar|weevil|sooty mold|powdery mildew|fungal leaf spot/i;
+
+// Wood-destroying-organism targets: pass on termite/WDO visits, and carpenter
+// ants also read fine on a general pest visit.
+const TERMITE_TARGET_RE = /termite|wood-?boring|wood borer/i;
+const CARPENTER_ANT_RE = /carpenter ant/i;
+
+const MOSQUITO_TARGET_RE = /mosquito/i;
+
+// Structural/household pests — the general-pest line. Broad on purpose: any
+// ant species, roaches, spiders (mites already claimed above), the usual
+// occasional invaders, stingers, biters, and rodents.
+const STRUCTURAL_ONLY_TARGET_RE =
+  /\bants?\b|roach|spider|silverfish|earwig|centipede|millipede|springtail|booklice|cricket|wasp|mud dauber|yellowjacket|hornet|\bfl(y|ies)\b|flea|tick|bed bug|pantry|scorpion|\brats?\b|\bmouse\b|\bmice\b|rodent/i;
+
+// Which service lines a label target belongs on. Returns null for targets no
+// pattern claims (nutrition goals, oddballs like "Darkling beetles") — those
+// pass on every line rather than silently vanishing from the picker.
+// Precedence matters: turf before structural ("Tawny mole crickets" is a lawn
+// pest, not a cricket), ornamental before structural ("Spider mites" is not a
+// spider), termite/carpenter-ant before the generic ant pattern.
+function labelTargetLines(target) {
+  if (/fire ant/i.test(target)) return ["pest", "lawn"];
+  if (LAWN_ONLY_TARGET_RE.test(target)) return ["lawn"];
+  if (ORNAMENTAL_ONLY_TARGET_RE.test(target)) return ["tree_shrub"];
+  if (TERMITE_TARGET_RE.test(target)) return ["termite"];
+  if (CARPENTER_ANT_RE.test(target)) return ["termite", "pest"];
+  if (MOSQUITO_TARGET_RE.test(target)) return ["mosquito"];
+  if (STRUCTURAL_ONLY_TARGET_RE.test(target)) return ["pest"];
+  return null;
+}
+
+// A prefill is a starting point, not a transcription of the label — cap it at
+// the few most popular targets (catalog arrays are ordered most-common-first)
+// and let the tech add the rest by hand (owner 2026-08-01: "3 at most, and
+// popular SWFL pests").
+export const MAX_LABEL_TARGET_PREFILL = 3;
+
+// Keep only the label targets that belong on the visit's service line
+// (detectServiceCategory: pest | lawn | tree_shrub | mosquito | termite), then
+// cap. Filtering runs in BOTH directions now — a lawn visit drops Talstar's
+// ants/roaches just like a pest visit drops its chinch bugs (owner 2026-08-01:
+// targets must populate for the service at hand).
+export function filterLabelTargetsForLine(targets, serviceCategory) {
+  const line = serviceCategory || "pest";
+  return targets
+    .filter((t) => {
+      const lines = labelTargetLines(t);
+      return !lines || lines.includes(line);
+    })
+    .slice(0, MAX_LABEL_TARGET_PREFILL);
 }
 
 // Species-specific, not category-broad (owner request 2026-07-23): the chips
