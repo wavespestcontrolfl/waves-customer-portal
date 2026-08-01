@@ -2529,8 +2529,12 @@ describe('public estimate one-time breakdown', () => {
 
     expect(html).toContain('manual-discount-row');
     expect(html).toContain('Military Discount');
-    // Typographic minus (U+2212) — fmtMoneySigned convention (estimate audit 2026-07-07).
-    expect(html).toContain('−$15.00 / quarter');
+    // "per month" audit 2026-08-01: a residential plan is priced per
+    // application, so this row names what the discount applies to instead of
+    // quoting the old cadence spread (−$15.00 / quarter) — a combined-total
+    // figure the customer is never charged as a line.
+    expect(html).toContain('Applied to your plan pricing');
+    expect(html).not.toContain('−$15.00 / quarter');
   });
 
   test('public pricing bundle exposes annual prepay for lawn-only estimates', async () => {
@@ -7172,8 +7176,8 @@ describe('public estimate one-time breakdown', () => {
     ]));
   });
 
-  test('server-rendered estimate keeps aggregate hero when service cards do not cover the full total', () => {
-    const html = renderPage('partial-token', {
+  test('server-rendered estimate names the billing unit when service cards do not cover the full total', () => {
+    const partialCoverageEstimate = {
       status: 'sent',
       customerName: 'Pat Customer',
       address: '123 Main St',
@@ -7181,7 +7185,8 @@ describe('public estimate one-time breakdown', () => {
       annualTotal: 1140,
       onetimeTotal: 0,
       tier: 'Silver',
-    }, {
+    };
+    const partialCoverageData = {
       result: {
         recurring: {
           services: [
@@ -7196,10 +7201,26 @@ describe('public estimate one-time breakdown', () => {
           pestTiers: [{ label: 'Quarterly', mo: 50, pa: 150, apps: 4 }],
         },
       },
-    });
+    };
+    const html = renderPage('partial-token', partialCoverageEstimate, partialCoverageData);
 
     expect(html).not.toContain('class="service-price-list"');
-    expect(html).toContain('id="monthly-display">$285.00</span>');
+    // "per month" audit 2026-08-01: the aggregate cadence hero ($285.00 /
+    // quarter) is gone for residential plans — an uncovered total now names
+    // the billing unit instead of presenting a combined figure.
+    expect(html).toContain('Priced per application');
+    expect(html).not.toContain('id="monthly-display"');
+
+    // …unless the plan genuinely bills by the month. A current monthly member
+    // keeps membership billing at accept (#2978), so their hero shows the real
+    // recurring amount and their WaveGuard tier — the SAME fork commercial
+    // uses (codex #3128 r6).
+    const monthlyMemberHtml = renderPage('partial-token', partialCoverageEstimate, partialCoverageData, null, {
+      monthlyBilledEstimate: true,
+    });
+    expect(monthlyMemberHtml).toContain('id="monthly-display">$285.00</span>');
+    expect(monthlyMemberHtml).toContain('WaveGuard Silver');
+    expect(monthlyMemberHtml).not.toContain('Priced per application');
   });
 
   test('accept success payload marks invoice payment as the next step', () => {

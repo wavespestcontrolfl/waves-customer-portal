@@ -1073,10 +1073,14 @@ function MembershipCard({ membership }) {
   if (membership.tierDiscountPct != null && !(Number(membership.tierDiscountPct) > 0)) return null;
   const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
     .filter((s) => Number(s.extraDiscountPct) > 0);
+  // monthlySavings is deliberately NOT an admission criterion (pre-push audit
+  // P1, "per month" sweep 2026-08-01) — mirrors the SSR filter. The row prints
+  // a discount percentage or a per-application saving and nothing else, so a
+  // row admitted on monthlySavings ALONE renders a bare "Member pricing" with
+  // no figure, which is the no-benefit card this gate exists to suppress.
   const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
     .filter((s) => Number(s.discountPct) > 0
-      || Number(s.perApplicationSavings) > 0
-      || Number(s.monthlySavings) > 0);
+      || Number(s.perApplicationSavings) > 0);
   if (!membership.upgrade && existing.length === 0 && added.length === 0) return null;
   const hello = membership.firstName ? `Welcome back, ${membership.firstName}` : 'Welcome back';
 
@@ -1157,7 +1161,7 @@ function MembershipCard({ membership }) {
                 {s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}
                 {Number(s.perApplicationSavings) > 0
                   ? ` · save ${money(s.perApplicationSavings)} per application`
-                  : (Number(s.monthlySavings) > 0 ? ` · save ${money(s.monthlySavings)}/mo` : '')}
+                  : ''}
               </span>
             </div>
           ))}
@@ -2076,7 +2080,15 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
   const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
   const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
-  const creditBox = (amount) => (
+  // The derived credit is a MONTHLY slice (subtotal − net below) of a
+  // WHOLE-PLAN discount, and this card renders only for multi-service plans
+  // (services.length > 1 at the call site) whose combinedFrequency inherits
+  // the PRIMARY service's cadence — dividing the plan credit by one service's
+  // visit count would assert a per-application figure that is not the
+  // discount applied to any application's charge (codex #3128 r4, retiring
+  // the r1 numeric path). The credit therefore always renders label-only; the
+  // dollar effect is already visible in each service card's discounted price.
+  const creditBox = () => (
     <div style={{
       ...row,
       padding: '12px 14px',
@@ -2088,7 +2100,7 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
       fontSize: 16,
     }}>
       <span>{creditLabel}</span>
-      <strong style={num}>{fmtMoneySigned(-amount)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
+      <span style={{ fontWeight: 600, fontSize: 14 }}>Applied to your plan pricing</span>
     </div>
   );
 
@@ -3356,6 +3368,10 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
 export function ServiceSection({
   section,
   servicesLength = 1,
+  // The plan is charged BY THE MONTH — commercial (proposal or auto-priced) or
+  // a current monthly member whose accept preserves membership billing. Either
+  // way the bundle card keeps its combined total (codex #3128 r6).
+  billsMonthly = false,
   selectedFrequencyKey,
   selectedAddOns = new Set(),
   onFrequencyChange,
@@ -3507,6 +3523,16 @@ export function ServiceSection({
             // cadence total accept/billing charges, so the bundle card keeps
             // its combined /mo total.
             preferPerApplicationPrice={section.key !== 'bundle'}
+            // The bundle card used to keep its combined /mo total here; that
+            // is a plan total the estimate surface must not carry ("per
+            // month" audit 2026-08-01) — its headline now names the billing
+            // unit and the itemized rows carry the per-application prices.
+            // Monthly-billed plans are the exemption: commercial approval is
+            // explicitly monthly (and rows may carry no application count),
+            // and a preserved monthly member's accept keeps monthly dues —
+            // for both, the combined total IS the charge. Mirrors the SSR
+            // recurringBilledMonthly fork (codex #3128 r4/r6).
+            suppressCombinedTotal={section.key === 'bundle' && !billsMonthly}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -5050,6 +5076,18 @@ function EstimateViewPageInner() {
   })();
   const quoteRequiredReason = cta?.quoteRequiredReason || pricing?.quoteRequiredReason || pricing?.quoteRequiredItems?.[0]?.reason || '';
   const isCommercialProposal = cta?.commercialProposal === true || quoteRequiredReason === 'commercial_proposal';
+  // Commercial identity for pricing display: formal proposals OR auto-priced
+  // commercial estimates (cta.commercialAutoPriced) — the bundle card keeps
+  // the monthly contract price for both, mirroring the SSR fork (codex #3128
+  // r5: commercialProposal alone covered only quote-required proposals).
+  const isCommercialEstimate = isCommercialProposal || cta?.commercialAutoPriced === true;
+  // The second monthly-billed identity (codex #3128 r6): a current monthly
+  // member keeps membership billing at accept, so their bundle's combined
+  // total is the real charge — suppressing it would replace a true monthly
+  // amount with a per-application headline the account never bills. Resolved
+  // server-side from the live customer lane (the same predicate that strips
+  // billedPerApplication flags); absent → false → today's behavior.
+  const billsMonthly = isCommercialEstimate || cta?.monthlyBilled === true;
   const proposalPdfEmailed = cta?.proposalPdfEmailed === true;
 
   // Service/price cards — shared by the live configurator (below) and the
@@ -5118,6 +5156,7 @@ function EstimateViewPageInner() {
                 key={section.key}
                 section={section}
                 servicesLength={services.length}
+                billsMonthly={billsMonthly}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}
