@@ -265,6 +265,18 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(bad.dropped).toBe(1);
   });
 
+  test('generic modifiers never become aliases — "Avoid high-nitrogen fertilizer" survives (r42)', () => {
+    const applied = [{ product_name: 'LESCO High Manganese Combo Micronutrient', product_category: 'micronutrient' }];
+    const ok = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Avoid high-nitrogen fertilizer until the next visit.', reason: 'x', timeframe: 'y' }],
+    }, applied);
+    expect(ok.dropped).toBe(0);
+    const bad = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Avoid Manganese until the next visit.', reason: 'x', timeframe: 'y' }],
+    }, applied);
+    expect(bad.dropped).toBe(1);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

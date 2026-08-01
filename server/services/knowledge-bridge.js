@@ -438,6 +438,10 @@ const GENERIC_NAME_TOKENS = new Set([
   'double', 'triple', 'extra', 'garden', 'general', 'green', 'growth',
   'healthy', 'home', 'natural', 'power', 'prime', 'protect', 'protection',
   'quick', 'rapid', 'root', 'season', 'seasonal', 'super', 'total', 'yard',
+  // Common modifiers (codex P2 r42): "LESCO High Manganese Combo" must not
+  // turn "Avoid high-nitrogen fertilizer" into a product match.
+  'high', 'heavy', 'light', 'slow', 'fast', 'strong', 'pure', 'rich',
+  'combo', 'spring', 'summer', 'fall', 'winter', 'early', 'late',
 ]);
 
 // Generic fallback terms for applied rows whose category is genuinely
