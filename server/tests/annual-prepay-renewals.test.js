@@ -88,8 +88,8 @@ describe('annual prepay renewal helpers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
-    // scheduling/occupancy acquireOccupancyLock issues a pg advisory lock.
-    db.raw = jest.fn().mockResolvedValue(undefined);
+    // scheduling/occupancy lock probes: pg_try_advisory_xact_lock succeeds.
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ locked: true }] });
     // The timed first-visit seed opens its own transaction when the caller
     // passed a bare connection; run the callback against the same mock.
     db.transaction = jest.fn(async (cb) => cb(db));

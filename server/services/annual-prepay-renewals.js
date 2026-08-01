@@ -499,10 +499,15 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     // before the earliest later term; the resulting shortfall (if any) files
     // the coverage-shortfall exception below for operator reconciliation.
     try {
+      // ANY later term caps the slide — status-shape filtering here has
+      // already missed the decided-lapse form (status 'cancelled' +
+      // renewal_decision 'cancel' still counts as paid coverage in
+      // coveredTermsAsOf), and capping on a genuinely dead successor merely
+      // under-extends, which the shortfall exception below surfaces. Being
+      // conservative can't create overlapping paid coverage; being clever can.
       const successor = await conn('annual_prepay_terms')
         .where({ customer_id: term.customer_id })
         .whereNot({ id: term.id })
-        .whereIn('status', [...ACTIVE_STATUSES, PAYMENT_PENDING_STATUS, ...DECIDED_COVERED_STATUSES])
         .where('term_start', '>', termEnd)
         .orderBy('term_start', 'asc')
         .first('term_start');
@@ -700,8 +705,15 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       // held by the OUTER transaction once the savepoint commits, so it still
       // covers the insert below.
       await trx.transaction(async (sp) => {
-        const { acquireOccupancyLock } = require('./scheduling/occupancy');
-        await acquireOccupancyLock(sp, scheduledDate);
+        // TRY-lock, not a blocking acquire: activation already holds
+        // invoice/term row locks here, so reaching rung 1 late and WAITING
+        // could deadlock against a booking that holds the date lock and wants
+        // those rows (AGENTS.md occupancy ordering). Failing to get the lock
+        // degrades to a windowless seed — never an overlap, never a deadlock.
+        const { tryAcquireOccupancyLock } = require('./scheduling/occupancy');
+        if (!(await tryAcquireOccupancyLock(sp, scheduledDate))) {
+          throw new Error('occupancy date lock unavailable');
+        }
         // datesToSeed was computed BEFORE this lock. A concurrent booking or
         // payment sync can have committed an adoptable visit on this exact
         // date in the gap — the conflict filter below would exempt it as
@@ -759,8 +771,11 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     let windowStart = firstVisitWindowStart;
     try {
       await trx.transaction(async (sp) => {
-        const { acquireOccupancyLock } = require('./scheduling/occupancy');
-        await acquireOccupancyLock(sp, promisedTarget);
+        // Same late-rung-1 posture as the timed seed: try, never wait.
+        const { tryAcquireOccupancyLock } = require('./scheduling/occupancy');
+        if (!(await tryAcquireOccupancyLock(sp, promisedTarget))) {
+          throw new Error('occupancy date lock unavailable');
+        }
         const conflict = await findVisitWindowConflict(sp, {
           scheduledDate: promisedTarget,
           windowStart,
@@ -1649,6 +1664,12 @@ async function refreshTermSnapshot(termOrId, conn = db) {
     if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
     await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
     await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
+    // Callers sync customers.waveguard_renewal_date from the PRE-slide end
+    // (or their own normalizedEnd), so renewal workflows would fire while
+    // coverage is still running — re-sync from the slid end here.
+    if (windowEnd !== termEnd) {
+      await syncCustomerRenewalDate(term.customer_id, windowEnd, conn);
+    }
   }
   const coveredRows = coverageServiceType && coverageVisitCount
     ? await coverageRowsForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn)
