@@ -2399,13 +2399,30 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(repairInventedInternalRoutes('[x](/pest-services/)').body).toContain('/pest-control-services/');
   });
 
-  test('parenthesised destinations are never partially rewritten (r3)', () => {
-    // Rewriting on a partial match would leave the tail as corrupted prose.
-    const body = 'See the [guide](/pest-library/ants_(insects)/) here.';
-    const r = repairInventedInternalRoutes(body);
-    expect(r.body).toBe(body);
-    expect(r.body).not.toContain('guide/)');
-    expect(r.repairs).toEqual([]);
+  test('a PARTIAL destination match is never rewritten (r3)', () => {
+    // Rewriting a prefix would leave the tail as corrupted prose. Balanced
+    // parens, backslash escapes, and a continuing path are all rejected.
+    for (const body of [
+      'See the [guide](/pest-library/ants_(insects)/) here.',
+      'See the [guide](/pest-library/ants_\\)/) here.',
+    ]) {
+      const r = repairInventedInternalRoutes(body);
+      expect(r.body).toBe(body);
+      expect(r.body).not.toContain('guide/');
+      expect(r.repairs).toEqual([]);
+    }
+  });
+
+  test('an empty domain list on a refresh is not read as hub-only (r3)', () => {
+    // A legacy refresh keeps multi-domain targeting with an empty list.
+    const r = repairInventedInternalRoutes('[services](/pest-control/)', [], {
+      targetDomains: [], assumeSpokeWhenUnknown: true,
+    });
+    expect(r.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
+    // A declared hub domain still wins over the assumption.
+    expect(repairInventedInternalRoutes('[services](/pest-control/)', [], {
+      targetDomains: ['www.wavespestcontrol.com'], assumeSpokeWhenUnknown: true,
+    }).body).toBe('[services](/pest-control-services/)');
   });
 
   test('mismatched angle delimiters are left for the gate (r3)', () => {

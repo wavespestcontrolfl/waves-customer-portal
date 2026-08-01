@@ -1511,12 +1511,18 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
   }
   // Does this draft publish to a spoke? Alias targets are HUB pages, so a
   // relative alias is only safe when the publishing domain IS the hub.
-  const targetsSpoke = (Array.isArray(options.targetDomains) ? options.targetDomains : [])
-    .some((d) => {
+  const declaredDomains = Array.isArray(options.targetDomains) ? options.targetDomains.filter(Boolean) : [];
+  const targetsSpoke = declaredDomains.length
+    ? declaredDomains.some((d) => {
       const host = String(d || '').toLowerCase()
         .replace(/^https?:\/\//, '').replace(/[/?#].*$/, '').replace(/^www\./, '');
       return Boolean(host) && !isHubHost(host);
-    });
+    })
+    // No declared domains is NOT evidence of hub-only (a legacy refresh keeps
+    // multi-domain targeting with an empty list) — the caller says whether to
+    // assume spoke. Absolute hub URLs are valid on the hub too, so assuming
+    // spoke is the safe direction (Codex r3).
+    : options.assumeSpokeWhenUnknown === true;
   // Countdown map — each grandfathered occurrence is spent once.
   const exemptLeft = new Map();
   const priorBody = typeof options.refreshPriorBody === 'string' ? options.refreshPriorBody : '';
@@ -1526,19 +1532,24 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     }
   }
   const repairs = [];
-  const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, bang, anchorText, open, dest, close, title) => {
+  const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, bang, anchorText, open, dest, close, title, offset) => {
     if (bang) return whole; // image embed — never rewrite
     // Mismatched angle delimiters are MALFORMED Markdown. Repairing one would
     // hand evaluate() an allowlisted path and let a link that cannot render
     // pass the gate, so leave it for the gate to park (Codex r3).
     if (Boolean(open) !== Boolean(close)) return whole;
-    // Markdown permits BALANCED parentheses in a destination, but this
-    // pattern stops at the first ")" — so "/pest-library/ants_(insects)/"
-    // matches only a prefix, and rewriting on that partial match would leave
-    // the tail behind as corrupted prose ("guide/)"). An unbalanced capture
-    // means the real destination extends past the match: leave it entirely
-    // alone and let the fail-closed gate park it (pre-push Codex r3).
-    if ((dest.match(/\(/g) || []).length !== (dest.match(/\)/g) || []).length) return whole;
+    // NEVER rewrite on a PARTIAL destination match. This pattern stops at the
+    // first ")", but Markdown allows balanced parens ("/ants_(insects)/") and
+    // backslash-escaped ones ("/ants_\)/") inside a destination — in both
+    // cases the real URL continues past the match, and rewriting the prefix
+    // leaves the tail behind as corrupted prose ("guide/"). Rather than grow
+    // the pattern per escape form, reject every shape that signals the
+    // destination did not end here and let the fail-closed gate park the
+    // draft (pre-push Codex r3, two rounds of this class).
+    const partialMatch = dest.includes('\\')
+      || (dest.match(/\(/g) || []).length !== (dest.match(/\)/g) || []).length
+      || text[offset + whole.length] === '/';
+    if (partialMatch) return whole;
     const path = toPath(dest);
     if (path === null) return whole; // absolute URL on someone else's host
     // Resolve dot segments the way the gate does, so "/images/../x/" and the

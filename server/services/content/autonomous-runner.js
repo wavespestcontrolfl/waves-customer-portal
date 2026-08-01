@@ -651,6 +651,12 @@ class AutonomousRunner {
           targetDomains: Array.isArray(guardOptions.domains)
             ? guardOptions.domains
             : (Array.isArray(draft.frontmatter?.domains) ? draft.frontmatter.domains : []),
+          // A legacy REFRESH can carry an EMPTY domain list while
+          // publishRefresh still preserves multi-domain targeting, so "no
+          // domains" is not evidence of hub-only. Treat it as possibly
+          // spoke-targeted: an absolute hub URL is correct on the hub too,
+          // whereas a relative one is dead on every spoke (Codex r3).
+          assumeSpokeWhenUnknown: guardOptions.isRefresh === true,
         },
       );
       if (routeRepair.repairs.length) {
