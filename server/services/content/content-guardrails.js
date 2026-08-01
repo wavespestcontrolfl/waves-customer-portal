@@ -68,6 +68,13 @@ function findHardcodedPrice(text) {
     // Regulatory fines are not Waves service pricing. Allow ordinance/citation
     // contexts while still blocking customer-facing service price claims.
     if (isRegulatoryPenaltyAmount(match[0].trim(), window)) continue;
+    // A price ATTRIBUTED to a named competitor is reporting, not our price
+    // list (owner ruling 2026-08-01) — "cancel your pest control contract"
+    // posts have to name the other company's cancellation fee to be useful.
+    // Scoped to the amount's OWN SENTENCE, not the surrounding window: a
+    // competitor named in a neighbouring sentence must never launder our
+    // price ("Orkin is expensive. Quarterly pest control is $129.").
+    if (isThirdPartyPriceCitation(s, match.index)) continue;
     return match[0].trim();
   }
   return null;
@@ -77,6 +84,197 @@ function priceFinding(body) {
   const hit = findHardcodedPrice(body);
   if (!hit) return null;
   return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
+}
+
+// Third-party price attribution (owner ruling 2026-08-01). A dollar figure
+// is reporting — not a Waves price claim — when the surrounding copy names
+// WHOSE price it is and that party isn't us. Two ways to qualify:
+//   1. a curated competitor brand name / alias sits in the window, or
+//   2. a generic third-party framing ("other companies charge…", "the
+//      previous provider's fee").
+// First-person framing anywhere in the window disqualifies it outright, so
+// "we charge $199" can never ride in on a competitor mention elsewhere in
+// the sentence. Waves prices stay banned everywhere — link the calculator.
+// ANY first-person / Waves marker in the price's sentence disqualifies the
+// exemption outright — no verb list to keep in sync (the earlier
+// charge|price|fee list missed "is", "starts at", "bill", "offers"), and a
+// sentence that mentions us AND a dollar figure is a Waves price claim
+// regardless of phrasing: "Our quarterly service is $89, unlike Orkin."
+// Brand TEMPLATE TOKENS count as first-party: spoke-shared copy never
+// writes "Waves" literally, it writes {{brandName}} (pre-push Codex P0 —
+// "Unlike Orkin, {{brandName}} charges $89" must stay blocked).
+const FIRST_PARTY_MARKER_RE = /\b(we|we're|our|ours|us|waves|waveguard)\b|\{\{\s*(?:brand|site|company)[a-zA-Z]*\s*\}\}/i;
+
+// Clause boundaries INSIDE a sentence: punctuation plus contrast/coordination
+// conjunctions. A competitor named in a DIFFERENT clause does not own the
+// amount (pre-push Codex P0 — "Orkin charges too much, but quarterly pest
+// control is $129 per application").
+// COORDINATING conjunctions (and/or/plus) split too: they introduce a new
+// subject, and "Orkin charges too much and quarterly pest control costs
+// $129" must not let the Orkin predicate own the second amount (pre-push
+// Codex P0). Splitting here only ever NARROWS the exemption.
+const CLAUSE_SPLIT_RE = /[,;:—–]|\b(?:but|while|whereas|however|though|although|yet|meanwhile|and|or|plus)\b/gi;
+// Explicit third-party SUBJECTS only. Deliberately excludes vague nouns like
+// "the industry" or "a typical charge" — those describe a market, not a party
+// that owns a price, and they let ordinary marketing copy through
+// ("The industry-leading quarterly plan costs $129" — pre-push Codex P0).
+const GENERIC_THIRD_PARTY_RE = /\b(competitors?|other (?:companies|providers|firms)|national (?:chains?|companies|brands?)|big(?:-| )box (?:companies|chains?|providers?)|another company|(?:previous|current|prior|former|existing) (?:provider|company|contractor|exterminator)|most (?:companies|providers)|many (?:companies|providers)|industry average)\b/i;
+
+// A third party OWNS the amount only in an explicit pricing construction —
+// naming them earlier in the clause is not enough ("Avoid Orkin by choosing
+// quarterly pest control for $129" — pre-push Codex P0). Two shapes, both
+// requiring the third party to be the SUBJECT:
+//   (A) <party> …short filler… <pricing verb> … $amount
+//       "Orkin charges a $199 fee", "other companies typically charge $25"
+//   (B) <party>'s <price noun> is/was/starts at … $amount
+//       "Orkin's cancellation fee is $199"
+// Bare copulas ("is"/"are") are NOT accepted in shape A: "Orkin is expensive
+// and quarterly pest control is $129" must stay blocked.
+const PRICING_VERB_RE = /^(?:charges?|charged|bills?|billed|lists?|listed|quotes?|quoted|asks?|wants?|sets?|advertises?|prices?|priced|costs?|runs?|reports?|collects?|adds?)$/i;
+// WHITELIST, not a blocklist: every token between the third-party subject
+// and the amount must be either the pricing verb (once) or an innocuous
+// determiner/quantifier/price noun. Anything unexpected — a subordinating
+// conjunction, a second subject, another verb — rejects the exemption by
+// construction, which is what ends the "one more conjunction" arms race
+// ("Orkin charges too much because the standard rate is $129" — pre-push
+// Codex P0).
+// NOTE: no price NOUNS here (price/cost/charge/rate/pricing). They double as
+// verbs, which let a SECOND predicate ride through as filler — "Orkin reports
+// the quarterly plan costs $129" (pre-push Codex P0). Only the amount's own
+// trailing noun ("fee") and neutral determiners/quantifiers qualify.
+const PRICE_FILLER_WORD_RE = /^(?:a|an|the|about|around|approximately|roughly|nearly|almost|up|to|as|only|just|its|their|his|her|your|new|typical|typically|usual|usually|generally|often|standard|average|annual|monthly|quarterly|yearly|initial|first|one-time|onetime|early|cancellation|termination|contract|treatment|visit|plan|plans|fee|fees|minimum|customer|customers|client|clients|homeowner|homeowners|may|might|can|could|will|would|still|reportedly|both|per|of|from|at|near|flat|extra|additional)$/i;
+const MAX_ATTRIBUTION_TOKENS = 8;
+
+// RIGID TEMPLATE, deliberately small: the pricing verb must be the FIRST
+// token after the party (one optional modal/adverb), and only determiners or
+// hedges may sit between that verb and the amount. Eight adversarial review
+// rounds established that anything looser leaves room for a second subject
+// or predicate to slip in and launder a Waves price — so the accepted
+// language is a closed set ("Orkin charges a $199 fee", "other companies may
+// bill up to $25"), not "a pricing verb somewhere nearby". Sentences the
+// template rejects are still publishable, just rephrased into this shape.
+const PRE_VERB_MODIFIER_RE = /^(?:may|might|can|could|will|would|often|typically|usually|generally|reportedly|also|still|now|both|each|all|generally)$/i;
+const POST_VERB_MODIFIER_RE = /^(?:a|an|the|its|their|your|about|around|approximately|roughly|nearly|almost|up|to|as|much|as-much-as|only|just|from|over|under|another|one|each|per|flat|extra|additional|new|standard|typical|average|annual|monthly|quarterly|yearly|initial|first|one-time|onetime|early|cancellation|termination|contract|treatment|visit|plan|service)$/i;
+
+function attributionBindsToAmount(between) {
+  const tokens = String(between || '').replace(/^(?:'s|’s)/, ' ').split(/\s+/)
+    .map((t) => t.replace(/[^\w'-]/g, ''))
+    .filter(Boolean);
+  if (!tokens.length || tokens.length > MAX_ATTRIBUTION_TOKENS) return false;
+  let i = 0;
+  // At most two pre-verb modifiers ("may", "typically").
+  let modifiers = 0;
+  while (i < tokens.length && PRE_VERB_MODIFIER_RE.test(tokens[i])) {
+    if (++modifiers > 2) return false;
+    i += 1;
+  }
+  if (i >= tokens.length || !PRICING_VERB_RE.test(tokens[i])) return false;
+  i += 1;
+  // Everything remaining must be a determiner/hedge — no second verb, no
+  // second subject.
+  for (; i < tokens.length; i += 1) {
+    if (!POST_VERB_MODIFIER_RE.test(tokens[i])) return false;
+  }
+  return true;
+}
+// The price noun must be DIRECTLY governed by the possessive (at most two
+// modifiers) and the copula must land immediately before the amount — no
+// intervening subject or predicate. Rejects "Orkin's website notes the local
+// plan price is $129" (pre-push Codex P0) while keeping "Orkin's cancellation
+// fee is $199".
+const POSSESSIVE_PRICE_RE = /^(?:'s|’s)\s+(?:[A-Za-z-]+\s+){0,2}(?:fee|fees|price|prices|pricing|rate|rates|charge|charges|cost|costs|quote|quotes|minimum)\s+(?:is|was|are|were|starts?\s+at|runs?|comes?\s+to)\s*$/i;
+//   (C) benchmark subject + copula: "the industry average is $145". The
+//       phrase names a market statistic, so it can never denote a Waves
+//       price — a bare copula is safe here (it is not in shape A).
+const BENCHMARK_SUBJECT_RE = /^(?:industry average)$/i;
+const BENCHMARK_COPULA_RE = /^[^.!?]{0,20}?\b(?:is|was|are|were|runs?|comes? to|sits? at|hovers? around)\b[^.!?]{0,15}?$/i;
+
+function competitorNamePattern() {
+  if (competitorNamePattern._re !== undefined) return competitorNamePattern._re;
+  const names = [];
+  try {
+    const { COMPETITORS } = require('./competitor-facts');
+    for (const c of Array.isArray(COMPETITORS) ? COMPETITORS : []) {
+      if (c?.name) names.push(String(c.name));
+      for (const a of Array.isArray(c?.aliases) ? c.aliases : []) names.push(String(a));
+    }
+  } catch { /* competitor-facts unavailable — generic framing still applies */ }
+  // Longest-first so "Truly Nolen of America" wins over "Truly Nolen".
+  const alts = names
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .map((n) => escapeRegExp(n).replace(/\s+/g, '\\s+'));
+  competitorNamePattern._re = alts.length ? new RegExp(`\\b(?:${alts.join('|')})\\b`, 'i') : null;
+  return competitorNamePattern._re;
+}
+
+// The sentence containing `index`. Boundaries = . ! ? followed by whitespace
+// or end-of-string (so decimal amounts like "$49.99" never split), PLUS any
+// line break: an unpunctuated Markdown heading otherwise merges with the
+// block below it and "## Orkin\nQuarterly plan costs $129" would read as
+// attribution (pre-push Codex P0).
+function sentenceAround(text, index) {
+  const s = String(text || '');
+  const boundaryRe = /[.!?](?=\s|$)|\r?\n/g;
+  let start = 0;
+  let m;
+  while ((m = boundaryRe.exec(s)) !== null) {
+    if (m.index >= index) break;
+    start = m.index + 1;
+  }
+  boundaryRe.lastIndex = index;
+  const endMatch = boundaryRe.exec(s);
+  const end = endMatch ? endMatch.index + 1 : s.length;
+  return { text: s.slice(start, end), offset: start };
+}
+
+// The clause containing `localIndex` within a sentence.
+function clauseAround(sentence, localIndex) {
+  const s = String(sentence || '');
+  const splitRe = new RegExp(CLAUSE_SPLIT_RE.source, CLAUSE_SPLIT_RE.flags);
+  let start = 0;
+  let m;
+  while ((m = splitRe.exec(s)) !== null) {
+    if (m.index >= localIndex) break;
+    start = m.index + m[0].length;
+  }
+  splitRe.lastIndex = localIndex;
+  const endMatch = splitRe.exec(s);
+  const end = endMatch ? endMatch.index : s.length;
+  return { text: s.slice(start, end), offset: start };
+}
+
+// True only when the amount's OWN CLAUSE attributes the price to someone who
+// isn't us, with the attribution standing BEFORE the amount (subject
+// position) — "Orkin charges a $199 cancellation fee", not "$199 … Orkin"
+// and not "Orkin charges too much, but our rate is $129". The first-party
+// disqualifier is SENTENCE-wide (deliberately broader than the attribution
+// scope): any mention of us anywhere in the sentence blocks the exemption.
+function isThirdPartyPriceCitation(text, amountIndex) {
+  const { text: sentence, offset: sentenceOffset } = sentenceAround(text, amountIndex);
+  if (!sentence) return false;
+  if (FIRST_PARTY_MARKER_RE.test(sentence)) return false;
+  const localAmountIndex = amountIndex - sentenceOffset;
+  const { text: clause, offset: clauseOffset } = clauseAround(sentence, localAmountIndex);
+  if (!clause) return false;
+  const clauseAmountIndex = localAmountIndex - clauseOffset;
+  for (const re of [GENERIC_THIRD_PARTY_RE, competitorNamePattern()]) {
+    if (!re) continue;
+    const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let m;
+    while ((m = scan.exec(clause)) !== null) {
+      if (m.index >= clauseAmountIndex) break;
+      const between = clause.slice(m.index + m[0].length, clauseAmountIndex);
+      // (A) the party is the subject of a pricing predicate that owns THIS
+      // amount — every linking token whitelisted (see attributionBindsToAmount).
+      if (attributionBindsToAmount(between)) return true;
+      // (B) possessive price noun: "Orkin's cancellation fee is $199".
+      if (POSSESSIVE_PRICE_RE.test(between)) return true;
+      // (C) benchmark subject + copula: "the industry average is $145".
+      if (BENCHMARK_SUBJECT_RE.test(m[0].trim()) && BENCHMARK_COPULA_RE.test(between)) return true;
+    }
+  }
+  return false;
 }
 
 function isRegulatoryPenaltyAmount(amount, context) {
@@ -215,9 +413,27 @@ function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] }
 
 // Exact host or subdomain of an allowed host ("entnemdept.ufl.edu" is allowed
 // by "ufl.edu"; "evil-ufl.edu" is not — the dot prefix prevents suffix abuse).
-function hostAllowed(host, allowed) {
+// US government and accredited-education TLDs are citation-grade by
+// registration policy (owner ruling 2026-08-01): .gov requires a verified
+// US government entity, .edu an accredited institution, so neither can be
+// stood up by the spam/injection vector this gate exists to stop — while
+// statute and extension-research citations are exactly the sourcing the
+// E-E-A-T rules ask for. The curated OPERATOR_CITATION_HOSTS list could
+// never enumerate them (flsenate.gov, every state extension service, …).
+// Kept to the exact suffixes: lookalikes like "gov.example.com" or a
+// ".gov.co" ccTLD registration do NOT match.
+//
+// OPERATOR-PROVENANCE ONLY, exactly like OPERATOR_CITATION_HOSTS: mined
+// drafts stay internal-only because untrusted SERP/PAA text reaches their
+// writer prompt, and "cite a .gov" is a plausible injection instruction.
+// Operator-directed briefs carry Adam's own source_notes, so the citation
+// is asked for rather than smuggled in.
+const CITATION_GRADE_TLD_RE = /\.(gov|edu)$/i;
+
+function hostAllowed(host, allowed, { citationGradeTlds = false } = {}) {
   if (!host) return false;
   if (allowed.has(host)) return true;
+  if (citationGradeTlds && CITATION_GRADE_TLD_RE.test(host)) return true;
   for (const a of allowed) {
     if (a && host.endsWith(`.${a}`)) return true;
   }
@@ -424,7 +640,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     let host = null;
     try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
-    if (!hostAllowed(norm, allowed)) {
+    if (!hostAllowed(norm, allowed, { citationGradeTlds: operatorCitations })) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
   }
@@ -2018,6 +2234,7 @@ module.exports = {
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
+  isThirdPartyPriceCitation,
   // single source of truth for the product-claim + prevention-promise
   // policies — consumed by the writer prompts so instruction and enforcement
   // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).

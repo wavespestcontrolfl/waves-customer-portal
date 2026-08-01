@@ -363,7 +363,14 @@ describe('outbound-link gate: operator-intercept citation exceptions (Codex roun
   test('operatorCitations still blocks non-curated hosts and suffix-spoofed domains', () => {
     expect(guardrails.evaluate({ body: 'Buy [links](https://spam.example/x).' }, { operatorCitations: true })
       .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
-    expect(guardrails.evaluate({ body: 'See https://evil-ufl.edu/x now.' }, { operatorCitations: true })
+    // Lookalikes on OPEN TLDs stay blocked — anyone can register these.
+    // (The former ".edu lookalike" case moved to the citation-grade-TLD
+    // suite below: owner ruling 2026-08-01 admits .gov/.edu wholesale for
+    // operator-directed drafts, and neither TLD is openly registrable —
+    // .edu needs accreditation, .gov a verified US government entity.)
+    expect(guardrails.evaluate({ body: 'See https://evil-ufl.com/x now.' }, { operatorCitations: true })
+      .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+    expect(guardrails.evaluate({ body: 'See https://ufl.edu.example.net/x now.' }, { operatorCitations: true })
       .findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
   });
   test('mined drafts (no operator flags) stay internal-only — UF/IFAS still blocks', () => {
@@ -2237,5 +2244,194 @@ describe('blog meta contract applies to NON-refresh blog publishes (legacy lane)
       {},
     );
     expect(r.findings.some((f) => String(f.code).startsWith('META_') || String(f.code).startsWith('BLOG_META'))).toBe(false);
+  });
+});
+
+describe('third-party price citations + citation-grade TLDs (owner ruling 2026-08-01)', () => {
+  const { findHardcodedPrice } = guardrails;
+
+  test('a competitor-attributed price is reporting, not a Waves price claim', () => {
+    for (const body of [
+      'Orkin charges a $199 cancellation fee when you break the agreement early.',
+      // Canonical attribution shape — "Terminix customers report a $150…"
+      // puts a second subject before the verb and is deliberately NOT
+      // exempt (see the rigid-template note in content-guardrails).
+      'Terminix charges a $150 early-termination fee on annual plans.',
+      'Other companies typically charge $25 per month more for the same coverage.',
+      'Your previous provider may bill a $99 fee for ending service early.',
+    ]) {
+      expect(findHardcodedPrice(body)).toBeNull();
+    }
+  });
+
+  test('first-person price framing is still HARD-blocked, even beside a competitor name', () => {
+    for (const body of [
+      'Unlike Orkin, we charge $89 for the same quarterly service in Bradenton.',
+      'Orkin is expensive, but our price is $129 per treatment for local homes.',
+      'Waves charges $99 for the first visit and Terminix charges more.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  test('a bare price with no attribution stays blocked (unchanged policy)', () => {
+    expect(findHardcodedPrice('Quarterly pest control runs $129 for most homes.')).not.toBeNull();
+  });
+
+  // Pre-push Codex P0: a 200-char WINDOW let a competitor named in a
+  // NEIGHBOURING sentence launder a Waves price. Exemption is sentence-scoped
+  // and requires the third party to precede the amount.
+  test('a competitor in a neighbouring sentence never launders our price', () => {
+    for (const body of [
+      'Orkin is expensive. Quarterly pest control is $129 per application.',
+      'Terminix locks you into a year. The standard rate is $89 per visit here.',
+      'Homeowners compare Massey Services often. A single treatment costs $150.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  test('first-party framing wins even in the same sentence as a competitor', () => {
+    for (const body of [
+      'Our quarterly service is $89, unlike Orkin.',
+      'We bill $129 per visit while Terminix bills more.',
+      'Waves offers $99 first treatments compared with Orkin.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  // Pre-push Codex P0 round 2.
+  test('brand template tokens count as first-party (spoke-shared copy)', () => {
+    for (const body of [
+      'Unlike Orkin, {{brandName}} charges $89 per application.',
+      'Orkin is pricier than {{ brandName }}, which bills $99 per visit.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  test('a competitor in a DIFFERENT clause does not own the amount', () => {
+    for (const body of [
+      'Orkin charges too much, but quarterly pest control is $129 per application.',
+      'Terminix locks you in; the standard rate is $89 per visit.',
+      'Massey Services advertises heavily while the going rate is $150 a visit.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  test('attribution must PRECEDE the amount (subject position)', () => {
+    expect(findHardcodedPrice('The fee is $199 according to nothing in particular.')).not.toBeNull();
+    expect(findHardcodedPrice('Orkin lists a $199 fee.')).toBeNull();
+  });
+
+  // Pre-push Codex P0 round 3: naming a party is not owning the price.
+  test('a named competitor without a pricing construction does NOT exempt', () => {
+    for (const body of [
+      'Avoid Orkin by choosing quarterly pest control for $129.',
+      'Orkin is expensive and quarterly pest control is $129 per application.',
+      'Homeowners leaving Terminix still pay $89 for the same coverage.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  test('vague market nouns are not third-party owners', () => {
+    for (const body of [
+      'The industry-leading quarterly plan costs $129 for most homes.',
+      'A typical charge is $129 for quarterly service.',
+      // "current service" could be OURS — only provider/company/contractor
+      // /exterminator qualify as external owners (pre-push Codex P0).
+      'Current service charges $99 per application.',
+      'Existing service costs $129 for quarterly coverage.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  // Pre-push Codex P0 round 4: a coordinating conjunction starts a new
+  // subject — the competitor's predicate must not reach across it.
+  test('a new subject after and/or/plus is not covered by the competitor predicate', () => {
+    for (const body of [
+      'Orkin charges too much and quarterly pest control costs $129 per application.',
+      'Orkin charges $199 and quarterly pest control costs $129 per application.',
+      'Terminix bills annually or the standard plan costs $89 per visit.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  test('coordination still allows a genuinely attributed amount', () => {
+    expect(findHardcodedPrice('Orkin and Terminix both charge $199 to cancel early.')).toBeNull();
+  });
+
+  // Pre-push Codex P0 round 5: an intervening predicate must not be crossed.
+  test('an intervening subordinate clause breaks attribution', () => {
+    for (const body of [
+      'Orkin charges too much because the standard rate is $129.',
+      'Terminix bills annually since the going rate is $89 per visit.',
+      'Orkin charges more when the quarterly plan costs $129 per application.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  // Pre-push Codex P0 round 7: a second predicate after the attribution verb,
+  // and arbitrary text inside the possessive, both laundered a Waves price.
+  test('a second predicate after the attribution verb breaks attribution', () => {
+    for (const body of [
+      'Orkin reports the quarterly plan costs $129 per application.',
+      "Orkin's website notes the local plan price is $129 per application.",
+      'Terminix lists what the standard plan costs $89 for.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  // Pre-push Codex P0 round 8: an unpunctuated Markdown heading merged with
+  // the block below it, so the heading's competitor "owned" the next price.
+  test('markdown block boundaries break attribution', () => {
+    for (const body of [
+      '## Orkin\nQuarterly plan costs $129 per application.',
+      'Orkin\n\nThe standard rate is $89 per visit.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+    }
+  });
+
+  test('possessive price constructions are attributed', () => {
+    expect(findHardcodedPrice("Orkin's cancellation fee is $199 in most contracts.")).toBeNull();
+    expect(findHardcodedPrice('The industry average is $145 per quarterly visit.')).toBeNull();
+  });
+
+  test('operator drafts may cite any .gov / .edu (statutes, extension research)', () => {
+    for (const body of [
+      'Florida law sets the cancellation window — see [the statute](https://www.flsenate.gov/Laws/Statutes/2024/501.017).',
+      'UF/IFAS covers chinch bug thresholds in [this guide](https://edis.ifas.ufl.edu/publication/IN1234).',
+      'The state extension service explains it at https://extension.msstate.edu/publications/insects.',
+    ]) {
+      const r = guardrails.evaluate({ body }, { operatorCitations: true });
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
+    }
+  });
+
+  test('citation-grade TLDs do NOT leak to mined drafts (injection boundary holds)', () => {
+    const r = guardrails.evaluate(
+      { body: 'See [the statute](https://www.flsenate.gov/Laws/Statutes/2024/501.017).' },
+      {},
+    );
+    expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('only the exact .gov/.edu suffix qualifies — lookalikes still block', () => {
+    for (const body of [
+      'See [this page](https://gov.example.com/statutes) for the rule.',
+      'See [this page](https://flsenate.gov.example.net/statutes) for the rule.',
+      'See [this page](https://ufl.edu.co/creatures) for the guide.',
+    ]) {
+      const r = guardrails.evaluate({ body }, { operatorCitations: true });
+      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+    }
   });
 });
