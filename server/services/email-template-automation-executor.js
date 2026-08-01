@@ -414,13 +414,28 @@ async function loadAutomations(triggerEventKey, automationKey) {
 async function logRunEvent(runId, eventType, message, metadata = {}, conn = db) {
   if (!runId) return null;
   try {
-    const [event] = await conn('email_template_automation_run_events').insert({
-      run_id: runId,
-      event_type: eventType,
-      message: message || null,
-      metadata: JSON.stringify(metadata || {}),
-    }).returning('*');
-    return event || null;
+    const insertEvent = async (c) => {
+      const [event] = await c('email_template_automation_run_events').insert({
+        run_id: runId,
+        event_type: eventType,
+        message: message || null,
+        metadata: JSON.stringify(metadata || {}),
+      }).returning('*');
+      return event || null;
+    };
+    // Best-effort logging must never POISON a caller's transaction (r17
+    // pre-push P1): in Postgres a failed statement aborts the enclosing
+    // transaction even though the JS error is caught below — the caller
+    // would then COMMIT an aborted transaction and silently lose the run
+    // row this event annotates. A nested knex transaction (SAVEPOINT)
+    // scopes the failure to the event insert alone: its rollback releases
+    // the savepoint and the outer transaction stays healthy. The pooled
+    // path keeps the plain insert — there is no enclosing transaction to
+    // protect.
+    if (conn.isTransaction) {
+      return await conn.transaction((sp) => insertEvent(sp));
+    }
+    return await insertEvent(conn);
   } catch (err) {
     logger.warn(`[email-template-automation] failed to log ${eventType} for run ${runId}: ${err.message}`);
     return null;

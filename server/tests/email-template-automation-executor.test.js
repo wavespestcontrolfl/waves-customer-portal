@@ -278,6 +278,85 @@ describe('email template automation executor', () => {
     expect(opTrace).toContain('table:email_template_automation_run_events');
   });
 
+  test('a failing best-effort run-event insert inside the locked transaction is savepoint-scoped — the run row still commits', async () => {
+    // Postgres semantics modeled faithfully (r17 pre-push P1): logRunEvent
+    // swallows its insert error in JS, but WITHOUT a savepoint the failed
+    // statement has already aborted the enclosing transaction — the
+    // eventual COMMIT then fails and the just-inserted run row is silently
+    // rolled back. With the event insert wrapped in a nested transaction
+    // (SAVEPOINT), its failure rolls back only the savepoint and the run
+    // commits. The stub aborts the trx whenever the failing insert runs
+    // OUTSIDE a savepoint, and the transaction wrapper refuses to commit an
+    // aborted trx — so a regression to a bare best-effort insert fails this
+    // test the same way it loses runs in production.
+    const queuedRun = run();
+    let savepointDepth = 0;
+    let trxAborted = false;
+    const existingRunQuery = chain({ first: null });
+    const insertRunQuery = chain({ returning: [queuedRun] });
+    const eventQuery = chain({});
+    eventQuery.returning = jest.fn(async () => {
+      if (savepointDepth === 0) trxAborted = true;
+      throw new Error('null value in column "metadata" violates not-null constraint');
+    });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+      email_template_automation_runs: [existingRunQuery, insertRunQuery],
+      email_template_automation_run_events: [eventQuery],
+    });
+    // Transaction wrapper that models the aborted-trx COMMIT failure and
+    // provides the nested-transaction (savepoint) entry point.
+    db.transaction = jest.fn(async (fn) => {
+      const trx = (table) => { opTrace.push(`table:${table}`); return takeFromQueue(table); };
+      trx.isTransaction = true;
+      trx.raw = jest.fn(async (...args) => {
+        advisoryLockCalls.push(args);
+        return { rows: [] };
+      });
+      trx.transaction = jest.fn(async (spFn) => {
+        savepointDepth += 1;
+        try {
+          return await spFn(trx);
+        } finally {
+          savepointDepth -= 1;
+        }
+      });
+      const result = await fn(trx);
+      if (trxAborted) {
+        const err = new Error('current transaction is aborted, commands ignored until end of transaction block');
+        err.code = '25P02';
+        throw err;
+      }
+      return result;
+    });
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    // The run committed despite the failed audit event.
+    expect(result.results[0].run.id).toBe('run-1');
+    expect(result.results[0].deduped).toBe(false);
+    expect(insertRunQuery.insert).toHaveBeenCalled();
+    // The event insert was attempted — inside a savepoint — and its
+    // failure never aborted the outer transaction.
+    expect(eventQuery.returning).toHaveBeenCalled();
+    expect(trxAborted).toBe(false);
+  });
+
   test('a trigger replay racing the insert inside the locked transaction recovers the existing run WITHOUT aborting the trx', async () => {
     // Postgres semantics modeled faithfully (r16): a raised unique
     // violation ABORTS the enclosing transaction — every later statement on

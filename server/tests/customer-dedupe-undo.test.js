@@ -1071,7 +1071,7 @@ describe('revertMerge', () => {
   it('a JOURNALED, untouched dunning sequence still reverts — it moves back with the invoice (control)', async () => {
     const journal = baseJournal();
     journal.repointed_ids.tables['invoice_followup_sequences.customer_id'] = ['seq-1'];
-    const { trx } = buildRevertTrx({
+    const { trx, state } = buildRevertTrx({
       journal,
       winner: baseWinner(),
       loser: baseLoser(),
@@ -1087,6 +1087,37 @@ describe('revertMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
     expect(result.repointedBack['invoice_followup_sequences.customer_id']).toBe(1);
+    // Collection-critical (r17 pre-push P1): the follow-up worker updates
+    // sequences in place, so the journaled row verifies under FOR UPDATE —
+    // a worker mid-send blocks instead of racing the repoint.
+    expect(state.verified).toEqual(expect.arrayContaining([
+      { table: 'invoice_followup_sequences', forUpdate: true },
+    ]));
+  });
+
+  it('refuses when a JOURNALED dunning sequence itself was touched since the merge (the worker advanced it)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['invoice_followup_sequences.customer_id'] = ['seq-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        invoice_followup_sequences: {
+          stillOnWinner: ['seq-1'],
+          // Financial-drift shape: the verification pass reads the real row
+          // with its timestamps and sees a post-merge touch.
+          verifiedRows: [{ id: 'seq-1', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-30T06:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/invoice_followup_sequences row\(s\) recorded by this merge were updated after it/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
   });
 
   it('refuses (409) when clearing inherited SERVICE CONTACTS would orphan a since-merge appointment\'s comms routing (r17)', async () => {

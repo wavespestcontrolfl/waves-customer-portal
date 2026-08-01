@@ -1610,6 +1610,16 @@ const REVERT_FINANCIAL_TABLES = new Set([
   // governing the restored loser's invoice. Plain uuid `id` PK +
   // customer_id (20260530000001), so the standard machinery applies.
   'payment_plans',
+  // A dunning follow-up sequence drives its invoice's collection path and
+  // is UPDATED IN PLACE by the follow-up worker (status/step/anchor
+  // advances) — so a journaled sequence must verify under FOR UPDATE,
+  // refuse post-merge touches and count-only journals, and reverse-repoint
+  // exactly (r17 pre-push P1): without the lock, a worker mid-send could
+  // move the sequence between verification and repoint. Plain uuid `id`
+  // PK + customer_id + invoice_id, timestamps(true, true)
+  // (20260414000032). UNJOURNALED sequences on a journaled invoice are the
+  // separate finalization gap covered by the invoice-child probe below.
+  'invoice_followup_sequences',
 ]);
 
 // Comms-CONSENT tables where a MISSING row semantically means "allowed":
