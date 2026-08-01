@@ -163,6 +163,26 @@ function RowInclusions({ items, collapsible = false }) {
   );
 }
 
+// Applications-per-year for a frequency, resolved the one way the whole
+// surface agrees on: the frequency's own count, else the single visit-bearing
+// treatment row's, else the cadence-key default when there are NO treatment
+// rows at all (an unsplit combined frequency with several rows of differing
+// counts must not advertise one number for all of them). Returns null when no
+// unambiguous count exists. Exported so the plan-level credit card counts
+// applications exactly as the cards do.
+export function applicationsPerYearForFrequency(frequency) {
+  if (!frequency) return null;
+  const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+  const own = Number(frequency.visitsPerYear);
+  if (own > 0) return own;
+  const visitRows = Array.isArray(frequency.perServiceTreatments)
+    ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
+    : [];
+  if (visitRows.length === 1) return Number(visitRows[0].visitsPerYear);
+  if (visitRows.length === 0) return CADENCE_VISITS[frequency.key] || null;
+  return null;
+}
+
 // Pure per-application derivation shared with the sticky book bar so the bar
 // quotes exactly the figure this card leads with. Returns the net
 // per-application price, or null when no single unambiguous one exists (the
@@ -230,18 +250,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   // Applications-per-year count — only when unambiguous. Feeds the anchor
   // math below; the count itself renders only in the per-row sub-label
   // (owner 2026-07-23: no "N applications per year included" headline line).
-  const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
-  const treatmentVisitRows = Array.isArray(frequency.perServiceTreatments)
-    ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
-    : [];
-  // The cadence-key fallback only applies when there are NO per-service
-  // treatment rows: an unsplit combined frequency with several rows of
-  // differing counts must not advertise one number for all of them.
-  const visitsPerYear = Number(frequency.visitsPerYear) > 0
-    ? Number(frequency.visitsPerYear)
-    : (treatmentVisitRows.length === 1
-      ? Number(treatmentVisitRows[0].visitsPerYear)
-      : (treatmentVisitRows.length === 0 ? (CADENCE_VISITS[frequency.key] || null) : null));
+  const visitsPerYear = applicationsPerYearForFrequency(frequency);
   // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the
   // displayed cadence price ("$X–$Y/mo, confirmed on site"). The server flags the
   // frequency with lowConfidenceRangePct; the WIDE case is already quote-required
@@ -320,6 +329,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     if (!(recurringAnnual > 0) || !(visits > 0)) return 0;
     return round2(recurringAnnual / visits);
   })();
+  // A discount reads in the same unit as the price it reduces. When the card
+  // leads with a per-application price, a "/mo" credit row describes a billing
+  // period this plan doesn't use — the customer pays per application, so the
+  // credit is quoted per application too (owner 2026-08-01).
+  const showDiscountPerApplication = perAppNet != null && manualDiscountPerApplication > 0;
   const perAppSavingsRaw = perAppNet != null
     ? round2(perAppAnchor - perAppNet - manualDiscountPerApplication)
     : 0;
@@ -443,12 +457,17 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      {manualDiscount && manualDiscountInterval > 0 ? (
+      {manualDiscount && (showDiscountPerApplication ? manualDiscountPerApplication > 0 : manualDiscountInterval > 0) ? (
         <div style={{
           display: 'flex',
           justifyContent: 'space-between',
-          gap: 12,
+          gap: 4,
           alignItems: 'center',
+          // "/ application" is a wider unit than "/mo", and catalog labels run
+          // long ("Custom Percentage Discount") — on a 390px phone the two
+          // squeezed each other into three ragged lines. Wrapping drops the
+          // amount onto its own right-aligned line instead.
+          flexWrap: 'wrap',
           marginTop: 12,
           padding: '12px 12px',
           border: '1px solid #DCFCE7',
@@ -460,7 +479,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           lineHeight: 1.35,
         }}>
           <span>{manualDiscount.label || 'Discount'}</span>
-          <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoneySigned(-manualDiscountInterval)}{periodLabel}</strong>
+          <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums', marginLeft: 'auto' }}>
+            {showDiscountPerApplication
+              ? <>{fmtMoneySigned(-manualDiscountPerApplication)} / {perApplicationNoun}</>
+              : <>{fmtMoneySigned(-manualDiscountInterval)}{periodLabel}</>}
+          </strong>
         </div>
       ) : null}
 

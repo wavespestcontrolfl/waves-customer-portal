@@ -272,6 +272,74 @@ describe('PriceCard — manual discount is not double-reported in-card', () => {
   });
 });
 
+describe('PriceCard — a discount reads in the unit of the price it reduces (owner 2026-08-01)', () => {
+  // Lawn: 9 applications a year on a monthly billing interval. The credit is an
+  // ANNUAL $43.44, so the old "/mo" row showed $3.62 — a billing period this
+  // plan does not use, next to a headline quoted per application.
+  const lawnFrequency = (overrides = {}) => ({
+    key: 'lawn_9',
+    label: '9 applications/year',
+    monthly: 74.7,
+    annual: 896.4,
+    perTreatment: 99.6,
+    monthlyBase: 83,
+    visitsPerYear: 9,
+    billedPerApplication: true,
+    manualDiscount: { amount: 43.44, recurringAmount: 43.44, label: 'Custom Percentage Discount' },
+    ...overrides,
+  });
+
+  it('quotes the credit per application when the card leads with a per-application price', () => {
+    render(<PriceCard frequency={lawnFrequency()} waveGuardTier="Silver" preferPerApplicationPrice />);
+
+    // $43.44/yr over 9 applications = $4.83 each.
+    expect(screen.getByText(/\$4\.83 \/ application/)).toBeInTheDocument();
+    // The monthly amortization ($43.44/12) is gone.
+    expect(screen.queryByText(/\$3\.62/)).toBeNull();
+  });
+
+  it('honors a custom per-application noun', () => {
+    render(
+      <PriceCard
+        frequency={lawnFrequency()}
+        waveGuardTier="Silver"
+        preferPerApplicationPrice
+        perApplicationNoun="visit"
+      />,
+    );
+
+    expect(screen.getByText(/\$4\.83 \/ visit/)).toBeInTheDocument();
+  });
+
+  it('keeps the billing-interval unit when the card itself leads with a cadence price', () => {
+    // No per-application headline (preferPerApplicationPrice off) → the credit
+    // stays in the interval the card quotes, so the two never disagree.
+    render(<PriceCard frequency={lawnFrequency()} waveGuardTier="Silver" />);
+
+    expect(screen.getByText(/\$3\.62\/mo/)).toBeInTheDocument();
+    expect(screen.queryByText(/\/ application/)).toBeNull();
+  });
+
+  it('still renders the row for a flat-monthly service with no per-application price', () => {
+    // Termite monitoring bills a flat monthly and has no visit-priced headline —
+    // "/mo" is the correct unit there and must survive.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'recurring',
+          label: 'Termite Bait Monitoring',
+          monthly: 35,
+          annual: 420,
+          manualDiscount: { amount: 43.44, recurringAmount: 43.44, label: 'Custom Percentage Discount' },
+        }}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getByText(/\$3\.62\/mo/)).toBeInTheDocument();
+  });
+});
+
 describe('PriceCard — no monthly billing note (owner 2026-07-23: billing is always per application)', () => {
   const termiteFrequency = (overrides = {}) => ({
     key: 'recurring',

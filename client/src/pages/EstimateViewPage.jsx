@@ -29,7 +29,7 @@ import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
 import BrandFooter from '../components/BrandFooter';
-import PriceCard from '../components/estimate/PriceCard';
+import PriceCard, { applicationsPerYearForFrequency } from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
 import SlotPicker from '../components/estimate/SlotPicker';
 import PaymentPreferenceButtons, { CARD_SURCHARGE_DISCLOSURE } from '../components/estimate/PaymentPreferenceButtons';
@@ -2034,7 +2034,7 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 // the net they actually pay. Renders ONLY when there's a credit to itemize:
 // customer-facing estimates never show a combined "Plan total" (owner rule
 // 2026-07-07, re-affirmed 2026-07-23 after a brief same-day reversal).
-export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null }) {
+export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null, planApplicationsPerYear = null }) {
   if (!combined) return null;
   // The live discount object (selected row first — the server nulls
   // combined.manualDiscount whenever the DEFAULT cadence floor-suppresses the
@@ -2073,24 +2073,41 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   const netMonthly = Number(selectedFrequency?.monthly ?? combined.monthlySubtotal);
   if (!Number.isFinite(netMonthly) || netMonthly < 0) return null;
 
-  const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
   const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
-  const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
-  const creditBox = (amount) => (
-    <div style={{
-      ...row,
-      padding: '12px 14px',
-      borderRadius: 10,
-      border: `1px solid ${W.greenLight}`,
-      background: W.successWash,
-      color: W.green,
-      fontWeight: 800,
-      fontSize: 16,
-    }}>
-      <span>{creditLabel}</span>
-      <strong style={num}>{fmtMoneySigned(-amount)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
-    </div>
-  );
+  // A plan credit is an ANNUAL figure the engine spreads across the year's
+  // applications — quoting it "/mo" described a billing period this plan
+  // doesn't have and shrank the number to its least meaningful form (owner
+  // 2026-08-01: "we're not a per month type situation, it's per application").
+  // Per year is the one unit that stays exact for a multi-service plan whose
+  // services run different cadences: the credit is allocated proportionally by
+  // price, not evenly per visit, so a single plan-wide per-application dollar
+  // figure would be a number no invoice matches. The applications line carries
+  // the per-application framing without inventing that split.
+  const creditBox = (monthlyAmount) => {
+    const annualAmount = round2(monthlyAmount * 12);
+    return (
+      <div style={{
+        padding: '16px 18px',
+        borderRadius: 10,
+        border: `1px solid ${W.greenLight}`,
+        background: W.successWash,
+        color: W.green,
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 800, lineHeight: 1.35 }}>{creditLabel}</div>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+          <strong style={{ ...num, fontSize: 'clamp(26px, 8.5vw, 32px)', fontWeight: 800, lineHeight: 1 }}>
+            {fmtMoneySigned(-annualAmount)}
+          </strong>
+          <span style={{ fontSize: 15, fontWeight: 600 }}>per year</span>
+        </div>
+        {planApplicationsPerYear > 0 ? (
+          <div style={{ fontSize: 14, fontWeight: 600, marginTop: 8, lineHeight: 1.45 }}>
+            Spread across your {planApplicationsPerYear} applications a year.
+          </div>
+        ) : null}
+      </div>
+    );
+  };
 
   // Credit = the ACTUAL reduction for the SELECTED cadence: the sum of the
   // pre-credit per-service cards minus the net the accept payload charges.
@@ -5186,6 +5203,22 @@ function EstimateViewPageInner() {
                 const m = Number(cur?.monthly);
                 return sum + (Number.isFinite(m) ? m : 0);
               }, 0)}
+              // Applications the plan actually delivers in a year, resolved
+              // per service exactly as each card resolves its own count. Only
+              // rendered when EVERY recurring service reports one — a partial
+              // sum would undercount the plan and misdescribe the credit.
+              planApplicationsPerYear={(() => {
+                let total = 0;
+                for (const s of services) {
+                  if (!s?.isRecurring) continue;
+                  const freqs = Array.isArray(s.frequencies) ? s.frequencies : [];
+                  const cur = freqs.find((f) => f.key === selected[s.key]) || freqs[0] || null;
+                  const visits = applicationsPerYearForFrequency(cur);
+                  if (!(Number(visits) > 0)) return null;
+                  total += Number(visits);
+                }
+                return total > 0 ? total : null;
+              })()}
             />
           ) : null}
 

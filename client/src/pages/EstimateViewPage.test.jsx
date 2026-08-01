@@ -813,12 +813,13 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
 
   it('renders the credit as the per-service-sum minus the net — and no combined totals', () => {
     // Per-service cards sum to $84.08/mo (pre-credit); combined net is $82.00/mo →
-    // the credit shown is the exact difference ($2.08). The combined monthly and
-    // annual totals themselves never render (owner directive 2026-07-11).
+    // the credit is the exact difference ($2.08/mo), rendered as the year it
+    // actually is ($24.96). The combined monthly and annual totals themselves
+    // never render (owner directive 2026-07-11).
     const { container } = render(<PlanTotalSummary combined={combined} preCreditMonthly={84.08} />);
     const text = container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/); // fmtMoneySigned uses a Unicode minus
+    expect(text).toMatch(/[−-]\$24\.96/); // fmtMoneySigned uses a Unicode minus
     expect(text).toContain('Applied to your plan when you book.');
     expect(text).not.toContain('Plan subtotal');
     expect(text).not.toContain('Your price');
@@ -843,7 +844,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }} preCreditMonthly={112.08} />,
     );
     const text = container.textContent;
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$24\.96/);
     expect(text).not.toContain('$112.08');
     expect(text).not.toContain('$110.00');
     expect(text).not.toContain('$1,320.00 / year');
@@ -856,8 +857,8 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const text = render(
       <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 83.50, annual: 1002 }} preCreditMonthly={84.08} />,
     ).container.textContent;
-    expect(text).toMatch(/[−-]\$0\.58/);
-    expect(text).not.toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$6\.96/);
+    expect(text).not.toMatch(/[−-]\$24\.96/);
     expect(text).not.toContain('$83.50');
   });
 
@@ -871,7 +872,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
     const text = render(<PlanTotalSummary combined={ranged} preCreditMonthly={84.08} />).container.textContent;
     expect(text).toContain('Referral Credit'); // credit stays visible…
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$24\.96/);
     expect(text).not.toContain('Your price'); // …but no exact subtotal/net
     expect(text).not.toContain('Plan subtotal');
     // Same when the range rides on the selected frequency.
@@ -889,8 +890,8 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const text = render(
       <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 111.50, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
     ).container.textContent;
-    expect(text).toMatch(/[−-]\$0\.58/);
-    expect(text).not.toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$6\.96/);
+    expect(text).not.toMatch(/[−-]\$24\.96/);
   });
 
   it('suppresses for a quote-required selection (page hides exact dollars)', () => {
@@ -911,7 +912,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     };
     const text = render(<PlanTotalSummary combined={comped} preCreditMonthly={84.08} />).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).toMatch(/[−-]\$1,008\.96/);
     expect(text).not.toContain('Plan subtotal');
     expect(text).not.toContain('Your price');
   });
@@ -942,7 +943,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
     const text = render(<PlanTotalSummary combined={ranged} />).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$24\.96/);
     expect(text).not.toContain('Plan subtotal');
   });
 
@@ -972,7 +973,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$24\.96/);
     expect(text).not.toContain('Plan subtotal');
     expect(text).not.toContain('$110.00');
   });
@@ -990,7 +991,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
         preCreditMonthly={112.08}
       />,
     ).container.textContent;
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$24\.96/);
     expect(text).toContain('Discount');
     expect(text).not.toContain('Plan subtotal');
     expect(text).not.toContain('$110.00');
@@ -1007,7 +1008,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$24\.96/);
     expect(text).not.toContain('$110.00');
   });
 
@@ -1036,7 +1037,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toMatch(/[−-]\$24\.96/);
     expect(text).not.toContain('Plan subtotal');
   });
 
@@ -1070,7 +1071,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).toMatch(/[−-]\$1,008\.96/);
     expect(text).not.toContain('Your price');
   });
 
@@ -1086,8 +1087,49 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).toMatch(/[−-]\$1,008\.96/);
     expect(text).not.toContain('Your price');
+  });
+
+  // Owner 2026-08-01: "we're not a per month type situation, it's per
+  // application." A plan credit is an annual figure the engine spreads across
+  // the year's applications — quoting it "/mo" named a billing period the plan
+  // does not have and shrank the saving to its least meaningful form.
+  it('never quotes the credit as a monthly amount', () => {
+    const text = render(<PlanTotalSummary combined={combined} preCreditMonthly={84.08} />).container.textContent;
+    expect(text).toContain('per year');
+    expect(text).not.toContain('/mo');
+    expect(text).not.toMatch(/[−-]\$2\.08/);
+  });
+
+  it('names the plan applications the credit is spread across when the count is known', () => {
+    const text = render(
+      <PlanTotalSummary combined={combined} preCreditMonthly={84.08} planApplicationsPerYear={13} />,
+    ).container.textContent;
+    expect(text).toContain('Spread across your 13 applications a year.');
+  });
+
+  it('omits the applications line when the plan has no unambiguous count', () => {
+    // A partial count would undercount the plan and misdescribe the credit, so
+    // the parent passes null and the card simply says nothing about visits.
+    const text = render(<PlanTotalSummary combined={combined} preCreditMonthly={84.08} />).container.textContent;
+    expect(text).not.toContain('Spread across');
+    // The credit itself still renders.
+    expect(text).toMatch(/[−-]\$24\.96/);
+  });
+
+  it('uses the annual figure on a ranged low-confidence plan too', () => {
+    const text = render(
+      <PlanTotalSummary
+        combined={{ ...combined, lowConfidenceRangePct: 0.2 }}
+        preCreditMonthly={84.08}
+        planApplicationsPerYear={13}
+      />,
+    ).container.textContent;
+    expect(text).toMatch(/[−-]\$24\.96/);
+    expect(text).toContain('per year');
+    expect(text).toContain('Spread across your 13 applications a year.');
+    expect(text).not.toContain('/mo');
   });
 });
 
