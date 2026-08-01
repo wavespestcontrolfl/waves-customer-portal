@@ -21,6 +21,7 @@ const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateStri
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
+const { buildAppointmentLink } = require('./appointment-link');
 
 // Service states for which a reminder must never fire. A reminder row can be
 // armed (cancelled=false) while its underlying scheduled_service moved into one
@@ -377,6 +378,31 @@ async function renderTemplate(templateKey, vars, context = {}) {
   } catch { /* fall through */ }
   logger.warn(`[appt-remind] SMS template ${templateKey} is missing or inactive`);
   return null;
+}
+
+// Appointment-page copy ladder (GATE_APPOINTMENT_PAGE). The _v2 rows are
+// the short link-first bodies that point at /appointment/:token — the same
+// gate that makes that page reachable, so copy and destination can never
+// go live apart. Semantics mirror the rain-out v3 ladder:
+//   - gate off            -> render the original row, unchanged;
+//   - _v2 renders         -> use it;
+//   - _v2 row ABSENT      -> rolled-back migration, fall back to the
+//                            original so the customer still gets a text;
+//   - _v2 row DISABLED    -> that is the ops kill switch: return null so
+//                            the send stops rather than silently reverting
+//                            to long copy the operator just turned off.
+async function renderAppointmentPageTemplate(baseKey, v2Vars, legacyVars, context = {}) {
+  if (process.env.GATE_APPOINTMENT_PAGE === 'true') {
+    const v2Key = `${baseKey}_v2`;
+    const body = await renderTemplate(v2Key, v2Vars, context);
+    if (body) return body;
+    const row = await db('sms_templates').where({ template_key: v2Key }).first('id');
+    if (row) {
+      logger.warn(`[appt-remind] ${v2Key} disabled - skipping send rather than reverting to legacy copy`);
+      return null;
+    }
+  }
+  return renderTemplate(baseKey, legacyVars, context);
 }
 
 async function renderRequiredTemplate(templateKey, vars, context = {}) {
@@ -872,6 +898,13 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Self-serve reschedule deep link — one mint shared by the SMS clause
       // and the email CTA. Best-effort: a null link renders clean copy.
       const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+      // Appointment-page link for the v2 (link-first) confirmation body;
+      // labelled confirm-first because a fresh booking's primary action
+      // on that page is the Confirm button.
+      const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
+        customerId,
+        label: 'View and confirm your appointment',
+      });
 
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
@@ -885,8 +918,11 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         rescheduleUrl: reschedule.url,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
-          return renderTemplate(
+          return renderAppointmentPageTemplate(
             'appointment_confirmation',
+            // A fresh booking lands on the page's Confirm button, so this
+            // clause frames the link as confirm-first.
+            { first_name: firstName, service_type: serviceLabel, date, time, day, appointment_line: appointmentLink.line },
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
@@ -1686,6 +1722,10 @@ const AppointmentReminders = {
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
+            // Appointment-page link for the v2 (link-first) body. Built
+            // unconditionally — it is cheap, best-effort, and keeps the
+            // gated branch below free of extra control flow.
+            const appointment24 = await buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id });
             // Card-hold fee policy clause — see the 72h twin above.
             const cardHoldPolicyLine24 = await require('./estimate-card-holds')
               .cardHoldReminderLine(r.scheduled_service_id);
@@ -1699,8 +1739,15 @@ const AppointmentReminders = {
               rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-                return renderTemplate(
+                return renderAppointmentPageTemplate(
                   'reminder_24h',
+                  // v2: the page carries the detail — body keeps the arrival
+                  // window + fee disclosure and hands off to the link.
+                  // BOTH var sets carry {window} AND {time}: getTemplate
+                  // suppresses the whole SMS on an unresolved placeholder,
+                  // and this render must survive either body shape (v2 or
+                  // legacy) plus an admin edit that reintroduces {time}.
+                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
