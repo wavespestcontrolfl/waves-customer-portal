@@ -4071,7 +4071,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // per-application default (codex #3128 r6).
   const monthlyBilledEstimate = opts.monthlyBilledEstimate === true;
   // Either identity means the plan is charged by the month, so neither may
-  // render the per-application service cards or the per-application fallback.
+  // fall through to the "Priced per application" hero.
+  //
+  // This gate sits AFTER serviceCardsCoverRecurringTotal, deliberately (codex
+  // #3128 r8, correcting r6): when the rows reconcile to the total, the
+  // per-application service cards are the RIGHT surface even for a
+  // monthly-billed plan — owner directive 2026-07-01 renders the commercial
+  // turf line exactly that way so the card can carry its application cadence
+  // AND the mowing/edging/maintenance exclusion, and supplementalServiceSummaryHtml
+  // is empty at full coverage, so preempting the cards deletes both from the
+  // proposal the customer approves. The defect r6 named was only the
+  // UNCOVERED total, which is what this arm answers.
   const recurringBilledMonthly = commercialRecurringEstimate || monthlyBilledEstimate;
 
   // Termite trenching review gate: a trenching job is a high-liability structural
@@ -4603,7 +4613,9 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
       <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
-    ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (recurringBilledMonthly ? `
+    ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
+      ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
+    ` : recurringBilledMonthly ? `
       <div class="big-price" data-mode-only="recurring">
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
         <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
@@ -4612,8 +4624,6 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       </div>
       ${manualDiscountHtml}
       ${supplementalServiceSummaryHtml}
-    ` : serviceCardsCoverRecurringTotal ? `
-      ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
     ` : `
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:34px">Priced per application</span>
@@ -10684,19 +10694,17 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     const prefMeta = {};
     for (const k of SERVICE_PREF_KEYS) {
       const cfg = SERVICE_PREFS[k];
+      // Byte-identical to renderPrefRow's label (codex #3128 r8): the toggle
+      // handler writes this string straight over the server-rendered row, so
+      // a cadence spread here silently undid the per-application copy the
+      // page loaded with the moment the customer touched a switch.
       let savingsLabel = '';
       if (pestRecurring && hasPestOneTime) {
-        const rec = Math.round(((cfg.perVisit * pestRecurring.visitsPerYear) / 12) * 100) / 100;
-        const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
-        const intervalSavings = intervalPriceFromMonthly(rec, freqKey);
-        savingsLabel = `Save $${intervalSavings.toFixed(intervalSavings % 1 ? 2 : 0)}${pricePeriodLabelForFrequencyKey(freqKey)} + $${cfg.oneTime} on one-time`;
+        savingsLabel = `Save ${fmtMoney(cfg.perVisit)} per application + ${fmtMoney(cfg.oneTime)} on one-time`;
       } else if (pestRecurring) {
-        const rec = Math.round(((cfg.perVisit * pestRecurring.visitsPerYear) / 12) * 100) / 100;
-        const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
-        const intervalSavings = intervalPriceFromMonthly(rec, freqKey);
-        savingsLabel = `Save $${intervalSavings.toFixed(intervalSavings % 1 ? 2 : 0)}${pricePeriodLabelForFrequencyKey(freqKey)}`;
+        savingsLabel = `Save ${fmtMoney(cfg.perVisit)} per application`;
       } else if (hasPestOneTime) {
-        savingsLabel = `Save $${cfg.oneTime}`;
+        savingsLabel = `Save ${fmtMoney(cfg.oneTime)}`;
       }
       prefMeta[k] = { offDesc: cfg.offDesc, savingsLabel };
     }

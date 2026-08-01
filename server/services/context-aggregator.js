@@ -140,35 +140,71 @@ function customerSafeVisitNotes(notes) {
   } catch { return null; }
 }
 
-// The billing lane as a customer-facing FACT (codex #3128 r6).
+// How each resolved lane may be described to the customer (codex #3128 r8).
 //
-// The house-voice rule permits a monthly amount only when the account facts
-// state the lane is monthly membership — and only an EXPLICIT (owner-set)
-// billing_mode counts. A NULL mode that merely INFERS monthly from
-// tier + monthly_rate is exactly the population that can't be trusted:
-// almost every per-application customer carries a monthly_rate, so the
-// inference is a guess, and quoting it would misdescribe a real charge.
-// The 8AM dues cron still bills the inferred lane (MONTHLY_LANE_SQL), so
-// `resolvedMode` keeps that operational answer separate from the
-// customer-facing one.
+// Every lane gets its OWN truthful sentence. A blanket "not monthly, quote per
+// application" was wrong for annual prepay — that plan is already paid for the
+// year, so a per-application price is not what they owe either. And note
+// per_visit's copy: the lane is an internal billing mechanism (invoice on
+// completion), NOT customer wording — recurring work is always described "per
+// application", never "per visit".
+const BILLING_LANE_COPY = {
+  monthly_membership: {
+    monthlyBilled: true,
+    copy: 'MONTHLY MEMBERSHIP — dues are charged monthly, so this customer\'s monthly rate IS their price. State it plainly.',
+  },
+  annual_prepay: {
+    monthlyBilled: false,
+    copy: 'ANNUAL PREPAY — already paid up front for the year. Never describe a monthly charge, and never quote a per-application price as something they owe.',
+  },
+  per_application: {
+    monthlyBilled: false,
+    copy: 'PER APPLICATION — quote the per-application price and the number of applications a year.',
+  },
+  per_visit: {
+    monthlyBilled: false,
+    copy: 'PER APPLICATION (invoiced after each service) — quote the per-application price; never say "per visit" to a customer.',
+  },
+  one_time: {
+    monthlyBilled: false,
+    copy: 'ONE-TIME — a single job with no recurring billing relationship.',
+  },
+};
+
+// The billing lane as a customer-facing FACT (codex #3128 r6, r8).
+//
+// r6 carried only the EXPLICIT lane and reported an inferred one as "not
+// stated". That was too narrow (codex r8): resolveBillingLane's inference is
+// the SAME rule the dues cron bills by (MONTHLY_LANE_SQL), so a NULL-mode
+// account with a real tier and a positive rate genuinely IS charged monthly —
+// refusing to quote it withheld a true price. Provenance still travels with
+// the fact, since the two are not equally certain.
 //
 // Fail-closed: an unresolvable lane reads as "not stated", never as monthly.
 function resolveBillingLaneFacts(customer) {
-  let mode = null;
   try {
     const { resolveBillingLane } = require('./billing-lane');
-    const resolved = resolveBillingLane(customer);
-    mode = resolved.source === 'explicit' ? resolved.mode : null;
+    const { mode, source } = resolveBillingLane(customer);
+    const explicit = source === 'explicit';
+    const laneCopy = BILLING_LANE_COPY[mode];
+    if (!laneCopy) {
+      return {
+        resolvedMode: mode || null,
+        mode: null,
+        explicit,
+        monthlyBilled: false,
+        label: 'not stated on the account — never state a monthly amount; give the plan and cadence and let the office confirm',
+      };
+    }
+    const provenance = explicit
+      ? 'owner-set'
+      : 'not explicitly set — inferred by the same rule billing itself uses';
     return {
-      resolvedMode: resolved.mode,
+      resolvedMode: mode,
       mode,
-      explicit: resolved.source === 'explicit',
-      monthlyBilled: mode === 'monthly_membership',
-      label: mode === 'monthly_membership'
-        ? 'MONTHLY MEMBERSHIP (owner-set) — a monthly amount is correct for this account'
-        : mode
-          ? `${mode.replace(/_/g, ' ')} (owner-set) — NOT monthly; quote per application`
-          : 'not stated on the account — never state a monthly amount; give the plan and cadence and let the office confirm',
+      explicit,
+      monthlyBilled: laneCopy.monthlyBilled,
+      label: `${laneCopy.copy} (${provenance})`,
     };
   } catch {
     return {
@@ -661,7 +697,9 @@ class ContextAggregator {
     // Recomputed when absent so a direct buildSummary caller still fails
     // closed to "not stated" rather than dropping the fact entirely.
     const lane = billingLane || resolveBillingLaneFacts(c);
-    s += ` | Billing lane: ${lane.monthlyBilled ? 'monthly membership (owner-set)' : (lane.mode ? `${lane.mode.replace(/_/g, ' ')} (owner-set)` : 'not stated — no monthly amount')}`;
+    s += ` | Billing lane: ${lane.mode
+      ? `${lane.mode.replace(/_/g, ' ')}${lane.explicit ? '' : ' (inferred)'}`
+      : 'not stated — no monthly amount'}`;
     if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;

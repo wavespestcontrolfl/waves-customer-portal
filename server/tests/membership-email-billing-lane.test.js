@@ -117,3 +117,46 @@ describe('membership.updated billing-lane gate', () => {
     expect(summary).toMatch(/Monthly rate/);
   });
 });
+
+// Codex #3128 r8: an admin can change the lane AND the rate in one save.
+// Resolving only the post-update lane presented the old stored figure as
+// "your previous monthly rate" for a customer who was never billed monthly.
+describe('membership.updated resolves BOTH sides of a lane transition', () => {
+  async function transition({ from, to, beforeRate = 40, afterRate = 45 }) {
+    stubCustomer({ ...BASE, billing_mode: to, pipeline_stage: 'active_customer' });
+    const res = await sendMembershipUpdated({
+      customerId: 'c1',
+      before: { waveguard_tier: 'Bronze', monthly_rate: beforeRate, billing_mode: from },
+      after: { waveguard_tier: 'Bronze', monthly_rate: afterRate, billing_mode: to },
+    });
+    expect(res.ok).toBe(true);
+    expect(sentTemplates).toHaveLength(1);
+    return sentTemplates[0].payload;
+  }
+
+  test('moving INTO the monthly lane states the new charge and invents no previous rate', async () => {
+    const payload = await transition({ from: 'per_application', to: 'monthly_membership' });
+    const summary = String(payload.membership_change_summary || '');
+    // The old $40 was a stored per-application artifact, never a monthly charge.
+    expect(summary).not.toMatch(/40/);
+    expect(summary).toMatch(/now billed monthly at .*45/);
+    expect(payload.old_monthly_rate).toBe('');
+    expect(payload.new_monthly_rate).not.toBe('');
+  });
+
+  test('moving OUT of the monthly lane shows no monthly figures at all', async () => {
+    const payload = await transition({ from: 'monthly_membership', to: 'per_application' });
+    const summary = String(payload.membership_change_summary || '');
+    expect(summary).not.toMatch(/Monthly rate/i);
+    expect(summary).toMatch(/per application/i);
+    expect(payload.old_monthly_rate).toBe('');
+    expect(payload.new_monthly_rate).toBe('');
+  });
+
+  test('a rate change WITHIN the monthly lane still shows both figures', async () => {
+    const payload = await transition({ from: 'monthly_membership', to: 'monthly_membership' });
+    expect(String(payload.membership_change_summary)).toMatch(/Monthly rate: .*40.* to .*45/);
+    expect(payload.old_monthly_rate).not.toBe('');
+    expect(payload.new_monthly_rate).not.toBe('');
+  });
+});

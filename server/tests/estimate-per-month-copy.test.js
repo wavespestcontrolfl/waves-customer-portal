@@ -96,21 +96,36 @@ describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)
     ]);
   });
 
-  test('the per-application service cards never render for a monthly-billed plan', () => {
-    // The cards say "$X / application" on every row, so the monthly gate has
-    // to come FIRST in the hero chain — a commercial or preserved-monthly
-    // plan whose rows happen to reconcile to the total would otherwise be
-    // quoted in a unit it is not billed in (codex #3128 r6).
+  test('reconciled service cards still win over the monthly hero', () => {
+    // Ordering pin in the OTHER direction (codex #3128 r8, correcting r6):
+    // when the rows reconcile to the total, the per-application cards are the
+    // right surface even for a monthly-billed plan. Owner directive
+    // 2026-07-01 renders the commercial turf line that way so the card carries
+    // its application cadence AND the mowing-exclusion scope note, and
+    // supplementalServiceSummaryHtml is empty at full coverage — so hoisting
+    // the monthly gate above the cards silently deletes both from the
+    // proposal. The monthly arm exists for the UNCOVERED total only.
     const heroStart = src.indexOf('const recurringHeroPriceHtml');
     const hero = src.slice(heroStart, src.indexOf('Priced per application', heroStart));
-    expect(hero.indexOf('recurringBilledMonthly ? `'))
-      .toBeLessThan(hero.indexOf('serviceCardsCoverRecurringTotal ? `'));
+    expect(hero.indexOf('serviceCardsCoverRecurringTotal ? `'))
+      .toBeLessThan(hero.indexOf('recurringBilledMonthly ? `'));
   });
 
   test('preference rows quote the per-application amount, not a cadence spread', () => {
     const renderPrefRow = src.slice(src.indexOf('function renderPrefRow'), src.indexOf('function renderPrefRow') + 1400);
     expect(renderPrefRow).toContain('per application');
     expect(renderPrefRow).not.toContain('intervalPriceFromMonthly');
+  });
+
+  test('the post-toggle savings label matches the one the page rendered with', () => {
+    // The toggle handler writes the response's savingsLabel straight over the
+    // server-rendered row, so a cadence spread in the RESPONSE builder undid
+    // the per-application copy the moment a customer touched a switch
+    // (codex #3128 r8). Both builders must emit the same three strings.
+    const prefMeta = src.slice(src.indexOf('const prefMeta = {}'), src.indexOf('const prefMeta = {}') + 1200);
+    expect(prefMeta).toContain('per application');
+    expect(prefMeta).not.toContain('intervalPriceFromMonthly');
+    expect(prefMeta).not.toContain('pricePeriodLabelForFrequencyKey');
   });
 });
 
