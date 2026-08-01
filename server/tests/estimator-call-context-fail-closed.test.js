@@ -241,6 +241,46 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
   });
 });
 
+describe('buildSmsThreadContext distinct-customer conflict (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
+  const SMS_ARGS = {
+    phone: '+19415550123',
+    triggerBody: 'can I get a quote for pest control at 900 Other Property Rd please?',
+  };
+  const PHONE_MATCHED = {
+    id: 'cust-1', first_name: 'Sender', last_name: 'Customer', phone: '+19415550123',
+    email: 'a@example.test', address_line1: '1 Primary St', city: 'Venice', state: 'FL', zip: '34285',
+    pipeline_stage: 'active_customer', waveguard_tier: 'Silver', member_since: '2025-01-01',
+    lawn_type: null, property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family',
+    company_name: null, active: true,
+  };
+
+  test('gate ON + conflict: phone-matched customer downgrades to the ambiguous (name-only) posture', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [PHONE_MATCHED];
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
+    // The profile stays for the composer's name-only rendering, but the
+    // ambiguity flag blocks customer_id, address, and membership context.
+    expect(context.customer).toMatchObject({ id: 'cust-1' });
+    expect(context.customerPhoneAmbiguous).toBe(true);
+    expect(context.isExistingCustomer).toBe(false);
+  });
+
+  test('gate ON, no conflict: the phone-matched customer keeps full trust', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [PHONE_MATCHED];
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: false });
+    expect(context.customerPhoneAmbiguous).toBe(false);
+    expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate OFF: the conflict flag is inert (byte-identical legacy path)', async () => {
+    mockCustomerRows = [PHONE_MATCHED];
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
+    expect(context.customerPhoneAmbiguous).toBe(false);
+    expect(context.isExistingCustomer).toBe(true);
+  });
+});
+
 describe('buildSmsThreadContext isExistingCustomer requires active (gate on)', () => {
   const SMS_ARGS = {
     phone: '+19415550123',

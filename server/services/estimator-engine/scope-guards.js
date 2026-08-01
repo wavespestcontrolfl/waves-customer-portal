@@ -80,7 +80,10 @@ const OUT_OF_SCOPE_RE = new RegExp(
     'hvac\\s+(?:service|repair|work|quote|install\\w*|maint\\w*|system|unit|tech)',
     'service\\s+(?:my|the|our)\\s+hvac', 'air\\s*conditioning\\s+(?:service|repair|work)',
     'plumbing\\s+(?:work|issue|problem|repair|leak|service|quote)',
-    '(?:need|want|looking\\s+for|find|hire|recommend\\w*|get)\\s+an?\\s+(?:plumber|electrician|handyman)',
+    // Article optional: "need plumber" / "hire electrician" are requests
+    // too; bare trade SURNAMES stay safe because the request verb is still
+    // required ("Joe Plumber" has none).
+    '(?:need|want|looking\\s+for|find|hire|recommend\\w*|get)\\s+(?:an?\\s+)?(?:plumber|electrician|handyman)',
     'electrical\\s*(?:work|repair)',
     'handyman\\s+(?:service|work|job)s?',
     'drywall\\s+(?:repair|work|patch\\w*|install\\w*|job|quote)',
@@ -113,6 +116,15 @@ function deterministicOutOfScope(text) {
   const t = String(text || '');
   return OUT_OF_SCOPE_RE.test(t) && !IN_SCOPE_RE.test(t);
 }
+
+// Street-suffix tokens with no long/short alias pair, so they never appear
+// in address-compare's STREET_TOKEN_ALIASES — used ONLY as city boundaries
+// when rebuilding a no-comma locality ("100 Sample Loop North Port FL"),
+// never for compare-time normalization.
+const EXTRA_STREET_SUFFIXES = [
+  'loop', 'way', 'trail', 'trl', 'cove', 'cv', 'run', 'pass', 'path',
+  'bend', 'crossing', 'xing', 'glen', 'chase', 'pointe',
+];
 
 // Street-address candidates from free text: a street number followed by up
 // to four street-name words. The trailing words may overshoot into prose
@@ -205,6 +217,11 @@ function extractAddressCandidates(text) {
           'northeast', 'northwest', 'southeast', 'southwest', 'ne', 'nw', 'se', 'sw']);
         const suffixBoundary = new Set([
           ...Object.keys(STREET_TOKEN_ALIASES), ...Object.values(STREET_TOKEN_ALIASES),
+          // Common SWFL suffixes missing from the compare-time alias table
+          // (it only maps long↔short forms; these have no short form). A
+          // missing boundary would make "100 Sample Loop North Port FL"
+          // fall back to the single-word-city path and truncate the city.
+          ...EXTRA_STREET_SUFFIXES,
         ].filter((t) => !DIRECTIONALS.has(t)));
         let boundary = -1;
         for (let i = 0; i < flIdx; i += 1) {
@@ -213,6 +230,20 @@ function extractAddressCandidates(text) {
         const cityWords = boundary >= 0 ? words.slice(boundary + 1, flIdx) : words.slice(flIdx - 1, flIdx);
         const city = cityWords.join(' ').trim();
         if (city) locality = `, ${city}${zipNC ? ` ${zipNC[1]}` : ''}`;
+      }
+      if (!locality) {
+        // The city+FL can also live in the TAIL when a unit expression
+        // ended the street run ("100 Palm Ave Apt 6 Venice FL 34285" /
+        // "#6 …"): after the unit strip, localitySrc begins directly with
+        // the city — no comma anchor, and the words-based branch above
+        // can't see it. Anchored: optional city words, then the FL marker,
+        // then an optional ZIP; prose without an FL marker never matches.
+        const ncM = localitySrc.match(/^\s*([A-Za-z][A-Za-z .'-]{1,28}?)?\s*\b(?:fl|florida)\b\s*(\d{5})?\b/i);
+        if (ncM && (ncM[1] || ncM[2])) {
+          const city = String(ncM[1] || '').trim();
+          const zip = ncM[2] || '';
+          locality = `, ${[city, zip].filter(Boolean).join(' ')}`;
+        }
       }
       if (!locality && zipNC) {
         // ZIP-only fallback ("100 Palm Ave 34285", or FL forms where no
@@ -331,10 +362,12 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // Split-context threads: the address — or the service being asked about
   // ("Do you do power washing?" … "How much?") — may sit in an earlier text
   // of the same conversation, not the quote-flavored one that triggered
-  // triage. The recent bodies feed address extraction here AND ride back to
-  // the caller: recentTexts (full window) for the classifier prompt,
-  // vetoTexts (current burst only) for the hard scope veto.
-  let searchText = String(triggerBody || '');
+  // triage. The recent bodies ride back to the caller: recentTexts (full
+  // window) for the classifier prompt, vetoTexts (current burst only) for
+  // the hard scope veto. Customer GROUNDING, however, extracts addresses
+  // from the CURRENT exchange only (trigger + burst) — yesterday's
+  // conversation about customer A's property must not become grounding (or
+  // groundedCustomerId) for today's quote about an unmatched property B.
   let recentTexts = [];
   let vetoTexts = [];
   const digits = last10(phone);
@@ -354,14 +387,14 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
         .filter((t) => t.created_at && new Date(t.created_at).getTime() >= burstFloor)
         .map((t) => String(t.message_body || ''))
         .filter(Boolean);
-      searchText += `\n${recentTexts.join('\n')}`;
     } catch (err) {
       if (err.deadline) throw err;
       logger.warn(`[estimator-scope] triage thread lookup failed: ${err.message}`);
     }
   }
+  const groundingText = [String(triggerBody || ''), ...vetoTexts].join('\n');
 
-  for (const cand of extractAddressCandidates(searchText)) {
+  for (const cand of extractAddressCandidates(groundingText)) {
     const label = `Message thread names address "${cand.num} ${cand.firstWord}…" which matches`;
     const prefixes = prefixVariants(cand.num, cand.firstWord);
     assertTime();
@@ -546,6 +579,12 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
     lines,
     matchedExistingCustomer: entries.length > 0,
     groundedCustomerId: distinctIds.size === 1 ? entries[0].customer.id : null,
+    // MORE than one distinct customer (sender's phone matches A while the
+    // text names B's property): nobody's identity is safe to attach — the
+    // context build downgrades the phone-matched profile to the ambiguous
+    // (name-only, no pricing) posture so A's membership/address can't ride
+    // on B's draft.
+    groundedConflict: distinctIds.size > 1,
     recentTexts,
     vetoTexts,
   };

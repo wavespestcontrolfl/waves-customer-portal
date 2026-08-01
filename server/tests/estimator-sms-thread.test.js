@@ -256,6 +256,15 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(prompt).toContain('relates_to_existing_job');
   });
 
+  test('catalog offers bee treatment/honeycomb extraction, not removal; live relocation is NOT OFFERED', async () => {
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much to deal with bees in the wall?' });
+    const prompt = mockDispatch.mock.calls[0][1].text;
+    expect(prompt).toContain('wasp/hornet/bee treatment and honeycomb extraction');
+    expect(prompt).toContain('live bee relocation');
+    expect(prompt).not.toContain('bee removal');
+  });
+
   test('grounded classifier vetoes: not-offered service never bells', async () => {
     mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
     mockDispatch.mockResolvedValueOnce({
@@ -397,6 +406,29 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     await result.draftPromise;
     expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
       groundedCustomerId: 'cust-77',
+      groundedConflict: false,
+    }));
+  });
+
+  test('a distinct-customer conflict rides into the context build', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: ['Sender phone matches: existing active customer A', 'Message thread names address which matches: existing active customer B'],
+      matchedExistingCustomer: true,
+      groundedCustomerId: null,
+      groundedConflict: true,
+    });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'quote for pest control at 900 Other Property Rd please',
+    });
+    await result.draftPromise;
+    expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
+      groundedCustomerId: null,
+      groundedConflict: true,
     }));
   });
 
@@ -406,6 +438,7 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     await result.draftPromise;
     expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
       groundedCustomerId: null,
+      groundedConflict: false,
     }));
   });
 });

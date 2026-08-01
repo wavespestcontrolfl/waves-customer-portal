@@ -172,6 +172,14 @@ describe('deterministicOutOfScope', () => {
     expect(deterministicOutOfScope('drywall repair estimate?')).toBe(true);
   });
 
+  test('article-free trade requests still veto; trade surnames still do not', () => {
+    expect(deterministicOutOfScope('need plumber asap')).toBe(true);
+    expect(deterministicOutOfScope('want to hire electrician for the panel')).toBe(true);
+    expect(deterministicOutOfScope('looking for handyman')).toBe(true);
+    expect(deterministicOutOfScope("Hi, I'm Joe Plumber. Can I get a quote?")).toBe(false);
+    expect(deterministicOutOfScope('this is Handyman Hardware confirming your service quote')).toBe(false);
+  });
+
   test('roofing org names never trip the veto; roofing service requests still do', () => {
     // An org introducing itself while asking for OUR service is a lead.
     expect(deterministicOutOfScope('Hi, this is Gulf Coast Roofing — can we get a quote for our office?')).toBe(false);
@@ -230,6 +238,22 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('quote for 100 Palm Ave North Port FL')[0].locality).toBe(', North Port');
     // No suffix anywhere: fall back to the single word before FL.
     expect(extractAddressCandidates('we are at 100 Palm Venice FL')[0].locality).toBe(', Venice');
+  });
+
+  test('suffixes without alias pairs (Loop, Way, Trail, …) still bound the city', () => {
+    expect(extractAddressCandidates('quote for 100 Sample Loop North Port FL')[0].locality).toBe(', North Port');
+    expect(extractAddressCandidates('quote for 100 Sample Way Venice FL 34285')[0].locality).toBe(', Venice 34285');
+  });
+
+  test('comma-free localities still bind after an explicit unit (word and hash forms)', () => {
+    const [apt] = extractAddressCandidates('quote for 100 Palm Ave Apt 6 Venice FL 34285');
+    expect(apt.variants).toContain('100 Palm Ave Apt 6');
+    expect(apt.locality).toBe(', Venice 34285');
+    const [hash] = extractAddressCandidates('quote for 100 Palm Ave #6 Venice FL 34285');
+    expect(hash.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);
+    expect(hash.locality).toBe(', Venice 34285');
+    // State-only after a unit works too.
+    expect(extractAddressCandidates('quote for 100 Palm Ave Apt 6 Venice FL')[0].locality).toBe(', Venice');
   });
 
   test('captures locality only when a state or ZIP validates it', () => {
@@ -370,9 +394,9 @@ describe('loadThreadTriageContext', () => {
     expect(triage.lines).toEqual([]);
   });
 
-  test('grounds against addresses named in RECENT texts, not just the trigger body', async () => {
+  test('grounds against addresses named in the CURRENT burst, not just the trigger body', async () => {
     mockState.rows.sms_log = [
-      { message_body: 'Hi, this is the coordinator for Pat Homeowner at 4021 Coral Bay Loop' },
+      { message_body: 'Hi, this is the coordinator for Pat Homeowner at 4021 Coral Bay Loop', created_at: new Date().toISOString() },
     ];
     mockState.rows.customers = [
       { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
@@ -383,6 +407,30 @@ describe('loadThreadTriageContext', () => {
     });
     expect(triage.matchedExistingCustomer).toBe(true);
     expect(triage.lines.join('\n')).toContain('Pat Homeowner');
+  });
+
+  test('a STALE text\'s address (outside the burst window) never grounds a customer', async () => {
+    // Yesterday's conversation about customer A must not become grounding
+    // (or groundedCustomerId) for today's quote about an unmatched
+    // property B — the classifier prompt still SEES the stale text via
+    // recentTexts, but no customer entry is built from it.
+    mockState.rows.sms_log = [
+      {
+        message_body: 'Hi, this is the coordinator for Pat Homeowner at 4021 Coral Bay Loop',
+        created_at: new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString(),
+      },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'how much would a quarterly plan cost?',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+    expect(triage.groundedCustomerId).toBeNull();
+    expect(triage.lines).toEqual([]);
+    expect(triage.recentTexts.join('\n')).toContain('4021 Coral Bay Loop');
   });
 
   test('directional/suffix abbreviations still confirm against the stored long form', async () => {
@@ -603,6 +651,7 @@ describe('loadThreadTriageContext', () => {
       triggerBody: 'need a treatment at 4021 Coral Bay Loop',
     });
     expect(triage.groundedCustomerId).toBe('c-2');
+    expect(triage.groundedConflict).toBe(false);
 
     // Sender + address match for the SAME customer is still one distinct id.
     mockLoadCustomerByPhone.mockResolvedValue({
@@ -626,12 +675,16 @@ describe('loadThreadTriageContext', () => {
     });
     expect(triage.matchedExistingCustomer).toBe(true);
     expect(triage.groundedCustomerId).toBeNull();
+    // …and the distinct-customer conflict is flagged so the context build
+    // can downgrade the phone-matched profile to the ambiguous posture.
+    expect(triage.groundedConflict).toBe(true);
 
-    // No matches at all → null.
+    // No matches at all → null, no conflict.
     mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
     mockState.rows.customers = [];
     triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
     expect(triage.groundedCustomerId).toBeNull();
+    expect(triage.groundedConflict).toBe(false);
   });
 
   test('fails open to null on query errors', async () => {

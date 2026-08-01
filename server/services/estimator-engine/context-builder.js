@@ -442,7 +442,9 @@ async function buildCallContext(callLogId) {
 // error out entirely: unlike a call, there is no independent transcript —
 // the thread history itself cannot be attributed to one profile, and no
 // caller-name extraction exists to disambiguate.
-async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBody = '', groundedCustomerId = null }) {
+async function buildSmsThreadContext({
+  phone, triggerAt = new Date(), triggerBody = '', groundedCustomerId = null, groundedConflict = false,
+}) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
   // SMS path only: a service-contact sender (spouse/tenant/manager on the
   // configured contact slots) is an established identity — without the
@@ -476,6 +478,15 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBod
       customerGroundedByAddress = true;
     }
   }
+  // Distinct-customer conflict (gate-on): the sender's phone matches
+  // customer A but triage confirmed the text names a DIFFERENT customer's
+  // property. A's identity is real, but attaching A's address/membership
+  // pricing to B's draft would quote the wrong parcel with the wrong
+  // discounts — downgrade to the ambiguous-shared-phone posture the
+  // pipeline already honors: customerPhoneAmbiguous=true renders a
+  // name-only profile in the composer and blocks customer_id, address,
+  // and membership context downstream.
+  const phoneCustomerConflicted = guardsOn && groundedConflict === true && !!customer;
   const before = new Date(triggerAt);
   const smsSince = new Date(before.getTime() - 30 * 86400000);
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
@@ -510,7 +521,7 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBod
     extractionSource: 'none',
     phone,
     customer: customer || null,
-    customerPhoneAmbiguous: false,
+    customerPhoneAmbiguous: phoneCustomerConflicted,
     lead: leadMatch.lead || null,
     leadIsForThisCall: false,
     smsThread: [],
@@ -520,8 +531,10 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBod
     // via the contact-slot lookup or otherwise) keeps their profile as
     // history but must not unlock existing-customer pricing context —
     // active === true is required, same as the triage grounding gates. The
-    // legacy stage-only predicate is preserved byte-identical gate-off.
+    // legacy stage-only predicate is preserved byte-identical gate-off. A
+    // distinct-customer conflict also never prices as existing.
     isExistingCustomer: !!(customer
+      && !phoneCustomerConflicted
       && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
       && (!guardsOn || customer.active === true)),
   };

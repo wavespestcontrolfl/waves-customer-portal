@@ -83,7 +83,7 @@ async function threadQuoteSignal(body, triage = null) {
     const prompt = grounded
       ? `An SMS arrived at Waves Pest Control (pest control + lawn care company).
 
-SERVICES WAVES OFFERS: recurring & one-time pest control, lawn health programs & one-time lawn treatments, tree & shrub care, mosquito programs, termite bait/monitoring and termite/WDO inspections, rodent bait stations, flea/tick, chemical bed bug treatment, wasp/hornet/bee removal. NOT OFFERED: power washing, roofing, gutters, painting, pools, plumbing, HVAC, electrical, cleaning, junk removal, handyman work.
+SERVICES WAVES OFFERS: recurring & one-time pest control, lawn health programs & one-time lawn treatments, tree & shrub care, mosquito programs, termite bait/monitoring and termite/WDO inspections, rodent bait stations, flea/tick, chemical bed bug treatment, wasp/hornet/bee treatment and honeycomb extraction. NOT OFFERED: power washing, roofing, gutters, painting, pools, plumbing, HVAC, electrical, cleaning, junk removal, handyman work, live bee relocation.
 ${contextBlock}${threadBlock}
 Decide three things about the sender's message:
 - quote_request: are they asking for a QUOTE or PRICING for a service (new or additional service, "how much", describing a pest/lawn problem they want serviced)?
@@ -165,12 +165,14 @@ function smsOrigin(threadKey) {
 // grounding matched by address/sender when it matched exactly one — rides
 // into the context build so an off-file coordinator's quote links the
 // estimate to the customer it is provably about.
-async function runThreadDraft({ phone, digits, triggerBody, origin, dryRun, groundedCustomerId = null }) {
+async function runThreadDraft({ phone, digits, triggerBody, origin, dryRun, groundedCustomerId = null, groundedConflict = false }) {
   const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
     const { buildSmsThreadContext } = require('./context-builder');
     const { runDraftPipeline, notify } = require('./index');
-    const context = await buildSmsThreadContext({ phone, triggerBody, groundedCustomerId });
+    const context = await buildSmsThreadContext({
+      phone, triggerBody, groundedCustomerId, groundedConflict,
+    });
     if (context.error) {
       result.lane = 'red';
       result.reasons = [context.error];
@@ -313,9 +315,10 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       triggerBody,
       origin,
       dryRun,
-      // Gate off ⇒ triage never ran ⇒ null flows and the context build is
-      // byte-identical to today.
+      // Gate off ⇒ triage never ran ⇒ null/false flow and the context
+      // build is byte-identical to today.
       groundedCustomerId: triage?.groundedCustomerId || null,
+      groundedConflict: triage?.groundedConflict === true,
     })
       .catch((err) => {
         logger.error(`[estimator-sms] detached draft failed: ${err.message}`);
