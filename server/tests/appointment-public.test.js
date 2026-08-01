@@ -188,3 +188,36 @@ describe('confirm guards (codex r1)', () => {
     );
   });
 });
+
+describe('appointment link idempotent minting', () => {
+  test('an existing appointment code is reused instead of minting a new row', async () => {
+    // The page URL is deterministic per visit token, so one short code
+    // serves every message about the visit — and an eagerly rendered body
+    // whose SMS leg never runs (email-preference paths) costs at most one
+    // reused row, never an orphan per render (codex r5).
+    const { existingShortUrlFor } = require('../services/short-url');
+    const calls = [];
+    mockDb.mockImplementation((table) => {
+      calls.push(table);
+      const api = {
+        where: () => api,
+        orderBy: () => api,
+        first: async () => (table === 'short_codes' ? { code: 'abc12' } : null),
+      };
+      return api;
+    });
+    const url = await existingShortUrlFor({ kind: 'appointment', entityType: 'scheduled_services', entityId: 'svc-1' });
+    expect(url).toMatch(/\/l\/abc12$/);
+    expect(calls).toContain('short_codes');
+  });
+
+  test('missing inputs and lookup misses return null (mint proceeds)', async () => {
+    const { existingShortUrlFor } = require('../services/short-url');
+    expect(await existingShortUrlFor({ kind: 'appointment', entityType: 'scheduled_services', entityId: null })).toBe(null);
+    mockDb.mockImplementation(() => {
+      const api = { where: () => api, orderBy: () => api, first: async () => null };
+      return api;
+    });
+    expect(await existingShortUrlFor({ kind: 'appointment', entityType: 'scheduled_services', entityId: 'svc-2' })).toBe(null);
+  });
+});

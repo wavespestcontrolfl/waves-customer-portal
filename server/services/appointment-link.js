@@ -55,6 +55,16 @@ async function buildAppointmentLink(scheduledServiceId, { customerId = null, lab
     if (!svc?.reschedule_token) return { url: null, line: '' };
 
     const longUrl = portalUrl(`/appointment/${svc.reschedule_token}`);
+    // Idempotent per visit: the page URL is deterministic (one token, one
+    // page), so the FIRST minted code serves every message about this
+    // visit — confirmation now, the 24h reminder later. This also caps an
+    // eagerly rendered body whose SMS leg never runs (email-preference
+    // paths) at one reused row per visit rather than an orphan per render.
+    const { existingShortUrlFor } = require('./short-url');
+    const reused = await existingShortUrlFor({
+      kind: 'appointment', entityType: 'scheduled_services', entityId: svc.id,
+    });
+    if (reused) return { url: reused, line: smsLineFor(reused, label) };
     const url = await shortenOrPassthrough(longUrl, {
       kind: 'appointment',
       entityType: 'scheduled_services',
