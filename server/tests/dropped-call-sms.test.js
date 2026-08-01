@@ -38,6 +38,8 @@ const lineType = require('../services/messaging/validators/line-type');
 const {
   sendDroppedCallAddressRequest,
   endedAbruptly,
+  detectDroppedMidIntake,
+  eligibleNewProspect,
   MIN_CALL_SECONDS,
   _private,
 } = require('../services/dropped-call-sms');
@@ -135,6 +137,54 @@ describe('endedAbruptly', () => {
   it('false for transcripts too short to judge', () => {
     expect(endedAbruptly(mk(['Agent: Hello?', 'Caller: Hi —']))).toBe(false);
     expect(endedAbruptly('')).toBe(false);
+  });
+});
+
+describe('detectDroppedMidIntake', () => {
+  const ABRUPT = 'Agent: One?\nCaller: Two.\nAgent: What is your service address?\nCaller: It is —';
+
+  it('fires on a long abrupt call with no address on either extraction leg', () => {
+    expect(detectDroppedMidIntake({
+      durationSeconds: 300, transcription: ABRUPT, extracted: {}, v2Extraction: null,
+    })).toBe(true);
+  });
+
+  it('does not fire when the V2 canonical extraction already holds the street', () => {
+    expect(detectDroppedMidIntake({
+      durationSeconds: 300,
+      transcription: ABRUPT,
+      extracted: {},
+      v2Extraction: { property: { service_address: { street_line_1: '123 Main St' } } },
+    })).toBe(false);
+  });
+
+  it('does not fire when V1 captured the street, or the call is short', () => {
+    expect(detectDroppedMidIntake({
+      durationSeconds: 300, transcription: ABRUPT, extracted: { address_line1: '123 Main St' },
+    })).toBe(false);
+    expect(detectDroppedMidIntake({ durationSeconds: 60, transcription: ABRUPT, extracted: {} })).toBe(false);
+  });
+});
+
+describe('eligibleNewProspect', () => {
+  const BASE = { customerId: null, createdCustomerFromCall: false, isOutbound: false, v2Status: 'valid', callNature: 'new_lead' };
+
+  it('allows the normal named prospect whose customer record was created FROM this call', () => {
+    expect(eligibleNewProspect({ ...BASE, customerId: 'cust-1', createdCustomerFromCall: true })).toBe(true);
+  });
+
+  it('excludes a PRE-EXISTING linked customer', () => {
+    expect(eligibleNewProspect({ ...BASE, customerId: 'cust-1', createdCustomerFromCall: false })).toBe(false);
+  });
+
+  it('excludes outbound calls (inbound-only consent basis)', () => {
+    expect(eligibleNewProspect({ ...BASE, isOutbound: true })).toBe(false);
+  });
+
+  it('fails closed on classification: null/indeterminate nature and invalid V2 are card-only', () => {
+    expect(eligibleNewProspect({ ...BASE, callNature: null })).toBe(false);
+    expect(eligibleNewProspect({ ...BASE, callNature: 'other' })).toBe(false);
+    expect(eligibleNewProspect({ ...BASE, v2Status: 'schema_failed' })).toBe(false);
   });
 });
 

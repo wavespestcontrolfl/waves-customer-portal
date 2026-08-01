@@ -61,6 +61,36 @@ const FAREWELL_RE = new RegExp(
 );
 
 /**
+ * Full drop-mid-intake detection: long enough to be a real conversation,
+ * no service address captured by EITHER extraction leg (V1 flat or the
+ * canonical V2 service_address — V2 can hold the street when primary
+ * adoption is off or V1 missed it), and an abrupt transcript ending.
+ */
+function detectDroppedMidIntake({ durationSeconds, transcription, extracted = {}, v2Extraction = null } = {}) {
+  const v1Street = String(extracted.address_line1 || '').trim();
+  const v2Street = String(v2Extraction?.property?.service_address?.street_line_1 || '').trim();
+  return Number(durationSeconds) >= MIN_CALL_SECONDS
+    && !v1Street
+    && !v2Street
+    && endedAbruptly(transcription);
+}
+
+/**
+ * Whether the caller is a prospect the automatic text may go to. A customer
+ * record CREATED FROM THIS CALL is still a new prospect (Step 3 mints one
+ * for any named live caller, address or not) — only a PRE-EXISTING linked
+ * customer is excluded. Inbound only: the transactional consent basis is
+ * "they called us", and on outbound legs to_phone is the prospect's own
+ * number. call_nature must be POSITIVELY 'new_lead' (fail closed).
+ */
+function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, v2Status, callNature } = {}) {
+  return isOutbound !== true
+    && (!customerId || createdCustomerFromCall === true)
+    && v2Status === 'valid'
+    && callNature === 'new_lead';
+}
+
+/**
  * True when the transcript looks like a call that died mid-conversation:
  * enough turns to be a real exchange, and no farewell language anywhere in
  * the last three turns. Deterministic — no model call.
@@ -334,6 +364,8 @@ async function sendClaimed({ leadId, extracted, call, phone }) {
 module.exports = {
   sendDroppedCallAddressRequest,
   endedAbruptly,
+  detectDroppedMidIntake,
+  eligibleNewProspect,
   MIN_CALL_SECONDS,
   _private: { callbackClause, withinSendWindowET, normalizePhoneE164, FAREWELL_RE },
 };

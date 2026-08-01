@@ -7036,25 +7036,33 @@ const CallRecordingProcessor = {
         // one-per-phone claim, landline, STOP suppression, template kill
         // switch) live in the service. Best-effort: a detector or text
         // failure never breaks call processing.
-        if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam && transcription) {
+        if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
+          && !isOutboundCall(call) && transcription) {
           try {
             const DroppedCallSms = require('./dropped-call-sms');
             // recordingDurationSeconds: fresh recording jobs can have
             // duration_seconds unset while recording_duration_seconds is
             // populated (the race this file already handles elsewhere).
             const droppedCallSeconds = recordingDurationSeconds(call);
-            const droppedMidIntake = droppedCallSeconds >= DroppedCallSms.MIN_CALL_SECONDS
-              && !String(extracted.address_line1 || '').trim()
-              && DroppedCallSms.endedAbruptly(transcription);
+            const v2Extraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
+            const droppedMidIntake = DroppedCallSms.detectDroppedMidIntake({
+              durationSeconds: droppedCallSeconds,
+              transcription,
+              extracted,
+              v2Extraction,
+            });
             if (droppedMidIntake) {
               let smsOutcome = { sent: false, skipped: 'not_eligible' };
-              // Fail CLOSED on classification: an automatic customer text
-              // requires the model to have POSITIVELY identified a new sales
-              // inquiry — schema-valid null/indeterminate natures stay
-              // card-only.
-              const genuineNewProspect = !customerId
-                && v2Result?.status === 'valid'
-                && v2Result.extraction?.call_nature === 'new_lead';
+              // A customer record created FROM THIS CALL is still a new
+              // prospect (Step 3 mints one for any named live caller);
+              // classification fails CLOSED to card-only.
+              const genuineNewProspect = DroppedCallSms.eligibleNewProspect({
+                customerId,
+                createdCustomerFromCall,
+                isOutbound: isOutboundCall(call),
+                v2Status: v2Result?.status,
+                callNature: v2Result?.extraction?.call_nature,
+              });
               if (genuineNewProspect) {
                 smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({ leadId, extracted, call, phone });
               }
@@ -7062,7 +7070,7 @@ const CallRecordingProcessor = {
                 .insert(buildTriageItem({
                   callLogId: call.id,
                   flag: 'call_dropped_mid_intake',
-                  extraction: (v2Result?.status === 'valid' && v2Result.extraction) || null,
+                  extraction: v2Extraction,
                   extraPayload: {
                     caller_phone: phone || null,
                     dropped_after_seconds: droppedCallSeconds || null,
