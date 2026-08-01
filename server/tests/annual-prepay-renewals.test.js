@@ -509,10 +509,11 @@ describe('annual prepay renewal helpers', () => {
       },
     });
     const rowsQuery = query({ rows: [] });
+    const lockedRecheck = query({ rows: [] }); // no concurrent same-day visit
     const conflictQuery = query({ rows: [] }); // board is clear at 08:00
     const first = query({ returning: [{ id: 'svc-w1', scheduled_date: '2026-08-01', window_start: '08:00' }] });
     const second = query({ returning: [{ id: 'svc-w2', scheduled_date: '2026-11-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, conflictQuery, first, second] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, lockedRecheck, conflictQuery, first, second] });
 
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-w',
@@ -559,10 +560,11 @@ describe('annual prepay renewal helpers', () => {
       },
     });
     const rowsQuery = query({ rows: [] });
+    const lockedRecheck = query({ rows: [] }); // no concurrent same-day visit
     // The board moved between minting the invoice and paying it.
     const conflictQuery = query({ rows: [{ id: 'svc-other', window_start: '08:00', window_end: '09:00' }] });
     const seeded = query({ returning: [{ id: 'svc-x1', scheduled_date: '2026-08-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, conflictQuery, seeded] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, lockedRecheck, conflictQuery, seeded] });
 
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-x',
@@ -1088,11 +1090,12 @@ describe('annual prepay renewal helpers', () => {
       query({ returning: [{ id: 'svc-s4', scheduled_date: '2027-09-30' }] }),
     ];
     const termColsQuery = query({ columnInfo: { term_end: {}, first_visit_date: {} } });
+    const successorQuery = query({ first: undefined }); // no later term to collide with
     const termSlideUpdate = query({});
     const termStampUpdate = query({});
     setDbQueues({
       scheduled_services: [columnQuery, rowsQuery, ...inserts],
-      annual_prepay_terms: [termColsQuery, termSlideUpdate, termStampUpdate],
+      annual_prepay_terms: [termColsQuery, successorQuery, termSlideUpdate, termStampUpdate],
     });
 
     // Paid 5 months after mint: the customer bought 4 quarterly visits, so the
