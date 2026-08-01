@@ -2361,6 +2361,12 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     // hub, so keeping the spoke host would publish a dead link.
     const spoke = repairInventedInternalRoutes('[services](https://sarasotafllawncare.com/pest-control/)');
     expect(spoke.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
+    // Noncanonical hub origins are canonicalized, not preserved — keeping
+    // the draft's scheme/port would alias one dead link into another.
+    for (const bad of ['http://www.wavespestcontrol.com', 'https://www.wavespestcontrol.com:444']) {
+      const r = repairInventedInternalRoutes(`[services](${bad}/pest-control/)`);
+      expect(r.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
+    }
     // Schemes are case-insensitive, like the gate's own URL matcher.
     for (const scheme of ['HTTPS', 'HtTpS']) {
       const mixed = repairInventedInternalRoutes(`[services](${scheme}://www.wavespestcontrol.com/pest-control/)`);

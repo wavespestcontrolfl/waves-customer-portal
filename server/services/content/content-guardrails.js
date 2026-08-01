@@ -1585,14 +1585,16 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       // A SPOKE origin is never preserved: the alias target is a hub page, so
       // re-emitting the spoke host would publish a dead spoke link. Spoke
       // absolutes are re-pointed at the hub (pre-push Codex r3).
+      // ALWAYS the canonical hub origin, never the draft's own: `u.origin`
+      // carries the scheme and port it was written with, so an "http:" or
+      // ":444" hub URL would be aliased into another dead link that
+      // evaluate() then accepts (pre-push Codex r3).
       let origin = '';
       let isAbsolute = false;
       try {
         const u = new URL(dest);
         isAbsolute = true;
-        if (hubHosts.has(u.hostname.toLowerCase())) {
-          origin = isHubHost(u.hostname) ? u.origin : hubOrigin();
-        }
+        if (hubHosts.has(u.hostname.toLowerCase())) origin = hubOrigin();
       } catch { /* relative destination */ }
       // A RELATIVE alias resolves against the PUBLISHING domain. On spoke
       // content that is the spoke, where this hub-only target does not exist
