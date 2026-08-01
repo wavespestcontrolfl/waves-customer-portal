@@ -120,10 +120,17 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
   // lingers in the queue as already-handled.
   try {
     if (svc.source_call_log_id) {
-      await db('triage_items')
-        .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
-        .whereIn('status', ['open', 'in_progress'])
-        .update({ status: 'resolved', updated_at: db.fn.now() });
+      // Shared per-call lock contract (utils/triage-locks.js) with the other
+      // triage writers — serialize before the card update so an overlapping
+      // sweep/verdict can't deadlock or interleave the aggregate.
+      const { lockTriageCall } = require('../utils/triage-locks');
+      await db.transaction(async (trx) => {
+        await lockTriageCall(trx, svc.source_call_log_id);
+        await trx('triage_items')
+          .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
+          .whereIn('status', ['open', 'in_progress'])
+          .update({ status: 'resolved', updated_at: trx.fn.now() });
+      });
     }
   } catch (e) { logger.error(`[${routeTag}] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
 

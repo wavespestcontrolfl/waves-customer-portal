@@ -625,6 +625,16 @@ const gates = {
   // link.
   // Off → cron ticks are no-ops.
   callLogRelink: process.env.GATE_CALL_LOG_RELINK === 'true',
+  // Triage dead-letter drain: a nightly sweep that auto-resolves OPEN
+  // triage_items whose condition is provably moot (customer now has the
+  // address/name the card asked for; the call verifiably produced a booking
+  // via source_call_log_id) and auto-dismisses aged informational flags
+  // (spam 7d, listed advisory codes 30d). Explicit reason-code allowlist —
+  // owed-work cards (quote_promised, cancellation_request, booking holds,
+  // email_bounce_reverify, …) and in_progress cards are NEVER touched.
+  // Born from the 2026-07 backlog: ~1,800 open vs 32 ever resolved.
+  // Off → cron ticks are no-ops.
+  triageAutoResolve: process.env.GATE_TRIAGE_AUTO_RESOLVE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate
