@@ -10,7 +10,22 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 // An unlinked estimate links at accept through the SAME phone matcher, so an
 // existing monthly member can sit behind one (codex #3120 r3).
 const mockMatchByPhone = jest.fn();
-jest.mock('../routes/estimate-public', () => ({ matchAcceptCustomerByPhone: mockMatchByPhone }));
+// Outstanding quotes are described from the bundle the PAGE is selling, and the
+// page reconciles a lapsed membership before building it (#3120 r4/r6/r7).
+const mockBuildPricingBundle = jest.fn();
+const mockReconcileMembership = jest.fn();
+jest.mock('../routes/estimate-public', () => ({
+  matchAcceptCustomerByPhone: mockMatchByPhone,
+  buildPricingBundle: mockBuildPricingBundle,
+  reconcileFrozenMembershipSnapshot: mockReconcileMembership,
+  // Real implementation — selected → recommended → first.
+  defaultFrequencyFromList: (list = []) => list.find((f) => f?.selected || f?.isSelected)
+    || list.find((f) => f?.recommended || f?.isRecommended)
+    || list[0]
+    || null,
+}));
+const REBUILT = { key: 'standard', annual: 540, perTreatment: 90, visitsPerYear: 6, recommended: true };
+const LIVE_BUNDLE = { source: 'live_rebuild', frequencies: [REBUILT] };
 
 const {
   estimateBillsPerApplication,
@@ -40,6 +55,7 @@ beforeEach(() => {
   // module caches a true probe, so the cache has to be dropped between tests.
   _resetPerApplicationColumnsProbeForTests();
   mockDb.schema.hasColumn.mockResolvedValue(true);
+  mockBuildPricingBundle.mockResolvedValue(LIVE_BUNDLE);
 });
 
 describe('estimateBillsPerApplication', () => {
@@ -103,7 +119,7 @@ describe('pre-migration database (no customers.billing_mode)', () => {
   it('keeps the legacy document through resolveProposalBillingContext', async () => {
     stubTables({ customer: { pipeline_stage: 'lead', monthly_rate: 45 } });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: false });
+      .toEqual({ billsPerApplication: false, livePricing: null });
   });
 
   it('keeps the legacy document when the column probe itself errors', async () => {
@@ -140,7 +156,7 @@ describe('annual prepay is a per-ESTIMATE fact, not the customer lane', () => {
     stubTables({ customer: perAppCustomer, prepayTerm: { id: 't1', status: 'active' } });
     expect(await estimateSoldAsAnnualPrepay({ id: 'e1' })).toBe(true);
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: false });
+      .toEqual({ billsPerApplication: false, livePricing: null });
   });
 
   // Pre-push r5: the customer's CURRENT lane does not carry over — a prepay
@@ -148,13 +164,13 @@ describe('annual prepay is a per-ESTIMATE fact, not the customer lane', () => {
   it('a prepay CUSTOMER with no term on this estimate still gets per-application copy', async () => {
     stubTables({ customer: { ...perAppCustomer, billing_mode: 'annual_prepay' }, prepayTerm: undefined });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true });
+      .toEqual({ billsPerApplication: true, livePricing: { bundle: LIVE_BUNDLE, defaultCandidate: REBUILT, snapshotHit: false } });
   });
 
   it('is status-blind — a refunded term still just means "leave the document alone"', async () => {
     stubTables({ customer: perAppCustomer, prepayTerm: { id: 't1', status: 'refunded' } });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: false });
+      .toEqual({ billsPerApplication: false, livePricing: null });
   });
 });
 
@@ -162,7 +178,7 @@ describe('resolveProposalBillingContext', () => {
   it('reports the lane', async () => {
     stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 0, billing_mode: 'per_application' } });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true });
+      .toEqual({ billsPerApplication: true, livePricing: { bundle: LIVE_BUNDLE, defaultCandidate: REBUILT, snapshotHit: false } });
   });
 });
 
@@ -178,6 +194,93 @@ describe('fail-closed on an inconclusive lookup', () => {
     mockDb.schema.hasTable.mockResolvedValue(true);
     expect(await estimateSoldAsAnnualPrepay({ id: 'e1' })).toBeNull();
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: false });
+      .toEqual({ billsPerApplication: false, livePricing: null });
+  });
+});
+
+
+// #3120 r6/r7: the pricing authority depends on whether the price is locked.
+describe('pricing authority', () => {
+  const perAppCustomer = { pipeline_stage: 'lead', monthly_rate: 45 };
+
+  it('resolves the live bundle for an OUTSTANDING quote', async () => {
+    stubTables({ customer: perAppCustomer });
+    const estimate = { id: 'e1', customer_id: 'c1', status: 'sent' };
+    const ctx = await resolveProposalBillingContext(estimate);
+    expect(ctx.livePricing).toEqual({ bundle: LIVE_BUNDLE, defaultCandidate: REBUILT, snapshotHit: false });
+    expect(mockBuildPricingBundle).toHaveBeenCalledWith(estimate);
+  });
+
+  it('reconciles a lapsed membership BEFORE building the bundle', async () => {
+    stubTables({ customer: perAppCustomer });
+    const order = [];
+    mockReconcileMembership.mockImplementation(async () => { order.push('reconcile'); });
+    mockBuildPricingBundle.mockImplementation(async () => { order.push('build'); return LIVE_BUNDLE; });
+    await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1', status: 'sent' });
+    expect(order).toEqual(['reconcile', 'build']);
+  });
+
+  it('never rebuilds or reconciles an ACCEPTED estimate', async () => {
+    stubTables({ customer: perAppCustomer });
+    const ctx = await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1', status: 'accepted' });
+    expect(ctx).toEqual({ billsPerApplication: true, livePricing: null });
+    expect(mockBuildPricingBundle).not.toHaveBeenCalled();
+    expect(mockReconcileMembership).not.toHaveBeenCalled();
+  });
+
+  it('never rebuilds a price_locked_at row whose status has not flipped', async () => {
+    stubTables({ customer: perAppCustomer });
+    const ctx = await resolveProposalBillingContext({
+      id: 'e1', customer_id: 'c1', status: 'sent', price_locked_at: '2026-07-31T12:00:00Z',
+    });
+    expect(ctx.livePricing).toBeNull();
+    expect(mockBuildPricingBundle).not.toHaveBeenCalled();
+  });
+
+  it('picks the recommended cadence as the default, not merely the first', async () => {
+    stubTables({ customer: perAppCustomer });
+    mockBuildPricingBundle.mockResolvedValue({ frequencies: [{ key: 'quarterly', annual: 240 }, REBUILT] });
+    expect((await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' })).livePricing.defaultCandidate)
+      .toEqual(REBUILT);
+  });
+
+  it('skips quote-required cadences when choosing the default', async () => {
+    stubTables({ customer: perAppCustomer });
+    mockBuildPricingBundle.mockResolvedValue({
+      frequencies: [{ key: 'custom', quoteRequired: true, recommended: true }, REBUILT],
+    });
+    expect((await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' })).livePricing.defaultCandidate)
+      .toEqual(REBUILT);
+  });
+
+  // #3120 r8: a failed rebuild must NOT read as "frozen" — that would quote the
+  // very snapshot buildPricingBundle exists to reject.
+  it('reports UNRESOLVED (not frozen) when the rebuild fails', async () => {
+    stubTables({ customer: perAppCustomer });
+    mockBuildPricingBundle.mockRejectedValue(new Error('pricing engine down'));
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
+      .toEqual({ billsPerApplication: true, livePricing: { unresolved: true } });
+  });
+
+  it('marks a snapshot-served bundle so stale-total matching stays valid', async () => {
+    stubTables({ customer: perAppCustomer });
+    mockBuildPricingBundle.mockResolvedValue({ ...LIVE_BUNDLE, snapshotHit: true });
+    expect((await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' })).livePricing.snapshotHit)
+      .toBe(true);
+  });
+
+  // A DECLINED estimate is terminal but still downloadable — freeze it too.
+  it('treats a declined estimate as frozen', async () => {
+    stubTables({ customer: perAppCustomer });
+    const ctx = await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1', status: 'declined' });
+    expect(ctx.livePricing).toBeNull();
+    expect(mockBuildPricingBundle).not.toHaveBeenCalled();
+  });
+
+  it('does not rebuild at all for a legacy lane', async () => {
+    stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: null } });
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
+      .toEqual({ billsPerApplication: false, livePricing: null });
+    expect(mockBuildPricingBundle).not.toHaveBeenCalled();
   });
 });
