@@ -526,6 +526,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
+  // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
+  // missing-unit and ambiguous-oz rows stay parked for review). Gate is
+  // opt-in in EVERY environment (auto-writer pattern); kill = unset
+  // GATE_INVENTORY_UNIT_AUTOFIX. Every fix leaves a movement audit row.
+  // =========================================================================
+  cron.schedule('45 3 * * *', async () => {
+    if (!isEnabled('inventoryUnitAutofix')) return;
+    logger.info('Running: Inventory unit alias auto-fix sweep');
+    try {
+      await runExclusive('inventory-unit-autofix', () =>
+        require('./inventory-unit-review').runInventoryUnitAutofixSweep());
+    } catch (err) {
+      logger.error(`Inventory unit autofix sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Point-in-time MRR snapshot — keeps the MRR Trend honest: past months read
   // their real recorded MRR instead of being recomputed at today's prices.
   //  - DAILY 6:05AM ET: refresh the CURRENT month's row (in-progress month stays
@@ -667,17 +685,29 @@ function initScheduledJobs() {
   // everything ambiguous stays in the /admin/customers/duplicates review
   // queue. Double-gated (cronJobs AND customerDedupeAutoMerge, the latter
   // opt-in in every environment). Every merge is journaled + admin-notified.
+  // Same tick, own gate (customerDedupeAutoDismissRed): after the merge
+  // pass, red-tier pairs — the detector's own "two different people sharing
+  // a phone" verdict, which can never be merged — get the same "not a
+  // duplicate" dismissal an operator would click ('auto:red-tier').
   // =========================================================================
   cron.schedule('40 4 * * *', async () => {
-    if (!isEnabled('customerDedupeAutoMerge')) return;
+    const mergeOn = isEnabled('customerDedupeAutoMerge');
+    const dismissRedOn = isEnabled('customerDedupeAutoDismissRed');
+    if (!mergeOn && !dismissRedOn) return;
     logger.info('Running: Customer duplicate auto-merge sweep');
     try {
       // runExclusive: read-then-act — an overlapping tick could pick the same
       // loser row before the first merge soft-deletes it.
       await runExclusive('customer-dedupe-auto-merge', async () => {
-        const { runAutoMergeSweep } = require('./customer-dedupe');
-        const result = await runAutoMergeSweep();
-        logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+        const { runAutoMergeSweep, runRedPairAutoDismissSweep } = require('./customer-dedupe');
+        if (mergeOn) {
+          const result = await runAutoMergeSweep();
+          logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+        }
+        if (dismissRedOn) {
+          const result = await runRedPairAutoDismissSweep();
+          logger.info(`[customer-dedupe] red-pair auto-dismiss dismissed=${result.dismissed.length}${result.aborted ? ` aborted=${result.aborted}` : ''}`);
+        }
       });
     } catch (err) {
       logger.error(`Customer dedupe sweep failed: ${err.message}`);

@@ -212,20 +212,11 @@ async function computeDashboardAlertsUncached() {
   // 5. Inventory unit cleanup. Bad/missing/ambiguous units undermine
   // forecast, readiness, closeout deduction, restock receiving, and costing.
   try {
-    const unitReview = await db('products_catalog')
-      .where(function unitIssue() {
-        this.where(function missingUnit() {
-          this.whereNull('inventory_unit')
-            .where(function hasInventoryValue() {
-              this.whereNotNull('inventory_on_hand').orWhereNotNull('low_stock_threshold');
-            });
-        })
-          .orWhereRaw("lower(coalesce(inventory_unit, '')) = 'oz'")
-          .orWhereRaw(`
-            nullif(trim(coalesce(inventory_unit, '')), '') is not null
-            AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg')
-          `);
-      })
+    // The SHARED queue predicate from inventory-unit-review.js — same
+    // filter as the review route and the sweep digest, so this alert count
+    // always matches what the page shows (r15).
+    const { applyUnitReviewQueueFilter } = require('./inventory-unit-review');
+    const unitReview = await applyUnitReviewQueueFilter(db('products_catalog'))
       .count('* as count')
       .first();
     const count = parseInt(unitReview?.count || 0);

@@ -9,11 +9,11 @@ const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { passwordWriteAction, vendorCredentialKey, encryptedPasswordRaw } = require('../services/vendor-credentials');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
-  convertInventoryQuantity,
   describeInventoryConversion,
   normalizeInventoryUnit,
   unitDefinition,
 } = require('../services/inventory-units');
+const { applyInventoryUnitFix } = require('../services/inventory-unit-review');
 const {
   calcLandedCost,
   costLineFromUsage,
@@ -2977,20 +2977,13 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
 // GET /unit-review — products and forecast rows with inventory unit issues.
 router.get('/unit-review', async (req, res, next) => {
   try {
-    const products = await db('products_catalog')
-      .where(function unitIssue() {
-        this.where(function missingUnit() {
-          this.whereNull('inventory_unit')
-            .where(function hasInventoryValue() {
-              this.whereNotNull('inventory_on_hand').orWhereNotNull('low_stock_threshold');
-            });
-        })
-          .orWhereRaw("lower(coalesce(inventory_unit, '')) = 'oz'")
-          .orWhereRaw(`
-            nullif(trim(coalesce(inventory_unit, '')), '') is not null
-            AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg')
-          `);
-      })
+    // The SHARED queue predicate from inventory-unit-review.js — the same
+    // filter the sweep's digest count and dashboard-alerts run. r15: the
+    // inline copy here used whereNull-only for missing and an exact
+    // lower(...)='oz' for ambiguous, so 'Ounces' and whitespace-only units
+    // were counted by the digest but never shown on this page.
+    const { applyUnitReviewQueueFilter } = require('../services/inventory-unit-review');
+    const products = await applyUnitReviewQueueFilter(db('products_catalog'))
       .select(
         'id',
         'name',
@@ -3035,73 +3028,20 @@ router.get('/unit-review', async (req, res, next) => {
 });
 
 // POST /unit-review/:productId/fix — normalize a product inventory unit.
+// Application logic lives in inventory-unit-review.js (shared with the
+// nightly alias auto-fix sweep); behavior here is unchanged.
 router.post('/unit-review/:productId/fix', async (req, res, next) => {
   try {
     const nextUnit = String(req.body?.inventoryUnit || '').trim();
     const convertExistingStock = req.body?.convertExistingStock !== false;
     assertSupportedInventoryUnit(nextUnit);
 
-    const updated = await db.transaction(async (trx) => {
-      const product = await trx('products_catalog')
-        .where({ id: req.params.productId })
-        .forUpdate()
-        .first();
-      if (!product) {
-        const err = new Error('Product not found');
-        err.statusCode = 404;
-        throw err;
-      }
-      const currentUnit = product.inventory_unit || null;
-      const stockBefore = numberOrNull(product.inventory_on_hand);
-      const thresholdBefore = numberOrNull(product.low_stock_threshold);
-      let stockAfter = stockBefore;
-      let thresholdAfter = thresholdBefore;
-      let conversion = null;
-
-      if (convertExistingStock && currentUnit && normalizeInventoryUnit(currentUnit) !== normalizeInventoryUnit(nextUnit)) {
-        stockAfter = stockBefore != null ? convertInventoryQuantity(stockBefore, currentUnit, nextUnit) : null;
-        thresholdAfter = thresholdBefore != null ? convertInventoryQuantity(thresholdBefore, currentUnit, nextUnit) : null;
-        if ((stockBefore != null && stockAfter == null) || (thresholdBefore != null && thresholdAfter == null)) {
-          const err = new Error(`Cannot convert existing inventory from ${currentUnit} to ${nextUnit}`);
-          err.statusCode = 400;
-          throw err;
-        }
-        conversion = {
-          fromUnit: currentUnit,
-          toUnit: nextUnit,
-          stockBefore,
-          stockAfter,
-          thresholdBefore,
-          thresholdAfter,
-        };
-      }
-
-      await trx('products_catalog').where({ id: product.id }).update({
-        inventory_unit: nextUnit,
-        inventory_on_hand: stockAfter,
-        low_stock_threshold: thresholdAfter,
-        updated_at: new Date(),
-      });
-
-      if (conversion && stockBefore != null) {
-        const stockBeforeInNextUnit = convertInventoryQuantity(stockBefore, currentUnit, nextUnit);
-        await trx('product_inventory_movements').insert({
-          product_id: product.id,
-          movement_type: 'correction',
-          quantity: Number(((stockAfter || 0) - (stockBeforeInNextUnit || 0)).toFixed(4)),
-          unit: nextUnit,
-          stock_before: stockBeforeInNextUnit,
-          stock_after: stockAfter || 0,
-          metadata: {
-            source: 'inventory_unit_review_fix',
-            reason: 'Inventory unit normalization',
-            conversion,
-            adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
-          },
-        });
-      }
-
-      return trx('products_catalog').where({ id: product.id }).first();
+    const { product: updated } = await applyInventoryUnitFix({
+      productId: req.params.productId,
+      nextUnit,
+      convertExistingStock,
+      movementSource: 'inventory_unit_review_fix',
+      adjustedBy: req.adminUser?.id || req.adminUser?.email || req.adminUser?.name || null,
     });
 
     res.json({ success: true, product: mapProduct(updated) });
