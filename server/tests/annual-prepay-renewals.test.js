@@ -325,6 +325,7 @@ describe('annual prepay renewal helpers', () => {
       scheduled_services: [
         columnQuery,
         rowsQuery,
+        query({ first: undefined }),
         parentInsert,
         childInsert1,
         childInsert2,
@@ -421,7 +422,7 @@ describe('annual prepay renewal helpers', () => {
     const insert3 = query({ returning: [{ id: 'svc-3', scheduled_date: '2026-12-15' }] });
     const insert4 = query({ returning: [{ id: 'svc-4', scheduled_date: '2027-03-15' }] });
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, insert1, insert2, insert3, insert4],
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), insert1, insert2, insert3, insert4],
       invoices: [invoiceQuery],
     });
 
@@ -471,7 +472,7 @@ describe('annual prepay renewal helpers', () => {
     const insert1 = query({ returning: [{ id: 'svc-c', scheduled_date: '2026-12-15' }] });
     const insert2 = query({ returning: [{ id: 'svc-d', scheduled_date: '2027-03-15' }] });
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, insert1, insert2],
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), insert1, insert2],
     });
 
     await expect(_private.ensureCoverageRowsForTerm({
@@ -513,7 +514,7 @@ describe('annual prepay renewal helpers', () => {
     const conflictQuery = query({ rows: [] }); // board is clear at 08:00
     const first = query({ returning: [{ id: 'svc-w1', scheduled_date: '2026-08-01', window_start: '08:00' }] });
     const second = query({ returning: [{ id: 'svc-w2', scheduled_date: '2026-11-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, lockedRecheck, conflictQuery, first, second] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), lockedRecheck, conflictQuery, first, second] });
 
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-w',
@@ -564,7 +565,7 @@ describe('annual prepay renewal helpers', () => {
     // The board moved between minting the invoice and paying it.
     const conflictQuery = query({ rows: [{ id: 'svc-other', window_start: '08:00', window_end: '09:00' }] });
     const seeded = query({ returning: [{ id: 'svc-x1', scheduled_date: '2026-08-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, lockedRecheck, conflictQuery, seeded] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), lockedRecheck, conflictQuery, seeded] });
 
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-x',
@@ -613,7 +614,7 @@ describe('annual prepay renewal helpers', () => {
     const i3 = query({ returning: [{ id: 's3', scheduled_date: '2026-12-15' }] });
     const i4 = query({ returning: [{ id: 's4', scheduled_date: '2027-03-15' }] });
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, i1, i2, i3, i4],
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), i1, i2, i3, i4],
     });
 
     await expect(_private.ensureCoverageRowsForTerm({
@@ -656,7 +657,7 @@ describe('annual prepay renewal helpers', () => {
     const i2 = query({ returning: [{ id: 's2', scheduled_date: '2026-07-01' }] });
     const i3 = query({ returning: [{ id: 's3', scheduled_date: '2026-10-01' }] });
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, i1, i2, i3],
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), i1, i2, i3],
     });
 
     await expect(_private.ensureCoverageRowsForTerm({
@@ -703,6 +704,7 @@ describe('annual prepay renewal helpers', () => {
       scheduled_services: [
         columnQuery,
         rowsQuery,
+        query({ first: undefined }),
         parentInsert,
         childInsert1,
         childInsert2,
@@ -767,6 +769,7 @@ describe('annual prepay renewal helpers', () => {
       scheduled_services: [
         columnQuery,
         rowsQuery,
+        query({ first: undefined }),
         parentInsert,
         childInsert1,
         childInsert2,
@@ -901,7 +904,7 @@ describe('annual prepay renewal helpers', () => {
       ],
     });
     const seeded = query({ returning: [{ id: 'svc-p1', scheduled_date: '2026-08-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, seeded] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), seeded] });
 
     // 2 sold, 1 existing → 1 to seed. Without the exact-only rule the Aug-15
     // visit would absorb the Aug-01 promised slot and Nov-01 would seed instead.
@@ -953,7 +956,7 @@ describe('annual prepay renewal helpers', () => {
     const conflictQuery = query({ rows: [] }); // clear at 08:00 (row itself excluded)
     const retimeUpdate = query({});
     const laterSeed = query({ returning: [{ id: 'svc-r2', scheduled_date: '2026-11-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, lockedReRead, conflictQuery, retimeUpdate, laterSeed] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), lockedReRead, conflictQuery, retimeUpdate, laterSeed] });
 
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-r',
@@ -1012,7 +1015,7 @@ describe('annual prepay renewal helpers', () => {
       }],
     });
     const laterSeed = query({ returning: [{ id: 'svc-c2', scheduled_date: '2026-11-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, laterSeed] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), laterSeed] });
 
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-c',
@@ -1047,7 +1050,7 @@ describe('annual prepay renewal helpers', () => {
     });
     const rowsQuery = query({ rows: [] });
     const seeded = query({ returning: [{ id: 'svc-e1', scheduled_date: '2026-08-01' }] });
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, seeded] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), seeded] });
 
     // Payment lands at 4 PM on the promised day; the 8 AM window is over.
     await expect(_private.ensureCoverageRowsForTerm({
@@ -1096,7 +1099,7 @@ describe('annual prepay renewal helpers', () => {
     const termStampUpdate = query({});
     const refetchRows = query({ rows: [] }); // slid window still empty
     setDbQueues({
-      scheduled_services: [columnQuery, rowsQuery, refetchRows, ...inserts],
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), refetchRows, ...inserts],
       annual_prepay_terms: [termColsQuery, successorQuery, termSlideUpdate, termStampUpdate],
     });
 
@@ -1161,7 +1164,7 @@ describe('annual prepay renewal helpers', () => {
     });
     // NOTE: no annual_prepay_terms queue at all — any slide/stamp query would
     // throw "Unexpected db table" and fail this test.
-    setDbQueues({ scheduled_services: [columnQuery, rowsQuery] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, query({ first: { id: 'svc-i1' } })] });
 
     await expect(_private.ensureCoverageRowsForTerm({
       id: 'term-i',

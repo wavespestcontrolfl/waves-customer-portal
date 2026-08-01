@@ -490,12 +490,15 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // function also runs on every schedule-edit refresh of an ACTIVE term, and
   // an always-on today-floor would compound: each later refresh would see a
   // new positive lag and extend term_end again, indefinitely postponing
-  // renewal while billing stays suppressed. "Already activated" = a coverage
-  // row is already LINKED to this term (the first activation links its rows
-  // via the seed inserts and attachScheduledServices immediately after) —
-  // from then on this function is a pure gap-filler on the stored window.
+  // renewal while billing stays suppressed. "Already activated" = ANY row was
+  // ever linked to this term (the first activation links its rows via the
+  // seed inserts and attachScheduledServices immediately after) — from then
+  // on this function is a pure gap-filler on the stored window. Checked with
+  // a dedicated any-status query, NOT the eligible coverage set: cancelling
+  // every linked visit must not make a later refresh look like a first
+  // activation and reopen the compounding slide.
   const alreadyActivated = !!cols.annual_prepay_term_id
-    && existingRows.some((row) => row.annual_prepay_term_id != null && String(row.annual_prepay_term_id) === String(term.id));
+    && !!(await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).first('id'));
 
   // Seeding runs at PAYMENT time, so the past-date floor is today: a term paid
   // days after it was minted must not generate a visit that already happened.
@@ -760,6 +763,21 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       // timed promise. The visit still seeds on the right date, windowless.
       logger.warn(`[annual-prepay] term ${term.id} first-visit conflict check failed (${err.message}) — seeding without a window`);
       windowStart = null;
+      // The savepoint died before its adoption recheck ran (e.g. the date
+      // lock was held by a concurrent booking — which may be creating exactly
+      // the visit we would duplicate). Best-effort unlocked recheck before
+      // inserting; a holder that commits after this read can still slip
+      // through, but a windowless duplicate beats a skipped visit and the
+      // next refresh's tolerance matcher surfaces it.
+      try {
+        const sameDay = await trx('scheduled_services')
+          .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
+          .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
+          .select('*');
+        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+      } catch (recheckErr) {
+        logger.warn(`[annual-prepay] term ${term.id} post-failure adoption recheck failed (${recheckErr.message})`);
+      }
     }
     if (concurrentAdoptable) {
       logger.warn(`[annual-prepay] term ${term.id} found concurrently-created visit ${concurrentAdoptable.id} on ${scheduledDate} under the occupancy lock — adopting it instead of inserting a duplicate`);
