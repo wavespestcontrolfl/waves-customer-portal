@@ -150,23 +150,53 @@ function wikiIlikeQuery(term, trustedOnly, limit) {
 // generateAssessmentRecommendations for why runs must be serialized.
 const _recommendationRuns = new Map();
 
-// In-flight generation fence (codex P1 r28): Phase A stamps a marker so a
-// held email delivery cannot treat its own sanitize as final while an LLM
-// call is still able to write different grounded copy afterwards. The
-// marker carries a runId (only the owning run clears it) and an expiry (a
-// crashed process can never strand the email).
-const GENERATION_FENCE_MS = 15 * 60 * 1000;
+// In-flight generation fence (codex P1 r28+r29): a held email delivery must
+// not treat its sanitize as final while ANY generation can still write
+// different grounded copy afterwards. `_generationRuns` is a REGISTRY —
+// { runId: leaseExpiresAtISO } — so concurrent runs across pods each hold
+// their own entry and a finishing run removes only its own. The lease is
+// short but RENEWED on a heartbeat for as long as the provider chain runs,
+// so a 10-minute dispatch + fallback keeps the fence live, while a crashed
+// process's entry simply expires and can never strand the email.
+const GENERATION_LEASE_MS = 5 * 60 * 1000;
+const GENERATION_LEASE_RENEW_MS = 90 * 1000;
 function parseStoredRecommendations(value) {
   try {
     const parsed = typeof value === 'string' ? JSON.parse(value) : value;
     return parsed && typeof parsed === 'object' ? parsed : null;
   } catch { return null; }
 }
+function activeGenerationRuns(stored) {
+  const runs = stored && typeof stored._generationRuns === 'object' && stored._generationRuns
+    ? stored._generationRuns : {};
+  const now = Date.now();
+  const live = {};
+  for (const [id, until] of Object.entries(runs)) {
+    const ts = Date.parse(until);
+    if (Number.isFinite(ts) && ts > now) live[id] = until;
+  }
+  return live;
+}
 function generationInFlight(stored) {
-  const until = stored?._generationInFlightUntil;
-  if (!until) return false;
-  const ts = Date.parse(until);
-  return Number.isFinite(ts) && ts > Date.now();
+  return Object.keys(activeGenerationRuns(stored)).length > 0;
+}
+// Locked read-modify-write of the run registry. `mutate(liveRuns)` returns
+// the registry to persist; everything else in the payload is preserved.
+async function updateGenerationRuns(assessmentId, mutate) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+    const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+    const stored = parseStoredRecommendations(row?.recommendations) || {};
+    const next = mutate(activeGenerationRuns(stored));
+    if (next && Object.keys(next).length) stored._generationRuns = next;
+    else delete stored._generationRuns;
+    // Legacy scalar marker from the r28 shape — drop it on any touch.
+    delete stored._generationInFlightUntil;
+    delete stored._generationRunId;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ recommendations: JSON.stringify(stored), updated_at: new Date() });
+    return true;
+  });
 }
 
 // Persist-time guard (codex P1 #3093 r5): the applied-today prompt rule is
@@ -839,11 +869,14 @@ const KnowledgeBridge = {
       if (assessment.service_record_id) {
         appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
       }
-      // Stamp the fence BEFORE releasing the lock so no held delivery can
-      // finalize while this run's LLM call is still able to write.
+      // Register THIS run in the fence before releasing the lock — other
+      // pods' active runs keep their own entries.
       const stored = parseStoredRecommendations(assessment.recommendations) || {};
-      stored._generationInFlightUntil = new Date(Date.now() + GENERATION_FENCE_MS).toISOString();
-      stored._generationRunId = runId;
+      const runs = activeGenerationRuns(stored);
+      runs[runId] = new Date(Date.now() + GENERATION_LEASE_MS).toISOString();
+      stored._generationRuns = runs;
+      delete stored._generationInFlightUntil;
+      delete stored._generationRunId;
       await trx('lawn_assessments').where({ id: assessmentId })
         .update({ recommendations: JSON.stringify(stored), updated_at: new Date() });
       return { assessment, appliedProducts };
@@ -855,21 +888,29 @@ const KnowledgeBridge = {
       return undefined;
     });
     if (!phaseA) return null;
-    const result = await this._generateAssessmentRecommendationsUnlocked(assessmentId, phaseA, context, runId)
-      .catch((err) => { logger.error(`[knowledge-bridge] recommendation generation failed: ${err.message}`); return null; });
-    // Failure after Phase A must LIFT the fence (Phase B clears it on
-    // success by writing a fresh payload) — only the owning run clears it,
-    // so a concurrent run's marker survives.
+    // Renew this run's lease while the provider chain runs — the fence must
+    // outlast a 10-minute dispatch plus fallback (codex P1 r29).
+    const heartbeat = setInterval(() => {
+      void updateGenerationRuns(assessmentId, (runs) => ({
+        ...runs,
+        [runId]: new Date(Date.now() + GENERATION_LEASE_MS).toISOString(),
+      })).catch((renewErr) => logger.warn(`[knowledge-bridge] generation lease renew failed for ${assessmentId}: ${renewErr.message}`));
+    }, GENERATION_LEASE_RENEW_MS);
+    heartbeat.unref?.();
+    let result = null;
+    try {
+      result = await this._generateAssessmentRecommendationsUnlocked(assessmentId, phaseA, context, runId)
+        .catch((err) => { logger.error(`[knowledge-bridge] recommendation generation failed: ${err.message}`); return null; });
+    } finally {
+      clearInterval(heartbeat);
+    }
+    // Failure after Phase A must LIFT this run's entry (Phase B removes it
+    // on success) — concurrent runs' entries are preserved.
     if (!result) {
-      await db.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
-        const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
-        const stored = parseStoredRecommendations(row?.recommendations);
-        if (!stored || stored._generationRunId !== runId) return;
-        delete stored._generationInFlightUntil;
-        delete stored._generationRunId;
-        await trx('lawn_assessments').where({ id: assessmentId })
-          .update({ recommendations: JSON.stringify(stored), updated_at: new Date() });
+      await updateGenerationRuns(assessmentId, (runs) => {
+        const next = { ...runs };
+        delete next[runId];
+        return next;
       }).catch((clearErr) => logger.warn(`[knowledge-bridge] generation fence clear failed for ${assessmentId}: ${clearErr.message}`));
     }
     return result;
@@ -964,14 +1005,19 @@ Return a JSON object with:
           if (!fresh) return null;
           const existing = parseStoredRecommendations(fresh.recommendations);
           const existingGrounded = !!(existing && existing._groundedInApplications);
+          // Runs still active besides this one keep the fence up on the
+          // payload this write produces (codex P1 r29).
+          const remainingRuns = activeGenerationRuns(existing);
+          delete remainingRuns[runId];
           if (existingGrounded && !iAmGrounded) {
             logger.info(`[knowledge-bridge] ungrounded recommendation result for ${assessmentId} discarded — grounded copy already stored`);
-            if (existing && existing._generationRunId === runId) {
-              delete existing._generationInFlightUntil;
-              delete existing._generationRunId;
-              await trx('lawn_assessments').where({ id: assessmentId })
-                .update({ recommendations: JSON.stringify(existing), updated_at: new Date() });
-            }
+            const kept = { ...existing };
+            if (Object.keys(remainingRuns).length) kept._generationRuns = remainingRuns;
+            else delete kept._generationRuns;
+            delete kept._generationInFlightUntil;
+            delete kept._generationRunId;
+            await trx('lawn_assessments').where({ id: assessmentId })
+              .update({ recommendations: JSON.stringify(kept), updated_at: new Date() });
             return null;
           }
           // When the replacement summary was stripped, "keep the stored one"
@@ -981,6 +1027,7 @@ Return a JSON object with:
             parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
           }
           parsed._groundedInApplications = iAmGrounded;
+          if (Object.keys(remainingRuns).length) parsed._generationRuns = remainingRuns;
           await trx('lawn_assessments').where({ id: assessmentId }).update({
             ...(parsed.summary ? { ai_summary: parsed.summary } : {}),
             recommendations: JSON.stringify(parsed),
@@ -1173,7 +1220,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses };
+module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.treatmentGuard = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses };

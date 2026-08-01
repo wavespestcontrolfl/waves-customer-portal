@@ -217,3 +217,25 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(parsed.recommendations).toHaveLength(1);
   });
 });
+
+describe('generation fence registry (r28/r29)', () => {
+  const { _test } = require('../services/knowledge-bridge');
+  const future = () => new Date(Date.now() + 60000).toISOString();
+  const past = () => new Date(Date.now() - 60000).toISOString();
+
+  test('any live run keeps the fence up; expired entries are ignored', () => {
+    expect(_test.generationInFlight({ _generationRuns: { a: future() } })).toBe(true);
+    expect(_test.generationInFlight({ _generationRuns: { a: past() } })).toBe(false);
+    expect(_test.generationInFlight({})).toBe(false);
+    expect(_test.generationInFlight(null)).toBe(false);
+  });
+
+  test('a second concurrent run keeps the fence up after the first finishes', () => {
+    const stored = { _generationRuns: { runA: future(), runB: future() } };
+    const remaining = _test.activeGenerationRuns(stored);
+    delete remaining.runA; // runA's Phase B write
+    expect(_test.generationInFlight({ _generationRuns: remaining })).toBe(true);
+    delete remaining.runB;
+    expect(_test.generationInFlight({ _generationRuns: remaining })).toBe(false);
+  });
+});
