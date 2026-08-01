@@ -52,6 +52,11 @@ const CATALOG_TARGETS = [
   "White-footed ants", "Whiteflies", "Widow spiders", "Wolf spiders", "Wood borers",
   "Wood decay fungi", "Wood-boring beetles", "Wood-destroying beetles",
   "Yellow nutsedge",
+  // Added by 20260801300000, which fills the products that carried no targets.
+  "Bahiagrass", "Lawn burweed", "Palm bud rot (Phytophthora)",
+  "Lethal bronzing (palm) — preventive", "Lethal yellowing (palm) — preventive",
+  "Pythium blight", "Pythium damping-off", "Wood-decay fungi",
+  "Yellow tuft (downy mildew)",
 ];
 
 describe("defaultApplicationMethod", () => {
@@ -259,6 +264,69 @@ describe("labelTargetLines", () => {
   it("reads darkling beetles as a structural pest", () => {
     // Elector PSP carries it next to house flies.
     expect(labelTargetLines("Darkling beetles")).toEqual(["pest"]);
+  });
+
+  it("NEVER prefills a target nothing controls", () => {
+    // UF/IFAS: Ganoderma butt rot has no chemical control and Thielaviopsis
+    // trunk rot has no prevention or cure. A chip on a completed visit reads
+    // as "this product treated it", so these must never fill automatically —
+    // on ANY line, and even if someone adds them to a product's catalog row.
+    ["Ganoderma butt rot", "Ganoderma zonatum", "Thielaviopsis trunk rot"].forEach((t) =>
+      expect(labelTargetLines(t)).toEqual([]),
+    );
+    ALL_TARGET_LINES.forEach((line) =>
+      expect(
+        filterLabelTargetsForLine(
+          ["Ganoderma butt rot", "Palm leaf spot"],
+          new Set([line]),
+        ),
+      ).not.toContain("Ganoderma butt rot"),
+    );
+  });
+
+  it("files palm diseases as tree & shrub, not turf", () => {
+    // The lawn pattern claims a bare "leaf spot", so without an ornamental
+    // check first "Palm leaf spot" would file as turf.
+    [
+      "Palm leaf spot",
+      "Palm bud rot (Phytophthora)",
+      "Lethal bronzing (palm) — preventive",
+      "Lethal yellowing (palm) — preventive",
+      "Fusarium wilt (palm)",
+    ].forEach((t) => expect(labelTargetLines(t)).toEqual(["tree_shrub"]));
+    // The turf oomycete targets we actually write keep their own wording and
+    // stay on the lawn line. "Pythium root rot" is deliberately absent from
+    // our vocabulary — no product carries it and nothing writes it, so there
+    // is no line to assign it to. See the migration header for why it is not a
+    // turf claim on Banol or Subdue Maxx.
+    expect(labelTargetLines("Pythium blight")).toEqual(["lawn"]);
+    expect(labelTargetLines("Pythium damping-off")).toEqual(["lawn"]);
+    // Yellow tuft is a TURF disease that the Subdue Maxx turf directions spell
+    // "Yellow tuft (downy mildew)". A generic downy-mildew ornamental rule
+    // would steal it off lawn visits, so there isn't one.
+    expect(labelTargetLines("Yellow tuft (downy mildew)")).toEqual(["lawn"]);
+    expect(labelTargetLines("Yellow tuft")).toEqual(["lawn"]);
+    // A palm visit gets the palm disease; a lawn visit gets none of it.
+    expect(
+      filterLabelTargetsForLine(
+        ["Lethal bronzing (palm) — preventive"],
+        lines("Tree & Shrub Care"),
+      ),
+    ).toEqual(["Lethal bronzing (palm) — preventive"]);
+    expect(
+      filterLabelTargetsForLine(
+        ["Lethal bronzing (palm) — preventive"],
+        lines("Lawn Care Program"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("classifies the weeds and WDO wording the fill migration introduces", () => {
+    expect(labelTargetLines("Bahiagrass")).toEqual(["lawn"]);
+    expect(labelTargetLines("Lawn burweed")).toEqual(["lawn"]);
+    // Hyphenated and spaced spellings both read as WDO work.
+    expect(labelTargetLines("Wood-decay fungi")).toEqual(["termite"]);
+    expect(labelTargetLines("Wood decay fungi")).toEqual(["termite"]);
   });
 
   it("reads moles as a pest target without stealing mole crickets", () => {

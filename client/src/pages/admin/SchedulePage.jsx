@@ -15640,7 +15640,7 @@ export const ALL_TARGET_LINES = ["pest", "lawn", "tree_shrub", "termite", "mosqu
 // substring-loose because catalog target_pests values are free text pulled
 // from labels ("Southern Chinch Bugs", "sod webworm", "chinch bug (southern)").
 const LAWN_ONLY_TARGET_RE =
-  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|turf/i;
+  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|bahiagrass|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|burweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|yellow tuft|turf/i;
 
 // Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
 // borers, and foliar issues. Checked BEFORE the structural set so "Spider
@@ -15648,11 +15648,24 @@ const LAWN_ONLY_TARGET_RE =
 const ORNAMENTAL_ONLY_TARGET_RE =
   /whitefl|spiraling|scale insect|soft scale|mealybug|aphid|thrips|\bmites?\b|leafminer|\bborer|weevil|sooty mold|powdery mildew|fungal leaf spot/i;
 
-// "Fungal leaf spot" is ornamental, but bare "Leaf spot" (and "Gray leaf
-// spot") come off turf fungicide labels — Medallion SC and Armada 50 WDG both
-// carry it alongside brown patch. The lawn pattern claims a bare "leaf spot",
-// so the ornamental form needs claiming first.
-const ORNAMENTAL_LEAF_SPOT_RE = /fungal leaf spot/i;
+// Targets NOTHING controls. UF/IFAS is explicit that Ganoderma butt rot has no
+// chemical control and Thielaviopsis trunk rot has no prevention or cure, so
+// they must never prefill: a chip on a completed visit reads as "this product
+// treated it", which would be a claim no product can support. A tech can still
+// type either by hand as an observation — this only blocks the automatic fill.
+const NO_CONTROL_TARGET_RE = /ganoderma|thielaviopsis/i;
+
+// Palm and ornamental diseases. Checked BEFORE the turf pattern because the
+// lawn regex claims a bare "leaf spot" — without this, "Palm leaf spot" files
+// as turf. Palm disease tokens carry an explicit "(palm)" marker so the intent
+// is legible in the catalog as well as here; turf oomycetes keep their own
+// "Pythium ..." wording and stay on the lawn line.
+// NOTE: no bare "downy mildew" here. Yellow tuft — a St. Augustine turf
+// disease — is written "Yellow tuft (downy mildew)" on the Subdue Maxx turf
+// directions, so a generic downy-mildew rule would steal a turf target and
+// drop it from lawn visits. The turf form is claimed by the lawn pattern below.
+const ORNAMENTAL_DISEASE_RE =
+  /fungal leaf spot|\(palm\)|palm leaf spot|palm bud rot|lethal bronzing|lethal yellowing|fusarium wilt/i;
 
 // Nutrition goals, not pests: what a feeding is meant to correct or stimulate.
 // Fertilizer-family products get applied on turf AND on palms/ornamentals, so
@@ -15671,7 +15684,7 @@ const CATERPILLAR_TARGET_RE = /caterpillar/i;
 // "Wood borers" alone stays ornamental (the pattern above claims it — Tree-Age
 // and Ima-Jet are injection products), but the wood-DESTROYING organisms off a
 // Bora-Care label are WDO work.
-const TERMITE_TARGET_RE = /termite|wood-?boring|wood borer|wood-?destroying|wood decay/i;
+const TERMITE_TARGET_RE = /termite|wood-?boring|wood borer|wood-?destroying|wood-? ?decay/i;
 const CARPENTER_ANT_RE = /carpenter ant/i;
 
 const MOSQUITO_TARGET_RE = /mosquito/i;
@@ -15707,8 +15720,11 @@ const STRUCTURAL_ONLY_TARGET_RE =
 // test fixture covers both, since a value can be seeded (Talpirid's "Moles")
 // without appearing in the prod catalog snapshot.
 export function labelTargetLines(target) {
+  // Nothing controls these, so nothing may prefill them — checked first so no
+  // later pattern can claim them onto a line.
+  if (NO_CONTROL_TARGET_RE.test(target)) return [];
   if (/fire ant/i.test(target)) return ["pest", "lawn"];
-  if (ORNAMENTAL_LEAF_SPOT_RE.test(target)) return ["tree_shrub"];
+  if (ORNAMENTAL_DISEASE_RE.test(target)) return ["tree_shrub"];
   if (LAWN_ONLY_TARGET_RE.test(target)) return ["lawn"];
   if (CATERPILLAR_TARGET_RE.test(target)) return ["tree_shrub", "lawn"];
   if (ORNAMENTAL_ONLY_TARGET_RE.test(target)) return ["tree_shrub"];
