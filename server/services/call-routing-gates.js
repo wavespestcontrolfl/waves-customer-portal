@@ -95,20 +95,32 @@ function buildRouteDecision({
       ? (scheduling.status === 'confirmed' ? 'auto_create_appointment' : 'upsert_customer_only')
       : 'needs_review',
     final_action_taken: action,
-    // The REAL veto must survive into the audit record (codex round-5 P2).
-    // The central gates return reasons that are not triage flags —
-    // address_not_validated / off_hour_start — and a held call can carry
-    // ADVISORY flags at the same time (prior_complaint_unresolved,
-    // competing_quotes_active, an unknown model flag). Preferring
-    // finalTriageFlags alone recorded the advisory as the reason the call was
-    // held, which is actively misleading to the admin queue and to anything
-    // reasoning over route_decisions. Union them, veto first.
+    // Only ACTUAL vetoes reach the audit record (codex round-5 P2 +
+    // round-7 P2). Two failure modes to avoid:
+    //   - the central gates return reasons that are not triage flags
+    //     (address_not_validated / off_hour_start) — the reason itself is
+    //     the veto and must lead;
+    //   - a call held on a hard flag can simultaneously carry ADVISORY
+    //     flags (prior_complaint_unresolved, competing_quotes_active, an
+    //     unknown model flag). finalTriageFlags contains those too, so
+    //     serializing it recorded advisories as vetoes and the AI feedback
+    //     aggregation counted them as such. The triage_flags path uses
+    //     routingResult.appointmentBlockingFlags — exactly the flags that
+    //     blocked. Central-gate and scheduling returns carry no blocking
+    //     flags by construction (the flag stage passed), so they fall back
+    //     to [] — never to finalTriageFlags.
     blocked_reasons: JSON.stringify(
       routingResult?.allowed
         ? []
         : [
           ...(routingResult?.reason && routingResult.reason !== 'triage_flags' ? [routingResult.reason] : []),
-          ...finalTriageFlags.filter((f) => f !== routingResult?.reason),
+          // Fallback when appointmentBlockingFlags is absent: a named
+          // NON-flag reason (central gates, low_confidence, scheduling)
+          // means the flag stage passed — record nothing extra. No reason
+          // at all is the legacy shape some callers/tests still produce —
+          // keep its historical finalTriageFlags behavior.
+          ...(routingResult?.appointmentBlockingFlags
+            ?? (routingResult?.reason && routingResult.reason !== 'triage_flags' ? [] : finalTriageFlags)),
         ],
     ),
     allowed_reasons: JSON.stringify(routingResult?.allowed ? ['all_gates_passed'] : []),

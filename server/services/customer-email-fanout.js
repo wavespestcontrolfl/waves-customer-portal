@@ -64,7 +64,11 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unr
 
 // Mirrors OPEN_STATES in routes/admin-triage.js.
 const OPEN_REVIEW_STATES = ['open', 'in_progress'];
-const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
+// customer_email_missing (codex round-7 P2): a call that booked WITHOUT an
+// email files this card; once a valid email lands on the profile the card's
+// job is done — same lifecycle as the read-back cards, same resolution
+// safety (only a syntactically valid NEW address settles any of these).
+const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid', 'customer_email_missing'];
 
 function emailKey(value) {
   const s = String(value ?? '').trim().toLowerCase();

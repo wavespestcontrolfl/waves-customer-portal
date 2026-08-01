@@ -7335,36 +7335,56 @@ const CallRecordingProcessor = {
         if (customer) {
           customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified });
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
-          if (!customerValidation.ok) {
+          // Email advisory (owner ruling 2026-07-31): file the "collect the
+          // email" card whenever the email is missing — INDEPENDENT of the
+          // other required fields (codex round-7 P2). A caller missing
+          // email+zip previously produced a card listing only the zip, so the
+          // office completing the booking manually was never told to collect
+          // the email. Card failure never changes the booking outcome.
+          if (customerValidation.advisory?.includes('email')) {
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'customer_email_missing',
+                extraction: v2ApprovedExtraction || undefined,
+                severity: 'advisory',
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore()
+              .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
+          }
+          // Email-less bookings in SHADOW/LEGACY mode still require a
+          // positively validated address (codex round-7 P1). canAutoRoute's
+          // central address-trust gate only runs in enforce mode — and
+          // pre-PR, the email requirement was what (incidentally) held these
+          // bookings there. Without this, making email advisory would newly
+          // dispatch email-less callers to addresses nobody validated.
+          // Enforce mode is exempt: canAutoRoute already applied the full
+          // contract, including the known-customer on-file-address lane this
+          // site cannot evaluate.
+          const enforceModeActive = CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
+          const avPositiveForBooking = !!effectiveAddressValidation
+            && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
+            && effectiveAddressValidation.inServiceArea === true;
+          const emailAdvisoryHold = !enforceModeActive
+            && customerValidation.ok
+            && !!customerValidation.advisory?.includes('email')
+            && !avPositiveForBooking;
+          if (!customerValidation.ok || emailAdvisoryHold) {
+            const missingFields = customerValidation.ok ? ['email'] : customerValidation.missing;
             appointmentResult = {
               service: serviceResolution.service,
               dateTime: extracted.preferred_date_time,
               scheduleCreated: false,
               smsSent: false,
               skippedReason: 'missing_required_customer_fields',
-              missingFields: customerValidation.missing,
+              missingFields,
             };
             logger.warn(
               `[call-proc] Skipping appointment auto-create for ${callSid}: missing required customer fields ` +
-              customerValidation.missing.join(', ')
+              missingFields.join(', ') + (emailAdvisoryHold ? ' (email-less booking outside enforce mode requires a validated address)' : '')
             );
           } else {
-            // Email advisory (owner ruling 2026-07-31): the booking proceeds
-            // without an email — file the "collect the email" card so the
-            // office asks for it on the confirmation touch. Card failure
-            // never holds the booking.
-            if (customerValidation.advisory?.includes('email')) {
-              await db('triage_items')
-                .insert(buildTriageItem({
-                  callLogId: call.id,
-                  flag: 'customer_email_missing',
-                  extraction: v2ApprovedExtraction || undefined,
-                  severity: 'advisory',
-                }))
-                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                .ignore()
-                .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
-            }
             const firstName = customerValidation.details.firstName || '';
             const serviceType = callBookingCatalogRow?.name || serviceResolution.service;
             // Price: transcript-quoted (what the agent and caller agreed)
