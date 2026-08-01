@@ -420,6 +420,36 @@ describe('llm-dispatch-metrics', () => {
       expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
+    it('does not run gone-silent on a PARTIALLY covered day (gate toggled / deploy gap)', async () => {
+      // A handful of heartbeats means the window was not covered end to end,
+      // so "policy X recorded nothing" says nothing about whether X stopped.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      armDb({
+        yesterdayRows: [],
+        priorRows: [{ policy: 'report', total: '300', fallbacks: '0', failed: '0' }],
+        heartbeats: 3,
+        priorHeartbeats: 168,
+      });
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(out.exceptions).toHaveLength(0);
+      expect(mockEmailSend).not.toHaveBeenCalled();
+    });
+
+    it('states UNKNOWN rather than asserting breakage on a zero-heartbeat day', async () => {
+      // The gate may simply have been off for that day; claiming the recorder
+      // failed would be a guess. Reporting "cannot be read as healthy" is true
+      // either way.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
+      armDb({ yesterdayRows: [], priorRows: [], heartbeats: 0, priorHeartbeats: 168 });
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(out.emailed).toBe(true);
+      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/UNKNOWN/);
+      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/failed or the feature was disabled/);
+    });
+
     it('does not run gone-silent on an unjudgeable day', async () => {
       // No coverage means absence proves nothing — prior-week policies must
       // not each fire gone_silent just because the day recorded nothing.

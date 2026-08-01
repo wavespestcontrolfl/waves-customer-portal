@@ -55,6 +55,13 @@ const EPISODIC_LANE_RE = /:(?:sealed|backfill|replay)$/;
 // masquerade as a real policy in the digest.
 const HEARTBEAT_POLICY = '__heartbeat__';
 
+// The hourly cron gives ~24 heartbeats a day. Absence signals (gone_silent)
+// are only trustworthy on a day that was covered nearly end to end: a day the
+// gate was off for part of, or that a deploy interrupted, produces a handful
+// of heartbeats, and "policy X recorded nothing" during a partial window says
+// nothing about whether X stopped running.
+const MIN_DAY_COVERAGE = 20;
+
 // Ambient replay context. Eval harnesses replay fixed fixtures through the
 // SAME live service functions real traffic uses (call extraction, email
 // classification, fact-check), often many layers below where the harness can
@@ -391,16 +398,27 @@ async function runLlmDispatchDigest() {
   // running: on first deploy, or after the gate was off, recordHeartbeat
   // no-opped and the day is simply unjudgeable. priorHeartbeats > 0 is the
   // evidence that coverage existed.
+  // Deliberately phrased as UNKNOWN rather than "the recorder broke": a day
+  // with no heartbeats is equally consistent with the gate having been turned
+  // off for it, and distinguishing the two would need persisted gate history
+  // for a state only the operator can cause and would recognise. Reporting
+  // the fact ("nothing was recorded, so this day cannot be read as healthy")
+  // is true either way, which is what the digest owes the reader.
   const recorderError = (heartbeats === 0 && priorHeartbeats > 0)
-    ? `no heartbeat rows were recorded during ${day} (expected roughly one per hour), so the recorder was not writing that day`
+    ? `no heartbeat rows were recorded during ${day}, though the recorder was writing earlier in the week — either it failed or the feature was disabled for that day. Recording status for ${day} is UNKNOWN; it cannot be read as a healthy quiet day.`
     : null;
-  if (heartbeats === 0 && priorHeartbeats === 0) {
+  if (heartbeats > 0 && heartbeats < MIN_DAY_COVERAGE) {
+    logger.info(`[llm-dispatch-metrics] partial heartbeat coverage for ${day} (${heartbeats}/~24) — absence signals not judged`);
+  } else if (heartbeats === 0 && priorHeartbeats === 0) {
     logger.info(`[llm-dispatch-metrics] no heartbeat coverage for ${day} yet — absence signals not judged`);
   }
 
-  // With zero heartbeats we cannot tell "policy stopped running" from
-  // "nothing was recorded", so absence-based checks are not judgeable.
-  const exceptions = detectExceptions(yesterdayStats, priorWeekStats, recorderError, heartbeats > 0);
+  // Absence checks need a day covered nearly end to end. On a partial day
+  // (gate toggled, deploy gap) "policy X recorded nothing" is uninformative,
+  // and with zero heartbeats it is meaningless.
+  const exceptions = detectExceptions(
+    yesterdayStats, priorWeekStats, recorderError, heartbeats >= MIN_DAY_COVERAGE,
+  );
   let sendError = null;
   if (exceptions.length) {
     const sent = await emailExceptions(day, exceptions);
