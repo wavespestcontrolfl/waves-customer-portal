@@ -51,7 +51,11 @@ const REWRITES = [
     "Hello {first_name}! We're scheduled to see you on {service_date}, and your account has an outstanding balance.\n\nYou can take care of it before the visit here: {pay_url}"],
   ['payment_method_expiry',
     "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update it here so your service isn't interrupted: portal.wavespestcontrol.com",
-    "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update it here so your next payment goes through: portal.wavespestcontrol.com"],
+    // Also promises no OUTCOME. An updated card does not guarantee the next
+    // charge succeeds, and this workflow texts every customer with an
+    // expiring card on file — not only the one funding a scheduled charge.
+    // Fact + action, nothing forward-looking.
+    "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update it here so we have a current card on file: portal.wavespestcontrol.com"],
   ['balance_reminder_firm',
     "Hello {first_name}! Your {service_type} is {service_timing} and your account has an outstanding balance.\n\nPlease take care of it so we can keep you on schedule: {pay_url}",
     "Hello {first_name}! Your {service_type} is {service_timing} and your account has an outstanding balance.\n\nYou can take care of it here: {pay_url}"],

@@ -4651,13 +4651,13 @@ function BillingTab({ customer }) {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: `Card ending in ${cardExpiringSoon?.last4 || ''} has expired`,
-      detail: 'This card can no longer be charged. Update your payment method to keep your payments going through.',
+      detail: 'This card can no longer be charged. Update your saved payment method below.',
     },
     expiring: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'warning',
       badge: 'Card expiring', titleColor: B.orange, subtitleColor: B.grayDark,
       title: `Card ending in ${cardExpiringSoon?.last4 || ''} expires in ${cardExpiringSoon?.months || 0} month${cardExpiringSoon?.months === 1 ? '' : 's'}`,
-      detail: 'Update your payment method so your next payment goes through.',
+      detail: 'Update your saved payment method below before this card expires.',
     },
     active: {
       bg: '#F0FDF4', border: '#BBF7D0', icon: 'check',
