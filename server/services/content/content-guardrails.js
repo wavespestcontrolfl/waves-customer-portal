@@ -91,11 +91,31 @@ function blankTags(s) {
       j += 1;
     }
     if (close === -1) continue;
+    // A BLOCK-level tag is a rendered boundary. Blanking it to spaces merged
+    // adjacent paragraphs into one clause, so "<p>Other companies
+    // charge</p><p> $89 per visit…</p>" read as attribution even though the
+    // reader sees a bare price in its own paragraph (Codex r8). Emit a
+    // newline — which sentenceAround already treats as a boundary — in the
+    // tag's first position, keeping the blanking length-preserving.
+    const isBlock = BLOCK_TAG_RE.test(s.slice(i, close + 1));
     for (let k = i; k <= close; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    if (isBlock && out[i] !== '\n') out[i] = '\n';
     i = close;
   }
   return out.join('');
 }
+
+// Quoted strings in JSX must be read ESCAPE-AWARE, the way
+// comparison-table-gate.js:1149-1160 reads them: a label like
+// `Plan called \"Our service\"` ends at the escaped quote under a naive
+// [^"]* and the first-party marker after it is never seen (Codex r8). Same
+// pattern for row VALUES and column HEADERS — a stray escaped quote there
+// shifts which cell owns the amount.
+const QUOTED_STR_SRC = '"((?:[^"\\\\]|\\\\.)*)"|\'((?:[^\'\\\\]|\\\\.)*)\'';
+const unescapeStr = (v) => String(v ?? '').replace(/\\(.)/g, '$1');
+
+// Tags that START A NEW RENDERED BLOCK — attribution cannot cross one.
+const BLOCK_TAG_RE = /^<\/?(?:p|div|section|article|aside|main|header|footer|nav|figure|figcaption|blockquote|pre|hr|br|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|h[1-6])\b/i;
 
 function blankToRenderedText(s) {
   return blankTags(blankComments(s));
@@ -538,10 +558,10 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
     // companies","$199","Local service","$89"] must exempt only the $199
     // (pre-push Codex P0).
     const cellStrings = [];
-    const strRe = /"([^"]*)"|'([^']*)'/g;
+    const strRe = new RegExp(QUOTED_STR_SRC, 'g');
     let sm;
     while ((sm = strRe.exec(seg)) !== null) {
-      cellStrings.push({ text: sm[1] ?? sm[2], start: open + 1 + sm.index, end: open + 1 + sm.index + sm[0].length });
+      cellStrings.push({ text: unescapeStr(sm[1] ?? sm[2]), start: open + 1 + sm.index, end: open + 1 + sm.index + sm[0].length });
     }
     const idx = cellStrings.findIndex((c) => amountIndex >= c.start && amountIndex < c.end);
     if (idx === -1) return false;
@@ -574,9 +594,9 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
       let km;
       while ((km = labelKeyRe.exec(rowText)) !== null) {
         const rest = rowText.slice(km.index + km[0].length);
-        const strM = /^(?:"([^"]*)"|'([^']*)'|`([^`$]*)`)/.exec(rest);
+        const strM = new RegExp(`^(?:${QUOTED_STR_SRC}|\`((?:[^\`\\\\$]|\\\\.)*)\`)`).exec(rest);
         if (!strM) return false; // unsupported label expression
-        const label = strM[1] ?? strM[2] ?? strM[3];
+        const label = unescapeStr(strM[1] ?? strM[2] ?? strM[3]);
         if (label && hasFirstPartyMarker(label)) return false;
       }
     }
@@ -596,8 +616,8 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
         const colsOpen = compStart + colsM.index + colsM[0].length - 1;
         const colsClose = j.indexOf(']', colsOpen);
         if (colsClose !== -1) {
-          const headers = [...j.slice(colsOpen + 1, colsClose).matchAll(/"([^"]*)"|'([^']*)'/g)]
-            .map((m) => m[1] ?? m[2]);
+          const headers = [...j.slice(colsOpen + 1, colsClose).matchAll(new RegExp(QUOTED_STR_SRC, 'g'))]
+            .map((m) => unescapeStr(m[1] ?? m[2]));
           header = headers[idx + 1] ?? null; // columns[0] is the row-label column
         }
       }

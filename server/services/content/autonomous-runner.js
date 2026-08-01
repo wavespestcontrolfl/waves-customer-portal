@@ -3058,6 +3058,27 @@ class AutonomousRunner {
     for (const k of JSONB_COLS) {
       if (typeof out[k] === 'string') { try { out[k] = JSON.parse(out[k]); } catch (_) { /* leave as-is */ } }
     }
+    // Briefs persisted BEFORE the intercept marker existed carry no
+    // gsc_signal.intercept, but remediation's SEO-completion gate reads it —
+    // so on deploy an IN-FLIGHT sourced-price run would park as
+    // P0_HARDCODED_PRICE_NOT_APPROVED even though the run-context guardrail
+    // had already authorized it. Derive the provenance from the owning
+    // opportunity instead of requiring a backfill migration (Codex r8 P0).
+    // Only fills an ABSENT marker: a persisted false is authoritative, and an
+    // unreadable opportunity leaves it absent, so this stays fail-closed.
+    if (out.gsc_signal && typeof out.gsc_signal === 'object' && out.gsc_signal.intercept === undefined) {
+      const oppId = out.opportunity_id || run?.opportunity_id;
+      if (oppId) {
+        try {
+          const opp = await db('opportunity_queue').where('id', oppId).first('signal_metadata');
+          let meta = opp?.signal_metadata;
+          if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch (_) { meta = null; } }
+          if (meta) out.gsc_signal = { ...out.gsc_signal, intercept: Boolean(meta.intercept_brief) };
+        } catch (err) {
+          logger.warn(`[autonomous-runner] intercept-provenance backfill skipped for brief ${out.id}: ${err.message}`);
+        }
+      }
+    }
     return out;
   }
 

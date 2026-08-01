@@ -2436,6 +2436,22 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('<span> $89 per visit</span>', {})).toBe('$89');
   });
 
+  test('an escaped quote does not truncate a row label (r8)', () => {
+    const jsx = '<ComparisonTable columns={["What","Other companies"]} rows={[{ label: "Plan called \\"Our service\\"", values: ["$89 per visit"] }]} />';
+    expect(findHardcodedPrice(jsx, OP)).not.toBeNull();
+    // Escaped quotes in VALUES and HEADERS must not shift cell ownership.
+    expect(findHardcodedPrice('values: ["Aptive", "$199"]', OP)).toBeNull();
+    expect(findHardcodedPrice('<ComparisonTable columns={["Fee","Our \\"best\\" plan"]} rows={[{ label: "x", values: ["$89"] }]} />', OP)).not.toBeNull();
+  });
+
+  test('attribution cannot cross a rendered block boundary (r8)', () => {
+    // The reader sees a bare price in its own paragraph.
+    expect(findHardcodedPrice('<p>Other companies charge</p><p> $89 per visit for local quarterly service.</p>', OP)).not.toBeNull();
+    expect(findHardcodedPrice('<td>Other companies charge</td><td> $89 per visit locally.</td>', OP)).not.toBeNull();
+    // An INLINE tag is not a boundary — real attribution still works.
+    expect(findHardcodedPrice('<p>Orkin charges a <strong>$199</strong> cancellation fee.</p>', OP)).toBeNull();
+  });
+
   test('MDX/HTML comments cannot attribute a price (r6)', () => {
     // The reader sees only "$89 per visit" — the attribution never renders.
     expect(findHardcodedPrice('{/* other companies charge */} $89 per visit for local quarterly service.', OP)).not.toBeNull();
