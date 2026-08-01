@@ -3,7 +3,9 @@ const {
   findDuplicateEstimateByPhone,
   listOpenEstimatesByPhone,
   phoneLookupValues,
+  automatedEstimateLockKeys,
   withAutomatedEstimatePhoneLock,
+  withAutomatedEstimatePhoneLocks,
 } = require('../services/estimate-automation-duplicates');
 
 describe('estimate automation duplicate guard', () => {
@@ -93,5 +95,54 @@ describe('estimate automation duplicate guard', () => {
     );
     expect(result.lockedTrx).toBe(trx);
     expect(result.values.last10).toBe('9415550101');
+  });
+
+  test('multi-phone lock keys are unique and ASCENDING regardless of input order', () => {
+    // The sort IS the deadlock guard: two runs that share a phone pair must
+    // never grab the two locks in opposite orders.
+    expect(automatedEstimateLockKeys(['+1 (941) 555-9999', '941.555.0101']))
+      .toEqual(['9415550101', '9415559999']);
+    expect(automatedEstimateLockKeys(['941.555.0101', '+1 (941) 555-9999']))
+      .toEqual(['9415550101', '9415559999']);
+    // Same number in two formats collapses to one key; unusable input drops.
+    expect(automatedEstimateLockKeys(['+19415550101', '941-555-0101', 'not a phone']))
+      .toEqual(['9415550101']);
+  });
+
+  test('locks EVERY dedupe phone in one transaction before the callback runs', async () => {
+    const trx = { raw: jest.fn(async () => {}) };
+    const database = jest.fn();
+    database.transaction = jest.fn(async (callback) => callback(trx));
+
+    const result = await withAutomatedEstimatePhoneLocks(
+      ['+1 (941) 555-9999', '941.555.0101'],
+      async (lockedTrx, values) => {
+        // Both locks are held BEFORE any read the callback performs.
+        expect(trx.raw).toHaveBeenCalledTimes(2);
+        return { lockedTrx, values };
+      },
+      { database }
+    );
+
+    expect(database.transaction).toHaveBeenCalledTimes(1);
+    expect(trx.raw.mock.calls.map((c) => c[1][1])).toEqual(['9415550101', '9415559999']);
+    expect(result.lockedTrx).toBe(trx);
+    // Second arg stays the PRIMARY (first) phone's lookup values.
+    expect(result.values.last10).toBe('9415559999');
+  });
+
+  test('no usable phone in the set → bare callback, no transaction, no lock', async () => {
+    const database = jest.fn();
+    database.transaction = jest.fn();
+
+    const result = await withAutomatedEstimatePhoneLocks(
+      ['not a phone', null],
+      async (executor, values) => ({ executor, values }),
+      { database }
+    );
+
+    expect(database.transaction).not.toHaveBeenCalled();
+    expect(result.executor).toBe(database);
+    expect(result.values.last10).toBeNull();
   });
 });

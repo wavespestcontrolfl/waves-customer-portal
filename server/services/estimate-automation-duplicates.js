@@ -71,26 +71,70 @@ async function blockIfAutomatedEstimateDuplicate(phone, options = {}) {
   return automatedDuplicateBlock(existingEstimate);
 }
 
-async function withAutomatedEstimatePhoneLock(phone, callback, options = {}) {
-  const database = options.database || db;
-  const values = phoneLookupValues(phone);
-  if (!values.last10) return callback(database, values);
+// The lock keys a set of phones resolves to: unique last-10s, ASCENDING.
+// The sort is the deadlock guard — a duplicate decision that reads two
+// phones must take both locks, and two overlapping runs that share a phone
+// would deadlock if they grabbed the pair in opposite orders. Every caller
+// goes through this one ordering (single-phone callers included, via
+// withAutomatedEstimatePhoneLock below), so no two lock acquisitions in the
+// codebase can disagree about the order.
+function automatedEstimateLockKeys(phones) {
+  const list = Array.isArray(phones) ? phones : [phones];
+  const keys = new Set();
+  for (const phone of list) {
+    const { last10 } = phoneLookupValues(phone);
+    if (last10) keys.add(last10);
+  }
+  return [...keys].sort();
+}
 
-  return database.transaction(async (trx) => {
+// Take the advisory locks on an EXISTING transaction (callers that already
+// opened one — e.g. a call-scoped lock taken first — reuse this so the
+// ordering rule still holds). Sequential by design: the order is the point.
+async function acquireAutomatedEstimatePhoneLocks(trx, phones) {
+  const keys = automatedEstimateLockKeys(phones);
+  for (const key of keys) {
     await trx.raw(
       'select pg_advisory_xact_lock(hashtext(?), hashtext(?))',
-      [AUTOMATED_ESTIMATE_LOCK_NAMESPACE, values.last10]
+      [AUTOMATED_ESTIMATE_LOCK_NAMESPACE, key]
     );
+  }
+  return keys;
+}
+
+// Serialize a duplicate decision across EVERY phone it will read. A caller
+// that reads phone A's open estimates while holding only phone B's lock is
+// not serialized at all: a concurrent run under A's lock sees no open
+// estimate either, and both insert (there is no uniqueness constraint to
+// catch it). Pass every dedupe phone; the callback runs with all of them
+// locked for the whole transaction, reads and insert included.
+async function withAutomatedEstimatePhoneLocks(phones, callback, options = {}) {
+  const database = options.database || db;
+  const list = Array.isArray(phones) ? phones : [phones];
+  // Second-arg contract (unchanged): the PRIMARY phone's lookup values.
+  const values = phoneLookupValues(list[0]);
+  const keys = automatedEstimateLockKeys(list);
+  if (!keys.length) return callback(database, values);
+
+  return database.transaction(async (trx) => {
+    await acquireAutomatedEstimatePhoneLocks(trx, keys);
     return callback(trx, values);
   });
 }
 
+async function withAutomatedEstimatePhoneLock(phone, callback, options = {}) {
+  return withAutomatedEstimatePhoneLocks([phone], callback, options);
+}
+
 module.exports = {
+  acquireAutomatedEstimatePhoneLocks,
   automatedDuplicateBlock,
+  automatedEstimateLockKeys,
   blockIfAutomatedEstimateDuplicate,
   findDuplicateEstimateByPhone,
   listOpenEstimatesByPhone,
   OPEN_ESTIMATE_STATUSES,
   phoneLookupValues,
   withAutomatedEstimatePhoneLock,
+  withAutomatedEstimatePhoneLocks,
 };

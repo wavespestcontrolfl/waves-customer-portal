@@ -798,31 +798,43 @@ describe('buildSmsThreadContext distinct-customer conflict (GATE_ESTIMATOR_SCOPE
   });
 });
 
-describe('grounded drafts consult the CUSTOMER\'s open estimates too (dedupe phones)', () => {
+describe('linked-customer drafts consult the CUSTOMER\'s open estimates too (dedupe phones)', () => {
   const { dedupePhonesForContext } = jest.requireActual('../services/estimator-engine/draft-builder')._private;
 
   test('address-grounded context with a different customer phone → both numbers checked', () => {
     const phones = dedupePhonesForContext('+19415550123', {
       customerGroundedByAddress: true,
-      customer: { phone: '+19415559999' },
+      customer: { id: 'cust-1', phone: '+19415559999' },
     });
     expect(phones).toEqual(['+19415550123', '+19415559999']);
   });
 
-  test('same last-10, missing, or non-grounded customer phones stay single', () => {
+  test('SERVICE-CONTACT sender (linked without address grounding) also checks the customer\'s own number', () => {
+    // loadCustomerByPhone's includeServiceContacts branch links the real
+    // customer off service_contact*_phone; customerGroundedByAddress stays
+    // false, but the customer's open estimates still live under THEIR
+    // primary number and are invisible to a sender-only check.
+    expect(dedupePhonesForContext('+19415550123', {
+      customer: { id: 'cust-1', phone: '+19415559999' },
+    })).toEqual(['+19415550123', '+19415559999']);
+  });
+
+  test('same last-10, missing, or AMBIGUOUS customer phones stay single', () => {
     expect(dedupePhonesForContext('+19415550123', {
       customerGroundedByAddress: true,
-      customer: { phone: '941-555-0123' },
+      customer: { id: 'cust-1', phone: '941-555-0123' },
     })).toEqual(['+19415550123']);
     expect(dedupePhonesForContext('+19415550123', {
       customerGroundedByAddress: true,
-      customer: { phone: null },
+      customer: { id: 'cust-1', phone: null },
     })).toEqual(['+19415550123']);
-    // Phone-matched (non-grounded) customers: their history IS the
-    // sender's — one number, exactly today's behavior.
+    // An ambiguous shared-phone match is not a link at all (the draft's
+    // customer_id stays null there) — it must not widen the dedupe.
     expect(dedupePhonesForContext('+19415550123', {
-      customer: { phone: '+19415559999' },
+      customerPhoneAmbiguous: true,
+      customer: { id: 'cust-1', phone: '+19415559999' },
     })).toEqual(['+19415550123']);
+    expect(dedupePhonesForContext('+19415550123', {})).toEqual(['+19415550123']);
   });
 });
 
