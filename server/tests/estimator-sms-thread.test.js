@@ -540,6 +540,26 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockNotify).not.toHaveBeenCalled();
   });
 
+  test('a LOW-CONFIDENCE resume veto is not terminal — the draft proceeds', async () => {
+    // Resume vetoes are TERMINAL to lead-intake, which then suppresses its
+    // fallback — a 0.2-confidence guess must not leave an established
+    // quote request with no draft and no durable task.
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: false, service_offered: false, relates_to_existing_job: false, confidence: 0.2 },
+    });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'the back lanai please',
+      skipIntentGate: true,
+      skipCooldown: true,
+    });
+    expect(result.started).toBe(true);
+    expect(result.terminal).toBeUndefined();
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
   test('classifier trouble on a resume fails OPEN (quote already owed)', async () => {
     // Asymmetry vs the primary path is deliberate: there, ai_failed is
     // fail-closed; on a resume the intent is established, so the draft

@@ -153,6 +153,42 @@ describe('operational failure', () => {
   });
 });
 
+describe('address-LESS replies get the scope check BEFORE anything records', () => {
+  const ADDRESSLESS = () => ({
+    id: 'cust-1',
+    phone: '+19415550123',
+    address_line1: '',
+    lead_intake_status: 'awaiting_service',
+  });
+
+  test('address-less terminal veto ⇒ nothing recorded, no stage advance, no clarify', async () => {
+    // The refusal used to live inside if(hasAddress): an address-less
+    // 'power wash my yard' recorded lawn interest, advanced to
+    // awaiting_address, and parked an address clarification.
+    mockStartSmsThreadDraft.mockResolvedValue({ started: false, skipped: 'out_of_scope_service', terminal: true });
+
+    const result = await handleIntakeReply(ADDRESSLESS(), 'power wash my yard');
+
+    expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({ scopeCheckOnly: true }));
+    expect(result).toEqual({ handled: true, next: 'awaiting_service' });
+    // NO writes of any kind: no interest, no stage, no estimate, no alert.
+    expect(mockCustomerUpdates).toHaveLength(0);
+    expect(mockEstimateInserts).toHaveLength(0);
+    expect(mockEstimateUpdates).toHaveLength(0);
+    expect(mockSmsSends).toHaveLength(0);
+  });
+
+  test('address-less in-scope reply still records interest and advances to awaiting_address', async () => {
+    mockStartSmsThreadDraft.mockResolvedValue({ started: false, skipped: 'scope_check_only' });
+
+    const result = await handleIntakeReply(ADDRESSLESS(), 'quarterly pest control please');
+
+    expect(result).toEqual({ handled: false });
+    expect(mockCustomerUpdates.some((p) => p.lead_service_interest)).toBe(true);
+    expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'awaiting_address')).toBe(true);
+  });
+});
+
 describe('open-shell branch still runs the scope check', () => {
   const SHELL = { id: 'shell-est-1', address: '', customer_phone: '+19415550123', customer_email: null };
 

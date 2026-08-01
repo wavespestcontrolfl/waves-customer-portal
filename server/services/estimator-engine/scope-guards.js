@@ -135,7 +135,16 @@ const IN_SCOPE_RE = new RegExp(
 // semantics directly. \m/\M are Postgres word boundaries (≈ JS \b for
 // alphanumerics), which is what keeps '6' from matching '16', '26', or the
 // house number in '600 Palm Ave'.
-const UNIT_DESIGNATOR_ALT = '(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)';
+// 'fl' IS in this alternation, with no ZIP guard needed HERE: these
+// patterns are built only from a candidate's already-classified unitValue —
+// the extraction side applied the canonical isStateZipPair rule before any
+// unitValue exists, so by construction the SQL never receives a state-
+// marker "unit". On the ROW side a 'fl'-pattern can only over-fetch
+// (e.g. a line1 ending 'FL <value>'), and candidateMatchesRow confirmation
+// gates every fetched row — without 'fl' here, a '100 Palm Ave Fl 2'
+// candidate REJECTED the row storing 'Fl 2' before confirmation ever saw
+// it, which is the dangerous direction.
+const UNIT_DESIGNATOR_ALT = '(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor|fl)';
 function unitTokenPatterns(unitValue) {
   const v = String(unitValue).replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
   return {
@@ -272,6 +281,15 @@ function extractAddressCandidates(text) {
     let unitWordRaw = null;
     let unitValue = null;
     let localitySrc = afterStreet;
+    // Scan-past bookkeeping: everything the candidate CONSUMES from the
+    // tail (unit expression + locality expression) must advance the global
+    // regex, or the scanner re-enters the consumed text and mints phantom
+    // candidates ('100 Palm Ave Apt 6 Venice FL 34285' also emitted
+    // '6 Venice FL'). tailConsumed counts afterStreet chars eaten by the
+    // unit; rebuiltOffset marks how much of localitySrc is words-material
+    // (already inside m[0]) when it was rebuilt for the straddle case.
+    let tailConsumed = 0;
+    let rebuiltOffset = 0;
     if (designatorIdx > 0) {
       unitWordRaw = allWords[designatorIdx];
       const straddle = allWords[designatorIdx + 1];
@@ -283,12 +301,16 @@ function extractAddressCandidates(text) {
         // below still sees the city.
         unitValue = straddle;
         const remainder = allWords.slice(designatorIdx + 2).join(' ');
-        if (remainder) localitySrc = `${remainder}${afterStreet}`;
+        if (remainder) {
+          localitySrc = `${remainder}${afterStreet}`;
+          rebuiltOffset = remainder.length;
+        }
       } else {
         const vm = afterStreet.match(/^\s*#?\s*([A-Za-z0-9-]{1,8})\b/);
         if (vm) {
           unitValue = vm[1];
           localitySrc = afterStreet.slice(vm[0].length);
+          tailConsumed = vm[0].length;
         }
       }
     } else {
@@ -303,10 +325,12 @@ function extractAddressCandidates(text) {
         unitWordRaw = 'Fl';
         unitValue = flTail[1];
         localitySrc = afterStreet.slice(flTail[0].length);
+        tailConsumed = flTail[0].length;
       } else if (am) {
         unitWordRaw = am[1] || null;
         unitValue = am[3];
         localitySrc = afterStreet.slice(am[0].length);
+        tailConsumed = am[0].length;
       }
     }
     // An explicitly-stated unit rides on EVERY variant: sameStreetAddress
@@ -324,15 +348,22 @@ function extractAddressCandidates(text) {
     // fake locality that rejects the real customer row.
     const locM = localitySrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(\bFL\b|\bFlorida\b)?\s*(\d{5})?\b/i);
     let locality = '';
+    // How much of localitySrc the bound locality expression consumed —
+    // feeds the scan-past advance below.
+    let localityLen = 0;
     if (locM && (locM[2] || locM[3])) {
       locality = `, ${locM[1].trim()}${locM[3] ? ` ${locM[3]}` : ''}`;
+      localityLen = locM[0].length;
     } else {
       // Bare-ZIP form requires the comma ("…, 34285") — with street runs up
       // to seven words, a zip-like number after uncomma'd prose ("with a
       // budget of 15000") must stay unbound; a missing locality still
       // compares conservatively equal downstream.
       const zipDirect = localitySrc.match(/^\s*,\s*(\d{5})\b/);
-      if (zipDirect) locality = `, ${zipDirect[1]}`;
+      if (zipDirect) {
+        locality = `, ${zipDirect[1]}`;
+        localityLen = zipDirect[0].length;
+      }
     }
     if (!locality) {
       // No-comma forms: the street run swallows the city and FL marker
@@ -373,7 +404,12 @@ function extractAddressCandidates(text) {
         }
         const cityWords = boundary >= 0 ? words.slice(boundary + 1, flIdx) : words.slice(flIdx - 1, flIdx);
         const city = cityWords.join(' ').trim();
-        if (city) locality = `, ${city}${zipNC ? ` ${zipNC[1]}` : ''}`;
+        if (city) {
+          locality = `, ${city}${zipNC ? ` ${zipNC[1]}` : ''}`;
+          // City came from WORDS (inside m[0]); only a trailing ZIP was
+          // consumed from the tail.
+          if (zipNC) localityLen = zipNC[0].length;
+        }
       }
       if (!locality) {
         // The city+FL can also live in the TAIL when a unit expression
@@ -387,6 +423,7 @@ function extractAddressCandidates(text) {
           const city = String(ncM[1] || '').trim();
           const zip = ncM[2] || '';
           locality = `, ${[city, zip].filter(Boolean).join(' ')}`;
+          localityLen = ncM[0].length;
         }
       }
       if (!locality && zipNC) {
@@ -401,9 +438,20 @@ function extractAddressCandidates(text) {
         // Same suffix vocabulary the city-boundary test uses — the
         // alias table alone omits Loop/Way/Trail/Cove/…, which dropped
         // the ZIP from "100 Sample Loop 34287".
-        if (hasFl || ALL_STREET_SUFFIXES.has(lastWord)) locality = `, ${zipNC[1]}`;
+        if (hasFl || ALL_STREET_SUFFIXES.has(lastWord)) {
+          locality = `, ${zipNC[1]}`;
+          localityLen = zipNC[0].length;
+        }
       }
     }
+    // Scan past everything this candidate consumed: the unit expression
+    // plus the locality's TAIL portion. localitySrc is afterStreet minus
+    // the unit (normal case) or remainder+afterStreet (rebuilt straddle
+    // case, where the first rebuiltOffset chars are words-material already
+    // inside m[0] and consume nothing from the tail). Without this the
+    // global regex resumed INSIDE the consumed tail and minted phantom
+    // candidates from the unit value + city ('6 Venice FL').
+    re.lastIndex = m.index + m[0].length + tailConsumed + Math.max(0, localityLen - rebuiltOffset);
     const candidate = {
       num: m[1],
       firstWord: words[0],

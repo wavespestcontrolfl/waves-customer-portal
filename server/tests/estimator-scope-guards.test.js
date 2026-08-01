@@ -428,6 +428,40 @@ describe('extractAddressCandidates', () => {
     expect(_private.prefixVariants('100', 'Palm', 'Ave')).toEqual(['100 Palm%']);
   });
 
+  test('the SQL unit patterns accept the fl/floor designator spellings', () => {
+    // Without 'fl', a 'Fl 2' candidate REJECTED the row storing 'Fl 2' in
+    // address_line2 before confirmation ever saw it. No ZIP guard needed
+    // in SQL: patterns are built from a candidate's already-classified
+    // unitValue (extraction applied isStateZipPair), so a state marker
+    // never produces a pattern.
+    const { _private } = require('../services/estimator-engine/scope-guards');
+    const { line1Pattern, line2Pattern } = _private.unitTokenPatterns('2');
+    const js = (p) => new RegExp(p.replace(/\\[mM]/g, '\\b'), 'i');
+    expect(js(line2Pattern).test('Fl 2')).toBe(true);
+    expect(js(line2Pattern).test('Floor 2')).toBe(true);
+    expect(js(line1Pattern).test('100 Palm Ave Fl 2')).toBe(true);
+    expect(js(line2Pattern).test('Fl 12')).toBe(false);
+    // State-marker forms classify unit-less at extraction ⇒ discriminate
+    // builds no unit pattern at all.
+    expect(extractAddressCandidates('quote for 100 Palm Ave Venice FL 34285')[0].unitValue).toBeNull();
+  });
+
+  test('the scanner never re-enters a consumed unit/locality tail', () => {
+    // '6 Venice FL' used to emit as a phantom second candidate, making
+    // burst uniqueness see two addresses and withholding shorthand
+    // grounding.
+    const cands = extractAddressCandidates('100 Palm Ave Apt 6 Venice FL 34285');
+    expect(cands).toHaveLength(1);
+    expect(cands[0].unit).toBe('Apt 6');
+    expect(cands[0].locality).toBe(', Venice 34285');
+    // Multi-address messages still yield each address.
+    const two = extractAddressCandidates('quotes for 100 Palm Ave and 200 Oak St, Venice FL 34285');
+    expect(two).toHaveLength(2);
+    // Hash and floor tails advance the scanner too.
+    expect(extractAddressCandidates('100 Palm Ave #6, Venice FL 34285')).toHaveLength(1);
+    expect(extractAddressCandidates('100 Palm Ave Fl 2 Venice FL 34285')).toHaveLength(1);
+  });
+
   test('trailing-period tokens normalize at the tokenizer (N., Apt., Ste.)', () => {
     // 'Apt.' used to fail the designator cut entirely — no unit captured,
     // exact-unit guard bypassed.

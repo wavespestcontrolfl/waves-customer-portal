@@ -229,12 +229,20 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
       skipIntentGate: true,
       ...(scopeCheckOnly ? { scopeCheckOnly: true } : {}),
     });
+    if (scopeCheckOnly) {
+      // Scope verdict only — NEVER a draft or a status stamp, whatever the
+      // engine returned.
+      if (started?.terminal) {
+        logger.info(`[lead-intake] scope check refused as out-of-scope (${started.skipped})`);
+        return { drafted: false, terminal: true };
+      }
+      return { drafted: false, terminal: false };
+    }
     if (!started?.started) {
       if (started?.terminal) {
         logger.info(`[lead-intake] engine handoff refused as out-of-scope (${started.skipped}) — no shell fallback`);
         return { drafted: false, terminal: true };
       }
-      if (scopeCheckOnly) return { drafted: false, terminal: false };
       logger.warn(`[lead-intake] engine handoff not started (${started?.skipped || 'unknown'}) — falling back to shell`);
       return { drafted: false, terminal: false };
     }
@@ -262,6 +270,19 @@ async function handleIntakeReply(customer, body) {
       // Couldn't classify — fall through to AI draft / human inbox.
       return { handled: false };
     }
+
+    // TERMINAL SCOPE CHECK before ANYTHING records or advances: the scope
+    // refusal used to live inside the hasAddress branch, so an
+    // address-LESS 'power wash my yard' recorded a lawn interest, advanced
+    // to awaiting_address, and parked an address clarification — for work
+    // Waves does not do. A terminal veto refuses regardless of address
+    // presence: no interest recorded, no stage advance, no clarify parked.
+    // Operational outcomes (gate off, engine trouble) proceed unchanged;
+    // the downstream handoff keeps its own check as defense in depth.
+    const scopePreCheck = await engineDraftHandoff(
+      customer, body, 'scope pre-check (awaiting_service)', { scopeCheckOnly: true },
+    );
+    if (scopePreCheck.terminal) return { handled: true, next: status };
 
     await db('customers').where({ id: customer.id }).update({
       lead_service_interest: cls.interest,
