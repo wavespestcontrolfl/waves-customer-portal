@@ -222,12 +222,34 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
     expect(context.customerGroundedByAddress).toBeUndefined();
   });
 
-  test('gate ON: a phone-matched customer always wins over the grounded id', async () => {
+  test('gate ON: a REAL phone-matched customer wins over the grounded id', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [{ ...GROUNDED_ROW, id: 'cust-1' }];
     mockCustomerFirstRow = GROUNDED_ROW;
     const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
     expect(context.customer).toMatchObject({ id: 'cust-1' });
+    expect(context.customerGroundedByAddress).toBeUndefined();
+  });
+
+  test('gate ON: a webhook-minted PROSPECT phone match loses to the grounded customer', async () => {
+    // The Twilio webhook creates an active pipeline_stage='new_lead'
+    // customers row for first contacts BEFORE the pipeline runs — that
+    // shell must not beat the real customer triage matched by address.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [{ ...GROUNDED_ROW, id: 'prospect-1', pipeline_stage: 'new_lead' }];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.customer).toMatchObject({ id: 'cust-77' });
+    expect(context.customerGroundedByAddress).toBe(true);
+    expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate ON: a prospect phone match with a groundedConflict never grounds', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [{ ...GROUNDED_ROW, id: 'prospect-1', pipeline_stage: 'new_lead' }];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77', groundedConflict: true });
+    expect(context.customer).toMatchObject({ id: 'prospect-1' });
     expect(context.customerGroundedByAddress).toBeUndefined();
   });
 

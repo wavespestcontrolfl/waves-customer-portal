@@ -150,7 +150,10 @@ function extractAddressCandidates(text) {
   // tomorrow") keeps its job on the FIRST word.
   const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+(?:[A-Za-z][A-Za-z0-9'.-]*|(?<=\s(?:us|sr|cr|rte|rt|route|hwy|highway|road|rd)\s+)\d{1,4}\b)){0,6})/gi;
   let m;
-  const UNIT_WORD_RE = /^(?:apt|apartment|unit|suite|ste|#)$/i;
+  // Structural designators (lot/space/bldg/floor) come from the canonical
+  // set in utils/address-normalizer.js — bare 'fl' is deliberately OMITTED
+  // here (it collides with the FL state marker; 'floor' spelled out works).
+  const UNIT_WORD_RE = /^(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor|#)$/i;
   while (out.length < 3 && (m = re.exec(src)) !== null) {
     let words = m[2].split(/\s+/);
     // Skip obvious non-addresses: "24 hours", "30 minutes", "2 pm", and
@@ -167,11 +170,14 @@ function extractAddressCandidates(text) {
     // right next to the street run — a "#" further into the prose (ticket
     // numbers, "order #12") is not this address's unit.
     const nearStreet = `${m[2]} ${afterStreet.slice(0, 15)}`;
-    const unitM = nearStreet.match(/(?:\b(?:apt|apartment|unit|suite|ste)\.?\s*#?\s*|#\s*)([A-Za-z0-9-]{1,8})\b/i);
+    const unitM = nearStreet.match(/(?:\b(apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)\.?\s*#?\s*|(#)\s*)([A-Za-z0-9-]{1,8})\b/i);
     // An explicitly-stated unit rides on EVERY variant: sameStreetAddress
     // treats a missing unit as conservatively equal, so a unit-less variant
-    // of "Apt 6" would happily ground against the customer in Apt 1.
-    const unitSuffix = unitM ? ` Apt ${unitM[1]}` : '';
+    // of "Apt 6" would happily ground against the customer in Apt 1. The
+    // ORIGINAL designator word is preserved ("Lot 6", not "Apt 6") so the
+    // normalizer compares like-for-like; the bare hash form reads as Apt.
+    const unitWord = unitM ? (unitM[1] ? unitM[1][0].toUpperCase() + unitM[1].slice(1).toLowerCase() : 'Apt') : null;
+    const unitSuffix = unitM ? ` ${unitWord} ${unitM[3]}` : '';
     // Explicit locality after the street run — attached ONLY when anchored
     // AND validated: a comma-led city needs FL/Florida or a ZIP behind it
     // ("…, Bradenton FL" / "…, Venice 34285"), and a bare ZIP counts only
@@ -186,7 +192,7 @@ function extractAddressCandidates(text) {
       // with the bare unit VALUE.
       localitySrc = localitySrc.replace(/^\s*#?\s*[A-Za-z0-9-]{1,8}\b/, '');
     } else if (unitM) {
-      localitySrc = localitySrc.replace(/^\s*,?\s*(?:(?:apt|apartment|unit|suite|ste)\.?|#)\s*#?\s*[A-Za-z0-9-]{1,8}\b/i, '');
+      localitySrc = localitySrc.replace(/^\s*,?\s*(?:(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)\.?|#)\s*#?\s*[A-Za-z0-9-]{1,8}\b/i, '');
     }
     const locM = localitySrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(\bFL\b|\bFlorida\b)?\s*(\d{5})?\b/i);
     let locality = '';

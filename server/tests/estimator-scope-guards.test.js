@@ -265,6 +265,17 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('100 Palm Ave, spray before Saturday.')[0].locality).toBe('');
   });
 
+  test('captures STRUCTURAL unit designators with their original word', () => {
+    const [lot] = extractAddressCandidates('quote for 100 Park Rd Lot 6 please');
+    expect(lot.variants.every((v) => v.endsWith(' Lot 6'))).toBe(true);
+    expect(lot.variants).toContain('100 Park Rd Lot 6');
+    const [space] = extractAddressCandidates('service at 100 Park Rd Space 6');
+    expect(space.variants.every((v) => v.endsWith(' Space 6'))).toBe(true);
+    // Locality still parses after a structural unit.
+    const [withLoc] = extractAddressCandidates('quote for 100 Park Rd Lot 6, Venice FL 34285');
+    expect(withLoc.locality).toBe(', Venice 34285');
+  });
+
   test('captures explicit units onto every variant (word and hash forms)', () => {
     const [cand] = extractAddressCandidates('quote for 100 Palm Ave Apt 6 please');
     expect(cand.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);

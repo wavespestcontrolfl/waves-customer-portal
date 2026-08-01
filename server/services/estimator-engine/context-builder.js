@@ -464,14 +464,23 @@ async function buildSmsThreadContext({
   // discounts and fee waivers. Red out; the bell owns the manual path.
   if (customerMatch.unavailable) return { error: 'customer_lookup_unavailable' };
   let customer = customerMatch.customer;
-  // Triage grounding fallback (gate-on only): the sender's phone is off
-  // file but the thread provably named exactly one existing customer's
-  // property — link that customer so the draft carries membership context
-  // and persists customer_id, with a provenance flag so review can see the
-  // link came from the address, not the phone. A phone-matched customer
-  // always wins; gate off, groundedCustomerId never flows here at all.
+  // Triage grounding fallback (gate-on only): the thread provably named
+  // exactly one existing customer's property — link that customer so the
+  // draft carries membership context and persists customer_id, with a
+  // provenance flag so review can see the link came from the address, not
+  // the phone. It applies when the phone lookup found nothing, AND when it
+  // found only a NON-real customer: the Twilio webhook mints an active
+  // pipeline_stage='new_lead' customers row for first contacts BEFORE this
+  // build runs, so a first-contact coordinator's prospect shell would
+  // otherwise win over the real customer triage matched — persisting the
+  // prospect's customer_id and losing the membership context. A REAL
+  // phone-matched customer (active, established stage — the same gates
+  // triage applies) always wins; a distinct-customer conflict never
+  // grounds; gate off, groundedCustomerId never flows here at all.
+  const { CUSTOMER_STAGES } = require('../customer-stages');
+  const isRealCustomer = (c) => !!c && c.active === true && CUSTOMER_STAGES.includes(c.pipeline_stage);
   let customerGroundedByAddress = false;
-  if (!customer && groundedCustomerId && guardsOn) {
+  if (guardsOn && groundedCustomerId && !groundedConflict && !isRealCustomer(customer)) {
     const grounded = await loadGroundedCustomerById(groundedCustomerId);
     if (grounded) {
       customer = grounded;
