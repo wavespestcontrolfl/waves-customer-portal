@@ -243,27 +243,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
   let lawnSealRenewTimer = null;
   let releaseLawnSeal = null;
 
-  // EVERY lawn-report delivery gets the fence, not only delayed ones (issue
-  // #3135). A completion whose regeneration settled inside the hold window
-  // enqueues a normal job, and that path previously ran no version check and
-  // took no send seal — so an admin regeneration starting mid-render could
-  // overwrite the linked report while the older attachment was already on its
-  // way. The payload carries the assessment id now; falling back to the
-  // record backlink also covers jobs enqueued before that shipped. A record
-  // with no lawn assessment (pest, termite, …) resolves to null and is
-  // unaffected.
-  let fencedAssessmentId = heldPayload.lawn_assessment_id || null;
-  if (!fencedAssessmentId) {
-    fencedAssessmentId = await knex('lawn_assessments')
-      .where({ service_record_id: delivery.service_record_id })
-      .orderBy('created_at', 'desc')
-      .first('id')
-      .then((row) => row?.id || null)
-      .catch((lookupErr) => {
-        logger.warn(`[delivery-queue] lawn assessment lookup failed for record ${delivery.service_record_id}: ${lookupErr.message}`);
-        return null;
-      });
-  }
+  let fencedAssessmentId = null;
 
   if (heldForGrounding) {
     const KnowledgeBridge = require('../knowledge-bridge');
@@ -283,6 +263,36 @@ async function processServiceReportDelivery(delivery, knex = db) {
       return { status, error: sanitized.error };
     }
   }
+
+  // Fence target = the assessment the ATTACHMENT actually renders, resolved by
+  // the SAME function the renderer uses (codex P1 #3135 r1). A hand-rolled
+  // backlink query diverges: loadLinkedLawnAssessment filters to confirmed
+  // rows, orders by confirmed_at then created_at, and falls back through the
+  // scheduled service — and the record backlink is explicitly non-unique, so
+  // duplicating the rules could seal a DIFFERENT row than the one rendered, or
+  // miss a scheduled-service-only assessment entirely. Runs AFTER the held
+  // path's backlink recovery so a just-relinked assessment is resolvable.
+  //
+  // failClosed (codex P1 #3135 r2): a transient DB error must NOT read as
+  // "not a lawn record". Swallowing it would dispatch an unfenced attachment;
+  // defer retryably instead — only a clean query returning no row bypasses.
+  try {
+    const { loadLinkedLawnAssessment } = require('./report-data');
+    const serviceRow = await knex('service_records')
+      .where({ id: delivery.service_record_id })
+      .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
+    const linked = serviceRow
+      ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true })
+      : null;
+    fencedAssessmentId = linked?.id || null;
+  } catch (resolveErr) {
+    const status = await markDeliveryFailed(delivery, new Error(`lawn fence target unresolvable: ${resolveErr.message}`), knex);
+    return { status, error: resolveErr.message };
+  }
+  // Never weaken the held path: if canonical resolution finds nothing (e.g. the
+  // assessment isn't confirmed yet), fall back to the id the hold was created
+  // for, which is the row that was grounded and sanitized above.
+  if (!fencedAssessmentId && heldForGrounding) fencedAssessmentId = heldPayload.lawn_assessment_id;
 
   if (fencedAssessmentId) {
     const KnowledgeBridge = require('../knowledge-bridge');
