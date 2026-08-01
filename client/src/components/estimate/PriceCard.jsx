@@ -483,9 +483,14 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
               <span style={{ color: W.textBody, fontWeight: 600 }}>{item.label}</span>
               {/* No per-row unit: the anchor and the headline directly above
                   both read "/ application", so repeating it here only squeezed
-                  long catalog labels into three ragged lines on a phone. */}
+                  long catalog labels into three ragged lines on a phone.
+                  Navy, not green (owner 2026-08-01): the glass surface is a
+                  navy/gold system with no green in it, and these rows are part
+                  of the price block — they take the price's own color rather
+                  than reading as a separate "savings" callout. The minus sign
+                  and the struck anchor above already say these come off. */}
               <strong style={{
-                color: W.green,
+                color: W.blueDeeper,
                 fontWeight: 800,
                 whiteSpace: 'nowrap',
                 fontVariantNumeric: 'tabular-nums',
