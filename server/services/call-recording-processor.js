@@ -7421,9 +7421,19 @@ const CallRecordingProcessor = {
           // (canAutoRoute owns the contract there, and it books the same
           // V2 address the verdict was computed for).
           const avNormalized = effectiveAddressValidation?.normalized || null;
-          const avValidatesBookedAddress = !!avNormalized
+          // The unit must match too (codex final-round P1): AV sends
+          // street_line_2 to Google but its normalized form omits the
+          // subpremise, so the unit is compared against the V2 extraction's
+          // OWN address — the exact input the verdict was computed on. V1
+          // Apt A with a verdict for V2 Apt B holds. No valid V2 extraction
+          // means AV never ran on anything, so the gate fails closed.
+          const v2ValidatedAddress = v2ApprovedExtraction?.property?.service_address || null;
+          const unitKey = (v) => String(v || '').toLowerCase().replace(/[#.,]/g, ' ').replace(/\s+/g, ' ').trim();
+          const avValidatesBookedAddress = !!avNormalized && !!v2ValidatedAddress
             && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(avNormalized.street_line_1 || ''))
-            && String(extracted.zip || '').trim() === String(avNormalized.postal_code || '').trim();
+            && String(extracted.zip || '').trim() === String(avNormalized.postal_code || '').trim()
+            && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(v2ValidatedAddress.street_line_1 || ''))
+            && unitKey(extracted.address_line2) === unitKey(v2ValidatedAddress.street_line_2);
           const avPositiveForBooking = !!effectiveAddressValidation
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
             && effectiveAddressValidation.inServiceArea === true

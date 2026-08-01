@@ -905,8 +905,9 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
   });
 
   test('a known customer dispatching to their on-file address satisfies the address gate', () => {
-    // Barbara lane: no new address stated, so the booking goes to the stored
-    // (already verified) address — AV has nothing on THIS call to validate.
+    // On-file-address lane (the 2026-07-10 known-customer live case): no new
+    // address stated, so the booking goes to the stored (already verified)
+    // address — AV has nothing on THIS call to validate.
     const ex = extraction(['missing_service_address'], 0.9);
     ex.property = { service_address: {} };
     const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
