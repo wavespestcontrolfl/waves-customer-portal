@@ -131,6 +131,14 @@ function normalizeWindowStart(value) {
   return `${String(hours).padStart(2, '0')}:00`;
 }
 
+// Current Eastern wall-clock time as 'HH:MM' — used to refuse a promised
+// arrival hour that has already elapsed on the payment day.
+function etNowHHMM(date = new Date()) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date);
+}
+
 // window_end must stay DURATION-driven (AGENTS.md), so a start whose job block
 // would cross midnight is rejected rather than clamped into a short visit.
 function addMinutesHHMM(value, minutes) {
@@ -333,44 +341,26 @@ function effectiveFirstVisitDate(term) {
   return dateOnly(term?.first_visit_date) || dateOnly(term?.term_start);
 }
 
-function coverageSeriesAnchor(termStart, visitCount, cadence, termEnd, { firstVisitDate = null, notBefore = null } = {}) {
+function coverageSeriesAnchor(termStart, { firstVisitDate = null, notBefore = null } = {}) {
   const normalizedStart = dateOnly(termStart);
   if (!normalizedStart) return null;
-  // An explicitly promised first visit is honored as given. It is validated
-  // against the term window when the invoice is minted, and it must NEVER be
-  // quietly moved — the customer was told this date. (A legacy/edited term
-  // whose promise no longer fits simply truncates at term_end below, the same
-  // way a short custom term already renders fewer visits.)
   const promised = dateOnly(firstVisitDate);
-  const promiseFloor = dateOnly(notBefore);
-  // A promise still in the future is honored exactly. A promise that has
-  // ALREADY PASSED by the time payment lands cannot be kept — seeding it would
-  // recreate the past-dated visit this function exists to prevent — so it falls
-  // through to the forward shift below (the seeder logs the missed promise).
-  if (promised && promised > normalizedStart && (!promiseFloor || promised >= promiseFloor)) return promised;
-
-  let anchor = promised || normalizedStart;
   const floor = dateOnly(notBefore);
+  // A promise still in the future is honored exactly — it was validated
+  // against the term window at mint time and the customer was told this date.
+  // A promise that has ALREADY PASSED when payment lands cannot be kept
+  // (seeding it would recreate the past-dated visit this function exists to
+  // prevent) and falls through to the floor.
+  if (promised && promised > normalizedStart && (!floor || promised >= floor)) return promised;
+  let anchor = promised || normalizedStart;
+  // The floor is INVIOLABLE: a visit dated before the payment day can never be
+  // serviced, is skipped by the reminder sender, and reopens the regression
+  // this change fixes. When the term window can't absorb the shift the series
+  // TRUNCATES at term_end instead (coverageScheduleDates' cutoff) and the
+  // seeder logs the shortfall for operator action — a surfaced short schedule
+  // beats a silent unserviceable one.
   if (floor && anchor < floor) anchor = floor;
-  if (anchor <= normalizedStart) return normalizedStart;
-
-  // The past-date shift must keep the series inside [term_start, term_end]:
-  // everything downstream (coverageRowsForTerm, attachScheduledServices,
-  // applyPrepaidCoverageForTerm) only sees in-window visits, so a tail visit
-  // pushed past term_end would never be linked or stamped prepaid. Shift as far
-  // forward as the window allows and no further — NOT back to term_start, which
-  // would throw away the whole correction for a term paid very late.
-  const normalizedEnd = dateOnly(termEnd);
-  const schedule = coverageCadenceSchedule(cadence) || coverageCadenceSchedule(inferCoverageCadence({ coverage_visit_count: visitCount }));
-  const count = normalizeCoverageVisitCount(visitCount);
-  if (!normalizedEnd || !schedule || !count) return anchor;
-  const span = (count - 1) * schedule.value;
-  const latestAnchor = schedule.unit === 'days'
-    ? addDaysYmd(normalizedEnd, -span)
-    : addMonthsSameDay(normalizedEnd, -span);
-  if (!latestAnchor) return anchor;
-  if (anchor > latestAnchor) anchor = latestAnchor < normalizedStart ? normalizedStart : latestAnchor;
-  return anchor;
+  return anchor < normalizedStart ? normalizedStart : anchor;
 }
 
 function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, options = {}) {
@@ -379,7 +369,7 @@ function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, o
   if (!normalizedStart || !count) return [];
   const schedule = coverageCadenceSchedule(cadence) || coverageCadenceSchedule(inferCoverageCadence({ coverage_visit_count: count }));
   if (!schedule) return [];
-  const anchor = coverageSeriesAnchor(normalizedStart, count, cadence, termEnd, options) || normalizedStart;
+  const anchor = coverageSeriesAnchor(normalizedStart, options) || normalizedStart;
   const normalizedEnd = termEnd ? dateOnly(termEnd) : null;
   const dates = [];
   for (let index = 0; index < count; index++) {
@@ -433,7 +423,7 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   return matching.filter((row) => selectedIds.has(row.id));
 }
 
-async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString() } = {}) {
+async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString(), nowHHMM = etNowHHMM() } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
@@ -542,13 +532,19 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     firstVisitWindowStart = null;
   }
   const firstTargetDate = targetDates[0] || null;
+  // Payment landing on the promised DATE but after the promised HOUR must not
+  // create a window that is already over — it can't be serviced or reminded.
+  // The visit still seeds today, windowless, for the operator to retime.
+  if (firstVisitWindowStart && firstTargetDate === today && firstVisitWindowStart <= nowHHMM) {
+    logger.warn(`[annual-prepay] term ${term.id} promised window ${firstVisitWindowStart} on ${firstTargetDate} has already passed (now ${nowHHMM} ET) — seeding today's visit without a window`);
+    firstVisitWindowStart = null;
+  }
 
-  // A term paid so late that the window can't absorb the lag still generates
-  // its earliest visits in the past (shifting further would push a paid visit
-  // outside the term, where it would never be stamped prepaid). Surface it —
-  // those visits need an operator reschedule.
-  if (firstTargetDate && firstTargetDate < today) {
-    logger.warn(`[annual-prepay] term ${term.id} seeded coverage starting ${firstTargetDate}, before today (${today}) — term window too short to absorb the payment lag; visits need rescheduling`);
+  // The floor guarantees no past visit, so a term window too short to absorb
+  // the payment lag TRUNCATES instead — fewer rows than the customer paid for.
+  // Surface the shortfall: the operator extends the term or schedules the tail.
+  if (targetDates.length < coverageVisitCount) {
+    logger.warn(`[annual-prepay] term ${term.id} only ${targetDates.length} of ${coverageVisitCount} sold visits fit between ${firstTargetDate} and ${termEnd} — term needs extending or the remaining visits need manual scheduling`);
   }
   // The operator promised a date that had already passed by the time payment
   // landed. The series moved forward instead of seeding a visit that can't be
@@ -633,6 +629,12 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // excluded from its own conflict check) so the promise reaches the board.
   // Window only — status/technician stay untouched, and no notification path
   // runs off this direct update.
+  // Retiming works with the adopted row's OWN duration — a 90-minute visit
+  // retimed to 08:00 must block until 09:30, and window_end must reflect it,
+  // or the occupancy predicate would let another job start at 09:00.
+  const adoptedDuration = Number(adoptedPromisedRow?.estimated_duration_minutes) > 0
+    ? Number(adoptedPromisedRow.estimated_duration_minutes)
+    : baseDuration;
   const retimeAdoptedRow = async (trx) => {
     const row = adoptedPromisedRow;
     let windowStart = firstVisitWindowStart;
@@ -643,7 +645,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         const conflict = await findVisitWindowConflict(sp, {
           scheduledDate: promisedTarget,
           windowStart,
-          durationMinutes: baseDuration,
+          durationMinutes: adoptedDuration,
           excludeServiceIds: [row.id],
         });
         if (conflict) {
@@ -658,10 +660,23 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     if (!windowStart) return;
     const updates = { updated_at: new Date() };
     if (cols.window_start) updates.window_start = windowStart;
-    if (cols.window_end) updates.window_end = addMinutesHHMM(windowStart, baseDuration);
+    if (cols.window_end) updates.window_end = addMinutesHHMM(windowStart, adoptedDuration);
+    // Stale display fields would keep the dispatch board showing the OLD time
+    // while occupancy and reminders use the new one — clear them so every
+    // surface recomputes from window_start.
+    if (cols.time_window) updates.time_window = null;
+    if (cols.window_display) updates.window_display = null;
     await trx('scheduled_services').where({ id: row.id }).update(updates);
   };
-  if (adoptedPromisedRow && firstVisitWindowStart
+  // Skip when the adopted visit is already completed (or otherwise terminal):
+  // annual prepay collected at the completion appointment can adopt the
+  // just-serviced row, and rewriting its window would corrupt the recorded
+  // history of a job that already happened. Also skip when the promised start
+  // leaves no room for the row's own duration before midnight.
+  const adoptedRetimeable = adoptedPromisedRow
+    && !PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(adoptedPromisedRow.status || '').toLowerCase())
+    && !!addMinutesHHMM(firstVisitWindowStart, adoptedDuration);
+  if (adoptedRetimeable && firstVisitWindowStart
     && normalizeWindowStart(adoptedPromisedRow.window_start) !== firstVisitWindowStart) {
     if (conn.isTransaction) await retimeAdoptedRow(conn);
     else await conn.transaction((trx) => retimeAdoptedRow(trx));
@@ -681,6 +696,26 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     createdRows.push(created);
     if (!createdParentId) {
       createdParentId = created.id;
+    }
+  }
+
+  // Persist the anchor the seeder ACTUALLY used whenever it differs from what
+  // the term fields imply. Every later render of the paid invoice / pay page
+  // recomputes the schedule from the term WITHOUT the payment-day floor (a
+  // settled document must not drift with the calendar), so a late payment that
+  // shifted the series would otherwise display dates that were never created.
+  // Best-effort: a failed stamp only affects display, never the schedule.
+  if (firstTargetDate && (createdRows.length || adoptedPromisedRow)
+    && firstTargetDate !== effectiveFirstVisitDate(term)) {
+    try {
+      const termCols = await annualPrepayColumns(conn);
+      if (termCols.first_visit_date) {
+        await conn('annual_prepay_terms')
+          .where({ id: term.id })
+          .update({ first_visit_date: firstTargetDate, updated_at: new Date() });
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term.id} effective first-visit stamp failed (${err.message}) — paid-invoice dates may not match the seeded schedule`);
     }
   }
 
