@@ -7427,7 +7427,17 @@ const CallRecordingProcessor = {
           // OWN address — the exact input the verdict was computed on. V1
           // Apt A with a verdict for V2 Apt B holds. No valid V2 extraction
           // means AV never ran on anything, so the gate fails closed.
-          const v2ValidatedAddress = v2ApprovedExtraction?.property?.service_address || null;
+          // v2ApprovedExtraction is assigned only in the ENFORCE branch — in
+          // shadow/legacy mode (where this gate actually applies) it is
+          // always null, which made the gate permanently closed (codex
+          // final-round P1: fail-closed, so safe, but it nullified the
+          // intended positive-AV liberalization). The SHADOW extraction is
+          // the address AV was computed on in those modes; only a VALID
+          // extraction counts — an invalid payload is untrusted output and,
+          // consistently, AV wouldn't have a meaningful verdict for it.
+          const v2ForAddressCheck = v2ApprovedExtraction
+            || ((v2Result?.status === 'valid' && isV2Extraction(v2Result?.extraction)) ? v2Result.extraction : null);
+          const v2ValidatedAddress = v2ForAddressCheck?.property?.service_address || null;
           const unitKey = (v) => String(v || '').toLowerCase().replace(/[#.,]/g, ' ').replace(/\s+/g, ' ').trim();
           const avValidatesBookedAddress = !!avNormalized && !!v2ValidatedAddress
             && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(avNormalized.street_line_1 || ''))
