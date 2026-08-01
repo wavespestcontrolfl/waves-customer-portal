@@ -241,9 +241,18 @@ async function alertRecorderUnreachable(reason) {
     // that matters: does PostgreSQL itself accept a connection right now?
     // SSL mirrors server/knexfile.js production settings.
     const { Client } = require('pg');
+    // Connection settings are INHERITED from the live knex instance, not
+    // re-derived: a string-match heuristic ("localhost" ⇒ no SSL) would
+    // misclassify 127.0.0.1-style local URLs and demand TLS from a plain
+    // local Postgres — failing the probe and false-alarming an outage
+    // (codex #3130 r1). Whatever connection shape knex is successfully using
+    // is by definition the right one to probe with.
+    const liveConn = require('../models/db')?.client?.config?.connection;
+    const connCfg = typeof liveConn === 'string'
+      ? { connectionString: liveConn }
+      : (liveConn || { connectionString: process.env.DATABASE_URL });
     const probe = new Client({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DATABASE_URL?.includes('localhost') ? false : { rejectUnauthorized: false },
+      ...connCfg,
       connectionTimeoutMillis: 4000,
       query_timeout: 4000,
     });
@@ -432,15 +441,18 @@ async function runLlmDispatchDigest() {
     // above already returned, so a dark deployment cannot reach this email.
     const reason = err.message || String(err);
     logger.error(`[llm-dispatch-metrics] digest could not read llm_dispatch_log: ${reason}`);
-    await emailAlert(day, [{
+    const sent = await emailAlert(day, [{
       policy: '(recorder)',
       kind: 'not_recording',
       detail: `the digest could not read llm_dispatch_log (${reason}). Recording status for ${day} is UNKNOWN — treat this as an outage until it clears, not as a quiet day.`,
     }]);
     // Tell the scheduler's catch this failure already produced its alert —
     // otherwise it would fire alertRecorderUnreachable on top and double-email
-    // the same outage.
-    err.alerted = true;
+    // the same outage. Only when delivery actually SUCCEEDED (codex #3130
+    // r1): claiming alerted on a failed send would suppress the scheduler's
+    // fallback — the one retry that could still reach the operator after a
+    // transient mail failure.
+    err.alerted = !!sent?.ok;
     throw err;
   }
 

@@ -600,6 +600,33 @@ describe('llm-dispatch-metrics', () => {
       expect(err.alerted).toBe(true);
     });
 
+    it('does NOT claim alerted when the alert email failed to send — the scheduler retry must stay live', async () => {
+      // DB outage + transient SMTP failure: err.alerted=true here would
+      // suppress the scheduler's alertRecorderUnreachable fallback, losing
+      // the only retry that could still reach the operator (codex #3130 r1).
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: false, error: 'smtp 421' });
+      armDb({ yesterdayRows: [], priorRows: [], statsError: 'relation gone' });
+      const { runLlmDispatchDigest } = load();
+      const err = await runLlmDispatchDigest().catch((e) => e);
+      expect(err.message).toMatch(/relation gone/);
+      expect(err.alerted).toBe(false);
+    });
+
+    it('builds the probe from the LIVE knex connection config, not a URL heuristic', async () => {
+      // 127.0.0.1-style local URLs must not be forced onto SSL by a
+      // "localhost" substring check (codex #3130 r1). With the db mock
+      // exposing no client config, the probe falls back to DATABASE_URL —
+      // and must never inject an ssl option of its own.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const { Client } = require('pg');
+      const { alertRecorderUnreachable } = load();
+      await alertRecorderUnreachable('no_connection');
+      const cfg = Client.mock.calls[Client.mock.calls.length - 1][0];
+      expect(cfg).not.toHaveProperty('ssl');
+      expect(cfg.connectionTimeoutMillis).toBe(4000);
+    });
+
     it('stays silent on a quiet day when heartbeats prove the recorder was alive', async () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       armDb({ yesterdayRows: [], priorRows: [], heartbeats: 24 });
