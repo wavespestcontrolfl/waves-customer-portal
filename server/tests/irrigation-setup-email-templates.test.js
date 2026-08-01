@@ -116,6 +116,88 @@ describe('irrigation setup email template seeds', () => {
     expect(decision.payload.target_inches).toEqual(expect.any(String));
   });
 
+  // codex #3138 r1 P2 — the sweep must agree with the lawn report, which
+  // treats portal → turf profile → assessment as one fallback chain
+  // (report-data.js buildLawnWaterContext). Emailing "we have no schedule for
+  // you" to someone whose own report displays that number is the bug.
+  describe('tech-recorded schedules count as a schedule', () => {
+    test('a turf-profile reading routes to ADVICE, not a setup variant', () => {
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationInchesPerWeek: null,
+        turfIrrigationInchesPerWeek: 1,
+        rainfallInches7d: 2.1,
+        forecastRainInches: 0.5,
+      });
+      expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
+      expect(decision.payload.irrigation_inches).toBe('1');
+    });
+
+    test('an assessment reading routes to ADVICE when nothing else exists', () => {
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationInchesPerWeek: null,
+        turfIrrigationInchesPerWeek: null,
+        assessmentIrrigationInchesPerWeek: 1,
+        rainfallInches7d: 2.1,
+        forecastRainInches: 0.5,
+      });
+      expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
+      expect(decision.payload.irrigation_inches).toBe('1');
+    });
+
+    test('PORTAL ENTRY WINS over a tech reading, matching the report', () => {
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationInchesPerWeek: 1,
+        turfIrrigationInchesPerWeek: 3,
+        assessmentIrrigationInchesPerWeek: 2,
+        rainfallInches7d: 2.1,
+        forecastRainInches: 0.5,
+      });
+      expect(decision.payload.irrigation_inches).toBe('1');
+    });
+
+    test('the portal toggle does NOT suppress a tech-recorded reading', () => {
+      // The customer's own toggle only zeroes a value the customer entered.
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationSystem: false,
+        irrigationInchesPerWeek: null,
+        turfIrrigationInchesPerWeek: 1,
+        rainfallInches7d: 2.1,
+        forecastRainInches: 0.5,
+      });
+      expect(decision.shouldSend).toBe(true);
+      expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
+    });
+
+    test('…but it still suppresses a stale prefs-only reading', () => {
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationSystem: false,
+        irrigationInchesPerWeek: 1.25,
+      });
+      expect(decision.reason).toBe('setup_system');
+    });
+
+    test.each([
+      ['in_ground', TEMPLATE_SETUP_SCHEDULE],
+      ['mixed', TEMPLATE_SETUP_SCHEDULE],
+      // 'none' is knowledge that there is no system — do not ask for a run time.
+      ['none', TEMPLATE_SETUP_SYSTEM],
+      ['manual', TEMPLATE_SETUP_SYSTEM],
+    ])('a turf irrigation_type of %s with no inches picks %s', (type, expected) => {
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationSystem: null,
+        irrigationInchesPerWeek: null,
+        turfIrrigationType: type,
+      });
+      expect(decision.templateKey).toBe(expected);
+    });
+  });
+
   test('a real schedule still routes to the advice templates, not a setup variant', () => {
     const decision = buildWeeklyEmailDecision({
       ...BASE,

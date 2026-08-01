@@ -184,22 +184,37 @@ function buildWeeklyEmailDecision({
   grassType = null,
   weekEnding,
   irrigationInchesPerWeek,
+  turfIrrigationInchesPerWeek = null,
+  assessmentIrrigationInchesPerWeek = null,
+  turfIrrigationType = null,
   irrigationSystem = null,
   rainfallInches7d = null,
   et0Inches = null,
   forecastRainInches = null,
 } = {}) {
+  // Same fallback chain, same precedence, as the lawn report's
+  // buildLawnWaterContext (report-data.js): PORTAL ENTRY WINS, then a
+  // tech-recorded turf-profile reading, then the latest assessment. The two
+  // surfaces must agree — a customer whose report shows 1" must never get an
+  // email claiming we have no schedule for them (codex #3138 r1 P2).
+  const prefsInches = numberOrNull(irrigationInchesPerWeek);
+  const turfInches = numberOrNull(turfIrrigationInchesPerWeek);
+  const assessmentInches = numberOrNull(assessmentIrrigationInchesPerWeek);
+  const effectiveInches = prefsInches != null ? prefsInches
+    : (turfInches != null ? turfInches : assessmentInches);
+  // …and the same suppression semantics: the portal toggle only zeroes a
+  // value the customer did NOT enter — i.e. when the prefs reading is the
+  // only one there is. A tech-recorded reading is never suppressed by the
+  // customer's toggle.
+  const onlyPrefsReading = turfInches == null && assessmentInches == null && prefsInches != null;
+
   const advice = buildIrrigationAdvice({
     grassType,
     month: monthFromYmd(weekEnding),
-    irrigationInchesPerWeek,
+    irrigationInchesPerWeek: effectiveInches,
     rainfallInches7d,
     referenceEt0InchesWeek: et0Inches,
-    // The portal toggle is no longer an eligibility filter, so pass the real
-    // value: an explicit false must zero out a stale weekly-inches reading
-    // (the customer turned the system off), while null/true leaves the
-    // schedule to speak for itself.
-    irrigationEnabled: irrigationSystem === false ? false : true,
+    irrigationEnabled: irrigationSystem === false && onlyPrefsReading ? false : true,
   });
 
   // No usable schedule on file — nothing to balance, so this is the setup
@@ -212,7 +227,12 @@ function buildWeeklyEmailDecision({
     if (!advice.rainKnown) {
       return { shouldSend: false, reason: 'rain_unknown', advice };
     }
-    const hasSystem = irrigationSystem === true;
+    // "Do we know a sprinkler system exists?" — the portal toggle OR a tech's
+    // recorded irrigation_type. An explicit 'none' is knowledge that they have
+    // no system, so it stays on the how-do-you-water variant rather than
+    // asking for a run time they can't give.
+    const turfType = String(turfIrrigationType || '').trim().toLowerCase();
+    const hasSystem = irrigationSystem === true || turfType === 'in_ground' || turfType === 'mixed';
     const grassLabelSetup = customerGrassLabel(grassType);
     const rainSetup = formatInches(rainfallInches7d);
     const targetSetup = formatInches(advice.recommendedInchesPerWeek);
@@ -263,7 +283,7 @@ function buildWeeklyEmailDecision({
   const forecast = numberOrNull(forecastRainInches);
   const projectedDifferential = forecast == null
     ? null
-    : (numberOrNull(irrigationInchesPerWeek) + forecast) - advice.recommendedInchesPerWeek;
+    : (effectiveInches + forecast) - advice.recommendedInchesPerWeek;
   let reason = advice.status;
   if (advice.status === 'deficit' && projectedDifferential != null && projectedDifferential > -0.25) {
     reason = 'deficit_rain_forecast';
@@ -278,7 +298,9 @@ function buildWeeklyEmailDecision({
   const differential = Math.abs(numberOrNull(advice.differentialInchesPerWeek) ?? 0);
   const grassLabel = customerGrassLabel(grassType);
   const rain = formatInches(rainfallInches7d);
-  const irrigationFmt = formatInches(irrigationInchesPerWeek);
+  // The RESOLVED schedule, not the raw prefs column — the copy must quote
+  // the same number the advice was computed from (codex #3138 r1 P2).
+  const irrigationFmt = formatInches(effectiveInches);
   const total = formatInches(advice.appliedInchesPerWeek);
   const target = formatInches(advice.recommendedInchesPerWeek);
 
@@ -470,6 +492,23 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       'c.longitude',
       'pp.irrigation_inches_per_week',
       'pp.irrigation_system',
+      // A schedule can also have been recorded by a tech rather than typed by
+      // the customer (codex #3138 r1 P2). The lawn report already treats
+      // portal → turf profile → assessment as one fallback chain
+      // (report-data.js buildLawnWaterContext); this sweep must agree with it
+      // or we email "we don't have your watering schedule" to someone whose
+      // own report displays that very number.
+      'tp.irrigation_inches_per_week as turf_irrigation_inches_per_week',
+      'tp.irrigation_type as turf_irrigation_type',
+      db.raw(`(
+        SELECT la.irrigation_inches_per_week
+          FROM lawn_assessments la
+         WHERE la.customer_id = c.id
+           AND la.irrigation_inches_per_week IS NOT NULL
+           AND la.irrigation_inches_per_week > 0
+         ORDER BY la.service_date DESC NULLS LAST, la.created_at DESC
+         LIMIT 1
+      ) as assessment_irrigation_inches_per_week`),
       'tp.grass_type',
       'c.lawn_type',
     )
@@ -573,6 +612,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         grassType: resolveGrassType(customer),
         weekEnding,
         irrigationInchesPerWeek: customer.irrigation_inches_per_week,
+        turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
+        assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
+        turfIrrigationType: customer.turf_irrigation_type,
         irrigationSystem: customer.irrigation_system,
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
