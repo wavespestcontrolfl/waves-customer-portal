@@ -26,26 +26,14 @@ const FALLBACK_MIN_VOLUME = 5;       // ...but only with enough calls to mean it
 const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
                                      // ...and ZERO yesterday => "gone silent"
 
-// route-signature -> TEXT_POLICIES key. Matched structurally (not by object
-// identity) so the lookup is stable regardless of which module instance the
-// caller's policy object came from.
-let policyNamesBySig = null;
-function routeSig(policy) {
-  const leg = (r) => (r && r.provider && r.model ? `${r.provider}:${r.model}` : '-');
-  return `${leg(policy.primary)}|${leg(policy.fallback)}`;
-}
+// Named TEXT_POLICIES entries carry their registry key as `name` (set in
+// config/models.js). Route-signature matching is NOT safe here: with current
+// env defaults customerCopy/visionAnalysis and highStakes/deepAnalysis
+// resolve to identical route pairs, which would merge their stats and mask a
+// gone-silent policy behind its twin's traffic.
 function policyLabel(policy) {
   if (!policy) return 'unknown';
-  if (!policyNamesBySig) {
-    policyNamesBySig = new Map();
-    const MODELS = require('../config/models');
-    for (const [name, obj] of Object.entries(MODELS.TEXT_POLICIES || {})) {
-      const sig = routeSig(obj);
-      if (!policyNamesBySig.has(sig)) policyNamesBySig.set(sig, name);
-    }
-  }
-  const named = policy.primary ? policyNamesBySig.get(routeSig(policy)) : null;
-  if (named) return named;
+  if (typeof policy.name === 'string' && policy.name) return policy.name;
   // Ad-hoc { primary, fallback } pairs (call extraction, research miner):
   // label by the primary route so their traffic still aggregates.
   const p = policy.primary || policy;
@@ -168,7 +156,7 @@ async function runLlmDispatchDigest() {
   ]);
 
   const exceptions = detectExceptions(yesterdayStats, priorWeekStats);
-  let emailed = false;
+  let sendError = null;
   if (exceptions.length) {
     const day = etDateString(addETDays(new Date(), -1));
     const items = exceptions
@@ -181,15 +169,23 @@ async function runLlmDispatchDigest() {
       heading: 'AI provider exceptions',
       body: `The AI dispatcher hit ${exceptions.length === 1 ? 'an exception' : `${exceptions.length} exceptions`} yesterday (${day}):<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is not reported — this email only sends when something degraded.`,
     });
-    emailed = !!sent.ok;
-    if (!sent.ok) logger.error(`[llm-dispatch-metrics] digest email failed: ${sent.error}`);
+    if (!sent.ok) sendError = sent.error || 'unknown email error';
   }
 
   const cutoff = etDayWindow(RETENTION_DAYS).start;
   const pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
 
-  logger.info(`[llm-dispatch-metrics] digest: ${exceptions.length} exception(s), emailed=${emailed}, pruned=${pruned}`);
-  return { exceptions, emailed, pruned };
+  // An undeliverable exception email must FAIL the job (after retention
+  // pruning, which is independent) — otherwise runExclusive records a healthy
+  // run, tomorrow's tick moves to a new window, and the alert is silently
+  // lost. The throw lands in the scheduler's catch -> logger.error -> Sentry,
+  // and cron-lock job health shows the miss.
+  if (sendError) {
+    throw new Error(`digest email failed with ${exceptions.length} undelivered exception(s): ${sendError}`);
+  }
+
+  logger.info(`[llm-dispatch-metrics] digest: ${exceptions.length} exception(s), emailed=${exceptions.length > 0}, pruned=${pruned}`);
+  return { exceptions, emailed: exceptions.length > 0, pruned };
 }
 
 module.exports = {
