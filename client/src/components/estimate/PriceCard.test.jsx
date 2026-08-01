@@ -292,23 +292,10 @@ describe('PriceCard — a discount reads in the unit of the price it reduces (ow
   it('quotes the credit per application when the card leads with a per-application price', () => {
     render(<PriceCard frequency={lawnFrequency()} waveGuardTier="Silver" preferPerApplicationPrice />);
 
-    // $43.44/yr over 9 applications = $4.83 each.
-    expect(screen.getByText(/\$4\.83 \/ application/)).toBeInTheDocument();
+    // $43.44/yr over 9 applications = $4.83 each, itemized in the savings stack.
+    expect(screen.getByText(/[−-]\$4\.83/)).toBeInTheDocument();
     // The monthly amortization ($43.44/12) is gone.
     expect(screen.queryByText(/\$3\.62/)).toBeNull();
-  });
-
-  it('honors a custom per-application noun', () => {
-    render(
-      <PriceCard
-        frequency={lawnFrequency()}
-        waveGuardTier="Silver"
-        preferPerApplicationPrice
-        perApplicationNoun="visit"
-      />,
-    );
-
-    expect(screen.getByText(/\$4\.83 \/ visit/)).toBeInTheDocument();
   });
 
   it('keeps the billing-interval unit when the card itself leads with a cadence price', () => {
@@ -337,6 +324,117 @@ describe('PriceCard — a discount reads in the unit of the price it reduces (ow
     );
 
     expect(screen.getByText(/\$3\.62\/mo/)).toBeInTheDocument();
+  });
+});
+
+describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where the price is)', () => {
+  // List $110.00/application × 9 = $990/yr. WaveGuard Silver takes $11.00 an
+  // application, a $43.44/yr custom credit takes $4.83 → $94.17 net.
+  const lawn = (overrides = {}) => ({
+    key: 'lawn_9',
+    label: '9 applications/year',
+    visitsPerYear: 9,
+    monthlyBase: 82.5,
+    perTreatment: 94.17,
+    monthly: 70.63,
+    annual: 847.56,
+    billedPerApplication: true,
+    manualDiscount: { amount: 43.44, recurringAmount: 43.44, label: 'Custom Percentage Discount' },
+    ...overrides,
+  });
+
+  const stackRows = (container) => [...container.querySelectorAll('div')]
+    .map((el) => el.textContent)
+    .filter((t) => /^(WaveGuard|Custom Percentage Discount)/.test(t));
+
+  it('itemizes the tier discount and the custom discount as separate per-application rows', () => {
+    render(<PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />);
+
+    expect(screen.getByText('WaveGuard Silver')).toBeInTheDocument();
+    expect(screen.getByText('Custom Percentage Discount')).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$11\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$4\.83/)).toBeInTheDocument();
+  });
+
+  it('reconciles: anchor minus every stack row equals the headline price', () => {
+    render(<PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />);
+
+    // $110.00 anchor − $11.00 − $4.83 = $94.17 headline.
+    expect(screen.getByText(/\$110\.00 \/ application/)).toBeInTheDocument();
+    expect(screen.getByText('$94.17')).toBeInTheDocument();
+    expect(110 - 11 - 4.83).toBeCloseTo(94.17, 2);
+  });
+
+  it('does not also render the standalone discount row (no double-reporting)', () => {
+    const { container } = render(
+      <PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />,
+    );
+
+    // The custom discount appears exactly once on the card.
+    expect(stackRows(container).filter((t) => t.startsWith('Custom Percentage Discount'))).toHaveLength(1);
+  });
+
+  it('collapses to a single row when WaveGuard is the only discount', () => {
+    // Pest quarterly on a multi-service plan: per-service rows are pre-credit,
+    // so the card carries a tier discount and nothing else.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'quarterly',
+          label: 'Quarterly',
+          visitsPerYear: 4,
+          perVisit: 130,
+          perTreatment: 117,
+          monthly: 39,
+          annual: 468,
+          billedPerApplication: true,
+        }}
+        waveGuardTier="Silver"
+        showTierBadge={false}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getByText('WaveGuard Silver')).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$13\.00/)).toBeInTheDocument();
+    expect(screen.queryByText('Custom Percentage Discount')).toBeNull();
+  });
+
+  it('restates itself against the selected cadence', () => {
+    // Same plan at 12 applications a year: the tier slice and the credit slice
+    // both re-divide, so the stack is derived, never stamped.
+    render(
+      <PriceCard
+        frequency={lawn({ key: 'lawn_12', visitsPerYear: 12, monthlyBase: 95, perTreatment: 81.88, monthly: 81.88, annual: 982.56 })}
+        waveGuardTier="Silver"
+        showTierBadge={false}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getByText(/[−-]\$9\.50/)).toBeInTheDocument();   // tier: $95.00 × 10%
+    expect(screen.getByText(/[−-]\$3\.62/)).toBeInTheDocument();   // credit: $43.44 / 12
+    expect(screen.getByText('$81.88')).toBeInTheDocument();
+  });
+
+  it('names no tier row when the card has no WaveGuard tier', () => {
+    // Without a tier there is nothing to label the anchor gap with — inventing
+    // one would put a discount name on the card that no plan grants.
+    render(<PriceCard frequency={lawn()} showTierBadge={false} preferPerApplicationPrice />);
+
+    expect(screen.queryByText(/^WaveGuard/)).toBeNull();
+    // The custom discount still itemizes.
+    expect(screen.getByText('Custom Percentage Discount')).toBeInTheDocument();
+  });
+
+  it('falls back to the standalone row when the anchor is suppressed (showSavings off)', () => {
+    const { container } = render(
+      <PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice showSavings={false} />,
+    );
+
+    expect(screen.queryByText('WaveGuard Silver')).toBeNull();
+    // The credit is still visible, in per-application units.
+    expect(container.textContent).toMatch(/\$4\.83 \/ application/);
   });
 });
 

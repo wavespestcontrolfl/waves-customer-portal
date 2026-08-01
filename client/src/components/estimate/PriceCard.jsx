@@ -357,6 +357,31 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     && (!Array.isArray(frequency.perServiceTreatments) || frequency.perServiceTreatments.length === 0)
     && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
 
+  // Savings stack (owner 2026-08-01): every discount that shapes this price,
+  // itemized in the same unit as the price, directly beneath it — rather than
+  // a struck-through anchor whose gap is never explained plus a separate
+  // discount card elsewhere on the page. Reconciles by construction, since
+  // perAppSavings is defined as anchor − net − manual slice:
+  //     anchor − WaveGuard slice − manual slice = the headline net.
+  // Recomputed from `frequency` on every render, so switching cadence restates
+  // the whole stack against the newly selected per-application price.
+  // The WaveGuard row needs a tier to name; without one the anchor keeps its
+  // existing unlabeled behavior rather than inventing a label for the gap.
+  const savingsStack = perAppNet != null && showSavings
+    ? [
+      waveGuardTier && perAppSavings > 0
+        ? {
+          key: 'waveguard',
+          label: `WaveGuard ${glass ? glassTierDisplay(normalizedTier(waveGuardTier)) : normalizedTier(waveGuardTier)}`,
+          amount: perAppSavings,
+        }
+        : null,
+      manualDiscountPerApplication > 0
+        ? { key: 'manual', label: manualDiscount?.label || 'Discount', amount: manualDiscountPerApplication }
+        : null,
+    ].filter(Boolean)
+    : [];
+
   return (
     <div style={{
       padding: '8px 0 16px',
@@ -435,6 +460,43 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
+      {savingsStack.length ? (
+        <div style={{
+          marginTop: 14,
+          paddingTop: 12,
+          borderTop: `1px solid ${W.borderCool}`,
+          display: 'grid',
+          gap: 9,
+        }}>
+          {savingsStack.map((item) => (
+            <div
+              key={item.key}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 12,
+                alignItems: 'baseline',
+                fontSize: 14,
+                lineHeight: 1.35,
+              }}
+            >
+              <span style={{ color: W.textBody, fontWeight: 600 }}>{item.label}</span>
+              {/* No per-row unit: the anchor and the headline directly above
+                  both read "/ application", so repeating it here only squeezed
+                  long catalog labels into three ragged lines on a phone. */}
+              <strong style={{
+                color: W.green,
+                fontWeight: 800,
+                whiteSpace: 'nowrap',
+                fontVariantNumeric: 'tabular-nums',
+              }}>
+                {fmtMoneySigned(-item.amount)}
+              </strong>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
       {/* Standard exact prices show no annual figure (owner directive
           2026-07-03) — only the site-confirmation commercial range keeps
           its annual band, since the ranged /mo figure alone understates
@@ -457,7 +519,13 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      {manualDiscount && (showDiscountPerApplication ? manualDiscountPerApplication > 0 : manualDiscountInterval > 0) ? (
+      {/* The standalone row is the fallback for cards the savings stack can't
+          serve — a flat-monthly service with no per-application price, or a
+          card rendered with showSavings off. When the stack itemizes the
+          discount, this would restate it a second time. */}
+      {manualDiscount
+        && !savingsStack.some((item) => item.key === 'manual')
+        && (showDiscountPerApplication ? manualDiscountPerApplication > 0 : manualDiscountInterval > 0) ? (
         <div style={{
           display: 'flex',
           justifyContent: 'space-between',
