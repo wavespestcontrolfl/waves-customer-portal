@@ -592,4 +592,14 @@ describe('_composeBrief gsc_signal impressions fallback (seasonal_rising fix 202
   test('genuinely absent impressions stay null (gate still fails closed)', () => {
     expect(compose({}).gsc_signal.impressions).toBeNull();
   });
+
+  test('ZERO impressions stay null — no usable signal (r2)', () => {
+    // checkGscSignalAttached only rejects null, so a preserved 0 would let an
+    // evidence-free refresh through, reversing the fail-closed contract at
+    // refresh-audit.js:387-412.
+    expect(compose({ impressions: 0 }).gsc_signal.impressions).toBeNull();
+    expect(compose({ impressions: 0, impressions_recent_14d: 0 }).gsc_signal.impressions).toBeNull();
+    // A real signal under either key still resolves.
+    expect(compose({ impressions: 0, impressions_recent_14d: 240 }).gsc_signal.impressions).toBe(240);
+  });
 });

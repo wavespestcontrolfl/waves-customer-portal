@@ -1404,7 +1404,11 @@ const INVENTED_ROUTE_ALIASES = Object.freeze({
   '/waveguard/': '/waveguard-memberships/',
   '/guarantee/': '/waves-guarantee/',
   '/faq/': '/faqs/',
-  '/inspection/': '/pest-inspection/',
+  // NO bare '/inspection/' alias: it is service-AMBIGUOUS. A termite draft's
+  // "schedule an inspection" CTA belongs on /termite-inspection/, and a
+  // context-free alias would silently publish a WRONG destination — worse
+  // than the unlink this falls through to, which keeps the words and loses
+  // only the link (Codex r2).
   '/termite-inspections/': '/termite-inspection/',
   '/deals/': '/pest-control-deals/',
   '/specials/': '/pest-control-deals/',

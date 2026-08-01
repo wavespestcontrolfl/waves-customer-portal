@@ -736,9 +736,13 @@ class ContentBriefBuilder {
         // Fallback covers rows mined BEFORE seasonal_rising started writing
         // the canonical key — without it those queued rows keep failing
         // gsc_signal_attached until they are re-mined.
+        // `||`, NOT `??`: ZERO impressions means NO usable GSC signal, and
+        // the gate only rejects null — a `??` chain preserved 0 and let an
+        // evidence-free refresh through, reversing the fail-closed contract
+        // documented at refresh-audit.js:387-412 (Codex r2).
         impressions: opportunity.signal_metadata?.impressions
-          ?? opportunity.signal_metadata?.impressions_recent_14d
-          ?? null,
+          || opportunity.signal_metadata?.impressions_recent_14d
+          || null,
         avg_position: opportunity.signal_metadata?.avg_position || null,
         ctr: opportunity.signal_metadata?.ctr || null,
         decay_pct: opportunity.signal_metadata?.decay_pct || null,

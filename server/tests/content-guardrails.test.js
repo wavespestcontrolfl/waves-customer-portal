@@ -2332,6 +2332,16 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(two.repairs.length).toBe(1);
   });
 
+  test('service-ambiguous /inspection/ is unlinked, never aliased (r2)', () => {
+    // A termite CTA must not be silently sent to the general pest page — a
+    // WRONG destination is worse than losing the link.
+    const r = repairInventedInternalRoutes('Termites? [schedule an inspection](/inspection/) today.');
+    expect(r.body).toBe('Termites? schedule an inspection today.');
+    expect(r.repairs[0]).toMatchObject({ from: '/inspection/', to: null, action: 'unlinked' });
+    // The unambiguous termite plural still aliases.
+    expect(repairInventedInternalRoutes('[x](/termite-inspections/)').body).toContain('/termite-inspection/');
+  });
+
   test('every alias target is a real allowlisted route (module-load contract)', () => {
     const r = repairInventedInternalRoutes('[x](/get-a-quote/) [y](/faq/) [z](/waveguard/)');
     expect(r.repairs.length).toBe(3);
