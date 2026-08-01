@@ -55,7 +55,7 @@ const CATALOG_TARGETS = [
   // Added by 20260801300000, which fills the products that carried no targets.
   "Bahiagrass", "Lawn burweed", "Palm bud rot (Phytophthora)",
   "Lethal bronzing (palm) — preventive", "Lethal yellowing (palm) — preventive",
-  "Pythium blight", "Pythium damping-off", "Pythium root rot", "Wood-decay fungi",
+  "Pythium blight", "Pythium damping-off", "Wood-decay fungi",
   "Yellow tuft (downy mildew)",
 ];
 
@@ -294,10 +294,13 @@ describe("labelTargetLines", () => {
       "Lethal yellowing (palm) — preventive",
       "Fusarium wilt (palm)",
     ].forEach((t) => expect(labelTargetLines(t)).toEqual(["tree_shrub"]));
-    // Turf oomycetes keep their own wording and stay on the lawn line.
+    // The turf oomycete targets we actually write keep their own wording and
+    // stay on the lawn line. "Pythium root rot" is deliberately absent from
+    // our vocabulary — no product carries it and nothing writes it, so there
+    // is no line to assign it to. See the migration header for why it is not a
+    // turf claim on Banol or Subdue Maxx.
     expect(labelTargetLines("Pythium blight")).toEqual(["lawn"]);
     expect(labelTargetLines("Pythium damping-off")).toEqual(["lawn"]);
-    expect(labelTargetLines("Pythium root rot")).toEqual(["lawn"]);
     // Yellow tuft is a TURF disease that the Subdue Maxx turf directions spell
     // "Yellow tuft (downy mildew)". A generic downy-mildew ornamental rule
     // would steal it off lawn visits, so there isn't one.
