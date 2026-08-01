@@ -3113,7 +3113,7 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
       await trx('customer_interactions').insert({
         customer_id: req.params.id,
         interaction_type: 'note',
-        subject: 'Billing resumed',
+        subject: 'Billing pause cleared',
         body: `Billing pause cleared (paused ${pausedSince}${pauseReason ? `, reason: ${pauseReason}` : ''}). `
           + 'This removes the pause block only — other billing guards (autopay state, '
           + 'plan type, prepaid coverage) still apply. The paused months are not back-billed.',
@@ -3123,7 +3123,7 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
       await recordAuditEvent({
         actor_type: 'admin',
         actor_id: req.technicianId || null,
-        action: 'customer.billing_resumed',
+        action: 'customer.billing_pause_cleared',
         resource_type: 'customer',
         resource_id: req.params.id,
         metadata: { paused_since: pausedSince, pause_reason: pauseReason },

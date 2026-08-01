@@ -27,33 +27,25 @@ jest.mock('../services/logger', () => ({
 // Programmable per-test state. `storedPausedAt` is what the row holds at
 // UPDATE time — the compare-and-swap reads it, so a test can simulate
 // billing-cron re-pausing between the SELECT and the UPDATE.
-const CHARGEABLE_METHOD = {
-  id: 'pm-1',
-  processor: 'stripe',
-  method_type: 'card',
-  stripe_payment_method_id: 'pm_stripe_1',
-  is_default: true,
-  autopay_enabled: true,
-  exp_month: 12,
-  exp_year: 2099,
-};
-
 const mockState = {
   customer: null,
-  freshCustomer: null,
-  autopayMethod: CHARGEABLE_METHOD,
-  annualPrepayCovered: [],
-  annualPrepayPending: [],
   storedPausedAt: undefined,
   updates: [],
   interactions: [],
   auditEvents: [],
   insertShouldFail: false,
+  auditShouldFail: false,
   rolledBack: false,
 };
 
 jest.mock('../services/audit-log', () => ({
-  recordAuditEvent: jest.fn(async (event) => { mockState.auditEvents.push(event); }),
+  recordAuditEvent: jest.fn(async (event) => {
+    // Failed independently of the interaction insert, so the rollback test
+    // exercises the CRITICAL AUDIT failing inside the transaction rather than
+    // the note insert that happens to precede it.
+    if (mockState.auditShouldFail) throw new Error('audit event exploded');
+    mockState.auditEvents.push(event);
+  }),
 }));
 
 jest.mock('../models/db', () => {
@@ -63,12 +55,8 @@ jest.mock('../models/db', () => {
     q.whereNull = (col) => { q._null.push(col); return q; };
     q.whereNotNull = (col) => { (q._notNull = q._notNull || []).push(col); return q; };
     q.first = async () => {
-      if (table === 'payment_methods') return mockState.autopayMethod;
+      // The route reads exactly one row: the customer, guarded on deleted_at.
       if (table !== 'customers' || !mockState.customer) return null;
-      // The initial read carries .whereNull('deleted_at'); the post-transaction
-      // re-read does not, so this distinguishes them and lets a test move the
-      // row underneath the request.
-      if (!q._null.includes('deleted_at')) return mockState.freshCustomer || mockState.customer;
       if (mockState.customer.deleted_at) return null;
       return mockState.customer;
     };
@@ -138,15 +126,12 @@ async function resumeService(id, body = {}) {
 
 beforeEach(() => {
   mockState.customer = null;
-  mockState.freshCustomer = null;
-  mockState.autopayMethod = CHARGEABLE_METHOD;
-  mockState.annualPrepayCovered = [];
-  mockState.annualPrepayPending = [];
   mockState.storedPausedAt = undefined;
   mockState.updates = [];
   mockState.interactions = [];
   mockState.auditEvents = [];
   mockState.insertShouldFail = false;
+  mockState.auditShouldFail = false;
   mockState.rolledBack = false;
 });
 
@@ -196,7 +181,7 @@ describe('POST /admin/customers/:id/resume-service', () => {
     expect(mockState.auditEvents).toHaveLength(1);
     expect(mockState.auditEvents[0]).toMatchObject({
       actor_type: 'admin',
-      action: 'customer.billing_resumed',
+      action: 'customer.billing_pause_cleared',
       resource_type: 'customer',
       resource_id: 'cust-1',
       critical: true,
@@ -207,9 +192,9 @@ describe('POST /admin/customers/:id/resume-service', () => {
 
   test('a failed audit write rolls the resume back rather than losing the record', async () => {
     mockState.customer = { ...PAUSED };
-    mockState.insertShouldFail = true;
+    mockState.auditShouldFail = true;
 
-    await expect(resumeService('cust-1')).rejects.toThrow(/audit insert exploded/);
+    await expect(resumeService('cust-1')).rejects.toThrow(/audit event exploded/);
 
     // A money-affecting action that succeeded with no durable record is worse
     // than one that failed loudly.
@@ -224,7 +209,7 @@ describe('POST /admin/customers/:id/resume-service', () => {
 
     const note = mockState.interactions[0];
     expect(note).toBeTruthy();
-    expect(note.subject).toBe('Billing resumed');
+    expect(note.subject).toBe('Billing pause cleared');
     expect(note.body).toContain('2026-05-02');
     expect(note.body).toContain('autopay_final_failure');
     // The no-back-billing promise is what makes this safe to click, so it
