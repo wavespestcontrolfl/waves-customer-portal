@@ -182,11 +182,32 @@ function recurringQuoteLines(estimate) {
 
 // One recurring line → the price the customer is actually charged each time
 // we treat, or null when this line can't be expressed that way.
+// Recurring lines billed MONTHLY by design: their visit count is an
+// operational cadence, not a billing unit — rodent bait is "quarterly visits
+// (4/yr) — billed monthly to customer" (service-pricing.js) — so an
+// annual÷visits figure would present a billing unit the customer never pays
+// (codex #3124 r2, superseding r1's derive-from-annual direction for these).
+const MONTHLY_BILLED_SERVICE_KEYS = new Set([
+  'rodent_bait',
+  'commercial_rodent_bait',
+  'termite_bait',
+  'termite_station_rental',
+  'commercial_termite_bait',
+]);
+
 function perApplicationForLine(line) {
-  // Cadence first: it is the one field every recurring shape carries.
-  // Mosquito lines expose visits, lawn lines a numeric frequency, pest lines
-  // visitsPerYear with a STRING frequency (codex 2642 r1/r3).
-  // Palm-injection lines expose the cadence as appsPerYear (codex #3124 r2).
+  if (MONTHLY_BILLED_SERVICE_KEYS.has(String(line.service || '').trim())) return null;
+  // A line qualifies only when it carries an EXPLICIT per-application signal
+  // (perApp, or the perVisit that palm/mosquito shapes use) — monthly-billed
+  // station lines deliberately emit neither, and that absence is the design
+  // signal, not a data gap.
+  const perAppRaw = Number(line.perApp) > 0
+    ? Number(line.perApp)
+    : (Number(line.perVisit) > 0 ? Number(line.perVisit) : 0);
+  if (!(perAppRaw > 0)) return null;
+  // Cadence: mosquito lines expose visits, lawn lines a numeric frequency,
+  // pest lines visitsPerYear with a STRING frequency, palm appsPerYear
+  // (codex 2642 r1/r3; #3124 r2).
   const visits = Number(line.visitsPerYear) > 0
     ? Number(line.visitsPerYear)
     : Number(line.visits) > 0
@@ -199,16 +220,9 @@ function perApplicationForLine(line) {
   if (!visits) return null;
   // Exact cents (codex 2642 r1: whole-dollar rounding drifted the headline
   // from the monthly/annual math), preferring the DISCOUNTED annual over the
-  // list per-application rate. Rodent-bait lines carry an authoritative
-  // annual + cadence but NO redundant perApp/perVisit, so the annual path
-  // must stand on its own — requiring perApp first dropped rodent-only quotes
-  // and every bundle containing one (codex #3124 r1).
+  // list per-application rate.
   const discountedAnnual = Number(line.annualAfterDiscount ?? line.finalAnnual ?? line.annual) || 0;
-  const perAppRaw = Number(line.perApp) > 0
-    ? Number(line.perApp)
-    : (Number(line.perVisit) > 0 ? Number(line.perVisit) : 0);
   const exact = discountedAnnual > 0 ? discountedAnnual / visits : perAppRaw;
-  if (!(exact > 0)) return null;
   return {
     amount: Math.round(exact * 100) / 100,
     visitsPerYear: visits,
@@ -232,19 +246,14 @@ const RECURRING_LINE_LABELS = {
   lawn_care: 'Lawn Care',
   mosquito: 'Mosquito & No-See-Um Control',
   tree_shrub: 'Tree & Shrub Care',
-  rodent_bait: 'Rodent Bait Stations',
   palm_injection: 'Palm Tree Injections',
   foam_recurring: 'Recurring Foam Treatment',
-  termite_bait: 'Termite Bait Monitoring',
-  termite_station_rental: 'Termite Station Monitoring',
   termite_bond: 'Termite Bond',
   trap_only_retainer: 'Rodent Trapping Retainer',
   commercial_pest: 'Commercial Pest Control',
   commercial_lawn: 'Commercial Lawn Care',
   commercial_mosquito: 'Commercial Mosquito Control',
   commercial_tree_shrub: 'Commercial Tree & Shrub Care',
-  commercial_rodent_bait: 'Commercial Rodent Bait Stations',
-  commercial_termite_bait: 'Commercial Termite Bait Monitoring',
 };
 
 // An engine-supplied display name wins; otherwise the service key must map to

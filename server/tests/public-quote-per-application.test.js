@@ -584,19 +584,36 @@ describe('derivePerApplicationBreakdown', () => {
     expect(derivePerApplicationBreakdown(estimate)).toBeNull();
   });
 
-  // Codex #3124 r1: rodent-bait lines carry annual + cadence but no perApp,
-  // so requiring perApp dropped rodent-only quotes and every bundle with one.
-  test('derives rodent bait from its annual amount and cadence', () => {
-    const estimate = {
-      lineItems: [{ service: 'rodent_bait', name: '', monthly: 45, annual: 540, visitsPerYear: 6 }],
+  // Codex #3124 r2 (superseding r1): rodent bait is BILLED MONTHLY — its
+  // four visits are an operational cadence, not a billing unit
+  // (service-pricing.js: "quarterly visits (4/yr) — billed monthly to
+  // customer"), and it deliberately emits no perApp/perVisit. Deriving
+  // annual÷visits told the widget the customer pays "$147 per application"
+  // when they pay $49/mo.
+  test('excludes monthly-billed rodent bait rather than inventing a per-application price', () => {
+    const rodentOnly = {
+      lineItems: [{ service: 'rodent_bait', monthly: 49, annual: 588, visitsPerYear: 4 }],
     };
-    const lines = derivePerApplicationBreakdown(estimate);
-    expect(lines).toHaveLength(1);
-    expect(lines[0].label).toBe('Rodent Bait Stations');
-    expect(lines[0].per_application).toBe(90); // 540 / 6
-    expect(lines[0].visits_per_year).toBe(6);
-    // ...and the single-service helper now answers for it too.
-    expect(derivePerApplication(estimate)).toEqual({ amount: 90, visitsPerYear: 6 });
+    expect(derivePerApplicationBreakdown(rodentOnly)).toBeNull();
+    expect(derivePerApplication(rodentOnly)).toBeNull();
+    // All-or-nothing: a bundle containing rodent drops the whole breakdown
+    // instead of presenting a partial plan.
+    const bundle = {
+      lineItems: [
+        { service: 'pest_control', name: 'Pest Control', monthly: 39, perApp: 117, visitsPerYear: 4 },
+        { service: 'rodent_bait', monthly: 49, annual: 588, visitsPerYear: 4 },
+      ],
+    };
+    expect(derivePerApplicationBreakdown(bundle)).toBeNull();
+  });
+
+  test('a line with cadence but no explicit per-application signal is excluded', () => {
+    // Absence of perApp/perVisit is the design signal for monthly-billed
+    // shapes — annual÷visits must not stand on its own.
+    const estimate = {
+      lineItems: [{ service: 'some_station_service', name: 'Stations', monthly: 30, annual: 360, visitsPerYear: 4 }],
+    };
+    expect(derivePerApplicationBreakdown(estimate)).toBeNull();
   });
 
   // Palm-injection rows carry appsPerYear + perVisit and no name — the real
