@@ -204,7 +204,9 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
     id: 'cust-77', first_name: 'Pat', last_name: 'Homeowner', phone: '+19415559999',
     email: null, address_line1: '4021 Coral Bay Loop', city: 'Venice', state: 'FL', zip: '34285',
     pipeline_stage: 'active_customer', waveguard_tier: 'Silver', member_since: '2025-01-01',
-    lawn_type: null, property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family',
+    // Distinctive parcel traits so a retained primary-parcel value is
+    // visibly different from the generic default downstream.
+    lawn_type: 'St. Augustine', property_sqft: 1800, lot_sqft: 8000, property_type: 'Condo',
     company_name: null, active: true,
   };
 
@@ -273,7 +275,7 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
     expect(context.isExistingCustomer).toBe(false);
   });
 
-  test('gate ON: a SECONDARY-property scope overrides the profile address and nulls the measurements', async () => {
+  test('gate ON: a SECONDARY-property scope overrides the address and nulls EVERY parcel trait', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [];
     mockCustomerFirstRow = GROUNDED_ROW;
@@ -287,13 +289,54 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
       address_line1: '77 Rental Cove',
       city: 'North Port',
       zip: '34287',
-      // The profile's measurements describe the PRIMARY parcel — nulled so
-      // the property-facts lookup gathers the quoted property.
+      // Rewriting the address makes profileDescribesQuotedProperty read
+      // TRUE, so every retained PRIMARY-parcel trait would be consumed as
+      // fact about the quoted property: measurements by the property-facts
+      // resolver, property_type by draft-builder's pricing fallback, and
+      // lawn_type by the composer.
       property_sqft: null,
       lot_sqft: null,
+      property_type: null,
+      lawn_type: null,
+    });
+    // Person-level fields describe the CUSTOMER and survive.
+    expect(context.customer).toMatchObject({
+      first_name: 'Pat', last_name: 'Homeowner', waveguard_tier: 'Silver', member_since: '2025-01-01',
     });
     expect(context.customerGroundedByAddress).toBe(true);
     expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate ON: draft-builder\'s profile pricing fallback cannot fire off a secondary-scope context', async () => {
+    // The consumer-side proof: with profileDescribesQuotedProperty TRUE,
+    // buildEngineInput falls back to context.customer.property_type and
+    // .property_sqft. Nulled traits mean the generic default is used and
+    // no measuredTurfSf is injected from the primary parcel.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS,
+      groundedCustomerId: 'cust-77',
+      groundedScope: { address: '77 Rental Cove', line2: null, city: 'North Port', zip: '34287', isPrimary: false },
+    });
+    const { buildEngineInput } = jest.requireActual('../services/estimator-engine/draft-builder');
+    const engineArgs = (ctx) => ({
+      context: ctx,
+      intent: { category: 'RESIDENTIAL', is_commercial: false, services: {} },
+      propertyFacts: {},
+      profileDescribesQuotedProperty: true,
+    });
+    const input = buildEngineInput(engineArgs(context));
+    // Nulled traits ⇒ generic default, and no primary-parcel turf injected.
+    expect(input.propertyType).toBe('Single Family');
+    expect(input.measuredTurfSf).toBeUndefined();
+
+    // Control: the SAME call with the un-nulled profile would have priced
+    // the rental as the primary parcel's Condo on its 1800sf of turf.
+    const leaked = buildEngineInput(engineArgs({ ...context, customer: GROUNDED_ROW }));
+    expect(leaked.propertyType).not.toBe('Single Family');
+    expect(leaked.measuredTurfSf).toBe(1800);
   });
 
   test('gate ON: a unit-carrying scope folds the unit INTO address_line1 (every consumer reads line1)', async () => {
@@ -352,6 +395,10 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
       address_line1: '4021 Coral Bay Loop',
       property_sqft: 1800,
       lot_sqft: 8000,
+      // Primary parcel, no unit ⇒ the profile IS the quoted property, so
+      // its parcel traits stay.
+      property_type: 'Condo',
+      lawn_type: 'St. Augustine',
     });
     expect(context.customerGroundedByAddress).toBe(true);
   });
@@ -488,6 +535,27 @@ describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)
     mockCustomerRows = [{ ...SHELL, id: 'lead-cust-3', created_at: null }, REAL];
     context = await buildSmsThreadContext(SMS_ARGS);
     expect(context.error).toBe('ambiguous_phone');
+  });
+
+  test('gate ON: a recent blank-street lead with a POPULATED ZIP is not a shell', async () => {
+    // The real webhook insert blanks BOTH address_line1 and zip. A lead
+    // that has a locality but no street yet is a genuine separate lead —
+    // treating it as a shell discarded its ambiguity and attached the
+    // established customer's id, property, and membership pricing.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [{ ...SHELL, id: 'lead-cust-4', zip: '34205' }, REAL];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
+  });
+
+  test('gate ON: the true shell (street AND zip blank) still resolves', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    // city IS populated on the real insert (numberConfig.area) — it must
+    // not be treated as a shell signal.
+    mockCustomerRows = [{ ...SHELL, city: 'Parrish' }, REAL];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBeUndefined();
+    expect(context.customer).toMatchObject({ id: 'cust-1' });
   });
 
   test('gate ON: TWO real rows remain genuinely ambiguous (red-lane)', async () => {

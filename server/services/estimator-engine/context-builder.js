@@ -130,9 +130,18 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
     if (includeServiceContacts && rows.length > 1) {
       const { CUSTOMER_STAGES } = require('../customer-stages');
       const isReal = (r) => r.active === true && CUSTOMER_STAGES.includes(r.pipeline_stage);
+      // Every field the shell insert PROVABLY blanks (twilio-webhook.js
+      // domain/van branch: address_line1 '' AND zip ''), plus the stage and
+      // recency markers. city is NOT checked — the insert populates it from
+      // numberConfig.area, so it is not a shell signal. Requiring the blank
+      // ZIP is what separates the shell from a genuine recent new_lead that
+      // has a locality but no street yet; misreading that one as a shell
+      // discards real ambiguity and attaches the established customer's
+      // id, property, and membership pricing to the lead's quote.
       const isWebhookShell = (r) => !isReal(r)
         && !CUSTOMER_STAGES.includes(r.pipeline_stage)
         && !String(r.address_line1 || '').trim()
+        && !String(r.zip || '').trim()
         && !!r.created_at
         && Date.now() - new Date(r.created_at).getTime() <= WEBHOOK_SHELL_MAX_AGE_MS;
       const real = rows.filter(isReal);
@@ -579,8 +588,24 @@ async function buildSmsThreadContext({
       address_line2: unit,
       city: groundedScope.city || null,
       zip: groundedScope.zip || null,
+      // EVERY parcel-descriptive column on the customers select is cleared,
+      // not just the measurements. Rewriting the address makes
+      // profileDescribesQuotedProperty (index.js) read TRUE for the quoted
+      // property, and draft-builder then falls back to these fields — so a
+      // retained primary-parcel property_type re-prices a condo as detached
+      // and a retained lawn_type feeds the composer the wrong turf. Audited
+      // against the selected columns in loadCustomerByPhone /
+      // loadGroundedCustomerById: address_line1/city/zip (rewritten above),
+      // property_sqft, lot_sqft, property_type, lawn_type describe the
+      // PARCEL; state is locality-invariant ('FL'). No other parcel traits
+      // (bed_sqft, linear_ft_perimeter, palm_count, canopy_type) are
+      // selected, so none reach the context. Person-level fields — name,
+      // phone, email, waveguard_tier, member_since, company_name — stay:
+      // they describe the customer, not the property.
       property_sqft: null,
       lot_sqft: null,
+      property_type: null,
+      lawn_type: null,
     };
   };
   // Ambiguous grounding already returned above, so every branch here is
