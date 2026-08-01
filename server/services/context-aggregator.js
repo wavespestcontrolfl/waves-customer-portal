@@ -257,6 +257,40 @@ function resolveBillingLaneFacts(customer) {
   }
 }
 
+// Is a monthly dues charge actually COLLECTING on this account right now?
+//
+// Active autopay is not proof that one is (codex #3141 r2). The monthly cron
+// suppresses several populations before it ever reaches chargeMonthly, and
+// customerOnAutopay sees none of them: service_paused_at is filtered out of
+// the cron's own SELECT (billing-cron.js:121-125), a paused autopay is logged
+// skipped_paused and passed over, and annual-prepay coverage (GUARD 4) or an
+// open annual-prepay commitment (GUARD 5) both suppress the dues too.
+//
+// Every non-'active' answer is a REASON, not a silence: a paused autopay is
+// not the same claim as "the office bills these", and neither is an unknown.
+// Fail-closed — anything we cannot confirm resolves to 'unknown'.
+async function resolveDuesCollectionState(customer, autopayState) {
+  // Eligibility itself was unreadable — never speak to collection at all.
+  if (!autopayState) return 'unknown';
+  // The cron never even loads a service-paused customer.
+  if (customer?.service_paused_at) return 'service_paused';
+  if (autopayState.paused) return 'autopay_paused';
+  if (autopayState.on !== true) return 'autopay_off';
+  try {
+    const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+    const id = String(customer.id);
+    const [covered, pending] = await Promise.all([
+      AnnualPrepayRenewals.getActivelyCoveredCustomerIds(),
+      AnnualPrepayRenewals.getPaymentPendingCustomerIds(),
+    ]);
+    if (covered?.has(id)) return 'annual_prepay_covered';
+    if (pending?.has(id)) return 'annual_prepay_pending';
+  } catch {
+    return 'unknown';
+  }
+  return 'active';
+}
+
 // The customer-visible monthly dues FACT, derived through the SAME pricing
 // authority the charge itself runs through (codex #3141 r1).
 //
@@ -268,30 +302,44 @@ function resolveBillingLaneFacts(customer) {
 //
 // Two amounts, two different claims. `base` is the plan price (the dues
 // themselves) and is always true when a positive rate exists. `total` is what
-// the method on file is actually charged, and is stated ONLY when the funding
-// that decides the surcharge is positively known — stripe.charge backfills an
-// unresolved card_funding from Stripe at charge time and will surcharge if it
-// comes back 'credit', so an unknown funding leaves the total null and the
-// facts tell the assistant to state the dues and no charge total.
+// actually collects, and it is published only when BOTH halves are certain:
+// that a charge is collecting at all (see resolveDuesCollectionState), and
+// that every method which could collect it prices the same.
 //
-// Pure (the caller supplies the already-resolved autopay method) so the
-// surcharge arithmetic is unit-testable without a database.
-function resolveMonthlyDuesFact({ monthlyRate, autopayOn, method }) {
+// That second rule is why `methods` is a LIST and not the one row this used to
+// resolve (codex #3141 r2): stripe.charge honors customers.autopay_payment_
+// method_id first and only falls back to the default+enabled lookup
+// (stripe.js:1690-1737), so pricing the default row could publish one total
+// while the pointer method was charged another. Rather than re-deriving that
+// selection here — a second copy of a money rule, free to drift — every
+// candidate the charge path could pick is priced, and the total is published
+// only when they AGREE. Then it is right whichever one collection selects,
+// and a genuinely ambiguous account withholds instead of guessing.
+//
+// Pure (the caller supplies the already-fetched rows) so all of it is
+// unit-testable without a database.
+function resolveMonthlyDuesFact({ monthlyRate, collection, methods }) {
   const base = Number(monthlyRate || 0);
   if (!(base > 0)) return null;
-  // No active autopay = GUARD 1 in billing-cron skips the account entirely,
-  // so nothing auto-charges. The dues are still owed and still quotable; the
-  // office collects them.
-  if (autopayOn !== true || !method) {
-    return { base, surcharge: 0, total: null, surcharged: false, basis: 'no_autopay' };
-  }
+  const withheld = (basis) => ({ base, surcharge: 0, total: null, surcharged: false, basis });
+  // Not collecting (or not confirmably collecting) — the dues are still the
+  // plan price and still quotable; what must not be claimed is a charge.
+  const state = collection || 'unknown';
+  if (state !== 'active') return withheld(state);
+  if (!Array.isArray(methods) || methods.length === 0) return withheld('method_unknown');
   try {
     const { computeChargeAmount, isCardMethodType } = require('./stripe-pricing');
-    const funding = method.card_funding || null;
-    if (isCardMethodType(method.method_type) && !funding) {
-      return { base, surcharge: 0, total: null, surcharged: false, basis: 'unknown_funding' };
-    }
-    const quote = computeChargeAmount(base, method.method_type, { funding });
+    const quotes = methods.map((m) => {
+      const funding = m?.card_funding || null;
+      // A card whose funding has never been resolved is genuinely uncertain:
+      // stripe.charge backfills it from Stripe at charge time and surcharges
+      // if it comes back 'credit'.
+      if (isCardMethodType(m?.method_type) && !funding) return null;
+      return computeChargeAmount(base, m?.method_type, { funding });
+    });
+    if (quotes.some((q) => !q)) return withheld('unknown_funding');
+    if (new Set(quotes.map((q) => q.totalCents)).size > 1) return withheld('method_ambiguous');
+    const quote = quotes[0];
     return {
       base: quote.baseCents / 100,
       surcharge: quote.surchargeCents / 100,
@@ -301,8 +349,26 @@ function resolveMonthlyDuesFact({ monthlyRate, autopayOn, method }) {
     };
   } catch {
     // Pricing authority unreadable — never guess a total.
-    return { base, surcharge: 0, total: null, surcharged: false, basis: 'unknown_funding' };
+    return withheld('unknown_funding');
   }
+}
+
+// Every saved method the charge path could collect these dues from: the
+// enrollment pointer stripe.charge honors first, plus the default+enabled
+// rows it falls back to. Deliberately UNFILTERED beyond "could be charged at
+// all" — an extra row only ever makes the fact more conservative, while
+// re-implementing the charge path's eligibility predicate here could drop the
+// very row collection picks and turn a real charge into "nothing collects".
+async function fetchDuesChargeCandidates(customer) {
+  const rows = await db('payment_methods')
+    .where({ customer_id: customer.id, processor: 'stripe', autopay_enabled: true })
+    .whereNotNull('stripe_payment_method_id')
+    .where(function pointerOrDefault() {
+      this.where('is_default', true);
+      if (customer.autopay_payment_method_id) this.orWhere('id', customer.autopay_payment_method_id);
+    })
+    .select('id', 'method_type', 'card_funding', 'is_default');
+  return rows;
 }
 
 class ContextAggregator {
@@ -485,21 +551,21 @@ class ContextAggregator {
 
     // The dues AMOUNT the monthly lane authorizes, priced through the charge
     // path's own authority rather than the raw rate (codex #3141 r1). Only
-    // the monthly lane pays for this query — for every other lane the stored
-    // rate is an artifact nobody is charged, so there is nothing to price.
-    // An eligibility failure above leaves autopayState null, which resolves
-    // to the no-total shape: fail-closed, never a guessed charge.
+    // the monthly lane pays for these queries — for every other lane the
+    // stored rate is an artifact nobody is charged, so there is nothing to
+    // price. Every failure here resolves to a withheld total, never a guess:
+    // an eligibility failure above already leaves autopayState null, which
+    // reads as an unconfirmed collection state.
     if (billingLane.monthlyBilled) {
-      let autopayMethod = null;
-      try {
-        const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('./autopay-eligibility');
-        const row = await getChargeableAutopayMethod(customer, db);
-        autopayMethod = isChargeableAutopayMethod(row) ? row : null;
-      } catch { autopayMethod = null; }
+      const collection = await resolveDuesCollectionState(customer, autopayState);
+      let methods = null;
+      if (collection === 'active') {
+        try { methods = await fetchDuesChargeCandidates(customer); } catch { methods = null; }
+      }
       billingLane.monthlyDues = resolveMonthlyDuesFact({
         monthlyRate: customer.monthly_rate,
-        autopayOn: autopayState?.on === true,
-        method: autopayMethod,
+        collection,
+        methods,
       });
     }
 
@@ -852,3 +918,4 @@ module.exports.lawnOverall = lawnOverall;
 module.exports.customerSafeVisitNotes = customerSafeVisitNotes;
 module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;
 module.exports.resolveMonthlyDuesFact = resolveMonthlyDuesFact;
+module.exports.resolveDuesCollectionState = resolveDuesCollectionState;

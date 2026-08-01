@@ -235,25 +235,41 @@ function formatEtInstant(value) {
   } catch { return String(value || ''); }
 }
 
-// What actually leaves the account each month, next to the dues themselves
-// (codex #3141 r1). The dues are the plan price; the CHARGE can differ,
-// because stripe.charge adds the credit-card surcharge when the method on
-// file is a confirmed credit card. Each branch states only what the
-// aggregator positively resolved — an unknown funding or an eligibility
-// failure says so rather than implying the dues are the charge.
+// What actually leaves the account, next to the dues themselves (codex #3141
+// r1, r2). The dues are the plan price; the CHARGE can differ, because
+// stripe.charge adds the credit-card surcharge when the method collecting is
+// a confirmed credit card — and it can also not happen at all, because the
+// monthly cron suppresses several populations active autopay says nothing
+// about.
+//
+// Every branch states the reason the aggregator actually resolved. A paused
+// autopay is NOT the same claim as "the office bills these" (codex #3141 r2):
+// the cron logs skipped_paused and moves on, nothing is invoiced, and normal
+// collection resumes when the pause lifts — so each suppressor gets its own
+// sentence and none of them promises a bill nobody cuts.
+const MONTHLY_CHARGE_NOTES = {
+  no_surcharge: '. That exact amount is what collects from the payment method on file — no card fee applies to it',
+  // stripe.charge resolves an unset card_funding at charge time and
+  // surcharges if it comes back credit, so the total is genuinely unknown.
+  unknown_funding: '. A card fee may be added when these dues collect, so state the dues and never a charge total',
+  // More than one saved method could collect, and they price differently —
+  // publishing either one would be a coin flip on which the charge picks.
+  method_ambiguous: '. More than one saved method could collect these dues and they price differently, so state the dues and never a charge total',
+  method_unknown: '. No saved method is confirmed for these dues, so state the dues and never a charge total',
+  autopay_paused: '. Autopay is paused, so no dues are collecting until it resumes — state the dues, never a charge total, and let the office confirm',
+  autopay_off: '. Autopay is not active, so these dues are not auto-collecting — state the dues, never a charge total, and let the office confirm how they are collected',
+  service_paused: '. Billing on this account is paused, so no dues are collecting right now — state the dues, never a charge total, and let the office confirm',
+  annual_prepay_covered: '. Annual prepay coverage is active on this account, so monthly dues are not collecting — state the dues, never a charge total, and let the office confirm',
+  annual_prepay_pending: '. An annual-prepay invoice is open, so monthly dues are not collecting while it is pending — state the dues, never a charge total, and let the office confirm',
+};
 function monthlyChargeNote(dues) {
   if (dues.surcharged && dues.total != null) {
-    return `. The credit card on file is charged $${dues.total.toFixed(2)} a month — the $${dues.base.toFixed(2)} dues plus a $${dues.surcharge.toFixed(2)} credit-card fee. Both figures are exact; never add them up yourself`;
+    return `. When these dues collect from the credit card on file the charge is $${dues.total.toFixed(2)} — the $${dues.base.toFixed(2)} dues plus a $${dues.surcharge.toFixed(2)} credit-card fee. All three figures are exact; never add them up yourself`;
   }
-  if (dues.basis === 'no_surcharge' && dues.total != null) {
-    return '. That exact amount is what charges to the payment method on file each month — no card fee applies to it';
-  }
-  if (dues.basis === 'no_autopay') {
-    return '. Autopay is not active, so nothing auto-charges — the office bills these dues';
-  }
-  // unknown_funding: stripe.charge resolves the card's funding at charge time
-  // and surcharges if it comes back credit, so the total is genuinely unknown.
-  return '. A card fee may be added when it charges, so state the dues and never a charge total';
+  if (dues.basis === 'no_surcharge' && dues.total != null) return MONTHLY_CHARGE_NOTES.no_surcharge;
+  // Fail closed on any state we did not positively resolve.
+  return MONTHLY_CHARGE_NOTES[dues.basis]
+    || '. Whether these dues are currently collecting could not be confirmed, so state the dues and never a charge total';
 }
 
 /**
@@ -994,17 +1010,22 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // unreachable on the suggestion/auto-send path.
     //
     // Only what the facts actually STATE is authorized: the dues base always,
-    // and the surcharge-inclusive total only when it was resolved and
-    // published. The unresolved-funding case deliberately authorizes no total
-    // — the facts tell the drafter not to state one.
+    // and — when the surcharged total was resolved and published — that total
+    // AND the fee it breaks out (codex #3141 r2; the facts publish all three,
+    // so a draft that accurately repeats "the $2.85 credit-card fee" must not
+    // read as ungrounded). The unresolved-funding, ambiguous-method and
+    // suppressed-collection cases deliberately authorize no total and no fee:
+    // the facts tell the drafter not to state one.
     const laneDues = context.customer?.billingLane?.monthlyBilled
       ? context.customer.billingLane.monthlyDues
       : null;
+    const duesSurcharged = laneDues?.surcharged && laneDues.total != null;
     const authorizedCents = new Set([
       context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
       context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
       laneDues ? centsOf(laneDues.base) : null,
-      laneDues?.surcharged && laneDues.total != null ? centsOf(laneDues.total) : null,
+      duesSurcharged ? centsOf(laneDues.total) : null,
+      duesSurcharged ? centsOf(laneDues.surcharge) : null,
       ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
     ].filter((v) => Number.isFinite(v)));
     // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,

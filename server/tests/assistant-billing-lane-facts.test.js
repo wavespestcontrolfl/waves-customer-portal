@@ -21,7 +21,11 @@ const fs = require('fs');
 const path = require('path');
 
 const { buildFactsBlock } = require('../services/sms-shadow-drafter');
-const { resolveBillingLaneFacts, resolveMonthlyDuesFact } = require('../services/context-aggregator');
+const {
+  resolveBillingLaneFacts,
+  resolveMonthlyDuesFact,
+  resolveDuesCollectionState,
+} = require('../services/context-aggregator');
 
 const drafter = fs.readFileSync(path.join(__dirname, '../services/sms-shadow-drafter.js'), 'utf8');
 const agent = fs.readFileSync(path.join(__dirname, '../services/ai-assistant/managed-agent-config.js'), 'utf8');
@@ -31,6 +35,8 @@ const DEBIT_CARD = { method_type: 'card', card_funding: 'debit' };
 const UNRESOLVED_CARD = { method_type: 'card', card_funding: null };
 const BANK = { method_type: 'us_bank_account', card_funding: null };
 
+const duesFor = (methods, monthlyRate = 98.5) =>
+  resolveMonthlyDuesFact({ monthlyRate, collection: 'active', methods });
 const factsFor = (billingLane) => buildFactsBlock({ customer: { billingLane } });
 
 describe('the monthly dues fact is what the account is actually charged', () => {
@@ -38,7 +44,7 @@ describe('the monthly dues fact is what the account is actually charged', () => 
     // chargeMonthly hands monthly_rate to stripe.charge, where
     // computeChargeAmount adds the credit-card surcharge — quoting the base
     // as the charge contradicted the PaymentIntent and the payment row.
-    const dues = resolveMonthlyDuesFact({ monthlyRate: 98.5, autopayOn: true, method: CREDIT_CARD });
+    const dues = duesFor([CREDIT_CARD]);
     expect(dues.base).toBe(98.5);
     expect(dues.surcharged).toBe(true);
     // 2.90% of $98.50, floored to the cent by the pricing authority.
@@ -48,7 +54,7 @@ describe('the monthly dues fact is what the account is actually charged', () => 
 
   test('debit and bank methods pay the dues exactly — no surcharge', () => {
     for (const method of [DEBIT_CARD, BANK]) {
-      const dues = resolveMonthlyDuesFact({ monthlyRate: 98.5, autopayOn: true, method });
+      const dues = duesFor([method]);
       expect(dues.surcharged).toBe(false);
       expect(dues.total).toBe(98.5);
       expect(dues.basis).toBe('no_surcharge');
@@ -59,27 +65,79 @@ describe('the monthly dues fact is what the account is actually charged', () => 
     // stripe.charge backfills card_funding from Stripe at charge time and
     // surcharges if it comes back credit — the total is genuinely unknown
     // here, so the fact withholds it rather than implying dues == charge.
-    const dues = resolveMonthlyDuesFact({ monthlyRate: 98.5, autopayOn: true, method: UNRESOLVED_CARD });
+    const dues = duesFor([UNRESOLVED_CARD]);
     expect(dues.base).toBe(98.5);
     expect(dues.total).toBeNull();
     expect(dues.surcharged).toBe(false);
     expect(dues.basis).toBe('unknown_funding');
   });
 
-  test('without active autopay nothing auto-charges, but the dues are still real', () => {
-    // billing-cron GUARD 1 skips the account entirely; the office bills it.
-    for (const args of [{ autopayOn: false, method: CREDIT_CARD }, { autopayOn: true, method: null }]) {
-      const dues = resolveMonthlyDuesFact({ monthlyRate: 45, ...args });
+  test('candidates that price differently withhold the total entirely', () => {
+    // stripe.charge honors the enrollment pointer first and falls back to the
+    // default row, so pricing one of them could publish a total the other
+    // never charges. Agreement is the only safe answer.
+    const dues = duesFor([CREDIT_CARD, DEBIT_CARD]);
+    expect(dues.base).toBe(98.5);
+    expect(dues.total).toBeNull();
+    expect(dues.basis).toBe('method_ambiguous');
+    // Candidates that AGREE still publish — a pointer that merely duplicates
+    // the default row is the ordinary case and must not withhold.
+    expect(duesFor([CREDIT_CARD, { ...CREDIT_CARD, id: 'other' }]).total).toBe(101.35);
+    expect(duesFor([DEBIT_CARD, BANK]).total).toBe(98.5);
+  });
+
+  test('no candidate method at all withholds the total', () => {
+    for (const methods of [[], null, undefined]) {
+      const dues = duesFor(methods);
+      expect(dues.total).toBeNull();
+      expect(dues.basis).toBe('method_unknown');
+    }
+  });
+
+  test('a suppressed collection publishes the dues and no charge', () => {
+    // Each of these is a population the monthly cron skips — the dues are
+    // still the plan price, but no charge is running to describe.
+    for (const collection of [
+      'autopay_off', 'autopay_paused', 'service_paused',
+      'annual_prepay_covered', 'annual_prepay_pending', 'unknown',
+    ]) {
+      const dues = resolveMonthlyDuesFact({ monthlyRate: 45, collection, methods: [CREDIT_CARD] });
       expect(dues.base).toBe(45);
       expect(dues.total).toBeNull();
-      expect(dues.basis).toBe('no_autopay');
+      expect(dues.surcharged).toBe(false);
+      expect(dues.basis).toBe(collection);
     }
   });
 
   test('an unpriced rate produces no dues fact at all', () => {
     for (const monthlyRate of [0, null, undefined, -5]) {
-      expect(resolveMonthlyDuesFact({ monthlyRate, autopayOn: true, method: CREDIT_CARD })).toBeNull();
+      expect(resolveMonthlyDuesFact({ monthlyRate, collection: 'active', methods: [CREDIT_CARD] })).toBeNull();
     }
+  });
+});
+
+describe('active autopay is not proof a dues charge is running', () => {
+  const ON = { on: true, paused: false };
+
+  test('a service-paused account is never even loaded by the cron', async () => {
+    expect(await resolveDuesCollectionState({ id: 'c1', service_paused_at: new Date() }, ON))
+      .toBe('service_paused');
+  });
+
+  test('a paused autopay is its own state, not "the office bills it"', async () => {
+    // The cron logs skipped_paused and moves on: nothing is invoiced, and
+    // collection resumes on its own when the pause lifts.
+    expect(await resolveDuesCollectionState({ id: 'c1' }, { on: false, paused: true }))
+      .toBe('autopay_paused');
+  });
+
+  test('autopay off is distinct from paused', async () => {
+    expect(await resolveDuesCollectionState({ id: 'c1' }, { on: false, paused: false }))
+      .toBe('autopay_off');
+  });
+
+  test('an unreadable autopay state never claims a collection', async () => {
+    expect(await resolveDuesCollectionState({ id: 'c1' }, null)).toBe('unknown');
   });
 });
 
@@ -132,6 +190,34 @@ describe('the drafter facts block publishes only what was resolved', () => {
     expect(facts).not.toMatch(/\$10[0-9]\.\d{2}/);
   });
 
+  test('a suppressed collection names its own reason, never an office bill', () => {
+    // "the office bills these dues" was a promise nobody keeps: the cron logs
+    // skipped_paused and moves on, and no invoice is cut.
+    const paused = factsFor({
+      monthlyBilled: true,
+      label: 'MONTHLY MEMBERSHIP — dues are charged monthly',
+      monthlyDues: { base: 98.5, surcharge: 0, total: null, surcharged: false, basis: 'autopay_paused' },
+    });
+    expect(paused).toContain('Monthly dues: $98.50 per month');
+    expect(paused).toMatch(/Autopay is paused/);
+    expect(paused).not.toMatch(/office bills/);
+    for (const [basis, phrase] of [
+      ['service_paused', /Billing on this account is paused/],
+      ['annual_prepay_pending', /annual-prepay invoice is open/],
+      ['annual_prepay_covered', /Annual prepay coverage is active/],
+      ['method_ambiguous', /More than one saved method/],
+      ['unknown', /could not be confirmed/],
+    ]) {
+      const facts = factsFor({
+        monthlyBilled: true,
+        label: 'MONTHLY MEMBERSHIP — dues are charged monthly',
+        monthlyDues: { base: 98.5, surcharge: 0, total: null, surcharged: false, basis },
+      });
+      expect(facts).toMatch(phrase);
+      expect(facts).toMatch(/never a charge total/i);
+    }
+  });
+
   test('a non-monthly lane and an unpriced membership publish no dues line', () => {
     // For every other lane the stored rate is an artifact nobody is charged.
     expect(factsFor({ monthlyBilled: false, label: 'PER APPLICATION', monthlyDues: null }))
@@ -140,7 +226,7 @@ describe('the drafter facts block publishes only what was resolved', () => {
     expect(factsFor({
       monthlyBilled: false,
       label: 'MONTHLY MEMBERSHIP BUT UNPRICED',
-      monthlyDues: { base: 98.5, surcharge: 0, total: null, surcharged: false, basis: 'no_autopay' },
+      monthlyDues: { base: 98.5, surcharge: 0, total: null, surcharged: false, basis: 'autopay_off' },
     })).not.toMatch(/Monthly dues/);
   });
 
@@ -159,7 +245,16 @@ describe('the amounts the facts publish are the amounts the guard authorizes', (
     // fact exists to reach unreachable on the suggestion/auto-send path.
     expect(drafter).toContain('context.customer?.billingLane?.monthlyBilled');
     expect(drafter).toContain('laneDues ? centsOf(laneDues.base) : null');
-    expect(drafter).toContain('laneDues?.surcharged && laneDues.total != null ? centsOf(laneDues.total) : null');
+    expect(drafter).toContain('duesSurcharged ? centsOf(laneDues.total) : null');
+  });
+
+  test('the broken-out credit-card fee is authorized alongside the total', () => {
+    // The facts publish all three figures, so a draft that accurately repeats
+    // "the $2.85 credit-card fee" must not parse as an ungrounded amount and
+    // hold the whole draft in shadow — and the fee is authorized exactly as
+    // narrowly as the total, only when the surcharge was actually published.
+    expect(drafter).toContain('const duesSurcharged = laneDues?.surcharged && laneDues.total != null');
+    expect(drafter).toContain('duesSurcharged ? centsOf(laneDues.surcharge) : null');
   });
 
   test('the published dues come from the priced fact, never the raw rate', () => {
