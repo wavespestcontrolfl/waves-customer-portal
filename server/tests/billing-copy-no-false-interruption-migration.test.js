@@ -1,9 +1,15 @@
 const migration = require('../models/migrations/20260801200000_billing_copy_no_false_interruption');
 
-// Words that assert a consequence we do not actually carry out. A balance
-// never withholds service — the visit is scheduled, dispatched and performed
-// regardless — so none of these may appear in billing copy.
-const FALSE_CONSEQUENCE = /interrupt|disrupt|suspend|shut off|stop service|discontinue/i;
+// Claims of a consequence we do not actually carry out. A balance never
+// withholds service — the visit is scheduled, dispatched and performed
+// regardless — so none of these may appear in billing copy. The positive
+// framings are here because the first pass of this sweep missed all three:
+// "keep you on schedule" is the same promise as "won't be interrupted".
+const FALSE_CONSEQUENCE = new RegExp([
+  'interrupt', 'disrupt', 'suspend', 'shut off', 'stop service', 'discontinue',
+  'keep you on schedule', 'keep your appointment', 'keep service active',
+  'keeps? your service',
+].join('|'), 'i');
 
 function placeholders(body) {
   return (String(body).match(/\{[a-z_]+\}/g) || []).sort();
@@ -49,7 +55,7 @@ describe('billing copy — no false service-interruption claim', () => {
       // "{pay_url}" into a customer text.
       expect(placeholders(next)).toEqual(placeholders(expected));
       // The ask and the way to act on it both survive.
-      expect(next).toMatch(/\{pay_url\}|portal\.wavespestcontrol\.com/);
+      expect(next).toMatch(/\{pay_url\}|\{update_card_url\}|portal\.wavespestcontrol\.com/);
     }
   });
 

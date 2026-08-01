@@ -2,10 +2,20 @@
  * Remove the service-interruption threat from billing copy (owner finding
  * 2026-08-01).
  *
- * Two active templates told customers that paying protects their service:
+ * Five active templates told customers that paying protects their service.
+ * Two said it outright; three said the same thing in positive framing, which
+ * is the same claim and just as untrue:
  *
- *   balance_reminder_gentle  "keeps your service uninterrupted"
- *   payment_method_expiry    "so your service isn't interrupted"
+ *   balance_reminder_gentle     "keeps your service uninterrupted"
+ *   payment_method_expiry       "so your service isn't interrupted"
+ *   balance_reminder_firm       "so we can keep you on schedule"
+ *   balance_reminder_urgent     "Pay here to keep your appointment"
+ *   autopay_retry_final_failed  "Update your card to keep service active"
+ *
+ * The last one is the sharpest: it goes out at the exact moment the 3-retry
+ * ladder exhausts and service_paused_at is set — the one moment a customer
+ * might believe it — and the pause it announces stops only their dues, never
+ * their visits.
  *
  * Neither is true. Nothing in the platform withholds service for a balance:
  * the visit is scheduled, dispatched and performed regardless, and a new
@@ -41,6 +51,15 @@ const REWRITES = [
   ['payment_method_expiry',
     "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update it here so your service isn't interrupted: portal.wavespestcontrol.com",
     "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update it here so your next payment goes through: portal.wavespestcontrol.com"],
+  ['balance_reminder_firm',
+    "Hello {first_name}! Your {service_type} is {service_timing} and your account has an outstanding balance.\n\nPlease take care of it so we can keep you on schedule: {pay_url}",
+    "Hello {first_name}! Your {service_type} is {service_timing} and your account has an outstanding balance.\n\nYou can take care of it here: {pay_url}"],
+  ['balance_reminder_urgent',
+    "Hello {first_name}! Your service is {service_timing} and your account has an outstanding balance.\n\nPay here to keep your appointment: {pay_url}\n\nAlready paid? Reply and we'll check.",
+    "Hello {first_name}! Your service is {service_timing} and your account has an outstanding balance.\n\nPay here: {pay_url}\n\nAlready paid? Reply and we'll check."],
+  ['autopay_retry_final_failed',
+    "Hello {first_name}! After several tries your payment of ${amount} still has not gone through. Update your card to keep service active: {update_card_url}",
+    "Hello {first_name}! After several tries your payment of ${amount} still has not gone through. You can update your card and pay here: {update_card_url}"],
 ];
 
 exports.up = async function up(knex) {

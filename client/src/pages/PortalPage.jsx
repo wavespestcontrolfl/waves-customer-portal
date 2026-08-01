@@ -4632,9 +4632,11 @@ function BillingTab({ customer }) {
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: 'Payment failed - update your payment method',
       // No interruption claim: a balance never withholds service (nothing
-      // reads service_paused_at to block a visit). The retry ladder IS real
-      // — billing-cron retries up to 3 times — so that is what we say.
-      detail: "Your last payment could not be processed. Update your card and we'll retry it.",
+      // reads service_paused_at to block a visit). No retry promise either —
+      // billing-cron only retries rows it armed with next_retry_at, which
+      // happens solely in the MONTHLY dues failure path, so a per-visit or
+      // Auto Pay-off customer seeing this banner is never retried.
+      detail: 'Your last payment could not be processed. Adding a working card is the fastest way to clear the balance.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
