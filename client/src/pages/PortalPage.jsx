@@ -4638,9 +4638,14 @@ function BillingTab({ customer }) {
       // Auto Pay-off customer seeing this banner is never retried. And a
       // saved card never settles an EXISTING invoice — so this points at Pay
       // now for the balance, exactly like the Auto Pay-off banner below.
+      // No promise about future charges either: this banner also renders
+      // after the final retry sets service_paused_at, which billing-cron
+      // skips and no card update clears (there is no resume path today), and
+      // it renders with Auto Pay off. Both actions are stated plainly and
+      // nothing is guaranteed about what happens next.
       detail: primaryOpenInvoice
-        ? `Your last payment could not be processed. Pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above; updating your card covers future charges.`
-        : 'Your last payment could not be processed. Update your card so future charges go through.',
+        ? `Your last payment could not be processed. Pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above, and update your saved card below.`
+        : 'Your last payment could not be processed. Update your saved card below.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
