@@ -644,7 +644,10 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
       ? MODELS.TEXT_POLICIES.highStakes.fallback
       : MODELS.TEXT_POLICIES.fastStructured.fallback);
     const routed = await dispatchWithFallback(
-      { primary: route, ...(fallback ? { fallback } : {}) },
+      // name: per-provider shadow lanes are deliberately distinct policies —
+      // without it, dispatch metrics would label them by their (shared)
+      // resolved routes and merge their stats.
+      { name: `smsShadow:${route.provider}`, primary: route, ...(fallback ? { fallback } : {}) },
       { system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );

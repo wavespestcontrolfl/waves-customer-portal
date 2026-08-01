@@ -1479,7 +1479,7 @@ router.post('/rewrite-sms', async (req, res) => {
     // the two env vars diverge. Blank output is rejected so a content-filtered
     // success still reaches the other provider.
     const routed = await require('../services/llm/call').dispatchWithFallback(
-      { primary: MODELS.ROUTES.smsToneRewrite, fallback: MODELS.TEXT_POLICIES.customerCopy.fallback },
+      { name: 'smsToneRewrite', primary: MODELS.ROUTES.smsToneRewrite, fallback: MODELS.TEXT_POLICIES.customerCopy.fallback },
       { text: rewritePrompt, jsonMode: false, maxTokens: 500 },
       { validate: (result) => (String(result.text || '').trim() ? null : 'empty_response') },
     );

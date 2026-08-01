@@ -107,7 +107,8 @@ const gates = {
   // (all-providers-failed, fallback-rate spike, policy gone silent) to the
   // company inbox. Opt-in in EVERY environment (dev/test must not email or
   // write metrics rows by accident). Kill switch: unset — recording and the
-  // digest both no-op instantly; existing rows just age out.
+  // digest email no-op instantly; the daily retention prune keeps running so
+  // existing rows still age out.
   llmDispatchMetrics: process.env.GATE_LLM_DISPATCH_METRICS === 'true',
 
   // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the

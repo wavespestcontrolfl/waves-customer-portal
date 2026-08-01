@@ -34,10 +34,15 @@ const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
 function policyLabel(policy) {
   if (!policy) return 'unknown';
   if (typeof policy.name === 'string' && policy.name) return policy.name;
-  // Ad-hoc { primary, fallback } pairs (call extraction, research miner):
-  // label by the primary route so their traffic still aggregates.
-  const p = policy.primary || policy;
-  return p && p.provider && p.model ? `${p.provider}/${p.model}` : 'unknown';
+  // Anonymous { primary, fallback } pairs: label by the FULL route pair —
+  // primary-only labels merged distinct lanes sharing a primary (codex r2).
+  // Every in-repo ad-hoc policy now carries `name`; this is the safety net
+  // for future unnamed ones.
+  const leg = (r) => (r && r.provider && r.model ? `${r.provider}/${r.model}` : null);
+  const primary = leg(policy.primary || policy);
+  if (!primary) return 'unknown';
+  const fallback = leg(policy.fallback);
+  return fallback ? `${primary}→${fallback}` : primary;
 }
 
 function isEnabled() {
@@ -144,8 +149,16 @@ async function loadStats(db, start, end) {
  * ONLY when exceptions exist, then prunes rows past retention.
  */
 async function runLlmDispatchDigest() {
-  if (!isEnabled()) return { skipped: 'gate_off' };
   const db = require('../models/db');
+
+  // Retention pruning runs regardless of the gate: turning the kill switch
+  // off must stop recording and emailing, not leave accumulated rows parked
+  // forever past the promised 30-day window (codex r2 P2). On an empty
+  // table this is a cheap indexed no-op DELETE.
+  const cutoff = etDayWindow(RETENTION_DAYS).start;
+  const pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
+
+  if (!isEnabled()) return { skipped: 'gate_off', pruned };
   const { etDateString, addETDays } = require('../utils/datetime-et');
 
   const yesterday = etDayWindow(1);
@@ -172,14 +185,11 @@ async function runLlmDispatchDigest() {
     if (!sent.ok) sendError = sent.error || 'unknown email error';
   }
 
-  const cutoff = etDayWindow(RETENTION_DAYS).start;
-  const pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
-
-  // An undeliverable exception email must FAIL the job (after retention
-  // pruning, which is independent) — otherwise runExclusive records a healthy
-  // run, tomorrow's tick moves to a new window, and the alert is silently
-  // lost. The throw lands in the scheduler's catch -> logger.error -> Sentry,
-  // and cron-lock job health shows the miss.
+  // An undeliverable exception email must FAIL the job (retention pruning
+  // already ran above, independently) — otherwise runExclusive records a
+  // healthy run, tomorrow's tick moves to a new window, and the alert is
+  // silently lost. The throw lands in the scheduler's catch -> logger.error
+  // -> Sentry, and cron-lock job health shows the miss.
   if (sendError) {
     throw new Error(`digest email failed with ${exceptions.length} undelivered exception(s): ${sendError}`);
   }

@@ -550,9 +550,10 @@ function initScheduledJobs() {
   // DAILY 6:25AM ET — LLM dispatch exception digest: aggregates yesterday's
   // llm_dispatch_log rows and emails the company inbox ONLY when a policy
   // degraded (all-providers-failed, fallback-rate spike, or gone silent);
-  // green days send nothing. Also prunes rows past retention. Dark until
-  // GATE_LLM_DISPATCH_METRICS=true (the service no-ops while off). runExclusive
-  // so a deploy overlap doesn't double-email the same day.
+  // green days send nothing. Dark until GATE_LLM_DISPATCH_METRICS=true
+  // (stats + email no-op while off; the retention prune still runs so
+  // accumulated rows age out after a gate-off). runExclusive so a deploy
+  // overlap doesn't double-email the same day.
   cron.schedule('25 6 * * *', async () => {
     try {
       await runExclusive('llm-dispatch-digest', () => require('./llm-dispatch-metrics').runLlmDispatchDigest());

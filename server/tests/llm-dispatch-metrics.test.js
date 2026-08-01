@@ -70,10 +70,21 @@ describe('llm-dispatch-metrics', () => {
       expect(policyLabel(MODELS.TEXT_POLICIES.deepAnalysis)).toBe('deepAnalysis');
     });
 
-    it('labels ad-hoc policies by their primary route', () => {
+    it('prefers an explicit name on ad-hoc policies (distinct lanes can share routes)', () => {
       const { policyLabel } = load();
-      const adHoc = { primary: { provider: 'openai', model: 'model-a' }, fallback: { provider: 'anthropic', model: 'model-b' } };
-      expect(policyLabel(adHoc)).toBe('openai/model-a');
+      const named = { name: 'callExtraction', primary: { provider: 'openai', model: 'model-a' }, fallback: { provider: 'anthropic', model: 'model-b' } };
+      expect(policyLabel(named)).toBe('callExtraction');
+    });
+
+    it('labels anonymous policies by the FULL route pair, never primary alone', () => {
+      // Two lanes sharing a primary but differing in fallback must not merge.
+      const { policyLabel } = load();
+      const a = { primary: { provider: 'openai', model: 'model-a' }, fallback: { provider: 'anthropic', model: 'model-b' } };
+      const b = { primary: { provider: 'openai', model: 'model-a' }, fallback: { provider: 'anthropic', model: 'model-c' } };
+      expect(policyLabel(a)).toBe('openai/model-a→anthropic/model-b');
+      expect(policyLabel(b)).toBe('openai/model-a→anthropic/model-c');
+      expect(policyLabel(a)).not.toBe(policyLabel(b));
+      expect(policyLabel({ primary: { provider: 'openai', model: 'model-a' } })).toBe('openai/model-a');
       expect(policyLabel(null)).toBe('unknown');
     });
   });
@@ -169,21 +180,27 @@ describe('llm-dispatch-metrics', () => {
   });
 
   describe('runLlmDispatchDigest', () => {
-    // db() is called three times per run: yesterday stats, prior-week stats,
-    // then the retention prune.
+    // db() is called three times per run: the retention prune FIRST (it must
+    // run even when the gate is off), then yesterday stats, then prior-week
+    // stats.
     function armDb({ yesterdayRows, priorRows, delCount = 3 }) {
       const prune = makeChain([], delCount);
       mockDb
+        .mockReturnValueOnce(prune)
         .mockReturnValueOnce(makeChain(yesterdayRows))
-        .mockReturnValueOnce(makeChain(priorRows))
-        .mockReturnValueOnce(prune);
+        .mockReturnValueOnce(makeChain(priorRows));
       return { prune };
     }
 
-    it('skips entirely while the gate is off', async () => {
+    it('skips stats and email while the gate is off, but STILL prunes retention', async () => {
+      const prune = makeChain([], 7);
+      mockDb.mockReturnValueOnce(prune);
       const { runLlmDispatchDigest } = load();
-      await expect(runLlmDispatchDigest()).resolves.toEqual({ skipped: 'gate_off' });
-      expect(mockDb).not.toHaveBeenCalled();
+      await expect(runLlmDispatchDigest()).resolves.toEqual({ skipped: 'gate_off', pruned: 7 });
+      // Exactly one db call (the prune) — no stats queries, no email.
+      expect(mockDb).toHaveBeenCalledTimes(1);
+      expect(prune.del).toHaveBeenCalled();
+      expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
     it('sends the exception email and prunes on a degraded day', async () => {
