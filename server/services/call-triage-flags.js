@@ -934,16 +934,20 @@ function canAutoRoute(extraction, opts = {}) {
     });
   }
 
-  // Both demotions below newly ALLOW bookings that used to park, so each is
-  // additionally guarded on an on-the-hour start (AGENTS.md: window_start is
-  // always HH:00:00, owner 2026-07-27). The booking path copies
-  // confirmed_start_at's wall clock into window_start unchanged, so demoting
-  // an off-hour slot would auto-create a prohibited :15/:30 start. Off-hour
-  // confirmations keep the block and reach the office, which places them on
-  // an hour boundary — the same guard the agent-commitment path uses.
-  // (The wider gap — that ANY already-routable off-hour call books as-is —
-  // predates this change and is the owner's call, not widened here.)
   const startOnTheHour = confirmedStartOnTheHour(extraction.scheduling?.confirmed_start_at);
+
+  // A POSITIVE Address Validation verdict — Google accepted (or corrected)
+  // the stated address AND placed it in the service area. Required before
+  // the authorization demotion below (codex round-3 P1): when AV is disabled
+  // or returns not_attempted, computeDeterministicTriageFlags raises NO
+  // address flag for a populated, high-confidence address, so
+  // caller_not_authorized was the incidental last block standing between an
+  // unvalidated address and an auto-dispatch. Demoting it unconditionally
+  // would let an unknown-relationship call book against an address nobody
+  // ever validated (AGENTS.md L367-370: never silent auto-route).
+  const avPositivelyValidated = !!opts.addressValidation
+    && ['validated_accept', 'corrected'].includes(String(opts.addressValidation.status || ''))
+    && opts.addressValidation.inServiceArea === true;
 
   // Unknown relationship is NOT non-owner (owner ruling 2026-07-31, call
   // log a771fa15): most homeowners never STATE "it's my house", so
@@ -955,9 +959,13 @@ function canAutoRoute(extraction, opts = {}) {
   // demotion below. The flag moves to failedOpenFlags so the office still
   // gets the "confirm the account holder" advisory card — book-and-flag,
   // never book-and-hide.
+  //
+  // Guarded on a confirmed, on-the-hour start AND a positively validated
+  // address: this is the last block on the path, so everything it used to
+  // backstop has to be satisfied some other way before it lifts.
   const callerRelationship = String(extraction.caller?.relationship_to_property || 'unknown').trim() || 'unknown';
   const explicitlyNonOwner = callerRelationship !== 'owner' && callerRelationship !== 'unknown';
-  if (!explicitlyNonOwner && confirmedWithStart && startOnTheHour) {
+  if (!explicitlyNonOwner && confirmedWithStart && startOnTheHour && avPositivelyValidated) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
       return true;
@@ -1067,6 +1075,32 @@ function canAutoRoute(extraction, opts = {}) {
 
   if (extraction.consent?.do_not_contact_request === true) {
     return { allowed: false, reason: 'do_not_contact', failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
+  }
+
+  // CENTRAL on-the-hour gate (codex round-3 P1). window_start is ALWAYS
+  // HH:00:00 (AGENTS.md, owner 2026-07-27) and the booking path copies this
+  // wall clock into window_start unchanged — so an off-hour confirmed start
+  // must never auto-create an appointment, whatever cleared the flags.
+  //
+  // It sits here, at the single exit that every allowed booking passes
+  // through, rather than on the individual demotions: this PR turns several
+  // previously-blocking signals advisory (prior_complaint_unresolved,
+  // competing_quotes_active, a missing email, unknown model flags), and each
+  // of those newly-allowed paths would otherwise need its own copy of the
+  // guard — and the pre-existing clean-call path never had one at all.
+  //
+  // Off-hour calls reach the office as a time card and are placed on an hour
+  // boundary, exactly as the agent-commitment path has always done. Nothing
+  // is rounded automatically: the caller was told a specific time, so moving
+  // it is a human decision.
+  if (!confirmedStartOnTheHour(scheduling.confirmed_start_at)) {
+    return {
+      allowed: false,
+      reason: 'off_hour_start',
+      confirmedStartAt: scheduling.confirmed_start_at,
+      flags: finalFlags,
+      failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined,
+    };
   }
 
   return { allowed: true, flags: finalFlags, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };

@@ -707,18 +707,44 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     normalized: { street_line_1: '100 Example Court', city: 'Bradenton', postal_code: '34211' },
   };
 
+  // A positively validated address is REQUIRED before the authorization
+  // demotion lifts (codex round-3 P1) — it is the last block on the path, so
+  // everything it incidentally backstopped must be satisfied another way.
+  const AV_OK = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+
   test('unknown relationship demotes caller_not_authorized and books (advisory card kept)', () => {
     const ex = extraction(['caller_not_authorized']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
-    const r = canAutoRoute(ex, {});
+    const r = canAutoRoute(ex, { addressValidation: AV_OK });
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
   test('absent caller block counts as unknown and demotes too', () => {
-    const r = canAutoRoute(extraction(['caller_not_authorized']), {});
+    const r = canAutoRoute(extraction(['caller_not_authorized']), { addressValidation: AV_OK });
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('NO positive AV verdict → the authorization block stays (codex round-3 P1)', () => {
+    // With AV disabled/not_attempted, computeDeterministicTriageFlags raises
+    // no address flag for a populated address — caller_not_authorized was the
+    // only thing standing between an unvalidated address and a dispatch.
+    for (const av of [undefined, { status: 'not_attempted' }, { status: 'api_unavailable' },
+      { status: 'validated_accept', inServiceArea: false }, { status: 'confirm_needed', inServiceArea: true }]) {
+      const ex = extraction(['caller_not_authorized']);
+      ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+      const r = canAutoRoute(ex, av ? { addressValidation: av } : {});
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    }
+  });
+
+  test('a CORRECTED in-area verdict also satisfies the demotion', () => {
+    const ex = extraction(['caller_not_authorized']);
+    ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
+    const r = canAutoRoute(ex, { addressValidation: { status: 'corrected', inServiceArea: true } });
+    expect(r.allowed).toBe(true);
   });
 
   test('an EXPLICIT non-owner without authorization still hard-blocks', () => {
@@ -747,9 +773,7 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
   test('a clean AV acceptance + unknown relationship books (the shape that SHOULD auto-route)', () => {
     const ex = extraction(['caller_not_authorized']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
-    const r = canAutoRoute(ex, {
-      addressValidation: { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' },
-    });
+    const r = canAutoRoute(ex, { addressValidation: AV_OK });
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
@@ -762,7 +786,7 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
       const ex = extraction(['caller_not_authorized']);
       ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
       ex.scheduling.confirmed_start_at = off;
-      const r = canAutoRoute(ex, {});
+      const r = canAutoRoute(ex, { addressValidation: AV_OK });
       expect(r.allowed).toBe(false);
       expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
     }
@@ -774,7 +798,7 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     const ex = extraction(['caller_not_authorized']);
     ex.caller = { relationship_to_property: 'unknown', on_site_authorization: false };
     ex.scheduling.confirmed_start_at = '2026-07-11T19:00:00+05:30';
-    const r = canAutoRoute(ex, {});
+    const r = canAutoRoute(ex, { addressValidation: AV_OK });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
@@ -809,6 +833,32 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
         expect(r.appointmentBlockingFlags).toContain(flag);
       }
     }
+  });
+
+  test('CENTRAL hour gate: an otherwise-clean off-hour call never auto-books (codex round-3 P1)', () => {
+    // No flags at all, high confidence, validated address — the ONLY problem
+    // is the :30 start. Previously this booked a prohibited window.
+    const ex = extraction([]);
+    ex.scheduling.confirmed_start_at = '2026-07-11T09:30:00-04:00';
+    const r = canAutoRoute(ex, { addressValidation: AV_OK });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toBe('off_hour_start');
+    expect(r.confirmedStartAt).toBe('2026-07-11T09:30:00-04:00');
+  });
+
+  test('CENTRAL hour gate covers the newly-advisory paths too', () => {
+    for (const flag of ['prior_complaint_unresolved', 'competing_quotes_active', 'brand_new_model_flag']) {
+      const ex = extraction([flag]);
+      ex.scheduling.confirmed_start_at = '2026-07-11T09:30:00-04:00';
+      const r = canAutoRoute(ex, { addressValidation: AV_OK });
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe('off_hour_start');
+    }
+  });
+
+  test('an on-the-hour clean call is unaffected by the central gate', () => {
+    const r = canAutoRoute(extraction([]), { addressValidation: AV_OK });
+    expect(r.allowed).toBe(true);
   });
 
   test('a demoted flag still rides a scheduling-blocked return so its advisory card files (codex P2)', () => {

@@ -131,6 +131,10 @@ function buildTriageItem({
     // showing up as a booking that needs a time.
     not_confirmed: 'time_ambiguous',
     confirmed_without_start_time: 'time_ambiguous',
+    // Confirmed at a :15/:30/:45 start — window_start is always HH:00:00
+    // (owner rule), so the office places it on an hour boundary rather than
+    // the pipeline silently rounding a time the caller was told.
+    off_hour_start: 'time_ambiguous',
     cancellation_request: 'time_ambiguous',
     after_hours_emergency: 'time_ambiguous',
     existing_appointment_coordination: 'time_ambiguous',
@@ -236,6 +240,9 @@ function buildTriageItem({
     'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
     'reschedule_or_cancel', 'cancellation_request',
     'existing_appointment_coordination', 'auto_booking_skipped_after_approval',
+    // The off-hour card's whole job is to show the agreed time so the office
+    // can place it on an hour boundary — it needs the scheduling payload.
+    'off_hour_start',
   ]);
   if (SCHEDULING_PAYLOAD_FLAGS.has(flag) && extraction?.scheduling) {
     const s = extraction.scheduling;
