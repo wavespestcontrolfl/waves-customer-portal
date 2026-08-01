@@ -119,14 +119,19 @@ function relabelReminderServiceType(value, fromName, toName) {
 
 // Statement ids among these invoices' payer_statement_id links whose
 // statement is no longer 'open' — i.e. frozen issued billing documents.
+// Locks EVERY referenced statement row (not just already-frozen ones) for
+// the migration transaction: finalizeStatement starts by locking the
+// statement row, so a concurrent finalization serializes behind our commit
+// instead of freezing a statement whose invoice we are mid-relabel
+// (codex #3108 r11).
 async function frozenPayerStatementIds(knex, invoices) {
   const stmtIds = [...new Set(invoices.map((inv) => inv.payer_statement_id).filter(Boolean))];
   if (!stmtIds.length || !(await knex.schema.hasTable('payer_statements'))) return new Set();
   const rows = await knex('payer_statements')
     .whereIn('id', stmtIds)
-    .whereNot('status', 'open')
-    .select('id');
-  return new Set(rows.map((r) => r.id));
+    .forUpdate()
+    .select('id', 'status');
+  return new Set(rows.filter((r) => r.status !== 'open').map((r) => r.id));
 }
 
 async function loadState(knex) {
@@ -344,9 +349,14 @@ exports.up = async function up(knex) {
   const snapshotVisitIds = [...new Set([...state.backfilledVisitIds, ...state.addonParentVisitIds])];
 
   if (snapshotVisitIds.length && (await knex.schema.hasTable('invoices'))) {
+    // FOR UPDATE: patches derive from these reads — locking the invoice
+    // rows serializes a concurrent admin edit (which also locks the row in
+    // InvoiceService.update) behind our commit, so a patch can never
+    // overwrite an interleaved edit's title/line_items (codex #3108 r11).
     const drafts = await knex('invoices')
       .whereIn('scheduled_service_id', snapshotVisitIds)
       .whereIn('status', ['draft', 'scheduled'])
+      .forUpdate()
       .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id');
     // A draft already accrued to a FROZEN payer statement (anything not
     // 'open' is a finalized/issued billing document) stays untouched —
@@ -496,13 +506,15 @@ exports.down = async function down(knex) {
       linkedVisitIds.length && (await knex.schema.hasTable('scheduled_services'))
         ? (await knex('scheduled_services')
           .whereIn('id', linkedVisitIds)
-          .whereIn('status', TERMINAL_VISIT_STATUSES)
-          .select('id')).map((v) => v.id)
+          .forUpdate()
+          .select('id', 'status')).filter((v) => TERMINAL_VISIT_STATUSES.includes(v.status)).map((v) => v.id)
         : []
     );
+    // Same row lock as up(): reversal patches derive from these reads.
     const drafts = await knex('invoices')
       .whereIn('id', invoiceIds)
       .whereIn('status', ['draft', 'scheduled'])
+      .forUpdate()
       .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id');
     // Same frozen-statement rule on the way back: a draft that accrued to a
     // finalized statement since up() is part of an issued document now.
@@ -531,6 +543,7 @@ exports.down = async function down(knex) {
       (await knex('scheduled_services')
         .whereIn('self_booking_id', selfBookingIds)
         .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+        .forUpdate()
         .select('self_booking_id')).map((v) => v.self_booking_id)
     );
     const revertSb = selfBookingIds.filter((id) => openLinkedSb.has(id));
@@ -554,10 +567,13 @@ exports.down = async function down(knex) {
     const parentIds = [...new Set(addons.map((a) => a.scheduled_service_id).filter(Boolean))];
     const terminalParents = new Set(
       parentIds.length && (await knex.schema.hasTable('scheduled_services'))
+        // FOR UPDATE mirrors up()'s parent lock: a parent completing
+        // concurrently serializes behind the rollback commit instead of
+        // snapshotting the new label while we revert its add-on (codex r11).
         ? (await knex('scheduled_services')
           .whereIn('id', parentIds)
-          .whereIn('status', TERMINAL_VISIT_STATUSES)
-          .select('id')).map((v) => v.id)
+          .forUpdate()
+          .select('id', 'status')).filter((v) => TERMINAL_VISIT_STATUSES.includes(v.status)).map((v) => v.id)
         : []
     );
     const revertIds = addons.filter((a) => !terminalParents.has(a.scheduled_service_id)).map((a) => a.id);
