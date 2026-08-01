@@ -2102,9 +2102,21 @@ function initScheduledJobs() {
                   // generic "Thanks for reaching out — your balance is $X"
                   // must not unlock payment-history amounts.
                   const ackBody = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i.test(String(msg.message_body || ''));
+                  // Monthly-membership dues are a CURRENT obligation, so they
+                  // belong in this set on the same terms as the balance
+                  // (codex #3141 r3). Without them a reviewed "$98.50/mo"
+                  // reply that an operator scheduled instead of sending
+                  // immediately was deterministically retired here as a stale
+                  // amount, so the monthly lane could be drafted and approved
+                  // but never actually sent. Shared definition with the
+                  // drafter's draft-time guard — these two lists had already
+                  // drifted once — and it re-reads the FRESH context above,
+                  // so a lane that stopped collecting between review and fire
+                  // publishes nothing and correctly blocks the send.
                   const authorized = new Set([
                     ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
                     ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
+                    ...ContextAggregator.authorizedDuesCents(ctx),
                     ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
                   ].filter((v) => Number.isFinite(v)));
                   amountsStale = bodyAmounts.some((a) => !authorized.has(a));

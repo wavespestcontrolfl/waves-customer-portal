@@ -137,6 +137,34 @@ describe('buildSummary billing-lane fact', () => {
     expect(s).toContain('$101.35 charged to the card on file');
   });
 
+  test('a suppressed collection carries its reason into the snapshot', () => {
+    // The managed agent gets ONLY this string — never the drafter's facts
+    // block — so "monthly membership, $98.50" with the reason dropped let it
+    // answer a current-charge question from a rate alone (codex #3141 r3).
+    for (const [collection, phrase] of [
+      ['autopay_paused', /autopay paused, not collecting/],
+      ['service_paused', /billing paused, not collecting/],
+      ['account_inactive', /account not active, not collecting/],
+      ['annual_prepay_pending', /annual prepay invoice open, not collecting/],
+      ['unknown', /collection state unconfirmed/],
+    ]) {
+      const s = summaryFor(
+        { billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
+        { collection },
+      );
+      expect(s).toContain('$98.50/mo dues');
+      expect(s).toMatch(phrase);
+    }
+  });
+
+  test('a collecting lane with no card fee carries the amount with no caveat', () => {
+    const s = summaryFor(
+      { billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
+      { collection: 'active', methods: [{ method_type: 'us_bank_account', card_funding: null }] },
+    );
+    expect(s).toContain('($98.50/mo dues)');
+  });
+
   test('an UNPRICED membership carries no amount and is not called monthly-billed', () => {
     // No rate = the dues cron never selects the row and chargeMonthly refuses
     // it, so nothing is charged monthly at all.

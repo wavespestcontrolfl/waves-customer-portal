@@ -25,9 +25,11 @@ const {
   resolveBillingLaneFacts,
   resolveMonthlyDuesFact,
   resolveDuesCollectionState,
+  authorizedDuesCents,
 } = require('../services/context-aggregator');
 
 const drafter = fs.readFileSync(path.join(__dirname, '../services/sms-shadow-drafter.js'), 'utf8');
+const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
 const agent = fs.readFileSync(path.join(__dirname, '../services/ai-assistant/managed-agent-config.js'), 'utf8');
 
 const CREDIT_CARD = { method_type: 'card', card_funding: 'credit' };
@@ -98,7 +100,7 @@ describe('the monthly dues fact is what the account is actually charged', () => 
     // Each of these is a population the monthly cron skips — the dues are
     // still the plan price, but no charge is running to describe.
     for (const collection of [
-      'autopay_off', 'autopay_paused', 'service_paused',
+      'autopay_off', 'autopay_paused', 'service_paused', 'account_inactive',
       'annual_prepay_covered', 'annual_prepay_pending', 'unknown',
     ]) {
       const dues = resolveMonthlyDuesFact({ monthlyRate: 45, collection, methods: [CREDIT_CARD] });
@@ -122,6 +124,13 @@ describe('active autopay is not proof a dues charge is running', () => {
   test('a service-paused account is never even loaded by the cron', async () => {
     expect(await resolveDuesCollectionState({ id: 'c1', service_paused_at: new Date() }, ON))
       .toBe('service_paused');
+  });
+
+  test('inactive and deleted accounts are outside the cron SELECT too', async () => {
+    // active: true and deleted_at IS NULL are part of the same WHERE as the
+    // pause columns, and this context can resolve a row that fails either.
+    expect(await resolveDuesCollectionState({ id: 'c1', active: false }, ON)).toBe('account_inactive');
+    expect(await resolveDuesCollectionState({ id: 'c1', deleted_at: new Date() }, ON)).toBe('account_inactive');
   });
 
   test('a paused autopay is its own state, not "the office bills it"', async () => {
@@ -203,6 +212,7 @@ describe('the drafter facts block publishes only what was resolved', () => {
     expect(paused).not.toMatch(/office bills/);
     for (const [basis, phrase] of [
       ['service_paused', /Billing on this account is paused/],
+      ['account_inactive', /account is not active/],
       ['annual_prepay_pending', /annual-prepay invoice is open/],
       ['annual_prepay_covered', /Annual prepay coverage is active/],
       ['method_ambiguous', /More than one saved method/],
@@ -237,24 +247,39 @@ describe('the drafter facts block publishes only what was resolved', () => {
   });
 });
 
-describe('the amounts the facts publish are the amounts the guard authorizes', () => {
-  test('the deterministic whitelist admits the dues published above it', () => {
+describe('the amounts the facts publish are the amounts the guards authorize', () => {
+  const laneWith = (monthlyDues) => ({ customer: { billingLane: { monthlyBilled: true, monthlyDues } } });
+
+  test('the dues base is authorized whenever dues were published', () => {
     // Built from balances, invoices and payments only, the whitelist marked
     // the dues figure the facts block had just published as ungrounded and
     // held every monthly-lane draft in shadow — making the exception this
     // fact exists to reach unreachable on the suggestion/auto-send path.
-    expect(drafter).toContain('context.customer?.billingLane?.monthlyBilled');
-    expect(drafter).toContain('laneDues ? centsOf(laneDues.base) : null');
-    expect(drafter).toContain('duesSurcharged ? centsOf(laneDues.total) : null');
+    expect(authorizedDuesCents(laneWith({ base: 98.5, surcharge: 0, total: null, surcharged: false, basis: 'unknown_funding' })))
+      .toEqual([9850]);
   });
 
-  test('the broken-out credit-card fee is authorized alongside the total', () => {
+  test('the broken-out fee is authorized alongside the total, never without it', () => {
     // The facts publish all three figures, so a draft that accurately repeats
     // "the $2.85 credit-card fee" must not parse as an ungrounded amount and
-    // hold the whole draft in shadow — and the fee is authorized exactly as
-    // narrowly as the total, only when the surcharge was actually published.
-    expect(drafter).toContain('const duesSurcharged = laneDues?.surcharged && laneDues.total != null');
-    expect(drafter).toContain('duesSurcharged ? centsOf(laneDues.surcharge) : null');
+    // hold the whole draft in shadow.
+    expect(authorizedDuesCents(laneWith({ base: 98.5, surcharge: 2.85, total: 101.35, surcharged: true, basis: 'credit_card_surcharge' })))
+      .toEqual([9850, 10135, 285]);
+  });
+
+  test('a lane that published no dues authorizes nothing', () => {
+    expect(authorizedDuesCents(laneWith(null))).toEqual([]);
+    expect(authorizedDuesCents({ customer: { billingLane: { monthlyBilled: false, monthlyDues: { base: 98.5 } } } })).toEqual([]);
+    expect(authorizedDuesCents({})).toEqual([]);
+    expect(authorizedDuesCents(undefined)).toEqual([]);
+  });
+
+  test('BOTH amount guards ask the same definition', () => {
+    // The draft-time guard and the scheduler's fire-time revalidation had
+    // already drifted: a reviewed dues reply that an operator scheduled was
+    // retired as a stale amount, so the lane could be approved but never sent.
+    expect(drafter).toContain("require('./context-aggregator').authorizedDuesCents(context)");
+    expect(scheduler).toContain('ContextAggregator.authorizedDuesCents(ctx)');
   });
 
   test('the published dues come from the priced fact, never the raw rate', () => {

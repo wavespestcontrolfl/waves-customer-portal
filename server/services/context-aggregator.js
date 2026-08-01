@@ -272,7 +272,12 @@ function resolveBillingLaneFacts(customer) {
 async function resolveDuesCollectionState(customer, autopayState) {
   // Eligibility itself was unreadable — never speak to collection at all.
   if (!autopayState) return 'unknown';
-  // The cron never even loads a service-paused customer.
+  // The cron's SELECT is the first gate, and it filters on more than the
+  // pause columns (codex #3141 r3): `active: true` and `deleted_at IS NULL`
+  // are part of the same WHERE, and getContextForCustomer can resolve a row
+  // that fails either one. None of these customers is ever loaded, so none of
+  // them is charged.
+  if (customer?.active === false || customer?.deleted_at) return 'account_inactive';
   if (customer?.service_paused_at) return 'service_paused';
   if (autopayState.paused) return 'autopay_paused';
   if (autopayState.on !== true) return 'autopay_off';
@@ -351,6 +356,44 @@ function resolveMonthlyDuesFact({ monthlyRate, collection, methods }) {
     // Pricing authority unreadable — never guess a total.
     return withheld('unknown_funding');
   }
+}
+
+// The one-phrase form of a dues fact that is NOT publishing a charge total,
+// for the managed-agent context snapshot (codex #3141 r3). The snapshot is
+// all that agent gets — it never sees the shadow drafter's facts block — so
+// serializing "$98.50/mo dues" while dropping the reason no charge is
+// collecting let it answer a current-charge question from a rate alone.
+const DUES_NO_COLLECTION_SHORT = {
+  autopay_paused: 'autopay paused, not collecting',
+  autopay_off: 'autopay off, not auto-collecting',
+  service_paused: 'billing paused, not collecting',
+  account_inactive: 'account not active, not collecting',
+  annual_prepay_covered: 'annual prepay active, not collecting',
+  annual_prepay_pending: 'annual prepay invoice open, not collecting',
+  unknown_funding: 'charge total unconfirmed',
+  method_ambiguous: 'charge total unconfirmed',
+  method_unknown: 'charge total unconfirmed',
+};
+
+// The monthly-dues amounts THIS context actually published, in cents.
+//
+// One definition, because there are two amount guards and they had already
+// drifted (codex #3141 r3): the drafter authorizes figures at draft time, and
+// the scheduler re-authorizes them against a freshly built context at fire
+// time, so a reviewed dues reply that sat in the queue was retired as a stale
+// amount. Both now ask this.
+//
+// Exactly what the facts state and nothing more: the dues base whenever a
+// monthly lane published dues, and the total plus the fee it breaks out only
+// when the surcharge was actually resolved and published.
+function authorizedDuesCents(context) {
+  const lane = context?.customer?.billingLane;
+  const dues = lane?.monthlyBilled ? lane.monthlyDues : null;
+  if (!dues) return [];
+  const cents = (v) => Math.round(Number(v) * 100);
+  const out = [cents(dues.base)];
+  if (dues.surcharged && dues.total != null) out.push(cents(dues.total), cents(dues.surcharge));
+  return out.filter((v) => Number.isFinite(v));
 }
 
 // Every saved method the charge path could collect these dues from: the
@@ -891,9 +934,16 @@ class ContextAggregator {
     // amount in the snapshot at all.
     const dues = lane.monthlyBilled ? lane.monthlyDues : null;
     if (dues) {
-      s += dues.surcharged && dues.total != null
-        ? ` ($${dues.base.toFixed(2)}/mo dues; $${dues.total.toFixed(2)} charged to the card on file incl. card fee)`
-        : ` ($${dues.base.toFixed(2)}/mo dues)`;
+      if (dues.surcharged && dues.total != null) {
+        s += ` ($${dues.base.toFixed(2)}/mo dues; $${dues.total.toFixed(2)} charged to the card on file incl. card fee)`;
+      } else {
+        // The REASON travels with the amount, or this snapshot says "monthly
+        // membership, $98.50" about an account nothing is collecting from
+        // (codex #3141 r3).
+        const why = DUES_NO_COLLECTION_SHORT[dues.basis]
+          || (dues.basis === 'no_surcharge' ? null : 'collection state unconfirmed');
+        s += ` ($${dues.base.toFixed(2)}/mo dues${why ? ` — ${why}` : ''})`;
+      }
     }
     if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
@@ -919,3 +969,4 @@ module.exports.customerSafeVisitNotes = customerSafeVisitNotes;
 module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;
 module.exports.resolveMonthlyDuesFact = resolveMonthlyDuesFact;
 module.exports.resolveDuesCollectionState = resolveDuesCollectionState;
+module.exports.authorizedDuesCents = authorizedDuesCents;

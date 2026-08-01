@@ -259,6 +259,7 @@ const MONTHLY_CHARGE_NOTES = {
   autopay_paused: '. Autopay is paused, so no dues are collecting until it resumes — state the dues, never a charge total, and let the office confirm',
   autopay_off: '. Autopay is not active, so these dues are not auto-collecting — state the dues, never a charge total, and let the office confirm how they are collected',
   service_paused: '. Billing on this account is paused, so no dues are collecting right now — state the dues, never a charge total, and let the office confirm',
+  account_inactive: '. This account is not active, so no dues are collecting — state the dues, never a charge total, and let the office confirm',
   annual_prepay_covered: '. Annual prepay coverage is active on this account, so monthly dues are not collecting — state the dues, never a charge total, and let the office confirm',
   annual_prepay_pending: '. An annual-prepay invoice is open, so monthly dues are not collecting while it is pending — state the dues, never a charge total, and let the office confirm',
 };
@@ -1009,23 +1010,17 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // the monthly-lane exception this PR exists to make reachable stayed
     // unreachable on the suggestion/auto-send path.
     //
-    // Only what the facts actually STATE is authorized: the dues base always,
-    // and — when the surcharged total was resolved and published — that total
-    // AND the fee it breaks out (codex #3141 r2; the facts publish all three,
-    // so a draft that accurately repeats "the $2.85 credit-card fee" must not
-    // read as ungrounded). The unresolved-funding, ambiguous-method and
-    // suppressed-collection cases deliberately authorize no total and no fee:
-    // the facts tell the drafter not to state one.
-    const laneDues = context.customer?.billingLane?.monthlyBilled
-      ? context.customer.billingLane.monthlyDues
-      : null;
-    const duesSurcharged = laneDues?.surcharged && laneDues.total != null;
+    // Only what the facts actually STATE is authorized. The monthly dues come
+    // from the shared definition (codex #3141 r2, r3): the dues base whenever
+    // the monthly lane published dues, plus the total AND the fee it breaks
+    // out when the surcharge was resolved — the facts publish all three, so a
+    // draft that accurately repeats "the $2.85 credit-card fee" must not read
+    // as ungrounded. It is shared with the scheduler's fire-time
+    // revalidation because two copies of this list had already drifted.
     const authorizedCents = new Set([
       context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
       context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
-      laneDues ? centsOf(laneDues.base) : null,
-      duesSurcharged ? centsOf(laneDues.total) : null,
-      duesSurcharged ? centsOf(laneDues.surcharge) : null,
+      ...require('./context-aggregator').authorizedDuesCents(context),
       ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
     ].filter((v) => Number.isFinite(v)));
     // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
