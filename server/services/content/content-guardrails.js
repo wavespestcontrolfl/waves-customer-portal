@@ -251,12 +251,16 @@ function competitorNamePatterns() {
 // attribution (pre-push Codex P0).
 function sentenceAround(text, index) {
   const s = String(text || '');
-  const boundaryRe = /[.!?](?=\s|$)|\r?\n/g;
+  // Trailing quotes/markdown markers after the punctuation are part of the
+  // boundary — 'Orkin charges $199.” $89 locally.' must split after the
+  // closing quote or the second amount inherits the attribution (pre-push
+  // Codex P0).
+  const boundaryRe = /[.!?]["”'’)\]*_]*(?=\s|$)|\r?\n/g;
   let start = 0;
   let m;
   while ((m = boundaryRe.exec(s)) !== null) {
     if (m.index >= index) break;
-    start = m.index + 1;
+    start = m.index + m[0].length;
   }
   boundaryRe.lastIndex = index;
   const endMatch = boundaryRe.exec(s);
@@ -272,6 +276,13 @@ function sentenceAround(text, index) {
 //   values: ["Aptive", "$199"]           (<ComparisonTable> prop row)
 // Same operator-provenance gate as the prose exemption; first-party markers
 // on the line disqualify it (a row about US must not exempt).
+function matchesThirdParty(textPart) {
+  for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
+    if (re && re.test(textPart)) return true;
+  }
+  return false;
+}
+
 function isTableAttributedPrice(text, amountIndex) {
   const s = String(text || '');
   const lineStart = s.lastIndexOf('\n', amountIndex - 1) + 1;
@@ -279,30 +290,92 @@ function isTableAttributedPrice(text, amountIndex) {
   if (lineEnd === -1) lineEnd = s.length;
   const line = s.slice(lineStart, lineEnd);
   const local = amountIndex - lineStart;
-  if (hasFirstPartyMarker(line)) return false;
-  // Markdown row: the whole line is cells; competitor must sit before the
-  // amount.
+  // Markdown row: bind the amount to its OWNING cell, never "anywhere
+  // earlier on the row" — "| Other companies | $199 | Local service | $89 |"
+  // must exempt only the $199 (pre-push Codex P0). Attribution comes from
+  // (a) the amount's own cell or the immediately preceding cell, or (b) the
+  // table's header row at the same column index. First-party in the owning
+  // cell/header blocks; parse failure fails closed.
   if (/^\s*\|/.test(line)) {
-    const before = line.slice(0, local);
-    for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
-      if (re && re.test(before)) return true;
+    const cells = [];
+    let cellStart = line.indexOf('|') + 1;
+    for (let ci = cellStart; ci <= line.length; ci += 1) {
+      if (ci === line.length || line[ci] === '|') {
+        cells.push({ text: line.slice(cellStart, ci), start: cellStart, end: ci });
+        cellStart = ci + 1;
+      }
     }
-    return false;
+    const idx = cells.findIndex((c) => local >= c.start && local < c.end);
+    if (idx === -1) return false;
+    const own = cells[idx].text;
+    const prev = idx > 0 ? cells[idx - 1].text : '';
+    if (hasFirstPartyMarker(own) || hasFirstPartyMarker(prev)) return false;
+    if (matchesThirdParty(own) || matchesThirdParty(prev)) return true;
+    // Header-row resolution: walk up contiguous table lines (skipping the
+    // |---| separator) to the topmost row; same column index attributes.
+    let hStart = lineStart;
+    let header = null;
+    while (hStart > 0) {
+      const prevEnd = hStart - 1;
+      const prevStart = s.lastIndexOf('\n', prevEnd - 1) + 1;
+      const prevLine = s.slice(prevStart, prevEnd);
+      if (!/^\s*\|/.test(prevLine)) break;
+      if (!/^[\s|:\-]+$/.test(prevLine)) header = prevLine;
+      hStart = prevStart;
+    }
+    if (!header) return false;
+    const headerCells = header.split('|').slice(1);
+    const headerCell = headerCells[idx];
+    if (!headerCell || hasFirstPartyMarker(headerCell)) return false;
+    return matchesThirdParty(headerCell);
   }
-  // ComparisonTable values prop: BOTH the amount and the competitor must be
-  // INSIDE the bracket segment — "These values: [Aptive] show that … is $89"
-  // is prose, not a cell, and must not exempt (pre-push Codex P0).
+  // ComparisonTable values prop (TEXT-scoped — JSX props span lines). Two
+  // sanctioned shapes:
+  //   a. the competitor is a cell in the SAME row: values:["Aptive","$199"]
+  //   b. the writer contract's real shape (Codex r3): provider names live in
+  //      the columns HEADER — columns={["What you get","Aptive",…]} — and
+  //      each row's values[i] maps to columns[i+1] (columns[0] labels the
+  //      row). The amount's own column header decides attribution.
+  // "These values: [Aptive] show that … is $89" stays prose (amount must be
+  // INSIDE the bracket), and parse failure/misalignment fails closed.
   const valuesRe = /\bvalues\s*[:=]\s*\[/g;
   let vm;
-  while ((vm = valuesRe.exec(line)) !== null) {
+  while ((vm = valuesRe.exec(s)) !== null) {
     const open = vm.index + vm[0].length - 1;
-    const close = line.indexOf(']', open);
+    const close = s.indexOf(']', open);
     if (close === -1) continue;
-    if (local <= open || local >= close) continue;
-    const before = line.slice(open + 1, local);
-    for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
-      if (re && re.test(before)) return true;
+    if (amountIndex <= open || amountIndex >= close) continue;
+    const seg = s.slice(open + 1, close);
+    if (hasFirstPartyMarker(seg)) return false;
+    // Locate the amount's own string in the array — attribution binds
+    // POSITIONALLY, never "any earlier cell in the row": values:["Other
+    // companies","$199","Local service","$89"] must exempt only the $199
+    // (pre-push Codex P0).
+    const cellStrings = [];
+    const strRe = /"([^"]*)"|'([^']*)'/g;
+    let sm;
+    while ((sm = strRe.exec(seg)) !== null) {
+      cellStrings.push({ text: sm[1] ?? sm[2], start: open + 1 + sm.index, end: open + 1 + sm.index + sm[0].length });
     }
+    const idx = cellStrings.findIndex((c) => amountIndex >= c.start && amountIndex < c.end);
+    if (idx === -1) return false;
+    // (a) the amount's own cell or the immediately preceding cell.
+    const own = cellStrings[idx].text;
+    const prev = idx > 0 ? cellStrings[idx - 1].text : '';
+    if (matchesThirdParty(own) || matchesThirdParty(prev)) return true;
+    // (b) resolve the amount's column header within this <ComparisonTable>.
+    const compStart = s.lastIndexOf('<ComparisonTable', vm.index);
+    if (compStart === -1) return false;
+    const colsM = /columns\s*=\s*\{?\s*\[/.exec(s.slice(compStart, vm.index));
+    if (!colsM) return false;
+    const colsOpen = compStart + colsM.index + colsM[0].length - 1;
+    const colsClose = s.indexOf(']', colsOpen);
+    if (colsClose === -1) return false;
+    const headers = [...s.slice(colsOpen + 1, colsClose).matchAll(/"([^"]*)"|'([^']*)'/g)]
+      .map((m) => m[1] ?? m[2]);
+    const header = headers[idx + 1]; // columns[0] is the row-label column
+    if (!header || hasFirstPartyMarker(header)) return false;
+    return matchesThirdParty(header);
   }
   return false;
 }
@@ -2206,7 +2279,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -2249,9 +2322,12 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
 
   const findings = [
     // Price must cover everything that ships: body AND meta. Third-party
-    // price citations are exempt only with operator provenance (the same
-    // flag that unlocks .gov/.edu citations).
-    priceFinding(publishableText, { thirdPartyCitations: operatorCitations }),
+    // price citations carry their OWN flag, stricter than operatorCitations:
+    // category/spoke seeds share the operator_intercept bucket and DO get
+    // citation hosts, but only true competitor-intercept briefs may cite
+    // competitor prices (Codex: seed lanes auto-publish informational posts
+    // and must keep the full price guard).
+    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),

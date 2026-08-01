@@ -2307,6 +2307,47 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     }
   });
 
+  test('quote-trailing sentence boundaries still split (pre-push P0)', () => {
+    expect(findHardcodedPrice('Orkin charges $199.” $89 per application locally.', OP)).not.toBeNull();
+  });
+
+  test('values attribution is cell-bound, never row-wide (pre-push P0)', () => {
+    const r = findHardcodedPrice('values: ["Other companies", "$199", "Local service", "$89"]', OP);
+    expect(r).not.toBeNull();
+    expect(r).toContain('$89');
+  });
+
+  test('citation provenance does NOT unlock prices — only competitorPriceCitations does (pre-push P0: seed lanes)', () => {
+    const body = 'Orkin charges a $199 cancellation fee when you break the agreement early.';
+    // operatorCitations alone (category/spoke seeds) keeps the price P0.
+    const seedish = guardrails.evaluate({ body }, { operatorCitations: true });
+    expect(seedish.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(true);
+    // True intercepts pass via the dedicated flag.
+    const intercept = guardrails.evaluate({ body }, { operatorCitations: true, competitorPriceCitations: true });
+    expect(intercept.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(false);
+  });
+
+  test('markdown attribution is cell-bound, never row-wide (pre-push P0)', () => {
+    // $199 owns "Other companies"; $89 owns "Local service" — only $199 exempt.
+    expect(findHardcodedPrice('| Other companies | $199 | Local service | $89 |', OP)).toBe('$89');
+    // Header-column resolution works for markdown tables too.
+    expect(findHardcodedPrice('| Fee | Aptive |\n|---|---|\n| Early cancel | $199 |', OP)).toBeNull();
+    expect(findHardcodedPrice('| Fee | Waves |\n|---|---|\n| Early cancel | $89 |', OP)).not.toBeNull();
+  });
+
+  test('ComparisonTable column headers attribute row values positionally (r3: real writer contract)', () => {
+    // values[i] maps to columns[i+1]; columns[0] labels the row.
+    const tbl = '<ComparisonTable columns={["Fee","Aptive"]}\n  rows={[{ label: "Early cancel", values: ["$199"] }]} />';
+    expect(findHardcodedPrice(tbl, OP)).toBeNull();
+    // The Waves column's value is OUR price — still blocked (write "None").
+    const mixed = '<ComparisonTable columns={["Fee","Waves"]}\n  rows={[{ label: "Early cancel", values: ["$199"] }]} />';
+    expect(findHardcodedPrice(mixed, OP)).not.toBeNull();
+    // No enclosing component/columns → fail closed.
+    expect(findHardcodedPrice('values: ["$199"] floating with no component', OP)).not.toBeNull();
+    // Mined drafts: the whole table exemption stays off.
+    expect(findHardcodedPrice(tbl, {})).not.toBeNull();
+  });
+
   test('comparison-table cells attribute (r2: markdown rows + values props; operator only)', () => {
     expect(findHardcodedPrice('| Aptive | $199 |', OP)).toBeNull();
     expect(findHardcodedPrice('values: ["Aptive", "$199"]', OP)).toBeNull();

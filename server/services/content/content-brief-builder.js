@@ -733,6 +733,10 @@ class ContentBriefBuilder {
         : {},
       gsc_signal: {
         bucket: opportunity.bucket,
+        // True competitor-intercept marker: category/spoke seeds share the
+        // operator_intercept bucket, so downstream price policy needs this
+        // to tell them apart after the content_briefs round-trip.
+        intercept: Boolean(opportunity.signal_metadata?.intercept_brief),
         impressions: opportunity.signal_metadata?.impressions || null,
         avg_position: opportunity.signal_metadata?.avg_position || null,
         ctr: opportunity.signal_metadata?.ctr || null,

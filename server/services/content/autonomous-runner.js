@@ -3024,6 +3024,12 @@ class AutonomousRunner {
       // the B1 cancellation brief cites the Florida statute through
       // verify_notes and got no citation allowance (Codex P1, 2026-08-01).
       operatorCitations: Boolean(operatorBrief),
+      // Competitor-price citations are STRICTER: category/spoke seeds share
+      // the operator_intercept bucket (and get citation hosts above) but
+      // auto-publish informational posts — only a true competitor-intercept
+      // brief (signal_metadata.intercept_brief) may cite competitor prices
+      // (Codex P0, 2026-08-01).
+      competitorPriceCitations: Boolean(opp?.signal_metadata?.intercept_brief),
       allowedInternalLinks,
       isRefresh,
       priorBody,

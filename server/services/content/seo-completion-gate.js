@@ -340,10 +340,12 @@ function detectPii(body = '') {
 // prices, calculator-framing AND regulatory-fine exemptions) — this gate's
 // previous private copy had drifted on all four.
 function detectHardcodedPrice(body = '', brief = null) {
-  // Operator provenance from the brief's persisted gsc_signal bucket — the
-  // same anti-spoofing key the quality gate trusts. Mined drafts get no
-  // third-party price exemption (fail closed).
-  const thirdPartyCitations = brief?.gsc_signal?.bucket === 'operator_intercept';
+  // Competitor-price provenance = the persisted TRUE-intercept marker, not
+  // the bucket alone: category/spoke seeds share the operator_intercept
+  // bucket and must keep the full price guard (Codex P0). Mined drafts and
+  // legacy briefs without the marker fail closed.
+  const thirdPartyCitations = brief?.gsc_signal?.bucket === 'operator_intercept'
+    && brief?.gsc_signal?.intercept === true;
   return findHardcodedPrice(body, { thirdPartyCitations }) !== null;
 }
 
