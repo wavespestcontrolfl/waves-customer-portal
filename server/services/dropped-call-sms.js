@@ -2,10 +2,10 @@
  * Dropped-call address-request text — texts a NEW prospect whose intake call
  * dropped mid-conversation before the service address was captured, asking
  * for the one field that blocks quoting/scheduling. Owner-directed
- * 2026-08-01 after the Juan case (12-minute engaged rodent call, dropped on
- * the forwarded leg at the exact address-exchange moment; Twilio Insights
- * showed clean quality — a handset/coverage one-off no config change fixes,
- * so this is the backstop).
+ * 2026-08-01 after a live case: a long, engaged intake call dropped on the
+ * forwarded leg at the exact address-exchange moment (Twilio Insights showed
+ * clean quality — a handset/coverage one-off no config change fixes, so
+ * this is the backstop).
  *
  * Called from call-recording-processor.js on the lead path ONLY — the
  * eligibility that makes this safe lives at the call site AND here:
@@ -307,8 +307,17 @@ async function sendClaimed({ leadId, extracted, call, phone }) {
   }
 
   if (result.blocked) {
-    // Policy block (STOP suppression, consent) — consumed on purpose: this
-    // number must not be retried by a later drop either.
+    // Transient infrastructure blocks (a consent-lookup DB failure, or any
+    // block the pipeline marks retryable) never consumed the one-shot —
+    // release BOTH claims so a later drop from this prospect can retry.
+    // Only TERMINAL policy blocks (STOP suppression, consent denial) consume
+    // it: that number must not be retried by a later drop either.
+    if (result.retryable || result.code === 'CONSENT_LOOKUP_FAILED') {
+      await clearLeadClaim(leadId);
+      await releasePhoneClaim(phone);
+      logger.warn(`[dropped-call-sms] Transient policy block for ${maskPhone(phone)} (released): ${result.code || 'blocked'}`);
+      return { sent: false, skipped: 'policy_block_transient' };
+    }
     await stampStatus(leadId, 'blocked');
     await stampPhoneClaim(phone, 'policy_block');
     logger.info(`[dropped-call-sms] Policy-blocked for ${maskPhone(phone)}: ${result.code || result.reason || 'blocked'}`);

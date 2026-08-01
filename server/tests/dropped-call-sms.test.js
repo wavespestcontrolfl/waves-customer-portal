@@ -96,7 +96,7 @@ afterEach(() => {
 });
 
 const CALL = { to_phone: '+19412166229', twilio_call_sid: 'CAtest', duration_seconds: 300 };
-const EXTRACTED = { first_name: 'juan' };
+const EXTRACTED = { first_name: 'sam' };
 
 function sendArgs() {
   return { leadId: LEAD_ID, extracted: EXTRACTED, call: CALL, phone: PHONE };
@@ -105,7 +105,7 @@ function sendArgs() {
 describe('endedAbruptly', () => {
   const mk = (lines) => lines.join('\n');
 
-  it('true for a Juan-style mid-sentence cutoff', () => {
+  it('true for a mid-sentence cutoff at the contact exchange', () => {
     expect(endedAbruptly(mk([
       'Agent: When are you available to be on site?',
       'Caller: Tomorrow works.',
@@ -210,7 +210,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: true });
     expect(renderSmsTemplate).toHaveBeenCalledWith('dropped_call_address_request', expect.objectContaining({
-      first_name: 'Juan',
+      first_name: 'Sam',
       callback_clause: ' at (941) 216-6229',
     }), expect.any(Object));
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -234,6 +234,13 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(state.deletes).toHaveLength(0);
     const claimStamp = state.updates.filter((u) => u.table === 'dropped_call_sms_claims').pop();
     expect(claimStamp.payload.outcome).toBe('policy_block');
+  });
+
+  it('transient consent-lookup block — releases BOTH claims (never terminal)', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'CONSENT_LOOKUP_FAILED' });
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'policy_block_transient' });
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 
   it('transient provider failure — releases BOTH claims for a later drop', async () => {

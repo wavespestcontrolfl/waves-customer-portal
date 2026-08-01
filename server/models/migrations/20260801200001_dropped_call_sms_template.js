@@ -3,9 +3,9 @@
  * (services/dropped-call-sms.js, gated by GATE_DROPPED_CALL_SMS).
  *
  * A NEW prospect whose intake call dropped mid-conversation before the
- * service address was captured (the 2026-07-27 Juan case: 12 engaged
- * minutes, call died on the forwarded leg at the exact address-exchange
- * moment, no callback ever happened) gets ONE text asking for the address —
+ * service address was captured (2026-07-27 live case: a long engaged call
+ * died on the forwarded leg at the exact address-exchange moment and no
+ * callback ever happened) gets ONE text asking for the address —
  * the single field that blocks quoting and scheduling. Admin-editable and
  * kill-switchable like every automated template (is_active toggle).
  *

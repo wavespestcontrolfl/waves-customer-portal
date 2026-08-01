@@ -7027,8 +7027,8 @@ const CallRecordingProcessor = {
         // conversation (not a voicemail) that ran MIN_CALL_SECONDS+, ended
         // with no farewell in the transcript tail, and left the service
         // address uncaptured is a drop-mid-intake — an engaged caller who got
-        // cut off (the 2026-07-27 Juan case: 12 minutes, dropped at the
-        // address exchange, no callback ever happened). Always opens a
+        // cut off (a 2026-07-27 live case: a long engaged call dropped at
+        // the address exchange and no callback ever happened). Always opens a
         // call-back review card; when the caller is a genuine NEW prospect
         // (valid V2 extraction whose call_nature is a sales inquiry, no
         // linked customer, not spam) the gated one-shot address-request text
@@ -7039,14 +7039,22 @@ const CallRecordingProcessor = {
         if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam && transcription) {
           try {
             const DroppedCallSms = require('./dropped-call-sms');
-            const droppedMidIntake = Number(call.duration_seconds) >= DroppedCallSms.MIN_CALL_SECONDS
+            // recordingDurationSeconds: fresh recording jobs can have
+            // duration_seconds unset while recording_duration_seconds is
+            // populated (the race this file already handles elsewhere).
+            const droppedCallSeconds = recordingDurationSeconds(call);
+            const droppedMidIntake = droppedCallSeconds >= DroppedCallSms.MIN_CALL_SECONDS
               && !String(extracted.address_line1 || '').trim()
               && DroppedCallSms.endedAbruptly(transcription);
             if (droppedMidIntake) {
               let smsOutcome = { sent: false, skipped: 'not_eligible' };
+              // Fail CLOSED on classification: an automatic customer text
+              // requires the model to have POSITIVELY identified a new sales
+              // inquiry — schema-valid null/indeterminate natures stay
+              // card-only.
               const genuineNewProspect = !customerId
                 && v2Result?.status === 'valid'
-                && !v2NonCustomerCallNature;
+                && v2Result.extraction?.call_nature === 'new_lead';
               if (genuineNewProspect) {
                 smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({ leadId, extracted, call, phone });
               }
@@ -7057,7 +7065,7 @@ const CallRecordingProcessor = {
                   extraction: (v2Result?.status === 'valid' && v2Result.extraction) || null,
                   extraPayload: {
                     caller_phone: phone || null,
-                    dropped_after_seconds: Number(call.duration_seconds) || null,
+                    dropped_after_seconds: droppedCallSeconds || null,
                     address_request_sms: smsOutcome.sent ? 'sent' : (smsOutcome.skipped || 'not_sent'),
                   },
                 }))
