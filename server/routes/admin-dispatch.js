@@ -2238,6 +2238,13 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       const serviceUpdate = {
         service_time_minutes: plan.minutes,
         actual_duration_minutes: plan.minutes,
+        // Durable stamp on the visit ROW (codex P2 #3152 round 5): the
+        // structured_notes marker can't exist when the record leg is skipped
+        // (no/ambiguous legacy record), and without a durable signal every
+        // later no-opts job-cost recalculation re-books labor from the
+        // inflated job-linked time entry. calculateJobCost reads this column
+        // off the row it already holds.
+        time_on_site_adjusted_minutes: plan.minutes,
         updated_at: new Date(),
       };
       if (plan.newEnd) {
@@ -2293,7 +2300,12 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
 
     try {
       const JobCosting = require('../services/job-costing');
-      await JobCosting.calculateJobCost(svc.id);
+      // The authoritative minutes travel DIRECTLY (codex P2 #3152 round 5):
+      // when the record leg was skipped there is no structured_notes marker
+      // for the durable re-derivation to find, and this recalc must still
+      // book the corrected labor over an inflated job-linked time entry.
+      // Later no-opts recalcs re-derive from the column stamped above.
+      await JobCosting.calculateJobCost(svc.id, undefined, { overrideLaborMinutes: plan.minutes });
     } catch (err) {
       logger.warn(`[time-on-site] job costing recalc failed for service ${svc.id}: ${err.message}`);
     }

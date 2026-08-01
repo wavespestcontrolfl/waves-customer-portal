@@ -424,6 +424,18 @@ async function calculateJobCost(scheduledServiceId, db, {
       overrideLaborMinutes = correctedMinutes;
     }
   }
+  // Second durable home for the same marker (codex P2 #3152 round 5): a
+  // corrected visit with NO resolvable record (missing/ambiguous legacy
+  // rows) can't carry the structured_notes marker at all, so the correction
+  // endpoint stamps scheduled_services.time_on_site_adjusted_minutes — read
+  // here off the row already in hand, no extra query. Redundant with the
+  // record marker when both exist; the caller's explicit option still wins.
+  if (overrideLaborMinutes == null) {
+    const stampedMinutes = Number(svc.time_on_site_adjusted_minutes);
+    if (Number.isFinite(stampedMinutes) && stampedMinutes > 0) {
+      overrideLaborMinutes = stampedMinutes;
+    }
+  }
 
   // An operator can dispose a completed visit as intentionally_free in the
   // Billing Recovery workbench (visit_billing_dispositions). That decision is

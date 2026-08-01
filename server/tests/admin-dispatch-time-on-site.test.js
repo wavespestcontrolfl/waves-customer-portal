@@ -441,6 +441,9 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(svcUpdate.whereCriteria).toEqual({ id: 'svc-1' });
     expect(svcUpdate.updatePayload.service_time_minutes).toBe(45);
     expect(svcUpdate.updatePayload.actual_duration_minutes).toBe(45);
+    // Durable row stamp — the marker that survives even with no report
+    // record to carry structured_notes (codex P2 round 5).
+    expect(svcUpdate.updatePayload.time_on_site_adjusted_minutes).toBe(45);
     const expectedEnd = new Date('2026-07-19T16:45:00Z');
     expect(svcUpdate.updatePayload.actual_end_time).toEqual(expectedEnd);
     expect(svcUpdate.updatePayload.check_out_time).toEqual(expectedEnd);
@@ -469,7 +472,9 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // An FK-linked record needs no heal — the linkage column stays untouched.
     expect(recUpdate.updatePayload.scheduled_service_id).toBeUndefined();
 
-    expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1');
+    // The authoritative minutes travel directly — the recalc must not
+    // depend on any marker having landed (codex P2 round 5).
+    expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1', undefined, { overrideLaborMinutes: 45 });
     const audit = dbMock.calls.find((c) => c.table === 'activity_log');
     expect(audit.insertPayload.action).toBe('time_on_site_adjusted');
     expect(audit.insertPayload.admin_user_id).toBe('admin-1');
@@ -677,7 +682,13 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body.recordUpdated).toBe(false);
     expect(res.body.recordAmbiguous).toBe(true);
-    expect(dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload)).toBeTruthy();
+    const ambSvcUpdate = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload);
+    expect(ambSvcUpdate).toBeTruthy();
+    // The skipped-record shapes are exactly why the row stamp and the direct
+    // override exist — labor must still book the corrected minutes now and
+    // on every later no-opts recalc (codex P2 round 5).
+    expect(ambSvcUpdate.updatePayload.time_on_site_adjusted_minutes).toBe(45);
+    expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1', undefined, { overrideLaborMinutes: 45 });
     expect(dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload)).toBeUndefined();
   });
 });
@@ -791,6 +802,18 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     const entriesAt = costingSource.indexOf("await db('time_entries')");
     expect(overrideAt).toBeGreaterThan(-1);
     expect(entriesAt).toBeGreaterThan(overrideAt);
+  });
+
+  test('the ROW stamp is a second durable home — corrected visits with no record still re-derive (codex P2 round 5)', () => {
+    expect(costingSource).toMatch(/if \(overrideLaborMinutes == null\) \{\s*\n\s*const stampedMinutes = Number\(svc\.time_on_site_adjusted_minutes\);\s*\n\s*if \(Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\) \{\s*\n\s*overrideLaborMinutes = stampedMinutes;/);
+    // And the migration that adds the column exists, guarded + symmetric.
+    const migrationSource = fs.readFileSync(
+      path.join(__dirname, '../models/migrations/20260801400000_time_on_site_adjusted_minutes.js'),
+      'utf8',
+    );
+    expect(migrationSource).toMatch(/hasColumn\('scheduled_services', 'time_on_site_adjusted_minutes'\)/);
+    expect(migrationSource).toMatch(/t\.integer\('time_on_site_adjusted_minutes'\)\.nullable\(\)/);
+    expect(migrationSource).toMatch(/dropColumn\('time_on_site_adjusted_minutes'\)/);
   });
 });
 
