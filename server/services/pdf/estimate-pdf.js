@@ -332,28 +332,20 @@ function termsBlock(ctx, proposal, totals, y) {
 /**
  * @param {object} estimate
  * @param {object} res  stream sink
- * @param {{ billsPerApplication?: boolean, annualPrepay?: boolean }} [billing]
+ * @param {{ billsPerApplication?: boolean }} [billing]
  *   Resolved by services/estimate-proposal-billing.js — the LIVE billing lane,
  *   because persisted snapshot flags freeze at send time (codex #3120 r2).
- *   Both default false, which renders exactly as this document did before the
+ *   Defaults false, which renders exactly as this document did before the
  *   per-application work: a caller that cannot establish the lane must never
  *   have a billing cadence invented for it.
  */
 function generateEstimateProposalPDF(estimate, res, billing = {}) {
-  const billsPerApplication = billing?.billsPerApplication === true;
-  const annualPrepay = billing?.annualPrepay === true;
-  // A prepaid plan's visits are covered by one annual payment, so it is quoted
-  // annually; an unestablished lane falls back to the legacy rendering rather
-  // than having a cadence invented for it. recurringMode is set ONLY here —
-  // the PDF is a rendering surface, so these lines can never round-trip
-  // through the Commercial Proposal editor's save (see normalizeProposal).
-  const recurringMode = annualPrepay
-    ? 'annual_prepay'
-    : (billsPerApplication ? 'per_application' : 'legacy');
-  const proposal = normalizeProposal(estimate, {
-    recurringMode,
-    annualPrepayTotal: billing?.annualPrepayTotal,
-  });
+  // recurringMode is set ONLY here — the PDF is a rendering surface, so these
+  // lines can never round-trip through the Commercial Proposal editor's save
+  // (see normalizeProposal). Anything but a confirmed per-application lane
+  // (monthly member, annual prepay, unknown) keeps the legacy rendering.
+  const recurringMode = billing?.billsPerApplication === true ? 'per_application' : 'legacy';
+  const proposal = normalizeProposal(estimate, { recurringMode });
   const totals = computeProposalTotals(proposal);
 
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });

@@ -14,7 +14,6 @@ jest.mock('../routes/estimate-public', () => ({ matchAcceptCustomerByPhone: mock
 
 const {
   estimateBillsPerApplication,
-  estimateAnnualPrepayTerm,
   resolveProposalBillingContext,
 } = require('../services/estimate-proposal-billing');
 
@@ -75,42 +74,25 @@ describe('estimateBillsPerApplication', () => {
   });
 });
 
-describe('estimateAnnualPrepayTerm', () => {
-  it('returns the CHARGED prepay amount, which may be discounted below annual_total', async () => {
-    stubTables({ prepayTerm: { id: 't1', status: 'active', prepay_amount: '513.00' } });
-    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toEqual({ prepayAmount: 513 });
-  });
-
-  it('is null for a cancelled term', async () => {
-    stubTables({ prepayTerm: { id: 't1', status: 'cancelled', prepay_amount: '513.00' } });
-    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toBeNull();
-  });
-
-  it('is null with no term and on a database without the table', async () => {
-    stubTables({ prepayTerm: undefined });
-    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toBeNull();
-    mockDb.schema.hasTable.mockResolvedValue(false);
-    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toBeNull();
-  });
-});
-
-describe('resolveProposalBillingContext', () => {
-  it('reports both facts together', async () => {
-    stubTables({
-      customer: { pipeline_stage: 'active_customer', monthly_rate: 0, billing_mode: 'per_application' },
-      prepayTerm: { status: 'active', prepay_amount: '513.00' },
-    });
-    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true, annualPrepay: true, annualPrepayTotal: 513 });
-  });
-});
 
 // Codex #3120 r4: a refunded term describes no coverage — lockstep with the
 // canonical logic in annual-prepay-renewals.js, which rejects refunded
 // invoices and payments.
-describe('refunded prepay terms', () => {
-  it('is null for a refunded term', async () => {
-    stubTables({ prepayTerm: { id: 't1', status: 'refunded', prepay_amount: '513.00' } });
-    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toBeNull();
+
+// Annual prepay is deliberately NOT re-derived here: coverage semantics belong
+// to annual-prepay-renewals.js. Reading the LANE is enough — a prepaid plan
+// simply keeps the legacy rendering (codex #3120 r4 + pre-push r5).
+describe('annual prepay lane', () => {
+  it('is NOT per-application, so the document stays as it was', async () => {
+    stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: 'annual_prepay' } });
+    expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(false);
+  });
+});
+
+describe('resolveProposalBillingContext', () => {
+  it('reports the lane', async () => {
+    stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 0, billing_mode: 'per_application' } });
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
+      .toEqual({ billsPerApplication: true });
   });
 });
