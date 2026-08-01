@@ -67,7 +67,7 @@ function Page({ children }) {
       {/* div, not <main> — WavesShell supplies the main landmark. */}
       <div style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
       {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-      <BrandFooter variant="light" />
+      <BrandFooter variant="light" appBadges={false} />
     </div>
   );
 }

@@ -29,7 +29,7 @@ function catByKey(categories, key) {
  * @param {string} input.customerConcern
  * @returns {Array} prioritized LawnInsightCard[]
  */
-function buildLawnInsightCards({ categories = [], water = {}, mowing = null, grassLabel = 'lawn', customerConcern = '', treatmentKinds = [] } = {}) {
+function buildLawnInsightCards({ categories = [], water = {}, mowing = null, grassLabel = 'lawn', customerConcern = '', treatmentKinds = [], waterInRequired = false } = {}) {
   const cards = [];
   const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
 
@@ -37,7 +37,9 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   const waterCat = catByKey(categories, 'water_moisture_stress');
   if (water && water.status === 'surplus') {
     cards.push({
-      category: 'water', status: 'needs_attention', confidence: water.overwatering ? 'tech_confirmed' : 'area_estimated',
+      // Same provenance rule as the damp card below: overwatering is an
+      // automated (photo/area) signal, not technician confirmation.
+      category: 'water', status: 'needs_attention', confidence: water.overwatering ? 'ai_supported' : 'area_estimated',
       headline: 'The lawn is likely getting too much water',
       whatWeSaw: water.overwatering
         ? 'Damp areas and fungal/mushroom signs in today’s photos, with the weekly water total running above target.'
@@ -46,7 +48,9 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       wavesAction: has('fungicide')
         ? 'Applied a fungicide and adjusted today’s plan toward drying things out.'
         : 'Documented the moisture and adjusted today’s plan toward drying things out.',
-      customerAction: 'Ease back on irrigation by one cycle and let us know if it stays soggy.',
+      customerAction: waterInRequired
+        ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
+        : 'Ease back on irrigation by one cycle and let us know if it stays soggy.',
       nextVisitPlan: 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
       confidenceNote: null,
     });
@@ -60,16 +64,51 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       customerAction: `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
       nextVisitPlan: 'Recheck moisture and color next visit to confirm the added water is landing.',
     });
-  } else if (water.localizedDry || (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention'))) {
-    // Balanced total but a localized dry/wet read — coverage, NOT "water more".
+  } else if (water.localizedDry) {
+    // Localized dry evidence (dry-signal observations or a coverage-issue
+    // snapshot) with a non-deficit total — coverage, NOT "water more".
     cards.push({
       category: 'water', status: 'watch', confidence: 'area_estimated',
       headline: 'Water coverage is the main thing to watch',
-      whatWeSaw: 'Total water for the week looks on target, but one area still reads off.',
+      // "on target" is a measurement claim — only when the week actually
+      // measured balanced; unknown-rain weeks describe the photo read only.
+      whatWeSaw: water && water.status === 'balanced'
+        ? 'Total water for the week looks on target, but one area still reads off.'
+        : 'One area reads drier than the rest of the lawn in today’s photos.',
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
       wavesAction: 'Flagged the area and will recheck it next visit.',
       customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',
       nextVisitPlan: 'Recheck the flagged area next visit to see whether coverage evened out.',
+    });
+  } else if (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention')) {
+    // The water score is degraded without dry evidence (overwatering/fungus
+    // signals also lower it) — a dry-area/sprinkler claim here would be
+    // invented (codex P1 #3093 r2). Grounded in the diagnosis's own
+    // explanation, and the action must match the signal: a damp/fungal read
+    // gets ease-back advice, never "keep the current schedule" (codex P1 r4).
+    // overwatering derives from the photo model / area snapshot — automated
+    // signals, never technician confirmation; 'tech_confirmed' here rendered
+    // "Confirmed by your technician" with false provenance (codex P1 r9).
+    const damp = !!(water && water.overwatering);
+    cards.push({
+      category: 'water', status: 'watch', confidence: damp ? 'ai_supported' : 'area_estimated',
+      headline: damp ? 'Damp areas are the thing to watch' : 'Moisture balance is the thing to watch',
+      whatWeSaw: waterCat.customerExplanation || 'Today’s photos showed a mixed moisture read across the lawn.',
+      whyItMatters: 'Keeping moisture balanced protects the lawn from both fungus pressure and dry stress.',
+      wavesAction: 'Flagged it for a recheck at the next visit.',
+      // "Keep your current watering schedule" requires a schedule ON FILE —
+      // for profiles without one it invented guidance and contradicted the
+      // add-your-schedule CTA (codex P2 r23).
+      customerAction: damp
+        // A label-required watering-in must not collide with ease-back
+        // advice — name the exception instead (codex P1 r32).
+        ? (waterInRequired
+          ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
+          : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
+        : (water && water.scheduleOnFile
+          ? 'Keep your current watering schedule unless we flag a change.'
+          : 'We’ll keep watching moisture balance at upcoming visits.'),
+      nextVisitPlan: 'Recheck the moisture balance next visit.',
     });
   }
 

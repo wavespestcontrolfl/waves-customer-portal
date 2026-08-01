@@ -250,7 +250,7 @@ const INTERIOR_FILL_ALPHA = 0.12;
 const INTERIOR_FILL_LIGHT_ALPHA = 0.05;
 // Lawn highlight (owner 2026-07-30, iterated live: "focus on the lawn" →
 // "only illuminate the lawn areas" → "not a box, it just should highlight
-// the lawn areas"): the render paints a luminous turf-green highlight over
+// the lawn areas"): the render paints a luminous highlight over
 // the ACTUAL GRASS inside the traced property boundary — no polygon outline,
 // no darkening of the rest of the photo. The traced loop is only the
 // property scope; the grass is the subject. Turf is detected per-pixel
@@ -258,7 +258,9 @@ const INTERIOR_FILL_LIGHT_ALPHA = 0.05;
 // green through browning tan). Never a flat FILL of the loop (codex P1
 // #3038 r3). Fallback when the imagery is not pixel-readable: the classic
 // clean outline.
-const HIGHLIGHT_RGB = [96, 214, 116];
+// Highlight color is the bright waves blue — same MIST_COLOR #0A7EC2 as the
+// spray tracker (owner 2026-07-30: green "doesn't show well" over turf).
+const HIGHLIGHT_RGB = [10, 126, 194];
 const HIGHLIGHT_ALPHA = 0.48;
 
 /**
