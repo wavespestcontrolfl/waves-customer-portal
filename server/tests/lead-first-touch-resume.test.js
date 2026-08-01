@@ -143,6 +143,11 @@ jest.mock('../models/db', () => {
             if (mockDoiMarkerError) throw mockDoiMarkerError;
             return mockDoiMarkerRow;
           }
+          // The r48 row LOCK (SELECT id ... FOR UPDATE, taken before the
+          // card question is re-asked) is the only unfiltered single-'id'
+          // read on this table. It reads nothing the tests model, so it
+          // must never consume mockHoldFirstQueue.
+          if (cols.length === 1 && cols[0] === 'id') return { id: whereId };
           if (mockHoldFirstQueue && mockHoldFirstQueue.length) {
             const next = mockHoldFirstQueue.shift();
             if (next instanceof Error) throw next;
@@ -1212,6 +1217,64 @@ describe('mid-send races (r19)', () => {
     expect(mockEnroll).toHaveBeenCalled();
   });
 
+  test('a DISMISSED latest disposition blocks the release even with no live card', async () => {
+    // The in-claim check asked only "is a card open?" (Codex #3084 r48).
+    // A sweep can pass its belt check on an OLD resolved card while a
+    // force-reprocess mints and invalidates a fresh one, and the operator
+    // can DISMISS that fresh card before this claim lands — the live-card
+    // query then sees nothing and would release an address whose NEWEST
+    // operator action was a refusal to confirm. The claim now re-asks the
+    // sweep's full two-part rule: no live card AND latest terminal
+    // disposition == 'resolved'.
+    mockTriageFirstQueue = [null, { status: 'dismissed' }];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('email_review_dismissed');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    // Plain re-pend — a deny stamp or retry marker must survive.
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending' });
+    expect(mockHoldUpdates.at(-1).last_error).toBeUndefined();
+  });
+
+  test('a card landing after the in-claim check still blocks the ENROLL, under the row lock', async () => {
+    // The mint site commits its card BEFORE its invalidation, and that
+    // invalidation then queues behind the enroll transaction's row lock
+    // (Codex #3084 r48) — so passing the in-claim check proves nothing by
+    // the time the enroll runs. The enroll re-asks the card question after
+    // taking the lock, which makes every already-committed card visible.
+    // Without it the drip starts to an address under read-back: the fresh
+    // enrollment's first step is immediately due.
+    mockTriageFirstQueue = [
+      null, { status: 'resolved' }, // in-claim: clean
+      { id: 'card-live' },          // under the enroll's row lock: minted since
+    ];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('email_review_live');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    // The enroll transaction rolled back and the PLAIN re-pend released
+    // the claim — no marker written, so a deny stays intact.
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending' });
+    expect(mockHoldUpdates.at(-1).last_error).toBeUndefined();
+  });
+
+  test('a card landing after the enroll still blocks the DOI, under the gate row lock', async () => {
+    // Same r48 window one stage later: the pre-send gate takes the hold's
+    // row lock and only then re-reads the card, so a card committed before
+    // the gate refuses the send with NOTHING written — no consumed marker,
+    // no bumped fence, so the caller's fenced re-pend still matches.
+    mockHold = baseHold({ held_drip: false });
+    mockTriageFirstQueue = [
+      null, { status: 'resolved' }, // in-claim: clean
+      { id: 'card-live' },          // under the gate's row lock: minted since
+    ];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(res.skipped).toBe('claim_lost');
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending' });
+    expect(mockHoldUpdates.at(-1).last_error).toBeUndefined();
+  });
+
   test('a DOI-failure re-pend never buries a mid-send deny stamp', async () => {
     // Retryable settles are deny-preserving too (Codex #3084 r22): the
     // guarded write refuses (a deny landed), and the fallback re-pends
@@ -1457,12 +1520,30 @@ describe('DOI dedupe guard and ledger sweep', () => {
     // live-card check (Codex #3084 r43) — card creation re-pends the
     // call's claims with a fence-invalidating bump so the claimant's gate
     // refuses, WITHOUT touching deny stamps or retry markers.
-    const invalidated = await repenHoldsForFreshEmailReview('call-1');
-    expect(invalidated).toBe(1);
-    const repen = mockHoldUpdates.at(-1);
-    expect(repen).toMatchObject({ status: 'pending' });
-    expect(repen.updated_at).toBeInstanceOf(Date);
-    expect(repen.last_error).toBeUndefined();
+    await repenHoldsForFreshEmailReview('call-1');
+    // Two DISJOINT writes since r48 (below): the plain re-pend is the one
+    // that carries no marker, and it must never stamp last_error.
+    const plain = mockHoldUpdates.find((u) => u.status === 'pending' && u.last_error === undefined);
+    expect(plain).toBeTruthy();
+    expect(plain.updated_at).toBeInstanceOf(Date);
+  });
+
+  test('invalidating a RELEASING claim preserves the uncertain-send force-resend ticket', async () => {
+    // A DOI release pre-stamps confirmation_sent_at BEFORE the provider
+    // call, so a claim broken mid-attempt may never have mailed anything
+    // (Codex #3084 r48). The only signal that forces the resend is the
+    // claim-time status being 'releasing' — a plain re-pend erases it and
+    // the retry's dedupe guard would trust the surviving pre-stamp and
+    // terminally settle a DOI that never went out. Releasing rows land
+    // under the SAME verified force-resend ticket a known-failed send uses.
+    await repenHoldsForFreshEmailReview('call-1');
+    // Exactly two writes, disjoint by predicate: the marker one claims the
+    // unmarked 'releasing' rows, the plain one claims everything else. The
+    // split is what keeps a deny stamp (or an owner's own neutral
+    // delivered-ambiguous park) from being overwritten with a resend order.
+    const repens = mockHoldUpdates.filter((u) => u.status === 'pending');
+    expect(repens.filter((u) => u.last_error === 'newsletter_doi_not_confirmed')).toHaveLength(1);
+    expect(repens.filter((u) => u.last_error === undefined)).toHaveLength(1);
   });
 
   test('a FAILED fresh-review invalidation throws the durable-state error instead of returning success', async () => {

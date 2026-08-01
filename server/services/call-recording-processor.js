@@ -9021,9 +9021,30 @@ const CallRecordingProcessor = {
           // send instead of stranding the customer pending forever.
           const doiRecentlySent = rebuildMeta?.newsletter_doi_sent_at
             && (Date.now() - new Date(rebuildMeta.newsletter_doi_sent_at).getTime()) < 24 * 60 * 60 * 1000;
-          if (doiRecentlySent) {
+          // A HELD newsletter released by ANY OTHER path is delivery
+          // evidence too (Codex #3084 r48): the mid-run card release, the
+          // triage resolve, the ledger sweep and the correction fanout all
+          // send the held DOI through resumeHeldFirstTouch, and none of
+          // them writes this run's post-provider marker — only Step 8's own
+          // send does. Without the ledger a recovery pass on a call whose
+          // hold was already released rebuilds the candidate and
+          // subscribeNewCallCustomerToNewsletter mails confirmation_resent
+          // to an inbox that just received the confirmation. The ledger IS
+          // the durable per-call record: released_newsletter is written
+          // only on a newsletterDelivered() outcome (the DOI went out, or
+          // the helper deliberately skipped with nothing left to send), so
+          // it is exactly the "nothing more to mail for this call" signal —
+          // and unlike the marker it is untimed, because a released hold
+          // settles the question permanently for this call.
+          let ledgerReleased = false;
+          if (!doiRecentlySent && await db.schema.hasTable('first_touch_holds')) {
+            ledgerReleased = !!(await db('first_touch_holds')
+              .where({ call_log_id: call.id, held_newsletter: true, released_newsletter: true })
+              .first('id'));
+          }
+          if (doiRecentlySent || ledgerReleased) {
             newsletterResult = newsletterResult || { skipped: 'confirmation_recently_sent' };
-            logger.info(`[call-proc] Skipping newsletter rebuild on retry — a recent DOI already went out (${maskSid(callSid)})`);
+            logger.info(`[call-proc] Skipping newsletter rebuild on retry — the held DOI already went out (${ledgerReleased ? 'hold ledger' : 'completion marker'}; ${maskSid(callSid)})`);
           } else {
             newsletterCandidate = {
               customerId,

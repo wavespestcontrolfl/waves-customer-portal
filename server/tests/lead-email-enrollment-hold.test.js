@@ -15,6 +15,11 @@ jest.mock('../models/db', () => {
   const chain = {
     where: jest.fn(() => chain),
     whereIn: jest.fn(() => chain),
+    // The r48 invalidation splits into two disjoint predicates — the
+    // uncertain-send ('releasing' + unmarked) rows keep a force-resend
+    // ticket, everything else re-pends plain.
+    whereNull: jest.fn(() => chain),
+    whereNot: jest.fn(() => chain),
     first: jest.fn(() => (mockFirstError ? Promise.reject(mockFirstError) : Promise.resolve(mockFirstResult))),
     insert: jest.fn(() => { if (mockInsertError) throw mockInsertError; return chain; }),
     onConflict: jest.fn(() => chain),
@@ -27,6 +32,10 @@ jest.mock('../models/db', () => {
   db._chain = chain;
   db.raw = jest.fn((x) => x);
   db.schema = { hasTable: jest.fn(async () => true) };
+  // The r48 invalidation runs its two writes in ONE transaction so the
+  // split can never leave a row half-invalidated; the stub hands back the
+  // same connection.
+  db.transaction = jest.fn(async (fn) => fn(db));
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));

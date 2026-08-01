@@ -141,6 +141,40 @@ function fencedHoldWrite(qb, claimStamp) {
   return qb;
 }
 
+// The single answer to "may this call's held address be sent right now?"
+// (Codex #3084 r48) — the sweep's two-part rule (r16/r42/r43), lifted so
+// the in-claim check and the pre-send gate ask it identically:
+//   1. ANY live card (open / in_progress) blocks — the address is under
+//      read-back. This check is separate from the ordering below on
+//      purpose: a live card carries no resolved_at, so a later-resolved
+//      sibling would sort ahead of it and hide it.
+//   2. Otherwise the LATEST TERMINAL disposition decides, and only
+//      'resolved' releases. A force-reprocess can mint a fresh card that
+//      the operator then DISMISSES — "not actionable" is not a
+//      confirmation, and the older resolved sibling must not speak for it.
+//      Equal-timestamp ties break toward dismissal: the tie must fail
+//      toward hold, never toward approval.
+// No card at all → null: the r4/r17 insert-failed recovery path owns that
+// state and its own marker keeps the hold pending.
+// Returns a skip reason, or null when nothing blocks. Throws propagate —
+// every caller treats an unverifiable card state as fail-closed.
+async function emailReviewBlocksRelease(callLogId, dbh = db) {
+  if (!callLogId) return null;
+  const live = await dbh('triage_items')
+    .where({ call_log_id: callLogId })
+    .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+    .whereIn('status', ['open', 'in_progress'])
+    .first('id');
+  if (live) return 'email_review_live';
+  const latest = await dbh('triage_items')
+    .where({ call_log_id: callLogId })
+    .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+    .orderByRaw("COALESCE(resolved_at, updated_at, created_at) DESC, (status = 'dismissed') DESC, id DESC")
+    .first('status');
+  if (latest && latest.status !== 'resolved') return 'email_review_dismissed';
+  return null;
+}
+
 // The pre-send GATE (Codex #3084 r34): the LAST hold write before an
 // external send, for marked and unmarked holds alike. One CAS atomically
 // (1) validates the fence — a denial or reclaim bumped updated_at, so the
@@ -164,7 +198,24 @@ function fencedHoldWrite(qb, claimStamp) {
 // Stamp-less legacy payloads gate unfenced (deny + target guards apply).
 // Throws propagate: group callers run their gates all-or-nothing in one
 // transaction and abort the whole send.
-async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = null) {
+// (6) With a reviewCallLogId, the card question is re-asked UNDER THE ROW
+// LOCK (Codex #3084 r48): a mint site commits its card BEFORE its
+// invalidation, and that invalidation then queues behind this send's row
+// lock for the whole provider call — so a claimant that passed its
+// in-claim card check can still be holding a fence the card was meant to
+// break. Locking the row FOR UPDATE first and only then reading the card
+// makes every card that committed before this point visible and refuses
+// the send with NOTHING written (no consumed marker, no bumped fence, so
+// the caller's fenced re-pend still matches); a card committing after the
+// lock blocks on it and invalidates the NEXT attempt — the accepted r43
+// trade. Correction-driven sends (the fanout, an operator's explicit
+// address override) pass no id and deliberately bypass: a correction IS
+// the read-back.
+async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = null, reviewCallLogId = null) {
+  if (reviewCallLogId) {
+    await dbh('first_touch_holds').where({ id: holdId }).forUpdate().first('id');
+    if (await emailReviewBlocksRelease(reviewCallLogId, dbh)) return null;
+  }
   const stamp = new Date();
   const qb = dbh('first_touch_holds')
     .where({ id: holdId })
@@ -230,14 +281,39 @@ async function repenAmbiguousDelivery(holdId, fenceStamps, dbh = db, marker = 'd
 // failure would let that claimant enroll or send the unreviewed address.
 // Every mint site routes the error into the extraction_failed retry path,
 // and the retry re-runs the card insert AND this invalidation.
+// An invalidated 'releasing' row keeps its UNCERTAIN-SEND marker (Codex
+// #3084 r48): a DOI release pre-stamps confirmation_sent_at before the
+// provider call, so a claim broken mid-attempt may or may not have mailed
+// anything. `runNewsletterResume`'s dedupe guard trusts that surviving
+// pre-stamp and would terminally settle a DOI that never went out — the
+// only signal that forces the resend is the claim-time status being
+// 'releasing' (the r36 duplicate-beats-never-delivered trade), and a plain
+// re-pend erases it. Releasing rows therefore land under the SAME verified
+// force-resend ticket a known-failed send uses. Scoped to unmarked rows:
+// a deny stamp, or a marker its own owner set (r41's neutral
+// delivered-ambiguous park included), is authoritative and must not be
+// overwritten with a resend order.
 async function repenHoldsForFreshEmailReview(callLogId, dbh = db) {
   if (!callLogId) return 0;
   try {
     if (!(await dbh.schema.hasTable('first_touch_holds'))) return 0;
-    return await dbh('first_touch_holds')
-      .where({ call_log_id: callLogId })
-      .whereIn('status', ['pending', 'releasing'])
-      .update({ status: 'pending', updated_at: new Date() });
+    return await dbh.transaction(async (trx) => {
+      const now = new Date();
+      // Disjoint by construction so the two writes cannot touch the same
+      // row (and the returned count stays a row count).
+      const plain = await trx('first_touch_holds')
+        .where({ call_log_id: callLogId })
+        .whereIn('status', ['pending', 'releasing'])
+        .whereNot(function uncertainSend() {
+          this.where('status', 'releasing').whereNull('last_error');
+        })
+        .update({ status: 'pending', updated_at: now });
+      const forcedResend = await trx('first_touch_holds')
+        .where({ call_log_id: callLogId, status: 'releasing' })
+        .whereNull('last_error')
+        .update({ status: 'pending', last_error: 'newsletter_doi_not_confirmed', updated_at: now });
+      return plain + forcedResend;
+    });
   } catch (invalidateErr) {
     logger.warn(`[first-touch-resume] fresh-review hold invalidation failed: ${invalidateErr.code || invalidateErr.name || 'db_error'} — failing the run so the retry re-synchronizes`);
     const stateErr = new Error('email_review_state_unavailable');
@@ -565,21 +641,24 @@ async function resumeHeldFirstTouch({
       // explicit operator correction (the email override) proceeds past a
       // live card. Fail-closed: an unverifiable card state never sends.
       // The plain re-pend touches no last_error (a deny stays intact).
+      // The DISPOSITION, not merely the absence of a live card (Codex
+      // #3084 r48): the sweep's belt check can pass on an OLD resolved
+      // card while a force-reprocess mints and invalidates a fresh one,
+      // and the operator can DISMISS that fresh card before this claim
+      // lands — the live-card query then sees nothing and released an
+      // address whose newest operator action was a refusal to confirm.
+      // emailReviewBlocksRelease re-asks both halves of the sweep's rule.
       if (!email && hold.call_log_id) {
-        let liveCard = null;
+        let blocked = null;
         try {
-          liveCard = await dbh('triage_items')
-            .where({ call_log_id: hold.call_log_id })
-            .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-            .whereIn('status', ['open', 'in_progress'])
-            .first('id');
+          blocked = await emailReviewBlocksRelease(hold.call_log_id, dbh);
         } catch (cardErr) {
-          logger.warn(`[first-touch-resume] in-claim live-card re-check failed: ${cardErr.code || cardErr.name || 'db_error'} — hold stays pending`);
-          liveCard = { unverified: true };
+          logger.warn(`[first-touch-resume] in-claim card disposition re-check failed: ${cardErr.code || cardErr.name || 'db_error'} — hold stays pending`);
+          blocked = 'email_review_unverified';
         }
-        if (liveCard) {
+        if (blocked) {
           await settleHold(hold.id, { status: 'pending' }, dbh, claimStamp);
-          result.skipped = result.skipped || 'email_review_live';
+          result.skipped = result.skipped || blocked;
           continue;
         }
       }
@@ -741,6 +820,25 @@ async function resumeHeldFirstTouch({
               dripSkip = { skipped: 'superseded_during_send', repen: true };
               return;
             }
+            // Card question re-asked UNDER THE ROW LOCK (Codex #3084 r48),
+            // same reason as the pre-send gate: the mint site commits its
+            // card BEFORE its invalidation, so a card that landed after
+            // this claim's in-claim check is visible here while its
+            // invalidation queues behind this lock. Without it the enroll
+            // — whose first step is immediately due — starts the drip to
+            // an address the operator is being asked to read back. Skipped
+            // for an explicit correction, which IS the read-back.
+            if (!email && hold.call_log_id) {
+              const cardBlocked = await emailReviewBlocksRelease(hold.call_log_id, trx);
+              if (cardBlocked) {
+                // No writes here: the enroll transaction rolls back and
+                // the PLAIN re-pend below returns the row to pending with
+                // its marker untouched (a deny stays intact), exactly as
+                // the in-claim card refusal does.
+                dripSkip = { skipped: cardBlocked, plainRepen: true };
+                return;
+              }
+            }
             const AutomationRunner = require('./automation-runner');
             const enroll = await AutomationRunner.enrollCustomer({
               templateKey: 'new_lead',
@@ -791,6 +889,8 @@ async function resumeHeldFirstTouch({
           if (dripSkip) {
             if (dripSkip.repen) {
               await repenHoldPreservingDeny(hold.id, 'superseded_during_send', dbh, claimStamp);
+            } else if (dripSkip.plainRepen) {
+              await settleHold(hold.id, { status: 'pending' }, dbh, claimStamp);
             } else {
               logger.info(`[first-touch-resume] enroll skipped (${dripSkip.skipped}) — hold left to its owner`);
             }
@@ -896,7 +996,12 @@ async function resumeHeldFirstTouch({
               // releasing row after the pre-send re-read preserves the
               // fence, so the gate's held_email CAS is what refuses the
               // stale send.
-              const gateStamp = await gateHoldForSend(hold.id, claimStamp, trx, sendEmail);
+              // The gate also re-asks the card question under the row lock
+              // (r48) — see gateHoldForSend. Passed only for a
+              // trigger-driven release; an explicit correction bypasses.
+              const gateStamp = await gateHoldForSend(
+                hold.id, claimStamp, trx, sendEmail, email ? null : hold.call_log_id,
+              );
               if (!gateStamp) {
                 gateRefused = true;
                 return;
@@ -1779,4 +1884,5 @@ module.exports = {
   gateHoldForSend,
   repenAmbiguousDelivery,
   repenHoldsForFreshEmailReview,
+  emailReviewBlocksRelease,
 };
