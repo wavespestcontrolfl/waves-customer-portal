@@ -178,6 +178,23 @@ async function renderAndStoreServiceReportPdf(recordId, {
   }
 }
 
+// Durable lawn-PDF correction marker helpers (codex P1 #3093 r30).
+async function lawnAssessmentIdForRecord(recordId, knex = db) {
+  const row = await knex('lawn_assessments').where({ service_record_id: recordId }).first('id').catch(() => null);
+  return row?.id || null;
+}
+
+async function clearLawnPdfCorrectionMarker(recordId, knex = db) {
+  const row = await knex('service_records').where({ id: recordId }).first('structured_notes');
+  let notes;
+  try {
+    notes = typeof row?.structured_notes === 'string' ? JSON.parse(row.structured_notes) : (row?.structured_notes || {});
+  } catch { notes = {}; }
+  if (!notes || notes.lawnPdfCorrectionPending !== true) return;
+  delete notes.lawnPdfCorrectionPending;
+  await knex('service_records').where({ id: recordId }).update({ structured_notes: JSON.stringify(notes) });
+}
+
 // forceFresh: skip the stored-object lookup and render anew — held email
 // deliveries must attach a render produced AFTER final copy settled, and no
 // fence can cover every render path (the public report route renders
@@ -188,7 +205,20 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   // the expected key must match what renderAndStore writes.
   const service = await knex('service_records')
     .where({ id: recordId })
-    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id');
+    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
+  // DURABLE correction marker (codex P1 #3093 r30): completion sets
+  // structured_notes.lawnPdfCorrectionPending when lawn copy may still
+  // change after the first render. Any render path — including the public
+  // report route on a box that never ran the completion callback — then
+  // renders FRESH until a post-settlement render clears it. Covers the
+  // no-email / process-restart path the in-process callback cannot.
+  let correctionPending = false;
+  try {
+    const notes = typeof service?.structured_notes === 'string'
+      ? JSON.parse(service.structured_notes) : (service?.structured_notes || {});
+    correctionPending = notes && notes.lawnPdfCorrectionPending === true;
+  } catch { correctionPending = false; }
+  const mustRenderFresh = forceFresh || correctionPending;
   const pestPressureConfig = await loadActiveConfig(knex).catch(() => null);
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
@@ -196,7 +226,7 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
       visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex),
     })
     : null;
-  const stored = (!forceFresh && service?.pdf_storage_key === expectedPdfStorageKey)
+  const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
     ? await getHealthyStoredReportPdf(service.pdf_storage_key)
     : null;
   if (stored) return { pdf: stored, key: service.pdf_storage_key, rendered: false };
@@ -208,6 +238,18 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     allowUnstoredPdf: true,
     pestPressureConfig,
   });
+  // A completed fresh render satisfies the pending correction — but only
+  // once the copy can no longer change (no generation in flight).
+  if (correctionPending && !rendered.storageFailed) {
+    try {
+      const { treatmentGuard } = require('../knowledge-bridge');
+      const assessmentId = await lawnAssessmentIdForRecord(recordId, knex);
+      const stillGenerating = assessmentId
+        ? await treatmentGuard.isGenerationInFlight(assessmentId, knex)
+        : false;
+      if (!stillGenerating) await clearLawnPdfCorrectionMarker(recordId, knex);
+    } catch { /* marker clearing is best-effort; a stale marker only costs a re-render */ }
+  }
   return {
     pdf: rendered.pdf,
     key: rendered.key,

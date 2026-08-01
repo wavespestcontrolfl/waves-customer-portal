@@ -5628,6 +5628,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           new Promise((resolve) => { setTimeout(() => resolve({ settled: false }), 60000).unref?.(); }),
         ]);
         lawnRecRegenTimedOut = !regenOutcome.settled;
+        if (lawnRecRegenTimedOut || !lawnRecRegenGrounded) {
+          // DURABLE correction marker (codex P1 r30): the in-process
+          // recovery callback dies with the process, and customers without
+          // report email have no worker path that forces a fresh render.
+          // structured_notes.lawnPdfCorrectionPending makes every render
+          // path (incl. the public report route on another box) render
+          // fresh until a post-settlement render clears it.
+          try {
+            const markNotes = { ...parseJsonObject(record.structured_notes), lawnPdfCorrectionPending: true };
+            await db('service_records').where({ id: record.id })
+              .update({ structured_notes: serializeJsonb(markNotes) });
+            record.structured_notes = markNotes;
+          } catch (markErr) {
+            logger.warn(`[dispatch] lawn PDF correction marker write failed for ${record.id}: ${markErr.message}`);
+          }
+        }
         if (lawnRecRegenTimedOut) {
           logger.warn('[dispatch] lawn recommendation regen still running after 60s — completion continues; PDF re-queues when the grounded write lands');
         } else if (!lawnRecRegenGrounded) {

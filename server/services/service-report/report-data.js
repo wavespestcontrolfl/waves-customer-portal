@@ -2338,7 +2338,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Typed reports carry their real findings in the snapshot (rendered by
   // TypedFindingsCard) — the legacy no-activity fallback would contradict
   // e.g. an active cockroach visit's snapshot.
-  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
+  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal
+    && !(serviceLine === 'lawn' && productsLoadFailed)
+    && shouldAddNoActivityFinding({ service, structured, protocol })) {
     findings.push({
       id: `no-activity-${service.id}`,
       zoneId: null,
@@ -2360,7 +2362,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // Enriched rows, not rawProducts: legacy rows with a null
     // product_category recover it from the catalog via
     // attachApprovedReportProductFacts (codex P2 r17).
-    const correctiveApplied = products.some((p) =>
+    // An outage-empty application set is NOT proof the visit applied
+    // nothing — the absolute "no lawn issues" claim must soften on that
+    // path too (codex P1 r30).
+    const correctiveApplied = productsLoadFailed || products.some((p) =>
       /fungicide|herbicide/i.test(String(p.product_category || p.approved_report_product_facts?.category || '')));
     if (correctiveApplied) {
       for (const finding of findings) {

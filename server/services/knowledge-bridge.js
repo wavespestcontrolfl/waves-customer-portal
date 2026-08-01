@@ -359,8 +359,14 @@ function contradictsAppliedProducts(text, appliedProducts) {
 // back to neutral monitoring copy (nextVisitFocus) or are removed so the
 // previously stored value stands (summary/customerTip).
 function appliedTreatmentClasses(appliedProducts) {
+  const rows = appliedProducts || [];
+  // A row whose category is unresolved could BE any class — class-phrased
+  // copy ("Hold off on fungicide") must still be caught for it, and neither
+  // the product name nor the generic terms cover that wording (codex P1
+  // r30). Conservatively treat unknown categories as every governed class.
+  if (rows.some((p) => !String(p.product_category || '').trim())) return Object.keys(TREATMENT_CLASSES);
   return Object.keys(TREATMENT_CLASSES).filter((cls) =>
-    (appliedProducts || []).some((p) => TREATMENT_CLASSES[cls].category.test(String(p.product_category || ''))));
+    rows.some((p) => TREATMENT_CLASSES[cls].category.test(String(p.product_category || ''))));
 }
 
 // Applied-product rows with categories recovered from the catalog: legacy
@@ -1223,4 +1229,16 @@ module.exports = KnowledgeBridge;
 module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
-module.exports.treatmentGuard = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses };
+module.exports.treatmentGuard = {
+  sanitizeRecommendationsAgainstTreatment,
+  contradictsAppliedTreatment,
+  contradictsAppliedProducts,
+  appliedTreatmentClasses,
+  // Durable fence read for render paths (codex P1 r30) — no lock needed, a
+  // stale-true only costs one extra fresh render.
+  async isGenerationInFlight(assessmentId, knex = db) {
+    if (!assessmentId) return false;
+    const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations').catch(() => null);
+    return generationInFlight(parseStoredRecommendations(row?.recommendations));
+  },
+};
