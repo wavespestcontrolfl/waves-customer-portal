@@ -56,11 +56,19 @@ describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
 
-  test('the uncovered-total hero names the billing unit instead of a combined cadence total', () => {
+  test('the uncovered-total hero names the billing unit — combined totals only behind the commercial gate', () => {
     expect(src).toContain('Priced per application');
-    // The old fallback interpolated the combined total + period word into the
-    // hero — that exact shape must not return.
-    expect(src).not.toMatch(/id="monthly-display">\$\{fmtMoney\(recurringDisplayTotal\)\}/);
+    // The combined cadence total may render ONLY inside the
+    // commercialManualAccept arm (commercial proposals are the documented
+    // exemption — their contract IS "Approve & pay monthly"; codex #3128 r3).
+    // Every interpolation of the combined total must sit after that gate and
+    // before the residential "Priced per application" arm.
+    const heroStart = src.indexOf('const recurringHeroPriceHtml');
+    const hero = src.slice(heroStart, src.indexOf('Priced per application', heroStart));
+    const gate = hero.indexOf('commercialManualAccept ? `');
+    expect(gate).toBeGreaterThan(-1);
+    const beforeGate = hero.slice(0, gate);
+    expect(beforeGate).not.toMatch(/id="monthly-display"/);
   });
 
   test('preference rows quote the per-application amount, not a cadence spread', () => {

@@ -4590,10 +4590,19 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
     ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
       ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
+    ` : commercialManualAccept ? `
+      <div class="big-price" data-mode-only="recurring">
+        ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
+        <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
+        <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
+        <span class="tier-lbl">Commercial</span>
+      </div>
+      ${manualDiscountHtml}
+      ${supplementalServiceSummaryHtml}
     ` : `
       <div class="big-price" data-mode-only="recurring">
         <span class="num" style="font-size:34px">Priced per application</span>
-        <span class="tier-lbl">${commercialManualAccept ? 'Commercial' : `WaveGuard ${escapeHtml(tier)}`}</span>
+        <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
       </div>
       ${manualDiscount && recurringDisplayManualDiscount > 0 ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>Applied to your plan pricing</strong></div>` : ''}
       ${supplementalServiceSummaryHtml}
