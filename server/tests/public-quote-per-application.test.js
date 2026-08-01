@@ -607,6 +607,39 @@ describe('derivePerApplicationBreakdown', () => {
     expect(derivePerApplicationBreakdown(bundle)).toBeNull();
   });
 
+  // Codex #3124 r4: RESIDENTIAL termite bait bills per application (owner
+  // 2026-07-20) and the engine emits the explicit pair — the r2 blacklist
+  // over-reached and stripped it. Shape is the real generateEstimate output.
+  test('derives residential termite bait — it bills per application, unlike rodent bait', () => {
+    const termiteOnly = {
+      lineItems: [{ service: 'termite_bait', monthly: 24, perApp: 72, visitsPerYear: 4, annual: 288 }],
+    };
+    const lines = derivePerApplicationBreakdown(termiteOnly);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].label).toBe('Termite Bait Monitoring');
+    expect(lines[0].per_application).toBe(72); // 288 / 4
+    expect(lines[0].visits_per_year).toBe(4);
+    expect(derivePerApplication(termiteOnly)).toEqual({ amount: 72, visitsPerYear: 4 });
+    // And the bundle keeps its full breakdown instead of collapsing.
+    const bundle = {
+      lineItems: [
+        { service: 'pest_control', name: 'Pest Control', monthly: 33.9, perApp: 113, visitsPerYear: 4, annualAfterDiscount: 406.8 },
+        { service: 'termite_bait', monthly: 21.6, perApp: 72, visitsPerYear: 4, annualAfterDiscount: 259.2 },
+      ],
+    };
+    expect(derivePerApplicationBreakdown(bundle)).toHaveLength(2);
+  });
+
+  // Commercial keeps billing monthly and is exempt from the unit rule, even
+  // though its engine rows do carry perApp/perVisit.
+  test('excludes commercial termite bait despite its explicit per-application signal', () => {
+    const commercial = {
+      lineItems: [{ service: 'commercial_termite_bait', monthly: 75, perApp: 225, perVisit: 225, visitsPerYear: 4, annual: 900 }],
+    };
+    expect(derivePerApplicationBreakdown(commercial)).toBeNull();
+    expect(derivePerApplication(commercial)).toBeNull();
+  });
+
   test('a line with cadence but no explicit per-application signal is excluded', () => {
     // Absence of perApp/perVisit is the design signal for monthly-billed
     // shapes — annual÷visits must not stand on its own.

@@ -187,10 +187,22 @@ function recurringQuoteLines(estimate) {
 // (4/yr) — billed monthly to customer" (service-pricing.js) — so an
 // annual÷visits figure would present a billing unit the customer never pays
 // (codex #3124 r2, superseding r1's derive-from-annual direction for these).
+//
+// Residential termite bait is NOT in this set (codex #3124 r4): standalone
+// termite bait is billed PER APPLICATION (owner 2026-07-20 — see
+// estimate-converter.js supportsConverterFollowUpSeeding), and the engine
+// emits it with an explicit perApp + visitsPerYear ({service:'termite_bait',
+// monthly:24, perApp:72, visitsPerYear:4, annual:288} — verified against
+// generateEstimate). Blacklisting it stripped the per-application pair from
+// termite-only quotes and dropped the whole recurring_lines breakdown from
+// every bundle containing one. The COMMERCIAL variants stay excluded: they
+// carry perApp/perVisit too, but commercial is exempt from the
+// per-application unit rule and bills monthly (AGENTS.md).
 const MONTHLY_BILLED_SERVICE_KEYS = new Set([
   'rodent_bait',
   'commercial_rodent_bait',
-  'termite_bait',
+  // Rider folded into the bait line at conversion, never a standalone charge —
+  // listing it separately would double-count the hardware uplift.
   'termite_station_rental',
   'commercial_termite_bait',
 ]);
@@ -248,6 +260,7 @@ const RECURRING_LINE_LABELS = {
   tree_shrub: 'Tree & Shrub Care',
   palm_injection: 'Palm Tree Injections',
   foam_recurring: 'Recurring Foam Treatment',
+  termite_bait: 'Termite Bait Monitoring',
   termite_bond: 'Termite Bond',
   trap_only_retainer: 'Rodent Trapping Retainer',
   commercial_pest: 'Commercial Pest Control',
