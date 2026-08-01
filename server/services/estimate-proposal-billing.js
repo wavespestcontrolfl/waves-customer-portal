@@ -28,10 +28,14 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { customerPreservesMonthlyMembership } = require('./billing-cadence');
 
-// Terms in these states never took the customer's money, so they describe no
-// prepaid coverage. Anything else (active//payment_pending/renewing/…) means
-// the plan is being sold as an annual prepay and the document should say so.
-const NON_COVERING_PREPAY_STATUSES = new Set(['cancelled', 'canceled', 'lapsed', 'superseded']);
+// Terms in these states describe no prepaid coverage — the money was never
+// taken, or it was given back. `refunded` is lockstep with the canonical
+// coverage logic in annual-prepay-renewals.js, which rejects refunded
+// invoices and payments (codex #3120 r4): a refunded term must not keep
+// presenting a covered year on the customer's document.
+const NON_COVERING_PREPAY_STATUSES = new Set([
+  'cancelled', 'canceled', 'lapsed', 'superseded', 'refunded',
+]);
 
 /**
  * The prepay term for this estimate, or null. `prepay_amount` is the total the

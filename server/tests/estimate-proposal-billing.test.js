@@ -104,3 +104,13 @@ describe('resolveProposalBillingContext', () => {
       .toEqual({ billsPerApplication: true, annualPrepay: true, annualPrepayTotal: 513 });
   });
 });
+
+// Codex #3120 r4: a refunded term describes no coverage — lockstep with the
+// canonical logic in annual-prepay-renewals.js, which rejects refunded
+// invoices and payments.
+describe('refunded prepay terms', () => {
+  it('is null for a refunded term', async () => {
+    stubTables({ prepayTerm: { id: 't1', status: 'refunded', prepay_amount: '513.00' } });
+    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toBeNull();
+  });
+});

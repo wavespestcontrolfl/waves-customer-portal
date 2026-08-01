@@ -268,19 +268,23 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
     });
     const out = lines(est);
     expect(out).toHaveLength(2);
-    // Per-application prices round to the cent, so a multi-row allocation
-    // lands within rounding residue of the target rather than exactly on it.
-    expect(out.reduce((a, l) => a + annualizedAmount(l), 0)).toBeCloseTo(1188, 1);
+    // The bundle credit explains the gap so the combo is accepted; the rows
+    // keep the prices the invoice charges (codex r4).
+    expect(out.map((l) => l.unitPrice)).toEqual([112, 140]);
   });
 
-  it('allocates a plan-level credit across the rows instead of falling back', () => {
+  // Codex #3120 r4: the accepted first-application amount comes from the
+  // UNSCALED treatment rows and multi-service plans stay pre-credit, so the
+  // credit explains the gap (identifying the cadence) but must NOT be
+  // allocated into the printed per-application price.
+  it('accepts a credit-explained gap but still quotes the price actually charged', () => {
     const est = withBundle({ ...lawnEstimate, annual_total: 486, monthly_total: null }, {
       frequencies: [{ ...lawnFrequency, annual: 486, manualDiscount: { recurringAmount: 54 } }],
     });
     const out = lines(est);
+    expect(out).toHaveLength(1);
     expect(out[0].frequency).toBe('per_application');
-    expect(out[0].unitPrice).toBe(81); // (540 - 54) / 6
-    expect(annualizedAmount(out[0])).toBe(486);
+    expect(out[0].unitPrice).toBe(90); // the charged rate, not (540-54)/6
   });
 
   it('rejects a gap the declared credit does not explain', () => {

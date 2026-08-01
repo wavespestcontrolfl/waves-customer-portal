@@ -223,34 +223,37 @@ function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bun
   if (drafts.length === 0) return null;
 
   // Reconcile against the stored annual total, which is authoritative (accept
-  // stamps it, and it is what the plan bills). A plan-level manual credit is
-  // priced into the cadence total but NOT into the per-service treatment rows
+  // stamps it, and it is what the plan bills) — this picks the right CADENCE,
+  // it does not reprice one. A plan-level manual credit is priced into the
+  // cadence total but NOT into the per-service treatment rows
   // (estimate-public.js treatmentDisplayPrice applies only the tier discount),
-  // so allow exactly that gap and allocate the credit across the rows in
-  // proportion to their share — the converter bills plan annual ÷ visits, so
-  // the allocated figure IS the charge the customer sees.
+  // so a gap of exactly the declared credit still identifies this candidate.
+  //
+  // The rows are then quoted UNSCALED, because that is what the customer is
+  // actually charged: the accepted first-application amount comes from the
+  // unscaled treatment rows and multi-service plans stay pre-credit with no
+  // discount itemization, so allocating the credit into the per-application
+  // prices would print figures the invoice never charges (codex #3120 r4).
+  // Nothing on this document contradicts that — a per-application plan prints
+  // no recurring roll-up for the unscaled rows to disagree with.
   const gross = roundMoney(drafts.reduce((acc, d) => acc + d.annual, 0));
-  let scale = 1;
   if (annualTotal > 0 && Math.abs(gross - annualTotal) > 0.05) {
     const creditAnnual = num(candidate.manualDiscount?.recurringAmount ?? candidate.manualDiscount?.amount)
       || num(bundleCredit);
     if (!(creditAnnual > 0) || Math.abs(gross - creditAnnual - annualTotal) > 0.05 || !(gross > 0)) return null;
-    scale = annualTotal / gross;
   }
 
   return drafts.map((draft) => (draft.visits
     ? normalizeLineItem({
       description: `${draft.name} — ${draft.visits} applications/yr`,
-      // Re-derive from the allocated annual rather than scaling the unit
-      // price, so the line bills exactly plan-annual ÷ visits.
-      unitPrice: roundMoney((draft.annual * scale) / draft.visits),
+      unitPrice: draft.perApplication,
       frequency: 'per_application',
       visitsPerYear: draft.visits,
       taxable: false,
     })
     : normalizeLineItem({
       description: draft.name,
-      unitPrice: roundMoney((draft.annual * scale) / 12),
+      unitPrice: draft.monthly,
       frequency: 'monthly',
       taxable: false,
     })));
