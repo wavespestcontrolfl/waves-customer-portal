@@ -155,45 +155,65 @@ function extractAddressCandidates(text) {
   // here (it collides with the FL state marker; 'floor' spelled out works).
   const UNIT_WORD_RE = /^(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor|#)$/i;
   while (out.length < 3 && (m = re.exec(src)) !== null) {
-    let words = m[2].split(/\s+/);
+    const allWords = m[2].split(/\s+/);
     // Skip obvious non-addresses: "24 hours", "30 minutes", "2 pm", and
     // bare number-pairs ("4 30") — numbered streets carry a suffix ("5th").
-    if (/^(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|am|pm)$/i.test(words[0])) continue;
-    if (/^\d+$/.test(words[0])) continue;
+    if (/^(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|am|pm)$/i.test(allWords[0])) continue;
+    if (/^\d+$/.test(allWords[0])) continue;
     // The street-word run may have swallowed a unit designator ("100 Palm
-    // Ave Apt 6" → words [Palm, Ave, Apt]) — cut the street there and read
-    // the unit id from the source after the designator.
-    const designatorIdx = words.findIndex((w) => UNIT_WORD_RE.test(w));
-    if (designatorIdx > 0) words = words.slice(0, designatorIdx);
+    // Ave Apt 6" → words [Palm, Ave, Apt]) — cut the street at the FIRST
+    // designator AFTER the first word. A street-LEADING designator word is
+    // street TEXT, not a unit: "100 Space Coast Parkway" / "100 Building B
+    // Way" must keep their full street run.
+    const designatorIdx = allWords.findIndex((w, i) => i > 0 && UNIT_WORD_RE.test(w));
+    const words = designatorIdx > 0 ? allWords.slice(0, designatorIdx) : allWords;
     const afterStreet = src.slice(m.index + m[0].length, m.index + m[0].length + 60);
-    // Unit forms: "Apt 6", "Unit B", "#6". The hash form is only trusted
-    // right next to the street run — a "#" further into the prose (ticket
-    // numbers, "order #12") is not this address's unit.
-    const nearStreet = `${m[2]} ${afterStreet.slice(0, 15)}`;
-    const unitM = nearStreet.match(/(?:\b(apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)\.?\s*#?\s*|(#)\s*)([A-Za-z0-9-]{1,8})\b/i);
+    // Unit forms: "Apt 6", "Unit B", "#6", "Lot 6". Two trusted shapes
+    // ONLY: a designator swallowed into the street run (value straddles
+    // into the tail), or a designator/# that STARTS the tail — an
+    // unanchored search over the street words would read "Space Coast" as
+    // a unit. A "#" further into the prose (ticket numbers, "order #12")
+    // is never this address's unit. localitySrc advances past whatever the
+    // unit consumed so the locality anchor still reaches the city/ZIP
+    // ("Apt 6, Venice FL 34285").
+    let unitWordRaw = null;
+    let unitValue = null;
+    let localitySrc = afterStreet;
+    if (designatorIdx > 0) {
+      unitWordRaw = allWords[designatorIdx];
+      const straddle = allWords[designatorIdx + 1];
+      if (straddle && /^[A-Za-z0-9-]{1,8}$/.test(straddle)) {
+        // Value was captured into the street run too ("Unit B") — the tail
+        // (and therefore localitySrc) starts after it already.
+        unitValue = straddle;
+      } else {
+        const vm = afterStreet.match(/^\s*#?\s*([A-Za-z0-9-]{1,8})\b/);
+        if (vm) {
+          unitValue = vm[1];
+          localitySrc = afterStreet.slice(vm[0].length);
+        }
+      }
+    } else {
+      const am = afterStreet.match(/^\s*,?\s*(?:\b(apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)\.?\s*#?\s*|(#)\s*)([A-Za-z0-9-]{1,8})\b/i);
+      if (am) {
+        unitWordRaw = am[1] || null;
+        unitValue = am[3];
+        localitySrc = afterStreet.slice(am[0].length);
+      }
+    }
     // An explicitly-stated unit rides on EVERY variant: sameStreetAddress
     // treats a missing unit as conservatively equal, so a unit-less variant
     // of "Apt 6" would happily ground against the customer in Apt 1. The
     // ORIGINAL designator word is preserved ("Lot 6", not "Apt 6") so the
     // normalizer compares like-for-like; the bare hash form reads as Apt.
-    const unitWord = unitM ? (unitM[1] ? unitM[1][0].toUpperCase() + unitM[1].slice(1).toLowerCase() : 'Apt') : null;
-    const unitSuffix = unitM ? ` ${unitWord} ${unitM[3]}` : '';
+    const unitWord = unitWordRaw ? unitWordRaw[0].toUpperCase() + unitWordRaw.slice(1).toLowerCase() : 'Apt';
+    const unitSuffix = unitValue ? ` ${unitWord} ${unitValue}` : '';
     // Explicit locality after the street run — attached ONLY when anchored
     // AND validated: a comma-led city needs FL/Florida or a ZIP behind it
     // ("…, Bradenton FL" / "…, Venice 34285"), and a bare ZIP counts only
     // when it directly follows the street. Comma prose ("100 Palm Ave,
     // please") and unrelated numbers ("budget of 15000") must not become a
-    // fake locality that rejects the real customer row. A unit expression
-    // between street and locality ("Apt 6, Venice FL 34285") is stripped
-    // first so the anchor still reaches the city/ZIP.
-    let localitySrc = afterStreet;
-    if (designatorIdx > 0) {
-      // Designator was swallowed into the street words; afterStreet starts
-      // with the bare unit VALUE.
-      localitySrc = localitySrc.replace(/^\s*#?\s*[A-Za-z0-9-]{1,8}\b/, '');
-    } else if (unitM) {
-      localitySrc = localitySrc.replace(/^\s*,?\s*(?:(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)\.?|#)\s*#?\s*[A-Za-z0-9-]{1,8}\b/i, '');
-    }
+    // fake locality that rejects the real customer row.
     const locM = localitySrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(\bFL\b|\bFlorida\b)?\s*(\d{5})?\b/i);
     let locality = '';
     if (locM && (locM[2] || locM[3])) {
@@ -368,37 +388,48 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // Split-context threads: the address — or the service being asked about
   // ("Do you do power washing?" … "How much?") — may sit in an earlier text
   // of the same conversation, not the quote-flavored one that triggered
-  // triage. The recent bodies ride back to the caller: recentTexts (full
-  // window) for the classifier prompt, vetoTexts (current burst only) for
-  // the hard scope veto. Customer GROUNDING, however, extracts addresses
-  // from the CURRENT exchange only (trigger + burst) — yesterday's
-  // conversation about customer A's property must not become grounding (or
-  // groundedCustomerId) for today's quote about an unmatched property B.
+  // triage — and Waves' OWN outbound texts carry grounding context too
+  // ("quarterly visit at 100 Palm booked Friday" is exactly what grounds a
+  // coordinator's reply), so the fetch reads BOTH directions. The bodies
+  // ride back to the caller: recentTexts (full window, direction-labeled)
+  // for the classifier prompt, vetoTexts (current burst, INBOUND ONLY —
+  // our own outbound wording like "we don't do power washing" must never
+  // hard-veto the sender's next ask) for the deterministic veto. Customer
+  // GROUNDING extracts addresses from the CURRENT exchange only (trigger +
+  // burst, both directions) — yesterday's conversation about customer A's
+  // property must not become grounding (or groundedCustomerId) for today's
+  // quote about an unmatched property B.
   let recentTexts = [];
   let vetoTexts = [];
+  let burstTexts = [];
   const digits = last10(phone);
   if (digits) {
     try {
       assertTime();
       const priorTexts = await bounded(db('sms_log')
-        .where({ direction: 'inbound' })
-        .whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
+        .where(function threadEitherDirection() {
+          this.whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
+            .orWhereRaw("regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`]);
+        })
         .whereRaw(`created_at >= NOW() - INTERVAL '${THREAD_WINDOW_HOURS} hours'`)
         .orderBy('created_at', 'desc')
         .limit(THREAD_WINDOW_LIMIT))
-        .select('message_body', 'created_at');
-      recentTexts = priorTexts.map((t) => String(t.message_body || '')).filter(Boolean);
+        .select('message_body', 'created_at', 'direction');
+      const isInbound = (t) => String(t.direction || '').toLowerCase() === 'inbound';
+      const body = (t) => String(t.message_body || '');
+      recentTexts = priorTexts
+        .filter((t) => body(t))
+        .map((t) => `[${isInbound(t) ? 'sender' : 'Waves'}] ${body(t)}`);
       const burstFloor = Date.now() - VETO_BURST_MINUTES * 60 * 1000;
-      vetoTexts = priorTexts
-        .filter((t) => t.created_at && new Date(t.created_at).getTime() >= burstFloor)
-        .map((t) => String(t.message_body || ''))
-        .filter(Boolean);
+      const inBurst = (t) => t.created_at && new Date(t.created_at).getTime() >= burstFloor;
+      vetoTexts = priorTexts.filter((t) => isInbound(t) && inBurst(t)).map(body).filter(Boolean);
+      burstTexts = priorTexts.filter(inBurst).map(body).filter(Boolean);
     } catch (err) {
       if (err.deadline) throw err;
       logger.warn(`[estimator-scope] triage thread lookup failed: ${err.message}`);
     }
   }
-  const groundingText = [String(triggerBody || ''), ...vetoTexts].join('\n');
+  const groundingText = [String(triggerBody || ''), ...burstTexts].join('\n');
 
   for (const cand of extractAddressCandidates(groundingText)) {
     const label = `Message thread names address "${cand.num} ${cand.firstWord}…" which matches`;
@@ -581,10 +612,22 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // customers (shared street prefix, sender ≠ addressed customer) stay
   // null — the composer must not guess which one the quote belongs to.
   const distinctIds = new Set(entries.map((e) => e.customer.id));
+  const groundedCustomerId = distinctIds.size === 1 ? entries[0].customer.id : null;
+  // The matched PROPERTY rides along with the customer: the draft context
+  // must price the property the thread is about, not the customer's primary
+  // profile (a secondary-property or Apt-6 match must not inherit Apt 1's
+  // address and measurements). Exactly one address-scoped entry → its full
+  // stamp; sender-only (unscoped) grounding or multiple matched properties
+  // → null (no override, conservative).
+  const scopedEntries = entries.filter((e) => e.scope);
+  const groundedScope = groundedCustomerId && scopedEntries.length === 1
+    ? scopedEntries[0].scope
+    : null;
   return {
     lines,
     matchedExistingCustomer: entries.length > 0,
-    groundedCustomerId: distinctIds.size === 1 ? entries[0].customer.id : null,
+    groundedCustomerId,
+    groundedScope,
     // MORE than one distinct customer (sender's phone matches A while the
     // text names B's property): nobody's identity is safe to attach — the
     // context build downgrades the phone-matched profile to the ambiguous

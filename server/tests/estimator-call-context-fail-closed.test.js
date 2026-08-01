@@ -261,6 +261,75 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
     expect(context.customerGroundedByAddress).toBeUndefined();
     expect(context.isExistingCustomer).toBe(false);
   });
+
+  test('gate ON: a SECONDARY-property scope overrides the profile address and nulls the measurements', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS,
+      groundedCustomerId: 'cust-77',
+      groundedScope: { address: '77 Rental Cove', line2: null, city: 'North Port', zip: '34287', isPrimary: false },
+    });
+    expect(context.customer).toMatchObject({
+      id: 'cust-77',
+      address_line1: '77 Rental Cove',
+      city: 'North Port',
+      zip: '34287',
+      // The profile's measurements describe the PRIMARY parcel — nulled so
+      // the property-facts lookup gathers the quoted property.
+      property_sqft: null,
+      lot_sqft: null,
+    });
+    expect(context.customerGroundedByAddress).toBe(true);
+    expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate ON: a unit-carrying scope attaches the unit and nulls the measurements', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS,
+      groundedCustomerId: 'cust-77',
+      groundedScope: { address: '4021 Coral Bay Loop', line2: 'Apt 6', city: 'Venice', zip: '34285', isPrimary: true },
+    });
+    expect(context.customer).toMatchObject({
+      address_line1: '4021 Coral Bay Loop',
+      address_line2: 'Apt 6',
+      property_sqft: null,
+      lot_sqft: null,
+    });
+  });
+
+  test('gate ON: a primary scope without a unit keeps the profile as-is', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS,
+      groundedCustomerId: 'cust-77',
+      groundedScope: { address: '4021 Coral Bay Loop', line2: null, city: 'Venice', zip: '34285', isPrimary: true },
+    });
+    expect(context.customer).toMatchObject({
+      address_line1: '4021 Coral Bay Loop',
+      property_sqft: 1800,
+      lot_sqft: 8000,
+    });
+    expect(context.customerGroundedByAddress).toBe(true);
+  });
+
+  test('gate OFF: groundedScope is inert too', async () => {
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS,
+      groundedCustomerId: 'cust-77',
+      groundedScope: { address: '77 Rental Cove', line2: null, city: 'North Port', zip: '34287', isPrimary: false },
+    });
+    expect(context.customer).toBeNull();
+    expect(context.customerGroundedByAddress).toBeUndefined();
+  });
 });
 
 describe('buildSmsThreadContext distinct-customer conflict (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {

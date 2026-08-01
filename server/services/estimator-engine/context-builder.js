@@ -443,7 +443,8 @@ async function buildCallContext(callLogId) {
 // the thread history itself cannot be attributed to one profile, and no
 // caller-name extraction exists to disambiguate.
 async function buildSmsThreadContext({
-  phone, triggerAt = new Date(), triggerBody = '', groundedCustomerId = null, groundedConflict = false,
+  phone, triggerAt = new Date(), triggerBody = '',
+  groundedCustomerId = null, groundedConflict = false, groundedScope = null,
 }) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
   // SMS path only: a service-contact sender (spouse/tenant/manager on the
@@ -485,6 +486,29 @@ async function buildSmsThreadContext({
     if (grounded) {
       customer = grounded;
       customerGroundedByAddress = true;
+      // The triage match carries WHICH property the thread is about. When
+      // it is not the primary profile address, or names a unit, keeping
+      // the loaded profile's address would price the WRONG parcel (Apt 6
+      // quoting as Apt 1; the rental quoting as the primary home) — and
+      // the later address-compare treats explicit-unit vs unitless as
+      // conservatively equal, so no re-gather would catch it. Override the
+      // address with the matched property's stamp and NULL the profile
+      // measurements: property_sqft/lot_sqft describe the primary parcel,
+      // and nulling forces the property-facts lookup to gather the quoted
+      // property instead. A primary-scope match without a unit keeps the
+      // profile as-is. Provenance (customerGroundedByAddress) rides along
+      // either way.
+      if (groundedScope && (groundedScope.isPrimary === false || groundedScope.line2)) {
+        customer = {
+          ...grounded,
+          address_line1: groundedScope.address || grounded.address_line1,
+          address_line2: groundedScope.line2 || null,
+          city: groundedScope.city || null,
+          zip: groundedScope.zip || null,
+          property_sqft: null,
+          lot_sqft: null,
+        };
+      }
     }
   }
   // Distinct-customer conflict (gate-on): the sender's phone matches

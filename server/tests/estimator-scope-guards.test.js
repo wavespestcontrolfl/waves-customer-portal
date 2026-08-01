@@ -276,6 +276,18 @@ describe('extractAddressCandidates', () => {
     expect(withLoc.locality).toBe(', Venice 34285');
   });
 
+  test('street-LEADING designator words are street text, never a unit', () => {
+    // The old unanchored unit search read "Space Coast" as "Space" + value.
+    const [space] = extractAddressCandidates('quote for 100 Space Coast Parkway please');
+    expect(space.variants).toEqual(['100 Space', '100 Space Coast', '100 Space Coast Parkway', '100 Space Coast Parkway please']);
+    const [bldg] = extractAddressCandidates('service at 100 Building B Way');
+    expect(bldg.variants).toEqual(['100 Building', '100 Building B', '100 Building B Way']);
+    // …while a REAL trailing unit after such a street still captures.
+    const [withUnit] = extractAddressCandidates('quote for 100 Space Coast Parkway Apt 6');
+    expect(withUnit.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);
+    expect(withUnit.variants).toContain('100 Space Coast Parkway Apt 6');
+  });
+
   test('captures explicit units onto every variant (word and hash forms)', () => {
     const [cand] = extractAddressCandidates('quote for 100 Palm Ave Apt 6 please');
     expect(cand.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);
@@ -476,16 +488,49 @@ describe('loadThreadTriageContext', () => {
     expect(triage.matchedExistingCustomer).toBe(true);
   });
 
-  test('vetoTexts is burst-scoped; recentTexts keeps the full window', async () => {
+  test('vetoTexts is burst-scoped; recentTexts keeps the full window with direction labels', async () => {
     const now = new Date().toISOString();
     const old = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
     mockState.rows.sms_log = [
-      { message_body: 'fresh text', created_at: now },
-      { message_body: 'stale text', created_at: old },
+      { message_body: 'fresh text', created_at: now, direction: 'inbound' },
+      { message_body: 'stale text', created_at: old, direction: 'inbound' },
     ];
     const triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
-    expect(triage.recentTexts).toEqual(['fresh text', 'stale text']);
+    expect(triage.recentTexts).toEqual(['[sender] fresh text', '[sender] stale text']);
     expect(triage.vetoTexts).toEqual(['fresh text']);
+  });
+
+  test('Waves\' own OUTBOUND text grounds the sender\'s reply', async () => {
+    mockState.rows.sms_log = [
+      {
+        message_body: 'Confirmed: quarterly visit at 4021 Coral Bay Loop is booked for Friday',
+        created_at: new Date().toISOString(),
+        direction: 'outbound',
+      },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you add flea treatment to that visit?',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+    expect(triage.lines.join('\n')).toContain('Pat Homeowner');
+    expect(triage.recentTexts[0]).toContain('[Waves]');
+  });
+
+  test('an outbound out-of-scope mention never enters vetoTexts', async () => {
+    mockState.rows.sms_log = [
+      {
+        message_body: 'Sorry, we do not offer power washing.',
+        created_at: new Date().toISOString(),
+        direction: 'outbound',
+      },
+    ];
+    const triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'ok how much then?' });
+    expect(triage.vetoTexts).toEqual([]);
+    expect(triage.recentTexts).toEqual(['[Waves] Sorry, we do not offer power washing.']);
   });
 
   test('a stated locality that disagrees with the row is NOT a match', async () => {
@@ -696,6 +741,39 @@ describe('loadThreadTriageContext', () => {
     triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
     expect(triage.groundedCustomerId).toBeNull();
     expect(triage.groundedConflict).toBe(false);
+  });
+
+  test('groundedScope carries the matched property stamp; sender-only grounding has none', async () => {
+    // Primary-address match → scope with isPrimary true.
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop', city: 'Venice', zip: '34285' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'need a treatment at 4021 Coral Bay Loop',
+    });
+    expect(triage.groundedScope).toMatchObject({ address: '4021 Coral Bay Loop', city: 'Venice', zip: '34285', isPrimary: true });
+
+    // Secondary-property match → scope with isPrimary false.
+    mockState.rows.customers = [];
+    mockState.rows['customer_properties as cp'] = [
+      { id: 'c-3', first_name: 'Multi', last_name: 'Property', address_line1: '77 Rental Cove', city: 'North Port', zip: '34287' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'need service at 77 Rental Cove',
+    });
+    expect(triage.groundedScope).toMatchObject({ address: '77 Rental Cove', city: 'North Port', zip: '34287', isPrimary: false });
+
+    // Sender-phone (unscoped) grounding → no scope to carry.
+    mockState.rows['customer_properties as cp'] = [];
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-1', first_name: 'Taylor', last_name: 'Sample', active: true, pipeline_stage: 'active_customer' },
+      ambiguous: false,
+    });
+    triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
+    expect(triage.groundedCustomerId).toBe('c-1');
+    expect(triage.groundedScope).toBeNull();
   });
 
   test('fails open to null on query errors', async () => {

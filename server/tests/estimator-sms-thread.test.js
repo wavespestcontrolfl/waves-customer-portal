@@ -334,7 +334,7 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     });
     await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much for that treatment?' });
     const prompt = mockDispatch.mock.calls[0][1].text;
-    expect(prompt).toContain('RECENT TEXTS FROM THIS NUMBER');
+    expect(prompt).toContain('RECENT TEXTS IN THIS THREAD');
     expect(prompt).toContain('spiders yesterday');
   });
 
@@ -380,6 +380,54 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
+  test('mixed-vocabulary clarify resume: the grounded classifier veto still fires', async () => {
+    // "power wash my yard" — OUT matches but 'yard' defeats the
+    // deterministic veto; the resume must still be scope-checked.
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: false, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'power wash my yard',
+      skipIntentGate: true,
+      skipCooldown: true,
+    });
+    expect(result.skipped).toBe('no_quote_intent_ai_out_of_scope');
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+  });
+
+  test('classifier trouble on a resume fails OPEN (quote already owed)', async () => {
+    // Asymmetry vs the primary path is deliberate: there, ai_failed is
+    // fail-closed; on a resume the intent is established, so the draft
+    // proceeds.
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    mockDispatch.mockRejectedValueOnce(new Error('llm down'));
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'the back lanai please',
+      skipIntentGate: true,
+      skipCooldown: true,
+    });
+    expect(result.started).toBe(true);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate off: resumes never consult the classifier (byte-identical)', async () => {
+    mockScopeGuardsEnabled.mockReturnValue(false);
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'power wash my yard',
+      skipIntentGate: true,
+      skipCooldown: true,
+    });
+    expect(result.started).toBe(true);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
   test('gate off never consults the guards (dark ship)', async () => {
     mockScopeGuardsEnabled.mockReturnValue(false);
     await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
@@ -394,6 +442,7 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
       lines: ['Message thread names address "4021 Coral…" which matches: existing active customer Pat Homeowner'],
       matchedExistingCustomer: true,
       groundedCustomerId: 'cust-77',
+      groundedScope: { address: '77 Rental Cove', line2: null, city: 'North Port', zip: '34287', isPrimary: false },
     });
     mockDispatch.mockResolvedValueOnce({
       ok: true,
@@ -407,6 +456,7 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
       groundedCustomerId: 'cust-77',
       groundedConflict: false,
+      groundedScope: expect.objectContaining({ address: '77 Rental Cove', isPrimary: false }),
     }));
   });
 
@@ -439,6 +489,7 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
       groundedCustomerId: null,
       groundedConflict: false,
+      groundedScope: null,
     }));
   });
 });

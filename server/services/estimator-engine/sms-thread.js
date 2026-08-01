@@ -67,9 +67,13 @@ const QUOTE_HINT_RE = new RegExp(
  * actually knows (offered services, sender/address→customer matches,
  * booked visits) instead of judging the message text alone.
  */
-async function threadQuoteSignal(body, triage = null) {
+async function threadQuoteSignal(body, triage = null, { hintGate = true } = {}) {
   const text = String(body || '').trim();
-  if (!text || !QUOTE_HINT_RE.test(text)) return { quoteRequest: false, method: 'regex' };
+  if (!text) return { quoteRequest: false, method: 'regex' };
+  // hintGate=false (clarify-resume scope check): resume replies answer a
+  // question ("power wash my yard") and rarely carry quote vocabulary, so
+  // the cheap prefilter would hide them from the grounded scope vetoes.
+  if (hintGate && !QUOTE_HINT_RE.test(text)) return { quoteRequest: false, method: 'regex' };
   try {
     const grounded = !!triage;
     const contextBlock = grounded && triage.lines.length
@@ -78,7 +82,7 @@ async function threadQuoteSignal(body, triage = null) {
     // The service being asked about may live in an earlier text ("Do you do
     // power washing?" … "How much?") — judge the message in its thread.
     const threadBlock = grounded && (triage.recentTexts || []).length
-      ? `\nRECENT TEXTS FROM THIS NUMBER (newest first):\n${triage.recentTexts.slice(0, 5).map((t) => `- ${JSON.stringify(t.slice(0, 200))}`).join('\n')}\n`
+      ? `\nRECENT TEXTS IN THIS THREAD (newest first; [sender] = their texts, [Waves] = our replies):\n${triage.recentTexts.slice(0, 5).map((t) => `- ${JSON.stringify(t.slice(0, 200))}`).join('\n')}\n`
       : '';
     const prompt = grounded
       ? `An SMS arrived at Waves Pest Control (pest control + lawn care company).
@@ -165,13 +169,16 @@ function smsOrigin(threadKey) {
 // grounding matched by address/sender when it matched exactly one — rides
 // into the context build so an off-file coordinator's quote links the
 // estimate to the customer it is provably about.
-async function runThreadDraft({ phone, digits, triggerBody, origin, dryRun, groundedCustomerId = null, groundedConflict = false }) {
+async function runThreadDraft({
+  phone, digits, triggerBody, origin, dryRun,
+  groundedCustomerId = null, groundedConflict = false, groundedScope = null,
+}) {
   const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
     const { buildSmsThreadContext } = require('./context-builder');
     const { runDraftPipeline, notify } = require('./index');
     const context = await buildSmsThreadContext({
-      phone, triggerBody, groundedCustomerId, groundedConflict,
+      phone, triggerBody, groundedCustomerId, groundedConflict, groundedScope,
     });
     if (context.error) {
       result.lane = 'red';
@@ -284,6 +291,23 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
         result.skipped = `no_quote_intent_${signal.method}`;
         return result;
       }
+    } else if (guarded && triage) {
+      // Clarify resumes established quote intent earlier, but the reply
+      // itself can name out-of-scope work in MIXED vocabulary ("power wash
+      // my yard") that defeats the deterministic veto above ('yard' is
+      // in-scope). Run the grounded classifier anyway and honor ONLY its
+      // explicit scope vetoes. The fail direction here is deliberately
+      // OPEN — the primary path fails CLOSED on classifier trouble because
+      // a false positive mints an unretractable owed-quote bell, but on a
+      // resume the quote is ALREADY owed, so ai_failed / malformed /
+      // low-confidence outcomes proceed instead of silently dropping an
+      // established request. hintGate off: resume replies rarely carry
+      // quote vocabulary, and the prefilter would hide them from the veto.
+      const signal = await threadQuoteSignal(triggerBody, triage, { hintGate: false });
+      if (signal.method === 'ai_out_of_scope' || signal.method === 'ai_existing_job') {
+        result.skipped = `no_quote_intent_${signal.method}`;
+        return result;
+      }
     }
     const origin = smsOrigin(`sms:${digits}`);
     if (!dryRun) {
@@ -319,6 +343,7 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       // build is byte-identical to today.
       groundedCustomerId: triage?.groundedCustomerId || null,
       groundedConflict: triage?.groundedConflict === true,
+      groundedScope: triage?.groundedScope || null,
     })
       .catch((err) => {
         logger.error(`[estimator-sms] detached draft failed: ${err.message}`);
