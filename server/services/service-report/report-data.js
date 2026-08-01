@@ -2223,6 +2223,25 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         if (treatmentGuard.contradictsAppliedTreatment(lawnAssessment.aiSummary, appliedClasses)) {
           lawnAssessment.aiSummary = NEUTRAL_SUMMARY;
         }
+        // Legacy snapshot + recommendation cards feed the public report
+        // assistant (/api/reports/:token/ask) directly — reconcile those
+        // customer-facing shapes too (codex P1 r23).
+        const contradicts = (text) => treatmentGuard.contradictsAppliedTreatment(text, appliedClasses);
+        const snap = lawnAssessment.snapshot;
+        if (snap && typeof snap === 'object') {
+          if (contradicts(snap.summary)) snap.summary = NEUTRAL_SUMMARY;
+          if (Array.isArray(snap.findings)) {
+            snap.findings = snap.findings.filter((f) => !contradicts(`${f?.customerCopy || ''} ${f?.title || ''}`));
+          }
+          if (Array.isArray(snap.nextWatchItems)) {
+            snap.nextWatchItems = snap.nextWatchItems.filter((item) => !contradicts(item));
+          }
+        }
+        if (Array.isArray(lawnAssessment.recommendationCards)) {
+          lawnAssessment.recommendationCards = lawnAssessment.recommendationCards.filter(
+            (card) => !contradicts(`${card?.title || ''} ${card?.customerCopy || ''} ${card?.reason || ''}`),
+          );
+        }
       }
     } catch (guardErr) {
       console.warn(`[report-data] render-time treatment reconciliation skipped: ${guardErr.message}`);

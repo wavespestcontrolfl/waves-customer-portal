@@ -178,7 +178,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
   }
 }
 
-async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } = {}) {
+// forceFresh: skip the stored-object lookup and render anew — held email
+// deliveries must attach a render produced AFTER final copy settled, and no
+// fence can cover every render path (the public report route renders
+// synchronously without a job row — codex P1 #3093 r23).
+async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, forceFresh = false } = {}) {
   // technician_notes + service_data ride along for the summary-copy key
   // component, service_type/service_line for the mosquito-V2 component —
   // the expected key must match what renderAndStore writes.
@@ -192,7 +196,7 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } =
       visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex),
     })
     : null;
-  const stored = service?.pdf_storage_key === expectedPdfStorageKey
+  const stored = (!forceFresh && service?.pdf_storage_key === expectedPdfStorageKey)
     ? await getHealthyStoredReportPdf(service.pdf_storage_key)
     : null;
   if (stored) return { pdf: stored, key: service.pdf_storage_key, rendered: false };

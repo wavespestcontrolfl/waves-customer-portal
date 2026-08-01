@@ -186,6 +186,11 @@ const TREATMENT_CLASSES = {
   // Report-visible soil products (codex P1 r20): CarbonPro-L class rows
   // persist soil_amendment/biostimulant categories; Hydretain-class rows
   // persist adjuvant/wetting-agent categories.
+  // Primo Maxx-class rows persist product_category 'pgr' (codex P1 r23).
+  pgr: {
+    category: /\bpgr\b|growth[\s_-]?regulator/i,
+    terms: '\\bpgr\\b|(?:plant\\s+)?growth\\s+regulator\\w*|growth\\s+regulation',
+  },
   soil_amendment: {
     category: /soil[\s_-]?amendment|biostimulant|humic/i,
     terms: 'biostimulant\\w*|soil\\s+amendment\\w*|humic\\s+(?:acid|application)|carbon\\s+(?:application|treatment)',

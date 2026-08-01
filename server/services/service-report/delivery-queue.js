@@ -245,48 +245,20 @@ async function processServiceReportDelivery(delivery, knex = db) {
       const status = await markDeliveryFailed(delivery, new Error(`grounding readiness unverified: ${sanitized.error}`), knex);
       return { status, error: sanitized.error };
     }
-    // A held delivery means copy was UNSETTLED when the PDF first rendered —
-    // and a no-op sanitize on THIS pass proves nothing about that earlier
-    // render (the late grounded write or a prior worker pass may have
-    // already corrected the copy, making today's sanitize a no-op — codex
-    // P1 r20). So for held deliveries, unconditionally: fence on any
-    // in-flight render (defer via backoff; a QUEUED job is safe — it reads
-    // settled data), then clear pdf_storage_key so the email always
-    // attaches a render produced from the settled copy.
-    // A lookup ERROR is not "no active render" — proceeding would let an
-    // unfenced renderer write its stale key after our invalidation (codex
-    // P1 r22). Retryable delivery failure on either outcome.
-    let activeRender;
-    try {
-      activeRender = await knex('service_report_pdf_jobs')
-        .where({ service_record_id: delivery.service_record_id, status: 'rendering' })
-        .first('id');
-    } catch (fenceErr) {
-      const status = await markDeliveryFailed(delivery, new Error(`render-fence lookup failed: ${fenceErr.message}`), knex);
-      return { status, error: fenceErr.message };
-    }
-    if (activeRender) {
-      const status = await markDeliveryFailed(delivery, new Error('deferred: PDF render in flight while finalizing held delivery'), knex);
-      return { status, error: 'pdf render in flight' };
-    }
-    try {
-      await knex('service_records')
-        .where({ id: delivery.service_record_id })
-        .update({ pdf_storage_key: null });
-    } catch (invalidateErr) {
-      // Invalidation failed → the stale key would be accepted by
-      // getOrRenderServiceReportPdf and the pre-grounding PDF emailed.
-      // Retryable delivery failure instead of sending (codex P1 r21).
-      const status = await markDeliveryFailed(delivery, new Error(`pdf invalidation failed: ${invalidateErr.message}`), knex);
-      return { status, error: invalidateErr.message };
-    }
   }
 
   try {
+    // Held deliveries FORCE a fresh render at send time: copy was unsettled
+    // when the first PDF rendered, and no fence can cover every render path
+    // — the public report route renders synchronously without a job row and
+    // could write a pre-finalization key after any invalidation (codex P1
+    // r20/r22/r23). forceFreshPdf skips the stored-object lookup entirely,
+    // so the attachment is always produced from the just-sanitized copy.
     const result = await sendServiceReportV1Email(delivery.service_record_id, {
       token: delivery.report_token,
       reportUrl: delivery.report_url,
       pdfUrl: delivery.pdf_url,
+      forceFreshPdf: !!(heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id),
     });
     if (result.ok) {
       await markDeliverySent(delivery, result, knex);

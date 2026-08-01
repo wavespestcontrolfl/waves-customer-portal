@@ -94,9 +94,14 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       whatWeSaw: waterCat.customerExplanation || 'Today’s photos showed a mixed moisture read across the lawn.',
       whyItMatters: 'Keeping moisture balanced protects the lawn from both fungus pressure and dry stress.',
       wavesAction: 'Flagged it for a recheck at the next visit.',
+      // "Keep your current watering schedule" requires a schedule ON FILE —
+      // for profiles without one it invented guidance and contradicted the
+      // add-your-schedule CTA (codex P2 r23).
       customerAction: damp
         ? 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.'
-        : 'Keep your current watering schedule unless we flag a change.',
+        : (water && water.scheduleOnFile
+          ? 'Keep your current watering schedule unless we flag a change.'
+          : 'We’ll keep watching moisture balance at upcoming visits.'),
       nextVisitPlan: 'Recheck the moisture balance next visit.',
     });
   }

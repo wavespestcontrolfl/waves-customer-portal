@@ -161,6 +161,13 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(parsed.recommendations).toHaveLength(2);
   });
 
+  test('PGR deferrals are caught (r23)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Hold off on the plant growth regulator until growth slows.', reason: 'x', timeframe: 'y' }],
+    }, [{ product_name: 'Primo Maxx', product_category: 'pgr' }]);
+    expect(dropped).toBe(1);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

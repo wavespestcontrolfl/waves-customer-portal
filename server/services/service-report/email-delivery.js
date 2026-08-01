@@ -410,7 +410,7 @@ async function loadServiceRecord(recordId) {
     .first();
 }
 
-async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } = {}) {
+async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, forceFreshPdf = false } = {}) {
   if (!sendgrid.isConfigured()) {
     return { ok: false, error: 'SendGrid not configured' };
   }
@@ -445,7 +445,7 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
 
   let pdf = null;
   try {
-    const result = await getOrRenderServiceReportPdf(recordId, { token: reportToken });
+    const result = await getOrRenderServiceReportPdf(recordId, { token: reportToken, forceFresh: forceFreshPdf });
     pdf = result.pdf;
     if (result.storageFailed) {
       await enqueuePdfRenderRetry({
