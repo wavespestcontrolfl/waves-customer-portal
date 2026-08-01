@@ -2419,6 +2419,15 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     }
   });
 
+  test('a label wrapped across a line is still repaired (r4)', () => {
+    const r = repairInventedInternalRoutes('See [long\nanchor](/pest-control/) here.');
+    expect(r.body).toContain('(/pest-control-services/)');
+    expect(r.body).toContain('[long\nanchor]');
+    // A BLANK line ends the paragraph — that is not one link.
+    const blank = 'See [broken\n\nanchor](/pest-control/) here.';
+    expect(repairInventedInternalRoutes(blank).body).toBe(blank);
+  });
+
   test('the repair never erases external-link evidence (r3 P0)', () => {
     // Unlinking would destroy the embedded URL and with it the P0 the gate
     // raises — the repair runs BEFORE evaluate().

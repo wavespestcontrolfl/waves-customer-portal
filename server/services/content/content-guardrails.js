@@ -1471,7 +1471,12 @@ const INVENTED_ROUTE_ALIASES = Object.freeze({
 // already matches that way — without it "HTTPS://…" skipped the repair and
 // was then parked by evaluate(), the divergence this repair exists to close
 // (pre-push Codex r3).
-const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\])*)\]\(\s*(<?)\s*((?:\/(?!\/)|https?:\/\/)[^)\s>]*)\s*(>?)\s*("[^"]*"|'[^']*'|\([^)]*\))?\s*\)/gi;
+// A label may wrap across a line — `[long\nanchor](/pest-control/)` is a
+// valid inline link, and excluding \n outright made the repair skip it while
+// the gate's collector still found the destination and parked the draft
+// (Codex r4). A SOFT break is allowed; a blank line ends the paragraph and is
+// still rejected, via `\n(?![ \t]*\n)`.
+const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\]|\n(?![ \t]*\n))*)\]\(\s*(<?)\s*((?:\/(?!\/)|https?:\/\/)[^)\s>]*)\s*(>?)\s*("[^"]*"|'[^']*'|\([^)]*\))?\s*\)/gi;
 
 /**
  * repairInventedInternalRoutes(body, allowedInternalLinks, options)

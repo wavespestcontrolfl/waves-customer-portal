@@ -662,7 +662,20 @@ class AutonomousRunner {
       if (routeRepair.repairs.length) {
         draft.body = routeRepair.body;
         run.internal_route_repairs = routeRepair.repairs;
-        logger.warn(`[autonomous-runner] repaired ${routeRepair.repairs.length} invented internal route(s): ${routeRepair.repairs.map((r) => (r.to ? `${r.from}→${r.to}` : `${r.from}→unlinked`)).join(', ')}`);
+        // ALIASED pairs are safe to name — both sides are constants from
+        // INVENTED_ROUTE_ALIASES. An UNLINKED `from` is an arbitrary path the
+        // writer invented, which can carry leaked PII
+        // ("/customers/<email>/"), so only its COUNT is logged: these lines
+        // land in plain-text Railway logs, and unlinking removes the string
+        // from the draft, so the log would outlive the content it came from
+        // (Codex r4; AGENTS.md never-log-customer-PII rule).
+        const aliased = routeRepair.repairs.filter((r) => r.to);
+        const unlinked = routeRepair.repairs.length - aliased.length;
+        const parts = [
+          aliased.length ? `aliased ${aliased.map((r) => `${r.from}→${r.to}`).join(', ')}` : null,
+          unlinked ? `unlinked ${unlinked} (paths withheld)` : null,
+        ].filter(Boolean).join('; ');
+        logger.warn(`[autonomous-runner] repaired ${routeRepair.repairs.length} invented internal route(s): ${parts}`);
       }
       const guardResult = contentGuardrails.evaluate(draft, guardOptions);
       if (!guardResult.pass) {
