@@ -198,9 +198,13 @@ describe('llm-dispatch-metrics', () => {
 
     it('flags a previously busy policy that went silent, but not quiet ones', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
-      const out = detectExceptions([], [
+      // Yesterday must show SOME traffic: one policy going quiet is only
+      // meaningful if the recorder itself is provably alive. A wholly empty
+      // day is the not_recording case instead.
+      const out = detectExceptions([{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }], [
         { policy: 'contentDraft', total: SILENT_MIN_WEEKLY },
         { policy: 'rarePolicy', total: SILENT_MIN_WEEKLY - 1 },
+        { policy: 'report', total: 200 },
       ]);
       expect(out).toHaveLength(1);
       expect(out[0]).toMatchObject({ policy: 'contentDraft', kind: 'gone_silent' });
@@ -208,11 +212,14 @@ describe('llm-dispatch-metrics', () => {
 
     it('never flags episodic lanes (:sealed/:backfill/:replay) as gone silent — they burst then quiet by design', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
-      const out = detectExceptions([], [
+      // Live traffic present, so the recorder is provably alive and the
+      // per-policy silence checks apply.
+      const out = detectExceptions([{ policy: 'report', total: 30, fallbacks: 0, failed: 0 }], [
         { policy: 'smsShadow:openai:sealed', total: SILENT_MIN_WEEKLY * 2 },
         { policy: 'smsShadow:anthropic:backfill', total: SILENT_MIN_WEEKLY * 2 },
         { policy: 'callExtraction:replay', total: SILENT_MIN_WEEKLY * 2 },
         { policy: 'smsShadow:openai', total: SILENT_MIN_WEEKLY * 2 },
+        { policy: 'report', total: 200 },
       ]);
       // Only the LIVE lane fires; episodic twins with identical volume do not.
       expect(out).toHaveLength(1);
@@ -226,6 +233,35 @@ describe('llm-dispatch-metrics', () => {
         []
       );
       expect(out.map((e) => e.kind).sort()).toEqual(['all_providers_failed', 'fallback_rate']);
+    });
+
+    it('reports a zero-row day as not_recording — silence must not read as healthy', () => {
+      const { detectExceptions } = load();
+      const out = detectExceptions([], [{ policy: 'report', total: 200 }]);
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ kind: 'not_recording' });
+      expect(out[0].detail).toMatch(/RECORDER is the likely fault/);
+    });
+
+    it('distinguishes a never-recorded table from a recorder that stopped', () => {
+      const { detectExceptions } = load();
+      const out = detectExceptions([], []);
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ kind: 'not_recording' });
+      expect(out[0].detail).toMatch(/only just enabled/);
+    });
+
+    it('reports the zero-row root cause ALONE, not one gone-silent per policy', () => {
+      const { detectExceptions, SILENT_MIN_WEEKLY } = load();
+      const out = detectExceptions([], [
+        { policy: 'report', total: SILENT_MIN_WEEKLY * 3 },
+        { policy: 'customerCopy', total: SILENT_MIN_WEEKLY * 3 },
+        { policy: 'contentDraft', total: SILENT_MIN_WEEKLY * 3 },
+      ]);
+      // Without the early return these three would each fire gone_silent —
+      // three duplicate symptoms of one root cause.
+      expect(out).toHaveLength(1);
+      expect(out[0].kind).toBe('not_recording');
     });
 
     it('returns nothing on a green day', () => {

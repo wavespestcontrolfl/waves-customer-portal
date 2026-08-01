@@ -11,6 +11,11 @@
  * llm_dispatch_log, and a daily cron emails ONLY exceptions to the company
  * inbox. Green days send nothing (hands-off + exception-based).
  *
+ * Silence is load-bearing here, so the digest also checks its OWN recording
+ * health: a day with zero rows is reported as an exception rather than read
+ * as "nothing wrong". Without that, a dead write path (insert failures are
+ * swallowed at debug level by design) would look exactly like a healthy day.
+ *
  * Dark until GATE_LLM_DISPATCH_METRICS=true. Kill switch: unset — recording
  * and the digest both no-op instantly; existing rows just age out.
  */
@@ -132,6 +137,30 @@ function etDayWindow(daysAgo) {
  */
 function detectExceptions(yesterdayStats, priorWeekStats) {
   const exceptions = [];
+
+  // Recording health FIRST — without it, "no email" is ambiguous between
+  // "nothing was wrong" and "nothing was recorded at all". recordDispatch
+  // swallows insert failures at debug level (deliberate: metrics must never
+  // cascade into the LLM call it observes), so a dead write path is otherwise
+  // invisible, and an empty table trivially yields zero exceptions. This
+  // portal runs AI work on daily crons alone, so a full ET day with zero
+  // dispatches means the recorder broke, not that the business went quiet.
+  const yesterdayTotal = yesterdayStats.reduce((n, s) => n + s.total, 0);
+  const priorWeekTotal = priorWeekStats.reduce((n, s) => n + s.total, 0);
+  if (yesterdayTotal === 0) {
+    exceptions.push({
+      policy: '(all policies)',
+      kind: 'not_recording',
+      detail: priorWeekTotal > 0
+        ? `ZERO dispatches recorded yesterday after ${priorWeekTotal} over the prior week — the RECORDER is the likely fault, not the providers. Until this clears, a silent digest cannot be read as "healthy".`
+        : 'ZERO dispatches recorded yesterday and none in the prior week — either the recorder is broken or GATE_LLM_DISPATCH_METRICS was only just enabled.',
+    });
+    // Every per-policy gone-silent finding would be a duplicate symptom of
+    // this one root cause, and no fallback/failure rows can exist with an
+    // empty day. Report the cause alone.
+    return exceptions;
+  }
+
   for (const s of yesterdayStats) {
     if (s.failed > 0) {
       exceptions.push({
@@ -214,8 +243,8 @@ async function runLlmDispatchDigest() {
     const sent = await email.send({
       to: DIGEST_TO,
       subject: `LLM dispatch exceptions — ${day}`,
-      heading: 'AI provider exceptions',
-      body: `The AI dispatcher hit ${exceptions.length === 1 ? 'an exception' : `${exceptions.length} exceptions`} yesterday (${day}):<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is not reported — this email only sends when something degraded.`,
+      heading: 'AI dispatch exceptions',
+      body: `${exceptions.length === 1 ? 'One exception' : `${exceptions.length} exceptions`} on ${day}:<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is never reported — this email only sends when something degraded, or when nothing was recorded at all.`,
     });
     if (!sent.ok) sendError = sent.error || 'unknown email error';
   }
