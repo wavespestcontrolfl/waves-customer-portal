@@ -208,9 +208,32 @@ async function createTrackedShortLink(longUrl, opts = {}) {
   }
 }
 
+/**
+ * The earliest existing code for an entity, as a ready short URL — or null.
+ * For deterministic destinations (the appointment page is one URL per
+ * visit token), reusing the first minted code makes minting idempotent per
+ * entity: an eagerly rendered body whose send leg never runs costs at most
+ * ONE row that every later message about the entity reuses, instead of a
+ * new orphan per render.
+ */
+async function existingShortUrlFor({ kind, entityType, entityId }) {
+  if (!kind || !entityType || !entityId) return null;
+  try {
+    const row = await db('short_codes')
+      .where({ kind, entity_type: entityType, entity_id: String(entityId) })
+      .orderBy('created_at', 'asc')
+      .first('code');
+    return row?.code ? `${baseUrl()}/l/${row.code}` : null;
+  } catch (err) {
+    logger.warn(`[short-url] existing-code lookup failed for ${kind}/${entityId}: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   createShortCode,
   createTrackedShortLink,
+  existingShortUrlFor,
   resolveShortCode,
   shortenOrPassthrough,
   invoiceShortCodePrefix,

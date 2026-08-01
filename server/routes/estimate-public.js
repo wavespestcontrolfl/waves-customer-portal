@@ -9834,21 +9834,49 @@ router.put('/:token/accept', async (req, res, next) => {
             const reschedule = confirmedAppointmentRow?.id
               ? await buildRescheduleLink(confirmedAppointmentRow.id, { customerId: customerId || null })
               : { url: null, line: '' };
-            const customerBody = await renderTemplate(
-              'appointment_confirmation',
-              {
-                first_name: firstName,
-                service_type: confirmedServiceLabel,
-                date: serviceDate,
-                time: timeWindow,
-                reschedule_line: reschedule.line,
-              },
-              undefined,
-              { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: confirmedAppointmentRow?.id || estimate.id },
-            );
-            if (!customerBody) {
-              logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
-            }
+            // The v2 render (and its appointment-page link mint) lives
+            // INSIDE the SMS closure below: an email-preferring customer
+            // whose email succeeds never runs the SMS leg, and an eager
+            // build would insert a never-expiring short code no message
+            // carries (codex r4). renderCustomerConfirmationBody is invoked
+            // by the closure at most once.
+            const renderCustomerConfirmationBody = async () => {
+              const { renderAppointmentPageTemplate } = require('../services/appointment-reminders');
+              return renderAppointmentPageTemplate(
+                'appointment_confirmation',
+                async () => {
+                  const { buildAppointmentLink } = require('../services/appointment-link');
+                  const apptLink = confirmedAppointmentRow?.id
+                    ? await buildAppointmentLink(confirmedAppointmentRow.id, { customerId: customerId || null })
+                    : { url: null, line: '' };
+                  // v2 quotes the window through the shared resolver so this
+                  // sender, the reminder sender and the call pipeline agree.
+                  // This path already holds the row, so pass window_start
+                  // straight in rather than re-reading it.
+                  const { confirmationArrivalWindow } = require('../services/appointment-reminders');
+                  const window = await confirmationArrivalWindow({
+                    windowStart: confirmedAppointmentRow?.window_start || null,
+                    scheduledServiceId: confirmedAppointmentRow?.id || null,
+                  });
+                  return {
+                    first_name: firstName,
+                    service_type: confirmedServiceLabel,
+                    date: serviceDate,
+                    time: timeWindow,
+                    window,
+                    appointment_line: apptLink.line,
+                  };
+                },
+                {
+                  first_name: firstName,
+                  service_type: confirmedServiceLabel,
+                  date: serviceDate,
+                  time: timeWindow,
+                  reschedule_line: reschedule.line,
+                },
+                { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: confirmedAppointmentRow?.id || estimate.id },
+              );
+            };
             // Honor the customer's account-level New Appointment Confirmation
             // channel (sms | email | both). Default 'sms' keeps the exact prior
             // send; a lead with no customerId resolves to 'sms' as well.
@@ -9857,7 +9885,11 @@ router.put('/:token/accept', async (req, res, next) => {
               scheduledServiceId: confirmedAppointmentRow?.id,
               serviceLabel: confirmedServiceLabel,
               smsAttempt: async () => {
-                if (!customerBody) return false;
+                const customerBody = await renderCustomerConfirmationBody();
+                if (!customerBody) {
+                  logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
+                  return false;
+                }
                 const sendResult = await sendCustomerMessage({
                   to: estimate.customer_phone,
                   body: customerBody,

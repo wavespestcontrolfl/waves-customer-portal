@@ -8,6 +8,7 @@ const {
   isSecureCardPath,
   isPriceChangeNoticePath,
   isContractPath,
+  isAppointmentPath,
 } = require('../utils/sensitive-spa-headers');
 
 const VALID_TOKEN = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -183,5 +184,25 @@ describe('contract signing shell (/contract/<token>)', () => {
     expect(isContractPath('/contract/')).toBe(false);
     expect(isContractPath(`/contracts/${CONTRACT_TOKEN}`)).toBe(false);
     expect(isContractPath(`/api/contracts/${CONTRACT_TOKEN}`)).toBe(false);
+  });
+
+  test('the appointment shell is noindex + no-referrer — its token can CONFIRM the visit', () => {
+    const APPT_TOKEN = 'a'.repeat(64);
+    expect(isAppointmentPath(`/appointment/${APPT_TOKEN}`)).toBe(true);
+    expect(isAppointmentPath(`/appointment/${APPT_TOKEN}/`)).toBe(true);
+    // Matches appointment-public.js TOKEN_RE exactly: 64 lowercase hex.
+    expect(isAppointmentPath(`/appointment/${'a'.repeat(63)}`)).toBe(false);
+    expect(isAppointmentPath(`/appointment/${'a'.repeat(65)}`)).toBe(false);
+    expect(isAppointmentPath(`/appointment/${'A'.repeat(64)}`)).toBe(false);
+    expect(isAppointmentPath(`/appointment/${'g'.repeat(64)}`)).toBe(false);
+    expect(isAppointmentPath('/appointment/')).toBe(false);
+    expect(isAppointmentPath(`/appointments/${APPT_TOKEN}`)).toBe(false);
+    expect(isAppointmentPath(`/api/public/appointment/${APPT_TOKEN}`)).toBe(false);
+
+    const res = mockResponse();
+    applySensitiveSpaHeaders(`/appointment/${APPT_TOKEN}`, res);
+    expect(res.set).toHaveBeenCalledWith('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    expect(res.set).toHaveBeenCalledWith('Referrer-Policy', 'no-referrer');
+    expect(res.set).toHaveBeenCalledWith('Cache-Control', 'no-store');
   });
 });
