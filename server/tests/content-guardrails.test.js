@@ -2342,6 +2342,23 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(repairInventedInternalRoutes('[x](/termite-inspections/)').body).toContain('/termite-inspection/');
   });
 
+  test('nested/escaped bracket labels are repaired, not parked (r3)', () => {
+    const nested = repairInventedInternalRoutes('See [nested [label]](/pest-control/) here.');
+    expect(nested.body).toContain('(/pest-control-services/)');
+    expect(nested.body).toContain('[nested [label]]');
+    const escaped = repairInventedInternalRoutes('See [a \\] b](/pest-control/) here.');
+    expect(escaped.body).toContain('(/pest-control-services/)');
+  });
+
+  test('an absolute hub link stays absolute when aliased (r3: spoke contract)', () => {
+    // A relative path would resolve to the SPOKE's own domain.
+    const r = repairInventedInternalRoutes('[services](https://www.wavespestcontrol.com/pest-control/)');
+    expect(r.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
+    expect(r.repairs[0]).toMatchObject({ from: '/pest-control/', to: '/pest-control-services/', action: 'aliased' });
+    // Relative destinations stay relative.
+    expect(repairInventedInternalRoutes('[services](/pest-control/)').body).toBe('[services](/pest-control-services/)');
+  });
+
   test('every alias target is a real allowlisted route (module-load contract)', () => {
     const r = repairInventedInternalRoutes('[x](/get-a-quote/) [y](/faq/) [z](/waveguard/)');
     expect(r.repairs.length).toBe(3);

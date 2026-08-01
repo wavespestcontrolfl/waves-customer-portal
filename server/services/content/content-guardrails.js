@@ -1441,7 +1441,13 @@ const INVENTED_ROUTE_ALIASES = Object.freeze({
 //     here would erase the evidence for the P0 DISALLOWED_EXTERNAL_LINK that
 //     exists to surface injected spam/backlinks, so it must reach the gate
 //     untouched. `\/(?!\/)` enforces this.
-const MD_INTERNAL_LINK_RE = /(!)?\[([^\]\n]*)\]\(\s*(<?)\s*((?:\/(?!\/)|https?:\/\/)[^)\s>]*)\s*(>?)\s*("[^"]*"|'[^']*'|\([^)]*\))?\s*\)/g;
+// The LABEL tolerates one level of nested brackets and backslash escapes —
+// `[nested [label]](/pest-control/)` is valid Markdown that the old
+// first-`]` match skipped, so the gate still saw the route and parked the
+// draft, which is the exact outcome this repair exists to prevent (Codex r3).
+// Each alternation branch consumes ≥1 char and they are disjoint on their
+// first character, so there is no backtracking ambiguity.
+const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\])*)\]\(\s*(<?)\s*((?:\/(?!\/)|https?:\/\/)[^)\s>]*)\s*(>?)\s*("[^"]*"|'[^']*'|\([^)]*\))?\s*\)/g;
 
 /**
  * repairInventedInternalRoutes(body, allowedInternalLinks, options)
@@ -1508,7 +1514,17 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     if (alias) {
       repairs.push({ from: norm, to: alias, action: 'aliased' });
       const titlePart = title ? ` ${title}` : '';
-      return `[${anchorText}](${open}${alias}${close}${titlePart})`;
+      // An ABSOLUTE hub link must stay absolute. On a spoke site a relative
+      // path resolves to the SPOKE's own domain, so dropping the origin sends
+      // readers to a page that does not exist there — the spoke contract
+      // requires hub handoffs to keep the full URL
+      // (spoke-seed-seeder.js:406-407, Codex r3).
+      let origin = '';
+      try {
+        const u = new URL(dest);
+        if (hubHosts.has(u.hostname.toLowerCase())) origin = u.origin;
+      } catch { /* relative destination — no origin to preserve */ }
+      return `[${anchorText}](${open}${origin}${alias}${close}${titlePart})`;
     }
     repairs.push({ from: norm, to: null, action: 'unlinked' });
     return anchorText;
