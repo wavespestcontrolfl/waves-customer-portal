@@ -26,6 +26,13 @@ const FALLBACK_MIN_VOLUME = 5;       // ...but only with enough calls to mean it
 const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
                                      // ...and ZERO yesterday => "gone silent"
 
+// Episodic one-shot workloads (sealed exams burst >=10 items then
+// intentionally no-op until the prompt/profile changes; backfill drains a
+// finite backlog) — expected inactivity, so they are excluded from
+// gone-silent detection. Their failure/fallback exceptions still report.
+// Convention: episodic lanes tag one of these suffixes on their policy name.
+const EPISODIC_LANE_RE = /:(?:sealed|backfill)$/;
+
 // Named TEXT_POLICIES entries carry their registry key as `name` (set in
 // config/models.js). Route-signature matching is NOT safe here: with current
 // env defaults customerCopy/visionAnalysis and highStakes/deepAnalysis
@@ -116,6 +123,7 @@ function detectExceptions(yesterdayStats, priorWeekStats) {
   }
   const yesterdayByPolicy = new Map(yesterdayStats.map((s) => [s.policy, s]));
   for (const w of priorWeekStats) {
+    if (EPISODIC_LANE_RE.test(w.policy)) continue; // one-shot lanes go quiet by design
     if (w.total >= SILENT_MIN_WEEKLY && !yesterdayByPolicy.has(w.policy)) {
       exceptions.push({
         policy: w.policy,

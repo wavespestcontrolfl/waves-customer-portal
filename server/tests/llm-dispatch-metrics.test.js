@@ -169,6 +169,27 @@ describe('llm-dispatch-metrics', () => {
       expect(out[0]).toMatchObject({ policy: 'contentDraft', kind: 'gone_silent' });
     });
 
+    it('never flags episodic lanes (:sealed/:backfill) as gone silent — they burst then quiet by design', () => {
+      const { detectExceptions, SILENT_MIN_WEEKLY } = load();
+      const out = detectExceptions([], [
+        { policy: 'smsShadow:openai:sealed', total: SILENT_MIN_WEEKLY * 2 },
+        { policy: 'smsShadow:anthropic:backfill', total: SILENT_MIN_WEEKLY * 2 },
+        { policy: 'smsShadow:openai', total: SILENT_MIN_WEEKLY * 2 },
+      ]);
+      // Only the LIVE lane fires; episodic twins with identical volume do not.
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({ policy: 'smsShadow:openai', kind: 'gone_silent' });
+    });
+
+    it('episodic lanes still report failures and fallback spikes', () => {
+      const { detectExceptions } = load();
+      const out = detectExceptions(
+        [{ policy: 'smsShadow:anthropic:backfill', total: 10, fallbacks: 4, failed: 1 }],
+        []
+      );
+      expect(out.map((e) => e.kind).sort()).toEqual(['all_providers_failed', 'fallback_rate']);
+    });
+
     it('returns nothing on a green day', () => {
       const { detectExceptions } = load();
       const out = detectExceptions(
