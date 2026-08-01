@@ -306,6 +306,28 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(out.status).not.toBe('sent');
   });
 
+  test('#3143 r1: a FRESH attachment reporting NULL provenance fails closed', async () => {
+    // buildReportV1Data's assessment lookup is fail-soft, so a transient query
+    // error yields a freshly rendered PDF with no lawn section at all while the
+    // permanent report still shows one — divergence by omission. Absence of a
+    // contradiction is not proof; the fence needs a positive match.
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend({
+        renderedAssessmentId: 'assess-canonical',
+        attachedAssessmentId: null,
+        attachmentRendered: true, // genuinely rendered, just couldn't resolve
+        hasAttachment: true,
+      });
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+    expect(out.status).not.toBe('sent');
+    expect(KnowledgeBridge.sealRecommendationsForSend).not.toHaveBeenCalled();
+  });
+
   test('#3143: body and attachment both matching proceeds', async () => {
     sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
       const safe = await opts.verifyBeforeSend({

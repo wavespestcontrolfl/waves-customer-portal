@@ -336,18 +336,19 @@ async function processServiceReportDelivery(delivery, knex = db) {
         // so the body agreeing with the fence says nothing about the file the
         // customer opens. The attachment reports its own provenance; it must
         // agree too.
-        if (hasAttachment) {
-          if (attachedAssessmentId && String(attachedAssessmentId) !== String(assessmentId)) {
-            logger.warn(`[delivery-queue] ATTACHED assessment ${attachedAssessmentId} differs from fenced ${assessmentId} for record ${delivery.service_record_id} — deferring send`);
-            return false;
-          }
-          // A cached object carries no provenance. Fenced deliveries force a
-          // fresh render, so this should be unreachable — treat it as a broken
-          // invariant and fail closed rather than mail an unverifiable file.
-          if (!attachmentRendered) {
-            logger.warn(`[delivery-queue] attachment for record ${delivery.service_record_id} came from storage with no provenance while fenced — deferring send`);
-            return false;
-          }
+        // This delivery is fenced, so a lawn assessment EXISTS for the record.
+        // An attachment must therefore prove it carries that exact assessment
+        // — POSITIVE proof, not merely the absence of a contradiction. A null
+        // id is a mismatch, not a pass: the report builder's lookup is
+        // fail-soft, so a transient query error yields a freshly rendered PDF
+        // with NO lawn section while the permanent report still shows one,
+        // which is the same divergence by omission. A cached object likewise
+        // carries no provenance. Fenced deliveries force a fresh render, so
+        // both are backstops rather than routine branches.
+        if (hasAttachment
+          && (!attachmentRendered || !attachedAssessmentId || String(attachedAssessmentId) !== String(assessmentId))) {
+          logger.warn(`[delivery-queue] attachment provenance unproven for record ${delivery.service_record_id} (attached=${attachedAssessmentId || 'none'}, rendered=${attachmentRendered}, fenced=${assessmentId}) — deferring send`);
+          return false;
         }
         const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
         if (sealed) {
