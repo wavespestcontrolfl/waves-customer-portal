@@ -1416,14 +1416,13 @@ function isKnownGoodInternalRoute(dest) {
 // than the unlink these now fall through to, which keeps the words and loses
 // only the link. Deliberately ABSENT for that reason (Codex r2/r3):
 //   /inspection/, /services/, /our-services/, /get-a-quote/, /free-quote/,
-//   /deals/, /specials/
+//   /deals/, /specials/, /library/
 // Each entry below is either pest-explicit at BOTH ends or agnostic at both.
 const INVENTED_ROUTE_ALIASES = Object.freeze({
   '/pest-control/': '/pest-control-services/',
   '/pest-services/': '/pest-control-services/',
   '/pests/': '/pest-library/',
   '/pest-guide/': '/pest-library/',
-  '/library/': '/pest-library/',
   '/areas/': '/service-areas/',
   '/areas-we-serve/': '/service-areas/',
   '/locations/': '/service-areas/',
