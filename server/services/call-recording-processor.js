@@ -7439,10 +7439,18 @@ const CallRecordingProcessor = {
             || ((v2Result?.status === 'valid' && isV2Extraction(v2Result?.extraction)) ? v2Result.extraction : null);
           const v2ValidatedAddress = v2ForAddressCheck?.property?.service_address || null;
           const unitKey = (v) => String(v || '').toLowerCase().replace(/[#.,]/g, ' ').replace(/\s+/g, ' ').trim();
+          // City included (codex final-round P1): ZIP almost always pins the
+          // city, but multi-city ZIPs exist and deriveCallReviewBridge
+          // refuses adoption on a city disagreement — the gate matches that
+          // bar. With street+city+zip+unit all matched against BOTH the
+          // AV-normalized form and the V2 input, the match is total.
+          const cityKey = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
           const avValidatesBookedAddress = !!avNormalized && !!v2ValidatedAddress
             && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(avNormalized.street_line_1 || ''))
             && String(extracted.zip || '').trim() === String(avNormalized.postal_code || '').trim()
+            && cityKey(extracted.city) === cityKey(avNormalized.city)
             && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(v2ValidatedAddress.street_line_1 || ''))
+            && cityKey(extracted.city) === cityKey(v2ValidatedAddress.city)
             && unitKey(extracted.address_line2) === unitKey(v2ValidatedAddress.street_line_2);
           const avPositiveForBooking = !!effectiveAddressValidation
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
