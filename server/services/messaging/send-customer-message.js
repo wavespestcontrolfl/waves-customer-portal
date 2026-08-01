@@ -154,9 +154,13 @@ async function sendCustomerMessage(input) {
   // are redirected to bell/push inside TwilioService.sendSMS, where GSM
   // encoding is irrelevant and bullets/punctuation must stay verbatim —
   // internal bodies that DO continue to Twilio are normalized at that
-  // boundary instead, after the redirect check.
+  // boundary instead, after the redirect check. Media sends (MMS) are also
+  // exempt: MMS is not segment-encoded, so rewriting a human-authored
+  // caption buys nothing.
+  const sendHasMedia = Array.isArray(sendInput.metadata?.mediaUrls)
+    && sendInput.metadata.mediaUrls.length > 0;
   if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
-    && ['customer', 'lead'].includes(sendInput.audience)) {
+    && ['customer', 'lead'].includes(sendInput.audience) && !sendHasMedia) {
     sendInput.body = normalizeGsmPunctuation(sendInput.body);
   }
 

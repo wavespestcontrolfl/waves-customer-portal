@@ -330,9 +330,13 @@ const TwilioService = {
       // whole body to UCS-2 — 67 chars/segment instead of 153. AFTER the
       // internal-redirect check on purpose: a bell/push notification is not
       // an SMS, so redirected internal alerts keep their original bullets
-      // and punctuation. Idempotent, so bodies already normalized upstream
-      // pass through unchanged.
-      body = normalizeGsmPunctuation(body);
+      // and punctuation. Media sends (MMS) are exempt — MMS is not
+      // segment-encoded, so a human-authored caption stays verbatim.
+      // Idempotent, so bodies already normalized upstream pass through
+      // unchanged.
+      const sendIsMms = (Array.isArray(options.mediaUrls) && options.mediaUrls.length > 0)
+        || !!options.mediaUrl;
+      if (!sendIsMms) body = normalizeGsmPunctuation(body);
 
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.

@@ -99,9 +99,15 @@ function normalizeGsmPunctuation(body) {
     const expanded = out.replace(ELLIPSIS_RE, '...');
     // Lazy require avoids a cycle if segment-counter ever imports this
     // module; today it imports nothing.
-    const { detectEncoding } = require('./segment-counter');
+    const { countSegments } = require('./segment-counter');
+    const expandedMeta = countSegments(expanded);
+    // Expansion must land on GSM-7 AND not cost segments: a body dense
+    // with ellipses (70 fit in one UCS-2 segment) would expand to 210
+    // periods = two GSM-7 segments, increasing the very cost and delivery
+    // risk this normalizer exists to avoid.
     if (expanded.length <= OUTBOUND_BODY_LIMIT
-      && detectEncoding(expanded).encoding === 'GSM_7') out = expanded;
+      && expandedMeta.encoding === 'GSM_7'
+      && expandedMeta.segmentCount <= countSegments(out).segmentCount) out = expanded;
   }
   return out;
 }

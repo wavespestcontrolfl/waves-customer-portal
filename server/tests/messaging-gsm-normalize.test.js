@@ -90,6 +90,12 @@ describe('normalizeGsmPunctuation', () => {
     expect(normalizeGsmPunctuation('a'.repeat(100) + '…')).toBe('a'.repeat(100) + '...');
   });
 
+  test('never expands ellipses when it would cost a segment', () => {
+    // 70 ellipses = one UCS-2 segment; 210 periods = two GSM-7 segments.
+    const dense = '…'.repeat(70);
+    expect(normalizeGsmPunctuation(dense)).toBe(dense);
+  });
+
   test('preserves ZWJ/ZWNJ join controls (joined emoji must not split)', () => {
     const joined = '\u{1F469}‍\u{1F4BB}'; // woman + ZWJ + laptop = one glyph
     expect(normalizeGsmPunctuation(joined)).toBe(joined);
@@ -130,6 +136,17 @@ describe('sendCustomerMessage GSM normalization wiring', () => {
     const auditInput = persistAudit.mock.calls[0][0];
     expect(auditInput.input.body).toBe("We'll see you tomorrow - reply here with questions...");
     expect(auditInput.segmentMeta.encoding).toBe('GSM_7');
+  });
+
+  test('MMS caption passes through unnormalized (media sends are not segment-encoded)', async () => {
+    const caption = 'Front bed — 12″ clearance • before photo';
+    const result = await sendCustomerMessage({
+      ...BASE_INPUT,
+      body: caption,
+      metadata: { mediaUrls: ['https://example.com/photo.jpg'], adminUserId: 'admin-1' },
+    });
+    expect(result.sent).toBe(true);
+    expect(sendViaTwilio.mock.calls[0][0].body).toBe(caption);
   });
 
   test('internal audience body passes through unnormalized (bell/push keeps bullets)', async () => {
