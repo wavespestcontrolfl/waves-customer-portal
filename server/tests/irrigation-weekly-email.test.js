@@ -126,14 +126,22 @@ describe('buildWeeklyEmailDecision', () => {
     expect(decision.reason).toBe('rain_unknown');
   });
 
-  test('no usable irrigation schedule sends nothing', () => {
+  // Was "no usable irrigation schedule sends nothing" until the owner
+  // directive 2026-08-01 widened the sweep: a missing schedule is now a
+  // SETUP variant, not a silence. The advice numbers must still be withheld —
+  // full variant coverage lives in irrigation-setup-email-templates.test.js.
+  test('no usable irrigation schedule sends the setup variant instead of nothing', () => {
     const decision = buildWeeklyEmailDecision({
       ...base,
       irrigationInchesPerWeek: null,
       rainfallInches7d: 1,
     });
-    expect(decision.shouldSend).toBe(false);
-    expect(decision.reason).toBe('unknown');
+    expect(decision.shouldSend).toBe(true);
+    expect(decision.reason).toBe('setup_system');
+    expect(decision.payload.rain_last_week).toBe('1');
+    // No balance is claimed when we don't know what they apply.
+    expect(decision.payload.total_inches).toBeUndefined();
+    expect(decision.payload.difference_inches).toBeUndefined();
   });
 
   test('deficit is REROUTED to on-track when the forecast alone covers the weekly target', () => {
@@ -574,10 +582,20 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       expect(bindings).toContain(true);
       expect(sql).toContain('"c"."deleted_at" is null');
       expect(sql).toContain('"c"."email" is not null');
-      // Irrigation targeting: a configured system with a real weekly target.
-      expect(sql).toContain('"pp"."irrigation_system" = ?');
-      expect(sql).toContain('"pp"."irrigation_inches_per_week" is not null');
-      expect(sql).toContain('"pp"."irrigation_inches_per_week" > ?');
+      // Irrigation columns are NOT eligibility (owner 2026-08-01) — they pick
+      // the copy variant downstream. Gating on them reached 3 of 23 otherwise
+      // eligible recurring-lawn customers, so these predicates must stay out
+      // of the query or the widening silently reverts.
+      expect(sql).not.toContain('"pp"."irrigation_system" = ?');
+      expect(sql).not.toContain('"pp"."irrigation_inches_per_week" is not null');
+      expect(sql).not.toContain('"pp"."irrigation_inches_per_week" > ?');
+      // …and the prefs table must be LEFT joined, or a customer who never
+      // opened Property Preferences disappears from the sweep entirely.
+      expect(sql).toMatch(/left join "property_preferences"/i);
+      expect(sql).not.toMatch(/inner join "property_preferences"/i);
+      // Both columns still have to be SELECTED — the variant decision reads them.
+      expect(sql).toContain('"pp"."irrigation_system"');
+      expect(sql).toContain('"pp"."irrigation_inches_per_week"');
       // Real customers only (owner 2026-07-09): pipeline_stage separates
       // customers from leads — customers.active is TRUE on lead rows.
       expect(sql).toContain('"c"."pipeline_stage" in (?, ?, ?)');

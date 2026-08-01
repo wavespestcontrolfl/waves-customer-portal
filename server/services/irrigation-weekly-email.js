@@ -42,6 +42,14 @@ const SUPPRESSION_GROUP = 'service_operational';
 const TEMPLATE_CUT_BACK = 'irrigation.weekly_cut_back';
 const TEMPLATE_ADD_WATER = 'irrigation.weekly_add_water';
 const TEMPLATE_ON_TRACK = 'irrigation.weekly_on_track';
+// Setup variants — the customer is on a recurring lawn program but we don't
+// have a usable watering schedule, so there is no balance to report. They
+// still get the week's measured rain and the seasonal target; the ask differs
+// by whether they've told us a sprinkler system exists (owner directive
+// 2026-08-01: the weekly email goes to the whole recurring-lawn book, not
+// just the handful who filled in the portal form).
+const TEMPLATE_SETUP_SCHEDULE = 'irrigation.weekly_setup_schedule';
+const TEMPLATE_SETUP_SYSTEM = 'irrigation.weekly_setup_system';
 
 // Sequential per-customer weather fetches; Open-Meteo caching in
 // application-conditions dedupes nearby customers (coords keyed at 2 decimals).
@@ -176,6 +184,7 @@ function buildWeeklyEmailDecision({
   grassType = null,
   weekEnding,
   irrigationInchesPerWeek,
+  irrigationSystem = null,
   rainfallInches7d = null,
   et0Inches = null,
   forecastRainInches = null,
@@ -186,10 +195,49 @@ function buildWeeklyEmailDecision({
     irrigationInchesPerWeek,
     rainfallInches7d,
     referenceEt0InchesWeek: et0Inches,
-    // Eligibility already required the portal toggle on; a stale-false here
-    // would wrongly zero out the schedule the customer just confirmed.
-    irrigationEnabled: true,
+    // The portal toggle is no longer an eligibility filter, so pass the real
+    // value: an explicit false must zero out a stale weekly-inches reading
+    // (the customer turned the system off), while null/true leaves the
+    // schedule to speak for itself.
+    irrigationEnabled: irrigationSystem === false ? false : true,
   });
+
+  // No usable schedule on file — nothing to balance, so this is the setup
+  // variant rather than advice. The rain number is still measured at their
+  // home and the target is still real, so the email carries its weight; the
+  // ask is what changes. Rain must be KNOWN for the same reason the advice
+  // path requires it: the email quotes the week's rainfall, and we never
+  // print a number we don't trust.
+  if (advice.profileMissing) {
+    if (!advice.rainKnown) {
+      return { shouldSend: false, reason: 'rain_unknown', advice };
+    }
+    const hasSystem = irrigationSystem === true;
+    const grassLabelSetup = customerGrassLabel(grassType);
+    const rainSetup = formatInches(rainfallInches7d);
+    const targetSetup = formatInches(advice.recommendedInchesPerWeek);
+    return {
+      shouldSend: true,
+      templateKey: hasSystem ? TEMPLATE_SETUP_SCHEDULE : TEMPLATE_SETUP_SYSTEM,
+      reason: hasSystem ? 'setup_schedule' : 'setup_system',
+      advice,
+      payload: {
+        first_name: String(firstName || '').trim() || 'there',
+        grass_label: grassLabelSetup,
+        week_ending: weekEnding,
+        rain_last_week: rainSetup,
+        target_inches: targetSetup,
+        forecast_line: forecastLine({
+          forecastRainInches,
+          status: advice.status,
+          targetInches: advice.recommendedInchesPerWeek,
+        }),
+        customer_portal_url: buildPortalUrl('/?tab=property'),
+        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_email: CONTACT_EMAIL,
+      },
+    };
+  }
 
   // Every eligible customer hears from us weekly — cut back, add water, or
   // "you're good to go" (owner directive 2026-07-02). The ONLY silent case is
@@ -276,10 +324,17 @@ function buildWeeklyEmailDecision({
 }
 
 /**
- * RECURRING lawn-care customers with a portal-entered weekly irrigation
- * schedule: real customer (pipeline stage, not the leads-default `active`
- * flag) + irrigation toggle ON + inches entered + an email and coordinates
- * to work with + REQUIRED recurring-lawn-service evidence.
+ * RECURRING lawn-care customers: real customer (pipeline stage, not the
+ * leads-default `active` flag) + an email and coordinates to work with +
+ * REQUIRED recurring-lawn-service evidence.
+ *
+ * The irrigation columns used to be eligibility filters. As of the owner
+ * directive 2026-08-01 they are not: the weekly rainfall number is derived
+ * from the customer's own coordinates and is useful on its own, so the whole
+ * recurring-lawn book hears from us and the irrigation profile only chooses
+ * which of three copy variants they get (advice / tell-us-your-schedule /
+ * do-you-have-a-system). Measured 2026-08-01: filtering on the columns
+ * reached 3 of 23 otherwise-eligible customers.
  *
  * Owner directive 2026-07-09 (refined): the audience is customers on a
  * recurring lawn program — the monthly / every-6-weeks / bi-monthly lawn
@@ -327,7 +382,12 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     .join(' OR ');
   const nonLivePlaceholders = NON_LIVE_VISIT_STATUSES.map(() => '?').join(', ');
   return db('customers as c')
-    .join('property_preferences as pp', 'pp.customer_id', 'c.id')
+    // LEFT so a recurring-lawn customer who never opened Property Preferences
+    // is still reachable — under the old INNER JOIN a missing prefs row made
+    // them invisible to the sweep entirely (1 live customer, verified
+    // 2026-08-01). Their variant is decided from the columns, which come back
+    // null.
+    .leftJoin('property_preferences as pp', 'pp.customer_id', 'c.id')
     .leftJoin('customer_turf_profiles as tp', function joinActiveProfile() {
       this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
     })
@@ -348,9 +408,12 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     .whereNotNull('c.email')
     .whereNotNull('c.latitude')
     .whereNotNull('c.longitude')
-    .where('pp.irrigation_system', true)
-    .whereNotNull('pp.irrigation_inches_per_week')
-    .where('pp.irrigation_inches_per_week', '>', 0)
+    // NOTE: irrigation_system / irrigation_inches_per_week are deliberately
+    // NOT filters (owner directive 2026-08-01). They select the COPY VARIANT
+    // in buildWeeklyEmailDecision — schedule on file gets advice, everyone
+    // else gets the same measured rainfall plus the matching ask. Gating on
+    // them reached 3 of 23 recurring-lawn customers; the other 20 simply
+    // never opened the portal's Property Preferences form.
     .where(function recurringLawnService() {
       // REQUIRED recurring-lawn evidence — tier / lawn_type / turf profile
       // never qualify a customer on their own (see the doc block above).
@@ -406,6 +469,7 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       'c.latitude',
       'c.longitude',
       'pp.irrigation_inches_per_week',
+      'pp.irrigation_system',
       'tp.grass_type',
       'c.lawn_type',
     )
@@ -509,6 +573,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         grassType: resolveGrassType(customer),
         weekEnding,
         irrigationInchesPerWeek: customer.irrigation_inches_per_week,
+        irrigationSystem: customer.irrigation_system,
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
       };
@@ -620,5 +685,7 @@ module.exports = {
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
   TEMPLATE_ON_TRACK,
+  TEMPLATE_SETUP_SCHEDULE,
+  TEMPLATE_SETUP_SYSTEM,
   _private: { forecastLine, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason },
 };
