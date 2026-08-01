@@ -2212,7 +2212,12 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     // record leg was skipped. Lookup failures PROPAGATE (codex P2 #3152):
     // a thrown error here is a real DB failure — a 500 the admin retries,
     // never a 200 that silently skipped the report-side correction.
-    const serviceRecordCols = await db('service_records').columnInfo().catch(() => ({}));
+    // Schema lookup failures PROPAGATE too (codex P2 #3152 round 4): a
+    // degraded {} would make resolveServiceRecord skip the authoritative FK
+    // lookup AND strip the pdf-invalidation / timing / FK-heal legs off the
+    // record update — a partial correction behind a 200. A transient
+    // metadata failure must 500 so the admin retries whole.
+    const serviceRecordCols = await db('service_records').columnInfo();
     const { record: resolvedRecord, viaFk: recordViaFk, ambiguous: recordAmbiguous } = await require('../services/job-costing')
       .resolveServiceRecord(db, svc, serviceRecordCols);
     const record = recordAmbiguous ? null : resolvedRecord;

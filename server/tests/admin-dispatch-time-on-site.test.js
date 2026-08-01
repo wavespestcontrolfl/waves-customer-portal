@@ -339,7 +339,7 @@ describe('route wiring contracts', () => {
 // Behavioral: the PATCH handler against a scripted knex mock
 // ---------------------------------------------------------------------------
 
-function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, legacyRows = null }) {
+function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, legacyRows = null, columnInfoError = null }) {
   // `record` answers resolveServiceRecord's FK query (.first()); `legacyRows`
   // (when set) answers its awaited (customer, date, type) soft-join, so the
   // pre-FK shapes exercise the REAL legacy resolution path.
@@ -362,7 +362,10 @@ function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, le
       },
       async update(payload) { op.updatePayload = payload; return 1; },
       async insert(payload) { op.insertPayload = payload; return [1]; },
-      async columnInfo() { return recordCols; },
+      async columnInfo() {
+        if (columnInfoError) throw columnInfoError;
+        return recordCols;
+      },
       then(resolve, reject) {
         return Promise.resolve(table === 'service_records' && op.limited ? (legacyRows || []) : [])
           .then(resolve, reject);
@@ -501,6 +504,27 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // real PostgreSQL 16, including the JSON-null-prior shape).
     expect(notesRaw.bindings).toEqual([JSON.stringify({ timeOnSite: 50, timeOnSiteAdjusted: true })]);
     expect(notesRaw.sql).toMatch(/-> 'timeOnSitePrior' IS NOT NULL/);
+  });
+
+  test('a columnInfo FAILURE propagates — a degraded schema must not strip the FK lookup or the record-update legs (codex P2 round 4)', async () => {
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      columnInfoError: new Error('metadata lookup timeout'),
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    let nextErr = null;
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { nextErr = err; },
+    );
+    expect(nextErr?.message).toBe('metadata lookup timeout');
+    expect(res.body).toBeNull();
+    expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined();
+    expect(JobCosting.calculateJobCost).not.toHaveBeenCalled();
   });
 
   test('a service_records lookup FAILURE propagates — never a 200 that silently skipped the report correction (codex P2)', async () => {
