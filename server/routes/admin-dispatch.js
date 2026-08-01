@@ -102,6 +102,7 @@ const {
 const {
   finiteDate,
   positiveNumber,
+  positiveMinutesBetween,
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
@@ -809,19 +810,57 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
 // and can correct the typo; the backlog-closeout must-land argument doesn't
 // apply). Backfill bodies pass through untouched — the backfill sanitizer
 // owns that branch. Pure for testability (_test).
-// The ONLY string shapes the completion panel's timer emits (elapsedSince:
-// "M:SS" below an hour, "H:MM:SS" above). Everything else that
-// minutesFromElapsed would parse — bare "45", "45 min", numbery arrays — is
-// operator input wearing a string costume and must take the admin gate
-// (codex P1 #3152 round 13: a technician posting timeOnSite: "45" would
-// otherwise write an arbitrary duration past the admin-only policy).
-const TIMER_ELAPSED_STRING = /^\d+:\d{2}(?::\d{2})?$/;
+// Timer-vs-operator classification is the SHARED rule in
+// completion-attempts (isOperatorTimeOnSite) — the intake gate here and the
+// idempotency MODE hash must never disagree about what counts as an
+// operator-entered duration (codex P2 #3152 round 14). Non-timer shapes —
+// bare "45", "45 min", numbery arrays — are operator input wearing a string
+// costume and take the admin gate (codex P1 round 13).
+//
+// Timer-SHAPED strings are additionally validated against the server's own
+// span (codex P1 round 14): the format alone cannot distinguish the panel's
+// real timer from a forged "45:00", but the server owns the start stamp.
+// Within this tolerance the client's second-level precision is kept
+// (network latency + modest clock drift); outside it the server-derived
+// span is recorded instead.
+const LIVE_TIMER_TOLERANCE_MINUTES = 5;
 
-function liveTimeOnSitePlan({ timeOnSite, role, backfill = false } = {}) {
+// Server-derived minutes rendered in the panel timer's own "H:MM:SS" shape,
+// so a substituted value flows through every downstream type-based contract
+// (structured_notes freeze, the numeric-means-adjusted signals) exactly
+// like a genuine timer submission.
+function minutesAsElapsedString(minutes) {
+  const whole = Math.max(0, Math.round(minutes));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}:00`;
+}
+
+function liveTimeOnSitePlan({ timeOnSite, role, backfill = false, service = {}, now = new Date() } = {}) {
   const isEmpty = timeOnSite == null || timeOnSite === '';
-  const isTimerString = typeof timeOnSite === 'string' && TIMER_ELAPSED_STRING.test(timeOnSite.trim());
-  if (backfill === true || isEmpty || isTimerString) {
+  if (backfill === true || isEmpty) {
     return { adjusted: false, effectiveTimeOnSite: timeOnSite };
+  }
+  if (!CompletionAttempts.isOperatorTimeOnSite(timeOnSite)) {
+    // Panel-timer shape — validate the claim against the server's span.
+    const claimedMinutes = minutesFromElapsed(timeOnSite);
+    const realStart = BACKFILL_INFERRED_START_FIELDS
+      .map((field) => finiteDate(service?.[field]))
+      .find(Boolean) || null;
+    if (!realStart) {
+      // No row-backed start = no reference to validate against. An admin
+      // keeps their value (they hold the typed override anyway); any other
+      // role records unknown rather than trusting an unverifiable claim —
+      // the genuine no-start panel submits "0:00", which carries no
+      // duration either way.
+      return role === 'admin'
+        ? { adjusted: false, effectiveTimeOnSite: timeOnSite }
+        : { adjusted: false, effectiveTimeOnSite: null };
+    }
+    const serverMinutes = positiveMinutesBetween(realStart, finiteDate(now) || new Date());
+    if (serverMinutes == null
+      || (claimedMinutes != null && Math.abs(claimedMinutes - serverMinutes) <= LIVE_TIMER_TOLERANCE_MINUTES)) {
+      return { adjusted: false, effectiveTimeOnSite: timeOnSite };
+    }
+    return { adjusted: false, effectiveTimeOnSite: minutesAsElapsedString(serverMinutes) };
   }
   if (role !== 'admin') {
     return {
@@ -3392,7 +3431,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // anything commits. Strings (the panel's auto-elapsed) pass through
     // untouched. Runs AFTER backfillPlan so a technician's backfill body
     // still fails as backfill_admin_only, not time_on_site_admin_only.
-    const livePlan = liveTimeOnSitePlan({ timeOnSite, role: req.techRole, backfill: isBackfillCompletion });
+    const livePlan = liveTimeOnSitePlan({ timeOnSite, role: req.techRole, backfill: isBackfillCompletion, service: svc });
     if (livePlan.error) {
       return res.status(livePlan.status).json(livePlan.error);
     }
@@ -4673,6 +4712,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let record;
     let turfOcrReadingId = null; // set when a gauge photo was captured → async OCR post-commit
     let linkedLawnAssessmentId = null;
+    // The completion transaction's wall clock, hoisted to handler scope so
+    // the post-commit tracker instant reuses the SAME clamp decision the
+    // lifecycle stamps were computed against (codex P2 #3152 round 14).
+    // Stays null on a crash-resumed retry (no transaction runs) — the
+    // tracker recompute falls back to the current clock there.
+    let completionWallClockAt = null;
     if (resumingCommittedCompletion) {
       record = await db('service_records').where({ id: claim.serviceRecordId }).first();
       if (!record) {
@@ -4802,7 +4847,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
 
         await db.transaction(async (trx) => {
+          // The finalization takes the scheduled_services row lock FIRST
+          // (codex P2 #3152 round 14): the time-on-site PATCH serializes on
+          // this lock, and without it the finalizer's service_records
+          // INSERT lands before its scheduled_services UPDATE would block —
+          // a correction slipping between the two missed the fresh record
+          // and was then overwritten. Locking up front makes finalization
+          // and correction strictly ordered whichever starts first.
+          await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
           const completionEndedAt = new Date();
+          completionWallClockAt = completionEndedAt;
           // Backfill: the service happened on its scheduled day — stamp the
           // record (and everything keyed off it: activity-score dates, the
           // completion invoice's service linkage) with that date, not today.
@@ -5929,8 +5983,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // yields the same start + minutes instant the lifecycle columns carry,
       // and null (no real start / clamped) falls through to the tracker's
       // wall clock exactly like a plain live completion.
+      // Anchored to the transaction's own wall clock so the clamp decision
+      // here matches the committed lifecycle stamps exactly (codex P2
+      // round 14); a crash-resumed retry (no transaction ran) falls back to
+      // the current clock — the recompute is deterministic from the frozen
+      // minutes and the row's start either way.
       : (typeof effectiveTimeOnSite === 'number'
-        ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, new Date())
+        ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionWallClockAt || new Date())
         : null);
 
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is

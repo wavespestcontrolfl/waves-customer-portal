@@ -660,9 +660,23 @@ async function markComplete(serviceId, opts = {}) {
       && (!svc.completed_at || new Date(svc.completed_at).getTime() !== suppliedCompletedAt.getTime())) {
       const moved = await db('scheduled_services')
         .where({ id: serviceId })
-        .modify((q) => (svc.completed_at == null
-          ? q.whereNull('completed_at')
-          : q.where('completed_at', svc.completed_at)))
+        .modify((q) => {
+          if (svc.completed_at == null) q.whereNull('completed_at');
+          else q.where('completed_at', svc.completed_at);
+          // completed_at alone is not a version token for every correction
+          // (codex P2 #3152 round 14): a newer clamped correction moves the
+          // durable stamp and duration but deliberately leaves completed_at
+          // untouched, so this write must ALSO be conditional on the stamp
+          // the caller's instant belongs to. Guarded on the column existing
+          // in the loaded row so pre-migration environments skip the
+          // predicate (no stamps can exist there).
+          if (opts.expectedAdjustedMinutes !== undefined
+            && Object.prototype.hasOwnProperty.call(svc, 'time_on_site_adjusted_minutes')) {
+            q.whereRaw('time_on_site_adjusted_minutes IS NOT DISTINCT FROM ?', [
+              opts.expectedAdjustedMinutes == null ? null : Number(opts.expectedAdjustedMinutes),
+            ]);
+          }
+        })
         .update({
           completed_at: suppliedCompletedAt,
           updated_at: new Date(),

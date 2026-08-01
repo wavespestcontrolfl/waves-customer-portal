@@ -87,13 +87,40 @@ const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/repo
 // ---------------------------------------------------------------------------
 
 describe('liveTimeOnSitePlan — the live-override intake gate', () => {
-  test('string elapsed passes through untouched for ANY role — the unchanged default', () => {
+  // A row checked in at 16:00Z, evaluated at 18:19:05Z — server span 139m,
+  // exactly what an honest panel timer would show.
+  const TIMED_SVC = {
+    actual_start_time: '2026-07-19T16:00:00Z',
+    check_in_time: '2026-07-19T16:00:00Z',
+  };
+  const GATE_NOW = new Date('2026-07-19T18:19:05Z');
+
+  test('an honest timer within tolerance passes through untouched for ANY role', () => {
     for (const role of ['admin', 'technician', undefined]) {
-      expect(liveTimeOnSitePlan({ timeOnSite: '2:19:05', role }))
+      expect(liveTimeOnSitePlan({ timeOnSite: '2:19:05', role, service: TIMED_SVC, now: GATE_NOW }))
         .toEqual({ adjusted: false, effectiveTimeOnSite: '2:19:05' });
     }
     expect(liveTimeOnSitePlan({ timeOnSite: undefined, role: 'technician' }))
       .toEqual({ adjusted: false, effectiveTimeOnSite: undefined });
+  });
+
+  test('a FORGED timer shape is replaced by the server-derived span (codex P1 round 14)', () => {
+    // "45:00" is format-valid, but the row says 139 minutes — the format
+    // alone proves nothing, the server span is recorded instead.
+    for (const role of ['technician', 'admin']) {
+      expect(liveTimeOnSitePlan({ timeOnSite: '45:00', role, service: TIMED_SVC, now: GATE_NOW }))
+        .toEqual({ adjusted: false, effectiveTimeOnSite: '2:19:00' });
+    }
+    // Modest drift stays within tolerance and keeps the client's precision.
+    expect(liveTimeOnSitePlan({ timeOnSite: '2:16:30', role: 'technician', service: TIMED_SVC, now: GATE_NOW }))
+      .toEqual({ adjusted: false, effectiveTimeOnSite: '2:16:30' });
+  });
+
+  test('a timer claim with NO row-backed start: admin keeps it, any other role records unknown', () => {
+    expect(liveTimeOnSitePlan({ timeOnSite: '45:00', role: 'technician', service: {}, now: GATE_NOW }))
+      .toEqual({ adjusted: false, effectiveTimeOnSite: null });
+    expect(liveTimeOnSitePlan({ timeOnSite: '45:00', role: 'admin', service: {}, now: GATE_NOW }))
+      .toEqual({ adjusted: false, effectiveTimeOnSite: '45:00' });
   });
 
   test('numeric value from a non-admin → 403 time_on_site_admin_only, fail-closed', () => {
@@ -120,10 +147,12 @@ describe('liveTimeOnSitePlan — the live-override intake gate', () => {
       .toEqual({ adjusted: true, effectiveTimeOnSite: 45 });
     expect(liveTimeOnSitePlan({ timeOnSite: '45 min', role: 'admin' }))
       .toEqual({ adjusted: true, effectiveTimeOnSite: 45 });
-    // Genuine timer shapes stay ungated for every role.
+    // Genuine timer shapes take the server-span validation, not the admin
+    // gate — never a 403 for a real timer.
     for (const timer of ['2:19:05', '9:05', '412:07:33']) {
-      expect(liveTimeOnSitePlan({ timeOnSite: timer, role: 'technician' }))
-        .toEqual({ adjusted: false, effectiveTimeOnSite: timer });
+      const plan = liveTimeOnSitePlan({ timeOnSite: timer, role: 'technician', service: TIMED_SVC, now: GATE_NOW });
+      expect(plan.status).toBeUndefined();
+      expect(plan.adjusted).toBe(false);
     }
   });
 
@@ -319,7 +348,7 @@ describe('live override composed with buildCompletionLifecycleUpdates', () => {
 
 describe('route wiring contracts', () => {
   test('the live plan gates intake AFTER the backfill plan and BEFORE anything commits', () => {
-    expect(source).toMatch(/const livePlan = liveTimeOnSitePlan\(\{ timeOnSite, role: req\.techRole, backfill: isBackfillCompletion \}\);/);
+    expect(source).toMatch(/const livePlan = liveTimeOnSitePlan\(\{ timeOnSite, role: req\.techRole, backfill: isBackfillCompletion, service: svc \}\);/);
     expect(source).toMatch(/if \(livePlan\.error\) \{\s*\n\s*return res\.status\(livePlan\.status\)\.json\(livePlan\.error\);/);
     const backfillPlanAt = source.indexOf('backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date');
     const livePlanAt = source.indexOf('const livePlan = liveTimeOnSitePlan(');
@@ -547,8 +576,25 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // columns — a correction crossing an ET day boundary must not stay
     // attributed to the late-closeout day. Numeric effectiveTimeOnSite is
     // the durable mode signal (frozen-restored on resume), so the branch
-    // holds on crash-resumed retries too.
-    expect(source).toMatch(/: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, new Date\(\)\)\s*\n\s*: null\);/);
+    // holds on crash-resumed retries too. Anchored to the transaction's own
+    // wall clock so the clamp decision matches the committed stamps (codex
+    // P2 round 14).
+    expect(source).toMatch(/: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt \|\| new Date\(\)\)\s*\n\s*: null\);/);
+  });
+
+  test('the finalization takes the row lock at transaction start — corrections and finalizations are strictly ordered (codex P2 round 14)', () => {
+    expect(source).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);\s*\n\s*const completionEndedAt = new Date\(\);\s*\n\s*completionWallClockAt = completionEndedAt;/);
+  });
+
+  test('the already-complete rewrite is conditional on the correction stamp too (codex P2 round 14)', () => {
+    const trackerSource = fs.readFileSync(
+      path.join(__dirname, '../services/track-transitions.js'),
+      'utf8',
+    );
+    // completed_at alone is not a version token — a clamped newer
+    // correction moves the stamp without moving completed_at, so the UPDATE
+    // itself predicates on the stamp the caller's instant belongs to.
+    expect(trackerSource).toMatch(/whereRaw\('time_on_site_adjusted_minutes IS NOT DISTINCT FROM \?', \[\s*\n\s*opts\.expectedAdjustedMinutes == null \? null : Number\(opts\.expectedAdjustedMinutes\),\s*\n\s*\]\)/);
   });
 
   test('a repeat edit sends only the correction keys — prior preservation lives in the SQL CASE, not JS state', async () => {

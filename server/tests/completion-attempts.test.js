@@ -682,6 +682,17 @@ describe('completion attempts', () => {
     expect(hashCompletionRequest({ ...base, timeOnSite: 61 })).not.toBe(flagless);
     expect(coreHashSegment(hashCompletionRequest({ ...base, timeOnSite: 61 })))
       .toBe(coreHashSegment(flagless));
+    // Operator STRING forms bind the same way (codex P2 #3152 round 14):
+    // the route's gate adjusts "45" as operator input, so a same-key retry
+    // flipping it to "60" must mismatch — while genuine timer strings stay
+    // excluded, and whitespace canonicalizes to the same content.
+    expect(hashCompletionRequest({ ...base, timeOnSite: '45' }))
+      .not.toBe(hashCompletionRequest({ ...base, timeOnSite: '60' }));
+    expect(hashCompletionRequest({ ...base, timeOnSite: '45' })).not.toBe(flagless);
+    expect(hashCompletionRequest({ ...base, timeOnSite: '45' }))
+      .toBe(hashCompletionRequest({ ...base, timeOnSite: ' 45 ' }));
+    expect(coreHashSegment(hashCompletionRequest({ ...base, timeOnSite: '45' })))
+      .toBe(coreHashSegment(flagless));
     // Matcher semantics: strict wants the full composite; resume wants core.
     expect(requestHashMatches(flagged, flagless)).toBe(false);
     expect(requestHashMatches(flagged, flagged)).toBe(true);

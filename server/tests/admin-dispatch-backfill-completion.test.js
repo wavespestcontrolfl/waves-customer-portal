@@ -827,9 +827,10 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
     // Fix round 13: a NORMAL completion's timeOnSite is the panel's
     // auto-elapsed timer STRING (ticks every second) — hashing it turned
     // any transient pre-commit failure into idempotency_key_mismatch on the
-    // next tick. Operator-TYPED minutes (a NUMBER — backfill's, or the live
-    // admin override's) bind in any mode.
-    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: backfill === true \|\| typeof timeOnSite === 'number' \? \(timeOnSite \?\? null\) : null,/);
+    // next tick. Operator statements — numbers AND non-timer strings, the
+    // same isOperatorTimeOnSite rule the route's intake gate uses (codex
+    // P2 #3152 round 14) — bind in any mode.
+    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: backfill === true \|\| isOperatorTimeOnSite\(timeOnSite\)/);
     // The resume claim is the ONLY core-segment comparison site; the
     // pending/failed/succeeded sites go through the strict matcher.
     expect(attemptsSource).toMatch(/if \(!resumeHashMatches\(row\.request_hash, requestHash\)\) \{/);
@@ -2500,7 +2501,7 @@ describe('completion route wiring (source contracts)', () => {
     // The else branch carries the LIVE admin override's adjusted instant
     // (codex P2 #3152 round 10) — null for plain live completions, so the
     // backfill contract itself is unchanged.
-    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, new Date\(\)\)\s*\n\s*: null\);/);
+    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt \|\| new Date\(\)\)\s*\n\s*: null\);/);
     // Derived AFTER the crash-resume re-derivation (it reads the healed
     // flag AND the frozen duration), BEFORE the first markComplete that
     // consumes it.
