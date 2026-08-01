@@ -59,7 +59,11 @@ const REWRITES = [
     "Hello {first_name}! Your service is {service_timing} and your account has an outstanding balance.\n\nPay here: {pay_url}\n\nAlready paid? Reply and we'll check."],
   ['autopay_retry_final_failed',
     "Hello {first_name}! After several tries your payment of ${amount} still has not gone through. Update your card to keep service active: {update_card_url}",
-    "Hello {first_name}! After several tries your payment of ${amount} still has not gone through. You can update your card and pay here: {update_card_url}"],
+    // NOT "pay here": {update_card_url} is the generic billing tab, and an
+    // exhausted monthly autopay leaves a failed `payments` row, not an open
+    // invoice — so the portal may show no Pay now button at all. Promising a
+    // payment path that isn't there just swaps one false claim for another.
+    "Hello {first_name}! After several tries your payment of ${amount} still has not gone through. You can update your card here: {update_card_url}"],
 ];
 
 exports.up = async function up(knex) {
