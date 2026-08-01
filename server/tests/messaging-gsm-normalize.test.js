@@ -84,6 +84,12 @@ describe('normalizeGsmPunctuation', () => {
     expect(normalizeGsmPunctuation('José…')).toBe('José...');
   });
 
+  test('never expands the ellipsis past the 1600-char outbound cap', () => {
+    const nearLimit = 'a'.repeat(1599) + '…';
+    expect(normalizeGsmPunctuation(nearLimit)).toBe(nearLimit);
+    expect(normalizeGsmPunctuation('a'.repeat(100) + '…')).toBe('a'.repeat(100) + '...');
+  });
+
   test('preserves ZWJ/ZWNJ join controls (joined emoji must not split)', () => {
     const joined = '\u{1F469}‍\u{1F4BB}'; // woman + ZWJ + laptop = one glyph
     expect(normalizeGsmPunctuation(joined)).toBe(joined);
@@ -124,5 +130,18 @@ describe('sendCustomerMessage GSM normalization wiring', () => {
     const auditInput = persistAudit.mock.calls[0][0];
     expect(auditInput.input.body).toBe("We'll see you tomorrow - reply here with questions...");
     expect(auditInput.segmentMeta.encoding).toBe('GSM_7');
+  });
+
+  test('internal audience body passes through unnormalized (bell/push keeps bullets)', async () => {
+    const briefing = '• Revenue — up\n• Leads — “strong”';
+    const result = await sendCustomerMessage({
+      to: '+19415550142',
+      channel: 'sms',
+      audience: 'internal',
+      purpose: 'internal_briefing',
+      body: briefing,
+    });
+    expect(result.sent).toBe(true);
+    expect(sendViaTwilio.mock.calls[0][0].body).toBe(briefing);
   });
 });

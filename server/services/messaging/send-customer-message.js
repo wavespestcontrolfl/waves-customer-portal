@@ -150,7 +150,13 @@ async function sendCustomerMessage(input) {
   // every source at once: templates, hardcoded builders, interpolated
   // variables, AI drafts, and manual admin sends. Before countSegments so
   // the audit row records what actually goes to the provider.
-  if (sendInput.channel === 'sms' && typeof sendInput.body === 'string') {
+  // Customer/lead audiences ONLY: internal briefings (audience 'internal')
+  // are redirected to bell/push inside TwilioService.sendSMS, where GSM
+  // encoding is irrelevant and bullets/punctuation must stay verbatim —
+  // internal bodies that DO continue to Twilio are normalized at that
+  // boundary instead, after the redirect check.
+  if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
+    && ['customer', 'lead'].includes(sendInput.audience)) {
     sendInput.body = normalizeGsmPunctuation(sendInput.body);
   }
 

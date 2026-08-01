@@ -71,6 +71,11 @@ const REPLACEMENTS = Object.fromEntries([
 // can add a segment at a 67-unit boundary.
 const ELLIPSIS_RE = /\u2026/g;
 
+// Twilio's hard outbound body cap, mirrored from sms-guard.js
+// validateOutbound (body.length > 1600 -> 'body-too-long'). Expansion must
+// never push a previously valid body over it.
+const OUTBOUND_BODY_LIMIT = 1600;
+
 const SPACE_CLASS = '\\u00A0\\u2000-\\u200A\\u202F\\u205F\\u3000';
 
 // One regex pass over everything this module touches.
@@ -95,7 +100,8 @@ function normalizeGsmPunctuation(body) {
     // Lazy require avoids a cycle if segment-counter ever imports this
     // module; today it imports nothing.
     const { detectEncoding } = require('./segment-counter');
-    if (detectEncoding(expanded).encoding === 'GSM_7') out = expanded;
+    if (expanded.length <= OUTBOUND_BODY_LIMIT
+      && detectEncoding(expanded).encoding === 'GSM_7') out = expanded;
   }
   return out;
 }
