@@ -113,6 +113,34 @@ describe('appointment page state', () => {
     expect(slotMatchesShown(row, { date: '2026-08-05', windowStart: null })).toBe(false);
   });
 
+  test('an idempotent-success verdict is not enough — the slot must still match', () => {
+    // The office moves the visit after this request's first read, then a
+    // DIFFERENT surface (the logged-in portal, or this page in another tab)
+    // confirms the new slot. The reread then shows confirmed +
+    // customer_confirmed — 'idempotent_success' by identity — while the slot
+    // is no longer the one this client is showing. Both halves are required
+    // before returning success, or the stale card flips to Confirmed.
+    const movedAndConfirmed = {
+      status: 'confirmed',
+      customer_confirmed: true,
+      scheduled_date: '2026-08-09',
+      window_start: '13:00:00',
+    };
+    const shown = { date: '2026-08-05', windowStart: '09:00' };
+    expect(confirmRaceVerdict(movedAndConfirmed)).toBe('idempotent_success');
+    expect(slotMatchesShown(movedAndConfirmed, shown)).toBe(false);
+
+    // The genuine double-tap: same slot, customer's own confirm won.
+    const sameSlot = {
+      status: 'confirmed',
+      customer_confirmed: true,
+      scheduled_date: '2026-08-05',
+      window_start: '09:00:00',
+    };
+    expect(confirmRaceVerdict(sameSlot)).toBe('idempotent_success');
+    expect(slotMatchesShown(sameSlot, shown)).toBe(true);
+  });
+
   test('a windowless visit stays live until the end of its day', () => {
     expect(pageState({ status: 'pending', scheduled_date: '2026-08-01' }, NOW).state).toBe('upcoming');
     expect(pageState({ status: 'pending', scheduled_date: '2026-07-31' }, NOW).state).toBe('past');

@@ -573,8 +573,19 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       // documented double-submit success; anything else — including a
       // SmartRebooker reschedule that stamps 'confirmed' on a NEW slot —
       // must reload as CHANGED or the page shows the stale slot.
-      const now = await db('scheduled_services').where({ id: svc.id }).first('status', 'customer_confirmed');
-      if (confirmRaceVerdict(now) === 'idempotent_success') {
+      //
+      // The verdict is necessary but NOT sufficient: the office can move the
+      // visit after this request's first read, and a different surface (the
+      // logged-in portal, or this page in another tab) can then confirm the
+      // NEW slot. That leaves status=confirmed AND customer_confirmed=true —
+      // an "idempotent success" by identity — while the slot is no longer
+      // the one this client is showing. So the reread carries the slot too
+      // and it must STILL match what the customer saw, or the answer is
+      // CHANGED and the page reloads (codex, r10 follow-up).
+      const now = await db('scheduled_services')
+        .where({ id: svc.id })
+        .first('status', 'customer_confirmed', 'scheduled_date', 'window_start');
+      if (confirmRaceVerdict(now) === 'idempotent_success' && slotMatchesShown(now, req.body)) {
         return res.json({ success: true, confirmed: true });
       }
       return res.status(409).json({
