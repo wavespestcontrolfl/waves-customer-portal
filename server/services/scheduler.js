@@ -547,6 +547,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 6:25AM ET — LLM dispatch exception digest: aggregates yesterday's
+  // llm_dispatch_log rows and emails the company inbox ONLY when a policy
+  // degraded (all-providers-failed, fallback-rate spike, or gone silent);
+  // green days send nothing. Also prunes rows past retention. Dark until
+  // GATE_LLM_DISPATCH_METRICS=true (the service no-ops while off). runExclusive
+  // so a deploy overlap doesn't double-email the same day.
+  cron.schedule('25 6 * * *', async () => {
+    try {
+      await runExclusive('llm-dispatch-digest', () => require('./llm-dispatch-metrics').runLlmDispatchDigest());
+    } catch (err) {
+      logger.error(`[llm-dispatch-metrics] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Month-end capture: fire on days 28–31 at 11:50pm ET, but only on the ACTUAL
   // final day (tomorrow ET is the 1st). Records the current (ending) month so it
   // freezes near its true end, capturing same-final-day conversions/churn/rate
