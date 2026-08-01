@@ -1141,8 +1141,18 @@ const BillingCron = {
           // and the correct Waves callback number. (Previous copy had the
           // wrong area code — 239 instead of 941.)
           try {
-            const amountText = resolveSmsAmount(payment.amount);
-            if (!amountText) throw new Error(`no resolvable amount on payment ${payment.id}`);
+            // THIS attempt's gross, not the original obligation's.
+            // charge() recomputes the total for the customer's CURRENT
+            // tender and attaches the row it inserted as err.paymentRecord,
+            // so a customer who moved from card to ACH between attempts is
+            // quoted what we actually just tried to take. payment.amount
+            // would still carry the old surcharged gross and disagree with
+            // Stripe to the cent. No fallback: every other value in scope
+            // can misstate the current attempt, and the amount-agreement
+            // rule makes a wrong figure worse than no text (the catch below
+            // logs it).
+            const amountText = resolveSmsAmount(err.paymentRecord?.amount);
+            if (!amountText) throw new Error(`no attempt amount for retry of payment ${payment.id} (paymentRecord ${err.paymentRecord?.id || 'missing'})`);
             const body = await renderTemplate('autopay_retry_final_failed',
               { first_name: customer.first_name, amount: amountText, update_card_url: BILLING_PORTAL_URL },
               { workflow: 'autopay_retry_final_failed', entity_type: 'payment', entity_id: payment.id },
@@ -1235,8 +1245,10 @@ const BillingCron = {
 
           // Send retry SMS with update-card link
           try {
-            const amountText = resolveSmsAmount(payment.amount);
-            if (!amountText) throw new Error(`no resolvable amount on payment ${payment.id}`);
+            // Same rule as the final-failure site above: this attempt's
+            // recomputed gross, never the original obligation's.
+            const amountText = resolveSmsAmount(err.paymentRecord?.amount);
+            if (!amountText) throw new Error(`no attempt amount for retry of payment ${payment.id} (paymentRecord ${err.paymentRecord?.id || 'missing'})`);
             const body = await renderTemplate('autopay_retry_failed',
               { first_name: customer.first_name, amount: amountText, update_card_url: BILLING_PORTAL_URL },
               { workflow: 'autopay_retry_failed', entity_type: 'payment', entity_id: payment.id },

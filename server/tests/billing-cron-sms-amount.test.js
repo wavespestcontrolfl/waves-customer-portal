@@ -67,6 +67,24 @@ describe('billing-cron autopay SMS call sites', () => {
     expect(stringLiteralAmounts).toEqual([]);
   });
 
+  test('retry-failure texts quote THIS attempt, never the original obligation', () => {
+    // charge() recomputes the total for the customer's current tender, so a
+    // card-to-ACH switch between attempts makes payment.amount (the original
+    // surcharged gross) disagree with what was just sent to Stripe. The
+    // amount-agreement rule in AGENTS.md makes that a P0, and it is
+    // invisible in review because both values are plausible dollar figures.
+    for (const key of ['autopay_retry_failed', 'autopay_retry_final_failed']) {
+      const idx = src.indexOf(`renderTemplate('${key}'`);
+      expect(idx).toBeGreaterThan(-1);
+      const preceding = src.slice(Math.max(0, idx - 900), idx);
+      const resolveCall = preceding.slice(preceding.lastIndexOf('resolveSmsAmount('));
+      expect(resolveCall).toContain('err.paymentRecord?.amount');
+      // No fallback may reintroduce the original obligation's gross.
+      expect(resolveCall.slice(0, resolveCall.indexOf(')'))).not.toContain('payment.amount,');
+      expect(resolveCall.slice(0, resolveCall.indexOf(')'))).not.toMatch(/resolveSmsAmount\(\s*payment\.amount/);
+    }
+  });
+
   test('every autopay template render resolves its amount first', () => {
     const AMOUNT_TEMPLATES = [
       'autopay_charge_success',
