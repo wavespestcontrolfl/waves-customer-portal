@@ -381,7 +381,22 @@ async function calculateJobCost(scheduledServiceId, db, {
   if (!svc) throw new Error(`scheduled_service ${scheduledServiceId} not found`);
 
   const srCols = await db('service_records').columnInfo().catch(() => ({}));
-  const { record, ambiguous } = await resolveServiceRecord(db, svc, srCols);
+  const { record: resolvedRecord, ambiguous } = await resolveServiceRecord(db, svc, srCols);
+  // An ambiguous legacy soft-join match contributes NOTHING (codex P2 #3152
+  // round 6): the newest of several same-customer/date/type records is an
+  // arbitrary pick, and using its revenue/products would attach another
+  // visit's financials to this row's job_costs — the same corruption the
+  // service_records write-through guard below has always refused. Costing
+  // proceeds as a record-less visit: revenue derives from the scheduled
+  // service/customer, products contribute nothing, and job_costs carries no
+  // service_record_id.
+  const record = ambiguous ? null : resolvedRecord;
+  if (ambiguous) {
+    logger.warn(
+      `[job-costing] ${scheduledServiceId} — ambiguous legacy service_record match `
+      + '(same customer/date/type duplicates); costing proceeds record-less',
+    );
+  }
   const customer = await db('customers').where({ id: svc.customer_id }).first();
 
   // Durable untrusted-span policy: the backfill closeout route passes
@@ -504,6 +519,8 @@ async function calculateJobCost(scheduledServiceId, db, {
   //    are stored status='incomplete' while their scheduled_service stays
   //    'completed', and the dashboard counts any non-null revenue — an incomplete
   //    visit must not surface revenue/margin.
+  // (`ambiguous` here is belt-and-braces — an ambiguous match is already
+  // nulled out at resolution above, so it can't reach this write.)
   const recordCompleted = !srCols.status || record?.status === 'completed';
   let wroteThrough = false;
   if (record?.id && !ambiguous && recordCompleted) {
@@ -522,11 +539,6 @@ async function calculateJobCost(scheduledServiceId, db, {
       await db('service_records').where({ id: record.id }).update(upd);
       wroteThrough = true;
     }
-  } else if (record?.id && ambiguous) {
-    logger.warn(
-      `[job-costing] ${scheduledServiceId} — ambiguous legacy service_record match `
-      + '(same customer/date/type duplicates); skipped service_records write-through',
-    );
   }
 
   logger.info(

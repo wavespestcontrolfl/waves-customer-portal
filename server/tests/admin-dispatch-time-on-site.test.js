@@ -804,6 +804,19 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     expect(entriesAt).toBeGreaterThan(overrideAt);
   });
 
+  test('an ambiguous legacy match contributes NOTHING to costing — nulled at resolution, not just at the write-through (codex P2 round 6)', () => {
+    // Pre-fix, calculateJobCost used the arbitrary newest ambiguous record's
+    // revenue and products for this visit's job_costs; only the
+    // service_records write-through was guarded. The record is now nulled
+    // the moment ambiguity is detected, so it cannot reach deriveRevenue,
+    // calcProductsCost, or the job_costs service_record_id linkage.
+    expect(costingSource).toMatch(/const record = ambiguous \? null : resolvedRecord;/);
+    const nullOutAt = costingSource.indexOf('const record = ambiguous ? null : resolvedRecord;');
+    const deriveRevenueAt = costingSource.indexOf('const revenue = intentionallyFree ? 0 : deriveRevenue({');
+    expect(nullOutAt).toBeGreaterThan(-1);
+    expect(deriveRevenueAt).toBeGreaterThan(nullOutAt);
+  });
+
   test('the ROW stamp is a second durable home — corrected visits with no record still re-derive (codex P2 round 5)', () => {
     expect(costingSource).toMatch(/if \(overrideLaborMinutes == null\) \{\s*\n\s*const stampedMinutes = Number\(svc\.time_on_site_adjusted_minutes\);\s*\n\s*if \(Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\) \{\s*\n\s*overrideLaborMinutes = stampedMinutes;/);
     // And the migration that adds the column exists, guarded + symmetric.
