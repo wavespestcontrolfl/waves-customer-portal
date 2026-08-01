@@ -657,6 +657,11 @@ class AutonomousRunner {
           // spoke-targeted: an absolute hub URL is correct on the hub too,
           // whereas a relative one is dead on every spoke (Codex r3).
           assumeSpokeWhenUnknown: guardOptions.isRefresh === true,
+          // The repair asks externalLinkFinding whether rewriting would erase
+          // a P0, and that question is only meaningful under the SAME
+          // citation posture evaluate() will apply (Codex r5).
+          operatorCitations: guardOptions.operatorCitations === true,
+          requiredSourceUrls: guardOptions.requiredSourceUrls,
         },
       );
       if (routeRepair.repairs.length) {

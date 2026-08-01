@@ -2456,6 +2456,38 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(repairInventedInternalRoutes('[x](/pest-control/)').body).toBe('[x](/pest-control-services/)');
   });
 
+  test('the external-link check uses the DRAFT\'s citation posture (r5)', () => {
+    // epa.gov is operator-only. On a NON-operator draft the gate rejects it,
+    // so unlinking here would erase that P0 — a permissive check made the
+    // repair believe the link was safe.
+    const body = '[x](/invented/ "https://epa.gov/source")';
+    expect(repairInventedInternalRoutes(body).body).toBe(body);
+    expect(guardrails.evaluate({ body: repairInventedInternalRoutes(body).body }, {}).findings
+      .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+  });
+
+  test('query and fragment suffixes are repaired, not skipped (r5)', () => {
+    // The gate strips the suffix when normalizing and parks anyway, so
+    // skipping these left them on the redraft/skip path.
+    const q = repairInventedInternalRoutes('[services](/pest-control/?utm_source=blog)');
+    expect(q.body).toBe('[services](/pest-control-services/?utm_source=blog)');
+    const f = repairInventedInternalRoutes('[services](/pest-control/#pricing)');
+    expect(f.body).toBe('[services](/pest-control-services/#pricing)');
+    // Unknown routes with a suffix still unlink.
+    expect(repairInventedInternalRoutes('[a](/nope-invented/?x=1)').repairs[0])
+      .toMatchObject({ to: null, action: 'unlinked' });
+    // A URL NESTED in the suffix must never ride along onto the alias — on an
+    // absolute hub destination the whole-link scan misses it.
+    for (const body of [
+      '[x](https://www.wavespestcontrol.com/pest-control/?next=https://evil.example)',
+      '[x](/pest-control/?next=//evil.example)',
+    ]) {
+      expect(repairInventedInternalRoutes(body).body).toBe(body);
+      expect(guardrails.evaluate({ body: repairInventedInternalRoutes(body).body }, {}).findings
+        .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' || f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    }
+  });
+
   test('an empty domain list on a refresh is not read as hub-only (r3)', () => {
     // A legacy refresh keeps multi-domain targeting with an empty list.
     const r = repairInventedInternalRoutes('[services](/pest-control/)', [], {

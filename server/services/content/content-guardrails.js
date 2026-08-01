@@ -1492,6 +1492,12 @@ const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\]|\n(?![ \t]*\n
  *   are consumed, so a refresh still cannot ADD occurrences of a dead route.
  */
 function repairInventedInternalRoutes(body, allowedInternalLinks = [], options = {}) {
+  // Same external-link posture the GATE will apply to this draft — see the
+  // call site below for why a permissive default is unsafe here.
+  const externalLinkOptions = {
+    operatorCitations: options.operatorCitations === true,
+    requiredSourceUrls: Array.isArray(options.requiredSourceUrls) ? options.requiredSourceUrls : [],
+  };
   const text = String(body || '');
   if (!text) return { body: text, repairs: [] };
   const hubHosts = hubHostSet();
@@ -1566,11 +1572,26 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     // control characters slip a substring check entirely. If
     // externalLinkFinding reports ANYTHING about this link, leave it whole
     // (pre-push Codex r3/r4, three rounds of this class).
-    if (externalLinkFinding(whole, { operatorCitations: true })) return whole;
-    // Query/fragment paths are still skipped outright: they are not plain
-    // routes, and the alias map only describes plain ones.
-    if (/[?#]/.test(dest)) return whole;
-    const path = toPath(dest);
+    // The options MUST be the ones evaluate() will use. Forcing
+    // operatorCitations:true made this check MORE permissive than the gate,
+    // so an operator-only citation host in a non-operator draft looked safe
+    // here, got unlinked, and the P0 vanished — the very failure this guard
+    // exists to prevent (Codex r5).
+    if (externalLinkFinding(whole, externalLinkOptions)) return whole;
+    // A harmless ?query or #fragment is still a repairable route: the gate
+    // strips the suffix when normalizing and parks the draft anyway, so
+    // skipping these left them on the redraft/skip path this exists to
+    // eliminate (Codex r5). The suffix is carried onto the alias.
+    const suffixAt = dest.search(/[?#]/);
+    const suffix = suffixAt === -1 ? '' : dest.slice(suffixAt);
+    // Scanning the WHOLE link misses a URL nested in the query when the
+    // destination is an absolute hub URL: externalLinkFinding's URL regex
+    // swallows the entire string as ONE hub URL, so
+    // "https://www.wavespestcontrol.com/pest-control/?next=https://evil.example"
+    // came back clean and the evil suffix rode along onto the alias. Scanning
+    // the SUFFIX ON ITS OWN does detect it (pre-push Codex r5 P0).
+    if (suffix && externalLinkFinding(suffix, externalLinkOptions)) return whole;
+    const path = toPath(suffixAt === -1 ? dest : dest.slice(0, suffixAt));
     if (path === null) return whole; // absolute URL on someone else's host
     // Resolve dot segments the way the gate does, so "/images/../x/" and the
     // /images/ exemption agree with collectInternalDestinations.
@@ -1613,7 +1634,7 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       // dead link it ACCEPTS. Spoke content gets the absolute hub URL, which
       // is what the spoke contract wants for a handoff anyway (Codex r3).
       if (!isAbsolute && targetsSpoke) origin = hubOrigin();
-      return `[${anchorText}](${open}${origin}${alias}${close}${titlePart})`;
+      return `[${anchorText}](${open}${origin}${alias}${suffix}${close}${titlePart})`;
     }
     repairs.push({ from: norm, to: null, action: 'unlinked' });
     return anchorText;
