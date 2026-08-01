@@ -208,12 +208,17 @@ const ABBREV_DOT_RE = /\b(St|Dr|Mt|Ft|Mr|Mrs|Ms|vs|No)\./gi;
 // splitting there hands downstream checks a bare "99" and hides the money
 // term (Codex r3).
 const DECIMAL_DOT_RE = /(\d)\.(\d)/g;
+// Domain-name dots ("wavespestcontrol.com") are not sentence boundaries
+// either — splitting there fragments "Contact site.com for pricing" so no
+// fragment carries the transactional shape (Codex r8).
+const DOMAIN_DOT_RE = /(\w)\.(com|net|org|io|co|us|biz|info)\b/gi;
 function metaSentences(text) {
   const t = String(text || '').trim();
   if (!t) return [];
   const masked = t
     .replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'))
-    .replace(DECIMAL_DOT_RE, '$1\u0001$2');
+    .replace(DECIMAL_DOT_RE, '$1\u0001$2')
+    .replace(DOMAIN_DOT_RE, '$1\u0001$2');
   return masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
 }
 function lastSentence(text) {
@@ -241,7 +246,17 @@ function lastSentence(text) {
 //   3. price-marketing frame on a dollar amount ("starts at $49.99",
 //      "for just $99") — bare currency elsewhere is a stat, not a pitch
 //   4. brand-as-subject offering ("Waves offers quarterly plans")
-const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^.!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^.!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b/i;
+// Gap classes are [^!?] (dots allowed): these run on ALREADY-SPLIT
+// sentences, so any interior dot is a masked-and-restored abbreviation,
+// decimal, or domain — never a sentence boundary (Codex r8). Five shapes:
+//   1. solicitation verb reaching a sales noun ("Contact site.com for pricing")
+//   2. sales noun + now/today urgency
+//   3. price-marketing frame ("starts at $49.99")
+//   4. brand-as-subject offering ("Waves offers quarterly plans")
+//   5. direct price assertion on a service/estimate noun
+//      ("a treatment estimate costs $99") — "damage costs $2,000" stays a
+//      stat because "damage" is not a sales noun (Codex r10)
+const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b|\b(quote|estimate|pricing|price|plan|service|treatment)s?\b[^!?]{0,30}?\b(?:costs?|runs?|is|starts?)\s+(?:about\s+|around\s+|only\s+|just\s+)?\$\d/i;
 // EVERY sentence is scanned for the sales shapes — a pitch followed by an
 // informational closer ("Learn more about saving big with Waves. This guide
 // explains…") is still sales copy (Codex r5). There is deliberately NO bare
@@ -249,10 +264,16 @@ const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|sch
 // "40% of lawns" are legitimate stats wherever they sit — dollar amounts
 // only count as sales copy inside a price-marketing frame ("starts at
 // $49.99"), which TRANSACTIONAL_SENTENCE_RE carries.
+// CTA-riding sales terms exclude quote/estimate: "Learn more about a county
+// damage estimate." is informational — a bare sales NOUN inside a CTA
+// sentence is not a pitch unless it's money/deal language ("saving big",
+// "our pricing"). Transactional quote/estimate uses are already caught by
+// TRANSACTIONAL_SENTENCE_RE's verb/urgency/price shapes (Codex r9).
+const CTA_RIDING_SALES_RE = /\b(sav(?:e|ing|ings)|deal|offer|price|pricing|discount|percent)\b|[%$]/i;
 function metaHasSalesCopy(text) {
   const sentences = metaSentences(text);
   if (!sentences.length) return false;
-  return sentences.some((s) => TRANSACTIONAL_SENTENCE_RE.test(s) || (SOFT_CTA_RE.test(s) && CTA_SALES_TERMS_RE.test(s)));
+  return sentences.some((s) => TRANSACTIONAL_SENTENCE_RE.test(s) || (SOFT_CTA_RE.test(s) && CTA_RIDING_SALES_RE.test(s)));
 }
 
 // Waves' own number typed WITHOUT separators ("Call 9412972606") slips both

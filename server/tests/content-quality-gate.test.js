@@ -1055,6 +1055,25 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     expect(r.reason).toBe('blog_meta_sales_copy');
   });
 
+  test('domain dots do not fragment transactional sentences (r8: "Contact site.com for pricing")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Contact wavespestcontrol.com for pricing on quarterly pest service.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('informational CTA subjects are NOT sales copy (r9: "Learn more about a county damage estimate.")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about a county damage estimate.` });
+    expect(r.ok).toBe(true);
+  });
+
+  test('direct price assertions on service nouns HARD-fail; damage-cost stats do not (r10)', () => {
+    const priced = checkBlogMetaContract({ meta_description: 'A professional treatment estimate costs $99 for most Southwest Florida homes, with quarterly plans built around year-round pest pressure.' });
+    expect(priced.ok).toBe(false);
+    expect(priced.reason).toBe('blog_meta_sales_copy');
+    const stat = checkBlogMetaContract({ meta_description: 'Repairing termite damage costs $2,000 on average across the region. This guide covers the prevention steps that matter most here.' });
+    expect(stat.ok).toBe(true);
+  });
+
   test('a statistic closer with currency stays publishable (r7: no bare symbol check — intent lives in the frame)', () => {
     for (const tail of [
       'Termites cause more than $5 billion in property damage every year.',
