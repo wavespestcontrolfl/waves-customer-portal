@@ -484,6 +484,27 @@ async function calculateJobCost(scheduledServiceId, db, {
     revenue, laborHours, laborCost, productsCost, driveCost, expensesCost,
   });
 
+  // Correction-stamp fence (codex P2 #3152 round 8): the durable
+  // time_on_site_adjusted_minutes stamp was read ONCE with the svc row, and
+  // several async reads ran since — a recalculation that straddled a NEWER
+  // correction would land stale labor last. Re-read the stamp just before
+  // the financial writes; if it moved, skip them entirely — the newer
+  // correction's own recalculation (reading the newer stamp) owns the truth.
+  // Full-row read on purpose: selecting the column by name would throw in an
+  // environment that predates migration 20260801400000, while a missing
+  // property compares null === null and proceeds.
+  {
+    const rowNow = await db('scheduled_services').where({ id: scheduledServiceId }).first();
+    const norm = (v) => (v == null ? null : Number(v));
+    if (norm(rowNow?.time_on_site_adjusted_minutes) !== norm(svc.time_on_site_adjusted_minutes)) {
+      logger.warn(
+        `[job-costing] ${scheduledServiceId} — correction stamp moved during recalculation `
+        + `(${norm(svc.time_on_site_adjusted_minutes)} → ${norm(rowNow?.time_on_site_adjusted_minutes)}); skipping stale financial writes`,
+      );
+      return { ...fin, laborHours: fin.labor_hours, serviceRecordId: null, staleSkipped: true };
+    }
+  }
+
   // 1. job_costs ledger (existing consumers: admin-job-costs, equipment).
   const row = {
     service_record_id: record?.id || null,

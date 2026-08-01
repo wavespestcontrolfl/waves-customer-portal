@@ -806,6 +806,56 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     expect(entriesAt).toBeGreaterThan(overrideAt);
   });
 
+  test('the stamp fence skips stale financial writes when a newer correction landed mid-recalculation (codex P2 round 8)', async () => {
+    // Correction A (45) starts costing; correction B (60) commits and its
+    // costing finishes first. A's write landing last must NOT re-book 45 —
+    // the fence re-reads the stamp just before the writes and bails.
+    const { calculateJobCost: realCalculateJobCost } = jest.requireActual('../services/job-costing');
+    const writes = { jobCosts: [], recordUpdates: [] };
+    let svcReads = 0;
+    const svcAtRead = {
+      id: 'svc-1', customer_id: 'cust-1', status: 'completed',
+      service_time_minutes: 45, actual_duration_minutes: 45,
+      time_on_site_adjusted_minutes: 45,
+      estimated_price: 129,
+    };
+    const dbFence = (table) => {
+      const chain = {
+        where: () => chain,
+        whereNot: () => chain,
+        whereBetween: () => chain,
+        leftJoin: () => chain,
+        orderBy: () => chain,
+        limit: () => chain,
+        count: () => chain,
+        columnInfo: async () => ({ scheduled_service_id: {}, revenue: {} }),
+        select: async () => [],
+        async first() {
+          if (table === 'scheduled_services') {
+            svcReads += 1;
+            // First read: A's view (45). Fence re-read: B already stamped 60.
+            return svcReads === 1 ? svcAtRead : { ...svcAtRead, time_on_site_adjusted_minutes: 60 };
+          }
+          return null;
+        },
+        insert: async (r) => { writes.jobCosts.push(r); return [1]; },
+        update: async (u) => { writes.recordUpdates.push(u); return 1; },
+      };
+      chain.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      return chain;
+    };
+    const res = await realCalculateJobCost('svc-1', dbFence);
+    expect(res.staleSkipped).toBe(true);
+    expect(writes.jobCosts).toEqual([]);
+    expect(writes.recordUpdates).toEqual([]);
+    // Wiring: the fence sits between the financial computation and the
+    // job_costs ledger write.
+    const fenceAt = costingSource.indexOf('correction stamp moved during recalculation');
+    const ledgerAt = costingSource.indexOf('// 1. job_costs ledger');
+    expect(fenceAt).toBeGreaterThan(-1);
+    expect(ledgerAt).toBeGreaterThan(fenceAt);
+  });
+
   test('an ambiguous legacy match contributes NOTHING to costing — nulled at resolution, not just at the write-through (codex P2 round 6)', () => {
     // Pre-fix, calculateJobCost used the arbitrary newest ambiguous record's
     // revenue and products for this visit's job_costs; only the
