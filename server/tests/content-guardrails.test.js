@@ -2413,6 +2413,22 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     }
   });
 
+  test('the repair never erases external-link evidence (r3 P0)', () => {
+    // Unlinking would destroy the embedded URL and with it the P0 the gate
+    // raises — the repair runs BEFORE evaluate().
+    const injected = 'Click [x](/invented/?next=https://evil.example) now.';
+    const r = repairInventedInternalRoutes(injected);
+    expect(r.body).toBe(injected);
+    expect(r.repairs).toEqual([]);
+    expect(guardrails.evaluate({ body: r.body }, {}).findings
+      .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+    // A URL parked in the link TITLE is preserved too (unlinking drops it).
+    const titled = '[x](/pest-control/ "see https://evil.example")';
+    expect(repairInventedInternalRoutes(titled).body).toBe(titled);
+    // A plain path is still repaired.
+    expect(repairInventedInternalRoutes('[x](/pest-control/)').body).toBe('[x](/pest-control-services/)');
+  });
+
   test('an empty domain list on a refresh is not read as hub-only (r3)', () => {
     // A legacy refresh keeps multi-domain targeting with an empty list.
     const r = repairInventedInternalRoutes('[services](/pest-control/)', [], {

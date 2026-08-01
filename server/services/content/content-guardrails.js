@@ -1550,6 +1550,15 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       || (dest.match(/\(/g) || []).length !== (dest.match(/\)/g) || []).length
       || text[offset + whole.length] === '/';
     if (partialMatch) return whole;
+    // The repair runs BEFORE evaluate(), so anything it rewrites away is
+    // evidence the gate never sees. A destination carrying a query, fragment
+    // or embedded URL — "/invented/?next=https://evil.example" — currently
+    // raises DISALLOWED_EXTERNAL_LINK; unlinking it to bare text would erase
+    // that P0 and publish the injected backlink. Same for a URL parked in the
+    // link title, which unlinking discards. Only PLAIN paths are repaired
+    // (pre-push Codex r3; same class as the protocol-relative rule above).
+    const afterScheme = dest.replace(/^https?:\/\//i, '');
+    if (/[?#]/.test(dest) || afterScheme.includes('://') || (title && title.includes('://'))) return whole;
     const path = toPath(dest);
     if (path === null) return whole; // absolute URL on someone else's host
     // Resolve dot segments the way the gate does, so "/images/../x/" and the
