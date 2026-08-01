@@ -3425,7 +3425,17 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // admin client re-derives profile.footprint = homeSqFt / stories when
     // building the request, and a positive value here would bypass the
     // pricing-side derivation guard entirely (codex P1 #2721).
-    footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprintSqFt ?? p.footprint),
+    //
+    // Below that guard, the operator's typed Home Sq Ft / Stories wins over the
+    // lookup's measured footprint (owner ruling 2026-08-01). The admin form
+    // re-derives profile.footprint from those two fields on every calculate,
+    // but profile.footprintSqFt is spread in from the property-lookup response
+    // and is never recleared — so reading footprintSqFt first made the typed
+    // square footage silently inert on pest pricing (the engine's
+    // resolvePestFootprint takes footprintSqFt before homeSqFt, and this
+    // translator never forwards `footprint`). Same silent-drop class as the
+    // attachedGarage key note in EstimatePage.jsx.
+    footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprint ?? p.footprintSqFt),
     footprintUnknown: p.footprintUnknown === true || undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,
