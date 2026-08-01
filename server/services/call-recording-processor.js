@@ -2894,7 +2894,6 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   if (!customer.zip && extracted.zip) updates.zip = extracted.zip;
   if (Object.keys(updates).length === 0) return customer;
   updates.updated_at = new Date();
-  await db('customers').where({ id: customerId }).update(updates);
   // An empty→value email write has no old address to retarget, so the
   // lightweight path (resolve the cards only) is right. REPLACING a garbled
   // stored email is a different write: copies of that old address really are
@@ -2904,25 +2903,44 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   // P1, and round-13 residual #1). Either way the read-back cards filed for
   // THIS capture must not settle: the capture is unverified by design, so
   // only customer_email_missing resolves (round-9 + round-10 P2).
-  if (updates.email) {
+  //
+  // The replacement runs the customer write and the fan-out in ONE
+  // transaction (codex round-24 P1): writing the email first and swallowing a
+  // fan-out failure left the customer on the new address with snapshots
+  // half-migrated — and permanently, because the next call sees a VALID
+  // stored email and never retries. Rolling back keeps the malformed value,
+  // which is the retryable state. Best-effort at the call level either way:
+  // a failure leaves the record exactly as it was and the office still has
+  // the review card.
+  const replacingGarbledEmail = !!(updates.email && storedEmailInvalid);
+  const fanout = require('./customer-email-fanout');
+  if (replacingGarbledEmail) {
     try {
-      const fanout = require('./customer-email-fanout');
-      if (storedEmailInvalid) {
+      await db.transaction(async (trx) => {
+        await trx('customers').where({ id: customerId }).update(updates);
         await fanout.propagateCustomerEmailChange({
           before: customer,
           after: { id: customerId, email: updates.email },
           source: 'call-captured email replacing a garbled address (appointment backfill)',
           reviewReasonCodes: ['customer_email_missing'],
-        });
-      } else {
-        await fanout.resolveOpenEmailReviewCards({
-          customerId, email: updates.email,
-          source: 'call-captured email (appointment backfill)',
-          reasonCodes: ['customer_email_missing'],
-        });
-      }
+        }, trx);
+      });
     } catch (e) {
-      logger.warn(`[call-proc] email fanout/review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
+      logger.warn(`[call-proc] email replacement rolled back for customer ${customerId}: ${e.message}`);
+      return customer;
+    }
+    return { ...customer, ...updates };
+  }
+  await db('customers').where({ id: customerId }).update(updates);
+  if (updates.email) {
+    try {
+      await fanout.resolveOpenEmailReviewCards({
+        customerId, email: updates.email,
+        source: 'call-captured email (appointment backfill)',
+        reasonCodes: ['customer_email_missing'],
+      });
+    } catch (e) {
+      logger.warn(`[call-proc] email review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
     }
   }
   return { ...customer, ...updates };
@@ -6059,32 +6077,44 @@ const CallRecordingProcessor = {
           if (extracted.zip) updates.zip = extracted.zip;
         }
         if (Object.keys(updates).length > 0) {
-          await db('customers').where({ id: customerId }).update(updates);
           // Same contract as the appointment backfill above: a REPLACEMENT of
           // a garbled stored email must fan out (copies of the old address
-          // exist), an empty→value write only settles the missing-email card,
-          // and neither settles the read-back cards filed for this unverified
-          // capture (round-9 + round-10 P2; fanout gap from the local
-          // pre-push audit P1).
-          if (updates.email) {
+          // exist) and does so in ONE transaction with the customer write, so
+          // a partial fan-out cannot strand snapshots on an address the
+          // record no longer holds (codex round-24 P1); an empty→value write
+          // only settles the missing-email card; neither settles the
+          // read-back cards filed for this unverified capture (round-9 +
+          // round-10 P2; fan-out gap from the local pre-push audit P1).
+          const fanout = require('./customer-email-fanout');
+          const replacingGarbled = !!(updates.email && existingEmailInvalid);
+          if (replacingGarbled) {
             try {
-              const fanout = require('./customer-email-fanout');
-              if (existingEmailInvalid) {
+              await db.transaction(async (trx) => {
+                await trx('customers').where({ id: customerId }).update(updates);
                 await fanout.propagateCustomerEmailChange({
                   before: existing,
                   after: { id: customerId, email: updates.email },
                   source: 'call-captured email replacing a garbled address (phone-match update)',
                   reviewReasonCodes: ['customer_email_missing'],
-                });
-              } else {
+                }, trx);
+              });
+            } catch (e) {
+              // Rolled back: the malformed value stays, which is the state a
+              // later call can retry from.
+              logger.warn(`[call-proc] email replacement rolled back for customer ${customerId}: ${e.message}`);
+            }
+          } else {
+            await db('customers').where({ id: customerId }).update(updates);
+            if (updates.email) {
+              try {
                 await fanout.resolveOpenEmailReviewCards({
                   customerId, email: updates.email,
                   source: 'call-captured email (phone-match update)',
                   reasonCodes: ['customer_email_missing'],
                 });
+              } catch (e) {
+                logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
               }
-            } catch (e) {
-              logger.warn(`[call-proc] email fanout/review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
             }
           }
         }
@@ -9012,7 +9042,12 @@ const CallRecordingProcessor = {
     // call's own captured email, so a caller who DID give one gets no card.
     // The open-row conflict clause makes a second insert a no-op. Card
     // failure never changes the call outcome.
-    if (customerId && appointmentResult && !appointmentResult.scheduleCreated) {
+    // Keyed on "no schedule row was created", NOT on appointmentResult being
+    // truthy (codex round-24 P2): a confirmed email-less call with no
+    // preferred_date_time — or only a vague time — leaves every branch above
+    // unentered, so appointmentResult stays undefined and requiring it
+    // skipped exactly the held bookings the office has to finish by hand.
+    if (customerId && !appointmentResult?.scheduleCreated) {
       try {
         const unbookedCustomer = await db('customers').where({ id: customerId }).first();
         if (unbookedCustomer

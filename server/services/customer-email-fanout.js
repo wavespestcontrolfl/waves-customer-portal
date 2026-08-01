@@ -175,7 +175,15 @@ async function propagateCustomerEmailChange({
   // address before it fans out anywhere or settles a review card — an
   // operator typo like "foo@bar" must not overwrite deliverable copies or
   // resolve an email_invalid card with another invalid value.
-  const oldEmail = emailKey(before && before.email);
+  // A stored value with no at-sign ("not-an-email", a garbled call capture)
+  // is still a REAL string sitting in the snapshot columns — emailKey drops
+  // it to '', which skipped every retarget below and left leads, estimates,
+  // automations and queued sends permanently bound to it (codex round-24 P2).
+  // Fall back to the normalized raw value: it can only ADD matches that
+  // previously matched nothing, and an empty/absent old value still yields ''
+  // (nothing to retarget), which is the pre-existing behavior.
+  const oldEmail = emailKey(before && before.email)
+    || String((before && before.email) ?? '').trim().toLowerCase();
   const newEmail = cleanValidEmailOrNull(after && after.email) || '';
   if (!customerId || !newEmail || oldEmail === newEmail) return counts;
 
