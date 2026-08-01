@@ -44,8 +44,11 @@ const TEMPLATES = [
     name: 'Appointment Confirmation (Link-First)',
     // Program-entry message: STOP stays (first text of a booking
     // lifecycle). The window explanation lives on the page this links to.
-    body: "Hello {first_name}! Your {service_type} is booked for {day}, {date} at {time}.\n\n{appointment_line}Reply STOP to opt out.",
-    variables: ['first_name', 'service_type', 'day', 'date', 'time', 'appointment_line'],
+    // No {day}: the estimate-acceptance and call-pipeline confirmation
+    // senders have only date + time, and an unresolved placeholder
+    // suppresses the whole SMS. The date already names the weekday risk-free.
+    body: "Hello {first_name}! Your {service_type} is booked for {date} at {time}.\n\n{appointment_line}Reply STOP to opt out.",
+    variables: ['first_name', 'service_type', 'date', 'time', 'appointment_line'],
     sort_order_after: 'appointment_confirmation',
   },
 ];

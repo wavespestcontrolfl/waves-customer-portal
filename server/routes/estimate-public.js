@@ -9834,8 +9834,29 @@ router.put('/:token/accept', async (req, res, next) => {
             const reschedule = confirmedAppointmentRow?.id
               ? await buildRescheduleLink(confirmedAppointmentRow.id, { customerId: customerId || null })
               : { url: null, line: '' };
-            const customerBody = await renderTemplate(
+            // Through the appointment-page ladder: with GATE_APPOINTMENT_PAGE
+            // on, estimate-accepted bookings get the same link-first v2
+            // confirmation as every other path (codex: this sender bypassed
+            // the ladder and kept sending legacy copy). The factory only
+            // runs — and only mints a page link — when the v2 row will
+            // actually render; no row id means an empty clause, which the
+            // v2 body renders cleanly without.
+            const { renderAppointmentPageTemplate } = require('../services/appointment-reminders');
+            const customerBody = await renderAppointmentPageTemplate(
               'appointment_confirmation',
+              async () => {
+                const { buildAppointmentLink } = require('../services/appointment-link');
+                const apptLink = confirmedAppointmentRow?.id
+                  ? await buildAppointmentLink(confirmedAppointmentRow.id, { customerId: customerId || null })
+                  : { url: null, line: '' };
+                return {
+                  first_name: firstName,
+                  service_type: confirmedServiceLabel,
+                  date: serviceDate,
+                  time: timeWindow,
+                  appointment_line: apptLink.line,
+                };
+              },
               {
                 first_name: firstName,
                 service_type: confirmedServiceLabel,
@@ -9843,7 +9864,6 @@ router.put('/:token/accept', async (req, res, next) => {
                 time: timeWindow,
                 reschedule_line: reschedule.line,
               },
-              undefined,
               { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: confirmedAppointmentRow?.id || estimate.id },
             );
             if (!customerBody) {

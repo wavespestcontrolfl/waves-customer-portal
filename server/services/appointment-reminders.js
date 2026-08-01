@@ -2482,4 +2482,9 @@ AppointmentReminders._test = {
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).
 AppointmentReminders._internals = { isLandline };
 
+// Shared with the OTHER booking-confirmation senders (estimate acceptance,
+// call pipeline) so gate-on means link-first copy everywhere, not only for
+// this service's own confirmation path.
+AppointmentReminders.renderAppointmentPageTemplate = renderAppointmentPageTemplate;
+
 module.exports = AppointmentReminders;

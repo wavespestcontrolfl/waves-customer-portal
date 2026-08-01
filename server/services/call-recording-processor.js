@@ -7392,14 +7392,28 @@ const CallRecordingProcessor = {
           // schedule row doesn't exist yet at render time, so the self-serve
           // reschedule link can't be minted — pass an empty clause; the
           // template renders clean without it.
-          smsBody = await renderSmsTemplate('appointment_confirmation', {
-            first_name: firstName,
-            service_type: serviceType,
-            date_time: extracted.preferred_date_time,
-            date: parsedDate,
-            time: parsedTime,
-            reschedule_line: '',
-          }, {
+          // Through the appointment-page ladder so gate-on means the same
+          // v2 copy as every other confirmation sender. The schedule row
+          // doesn't exist yet, so no page link can be minted — the v2 body
+          // renders cleanly with an empty {appointment_line}, same as the
+          // legacy body does with an empty {reschedule_line}.
+          const { renderAppointmentPageTemplate } = require('./appointment-reminders');
+          smsBody = await renderAppointmentPageTemplate('appointment_confirmation',
+            async () => ({
+              first_name: firstName,
+              service_type: serviceType,
+              date: parsedDate,
+              time: parsedTime,
+              appointment_line: '',
+            }),
+            {
+              first_name: firstName,
+              service_type: serviceType,
+              date_time: extracted.preferred_date_time,
+              date: parsedDate,
+              time: parsedTime,
+              reschedule_line: '',
+            }, {
             workflow: 'call_booking_confirmation',
             entity_type: 'customer',
             entity_id: customer.id,
@@ -8545,14 +8559,26 @@ const CallRecordingProcessor = {
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
                         && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
-                        const contactBody = await renderSmsTemplate('appointment_confirmation', {
-                          first_name: String(contact.name || '').trim().split(/\s+/)[0] || firstName,
-                          service_type: serviceType,
-                          date_time: extracted.preferred_date_time,
-                          date: parsedDate,
-                          time: parsedTime,
-                          reschedule_line: '',
-                        }, {
+                        // Same ladder as the primary send — see the comment
+                        // there; no schedule row yet, so no page link.
+                        const { renderAppointmentPageTemplate: renderApptLadder } = require('./appointment-reminders');
+                        const contactFirst = String(contact.name || '').trim().split(/\s+/)[0] || firstName;
+                        const contactBody = await renderApptLadder('appointment_confirmation',
+                          async () => ({
+                            first_name: contactFirst,
+                            service_type: serviceType,
+                            date: parsedDate,
+                            time: parsedTime,
+                            appointment_line: '',
+                          }),
+                          {
+                            first_name: contactFirst,
+                            service_type: serviceType,
+                            date_time: extracted.preferred_date_time,
+                            date: parsedDate,
+                            time: parsedTime,
+                            reschedule_line: '',
+                          }, {
                           workflow: 'call_booking_confirmation',
                           entity_type: 'customer',
                           entity_id: customerId,

@@ -442,11 +442,18 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     await db.transaction(async (trx) => {
       updated = await trx('scheduled_services')
         .where({ id: svc.id, status: 'pending' })
-        // customer_confirmed rides along for parity with the logged-in
-        // confirm route (routes/schedule.js): the portal's "Confirm Visit"
-        // button keys on that flag, and leaving it false would keep
-        // offering a confirm whose retry can only 404.
-        .update({ status: 'confirmed', customer_confirmed: true, updated_at: trx.fn.now() });
+        // customer_confirmed + confirmed_at ride along for parity with the
+        // logged-in confirm route (routes/schedule.js) and self-booking
+        // (routes/booking.js), which write the trio together: the portal's
+        // "Confirm Visit" button keys on the flag, and /api/schedule
+        // exposes confirmedAt — a token-page confirm must not leave a
+        // hole in that record.
+        .update({
+          status: 'confirmed',
+          customer_confirmed: true,
+          confirmed_at: trx.fn.now(),
+          updated_at: trx.fn.now(),
+        });
       if (updated === 0) return;
       await trx('job_status_history').insert({
         job_id: svc.id,
@@ -456,6 +463,15 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       });
     });
     if (updated === 0) {
+      // Losing the guarded update is not automatically an error: two taps
+      // racing both pass the early idempotency check, the first commits,
+      // and the second matches zero rows. Re-read — if the visit IS now
+      // confirmed, the customer's intent succeeded and this is the
+      // documented double-submit success, not CHANGED.
+      const now = await db('scheduled_services').where({ id: svc.id }).first('status');
+      if (String(now?.status || '').toLowerCase() === 'confirmed') {
+        return res.json({ success: true, confirmed: true });
+      }
       return res.status(409).json({
         error: 'This appointment just changed — please refresh.',
         code: 'CHANGED',
