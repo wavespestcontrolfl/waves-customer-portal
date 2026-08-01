@@ -221,10 +221,28 @@ async function emailAlert(day, exceptions) {
 /**
  * Alert that the recorder could not even be reached — used when the cron lock
  * cannot acquire a DB connection, so runLlmDispatchDigest never runs at all.
- * Deliberately touches NO database.
+ *
+ * `acquireConnection` rejecting proves only that THIS process's pool had no
+ * connection at that instant — a local pool timeout under load, not
+ * necessarily a database outage (codex r7). So before alarming, CONFIRM with
+ * one direct cheap query: if it answers, the DB is fine (and on an overlap
+ * the other instance is running the digest) — log and stand down. Only when
+ * the confirm also fails is "unreachable" earned, and the alert email itself
+ * touches no database.
  */
 async function alertRecorderUnreachable(reason) {
   if (!isEnabled()) return { skipped: 'gate_off' };
+  try {
+    const db = require('../models/db');
+    await Promise.race([
+      db.raw('SELECT 1'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('confirm timeout')), 5000)),
+    ]);
+    logger.warn(`[llm-dispatch-metrics] lock acquisition failed (${reason}) but the DB answers a direct query — local pool blip, not an outage; standing down`);
+    return { skipped: 'db_reachable' };
+  } catch (confirmErr) {
+    logger.error(`[llm-dispatch-metrics] DB unreachable confirmed (${reason}; confirm: ${confirmErr.message})`);
+  }
   const { etDateString, addETDays } = require('../utils/datetime-et');
   const day = etDateString(addETDays(new Date(), -1));
   return emailAlert(day, [{
@@ -268,21 +286,21 @@ function etDayWindow(daysAgo) {
  * aggregated per policy: { policy, total, fallbacks, failed } plus the
  * prior-7-day totals { policy, total }.
  */
-function detectExceptions(yesterdayStats, priorWeekStats, probeError = null, absenceJudgeable = true) {
+function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, absenceJudgeable = true) {
   const exceptions = [];
 
   // Recording health FIRST — without it, "no email" is ambiguous between
-  // "nothing was wrong" and "nothing was recorded at all". recordDispatch
-  // swallows insert failures at debug level (deliberate: metrics must never
-  // cascade into the LLM call it observes), so a dead write path is otherwise
-  // invisible. `probeError` comes from actually attempting a write (see
-  // probeRecorder) — NOT from an empty day, which is a legitimate quiet-day
-  // state, not evidence of breakage.
-  if (probeError) {
+  // "nothing was wrong" and "nothing was recorded at all". `recorderIssue` is
+  // a COMPLETE sentence composed by the caller and rendered VERBATIM: the
+  // caller is the one that knows whether the evidence says "failed", "gate
+  // was off", or "partial coverage", and an earlier version of this wrapper
+  // prefixed "could not write" onto an UNKNOWN-status message, contradicting
+  // it (codex r7).
+  if (recorderIssue) {
     exceptions.push({
       policy: '(recorder)',
       kind: 'not_recording',
-      detail: `the dispatch recorder could not write to llm_dispatch_log (${probeError}). Nothing is being recorded, so a silent digest cannot be read as "healthy" until this clears.`,
+      detail: recorderIssue,
     });
   }
 
@@ -312,7 +330,7 @@ function detectExceptions(yesterdayStats, priorWeekStats, probeError = null, abs
   // It is likewise skipped when the day has no heartbeat coverage at all
   // (first deploy / gate previously off), where absence proves nothing.
   const yesterdayByPolicy = new Map(yesterdayStats.map((s) => [s.policy, s]));
-  for (const w of (probeError || !absenceJudgeable) ? [] : priorWeekStats) {
+  for (const w of (recorderIssue || !absenceJudgeable) ? [] : priorWeekStats) {
     if (EPISODIC_LANE_RE.test(w.policy)) continue; // one-shot lanes go quiet by design
     if (w.total >= SILENT_MIN_WEEKLY && !yesterdayByPolicy.has(w.policy)) {
       exceptions.push({
@@ -361,20 +379,29 @@ async function runLlmDispatchDigest() {
   // worst case (table gone) produced silence — the exact failure this whole
   // lane exists to eliminate.
   let pruned = 0;
+  let pruneError = null;
   let yesterdayStats;
   let priorWeekStats;
   let heartbeats = 0;
   let priorHeartbeats = 0;
+
+  // Retention pruning runs regardless of the gate (codex r2 P2: a kill-switch
+  // flip must not park rows forever) — and FAILS INDEPENDENTLY (codex r7): a
+  // DELETE deadlock or lost DELETE grant says nothing about recorder health,
+  // and must not abort the digest or masquerade as an outage while INSERT and
+  // SELECT still work. Maintenance failure = log and carry on; a genuinely
+  // dead table fails the stats reads below, which DO alert.
   try {
-    // Retention pruning runs regardless of the gate: turning the kill switch
-    // off must stop recording and emailing, not leave accumulated rows parked
-    // forever past the promised 30-day window (codex r2 P2). On an empty
-    // table this is a cheap indexed no-op DELETE.
     const cutoff = etDayWindow(RETENTION_DAYS).start;
     pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
+  } catch (err) {
+    pruneError = err.message || String(err);
+    logger.error(`[llm-dispatch-metrics] retention prune failed (maintenance only — digest continues): ${pruneError}`);
+  }
 
-    if (!isEnabled()) return { skipped: 'gate_off', pruned };
+  if (!isEnabled()) return { skipped: 'gate_off', pruned, ...(pruneError ? { pruneError } : {}) };
 
+  try {
     const yesterday = etDayWindow(1);
     const weekBefore = etDayWindow(8);
     [yesterdayStats, priorWeekStats, heartbeats, priorHeartbeats] = await Promise.all([
@@ -384,19 +411,17 @@ async function runLlmDispatchDigest() {
       countHeartbeats(db, weekBefore.start, yesterday.start),
     ]);
   } catch (err) {
+    // Stats reads failing means the day genuinely cannot be analyzed — alert
+    // over SMTP (which does not depend on the DB being reported on), then
+    // rethrow so cron-lock job health records the failed run. The gate check
+    // above already returned, so a dark deployment cannot reach this email.
     const reason = err.message || String(err);
     logger.error(`[llm-dispatch-metrics] digest could not read llm_dispatch_log: ${reason}`);
-    // The kill switch is absolute: while the gate is unset this feature sends
-    // NOTHING, including its own failure alerts. The prune above runs before
-    // the gate check, so without this guard a dark deployment would still
-    // email on a DB outage.
-    if (isEnabled()) {
-      await emailAlert(day, [{
-        policy: '(recorder)',
-        kind: 'not_recording',
-        detail: `the digest could not read llm_dispatch_log (${reason}). Recording status for ${day} is UNKNOWN — treat this as an outage until it clears, not as a quiet day.`,
-      }]);
-    }
+    await emailAlert(day, [{
+      policy: '(recorder)',
+      kind: 'not_recording',
+      detail: `the digest could not read llm_dispatch_log (${reason}). Recording status for ${day} is UNKNOWN — treat this as an outage until it clears, not as a quiet day.`,
+    }]);
     throw err;
   }
 
@@ -408,26 +433,31 @@ async function runLlmDispatchDigest() {
   // running: on first deploy, or after the gate was off, recordHeartbeat
   // no-opped and the day is simply unjudgeable. priorHeartbeats > 0 is the
   // evidence that coverage existed.
-  // Deliberately phrased as UNKNOWN rather than "the recorder broke": a day
-  // with no heartbeats is equally consistent with the gate having been turned
-  // off for it, and distinguishing the two would need persisted gate history
-  // for a state only the operator can cause and would recognise. Reporting
-  // the fact ("nothing was recorded, so this day cannot be read as healthy")
-  // is true either way, which is what the digest owes the reader.
-  const recorderError = (heartbeats === 0 && priorHeartbeats > 0)
-    ? `no heartbeat rows were recorded during ${day}, though the recorder was writing earlier in the week — either it failed or the feature was disabled for that day. Recording status for ${day} is UNKNOWN; it cannot be read as a healthy quiet day.`
-    : null;
-  if (heartbeats > 0 && heartbeats < MIN_DAY_COVERAGE) {
-    logger.info(`[llm-dispatch-metrics] partial heartbeat coverage for ${day} (${heartbeats}/~24) — absence signals not judged`);
+  // Every message is deliberately phrased as UNKNOWN rather than "the
+  // recorder broke": low/zero heartbeats are equally consistent with the gate
+  // having been off, and telling those apart would need persisted gate
+  // history for a state only the operator can cause and would recognise.
+  // What the digest owes the reader is the true statement either way: this
+  // day cannot be read as healthy. Statelessness is also why EVERY
+  // low-coverage state emails instead of only logging — an info log was the
+  // old behavior, and it meant a recorder broken from first deploy (or an
+  // outage older than the 7-day lookback) stayed silent FOREVER (codex r7).
+  // The zero/zero notice self-qualifies: it is expected once on enablement
+  // day, and its daily repetition is precisely the outage signal.
+  let recorderIssue = null;
+  if (heartbeats === 0 && priorHeartbeats > 0) {
+    recorderIssue = `no heartbeat rows were recorded during ${day}, though the recorder was writing earlier in the week — either it failed or the feature was disabled for that day. Recording status for ${day} is UNKNOWN; it cannot be read as a healthy quiet day.`;
   } else if (heartbeats === 0 && priorHeartbeats === 0) {
-    logger.info(`[llm-dispatch-metrics] no heartbeat coverage for ${day} yet — absence signals not judged`);
+    recorderIssue = `no recorder heartbeats exist for ${day} or the 7 days before it. This is expected if GATE_LLM_DISPATCH_METRICS was enabled (or this feature deployed) within the last day — but if this message repeats tomorrow, the recorder has never successfully written and should be treated as down.`;
+  } else if (heartbeats < MIN_DAY_COVERAGE) {
+    recorderIssue = `only ${heartbeats} of ~24 hours of ${day} have recorder heartbeats — partial coverage (deploy gap, gate toggle, or a partial outage). Dispatches during the uncovered hours may be missing from these stats, so ${day} cannot be fully trusted.`;
   }
 
   // Absence checks need a day covered nearly end to end. On a partial day
   // (gate toggled, deploy gap) "policy X recorded nothing" is uninformative,
   // and with zero heartbeats it is meaningless.
   const exceptions = detectExceptions(
-    yesterdayStats, priorWeekStats, recorderError, heartbeats >= MIN_DAY_COVERAGE,
+    yesterdayStats, priorWeekStats, recorderIssue, heartbeats >= MIN_DAY_COVERAGE,
   );
   let sendError = null;
   if (exceptions.length) {
@@ -444,8 +474,8 @@ async function runLlmDispatchDigest() {
     throw new Error(`digest email failed with ${exceptions.length} undelivered exception(s): ${sendError}`);
   }
 
-  logger.info(`[llm-dispatch-metrics] digest: ${exceptions.length} exception(s), emailed=${exceptions.length > 0}, pruned=${pruned}`);
-  return { exceptions, emailed: exceptions.length > 0, pruned };
+  logger.info(`[llm-dispatch-metrics] digest: ${exceptions.length} exception(s), emailed=${exceptions.length > 0}, pruned=${pruned}${pruneError ? ` pruneError=${pruneError}` : ''}`);
+  return { exceptions, emailed: exceptions.length > 0, pruned, ...(pruneError ? { pruneError } : {}) };
 }
 
 module.exports = {

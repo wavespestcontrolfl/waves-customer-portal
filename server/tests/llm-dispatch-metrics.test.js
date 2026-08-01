@@ -8,9 +8,14 @@
 
 const mockInsert = jest.fn();
 const mockDb = jest.fn(() => ({ insert: mockInsert }));
+// db.raw serves two roles: a synchronous SQL-fragment token inside
+// loadStats' aggregations, and the awaited `SELECT 1` reachability confirm in
+// alertRecorderUnreachable. Routing it through a jest fn lets tests reject
+// the confirm to simulate a genuine outage.
+const mockDbRaw = jest.fn((sql) => sql);
 jest.mock('../models/db', () => {
   const db = (...args) => mockDb(...args);
-  db.raw = (sql) => sql;
+  db.raw = (...args) => mockDbRaw(...args);
   return db;
 });
 const mockEmailSend = jest.fn();
@@ -55,6 +60,8 @@ describe('llm-dispatch-metrics', () => {
     // every db() call in the NEXT test by one. mockReset drains the queue.
     mockDb.mockReset();
     mockDb.mockImplementation(() => ({ insert: mockInsert }));
+    mockDbRaw.mockReset();
+    mockDbRaw.mockImplementation((sql) => sql);
     mockInsert.mockReturnValue(Promise.resolve());
     process.env = { ...ORIGINAL_ENV };
     delete process.env.GATE_LLM_DISPATCH_METRICS;
@@ -323,13 +330,24 @@ describe('llm-dispatch-metrics', () => {
   });
 
   describe('alertRecorderUnreachable', () => {
-    it('emails without touching the database (the DB is the thing that is down)', async () => {
+    it('emails when the reachability confirm ALSO fails (a genuine outage)', async () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       mockEmailSend.mockResolvedValue({ ok: true });
+      mockDbRaw.mockImplementation((sql) => (sql === 'SELECT 1'
+        ? Promise.reject(new Error('connection refused'))
+        : sql));
       const { alertRecorderUnreachable } = load();
       await expect(alertRecorderUnreachable('no_connection')).resolves.toEqual({ ok: true });
-      expect(mockDb).not.toHaveBeenCalled();
       expect(mockEmailSend.mock.calls[0][0].body).toMatch(/database was unreachable/);
+    });
+
+    it('stands down when the DB answers a direct query (local pool blip, not an outage)', async () => {
+      // One replica's acquireConnection timing out under load must not email
+      // an outage while the database is demonstrably fine.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const { alertRecorderUnreachable } = load();
+      await expect(alertRecorderUnreachable('no_connection')).resolves.toEqual({ skipped: 'db_reachable' });
+      expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
     it('honors the kill switch', async () => {
@@ -346,13 +364,13 @@ describe('llm-dispatch-metrics', () => {
     // to a healthy day; 0 means the recorder was dead during that day.
     function armDb({
       yesterdayRows, priorRows, delCount = 3,
-      heartbeats = 24, priorHeartbeats = 168, pruneError = null,
+      heartbeats = 24, priorHeartbeats = 168, pruneError = null, statsError = null,
     }) {
       const prune = makeChain([], delCount);
       if (pruneError) prune.del = jest.fn(() => Promise.reject(new Error(pruneError)));
       mockDb
         .mockReturnValueOnce(prune)
-        .mockReturnValueOnce(makeChain(yesterdayRows))
+        .mockReturnValueOnce(makeChain(yesterdayRows, 0, { selectError: statsError }))
         .mockReturnValueOnce(makeChain(priorRows))
         .mockReturnValueOnce(makeChain([], 0, { first: { n: String(heartbeats) } }))
         .mockReturnValueOnce(makeChain([], 0, { first: { n: String(priorHeartbeats) } }));
@@ -408,16 +426,19 @@ describe('llm-dispatch-metrics', () => {
       expect(out.exceptions.map((e) => e.kind)).toContain('not_recording');
     });
 
-    it('does NOT false-alarm before heartbeat coverage exists (first deploy / gate was off)', async () => {
-      // recordHeartbeat no-ops while dark, so yesterday legitimately has none.
-      // Reporting an outage here would make the FIRST digest after merge a
-      // false alarm.
+    it('sends a SELF-QUALIFYING notice when no coverage has ever existed — never indefinite silence', async () => {
+      // A recorder broken from first deploy (or an outage older than the
+      // 7-day lookback) must not be silent forever. The stateless answer is a
+      // notice that explains itself: expected once on enablement day, and its
+      // daily repetition IS the outage signal.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
       armDb({ yesterdayRows: [], priorRows: [], heartbeats: 0, priorHeartbeats: 0 });
       const { runLlmDispatchDigest } = load();
       const out = await runLlmDispatchDigest();
-      expect(out).toMatchObject({ emailed: false });
-      expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(out.emailed).toBe(true);
+      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/expected if GATE_LLM_DISPATCH_METRICS was enabled/);
+      expect(mockEmailSend.mock.calls[0][0].body).toMatch(/repeats tomorrow/);
     });
 
     it('counts DISTINCT HOURS, so replica duplicates cannot inflate coverage', async () => {
@@ -425,6 +446,7 @@ describe('llm-dispatch-metrics', () => {
       // ROWS but only ~10 distinct hours — a half-dead day must not read as
       // fully covered. The query is what enforces this; assert its shape.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
       const hb = makeChain([], 0, { first: { n: '10' } });
       mockDb
         .mockReturnValueOnce(makeChain([], 1))
@@ -435,14 +457,19 @@ describe('llm-dispatch-metrics', () => {
       const { runLlmDispatchDigest } = load();
       const out = await runLlmDispatchDigest();
       expect(hb.count).toHaveBeenCalledWith({ n: expect.stringMatching(/DISTINCT date_trunc\('hour', created_at\)/) });
-      // 10 distinct hours is below MIN_DAY_COVERAGE → absence not judged.
-      expect(out.exceptions).toHaveLength(0);
+      // 10 distinct hours is below MIN_DAY_COVERAGE → absence not judged
+      // (no gone_silent), and the partial coverage is itself surfaced.
+      expect(out.exceptions.map((e) => e.kind)).toEqual(['not_recording']);
+      expect(out.exceptions[0].detail).toMatch(/only 10 of ~24 hours/);
     });
 
-    it('does not run gone-silent on a PARTIALLY covered day (gate toggled / deploy gap)', async () => {
-      // A handful of heartbeats means the window was not covered end to end,
-      // so "policy X recorded nothing" says nothing about whether X stopped.
+    it('surfaces a PARTIALLY covered day and still skips gone-silent', async () => {
+      // Most of a day's metrics can be lost while a few late heartbeats
+      // exist; that must email (codex r7) — but "policy X recorded nothing"
+      // on an incomplete window still proves nothing, so gone_silent stays
+      // off and only the coverage exception is reported.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
       armDb({
         yesterdayRows: [],
         priorRows: [{ policy: 'report', total: '300', fallbacks: '0', failed: '0' }],
@@ -451,8 +478,9 @@ describe('llm-dispatch-metrics', () => {
       });
       const { runLlmDispatchDigest } = load();
       const out = await runLlmDispatchDigest();
-      expect(out.exceptions).toHaveLength(0);
-      expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(out.exceptions.map((e) => e.kind)).toEqual(['not_recording']);
+      expect(out.exceptions[0].detail).toMatch(/only 3 of ~24 hours/);
+      expect(mockEmailSend).toHaveBeenCalledTimes(1);
     });
 
     it('states UNKNOWN rather than asserting breakage on a zero-heartbeat day', async () => {
@@ -467,12 +495,15 @@ describe('llm-dispatch-metrics', () => {
       expect(out.emailed).toBe(true);
       expect(mockEmailSend.mock.calls[0][0].body).toMatch(/UNKNOWN/);
       expect(mockEmailSend.mock.calls[0][0].body).toMatch(/failed or the feature was disabled/);
+      // The wrapper must not re-assert breakage around the UNKNOWN wording.
+      expect(mockEmailSend.mock.calls[0][0].body).not.toMatch(/could not write/);
     });
 
-    it('does not run gone-silent on an unjudgeable day', async () => {
+    it('does not run gone-silent on an unjudgeable day (only the coverage notice fires)', async () => {
       // No coverage means absence proves nothing — prior-week policies must
       // not each fire gone_silent just because the day recorded nothing.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
       armDb({
         yesterdayRows: [],
         priorRows: [{ policy: 'report', total: '300', fallbacks: '0', failed: '0' }],
@@ -481,16 +512,33 @@ describe('llm-dispatch-metrics', () => {
       });
       const { runLlmDispatchDigest } = load();
       const out = await runLlmDispatchDigest();
-      expect(out.exceptions).toHaveLength(0);
-      expect(mockEmailSend).not.toHaveBeenCalled();
+      expect(out.exceptions.map((e) => e.kind)).toEqual(['not_recording']);
+      expect(out.exceptions.some((e) => e.kind === 'gone_silent')).toBe(false);
     });
 
-    it('respects the kill switch even when the prune throws', async () => {
-      // Gate off + dead table must stay silent — the documented kill switch is
-      // absolute, and the prune runs before the gate check.
+    it('a prune failure is maintenance-only: logged, digest continues, no outage email', async () => {
+      // DELETE deadlocking or losing its grant says nothing about recorder
+      // health while INSERT/SELECT still work (codex r7) — the digest must
+      // keep reading and reporting provider incidents.
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      mockEmailSend.mockResolvedValue({ ok: true });
+      armDb({
+        yesterdayRows: [{ policy: 'report', total: '3', fallbacks: '0', failed: '1' }],
+        priorRows: [],
+        pruneError: 'deadlock detected',
+      });
+      const { runLlmDispatchDigest } = load();
+      const out = await runLlmDispatchDigest();
+      expect(out.pruneError).toMatch(/deadlock/);
+      // The REAL provider incident was still evaluated and emailed; no
+      // not_recording exception came from the prune.
+      expect(out.exceptions.map((e) => e.kind)).toEqual(['all_providers_failed']);
+    });
+
+    it('respects the kill switch even when the prune throws (gate off = fully dark)', async () => {
       armDb({ yesterdayRows: [], priorRows: [], pruneError: 'connection terminated' });
       const { runLlmDispatchDigest } = load();
-      await expect(runLlmDispatchDigest()).rejects.toThrow(/connection terminated/);
+      await expect(runLlmDispatchDigest()).resolves.toMatchObject({ skipped: 'gate_off', pruneError: expect.stringMatching(/connection terminated/) });
       expect(mockEmailSend).not.toHaveBeenCalled();
     });
 
@@ -500,7 +548,7 @@ describe('llm-dispatch-metrics', () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       mockEmailSend.mockResolvedValue({ ok: false, error: 'smtp unconfigured' });
       const logger = require('../services/logger');
-      armDb({ yesterdayRows: [], priorRows: [], pruneError: 'relation does not exist' });
+      armDb({ yesterdayRows: [], priorRows: [], statsError: 'relation does not exist' });
       const { runLlmDispatchDigest } = load();
       await expect(runLlmDispatchDigest()).rejects.toThrow(/relation does not exist/);
       expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/ALERT UNDELIVERED.*smtp unconfigured/));
@@ -512,7 +560,10 @@ describe('llm-dispatch-metrics', () => {
       // does not depend on the database being reported on.
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       mockEmailSend.mockResolvedValue({ ok: true });
-      armDb({ yesterdayRows: [], priorRows: [], pruneError: 'relation "llm_dispatch_log" does not exist' });
+      // A truly missing table fails the READS, not just the delete — this is
+      // how the real failure presents (codex r3 caught the earlier version
+      // simulating it via an impossible prune-only failure).
+      armDb({ yesterdayRows: [], priorRows: [], statsError: 'relation "llm_dispatch_log" does not exist' });
       const { runLlmDispatchDigest } = load();
       await expect(runLlmDispatchDigest()).rejects.toThrow(/does not exist/);
       expect(mockEmailSend).toHaveBeenCalledTimes(1);
