@@ -56,7 +56,7 @@ const CUSTOMER = {
   annualPrepay: null,
   notificationPrefs: {
     serviceReminder24h: true, techEnRoute: true, serviceCompleted: true,
-    billingReminder: false, seasonalTips: true, smsEnabled: true, emailEnabled: true,
+    seasonalTips: true, smsEnabled: true, emailEnabled: true,
   },
 };
 
@@ -220,7 +220,6 @@ const NOTIFICATION_PREFS = {
   techArrived: true,
   autoFlipEnRoute: true,
   serviceCompleted: true,
-  billingReminder: false,
   seasonalTips: true,
   smsEnabled: true,
   emailEnabled: true,
@@ -329,7 +328,7 @@ Object.assign(api, {
       preferences: {
         appointmentConfirmation: true, serviceReminder72h: true, serviceReminder24h: true,
         techEnRoute: true, techArrived: true, autoFlipEnRoute: true, serviceCompleted: true,
-        billingReminder: false, seasonalTips: true, smsEnabled: true, emailEnabled: true,
+        seasonalTips: true, smsEnabled: true, emailEnabled: true,
         billingEmail: '', billingContactName: '', paymentConfirmationSms: true,
         appointmentNotifyPrimary: false, serviceReportNotifyPrimary: false,
       },

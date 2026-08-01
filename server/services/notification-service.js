@@ -9,7 +9,6 @@ const CUSTOMER_PREFERENCE_KEYS = new Set([
   'tech_en_route',
   'tech_arrived',
   'service_completed',
-  'billing_reminder',
   'payment_confirmation_sms',
 ]);
 
