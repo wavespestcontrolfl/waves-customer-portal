@@ -1055,8 +1055,16 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     expect(r.reason).toBe('blog_meta_sales_copy');
   });
 
-  test('domain dots do not fragment transactional sentences (r8: "Contact site.com for pricing")', () => {
-    const r = checkBlogMetaContract({ meta_description: `${LEAD}Contact wavespestcontrol.com for pricing on quarterly pest service.` });
+  test('domain dots do not fragment transactional sentences (r8/r11: subdomains included)', () => {
+    for (const host of ['wavespestcontrol.com', 'booking.wavespestcontrol.com']) {
+      const r = checkBlogMetaContract({ meta_description: `${LEAD}Contact ${host} for pricing on quarterly pest service.` });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('blog_meta_sales_copy');
+    }
+  });
+
+  test('ranged direct-price assertions HARD-fail (r11: "estimate runs from $99 to $149")', () => {
+    const r = checkBlogMetaContract({ meta_description: 'A professional treatment estimate runs from $99 to $149 for most homes, with quarterly plans built around year-round pest pressure.' });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('blog_meta_sales_copy');
   });

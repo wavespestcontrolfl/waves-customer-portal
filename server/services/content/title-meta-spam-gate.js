@@ -208,17 +208,19 @@ const ABBREV_DOT_RE = /\b(St|Dr|Mt|Ft|Mr|Mrs|Ms|vs|No)\./gi;
 // splitting there hands downstream checks a bare "99" and hides the money
 // term (Codex r3).
 const DECIMAL_DOT_RE = /(\d)\.(\d)/g;
-// Domain-name dots ("wavespestcontrol.com") are not sentence boundaries
-// either — splitting there fragments "Contact site.com for pricing" so no
-// fragment carries the transactional shape (Codex r8).
-const DOMAIN_DOT_RE = /(\w)\.(com|net|org|io|co|us|biz|info)\b/gi;
+// Hostname dots ("booking.wavespestcontrol.com") are not sentence
+// boundaries either — splitting there fragments "Contact site.com for
+// pricing" so no fragment carries the transactional shape (Codex r8/r11).
+// The lookahead masks EVERY label dot on a path to a known TLD, so
+// subdomains stay whole; a dot followed by whitespace never matches.
+const HOSTNAME_DOT_RE = /(\w)\.(?=(?:[\w-]+\.)*(?:com|net|org|io|co|us|biz|info)\b)/gi;
 function metaSentences(text) {
   const t = String(text || '').trim();
   if (!t) return [];
   const masked = t
     .replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'))
     .replace(DECIMAL_DOT_RE, '$1\u0001$2')
-    .replace(DOMAIN_DOT_RE, '$1\u0001$2');
+    .replace(HOSTNAME_DOT_RE, '$1\u0001');
   return masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
 }
 function lastSentence(text) {
@@ -256,7 +258,7 @@ function lastSentence(text) {
 //   5. direct price assertion on a service/estimate noun
 //      ("a treatment estimate costs $99") — "damage costs $2,000" stays a
 //      stat because "damage" is not a sales noun (Codex r10)
-const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b|\b(quote|estimate|pricing|price|plan|service|treatment)s?\b[^!?]{0,30}?\b(?:costs?|runs?|is|starts?)\s+(?:about\s+|around\s+|only\s+|just\s+)?\$\d/i;
+const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b|\b(quote|estimate|pricing|price|plan|service|treatment)s?\b[^!?]{0,30}?\b(?:costs?|runs?|is|starts?)\s+(?:about\s+|around\s+|only\s+|just\s+|from\s+|between\s+)?\$\d/i;
 // EVERY sentence is scanned for the sales shapes — a pitch followed by an
 // informational closer ("Learn more about saving big with Waves. This guide
 // explains…") is still sales copy (Codex r5). There is deliberately NO bare
