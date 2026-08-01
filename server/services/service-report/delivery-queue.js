@@ -238,6 +238,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // failure/backoff path instead of emailing possibly-stale copy (codex P1
   // #3093 r17).
   const heldPayload = (delivery.payload && typeof delivery.payload === 'object') ? delivery.payload : {};
+  let lawnFenceCheck = null;
   if (heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id) {
     const KnowledgeBridge = require('../knowledge-bridge');
     const sanitized = await KnowledgeBridge.sanitizeStoredRecommendations(heldPayload.lawn_assessment_id);
@@ -245,6 +246,29 @@ async function processServiceReportDelivery(delivery, knex = db) {
       const status = await markDeliveryFailed(delivery, new Error(`grounding readiness unverified: ${sanitized.error}`), knex);
       return { status, error: sanitized.error };
     }
+    // Capture the settled copy's version NOW and re-verify it after the
+    // attachment renders, right before dispatch (codex P1 r36): a run that
+    // starts after this one-time check must defer the send, not race it.
+    const { treatmentGuard } = KnowledgeBridge;
+    const assessmentId = heldPayload.lawn_assessment_id;
+    let versionAtCheck = null;
+    try {
+      const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+      versionAtCheck = row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null;
+    } catch (verErr) {
+      const status = await markDeliveryFailed(delivery, new Error(`grounding version unreadable: ${verErr.message}`), knex);
+      return { status, error: verErr.message };
+    }
+    lawnFenceCheck = async () => {
+      try {
+        if (await treatmentGuard.isGenerationInFlight(assessmentId, knex)) return false;
+        const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+        const versionNow = row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null;
+        return versionNow === versionAtCheck;
+      } catch {
+        return false; // unreadable fence state = defer, never send blind
+      }
+    };
   }
 
   try {
@@ -259,6 +283,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
       reportUrl: delivery.report_url,
       pdfUrl: delivery.pdf_url,
       forceFreshPdf: !!(heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id),
+      verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {
       await markDeliverySent(delivery, result, knex);

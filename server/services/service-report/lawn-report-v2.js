@@ -523,6 +523,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // claims (codex P1 r22).
   const drySignal = /\b(dry|drier|drought|tan|wilt)\b/.test(obsText)
     || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
+    // Reversed order — "irrigation is uneven across the west side"
+    // (codex P2 r36). Bounded gap so the subject and qualifier stay in
+    // the same clause.
+    || /\b(?:irrigation|water(?:ing)?|sprinkler|moisture)\b[^.!?]{0,30}\buneven\b/i.test(obsText)
     || /\b(?:sprinkler|irrigation|water)\s+coverage\b/.test(obsText);
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly

@@ -119,6 +119,9 @@ const RAIN_WINDOW_PHRASES = new RegExp([
   // single-day / sub-weekly framings — verb-first AND day-first orders
   // ("rain yesterday", "yesterday's rain" — codex P2 r27)
   '\\brain(?:fall)?\\s+(?:today|yesterday|overnight|last\\s+night)\\b',
+  // amount-first day framing — "4.23 inches yesterday" (codex P2 r36)
+  '\\binch(?:es)?\\b[^.!?]{0,25}\\b(?:today|yesterday|overnight|last\\s+night)\\b',
+  '\\b(?:today|yesterday|overnight|last\\s+night)\\b[^.!?]{0,25}\\binch(?:es)?\\b',
   "\\b(?:today|yesterday|last\\s+night|overnight)[\u2019']s\\s+rain(?:fall)?\\b",
   '\\b(?:last|past)\\s+(?:\\d+|one|two|three|four|five|six|couple\\s+of|few)\\s+(?:day|days|hour|hours|hrs)\\b',
   '\\b(?:over|in|during)\\s+the\\s+(?:last|past)\\s+(?:day|\\d+\\s*hours)\\b',
@@ -127,7 +130,15 @@ const RAIN_WINDOW_PHRASES = new RegExp([
 // Positive requirement for the water explanation (codex P1 r9: enumerating
 // every invalid phrasing is unwinnable): the copy must NAME the weekly
 // window, or it falls back to the deterministic sentence.
-const WEEKLY_WINDOW_PHRASES = /\b(?:this\s+(?:past\s+)?week|the\s+past\s+week|past\s+week|over\s+the\s+(?:past\s+)?week|(?:last|past)\s+(?:7|seven)\s+days|weekly|for\s+the\s+week|week[’']s\s+(?:rain|water))\b/i;
+const WEEKLY_PHRASE_SRC = "(?:this\\s+(?:past\\s+)?week|the\\s+past\\s+week|past\\s+week|over\\s+the\\s+(?:past\\s+)?week|(?:last|past)\\s+(?:7|seven)\\s+days|weekly|for\\s+the\\s+week|week[’']s\\s+(?:rain|water))";
+const RAIN_CLAIM_SRC = '(?:rain(?:fall)?|precipitation|inch(?:es)?|\\d+(?:\\.\\d+)?\\s*(?:in|\"))';
+// The weekly phrase must QUALIFY the rain claim itself — "keep your weekly
+// watering schedule" must not launder "4.23 inches yesterday" into a pass
+// (codex P2 r36). Bounded same-clause gap, both word orders.
+const WEEKLY_WINDOW_PHRASES = new RegExp(
+  `\\b${RAIN_CLAIM_SRC}[^.!?]{0,60}\\b${WEEKLY_PHRASE_SRC}\\b|\\b${WEEKLY_PHRASE_SRC}\\b[^.!?]{0,60}${RAIN_CLAIM_SRC}`,
+  'i',
+);
 const RAIN_TERMS = /\brain|\binch|\bprecipitation|\bwater/i;
 
 // Replace a deterministic string with the model's version only if it's a

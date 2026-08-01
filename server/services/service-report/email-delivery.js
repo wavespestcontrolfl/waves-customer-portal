@@ -410,7 +410,7 @@ async function loadServiceRecord(recordId) {
     .first();
 }
 
-async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, forceFreshPdf = false } = {}) {
+async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, forceFreshPdf = false, verifyBeforeSend = null } = {}) {
   if (!sendgrid.isConfigured()) {
     return { ok: false, error: 'SendGrid not configured' };
   }
@@ -475,6 +475,18 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, fo
     type: 'application/pdf',
     disposition: 'attachment',
   }] : undefined;
+
+  // Post-render fence (codex P1 #3093 r36): a recommendation run that
+  // starts after the worker's one-time sanitize check can overwrite the
+  // assessment while the attachment renders. The caller re-verifies the
+  // generation/version state HERE — after the render, before dispatch — and
+  // a false result aborts retryably instead of emailing divergent copy.
+  if (typeof verifyBeforeSend === 'function') {
+    const stillSafe = await verifyBeforeSend();
+    if (!stillSafe) {
+      return { ok: false, error: 'Report copy changed during render — deferring send', retryable: true };
+    }
+  }
 
   const serviceLabel = serviceDisplayName(data);
   const templateOutcomes = await Promise.allSettled(

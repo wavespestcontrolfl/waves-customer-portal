@@ -59,3 +59,22 @@ describe('safeWaterText — rain window enforcement', () => {
     expect(merged.snapshot.mainWatch).toBe('Weed pressure has eased since the last visit.');
   });
 });
+
+describe('r36 — weekly phrase must qualify the rain claim', () => {
+  const { safeWaterText } = require('../services/service-report/lawn-report-narrative')._test;
+  const FALLBACK = 'DETERMINISTIC';
+
+  test('unrelated "weekly" cannot launder a single-day amount', () => {
+    expect(safeWaterText('We received 4.23 inches yesterday; keep your weekly watering schedule unchanged.', FALLBACK)).toBe(FALLBACK);
+  });
+
+  test('weekly phrase qualifying the rain amount passes', () => {
+    expect(safeWaterText('Your lawn picked up 4.23 inches of rain this week, so easing back on irrigation is fine.', FALLBACK))
+      .toBe('Your lawn picked up 4.23 inches of rain this week, so easing back on irrigation is fine.');
+  });
+
+  test('weekly-first order also passes', () => {
+    expect(safeWaterText('Over the past week the lawn received 2.1 inches of rain.', FALLBACK))
+      .toBe('Over the past week the lawn received 2.1 inches of rain.');
+  });
+});

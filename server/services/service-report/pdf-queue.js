@@ -195,7 +195,15 @@ async function lawnRecommendationVersion(assessmentId, knex = db) {
 }
 
 async function lawnAssessmentIdForRecord(recordId, knex = db) {
-  const row = await knex('lawn_assessments').where({ service_record_id: recordId }).first('id');
+  // Deterministic newest-row selection matching loadLinkedLawnAssessment
+  // (codex P1 r36): the back-link index is non-unique, and an unordered
+  // .first() could fence against an OLDER assessment while the actual one
+  // was still being grounded — clearing the marker on the wrong evidence.
+  const row = await knex('lawn_assessments')
+    .where({ service_record_id: recordId })
+    .orderBy('confirmed_at', 'desc')
+    .orderBy('created_at', 'desc')
+    .first('id');
   return row?.id || null;
 }
 
