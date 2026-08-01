@@ -444,16 +444,9 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, fo
   });
 
   let pdf = null;
-  // Provenance of the ATTACHMENT, as reported by the render itself (#3143).
-  // null id + rendered=false means the PDF came from storage and can vouch for
-  // nothing; the fence decides what to do with that.
-  let attachedAssessmentId = null;
-  let attachmentRendered = false;
   try {
     const result = await getOrRenderServiceReportPdf(recordId, { token: reportToken, forceFresh: forceFreshPdf });
     pdf = result.pdf;
-    attachedAssessmentId = result.lawnAssessmentId || null;
-    attachmentRendered = result.rendered !== false;
     if (result.storageFailed) {
       await enqueuePdfRenderRetry({
         serviceRecordId: recordId,
@@ -498,14 +491,6 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, fo
     // about to receive, so the render's own answer is passed back to it.
     const stillSafe = await verifyBeforeSend({
       renderedAssessmentId: data?.lawnAssessment?.assessmentId || null,
-      // The PDF builds its OWN report data (#3143), so the body's answer says
-      // nothing about what was baked into the attachment. Both travel to the
-      // fence: the body's for the copy in the email, the attachment's for the
-      // file. hasAttachment distinguishes "no PDF at all" (nothing to diverge)
-      // from "a PDF whose provenance we can't vouch for".
-      attachedAssessmentId,
-      attachmentRendered,
-      hasAttachment: !!pdf,
     });
     if (!stillSafe) {
       return { ok: false, error: 'Report copy changed during render — deferring send', retryable: true };

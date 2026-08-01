@@ -268,16 +268,20 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(sendServiceReportV1Email.mock.calls[0][1].forceFreshPdf).toBe(true);
   });
 
-  // #3143: the body and the PDF build report data independently, so the body
-  // agreeing with the fence proves nothing about the file the customer opens.
-  test('#3143: the fence refuses when the ATTACHMENT contains a different assessment', async () => {
+  // #3143 — the PDF's CONTENT provenance is unobtainable server-side: the
+  // renderer points a headless browser at /report/:token and that page fetches
+  // its own data, so nothing here can ask what the browser received. What IS
+  // knowable is whether the ANSWER changed across the render window, which is
+  // the actual race: the backlink is non-unique, so a newly confirmed or
+  // relinked assessment can outrank the fenced one mid-render.
+  test('#3143: a SELECTION change across the render defers the send', async () => {
+    // Pre-render resolution picks the fenced row; the post-render re-check
+    // sees a newly confirmed row outrank it.
+    loadLinkedLawnAssessment
+      .mockResolvedValueOnce({ id: 'assess-canonical' }) // pre-render
+      .mockResolvedValueOnce({ id: 'assess-NEWLY-CONFIRMED' }); // post-render
     sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
-      const safe = await opts.verifyBeforeSend({
-        renderedAssessmentId: 'assess-canonical', // body agrees…
-        attachedAssessmentId: 'assess-OTHER', // …but the PDF does not
-        attachmentRendered: true,
-        hasAttachment: true,
-      });
+      const safe = await opts.verifyBeforeSend();
       return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
     });
     const knex = makeKnex();
@@ -289,80 +293,65 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(KnowledgeBridge.sealRecommendationsForSend).not.toHaveBeenCalled();
   });
 
-  test('#3143: an unverifiable CACHED attachment fails closed', async () => {
+  test('#3143: an UNREADABLE post-render re-check fails closed', async () => {
+    loadLinkedLawnAssessment
+      .mockResolvedValueOnce({ id: 'assess-canonical' })
+      .mockRejectedValueOnce(new Error('connection terminated'));
     sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
-      const safe = await opts.verifyBeforeSend({
-        renderedAssessmentId: 'assess-canonical',
-        attachedAssessmentId: null, // storage carries no provenance
-        attachmentRendered: false,
-        hasAttachment: true,
-      });
+      const safe = await opts.verifyBeforeSend();
       return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
     });
     const knex = makeKnex();
     const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
 
     const out = await processServiceReportDelivery(delivery, knex);
-    expect(out.status).not.toBe('sent');
-  });
 
-  test('#3143 r1: a FRESH attachment reporting NULL provenance fails closed', async () => {
-    // buildReportV1Data's assessment lookup is fail-soft, so a transient query
-    // error yields a freshly rendered PDF with no lawn section at all while the
-    // permanent report still shows one — divergence by omission. Absence of a
-    // contradiction is not proof; the fence needs a positive match.
-    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
-      const safe = await opts.verifyBeforeSend({
-        renderedAssessmentId: 'assess-canonical',
-        attachedAssessmentId: null,
-        attachmentRendered: true, // genuinely rendered, just couldn't resolve
-        hasAttachment: true,
-      });
-      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
-    });
-    const knex = makeKnex();
-    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
-
-    const out = await processServiceReportDelivery(delivery, knex);
     expect(out.status).not.toBe('sent');
     expect(KnowledgeBridge.sealRecommendationsForSend).not.toHaveBeenCalled();
   });
 
-  test('#3143: body and attachment both matching proceeds', async () => {
+  test('#3143: an unchanged selection proceeds to seal', async () => {
+    loadLinkedLawnAssessment.mockResolvedValue({ id: 'assess-canonical' });
     sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
-      const safe = await opts.verifyBeforeSend({
-        renderedAssessmentId: 'assess-canonical',
-        attachedAssessmentId: 'assess-canonical',
-        attachmentRendered: true,
-        hasAttachment: true,
-      });
+      const safe = await opts.verifyBeforeSend();
       return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
     });
     const knex = makeKnex();
     const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
 
     const out = await processServiceReportDelivery(delivery, knex);
+
     expect(out.status).toBe('sent');
     expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
       'assess-canonical', expect.any(String), expect.any(Function),
     );
+    // Resolved twice: once to pick the target, once to prove it didn't drift.
+    expect(loadLinkedLawnAssessment).toHaveBeenCalledTimes(2);
   });
 
-  test('#3143: no attachment at all leaves nothing to diverge — send proceeds', async () => {
+  test('#3143: the held-payload fallback is NOT selection-re-checked', async () => {
+    // Canonical resolution finds nothing (assessment not confirmed), so the
+    // fence falls back to the held id. Re-checking would compare against null
+    // and defer every held delivery forever.
+    loadLinkedLawnAssessment.mockResolvedValue(null);
     sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
-      const safe = await opts.verifyBeforeSend({
-        renderedAssessmentId: 'assess-canonical',
-        attachedAssessmentId: null,
-        attachmentRendered: false,
-        hasAttachment: false, // PDF render failed; email goes without one
-      });
+      const safe = await opts.verifyBeforeSend();
       return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
     });
     const knex = makeKnex();
-    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+    const delivery = {
+      ...DELIVERY,
+      payload: { awaiting_grounding: true, lawn_assessment_id: 'assess-held' },
+    };
 
     const out = await processServiceReportDelivery(delivery, knex);
+
     expect(out.status).toBe('sent');
+    expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
+      'assess-held', expect.any(String), expect.any(Function),
+    );
+    // Only the pre-render resolution ran — no post-render re-check.
+    expect(loadLinkedLawnAssessment).toHaveBeenCalledTimes(1);
   });
 
   test('r2: a lookup ERROR fails closed — deferred, never dispatched unfenced', async () => {

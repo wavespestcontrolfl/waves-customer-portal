@@ -244,6 +244,10 @@ async function processServiceReportDelivery(delivery, knex = db) {
   let releaseLawnSeal = null;
 
   let fencedAssessmentId = null;
+  // Whether the fence target came from canonical resolution (vs the held
+  // payload fallback). Only a canonically-resolved target can be re-checked
+  // against the renderer's selection after the render.
+  let fencedFromCanonical = false;
 
   if (heldForGrounding) {
     const KnowledgeBridge = require('../knowledge-bridge');
@@ -276,8 +280,8 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // failClosed (codex P1 #3135 r2): a transient DB error must NOT read as
   // "not a lawn record". Swallowing it would dispatch an unfenced attachment;
   // defer retryably instead — only a clean query returning no row bypasses.
+  const { loadLinkedLawnAssessment } = require('./report-data');
   try {
-    const { loadLinkedLawnAssessment } = require('./report-data');
     const serviceRow = await knex('service_records')
       .where({ id: delivery.service_record_id })
       .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
@@ -285,6 +289,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
       ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true })
       : null;
     fencedAssessmentId = linked?.id || null;
+    fencedFromCanonical = !!fencedAssessmentId;
   } catch (resolveErr) {
     const status = await markDeliveryFailed(delivery, new Error(`lawn fence target unresolvable: ${resolveErr.message}`), knex);
     return { status, error: resolveErr.message };
@@ -315,12 +320,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
     // registration refuses while it is unexpired, so nothing can start
     // between this check and the dispatch.
     const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
-    lawnFenceCheck = async ({
-      renderedAssessmentId = null,
-      attachedAssessmentId = null,
-      attachmentRendered = true,
-      hasAttachment = false,
-    } = {}) => {
+    lawnFenceCheck = async ({ renderedAssessmentId = null } = {}) => {
       try {
         // The render is authoritative about which assessment the customer is
         // about to receive (codex P1 #3135 r3). If it used a DIFFERENT row than
@@ -332,23 +332,43 @@ async function processServiceReportDelivery(delivery, knex = db) {
           logger.warn(`[delivery-queue] rendered assessment ${renderedAssessmentId} differs from fenced ${assessmentId} for record ${delivery.service_record_id} — deferring send`);
           return false;
         }
-        // The email body and the PDF build report data INDEPENDENTLY (#3143),
-        // so the body agreeing with the fence says nothing about the file the
-        // customer opens. The attachment reports its own provenance; it must
-        // agree too.
-        // This delivery is fenced, so a lawn assessment EXISTS for the record.
-        // An attachment must therefore prove it carries that exact assessment
-        // — POSITIVE proof, not merely the absence of a contradiction. A null
-        // id is a mismatch, not a pass: the report builder's lookup is
-        // fail-soft, so a transient query error yields a freshly rendered PDF
-        // with NO lawn section while the permanent report still shows one,
-        // which is the same divergence by omission. A cached object likewise
-        // carries no provenance. Fenced deliveries force a fresh render, so
-        // both are backstops rather than routine branches.
-        if (hasAttachment
-          && (!attachmentRendered || !attachedAssessmentId || String(attachedAssessmentId) !== String(assessmentId))) {
-          logger.warn(`[delivery-queue] attachment provenance unproven for record ${delivery.service_record_id} (attached=${attachedAssessmentId || 'none'}, rendered=${attachmentRendered}, fenced=${assessmentId}) — deferring send`);
-          return false;
+        // SELECTION re-check across the render window (issue #3143).
+        //
+        // The PDF's content provenance cannot be read server-side: the
+        // renderer does not consume the payload built here — it points a
+        // headless browser at /report/:token, and that page fetches
+        // /api/reports/:token/data, which rebuilds the report independently
+        // (server/services/service-report/pdf.js, server/routes/reports-public.js).
+        // With Cloudflare Browser Rendering the render is a remote URL->PDF
+        // call, so there is no hook to ask what the browser actually received.
+        //
+        // What IS knowable is whether the ANSWER changed. The version pin
+        // above catches the fenced row's copy moving during the render; it
+        // cannot catch a DIFFERENT row becoming the selection, which is the
+        // race here — the backlink is non-unique and a newly confirmed or
+        // relinked assessment can outrank the fenced one. Re-resolve through
+        // the same canonical function the report page uses and require the
+        // same answer. A change means the browser may well have rendered the
+        // new row, so defer; the retry fences whatever is current then.
+        //
+        // Fail closed: an unreadable re-check is not a pass.
+        //
+        // Only meaningful for a canonically-resolved target. On the held-payload
+        // fallback canonical resolution already returned nothing (the assessment
+        // isn't confirmed yet), so the report page renders no lawn section at
+        // all — there is no selection to drift, and re-checking would defer
+        // every held delivery forever.
+        if (fencedFromCanonical) {
+          const serviceNow = await knex('service_records')
+            .where({ id: delivery.service_record_id })
+            .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
+          const linkedNow = serviceNow
+            ? await loadLinkedLawnAssessment(serviceNow, knex, { failClosed: true })
+            : null;
+          if (String(linkedNow?.id || '') !== String(assessmentId)) {
+            logger.warn(`[delivery-queue] lawn assessment selection changed across render for record ${delivery.service_record_id} (fenced ${assessmentId}, now ${linkedNow?.id || 'none'}) — deferring send`);
+            return false;
+          }
         }
         const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
         if (sealed) {
