@@ -135,12 +135,21 @@ function sectionKeyForRow(row = {}, candidate = {}) {
 // and the first one that reconciles to the stored annual total wins, so a
 // mis-picked cadence can never reach the document.
 //
+// The BUNDLE is the caller's to resolve as well, and it must be the LIVE one
+// (estimate-proposal-billing.js asks the route for it). Reading
+// estimate_data.sendSnapshot.pricingBundle here would quote a policy-invalid
+// snapshot: buildPricingBundleInner deliberately refuses to fast-path a
+// snapshot carrying a retired cadence or a below-floor lawn price and rebuilds
+// it through the clamped ladder, so the page sells the rebuilt plan while the
+// frozen snapshot still describes the retired one. That snapshot's totals
+// generally still match the estimate — the route's own fast path requires it —
+// so the reconcile guard below cannot catch the difference (codex #3120 r4).
+//
 // Returns null — legacy monthly synthesis, i.e. today's rendering — whenever
 // the plan can't be described this way with confidence: no bundle, a row with
 // an unprovable cadence, or lines that don't reconcile. Failing to the old
 // document beats asserting a billing cadence the customer isn't on.
-function perApplicationRecurringLines(estimate = {}, estimateData = {}) {
-  const bundle = estimateData?.sendSnapshot?.pricingBundle;
+function perApplicationRecurringLines(estimate = {}, bundle = null) {
   if (!bundle || typeof bundle !== 'object') return null;
 
   const frequencies = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])
@@ -262,10 +271,10 @@ function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bun
 // Build a single-building fallback proposal from the engine line items /
 // estimate fields so ANY estimate can still produce a PDF even before the
 // operator has authored an explicit multi-building proposal.
-function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy' } = {}) {
+function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy', pricingBundle = null } = {}) {
   const perApplicationMode = recurringMode === 'per_application';
   const lineItems = perApplicationMode
-    ? [...(perApplicationRecurringLines(estimate, estimateData) || [])]
+    ? [...(perApplicationRecurringLines(estimate, pricingBundle) || [])]
     : [];
   const havePerApplicationRecurring = lineItems.length > 0;
   // A per-application plan whose lines could not be derived (no snapshot, or a
@@ -360,13 +369,13 @@ function isCommercialProposalData(estimateData) {
  * @returns {{ enabled, synthesized, title, preparedFor, propertyAddress,
  *   taxRate, taxLabel, terms, buildings: Array }}
  */
-function normalizeProposal(estimate = {}, { recurringMode = 'legacy' } = {}) {
+function normalizeProposal(estimate = {}, { recurringMode = 'legacy', pricingBundle = null } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const stored = estimateData.proposal;
 
   const base = stored && Array.isArray(stored.buildings) && stored.buildings.length
     ? stored
-    : synthesizeFallbackProposal(estimate, estimateData, { recurringMode });
+    : synthesizeFallbackProposal(estimate, estimateData, { recurringMode, pricingBundle });
 
   const buildings = (Array.isArray(base.buildings) ? base.buildings : []).map(normalizeBuilding);
 

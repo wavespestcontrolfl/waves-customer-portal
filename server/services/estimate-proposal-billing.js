@@ -122,23 +122,58 @@ async function estimateSoldAsAnnualPrepay(estimate) {
   }
 }
 
+// The pricing bundle the PDF quotes from must be the one the PAGE is selling,
+// not the frozen send snapshot: buildPricingBundleInner refuses to fast-path a
+// snapshot that violates lawn program policy (retired cadence, below-floor
+// price), carries a stale termite row, or is missing a required setup fee, and
+// rebuilds it through the clamped ladder builders. A snapshot like that keeps
+// totals that still match the estimate, so nothing downstream can detect it —
+// the PDF would quote a plan no outstanding link can sell (codex #3120 r4).
+//
+// buildPricingBundle is the single function that applies every one of those
+// checks AND the lane strip/backfill, so asking it is what keeps the two
+// documents in lockstep; re-implementing the checks here would just add a
+// second copy to drift. Lazy require for the same load-order reason as the
+// phone matcher. A failure returns null, which lands the caller on the legacy
+// document rather than on a bundle nobody vouched for.
+async function resolveLivePricingBundle(estimate) {
+  try {
+    const { buildPricingBundle } = require('../routes/estimate-public');
+    if (typeof buildPricingBundle !== 'function') return null;
+    const bundle = await buildPricingBundle(estimate);
+    return bundle && typeof bundle === 'object' ? bundle : null;
+  } catch (err) {
+    logger.warn(`[estimate-proposal-billing] live pricing bundle failed for estimate ${estimate?.id}: ${err.message}`);
+    return null;
+  }
+}
+
 /**
  * Per-application copy requires BOTH lookups to answer conclusively — any
  * unknown keeps the legacy document, which is always safe to render.
  *
- * @returns {Promise<{ billsPerApplication: boolean }>}
+ * The bundle is resolved ONLY for a confirmed per-application lane: it is the
+ * one expensive call here, and every other lane renders from the estimate's
+ * own stored totals exactly as it did before this PR.
+ *
+ * @returns {Promise<{ billsPerApplication: boolean, pricingBundle: object|null }>}
  */
 async function resolveProposalBillingContext(estimate) {
   const [perApplication, prepaid] = await Promise.all([
     estimateBillsPerApplication(estimate),
     estimateSoldAsAnnualPrepay(estimate),
   ]);
-  return { billsPerApplication: perApplication === true && prepaid === false };
+  const billsPerApplication = perApplication === true && prepaid === false;
+  return {
+    billsPerApplication,
+    pricingBundle: billsPerApplication ? await resolveLivePricingBundle(estimate) : null,
+  };
 }
 
 module.exports = {
   estimateBillsPerApplication,
   estimateSoldAsAnnualPrepay,
+  resolveLivePricingBundle,
   resolveProposalBillingContext,
 };
 // Test-only: lets suites exercise the pre-migration branch after a true probe

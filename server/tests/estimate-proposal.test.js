@@ -188,7 +188,13 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
     ...estimate,
     estimate_data: { sendSnapshot: { pricingBundle: bundle } },
   });
-  const lines = (estimate) => perApplicationRecurringLines(estimate, estimate.estimate_data);
+  // The caller hands in the LIVE bundle (estimate-proposal-billing resolves it
+  // through the route's buildPricingBundle) — these fixtures stand in for it.
+  const lines = (estimate) => perApplicationRecurringLines(
+    estimate,
+    estimate.estimate_data?.sendSnapshot?.pricingBundle || null,
+  );
+  const bundleOf = (estimate) => estimate.estimate_data?.sendSnapshot?.pricingBundle || null;
 
   it('quotes the accepted cadence per application, not per month', () => {
     const out = lines(lawnEstimate);
@@ -347,8 +353,31 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
 
   it('returns null with no bundle (the legacy document still renders a number)', () => {
     const bare = { monthly_total: 120, annual_total: 1440, estimate_data: {} };
-    expect(perApplicationRecurringLines(bare, bare.estimate_data)).toBeNull();
+    expect(perApplicationRecurringLines(bare, null)).toBeNull();
     expect(normalizeProposal(bare).buildings[0].lineItems[0].frequency).toBe('monthly');
+  });
+
+  // Codex #3120 r4: the synthesis must never reach into the send snapshot on
+  // its own. buildPricingBundleInner rebuilds a snapshot carrying a retired
+  // cadence or a below-floor lawn price, so a PDF that read the frozen copy
+  // would quote a plan the page no longer sells — and because that snapshot's
+  // totals still match the estimate, the reconcile guard cannot see it.
+  it('ignores the send snapshot entirely — an unresolved bundle renders legacy', () => {
+    // A stale snapshot that WOULD reconcile if it were trusted.
+    expect(perApplicationRecurringLines(lawnEstimate, null)).toBeNull();
+    expect(normalizeProposal(lawnEstimate, { recurringMode: 'per_application' })
+      .buildings[0].lineItems.map((i) => i.frequency)).not.toContain('per_application');
+  });
+
+  it('quotes the live bundle when it differs from the frozen snapshot', () => {
+    // The page rebuilt the retired cadence into a clamped 6x/yr ladder; the
+    // snapshot still says 4x/yr at a below-floor price.
+    const stale = { frequencies: [{ ...lawnFrequency, perTreatment: 60, visitsPerYear: 4, annual: 240 }] };
+    const est = { ...lawnEstimate, estimate_data: { sendSnapshot: { pricingBundle: stale } } };
+    const out = perApplicationRecurringLines(est, bundleOf(lawnEstimate));
+    expect(out).toHaveLength(1);
+    expect(out[0].unitPrice).toBe(90);
+    expect(out[0].visitsPerYear).toBe(6);
   });
 
   it('skips quote-required cadences', () => {
@@ -364,7 +393,7 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
         lineItems: [{ name: 'Initial cleanup', oneTimePrice: 150 }],
       },
     };
-    const p = normalizeProposal(est, { recurringMode: 'per_application' });
+    const p = normalizeProposal(est, { recurringMode: 'per_application', pricingBundle: bundleOf(est) });
     expect(p.buildings[0].lineItems.map((i) => i.frequency)).toEqual(['per_application', 'one_time']);
     expect(computeProposalTotals(p).annualRecurring).toBe(540);
   });
@@ -373,8 +402,9 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
   // drops visitsPerYear on save, so a promoted line would annualize to $0 and
   // the PUT would overwrite annual_total.
   it('is opt-in — the proposal editor read never sees the internal cadence', () => {
-    expect(normalizeProposal(lawnEstimate).buildings[0].lineItems[0].frequency).toBe('monthly');
-    expect(normalizeProposal(lawnEstimate, { recurringMode: 'per_application' })
+    expect(normalizeProposal(lawnEstimate, { pricingBundle: bundleOf(lawnEstimate) })
+      .buildings[0].lineItems[0].frequency).toBe('monthly');
+    expect(normalizeProposal(lawnEstimate, { recurringMode: 'per_application', pricingBundle: bundleOf(lawnEstimate) })
       .buildings[0].lineItems[0].frequency).toBe('per_application');
   });
 
