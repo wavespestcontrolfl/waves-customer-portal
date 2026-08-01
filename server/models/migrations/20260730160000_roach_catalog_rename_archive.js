@@ -119,17 +119,20 @@ function relabelReminderServiceType(value, fromName, toName) {
 
 // Statement ids among these invoices' payer_statement_id links whose
 // statement is no longer 'open' — i.e. frozen issued billing documents.
-// Locks EVERY referenced statement row (not just already-frozen ones) for
-// the migration transaction: finalizeStatement starts by locking the
-// statement row, so a concurrent finalization serializes behind our commit
-// instead of freezing a statement whose invoice we are mid-relabel
-// (codex #3108 r11).
+// DELIBERATELY LOCK-FREE (codex #3108 r13): the codebase's own statement
+// writers hold conflicting lock orders — voidInvoice takes
+// statement→invoice while InvoiceService.update takes invoice→statement —
+// so ANY lock this migration takes on statements can deadlock one of them,
+// and a deadlock abort of a migration fails the whole deploy. The invoice
+// writes instead use optimistic updated_at predicates (below); the residual
+// is a statement finalizing inside the sub-second read→write gap, which is
+// label-only and strictly safer than deadlocking a deploy or a live
+// billing write.
 async function frozenPayerStatementIds(knex, invoices) {
   const stmtIds = [...new Set(invoices.map((inv) => inv.payer_statement_id).filter(Boolean))];
   if (!stmtIds.length || !(await knex.schema.hasTable('payer_statements'))) return new Set();
   const rows = await knex('payer_statements')
     .whereIn('id', stmtIds)
-    .forUpdate()
     .select('id', 'status');
   return new Set(rows.filter((r) => r.status !== 'open').map((r) => r.id));
 }
@@ -251,20 +254,32 @@ exports.up = async function up(knex) {
       .whereNotIn('status', TERMINAL_VISIT_STATUSES)
       .select('id', 'self_booking_id');
     const visits = [...linked, ...legacy];
-    const ids = visits.map((v) => v.id);
-    if (ids.length) {
+    if (visits.length) {
       // Full expected prior state rides ON the update — status (a visit
       // completing concurrently keeps its completion-artifact label, codex
-      // r7) AND service_type (an admin switching the visit's service
-      // concurrently keeps their edit, codex r10) — and the RECORDED ids
-      // come from the returning set, so a skipped visit is neither recorded
-      // nor has its snapshots queued (codex r8).
-      const updatedRows = await knex('scheduled_services')
-        .whereIn('id', ids)
-        .where({ service_type: OLD_NAME })
-        .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-        .update({ service_type: NEW_NAME }, ['id']);
-      const updatedIds = (Array.isArray(updatedRows) ? updatedRows : [])
+      // r7), service_type (an admin switching the visit's service
+      // concurrently keeps their edit, codex r10), AND the catalog identity
+      // each group was selected under (an update-details edit that repoints
+      // service_id without touching the label concurrently moves the visit
+      // to another catalog service — it must fall out of the relabel, codex
+      // r13). RECORDED ids come from the returning sets, so a skipped visit
+      // is neither recorded nor has its snapshots queued (codex r8).
+      const updatedLinked = linked.length
+        ? await knex('scheduled_services')
+          .whereIn('id', linked.map((v) => v.id))
+          .where({ service_type: OLD_NAME, service_id: row.id })
+          .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+          .update({ service_type: NEW_NAME }, ['id'])
+        : [];
+      const updatedLegacy = legacy.length
+        ? await knex('scheduled_services')
+          .whereIn('id', legacy.map((v) => v.id))
+          .where({ service_type: OLD_NAME })
+          .whereNull('service_id')
+          .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+          .update({ service_type: NEW_NAME }, ['id'])
+        : [];
+      const updatedIds = [...(Array.isArray(updatedLinked) ? updatedLinked : []), ...(Array.isArray(updatedLegacy) ? updatedLegacy : [])]
         .map((r) => (r && typeof r === 'object' ? r.id : r))
         .filter(Boolean);
       state.backfilledVisitIds = updatedIds;
@@ -349,46 +364,36 @@ exports.up = async function up(knex) {
   const snapshotVisitIds = [...new Set([...state.backfilledVisitIds, ...state.addonParentVisitIds])];
 
   if (snapshotVisitIds.length && (await knex.schema.hasTable('invoices'))) {
-    // Lock ORDER matters (codex #3108 r12): voidInvoice and the other
-    // statement writers take the STATEMENT lock first, then the invoice —
-    // taking invoice locks first here is a textbook AB/BA deadlock, and a
-    // deadlock abort of a migration fails the whole deploy. So: unlocked
-    // pre-read to learn the statement links → lock statements → THEN lock
-    // and re-read the invoices (patches derive from the locked read; a
-    // concurrent InvoiceService.update also locks the row, codex r11).
-    const preRead = await knex('invoices')
+    // DELIBERATELY LOCK-FREE (codex #3108 r12+r13): the live invoice
+    // writers hold OPPOSITE lock orders (voidInvoice statement→invoice;
+    // InvoiceService.update invoice→statement), so any invoice/statement
+    // lock this migration holds can deadlock one of them — and a deadlock
+    // abort of a migration fails the whole deploy. Instead each patch is an
+    // OPTIMISTIC single-statement update predicated on the row's read
+    // updated_at (every live writer stamps it): any concurrent edit moves
+    // updated_at, the update hits zero rows, and nothing is claimed —
+    // stronger than the previous locked read, with no deadlock surface.
+    const drafts = await knex('invoices')
       .whereIn('scheduled_service_id', snapshotVisitIds)
       .whereIn('status', ['draft', 'scheduled'])
-      .select('id', 'payer_statement_id');
+      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id', 'updated_at');
     // A draft already accrued to a FROZEN payer statement (anything not
     // 'open' is a finalized/issued billing document) stays untouched —
     // statement lines load live from invoices.service_type, so relabeling
     // would change a rendered issued document (codex #3108 r8).
-    const frozenStatementIds = await frozenPayerStatementIds(knex, preRead);
-    const drafts = preRead.length
-      ? await knex('invoices')
-        .whereIn('id', preRead.map((r) => r.id))
-        .whereIn('status', ['draft', 'scheduled'])
-        .forUpdate()
-        .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id')
-      : [];
-    const checkedStmtIds = new Set(preRead.map((r) => r.payer_statement_id).filter(Boolean));
+    const frozenStatementIds = await frozenPayerStatementIds(knex, drafts);
     for (const inv of drafts) {
-      // Skip frozen-statement invoices AND any that accrued to a statement
-      // in the pre-read → locked-read gap (that statement isn't locked or
-      // status-checked — conservative skip).
-      if (inv.payer_statement_id
-        && (frozenStatementIds.has(inv.payer_statement_id) || !checkedStmtIds.has(inv.payer_statement_id))) continue;
+      if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
       const result = relabelInvoiceSnapshot(inv, OLD_NAME, NEW_NAME);
       if (!result) continue;
       // Status rechecked ON the update (a scheduled-send claim flips the
       // status to 'sending' and delivers — that invoice is history, codex
-      // #3108 r10), and the record only claims an invoice the update
-      // actually hit.
+      // #3108 r10); updated_at predicate rejects any interleaved edit; the
+      // record only claims an invoice the update actually hit.
       const count = await knex('invoices')
-        .where({ id: inv.id })
+        .where({ id: inv.id, updated_at: inv.updated_at })
         .whereIn('status', ['draft', 'scheduled'])
-        .update(result.patch);
+        .update({ ...result.patch, updated_at: knex.fn.now() });
       if (!count) continue;
       // Per-field ownership: rollback reverts only these fields/item-indexes.
       state.relabeledInvoices[inv.id] = {
@@ -534,33 +539,27 @@ exports.down = async function down(knex) {
     // Same statement-before-invoice lock ORDER as up() (codex r12 — the
     // reverse order deadlocks against voidInvoice), then the same row locks
     // for patch derivation.
-    const preRead = await knex('invoices')
+    // Same lock-free optimistic strategy as up() (codex r12+r13 — the live
+    // invoice writers' lock orders conflict with each other, so no lock
+    // order is safe here).
+    const drafts = await knex('invoices')
       .whereIn('id', invoiceIds)
       .whereIn('status', ['draft', 'scheduled'])
-      .select('id', 'payer_statement_id');
+      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id', 'updated_at');
     // Same frozen-statement rule on the way back: a draft that accrued to a
     // finalized statement since up() is part of an issued document now.
-    const frozenStatementIds = await frozenPayerStatementIds(knex, preRead);
-    const checkedStmtIds = new Set(preRead.map((r) => r.payer_statement_id).filter(Boolean));
-    const drafts = preRead.length
-      ? await knex('invoices')
-        .whereIn('id', preRead.map((r) => r.id))
-        .whereIn('status', ['draft', 'scheduled'])
-        .forUpdate()
-        .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id')
-      : [];
+    const frozenStatementIds = await frozenPayerStatementIds(knex, drafts);
     for (const inv of drafts) {
       const rec = relabeledInvoices[inv.id];
       if (!rec) continue;
       if (terminalVisitIds.has(rec.scheduled_service_id) || terminalVisitIds.has(inv.scheduled_service_id)) continue;
-      if (inv.payer_statement_id
-        && (frozenStatementIds.has(inv.payer_statement_id) || !checkedStmtIds.has(inv.payer_statement_id))) continue;
+      if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
       const patch = rollbackInvoiceSnapshot(inv, rec, NEW_NAME, OLD_NAME);
       if (!patch) continue;
       await knex('invoices')
-        .where({ id: inv.id })
+        .where({ id: inv.id, updated_at: inv.updated_at })
         .whereIn('status', ['draft', 'scheduled'])
-        .update(patch);
+        .update({ ...patch, updated_at: knex.fn.now() });
     }
   }
 
