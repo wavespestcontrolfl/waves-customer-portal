@@ -3230,9 +3230,12 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     // window rather than materializing an overlap.
     if (firstVisitDate && firstVisitWindowStart) {
       const conflict = await AnnualPrepayTimes.findVisitWindowConflict(db, {
-        customerId: customer.id,
         scheduledDate: firstVisitDate,
         windowStart: firstVisitWindowStart,
+        // A visit of this same coverage service already sitting at that hour is
+        // the one coverage will adopt, not a clash. The customer's OTHER
+        // services still count — they can't be performed simultaneously.
+        adoptableFor: { customerId: customer.id, coverageServiceType },
       });
       if (conflict) {
         return res.status(409).json({

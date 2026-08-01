@@ -16,17 +16,22 @@ const db = require('../models/db');
 
 const SETUP_FEE_WAIVED_RE = /setup fee waived|setup.*waiv/i;
 
-// coverage_* columns were added after the original annual_prepay_terms table.
-// Detect them once so an environment that has the table but not yet the
-// coverage migration (rolling deploy / preview DB) still loads the base term
-// instead of throwing and dropping the whole annual-prepay payload.
+// coverage_* and first_visit_* columns were added after the original
+// annual_prepay_terms table. Detect them once so an environment that has the
+// table but not yet those migrations (rolling deploy / preview DB) still loads
+// the base term instead of throwing and dropping the whole annual-prepay
+// payload. first_visit_date MUST be in this list — buildCoverageVisits anchors
+// the displayed schedule on it, and an unselected column reads as undefined,
+// silently falling back to term_start.
 let coverageColsCache = null;
 async function annualPrepayCoverageCols() {
   if (coverageColsCache) return coverageColsCache;
   try {
     const cols = await db('annual_prepay_terms').columnInfo();
-    coverageColsCache = ['coverage_service_type', 'coverage_visit_count', 'coverage_cadence']
-      .filter((c) => cols[c]);
+    coverageColsCache = [
+      'coverage_service_type', 'coverage_visit_count', 'coverage_cadence',
+      'first_visit_date', 'first_visit_window_start',
+    ].filter((c) => cols[c]);
   } catch {
     coverageColsCache = [];
   }
@@ -139,6 +144,10 @@ function buildPrepayCoverageSummary(prepay) {
 // scheduled_services join — so it's correct even before the invoice is paid and
 // coverage rows are seeded. Empty array when coverage isn't configured.
 function buildCoverageVisits(term, prepayAmount, { today = null } = {}) {
+  // A term that has not been paid yet has not seeded any visits, so its
+  // displayed schedule is still a forecast; an active/decided term's visits
+  // are already on the calendar.
+  const paymentPending = String(term?.status || '').toLowerCase() === 'payment_pending';
   const visitCount = term?.coverage_visit_count != null ? Number(term.coverage_visit_count) : null;
   if (!term?.term_start || !Number.isInteger(visitCount) || visitCount <= 0) return [];
   try {
@@ -146,14 +155,15 @@ function buildCoverageVisits(term, prepayAmount, { today = null } = {}) {
       require('./annual-prepay-renewals')._private;
     const { etDateString } = require('../utils/datetime-et');
     const cadence = term.coverage_cadence || inferCoverageCadence(term);
-    // Same inputs the payment-time seeder uses — including the today floor —
-    // so the dates shown on the invoice/pay page are the dates the customer
-    // will actually be given if they pay now. Omitting the floor here would
-    // let a lingering unpaid invoice keep displaying a first visit that
-    // seeding has already moved.
+    // While payment is PENDING, apply the same today floor the payment-time
+    // seeder will apply, so an unpaid invoice previews the dates the customer
+    // would actually get by paying now. Once the term is paid the visits exist
+    // as scheduled_services rows fixed at their seeded dates — re-flooring a
+    // settled invoice or its PDF would make the document drift away from the
+    // schedule a day at a time, so the floor is dropped there.
     const dates = coverageScheduleDates(term.term_start, visitCount, cadence, term.term_end, {
       firstVisitDate: term.first_visit_date || null,
-      notBefore: today || etDateString(),
+      notBefore: paymentPending ? (today || etDateString()) : null,
     }) || [];
     // Split by the sold visitCount so each displayed share equals the
     // prepaid_amount actually stamped on the covered scheduled_services

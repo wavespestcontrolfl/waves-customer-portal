@@ -149,10 +149,14 @@ function addMinutesHHMM(value, minutes) {
 // technician-NULL and tech-scoped WHEREs can't see them — and it already
 // handles live estimate holds and the nullable window_end.
 //
-// The customer's OWN rows are excluded: if they already have a visit at that
-// hour it is the visit this coverage adopts (the tolerance matcher in
-// ensureCoverageRowsForTerm), not a double-booking to refuse.
-async function findVisitWindowConflict(conn, { customerId = null, scheduledDate, windowStart, durationMinutes = 60 } = {}) {
+// `adoptableFor` narrowly ignores the ONE row this coverage would adopt: the
+// same customer's visit of the same coverage service type at that hour, which
+// the tolerance matcher in ensureCoverageRowsForTerm takes over rather than
+// duplicating. Every other row — including the same customer's OTHER services,
+// which still can't be performed simultaneously — counts as occupancy.
+async function findVisitWindowConflict(conn, {
+  scheduledDate, windowStart, durationMinutes = 60, adoptableFor = null,
+} = {}) {
   const date = dateOnly(scheduledDate);
   const start = normalizeWindowStart(windowStart);
   const end = addMinutesHHMM(start, durationMinutes);
@@ -163,9 +167,15 @@ async function findVisitWindowConflict(conn, { customerId = null, scheduledDate,
     date,
     windowStart: start,
     windowEnd: end,
-    excludeCustomerId: customerId || null,
   });
-  return rows && rows.length ? rows[0] : null;
+  if (!rows || !rows.length) return null;
+  const customerId = adoptableFor?.customerId || null;
+  const serviceType = adoptableFor?.coverageServiceType || null;
+  if (!customerId || !serviceType) return rows[0];
+  const blocking = rows.filter((row) => !(
+    String(row.customer_id) === String(customerId) && serviceMatchesCoverage(row, serviceType)
+  ));
+  return blocking.length ? blocking[0] : null;
 }
 
 function daysUntil(fromYmd, toYmd) {
@@ -497,38 +507,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     firstVisitWindowStart = null;
   }
   const firstTargetDate = targetDates[0] || null;
-  // The promise was captured when the invoice was minted; the board may have
-  // moved since. Re-check at seeding time and drop the window (keeping the
-  // date) rather than materializing a timed visit that overlaps another job.
-  if (firstVisitWindowStart && firstTargetDate && datesToSeed.includes(firstTargetDate)) {
-    try {
-      // Rung-1 date lock BEFORE the check, per the occupancy ordering
-      // contract: without it a concurrent booking can pass its own conflict
-      // check and commit an overlapping visit between our read and insert.
-      // pg_advisory_xact_lock is transaction-scoped, so this only serializes
-      // when `conn` is the payment transaction (the path that matters); called
-      // on a bare connection it is a no-op and the check stays best-effort —
-      // which is safe because the failure mode is a dropped window, not an
-      // overlapping booking.
-      const { acquireOccupancyLock } = require('./scheduling/occupancy');
-      await acquireOccupancyLock(conn, firstTargetDate);
-      const conflict = await findVisitWindowConflict(conn, {
-        customerId: term.customer_id,
-        scheduledDate: firstTargetDate,
-        windowStart: firstVisitWindowStart,
-        durationMinutes: baseDuration,
-      });
-      if (conflict) {
-        logger.warn(`[annual-prepay] term ${term.id} first-visit window ${firstVisitWindowStart} on ${firstTargetDate} collides with visit ${conflict.id} — seeding without a window`);
-        firstVisitWindowStart = null;
-      }
-    } catch (err) {
-      // Fail CLOSED: an unverifiable window must not become an overlapping
-      // timed promise. The visit still seeds on the right date, windowless.
-      logger.warn(`[annual-prepay] term ${term.id} first-visit conflict check failed (${err.message}) — seeding without a window`);
-      firstVisitWindowStart = null;
-    }
-  }
 
   // A term paid so late that the window can't absorb the lag still generates
   // its earliest visits in the past (shifting further would push a paid visit
@@ -538,7 +516,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     logger.warn(`[annual-prepay] term ${term.id} seeded coverage starting ${firstTargetDate}, before today (${today}) — term window too short to absorb the payment lag; visits need rescheduling`);
   }
 
-  for (const scheduledDate of datesToSeed) {
+  const buildInsert = (scheduledDate, windowStart) => {
     const insertData = {
       customer_id: term.customer_id,
       scheduled_date: scheduledDate,
@@ -547,9 +525,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       notes: `Annual prepaid ${coverageServiceType} coverage`,
       estimated_duration_minutes: baseDuration,
     };
-    const windowStart = (firstVisitWindowStart && scheduledDate === firstTargetDate)
-      ? firstVisitWindowStart
-      : null;
     if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;
     if (cols.is_recurring) insertData.is_recurring = true;
     if (cols.recurring_pattern) insertData.recurring_pattern = coverageCadence === 'every_6_weeks' ? 'custom' : coverageCadence;
@@ -567,8 +542,51 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     if (cols.customer_notes) insertData.customer_notes = null;
     if (cols.estimated_price && seededVisitPrice != null) insertData.estimated_price = seededVisitPrice;
     if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = true;
+    return insertData;
+  };
 
-    const [created] = await conn('scheduled_services').insert(insertData).returning('*');
+  // The promise was captured when the invoice was minted; the board may have
+  // moved since. The date lock, the conflict read and the timed INSERT must all
+  // sit in ONE transaction (occupancy ordering contract) — pg_advisory_xact_lock
+  // is transaction-scoped, so checking on a bare connection would release the
+  // lock before the insert and let a concurrent booking slip in between. This
+  // path is reached from Stripe activation with the root connection, so open a
+  // transaction when `conn` isn't already one.
+  const seedTimedFirstVisit = async (trx, scheduledDate) => {
+    let windowStart = firstVisitWindowStart;
+    try {
+      const { acquireOccupancyLock } = require('./scheduling/occupancy');
+      await acquireOccupancyLock(trx, scheduledDate);
+      const conflict = await findVisitWindowConflict(trx, {
+        scheduledDate,
+        windowStart,
+        durationMinutes: baseDuration,
+        adoptableFor: { customerId: term.customer_id, coverageServiceType },
+      });
+      if (conflict) {
+        logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
+        windowStart = null;
+      }
+    } catch (err) {
+      // Fail CLOSED: an unverifiable window must not become an overlapping
+      // timed promise. The visit still seeds on the right date, windowless.
+      logger.warn(`[annual-prepay] term ${term.id} first-visit conflict check failed (${err.message}) — seeding without a window`);
+      windowStart = null;
+    }
+    const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
+    return row;
+  };
+
+  for (const scheduledDate of datesToSeed) {
+    const wantsWindow = !!firstVisitWindowStart && scheduledDate === firstTargetDate;
+    let created;
+    if (wantsWindow) {
+      created = conn.isTransaction
+        ? await seedTimedFirstVisit(conn, scheduledDate)
+        : await conn.transaction((trx) => seedTimedFirstVisit(trx, scheduledDate));
+    } else {
+      [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
+    }
     if (!created) continue;
     createdRows.push(created);
     if (!createdParentId) {
