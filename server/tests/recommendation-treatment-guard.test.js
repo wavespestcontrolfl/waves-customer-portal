@@ -319,4 +319,23 @@ describe('generation fence registry (r28/r29)', () => {
     delete remaining.runB;
     expect(_test.generationInFlight({ _generationRuns: remaining })).toBe(false);
   });
+
+  // Issue #3135: the Phase B write now consults the seal too, so this
+  // predicate gates the final write and not just new-run registration.
+  test('sendSealActive is true only for an unexpired seal', () => {
+    expect(_test.sendSealActive({ _sendSealUntil: future() })).toBe(true);
+    expect(_test.sendSealActive({ _sendSealUntil: past() })).toBe(false);
+    expect(_test.sendSealActive({ _sendSealUntil: 'not-a-date' })).toBe(false);
+    expect(_test.sendSealActive({})).toBe(false);
+    expect(_test.sendSealActive(null)).toBe(false);
+  });
+
+  // A seal and a live run are independent gates: a seal with no run active
+  // must still block the write, which is exactly the interleaving #3135
+  // describes (lease expired, seal taken, provider returns late).
+  test('an active seal is independent of the generation fence', () => {
+    const sealedNoRuns = { _sendSealUntil: future() };
+    expect(_test.generationInFlight(sealedNoRuns)).toBe(false);
+    expect(_test.sendSealActive(sealedNoRuns)).toBe(true);
+  });
 });

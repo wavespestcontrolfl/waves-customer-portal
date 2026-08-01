@@ -238,10 +238,14 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // failure/backoff path instead of emailing possibly-stale copy (codex P1
   // #3093 r17).
   const heldPayload = (delivery.payload && typeof delivery.payload === 'object') ? delivery.payload : {};
+  const heldForGrounding = !!(heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id);
   let lawnFenceCheck = null;
   let lawnSealRenewTimer = null;
   let releaseLawnSeal = null;
-  if (heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id) {
+
+  let fencedAssessmentId = null;
+
+  if (heldForGrounding) {
     const KnowledgeBridge = require('../knowledge-bridge');
     // Backlink recovery (codex P1 r40): a completion that crashed before
     // writing service_record_id leaves the assessment unlinked, and
@@ -258,10 +262,44 @@ async function processServiceReportDelivery(delivery, knex = db) {
       const status = await markDeliveryFailed(delivery, new Error(`grounding readiness unverified: ${sanitized.error}`), knex);
       return { status, error: sanitized.error };
     }
+  }
+
+  // Fence target = the assessment the ATTACHMENT actually renders, resolved by
+  // the SAME function the renderer uses (codex P1 #3135 r1). A hand-rolled
+  // backlink query diverges: loadLinkedLawnAssessment filters to confirmed
+  // rows, orders by confirmed_at then created_at, and falls back through the
+  // scheduled service — and the record backlink is explicitly non-unique, so
+  // duplicating the rules could seal a DIFFERENT row than the one rendered, or
+  // miss a scheduled-service-only assessment entirely. Runs AFTER the held
+  // path's backlink recovery so a just-relinked assessment is resolvable.
+  //
+  // failClosed (codex P1 #3135 r2): a transient DB error must NOT read as
+  // "not a lawn record". Swallowing it would dispatch an unfenced attachment;
+  // defer retryably instead — only a clean query returning no row bypasses.
+  try {
+    const { loadLinkedLawnAssessment } = require('./report-data');
+    const serviceRow = await knex('service_records')
+      .where({ id: delivery.service_record_id })
+      .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
+    const linked = serviceRow
+      ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true })
+      : null;
+    fencedAssessmentId = linked?.id || null;
+  } catch (resolveErr) {
+    const status = await markDeliveryFailed(delivery, new Error(`lawn fence target unresolvable: ${resolveErr.message}`), knex);
+    return { status, error: resolveErr.message };
+  }
+  // Never weaken the held path: if canonical resolution finds nothing (e.g. the
+  // assessment isn't confirmed yet), fall back to the id the hold was created
+  // for, which is the row that was grounded and sanitized above.
+  if (!fencedAssessmentId && heldForGrounding) fencedAssessmentId = heldPayload.lawn_assessment_id;
+
+  if (fencedAssessmentId) {
+    const KnowledgeBridge = require('../knowledge-bridge');
     // Capture the settled copy's version NOW and re-verify it after the
     // attachment renders, right before dispatch (codex P1 r36): a run that
     // starts after this one-time check must defer the send, not race it.
-    const assessmentId = heldPayload.lawn_assessment_id;
+    const assessmentId = fencedAssessmentId;
     let versionAtCheck = null;
     try {
       const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
@@ -277,8 +315,18 @@ async function processServiceReportDelivery(delivery, knex = db) {
     // registration refuses while it is unexpired, so nothing can start
     // between this check and the dispatch.
     const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
-    lawnFenceCheck = async () => {
+    lawnFenceCheck = async ({ renderedAssessmentId = null } = {}) => {
       try {
+        // The render is authoritative about which assessment the customer is
+        // about to receive (codex P1 #3135 r3). If it used a DIFFERENT row than
+        // the one whose version was pinned before the render, there is no proof
+        // that row held still while it rendered — defer and let the retry fence
+        // the now-current assessment. A null id means the render produced no
+        // lawn assessment at all, so there is nothing to diverge from.
+        if (renderedAssessmentId && String(renderedAssessmentId) !== String(assessmentId)) {
+          logger.warn(`[delivery-queue] rendered assessment ${renderedAssessmentId} differs from fenced ${assessmentId} for record ${delivery.service_record_id} — deferring send`);
+          return false;
+        }
         const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
         if (sealed) {
           // The base TTL equals SendGrid's own request timeout, so a slow
@@ -313,7 +361,13 @@ async function processServiceReportDelivery(delivery, knex = db) {
       token: delivery.report_token,
       reportUrl: delivery.report_url,
       pdfUrl: delivery.pdf_url,
-      forceFreshPdf: !!(heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id),
+      // Any FENCED delivery forces a fresh render, not just held ones (codex
+      // P1 #3135 r3): a stored PDF carries no assessment or recommendation
+      // version, so a cached object rendered from an older copy would sail
+      // past the version check — the fence proves the stored copy didn't move
+      // during THIS render, not that the cached object came from it. Cost is
+      // one render per lawn delivery, which the held path already paid.
+      forceFreshPdf: heldForGrounding || !!fencedAssessmentId,
       verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {

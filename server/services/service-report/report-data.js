@@ -1819,8 +1819,17 @@ async function lawnPhotoUrl(photo) {
   }
 }
 
-async function loadLinkedLawnAssessment(service, knex = db) {
+// failClosed (issue #3135): the RENDER path treats an unreadable assessment as
+// "no assessment" and degrades the card, which is right for a page. A caller
+// that fences a SEND cannot do that — swallowing a transient error there would
+// dispatch an unfenced attachment, indistinguishable from a genuine non-lawn
+// record. Those callers opt in and get the error propagated instead.
+async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false } = {}) {
   if (!service?.customer_id) return null;
+  const swallow = (err) => {
+    if (failClosed) throw err;
+    return null;
+  };
 
   const baseCriteria = { customer_id: service.customer_id, confirmed_by_tech: true };
   const byRecord = service.id
@@ -1829,7 +1838,7 @@ async function loadLinkedLawnAssessment(service, knex = db) {
       .orderBy('confirmed_at', 'desc')
       .orderBy('created_at', 'desc')
       .first()
-      .catch(() => null)
+      .catch(swallow)
     : null;
   if (byRecord) return byRecord;
 
@@ -1840,7 +1849,7 @@ async function loadLinkedLawnAssessment(service, knex = db) {
       .orderBy('confirmed_at', 'desc')
       .orderBy('created_at', 'desc')
       .first()
-      .catch(() => null)
+      .catch(swallow)
     : null;
   if (byService) return byService;
 
