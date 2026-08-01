@@ -287,7 +287,13 @@ async function handleIntakeReply(customer, body) {
     const scopePreCheck = await engineDraftHandoff(
       customer, body, 'scope pre-check (awaiting_service)', { scopeCheckOnly: true },
     );
-    if (scopePreCheck.terminal) return { handled: true, next: status };
+    // terminal:true = consumed for DRAFTING only. NOTHING was said to the
+    // customer and no state advanced, so the webhook must NOT treat this as
+    // a fully handled reply: it still owes the message the normal inbound
+    // bell/push/owner-forward. Suppressing the quote was right; suppressing
+    // the notification would bury real service instructions ("this is for
+    // Friday's visit, please treat the backyard") in the comms log.
+    if (scopePreCheck.terminal) return { handled: true, terminal: true, next: status };
 
     await db('customers').where({ id: customer.id }).update({
       lead_service_interest: cls.interest,
@@ -357,7 +363,9 @@ async function handleIntakeReply(customer, body) {
       // Scope-refused: handled, but nothing was drafted and nothing is
       // owed. The state stays put (an 'estimate_drafted' stamp would be a
       // lie) so a genuine in-scope follow-up still gets the machine.
-      if (handoff.terminal) return { handled: true, next: status };
+      // Same contract as the pre-check above: no draft, nothing said, so
+      // the inbound message still flows into normal notification handling.
+      if (handoff.terminal) return { handled: true, terminal: true, next: status };
       const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
       await db('customers').where({ id: customer.id }).update({
         lead_intake_status: 'estimate_drafted',
@@ -409,7 +417,13 @@ async function handleIntakeReply(customer, body) {
     const scopePreCheck = await engineDraftHandoff(
       customer, body, 'scope pre-check (awaiting_address)', { scopeCheckOnly: true },
     );
-    if (scopePreCheck.terminal) return { handled: true, next: status };
+    // terminal:true = consumed for DRAFTING only. NOTHING was said to the
+    // customer and no state advanced, so the webhook must NOT treat this as
+    // a fully handled reply: it still owes the message the normal inbound
+    // bell/push/owner-forward. Suppressing the quote was right; suppressing
+    // the notification would bury real service instructions ("this is for
+    // Friday's visit, please treat the backyard") in the comms log.
+    if (scopePreCheck.terminal) return { handled: true, terminal: true, next: status };
 
     const address = body.trim();
     await db('customers').where({ id: customer.id }).update({
@@ -457,7 +471,9 @@ async function handleIntakeReply(customer, body) {
     if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
     // Scope-refused — same contract as the awaiting_service branch above:
     // handled, no estimate, no owner alert, state unchanged.
-    if (handoff.terminal) return { handled: true, next: status };
+    // Same contract as the pre-check above: no draft, nothing said, so
+    // the inbound message still flows into normal notification handling.
+    if (handoff.terminal) return { handled: true, terminal: true, next: status };
 
     const estimate = await createOrUpdateDraftEstimate(customer, interest);
     await db('customers').where({ id: customer.id }).update({

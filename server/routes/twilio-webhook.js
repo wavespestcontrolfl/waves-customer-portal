@@ -121,6 +121,24 @@ function extractContactNameFromSms(body) {
 }
 
 // POST /api/webhooks/twilio/sms — inbound SMS webhook
+// How the inbound handler must treat a lead-intake result. Extracted and
+// exported so the rule is pinnable — it decides whether an inbound text
+// reaches the bell/push/owner-forward block at the bottom of the handler.
+//   'consumed'                — the machine ANSWERED the customer; it owns
+//                               the reply end to end and the handler returns.
+//   'continue_without_quote'  — the machine REFUSED TO QUOTE (scope veto)
+//                               and said nothing. Quote paths are skipped;
+//                               everything else (logging, bell, push,
+//                               owner-forward) runs exactly as for any
+//                               other inbound message. Suppressing the
+//                               draft is a quoting decision, not a reason
+//                               to swallow a customer's message.
+//   'continue'                — not an intake reply at all.
+function intakeOutcome(intakeResult) {
+  if (!intakeResult?.handled) return 'continue';
+  return intakeResult.terminal ? 'continue_without_quote' : 'consumed';
+}
+
 router.post('/sms', async (req, res) => {
   // Whether THIS delivery actually took the dedupe ledger row. Only an owner
   // may release the claim on error (a fail-open delivery must not delete a
@@ -357,12 +375,27 @@ router.post('/sms', async (req, res) => {
     // Runs the intent classifier → asks for address → auto-creates a
     // draft estimate → SMS-notifies Adam at 941-599-3489. Only active
     // while lead_intake_status is set (seeded by lead-webhook).
+    // intakeScopeVetoed: the intake machine REFUSED to quote (out-of-scope
+    // trade, existing-job coordination, address veto) — no draft, and
+    // nothing was said to the customer. That is a decision about QUOTING
+    // only. The message itself is an ordinary inbound text and must still
+    // reach the normal bell/push/owner-forward below, or a time-sensitive
+    // service instruction ("this is for Friday's visit, please treat the
+    // backyard") would exist only in the comms log for someone to find by
+    // hand. Only the quote-generating branch is skipped.
+    let intakeScopeVetoed = false;
     if (customer && Body && customer.lead_intake_status &&
         customer.lead_intake_status !== 'estimate_drafted') {
       try {
         const LeadIntake = require('../services/lead-intake');
         const intakeResult = await LeadIntake.handleIntakeReply(customer, Body);
-        if (intakeResult?.handled) {
+        const outcome = intakeOutcome(intakeResult);
+        if (outcome === 'continue_without_quote') {
+          logger.info(`[lead-intake] Scope-vetoed (no draft) for ${customer.first_name}: ${customer.lead_intake_status} — continuing to normal inbound handling`);
+          intakeScopeVetoed = true;
+        } else if (outcome === 'consumed') {
+          // The machine ANSWERED the customer (asked for the address, or
+          // drafted and alerted the owner) — it owns this reply end to end.
           logger.info(`[lead-intake] Handled for ${customer.first_name}: ${customer.lead_intake_status} → ${intakeResult.next}`);
           await db('sms_log').insert({
             customer_id: customer.id, direction: 'inbound', from_phone: From, to_phone: To,
@@ -453,6 +486,10 @@ router.post('/sms', async (req, res) => {
     // mid-compose leaves the manual task instead of a silent loss.
     // Intake-machine replies return above and draft through lead-intake's
     // own handoff.
+    // A scope-vetoed intake reply already refused to quote — re-entering the
+    // estimator here would re-litigate that decision on the same text.
+    // Everything AFTER this block (logging, bell, push, owner-forward) still
+    // runs for it; only quoting is skipped.
     try {
       // Clarify-reply routing first: a text answering a recently sent
       // clarifying question records the supplied fields onto the linked
@@ -461,11 +498,11 @@ router.post('/sms', async (req, res) => {
       // texts fall through to the general quote-intent trigger. The
       // message continues into normal inbox handling either way.
       const { handleClarifyReply } = require('../services/estimate-clarify-asks');
-      const clarifyReply = Body && String(Body).trim()
+      const clarifyReply = (!intakeScopeVetoed && Body && String(Body).trim())
         ? await handleClarifyReply({ phone: From, body: Body })
         : { handled: false };
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('../services/estimator-engine/sms-thread');
-      if (!clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
+      if (!intakeScopeVetoed && !clarifyReply.handled && smsThreadDraftsEnabled() && Body && String(Body).trim()) {
         await startSmsThreadDraft({ phone: From, triggerBody: Body });
       }
     } catch (e) { logger.warn(`[estimator-sms] trigger failed: ${e.message}`); }
@@ -1044,6 +1081,7 @@ router.post('/status', async (req, res) => {
 
 router._internals = {
   extractContactNameFromSms,
+  intakeOutcome,
 };
 
 module.exports = router;

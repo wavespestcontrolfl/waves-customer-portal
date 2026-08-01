@@ -119,6 +119,10 @@ describe('terminal scope veto', () => {
       const result = await handleIntakeReply(CUSTOMER(), 'power wash my yard');
 
       expect(result.handled).toBe(true);
+      // terminal:true is what stops the webhook from swallowing the
+      // message: a refusal to QUOTE must not also suppress the inbound
+      // bell/push/owner-forward for what may be a service instruction.
+      expect(result.terminal).toBe(true);
       // The legacy fallback must not have run.
       expect(mockEstimateInserts).toHaveLength(0);
       expect(mockSmsSends).toHaveLength(0);
@@ -170,7 +174,9 @@ describe('address-LESS replies get the scope check BEFORE anything records', () 
     const result = await handleIntakeReply(ADDRESSLESS(), 'power wash my yard');
 
     expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({ scopeCheckOnly: true }));
-    expect(result).toEqual({ handled: true, next: 'awaiting_service' });
+    // terminal:true keeps the inbound message flowing to the normal
+    // bell/push/owner-forward — refusing to QUOTE must not silence it.
+    expect(result).toEqual({ handled: true, terminal: true, next: 'awaiting_service' });
     // NO writes of any kind: no interest, no stage, no estimate, no alert.
     expect(mockCustomerUpdates).toHaveLength(0);
     expect(mockEstimateInserts).toHaveLength(0);
@@ -225,7 +231,7 @@ describe('awaiting_address replies get the scope check BEFORE any persist', () =
 
     const result = await handleIntakeReply(ADDR_CUSTOMER(), BODY);
 
-    expect(result).toEqual({ handled: true, next: 'awaiting_address' });
+    expect(result).toEqual({ handled: true, terminal: true, next: 'awaiting_address' });
     expect(mockCustomerUpdates.some((p) => 'address_line1' in p)).toBe(false);
     expect(mockCustomerUpdates).toHaveLength(0);
     expect(mockEstimateInserts).toHaveLength(0);
