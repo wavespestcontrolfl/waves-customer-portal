@@ -217,7 +217,13 @@ function blankExpressions(str) {
 // escape-aware scanner; anything malformed blanks WHOLE so no fragment of it
 // can attribute.
 function blankMarkdownLinkDestinations(str) {
-  const text = String(str || '');
+  // REFERENCE links render only their label: "[Local plan][1]" plus a
+  // "[1]: https://…/Orkin" definition showed readers a local price while the
+  // invisible definition supplied the attribution (Codex r10). Blank the
+  // definition lines and the "[ref]" tails; labels stay where they are.
+  const text = String(str || '')
+    .replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*/gm, blankSpan)
+    .replace(/\]\s*\[[^\]\n]*\]/g, blankSpan);
   const out = text.split('');
   const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
   for (let i = 0; i < text.length; i += 1) {
@@ -282,7 +288,7 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
   // exemption (Codex r6/r7). Detection still runs on the original text — a
   // price hidden in markup stays flagged (conservative in both directions).
   const proseText = blankToRenderedText(s);
-  const tableText = blankComments(s);
+  const tableText = blankHiddenContent(blankComments(s));
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
   while ((match = priceRe.exec(s)) !== null) {
@@ -310,7 +316,7 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
     // ("## Other companies charge\n$89 …" read as one sentence, Codex r4).
     const tokenIndex = match.index + (match[1] ? match[1].length : 0);
     if (thirdPartyCitations
-      && (isThirdPartyPriceCitation(proseText, tokenIndex)
+      && (isThirdPartyPriceCitation(proseText, tokenIndex, s)
         || isTableAttributedPrice(tableText, proseText, tokenIndex))) continue;
     return match[0].trim();
   }
@@ -616,6 +622,12 @@ function splitTableCells(line) {
   let cellStart = /^\s*\|/.test(s) ? s.indexOf('|') + 1 : 0;
   for (let i = cellStart; i <= s.length; i += 1) {
     if (s[i] === '\\') { i += 1; continue; }
+    // A pipe inside a CODE SPAN is literal text, not a delimiter — treating
+    // it as one shifted every later cell onto the wrong header (Codex r10).
+    if (s[i] === '`') {
+      const close = s.indexOf('`', i + 1);
+      if (close !== -1) { i = close; continue; }
+    }
     if (i === s.length || s[i] === '|') {
       cells.push({ text: s.slice(cellStart, i), start: cellStart, end: i });
       cellStart = i + 1;
@@ -723,10 +735,39 @@ function parseStringArray(text, openIdx) {
 //     "[Aptive](https://…)" must identify Aptive, not fail the exact-name
 //     test on its brackets and URL (Codex r9);
 //   - backslash escapes, as elsewhere in this file.
+// Remove tag markup entirely (no space inserted, so "O<span>u</span>r"
+// becomes "Our"), using the quote-aware scanner rather than a regex.
+function stripTags(text) {
+  const str = String(text || '');
+  const tags = [...eachTag(str)];
+  if (!tags.length) return str;
+  let out = '';
+  let cursor = 0;
+  for (const tag of tags) {
+    out += str.slice(cursor, tag.start);
+    cursor = tag.end + 1;
+  }
+  return out + str.slice(cursor);
+}
+
 function cellIdentity(v) {
   return decodeEntitiesForScan(unescapeStr(String(v ?? '')))
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1');
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // Inline emphasis renders away: "O**ur** quarterly service" reads as
+    // "Our quarterly service", and splitting on the asterisks hid the
+    // first-party marker (Codex r10). Inline TAGS do the same —
+    // "O<span>u</span>r" renders as "Our" — and must be removed WITHOUT
+    // inserting a space, or the marker stays split (Codex r10).
+    // COMMENTS render away with no boundary too: "O<!--x-->ur" displays as
+    // "Our" (Codex r10). Removed BEFORE emphasis stripping, or the "*" in an
+    // MDX comment is eaten first and the comment no longer matches.
+    .replace(COMMENT_SPAN_RE, '')
+    .replace(/[*_`~]+/g, '')
+    // Quote-aware: a ">" inside an attribute value does not end the tag, and
+    // a naive regex left the tail behind, re-splitting the marker
+    // (Codex r10). stripTags removes markup WITHOUT inserting a boundary.
+    .replace(/[\s\S]*/, (t) => stripTags(t));
 }
 const cellIsFirstParty = (v) => hasFirstPartyMarker(cellIdentity(v));
 const cellIsThirdParty = (v) => identifiesThirdParty(cellIdentity(v));
@@ -738,7 +779,15 @@ const cellIsThirdParty = (v) => identifiesThirdParty(cellIdentity(v));
 // must share the SAME leading-pipe convention, or column indexes would be
 // off by one — mixed conventions fail closed.
 const hasLeadingPipe = (line) => /^\s*\|/.test(line);
-const isSeparatorLine = (line) => /^[\s|:\-]+$/.test(line) && line.includes('-');
+// EVERY cell must be a real delimiter (---, :--, --:, :-:). Accepting a row
+// merely because its characters come from the delimiter alphabet let
+// "--- | :" pass, and the block was then treated as a table whose header
+// owned the amount (Codex r10).
+const isSeparatorLine = (line) => {
+  if (!/^[\s|:\-]+$/.test(line) || !line.includes('-')) return false;
+  const cells = splitTableCells(line).map((c) => c.text.trim()).filter((c, i, arr) => !(c === '' && (i === 0 || i === arr.length - 1)));
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+};
 function isTableLine(text, lineStart, lineEnd) {
   const line = text.slice(lineStart, lineEnd);
   if (!line.includes('|')) return false;
@@ -768,7 +817,12 @@ function isTableLine(text, lineStart, lineEnd) {
 }
 
 function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
-  const s = String(renderedText || '');
+  // BOTH branches read the structural text. Blanking tags to spaces would
+  // split a marker across cells ("O<span>u</span>r" → "O u r"), so cell
+  // identity removes tag markup itself — which drops attributes with it, so
+  // an invisible title= still cannot attribute (Codex r7/r10). Hidden
+  // ELEMENT content is already blanked upstream.
+  const s = String(structuralText || '');
   const lineStart = s.lastIndexOf('\n', amountIndex - 1) + 1;
   let lineEnd = s.indexOf('\n', amountIndex);
   if (lineEnd === -1) lineEnd = s.length;
@@ -789,15 +843,29 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
     if (cellIsFirstParty(own)) return false;
     // Header-row resolution: walk up contiguous table lines (skipping the
     // --- separator) to the topmost row; same column index attributes.
-    let hStart = lineStart;
+    // The header is the line immediately ABOVE the separator that governs
+    // this row — not the topmost contiguous pipe line. Walking to the top
+    // picked a stray note row as the header, so "Note | Aptive" outranked the
+    // real "Fee | Waves" header and attributed our own column to a
+    // competitor (Codex r10).
     let header = null;
-    while (hStart > 0) {
-      const prevEnd = hStart - 1;
-      const prevStart = s.lastIndexOf('\n', prevEnd - 1) + 1;
-      const prevLine = s.slice(prevStart, prevEnd);
-      if (!prevLine.includes('|')) break;
-      if (!isSeparatorLine(prevLine)) header = prevLine;
-      hStart = prevStart;
+    {
+      let cursor = lineStart;
+      let sepStart = -1;
+      while (cursor > 0) {
+        const prevEnd = cursor - 1;
+        const prevStart = s.lastIndexOf('\n', prevEnd - 1) + 1;
+        const prevLine = s.slice(prevStart, prevEnd);
+        if (!prevLine.includes('|')) break;
+        if (isSeparatorLine(prevLine)) { sepStart = prevStart; break; }
+        cursor = prevStart;
+      }
+      if (sepStart > 0) {
+        const hEnd = sepStart - 1;
+        const hStart2 = s.lastIndexOf('\n', hEnd - 1) + 1;
+        const candidate = s.slice(hStart2, hEnd);
+        if (candidate.includes('|') && !isSeparatorLine(candidate)) header = candidate;
+      }
     }
     // Mixed leading-pipe conventions would shift column indexes by one.
     if (header && hasLeadingPipe(header) !== hasLeadingPipe(line)) return false;
@@ -813,6 +881,16 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
     // an amount its own header does not (Codex r7/r9).
     if (ownHeader) return cellIsThirdParty(ownHeader);
     if (header) return false; // header row present but this column is missing
+    // The current line may BE the header row (a separator sits directly
+    // below it). A header naming a competitor is not an owner for a price
+    // written into that same header, so adjacency there would launder it
+    // (Codex r10). Fail closed.
+    {
+      const nextStart = lineEnd + 1;
+      let nextEnd = s.indexOf('\n', nextStart);
+      if (nextEnd === -1) nextEnd = s.length;
+      if (nextStart < s.length && isSeparatorLine(s.slice(nextStart, nextEnd))) return false;
+    }
     // No header row: the amount's own cell or the immediately preceding one
     // attributes it — "| Other companies | $199 | Local service | $89 |"
     // exempts only the $199 (pre-push Codex P0).
@@ -861,7 +939,14 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
     // (Codex r6). objectStartIndex ignores braces inside quotes, anchored at
     // the enclosing tag so the scan stays inside JSX (where quotes pair) and
     // never treats an apostrophe in body prose as a string delimiter.
+    // The values array MUST belong to a <ComparisonTable>. A bare prose
+    // "values: [...]" is not a table row, and treating it as one let
+    // adjacency attribute a first-party price outside any component
+    // (Codex r10). No owning component → fail closed.
     const compStart = j.lastIndexOf('<ComparisonTable', vm.index);
+    if (compStart === -1) return false;
+    const owningTagEnd = openingTagEndIndex(j, compStart);
+    if (owningTagEnd === -1 || vm.index > owningTagEnd) return false;
     const rowStart = compStart === -1 ? -1 : objectStartIndex(j, compStart, vm.index);
     if (rowStart !== -1) {
       const rowEnd = objectEndIndex(j, close + 1);
@@ -917,7 +1002,13 @@ function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
         // with the row, and a wrong alignment exempts OUR price through a
         // neighbouring competitor column (Codex r9 P0) — fail closed.
         if (!parsedCols) return false;
-        header = parsedCols.elements[idx + 1]?.text ?? null; // columns[0] labels the row
+        // columns[0] labels the row. A PRESENT but SHORT columns array means
+        // the row has more values than declared columns — the amount has no
+        // declared owner, and falling back to adjacency let a neighbouring
+        // value attribute an unowned price (Codex r10). Fail closed.
+        const declared = parsedCols.elements[idx + 1];
+        if (!declared) return false;
+        header = declared.text;
       }
     }
     // The OWNING COLUMN decides when it exists — vetoing on our column and
@@ -988,7 +1079,7 @@ function clauseAround(sentence, localIndex) {
 // and not "Orkin charges too much, but our rate is $129". The first-party
 // disqualifier is SENTENCE-wide (deliberately broader than the attribution
 // scope): any mention of us anywhere in the sentence blocks the exemption.
-function isThirdPartyPriceCitation(text, amountIndex) {
+function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
   const { text: sentence, offset: sentenceOffset } = sentenceAround(text, amountIndex);
   if (!sentence) return false;
   // The first-party VETO reads the sentence DECODED — "O&#117;r service is
@@ -997,7 +1088,22 @@ function isThirdPartyPriceCitation(text, amountIndex) {
   // is only pattern-tested, never used for offsets; the clause scan below
   // deliberately stays on the RAW text, since decoding there would only ever
   // ADD third-party matches — the permissive direction.
-  if (hasFirstPartyMarker(decodeEntitiesForScan(sentence))) return false;
+  // The veto reads the whole PARAGRAPH, not just the sentence. Sentence
+  // splitting cannot be made abbreviation-proof — "Our U.S. service differs;
+  // Orkin charges $89" split at "U.S." and lost the marker (Codex r10) — and
+  // enumerating abbreviations is the same losing game. A paragraph-scoped
+  // veto closes the class outright; it only ever blocks MORE, and the
+  // attribution side below stays sentence- and clause-scoped.
+  // The veto reads the RAW paragraph through cellIdentity, which strips
+  // emphasis and tag markup WITHOUT inserting a boundary. proseText blanks
+  // tags to spaces, so "O<span>u</span>r" and "O**ur**" arrived pre-split and
+  // the marker was missed — the same bypass already closed for table cells
+  // (Codex r10). Reading raw text here only ever blocks MORE.
+  const vt = typeof vetoText === 'string' ? vetoText : text;
+  const paraStart = (() => { const i = vt.lastIndexOf('\n\n', amountIndex); return i === -1 ? 0 : i + 2; })();
+  const paraEndRaw = vt.indexOf('\n\n', amountIndex);
+  const paragraph = vt.slice(paraStart, paraEndRaw === -1 ? vt.length : paraEndRaw);
+  if (hasFirstPartyMarker(cellIdentity(paragraph))) return false;
   const localAmountIndex = amountIndex - sentenceOffset;
   const { text: clause, offset: clauseOffset } = clauseAround(sentence, localAmountIndex);
   if (!clause) return false;
