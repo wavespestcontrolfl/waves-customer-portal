@@ -599,6 +599,7 @@ async function backfillServiceRecordFinancials(db, { onError } = {}) {
 module.exports = {
   calculateJobCost,
   calcLaborCost,
+  resolveServiceRecord,
   backfillServiceRecordFinancials,
   deriveRevenue,
   computeServiceRecordFinancials,

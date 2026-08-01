@@ -1441,6 +1441,27 @@ function serializeJsonb(value) {
   return JSON.stringify(value ?? null);
 }
 
+// ATOMIC post-commit structured_notes key merge (codex P1 #3152 — the same
+// clobber class pdf-queue's clearLawnPdfCorrectionMarker fixed): once the
+// completion transaction has committed, service_records.structured_notes has
+// CONCURRENT writers — the completion side-effect status stamps below and
+// the admin time-on-site correction (PATCH /:serviceId/time-on-site) — and a
+// whole-column snapshot write from either side erases the other's keys.
+// Every post-commit writer therefore merges ONLY the keys it owns; the
+// in-memory record.structured_notes snapshots stay as they were (they feed
+// the response payload and later deltas), but what lands in the column is
+// the delta applied to its CURRENT committed value. Whole-column
+// serializeJsonb writes on structured_notes remain legal only INSIDE the
+// completion transaction, where nothing can race them.
+function mergeRecordNotesKeys(recordId, patch) {
+  return db('service_records').where({ id: recordId }).update({
+    structured_notes: db.raw(
+      "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify(patch)],
+    ),
+  });
+}
+
 function composeCompletionSmsBody({ recapText, body, suffix = '', maxSegments = 2 }) {
   // The stored recap is now full-length (so the service report reads completely);
   // tighten it to SMS-sized, complete-sentence copy before composing the message.
@@ -2177,14 +2198,27 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
-    // Lookup failures PROPAGATE (codex P2 #3152): .first() already returns
-    // undefined for a genuinely missing legacy row, so a thrown error here is
-    // a real DB failure — a 500 the admin retries, never a 200 that silently
-    // skipped the report-side correction.
-    const record = await db('service_records')
-      .where({ scheduled_service_id: svc.id })
-      .orderBy('id', 'desc')
-      .first();
+    // Canonical record resolution (codex P2 #3152 round 2): visits completed
+    // before migration 20260427000007 have service_records rows with a NULL
+    // scheduled_service_id, so an FK-only lookup would miss a record that
+    // exists and leave the customer report (and job costing's marker read)
+    // uncorrected. resolveServiceRecord is job-costing's own resolver — FK
+    // first, then the legacy (customer, date, type) soft-join with ambiguity
+    // detection — so the record this edit stamps is the SAME record
+    // calculateJobCost reads the marker from. An AMBIGUOUS legacy match is
+    // left untouched (job-costing skips those too: correcting the newest of
+    // several colliding records would stamp the wrong visit); the
+    // scheduled_services columns still correct, and the response says the
+    // record leg was skipped. Lookup failures PROPAGATE (codex P2 #3152):
+    // a thrown error here is a real DB failure — a 500 the admin retries,
+    // never a 200 that silently skipped the report-side correction.
+    const serviceRecordCols = await db('service_records').columnInfo().catch(() => ({}));
+    const { record: resolvedRecord, ambiguous: recordAmbiguous } = await require('../services/job-costing')
+      .resolveServiceRecord(db, svc, serviceRecordCols);
+    const record = recordAmbiguous ? null : resolvedRecord;
+    if (recordAmbiguous) {
+      logger.warn(`[time-on-site] ambiguous legacy service_record match for service ${svc.id} — correcting scheduled_services only`);
+    }
     const structuredNotes = parseJsonObject(record?.structured_notes);
 
     const plan = timeOnSiteEditPlan({ minutes: req.body?.minutes, service: svc, structuredNotes });
@@ -2212,7 +2246,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       await trx('scheduled_services').where({ id: svc.id }).update(serviceUpdate);
 
       if (record) {
-        const recordCols = await trx('service_records').columnInfo().catch(() => ({}));
+        const recordCols = serviceRecordCols;
         const recordUpdate = {
           // ATOMIC key merge (codex P1 #3152, same clobber class as
           // pdf-queue.js clearLawnPdfCorrectionMarker): a whole-column
@@ -2272,6 +2306,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       timeOnSiteMinutes: plan.minutes,
       endStampsRewritten: !!plan.newEnd,
       recordUpdated,
+      ...(recordAmbiguous ? { recordAmbiguous: true } : {}),
     });
   } catch (err) { next(err); }
 });
@@ -5847,17 +5882,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
       const latestNotes = parseJsonObject(record.structured_notes);
-      const photoNotes = {
-        ...latestNotes,
+      const completionPhotosDelta = {
         completionPhotos: {
           uploaded: completionPhotoUploadResult.uploaded,
           failed: completionPhotoUploadResult.failed,
           uploadedAt: new Date().toISOString(),
         },
       };
-      await db('service_records').where({ id: record.id }).update({
-        structured_notes: serializeJsonb(photoNotes),
-      }).catch((updateErr) => {
+      const photoNotes = { ...latestNotes, ...completionPhotosDelta };
+      await mergeRecordNotesKeys(record.id, completionPhotosDelta).catch((updateErr) => {
         logger.warn(`[dispatch] completion photo status update failed: ${updateErr.message}`);
       });
       record.structured_notes = photoNotes;
@@ -8026,8 +8059,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // carry the marker forward instead of clobbering it.
           recordStructuredNotes.paymentFailedNoticeStatus = 'sending';
           recordStructuredNotes.paymentFailedNoticeAttemptedAt = new Date().toISOString();
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(recordStructuredNotes),
+          await mergeRecordNotesKeys(record.id, {
+            paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+            paymentFailedNoticeAttemptedAt: recordStructuredNotes.paymentFailedNoticeAttemptedAt,
           });
           const failResult = await sendCustomerMessage({
             to: svc.cust_phone,
@@ -8045,8 +8079,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : 'failed';
           if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
           else recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(recordStructuredNotes),
+          await mergeRecordNotesKeys(record.id, {
+            paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+            ...(failResult.sent
+              ? { paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt }
+              : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError }),
           }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
           record.structured_notes = recordStructuredNotes;
           if (!failResult.sent) {
@@ -8321,8 +8358,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
         if (sentSmsBody) {
-          const sendingNotes = {
-            ...recordStructuredNotes,
+          // smsNotesDelta accumulates every key this SMS leg owns — each
+          // persisted write below merges the delta only (mergeRecordNotesKeys),
+          // never the whole snapshot.
+          const smsNotesDelta = {
             completionSmsStatus: 'sending',
             completionSmsType: sentSmsType,
             completionSmsBody: sentSmsBody,
@@ -8333,9 +8372,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               completionSmsBundledReviewUrl: bundledReviewUrl,
             } : {}),
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(sendingNotes),
-          });
+          const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
+          await mergeRecordNotesKeys(record.id, smsNotesDelta);
           const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id };
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
@@ -8379,35 +8417,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             });
             sentSmsChannel = 'sms';
             mmsFallbackToSms = true;
-            sendingNotes.completionSmsMmsFallbackAt = new Date().toISOString();
-            sendingNotes.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+            smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
+            smsNotesDelta.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+            sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
+            sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
           if (!smsResult.sent) {
-            const failedNotes = {
-              ...sendingNotes,
+            Object.assign(smsNotesDelta, {
               completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
               completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
               completionSmsFailedAt: new Date().toISOString(),
-            };
-            await db('service_records').where({ id: record.id }).update({
-              structured_notes: serializeJsonb(failedNotes),
             });
+            const failedNotes = { ...sendingNotes, ...smsNotesDelta };
+            await mergeRecordNotesKeys(record.id, smsNotesDelta);
             record.structured_notes = failedNotes;
             await markBundledReviewFailed(smsResult);
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           } else {
-            const sentNotes = {
-              ...sendingNotes,
+            Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
               sentSmsBody,
               sentSmsAt: new Date().toISOString(),
               sentSmsType,
               sentSmsChannel,
               serviceReportPreviewAssetId: serviceReportPreviewAsset?.id || null,
-            };
-            await db('service_records').where({ id: record.id }).update({
-              structured_notes: serializeJsonb(sentNotes),
             });
+            const sentNotes = { ...sendingNotes, ...smsNotesDelta };
+            await mergeRecordNotesKeys(record.id, smsNotesDelta);
             await db('service_report_events').insert({
               service_record_id: record.id,
               customer_id: svc.customer_id,
@@ -8460,15 +8496,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
       } catch (e) {
-        const failedNotes = {
-          ...parseJsonObject(record.structured_notes),
+        const failedDelta = {
           completionSmsStatus: 'failed',
           completionSmsError: e.message || 'SMS send failed',
           completionSmsFailedAt: new Date().toISOString(),
         };
-        await db('service_records').where({ id: record.id }).update({
-          structured_notes: serializeJsonb(failedNotes),
-        }).catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
+        const failedNotes = { ...parseJsonObject(record.structured_notes), ...failedDelta };
+        await mergeRecordNotesKeys(record.id, failedDelta)
+          .catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
         record.structured_notes = failedNotes;
         await markBundledReviewFailed();
         logger.error(`Completion SMS failed: ${e.message}`);
@@ -8477,14 +8512,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // Record the skip in structured_notes so the audit trail (and the
       // completionSmsStatus surfaced in the response) shows WHY no
       // completion SMS went out for a visit that asked for one.
-      const skippedNotes = {
-        ...recordStructuredNotes,
+      const skippedDelta = {
         completionSmsStatus: 'skipped_recap_sms_already_sent',
         completionSmsSkippedAt: new Date().toISOString(),
       };
-      await db('service_records').where({ id: record.id }).update({
-        structured_notes: serializeJsonb(skippedNotes),
-      }).catch((updateErr) => logger.warn(`[dispatch] completion SMS skip status update failed: ${updateErr.message}`));
+      const skippedNotes = { ...recordStructuredNotes, ...skippedDelta };
+      await mergeRecordNotesKeys(record.id, skippedDelta)
+        .catch((updateErr) => logger.warn(`[dispatch] completion SMS skip status update failed: ${updateErr.message}`));
       record.structured_notes = skippedNotes;
       logger.info(`[dispatch] Recap SMS already texted for service ${svc.id}; skipping completion SMS to avoid double-texting`);
     } else if (effectiveSendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
@@ -8520,14 +8554,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && !serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
       if (!latestNotes.serviceReportV1EmailStatus) {
-        const disabledNotes = {
-          ...latestNotes,
+        const disabledDelta = {
           serviceReportV1EmailStatus: 'disabled',
           serviceReportV1EmailDisabledAt: new Date().toISOString(),
         };
-        await db('service_records').where({ id: record.id }).update({
-          structured_notes: serializeJsonb(disabledNotes),
-        }).catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
+        const disabledNotes = { ...latestNotes, ...disabledDelta };
+        await mergeRecordNotesKeys(record.id, disabledDelta)
+          .catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
         record.structured_notes = disabledNotes;
       }
     }
@@ -8590,27 +8623,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
             }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
           }
-          const queuedNotes = {
-            ...latestNotes,
+          const queuedDelta = {
             serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
             serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
             serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
             serviceReportV1EmailError: queued.ok ? null : queued.error || null,
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(queuedNotes),
-          });
+          const queuedNotes = { ...latestNotes, ...queuedDelta };
+          await mergeRecordNotesKeys(record.id, queuedDelta);
           record.structured_notes = queuedNotes;
         } catch (err) {
-          const failedNotes = {
-            ...latestNotes,
+          const failedDelta = {
             serviceReportV1EmailStatus: 'failed',
             serviceReportV1EmailError: err.message || 'Email queue failed',
             serviceReportV1EmailFailedAt: new Date().toISOString(),
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(failedNotes),
-          }).catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
+          const failedNotes = { ...latestNotes, ...failedDelta };
+          await mergeRecordNotesKeys(record.id, failedDelta)
+            .catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
           record.structured_notes = failedNotes;
           logger.error(`[dispatch] v1 report email queue failed: ${err.message}`);
         }

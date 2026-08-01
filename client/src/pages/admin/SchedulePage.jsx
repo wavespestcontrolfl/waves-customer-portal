@@ -1470,7 +1470,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     setSaving(true);
     // Time-on-site correction rides the same Save button but its own
     // endpoint: validate before anything writes so a typo aborts the whole
-    // save rather than landing the update-details half only.
+    // save rather than landing the update-details half only. The PATCH
+    // itself runs AFTER update-details succeeds (codex P2 #3152 round 2):
+    // its server-side job-costing recalculation must see the saved service
+    // type/price/assignment, and a rejected details save must not leave the
+    // correction half-committed behind a "Save failed" alert.
     const timeOnSiteDirty =
       isCompletedVisit &&
       isAdminUser &&
@@ -1485,14 +1489,6 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       }
     }
     try {
-      if (timeOnSiteDirty) {
-        await adminFetch(`/admin/dispatch/${service.id}/time-on-site`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            minutes: Math.round(Number(String(timeOnSiteMinutes).trim())),
-          }),
-        });
-      }
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
       const cleanLines = serviceLines
@@ -1622,6 +1618,24 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         alert(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
+      }
+      // Details are saved — now the duration correction, so its server-side
+      // job-costing recalc prices against the values just persisted. A
+      // failure here is a PARTIAL save (details landed, correction didn't):
+      // say exactly that, matching the notification partial-failure above.
+      if (timeOnSiteDirty) {
+        try {
+          await adminFetch(`/admin/dispatch/${service.id}/time-on-site`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              minutes: Math.round(Number(String(timeOnSiteMinutes).trim())),
+            }),
+          });
+        } catch (patchErr) {
+          alert(
+            `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
+          );
+        }
       }
       onSaved?.();
     } catch (e) {

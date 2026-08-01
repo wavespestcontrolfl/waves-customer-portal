@@ -51,7 +51,13 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/job-costing', () => ({ calculateJobCost: jest.fn(async () => ({})) }));
+// calculateJobCost is mocked (the route awaits it post-commit) but
+// resolveServiceRecord stays REAL — the PATCH behavioral tests exercise the
+// actual FK-then-legacy resolution against the scripted db.
+jest.mock('../services/job-costing', () => ({
+  calculateJobCost: jest.fn(async () => ({})),
+  resolveServiceRecord: jest.requireActual('../services/job-costing').resolveServiceRecord,
+}));
 
 const fs = require('fs');
 const path = require('path');
@@ -313,7 +319,10 @@ describe('route wiring contracts', () => {
 // Behavioral: the PATCH handler against a scripted knex mock
 // ---------------------------------------------------------------------------
 
-function makeRecordingDb({ svc, record, recordCols, recordLookupError = null }) {
+function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, legacyRows = null }) {
+  // `record` answers resolveServiceRecord's FK query (.first()); `legacyRows`
+  // (when set) answers its awaited (customer, date, type) soft-join, so the
+  // pre-FK shapes exercise the REAL legacy resolution path.
   const calls = [];
   const chainFor = (table) => {
     const op = { table };
@@ -321,8 +330,10 @@ function makeRecordingDb({ svc, record, recordCols, recordLookupError = null }) 
     const chain = {
       where(criteria) { op.whereCriteria = criteria; return chain; },
       orderBy(col, dir) { op.orderBy = [col, dir]; return chain; },
+      limit(n) { op.limited = n; return chain; },
+      count(spec) { op.counted = spec; return chain; },
       async first() {
-        if (table === 'scheduled_services') return svc;
+        if (table === 'scheduled_services') return op.counted ? { c: 1 } : svc;
         if (table === 'service_records') {
           if (recordLookupError) throw recordLookupError;
           return record;
@@ -332,6 +343,10 @@ function makeRecordingDb({ svc, record, recordCols, recordLookupError = null }) 
       async update(payload) { op.updatePayload = payload; return 1; },
       async insert(payload) { op.insertPayload = payload; return [1]; },
       async columnInfo() { return recordCols; },
+      then(resolve, reject) {
+        return Promise.resolve(table === 'service_records' && op.limited ? (legacyRows || []) : [])
+          .then(resolve, reject);
+      },
     };
     chain.catch = () => chain;
     return chain;
@@ -359,7 +374,7 @@ function patchHandler() {
 }
 
 const RECORD_COLS = {
-  id: {}, structured_notes: {}, pdf_storage_key: {},
+  id: {}, structured_notes: {}, pdf_storage_key: {}, scheduled_service_id: {},
   ended_at: {}, completed_at: {}, actual_end_time: {}, check_out_time: {},
 };
 
@@ -559,6 +574,83 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(res.body.recordUpdated).toBe(false);
     expect(dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload)).toBeTruthy();
     expect(dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload)).toBeUndefined();
+  });
+
+  test('a pre-FK record (NULL scheduled_service_id) resolves via the legacy soft-join and gets corrected (codex P2 round 2)', async () => {
+    // Visits completed before migration 20260427000007: the FK query finds
+    // nothing, but resolveServiceRecord's (customer, date, type) soft-join
+    // finds the record — the SAME resolution job costing uses, so the marker
+    // this edit stamps is the record the recalc reads.
+    const legacyRecord = {
+      id: 'rec-legacy',
+      scheduled_service_id: null,
+      structured_notes: JSON.stringify({ visitOutcome: 'completed' }),
+    };
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: null, // FK query misses
+      recordCols: RECORD_COLS,
+      legacyRows: [legacyRecord],
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'a', techRole: 'admin' },
+      res, (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body.recordUpdated).toBe(true);
+    const recUpdate = dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload);
+    expect(recUpdate.whereCriteria).toEqual({ id: 'rec-legacy' });
+    expect(recUpdate.updatePayload.pdf_storage_key).toBeNull();
+    expect(recUpdate.updatePayload.structured_notes.__raw).toBe(true);
+  });
+
+  test('an AMBIGUOUS legacy match is left untouched — scheduled_services corrects, the record leg is skipped', async () => {
+    const rows = [
+      { id: 'rec-newer', scheduled_service_id: null, structured_notes: null },
+      { id: 'rec-older', scheduled_service_id: null, structured_notes: null },
+    ];
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: null,
+      recordCols: RECORD_COLS,
+      legacyRows: rows,
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'a', techRole: 'admin' },
+      res, (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body.recordUpdated).toBe(false);
+    expect(res.body.recordAmbiguous).toBe(true);
+    expect(dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload)).toBeTruthy();
+    expect(dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Completion-flow writers: post-commit notes writes are key merges (codex P1 round 2)
+// ---------------------------------------------------------------------------
+
+describe('post-commit structured_notes writers cannot clobber the correction', () => {
+  test('mergeRecordNotesKeys is the atomic jsonb merge', () => {
+    expect(source).toMatch(/function mergeRecordNotesKeys\(recordId, patch\) \{\s*\n\s*return db\('service_records'\)\.where\(\{ id: recordId \}\)\.update\(\{\s*\n\s*structured_notes: db\.raw\(\s*\n\s*"COALESCE\(structured_notes::jsonb, '\{\}'::jsonb\) \|\| \?::jsonb",/);
+  });
+
+  test('every whole-column structured_notes snapshot write left in the route is INSIDE the completion trx', () => {
+    // Post-commit, the column has concurrent writers (this correction and
+    // the completion side-effect stamps) — a whole-column write from either
+    // side erases the other's keys. The five allowed serializeJsonb sites
+    // are the record INSERT and four trx(...) updates, all inside the
+    // completion transaction where nothing can race them. A sixth
+    // occurrence means someone added a post-commit snapshot writer — route
+    // it through mergeRecordNotesKeys instead.
+    expect((source.match(/structured_notes: serializeJsonb\(/g) || []).length).toBe(5);
+    // And the converted side-effect writers all go through the merge helper.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(11);
   });
 });
 
