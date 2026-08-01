@@ -916,6 +916,60 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('an adopted promised-date visit is retimed to the promised window', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        technician_id: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    // The call-booked visit sits on the promised DATE but has no window.
+    const adopted = {
+      id: 'svc-adopted',
+      customer_id: 'customer-r',
+      scheduled_date: '2026-08-01',
+      service_type: 'Quarterly Pest Control',
+      status: 'pending',
+      window_start: null,
+    };
+    const rowsQuery = query({ rows: [adopted] });
+    const conflictQuery = query({ rows: [] }); // clear at 08:00 (row itself excluded)
+    const retimeUpdate = query({});
+    const laterSeed = query({ returning: [{ id: 'svc-r2', scheduled_date: '2026-11-01' }] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, conflictQuery, retimeUpdate, laterSeed] });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-r',
+      customer_id: 'customer-r',
+      term_start: '2026-08-01',
+      term_end: '2027-08-01',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 2,
+      coverage_cadence: 'quarterly',
+      first_visit_date: '2026-08-01',
+      first_visit_window_start: '08:00',
+    }, undefined, { today: '2026-07-31' })).resolves.toMatchObject({ createdCount: 1 });
+
+    // The adopted visit received the promised window (job-block end).
+    expect(retimeUpdate.where).toHaveBeenCalledWith({ id: 'svc-adopted' });
+    expect(retimeUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      window_start: '08:00',
+      window_end: '09:00',
+    }));
+    // The seeded LATER visit stays windowless — the promise applies to visit 1.
+    expect(laterSeed.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_date: '2026-11-01',
+      window_start: null,
+    }));
+  });
+
   test('the effective first visit date prefers the promise, falling back to term start', () => {
     expect(_private.effectiveFirstVisitDate({ term_start: '2026-07-30', first_visit_date: '2026-08-01' }))
       .toBe('2026-08-01');

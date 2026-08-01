@@ -151,11 +151,15 @@ function addMinutesHHMM(value, minutes) {
 //
 // `adoptableFor` narrowly ignores the ONE row this coverage would adopt: the
 // same customer's visit of the same coverage service type at that hour, which
-// the tolerance matcher in ensureCoverageRowsForTerm takes over rather than
-// duplicating. Every other row — including the same customer's OTHER services,
-// which still can't be performed simultaneously — counts as occupancy.
+// the exact-date matcher in ensureCoverageRowsForTerm takes over rather than
+// duplicating. The exemption mirrors coverageRowsForTerm's eligibility exactly
+// — a rescheduled/skipped/no-show row is NOT adoptable there, so it must count
+// as occupancy here or the timed insert could overlap it. Every other row —
+// including the same customer's OTHER services, which still can't be performed
+// simultaneously — counts as occupancy. `excludeServiceIds` skips a specific
+// row (the adopted visit itself, when retiming it in place).
 async function findVisitWindowConflict(conn, {
-  scheduledDate, windowStart, durationMinutes = 60, adoptableFor = null,
+  scheduledDate, windowStart, durationMinutes = 60, adoptableFor = null, excludeServiceIds = [],
 } = {}) {
   const date = dateOnly(scheduledDate);
   const start = normalizeWindowStart(windowStart);
@@ -167,13 +171,16 @@ async function findVisitWindowConflict(conn, {
     date,
     windowStart: start,
     windowEnd: end,
+    excludeServiceIds,
   });
   if (!rows || !rows.length) return null;
   const customerId = adoptableFor?.customerId || null;
   const serviceType = adoptableFor?.coverageServiceType || null;
   if (!customerId || !serviceType) return rows[0];
   const blocking = rows.filter((row) => !(
-    String(row.customer_id) === String(customerId) && serviceMatchesCoverage(row, serviceType)
+    String(row.customer_id) === String(customerId)
+    && serviceMatchesCoverage(row, serviceType)
+    && !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
   ));
   return blocking.length ? blocking[0] : null;
 }
@@ -464,7 +471,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // visit sitting midway between two cadence dates would suppress both and leave
   // the paid coverage short. The remaining-count cap stops over-seeding when the
   // customer already has at least the sold number of in-window matching visits.
-  const availableExistingDates = existingRows.map((row) => dateOnly(row.scheduled_date)).filter(Boolean);
+  const availableExisting = existingRows.filter((row) => dateOnly(row.scheduled_date));
   const cadenceMonths = coverageCadenceMonths(coverageCadence);
   const cadenceIntervalDays = cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30);
   const slotToleranceDays = Math.max(7, Math.floor(cadenceIntervalDays / 2));
@@ -476,17 +483,23 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // the customer would be told nothing and nobody would come on the day they
   // were quoted.
   const promisedTarget = dateOnly(term?.first_visit_date) === targetDates[0] ? targetDates[0] : null;
+  // The row that satisfied the promised target, if any — it may still need the
+  // promised arrival time applied (an adopted call-booked visit can be
+  // windowless or sitting at a different hour than the operator quoted).
+  let adoptedPromisedRow = null;
   const datesToSeed = [];
   for (const scheduledDate of targetDates) {
     if (datesToSeed.length >= remainingToSeed) break;
     const exactOnly = scheduledDate === promisedTarget;
-    const matchIndex = availableExistingDates.findIndex((existingDate) => {
+    const matchIndex = availableExisting.findIndex((row) => {
+      const existingDate = dateOnly(row.scheduled_date);
       if (exactOnly) return existingDate === scheduledDate;
       const diff = daysUntil(existingDate, scheduledDate);
       return diff != null && Math.abs(diff) <= slotToleranceDays;
     });
     if (matchIndex !== -1) {
-      availableExistingDates.splice(matchIndex, 1);
+      const [matched] = availableExisting.splice(matchIndex, 1);
+      if (exactOnly) adoptedPromisedRow = matched;
       continue;
     }
     datesToSeed.push(scheduledDate);
@@ -613,6 +626,46 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
     return row;
   };
+
+  // An adopted promised-date visit satisfied the slot by DATE alone — it can be
+  // windowless or sitting at a different hour than the operator quoted. Retime
+  // it in place (same lock + conflict shape as the timed insert, the row itself
+  // excluded from its own conflict check) so the promise reaches the board.
+  // Window only — status/technician stay untouched, and no notification path
+  // runs off this direct update.
+  const retimeAdoptedRow = async (trx) => {
+    const row = adoptedPromisedRow;
+    let windowStart = firstVisitWindowStart;
+    try {
+      await trx.transaction(async (sp) => {
+        const { acquireOccupancyLock } = require('./scheduling/occupancy');
+        await acquireOccupancyLock(sp, promisedTarget);
+        const conflict = await findVisitWindowConflict(sp, {
+          scheduledDate: promisedTarget,
+          windowStart,
+          durationMinutes: baseDuration,
+          excludeServiceIds: [row.id],
+        });
+        if (conflict) {
+          logger.warn(`[annual-prepay] term ${term.id} promised window ${windowStart} on ${promisedTarget} collides with visit ${conflict.id} — leaving adopted visit ${row.id} untimed`);
+          windowStart = null;
+        }
+      });
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term.id} adopted-visit window check failed (${err.message}) — leaving visit ${row.id} as-is`);
+      windowStart = null;
+    }
+    if (!windowStart) return;
+    const updates = { updated_at: new Date() };
+    if (cols.window_start) updates.window_start = windowStart;
+    if (cols.window_end) updates.window_end = addMinutesHHMM(windowStart, baseDuration);
+    await trx('scheduled_services').where({ id: row.id }).update(updates);
+  };
+  if (adoptedPromisedRow && firstVisitWindowStart
+    && normalizeWindowStart(adoptedPromisedRow.window_start) !== firstVisitWindowStart) {
+    if (conn.isTransaction) await retimeAdoptedRow(conn);
+    else await conn.transaction((trx) => retimeAdoptedRow(trx));
+  }
 
   for (const scheduledDate of datesToSeed) {
     const wantsWindow = !!firstVisitWindowStart && scheduledDate === firstTargetDate;
