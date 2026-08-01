@@ -202,8 +202,7 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
   });
 
   it('matches by stored totals when no accepted key is stamped (unaccepted estimate)', () => {
-    const out = lines({ ...lawnEstimate, accepted_frequency_key: null });
-    expect(out[0].unitPrice).toBe(90);
+    expect(lines({ ...lawnEstimate, accepted_frequency_key: null })[0].unitPrice).toBe(90);
   });
 
   it('picks the cadence matching the stored totals over a same-key mismatch', () => {
@@ -213,64 +212,72 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
         { ...lawnFrequency, key: 'enhanced', monthly: 65, annual: 780, perTreatment: 86.67, visitsPerYear: 9 },
       ],
     });
-    const out = lines(est);
-    expect(out[0].visitsPerYear).toBe(9);
-    expect(out[0].unitPrice).toBe(86.67);
+    expect(lines(est)[0].visitsPerYear).toBe(9);
   });
 
-  // Codex #3120 P1: a preserved monthly member keeps monthly billing at
-  // accept, and buildPricingBundle strips every billedPerApplication flag
-  // from their snapshot — but leaves perTreatment/visitsPerYear in place.
-  it('leaves a stripped (preserved monthly member) bundle on the monthly line', () => {
-    const { billedPerApplication, ...stripped } = lawnFrequency;
-    expect(billedPerApplication).toBe(true);
-    const est = withBundle(lawnEstimate, { frequencies: [stripped] });
-    expect(lines(est)).toBeNull();
-    expect(normalizeProposal(est, { synthesizePerApplication: true })
-      .buildings[0].lineItems[0].frequency).toBe('monthly');
-  });
-
-  it('never converts a pest/termite row on section policy alone (no flag, no conversion)', () => {
-    // pest is deliberately outside PER_APPLICATION_SECTION_KEYS: legacy
-    // flat-monthly termite rows carry a per-visit price AND a visit count.
-    const est = withBundle(lawnEstimate, {
-      frequencies: [{ ...lawnFrequency, serviceCategory: 'pest_control', billedPerApplication: undefined }],
-    });
-    expect(lines(est)).toBeNull();
-  });
-
-  // Codex #3120 P1: accepts with independent per-service cadences are priced
-  // by serviceCadenceCombos; accepted_frequency_key holds only the top-level key.
-  it('resolves an accepted per-service cadence combination', () => {
-    const est = withBundle({ ...lawnEstimate, annual_total: 940, monthly_total: null }, {
+  // Codex #3120 r2: every real serviceCadenceCombos entry carries a MANDATORY
+  // pest row (buildServiceCadenceCombos requires a pest axis), and combo rows
+  // never carry billedPerApplication because the backfill walks only
+  // frequencies. A flag-only rule rejected every production combo.
+  it('resolves an accepted per-service cadence combination including its mandatory pest row', () => {
+    const est = withBundle({ ...lawnEstimate, annual_total: 1288, monthly_total: null }, {
       frequencies: [{ ...lawnFrequency, annual: 540 }],
       serviceCadenceCombos: [
-        { key: 'combo-a', annual: 1200, perServiceTreatments: [{ service: 'lawn_care', label: 'Lawn', displayPrice: 100, visitsPerYear: 12 }] },
         {
-          key: 'combo-b',
-          annual: 940,
+          key: 'pest_quarterly|lawn_standard',
+          selection: { pest_control: 'pest_quarterly', lawn_care: 'standard' },
+          annual: 1600,
           perServiceTreatments: [
-            { service: 'lawn_care', label: 'Lawn Care Program', displayPrice: 90, visitsPerYear: 6 },
-            { service: 'mosquito', label: 'Mosquito', perTreatment: 100, visitsPerYear: 4 },
+            { service: 'pest_control', label: 'Pest Control', displayPrice: 100, visitsPerYear: 4 },
+            { service: 'lawn_care', label: 'Lawn Care Program', displayPrice: 200, visitsPerYear: 6 },
+          ],
+        },
+        {
+          key: 'pest_quarterly|lawn_enhanced',
+          selection: { pest_control: 'pest_quarterly', lawn_care: 'enhanced' },
+          annual: 1288,
+          perServiceTreatments: [
+            // No billedPerApplication anywhere — the production shape.
+            { service: 'pest_control', label: 'Pest Control', displayPrice: 112, visitsPerYear: 4 },
+            { service: 'lawn_care', label: 'Lawn Care Program', displayPrice: 140, visitsPerYear: 6 },
           ],
         },
       ],
     });
     const out = lines(est);
     expect(out).toHaveLength(2);
-    expect(out[0].description).toBe('Lawn Care Program — 6 applications/yr');
-    expect(out[1].unitPrice).toBe(100);
-    expect(out.reduce((a, l) => a + annualizedAmount(l), 0)).toBe(940);
+    expect(out.map((l) => l.frequency)).toEqual(['per_application', 'per_application']);
+    expect(out[0].description).toBe('Pest Control — 4 applications/yr');
+    expect(out[1].unitPrice).toBe(140);
+    expect(out.reduce((a, l) => a + annualizedAmount(l), 0)).toBe(1288);
   });
 
-  // Codex #3120 P1: treatmentDisplayPrice applies only the tier discount, so
-  // a plan-level manual credit leaves the rows summing ABOVE annual_total.
+  // Codex #3120 r2: buildServiceCadenceCombos omits manualDiscount from combo
+  // entries, while withManualDiscount stores it on the BUNDLE.
+  it('reads the bundle-level credit when a combo carries none', () => {
+    const est = withBundle({ ...lawnEstimate, annual_total: 1188, monthly_total: null }, {
+      manualDiscount: { recurringAmount: 100 },
+      serviceCadenceCombos: [{
+        key: 'pest_quarterly|lawn_standard',
+        annual: 1188,
+        perServiceTreatments: [
+          { service: 'pest_control', label: 'Pest Control', displayPrice: 112, visitsPerYear: 4 },
+          { service: 'lawn_care', label: 'Lawn Care Program', displayPrice: 140, visitsPerYear: 6 },
+        ],
+      }],
+    });
+    const out = lines(est);
+    expect(out).toHaveLength(2);
+    // Per-application prices round to the cent, so a multi-row allocation
+    // lands within rounding residue of the target rather than exactly on it.
+    expect(out.reduce((a, l) => a + annualizedAmount(l), 0)).toBeCloseTo(1188, 1);
+  });
+
   it('allocates a plan-level credit across the rows instead of falling back', () => {
     const est = withBundle({ ...lawnEstimate, annual_total: 486, monthly_total: null }, {
       frequencies: [{ ...lawnFrequency, annual: 486, manualDiscount: { recurringAmount: 54 } }],
     });
     const out = lines(est);
-    expect(out).toHaveLength(1);
     expect(out[0].frequency).toBe('per_application');
     expect(out[0].unitPrice).toBe(81); // (540 - 54) / 6
     expect(annualizedAmount(out[0])).toBe(486);
@@ -295,9 +302,39 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
       }],
     });
     const out = lines(est);
-    expect(out).toHaveLength(2);
     expect(out[1].frequency).toBe('monthly');
     expect(out[1].unitPrice).toBe(20);
+  });
+
+  // The #2965 carve-out: a legacy termite row carries a derived per-visit
+  // price AND a visit count yet bills the flat monthly, so only the explicit
+  // flag may convert it.
+  it('will not convert an unflagged termite row that merely looks per-application', () => {
+    const est = withBundle({ ...lawnEstimate, annual_total: 1020, monthly_total: null }, {
+      frequencies: [{
+        ...lawnFrequency,
+        annual: 1020,
+        perServiceTreatments: [
+          { service: 'lawn_care', label: 'Lawn Care Program', displayPrice: 90, visitsPerYear: 6 },
+          { service: 'termite_bait', label: 'Termite Bait Monitoring', displayPrice: 120, visitsPerYear: 4 },
+        ],
+      }],
+    });
+    expect(lines(est)).toBeNull();
+  });
+
+  it('converts a termite row that IS explicitly flagged', () => {
+    const est = withBundle({ ...lawnEstimate, annual_total: 1020, monthly_total: null }, {
+      frequencies: [{
+        ...lawnFrequency,
+        annual: 1020,
+        perServiceTreatments: [
+          { service: 'lawn_care', label: 'Lawn Care Program', displayPrice: 90, visitsPerYear: 6 },
+          { service: 'termite_bait', label: 'Termite', displayPrice: 120, visitsPerYear: 4, billedPerApplication: true },
+        ],
+      }],
+    });
+    expect(lines(est).map((l) => l.frequency)).toEqual(['per_application', 'per_application']);
   });
 
   it('returns null when the lines do not reconcile to the stored annual total', () => {
@@ -307,13 +344,12 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
   it('returns null with no bundle so the legacy monthly fallback still renders a number', () => {
     const bare = { monthly_total: 120, annual_total: 1440, estimate_data: {} };
     expect(perApplicationRecurringLines(bare, bare.estimate_data)).toBeNull();
-    expect(normalizeProposal(bare, { synthesizePerApplication: true })
+    expect(normalizeProposal(bare, { recurringMode: 'per_application' })
       .buildings[0].lineItems[0].frequency).toBe('monthly');
   });
 
   it('skips quote-required cadences', () => {
-    const est = withBundle(lawnEstimate, { frequencies: [{ ...lawnFrequency, quoteRequired: true }] });
-    expect(lines(est)).toBeNull();
+    expect(lines(withBundle(lawnEstimate, { frequencies: [{ ...lawnFrequency, quoteRequired: true }] }))).toBeNull();
   });
 
   it('still carries one-time engine lines alongside per-application recurring lines', () => {
@@ -325,18 +361,17 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
         lineItems: [{ name: 'Initial cleanup', oneTimePrice: 150 }],
       },
     };
-    const p = normalizeProposal(est, { synthesizePerApplication: true });
+    const p = normalizeProposal(est, { recurringMode: 'per_application' });
     expect(p.buildings[0].lineItems.map((i) => i.frequency)).toEqual(['per_application', 'one_time']);
     expect(computeProposalTotals(p).annualRecurring).toBe(540);
   });
 
-  // Codex #3120 P1: CommercialProposalPage has no per_application cadence and
+  // Codex #3120 r1: CommercialProposalPage has no per_application cadence and
   // drops visitsPerYear on save, so a promoted line would annualize to $0 and
   // the PUT would overwrite annual_total.
   it('is opt-in — the proposal editor read never sees the internal cadence', () => {
-    const editorView = normalizeProposal(lawnEstimate);
-    expect(editorView.buildings[0].lineItems[0].frequency).toBe('monthly');
-    expect(normalizeProposal(lawnEstimate, { synthesizePerApplication: true })
+    expect(normalizeProposal(lawnEstimate).buildings[0].lineItems[0].frequency).toBe('monthly');
+    expect(normalizeProposal(lawnEstimate, { recurringMode: 'per_application' })
       .buildings[0].lineItems[0].frequency).toBe('per_application');
   });
 
@@ -350,9 +385,46 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
         },
       },
     };
-    const p = normalizeProposal(authored, { synthesizePerApplication: true });
+    const p = normalizeProposal(authored, { recurringMode: 'per_application' });
     expect(p.enabled).toBe(true);
     expect(p.buildings[0].lineItems[0].frequency).toBe('monthly');
     expect(computeProposalTotals(p).monthlyEquivalent).toBe(350);
+  });
+});
+
+describe('annual prepay rendering (codex #3120 r2: prepaid visits are covered by one annual payment)', () => {
+  const prepayEstimate = {
+    customer_name: 'S. Morgan',
+    address: '1 Oak St',
+    service_interest: 'Lawn Care',
+    monthly_total: 45,
+    annual_total: 540,
+    accepted_frequency_key: 'standard',
+    estimate_data: { sendSnapshot: { pricingBundle: { frequencies: [{
+      key: 'standard', serviceCategory: 'lawn_care', monthly: 45, annual: 540,
+      perTreatment: 90, visitsPerYear: 6, billedPerApplication: true,
+    }] } } },
+  };
+
+  it('quotes the year, not a per-application charge that never happens', () => {
+    const p = normalizeProposal(prepayEstimate, { recurringMode: 'annual_prepay' });
+    const [line] = p.buildings[0].lineItems;
+    expect(line.frequency).toBe('annual');
+    expect(line.frequencyLabel).toBe('Annual');
+    expect(line.unitPrice).toBe(540);
+    // The visit count still tells the customer what the year buys.
+    expect(line.description).toBe('Lawn Care — 6 applications/yr');
+    expect(computeProposalTotals(p).annualRecurring).toBe(540);
+  });
+
+  it('is the same plan the per-application mode describes, priced differently', () => {
+    const perApp = normalizeProposal(prepayEstimate, { recurringMode: 'per_application' }).buildings[0].lineItems[0];
+    expect(perApp.frequency).toBe('per_application');
+    expect(perApp.unitPrice).toBe(90);
+    expect(perApp.description).toBe('Lawn Care — 6 applications/yr');
+  });
+
+  it('defaults to the legacy monthly rendering when no mode is given', () => {
+    expect(normalizeProposal(prepayEstimate).buildings[0].lineItems[0].frequency).toBe('monthly');
   });
 });

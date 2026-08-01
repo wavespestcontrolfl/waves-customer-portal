@@ -1648,7 +1648,10 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    generateEstimateProposalPDF(estimate, res);
+    // Same live billing lane the customer-facing download resolves, so the
+    // operator's copy and the customer's copy stay byte-identical.
+    const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    generateEstimateProposalPDF(estimate, res, await resolveProposalBillingContext(estimate));
   } catch (err) { next(err); }
 });
 

@@ -110,49 +110,25 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : {};
 }
 
-// Tier-plan sections whose accept path bills per application (plan annual ÷
-// visits). Byte-lockstep with TIER_BILLED_PER_APP_SECTION_KEYS in
-// estimate-public.js — and deliberately EXCLUDES pest/termite for the same
-// reason: legacy flat-monthly termite rows carry a derived per-visit price
-// AND a visit count yet genuinely bill the flat monthly, so only an explicit
-// billedPerApplication flag can speak for them.
-const PER_APPLICATION_SECTION_KEYS = new Set(['lawn_care', 'tree_shrub', 'mosquito', 'foam_recurring']);
+// Sections whose per-visit price and visit count do NOT prove per-application
+// billing: legacy flat-monthly termite rows carry both yet genuinely bill the
+// flat monthly (the #2965 carve-out that also keeps them out of
+// TIER_BILLED_PER_APP_SECTION_KEYS in estimate-public.js). Only an explicit
+// billedPerApplication flag can speak for these.
+const AMBIGUOUS_CADENCE_SECTION_KEYS = new Set(['termite_bait', 'termite_bond']);
 
-// Does this stored bundle describe a per-application billing lane?
-//
-// buildPricingBundle (estimate-public.js) resolves the lane BEFORE the
-// snapshot is stored: a customer who preserves monthly membership at accept
-// gets every billedPerApplication flag stripped deep, everyone else gets
-// missing flags added on the tier-plan surfaces. So the flag's presence in
-// the stored snapshot IS that lane decision, taken by the same predicate the
-// converter uses — and the estimate page renders per-application copy off
-// exactly this flag. Reading it here keeps the PDF and the page telling one
-// story, with no second lane lookup to drift out of sync.
-//
-// Returns false when a tier-plan entry that LOOKS per-application carries no
-// flag: that is the fingerprint of a stripped (preserved-monthly-member)
-// bundle, and quoting them per application would misdescribe a real monthly
-// charge. Returns null when the bundle carries no tier-plan entry at all —
-// unknown lane, callers treat it as "flag required per row".
-function bundleBillsPerApplication(bundle = {}) {
-  const entries = [
-    ...(Array.isArray(bundle.frequencies) ? bundle.frequencies : []),
-    ...(Array.isArray(bundle.hiddenLawnFrequencies) ? bundle.hiddenLawnFrequencies : []),
-  ].filter((entry) => entry
-    && entry.quoteRequired !== true
-    && PER_APPLICATION_SECTION_KEYS.has(entry.serviceCategory)
-    && num(entry.perTreatment) > 0
-    && num(entry.visitsPerYear) > 0);
-  if (entries.length === 0) return null;
-  return entries.every((entry) => entry.billedPerApplication === true);
+function sectionKeyForRow(row = {}, candidate = {}) {
+  return String(row.service ?? row.serviceCategory ?? candidate.serviceCategory ?? '').toLowerCase();
 }
 
 // Recurring lines quoted the way residential plans actually bill — per
 // completed application (owner rule 2026-07-23 / 2026-07-31: billing is per
 // application or annual prepay, never a flat monthly).
 //
-// Sources the send snapshot's pricing bundle — the same lane-resolved payload
-// the estimate page renders — and considers BOTH top-level frequencies and
+// The BILLING LANE is the caller's to establish (estimate-proposal-billing.js
+// resolves it live, the way the estimate page does) — this function only
+// describes the plan once that lane says per-application. It reads the send
+// snapshot's pricing bundle and considers BOTH top-level frequencies and
 // serviceCadenceCombos, because an accept that picked independent per-service
 // cadences is priced by the matching combo while accepted_frequency_key
 // records only the top-level key. Candidates are tried in confidence order
@@ -160,15 +136,12 @@ function bundleBillsPerApplication(bundle = {}) {
 // mis-picked cadence can never reach the document.
 //
 // Returns null — legacy monthly synthesis, i.e. today's rendering — whenever
-// the plan can't be described this way with confidence: no bundle, a stripped
-// (monthly-member) lane, a row with no per-application authority, or lines
-// that don't reconcile. Failing to the old document beats asserting a billing
-// cadence the customer isn't on.
+// the plan can't be described this way with confidence: no bundle, a row with
+// an unprovable cadence, or lines that don't reconcile. Failing to the old
+// document beats asserting a billing cadence the customer isn't on.
 function perApplicationRecurringLines(estimate = {}, estimateData = {}) {
   const bundle = estimateData?.sendSnapshot?.pricingBundle;
   if (!bundle || typeof bundle !== 'object') return null;
-  const laneBillsPerApplication = bundleBillsPerApplication(bundle);
-  if (laneBillsPerApplication === false) return null;
 
   const frequencies = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])
     .filter((entry) => entry && entry.quoteRequired !== true);
@@ -195,8 +168,11 @@ function perApplicationRecurringLines(estimate = {}, estimateData = {}) {
   ];
   for (const candidate of ordered) {
     const lines = perApplicationLinesForCandidate(candidate, estimate, {
-      laneBillsPerApplication,
       annualTotal,
+      // The plan-level manual credit lives on the BUNDLE (withManualDiscount)
+      // and on top-level frequencies; buildServiceCadenceCombos omits it from
+      // combo entries, whose annual is nonetheless net of it (codex #3120 r2).
+      bundleCredit: num(bundle.manualDiscount?.recurringAmount ?? bundle.manualDiscount?.amount),
     });
     if (lines) return lines;
   }
@@ -205,7 +181,7 @@ function perApplicationRecurringLines(estimate = {}, estimateData = {}) {
 
 // One candidate cadence (a top-level frequency or a serviceCadenceCombo) →
 // its per-application lines, or null if it can't be described or priced.
-function perApplicationLinesForCandidate(candidate, estimate, { laneBillsPerApplication, annualTotal }) {
+function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bundleCredit = 0 }) {
   // Split entries carry per-service treatment rows; rowless single-service
   // entries carry perTreatment/visitsPerYear on the frequency itself — but
   // their label is the CADENCE name ("Bi-monthly"), so the service name comes
@@ -219,21 +195,26 @@ function perApplicationLinesForCandidate(candidate, estimate, { laneBillsPerAppl
     const perApplication = num(row.displayPrice ?? row.perTreatment);
     const monthly = num(row.monthly);
     const name = hasRows ? (row.label || row.service || 'Recurring service') : rowlessName;
-    if (perApplication > 0 && visits > 0) {
-      // Per-application authority, in descending order of directness. Combos
-      // never carry the flag (the backfill only walks frequencies), so their
-      // rows fall to the section-key policy — sound only because a stripped
-      // monthly-member bundle was already rejected above.
-      const authoritative = row.billedPerApplication === true
-        || candidate.billedPerApplication === true
-        || (laneBillsPerApplication === true
-          && PER_APPLICATION_SECTION_KEYS.has(row.service ?? candidate.serviceCategory));
-      if (!authoritative) return null;
+    const section = sectionKeyForRow(row, candidate);
+    // A per-visit price and a visit count describe per-application billing
+    // once the caller's lane says so — EXCEPT on the sections where legacy
+    // flat-monthly payloads look identical, which need THIS ROW's own flag
+    // (an entry-level flag describes the entry, not its termite rider).
+    // Combo rows never carry the flag (the backfill walks only frequencies)
+    // and every real combo carries a mandatory pest row, so inferring from
+    // the row alone is what makes combos describable at all (codex #3120 r2).
+    const cadenceIsProvable = AMBIGUOUS_CADENCE_SECTION_KEYS.has(section)
+      ? row.billedPerApplication === true
+      : true;
+    if (perApplication > 0 && visits > 0 && cadenceIsProvable) {
       drafts.push({ name, visits, perApplication, annual: roundMoney(perApplication * visits) });
     } else if (monthly > 0) {
       // Flat-monthly rows (termite bait monitoring) genuinely charge a
       // monthly amount on accept — keep the honest label.
       drafts.push({ name, monthly, annual: roundMoney(monthly * 12) });
+    } else if (perApplication > 0 && visits > 0) {
+      // Priced, but on a section whose cadence we cannot prove.
+      return null;
     }
     // Rows with neither price are display-only (the estimate page filters
     // them the same way); dropping one that DID carry dollars fails the
@@ -251,7 +232,8 @@ function perApplicationLinesForCandidate(candidate, estimate, { laneBillsPerAppl
   const gross = roundMoney(drafts.reduce((acc, d) => acc + d.annual, 0));
   let scale = 1;
   if (annualTotal > 0 && Math.abs(gross - annualTotal) > 0.05) {
-    const creditAnnual = num(candidate.manualDiscount?.recurringAmount ?? candidate.manualDiscount?.amount);
+    const creditAnnual = num(candidate.manualDiscount?.recurringAmount ?? candidate.manualDiscount?.amount)
+      || num(bundleCredit);
     if (!(creditAnnual > 0) || Math.abs(gross - creditAnnual - annualTotal) > 0.05 || !(gross > 0)) return null;
     scale = annualTotal / gross;
   }
@@ -277,10 +259,22 @@ function perApplicationLinesForCandidate(candidate, estimate, { laneBillsPerAppl
 // Build a single-building fallback proposal from the engine line items /
 // estimate fields so ANY estimate can still produce a PDF even before the
 // operator has authored an explicit multi-building proposal.
-function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { synthesizePerApplication = false } = {}) {
-  const lineItems = synthesizePerApplication
-    ? [...(perApplicationRecurringLines(estimate, estimateData) || [])]
-    : [];
+function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy' } = {}) {
+  const derived = recurringMode === 'legacy'
+    ? null
+    : perApplicationRecurringLines(estimate, estimateData);
+  // An annual prepay covers the year in ONE payment: the same derivation
+  // names the plan and its visit count, but each line is quoted as the annual
+  // amount actually paid rather than a per-application charge that never
+  // happens (codex #3120 r2).
+  const lineItems = (derived || []).map((line) => (recurringMode === 'annual_prepay'
+    ? normalizeLineItem({
+      description: line.description,
+      unitPrice: annualizedAmount(line),
+      frequency: 'annual',
+      taxable: line.taxable,
+    })
+    : line));
   const havePerApplicationRecurring = lineItems.length > 0;
   const engineLines = Array.isArray(estimateData?.sendSnapshot?.pricingBundle?.lineItems)
     ? estimateData.sendSnapshot.pricingBundle.lineItems
@@ -355,25 +349,26 @@ function isCommercialProposalData(estimateData) {
  * Falls back to a synthesized single-building proposal when none is authored.
  *
  * @param {object} estimate
- * @param {{ synthesizePerApplication?: boolean }} [options]
- *   synthesizePerApplication — quote a synthesized proposal's recurring lines
- *   per application instead of as a flat monthly. **Rendering-only**: opt in
- *   from the PDF path, never from the Commercial Proposal editor's read. The
- *   editor's FREQUENCY_OPTIONS/PER_YEAR map has no per_application cadence and
- *   its payload round-trip drops visitsPerYear, so a promoted line would save
- *   back with no occurrence count and annualize to $0 — overwriting the
- *   estimate's authoritative annual_total on PUT.
+ * @param {{ recurringMode?: 'legacy'|'per_application'|'annual_prepay' }} [options]
+ *   How a SYNTHESIZED proposal quotes its recurring lines. Defaults to
+ *   'legacy' (the flat-monthly engine lines this has always produced).
+ *   **Rendering-only**: the richer modes are opt-in from the PDF path and
+ *   never from the Commercial Proposal editor's read — the editor's
+ *   FREQUENCY_OPTIONS/PER_YEAR map has no per_application cadence and its
+ *   payload round-trip drops visitsPerYear, so a promoted line would save back
+ *   with no occurrence count and annualize to $0, overwriting the estimate's
+ *   authoritative annual_total on PUT.
  *
  * @returns {{ enabled, synthesized, title, preparedFor, propertyAddress,
  *   taxRate, taxLabel, terms, buildings: Array }}
  */
-function normalizeProposal(estimate = {}, { synthesizePerApplication = false } = {}) {
+function normalizeProposal(estimate = {}, { recurringMode = 'legacy' } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const stored = estimateData.proposal;
 
   const base = stored && Array.isArray(stored.buildings) && stored.buildings.length
     ? stored
-    : synthesizeFallbackProposal(estimate, estimateData, { synthesizePerApplication });
+    : synthesizeFallbackProposal(estimate, estimateData, { recurringMode });
 
   const buildings = (Array.isArray(base.buildings) ? base.buildings : []).map(normalizeBuilding);
 

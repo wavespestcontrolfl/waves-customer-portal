@@ -17669,7 +17669,11 @@ router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
-    generateEstimateProposalPDF(estimate, res);
+    // Resolve the LIVE billing lane, exactly like the page's pricing bundle —
+    // persisted snapshot flags freeze at send time and would let this document
+    // contradict the estimate the customer is looking at.
+    const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    generateEstimateProposalPDF(estimate, res, await resolveProposalBillingContext(estimate));
   } catch (err) { next(err); }
 });
 
