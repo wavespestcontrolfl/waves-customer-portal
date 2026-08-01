@@ -23,6 +23,9 @@ jest.mock('../services/invoice', () => ({
 jest.mock('../services/customer-credit', () => ({
   postCreditMovement: jest.fn(),
 }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
+}));
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -1063,6 +1066,61 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
+  test('a late payment slides the coverage window so all sold visits still fit', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        technician_id: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    const rowsQuery = query({ rows: [] });
+    const inserts = [
+      query({ returning: [{ id: 'svc-s1', scheduled_date: '2026-12-30' }] }),
+      query({ returning: [{ id: 'svc-s2', scheduled_date: '2027-03-30' }] }),
+      query({ returning: [{ id: 'svc-s3', scheduled_date: '2027-06-30' }] }),
+      query({ returning: [{ id: 'svc-s4', scheduled_date: '2027-09-30' }] }),
+    ];
+    const termColsQuery = query({ columnInfo: { term_end: {}, first_visit_date: {} } });
+    const termSlideUpdate = query({});
+    const termStampUpdate = query({});
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, ...inserts],
+      annual_prepay_terms: [termColsQuery, termSlideUpdate, termStampUpdate],
+    });
+
+    // Paid 5 months after mint: the customer bought 4 quarterly visits, so the
+    // window slides by the lag instead of truncating the tail — the 4th visit
+    // (2027-09-30, past the original 2027-07-30 end) still seeds and the term
+    // row records the new end.
+    const term = {
+      id: 'term-s',
+      customer_id: 'customer-s',
+      term_start: '2026-07-30',
+      term_end: '2027-07-30',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+      coverage_cadence: 'quarterly',
+    };
+    await expect(_private.ensureCoverageRowsForTerm(term, undefined, { today: '2026-12-30' }))
+      .resolves.toMatchObject({
+        createdCount: 4,
+        targetDates: ['2026-12-30', '2027-03-30', '2027-06-30', '2027-09-30'],
+      });
+
+    expect(termSlideUpdate.update).toHaveBeenCalledWith(expect.objectContaining({ term_end: '2027-12-30' }));
+    // The in-memory term carries the slid end for the attach/stamp steps that
+    // follow inside refreshTermSnapshot.
+    expect(term.term_end).toBe('2027-12-30');
+    expect(inserts[3].insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-09-30' }));
+  });
+
   test('the effective first visit date prefers the promise, falling back to term start', () => {
     expect(_private.effectiveFirstVisitDate({ term_start: '2026-07-30', first_visit_date: '2026-08-01' }))
       .toBe('2026-08-01');
@@ -1655,6 +1713,9 @@ describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
         query({ first: undefined }),
         query({ returning: [TERM] }),
         query({ first: TERM }),
+        // Coverage-window slide check (real-clock floor shifts this past-dated
+        // fixture): empty columnInfo → no term_end column → slide skipped.
+        query({ columnInfo: {} }),
         query({ returning: [TERM] }),
       ],
       scheduled_services: [
