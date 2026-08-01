@@ -2466,44 +2466,26 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
       .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
   });
 
-  test('query and fragment suffixes are repaired, not skipped (r5)', () => {
-    // The gate strips the suffix when normalizing and parks anyway, so
-    // skipping these left them on the redraft/skip path.
-    const q = repairInventedInternalRoutes('[services](/pest-control/?utm_source=blog)');
-    expect(q.body).toBe('[services](/pest-control-services/?utm_source=blog)');
-    const f = repairInventedInternalRoutes('[services](/pest-control/#pricing)');
-    expect(f.body).toBe('[services](/pest-control-services/#pricing)');
-    // Unknown routes with a SAFE suffix still unlink.
-    expect(repairInventedInternalRoutes('[a](/nope-invented/?utm_source=blog)').repairs[0])
-      .toMatchObject({ to: null, action: 'unlinked' });
-    // A URL NESTED in the suffix must never ride along onto the alias — on an
-    // absolute hub destination the whole-link scan misses it.
+  test('suffixed routes are never repaired (r5/r6: PII cannot be separated)', () => {
+    // Aliasing would rewrite the route into an ALLOWLISTED one, flipping the
+    // guard from park to pass, and a refresh re-checks nothing downstream.
+    // Key allowlists and character heuristics could not tell PII from
+    // tracking noise, so no suffix rides along — parking is the safe loss.
     for (const body of [
-      '[x](https://www.wavespestcontrol.com/pest-control/?next=https://evil.example)',
-      '[x](/pest-control/?next=//evil.example)',
-    ]) {
-      expect(repairInventedInternalRoutes(body).body).toBe(body);
-      expect(guardrails.evaluate({ body: repairInventedInternalRoutes(body).body }, {}).findings
-        .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' || f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
-    }
-  });
-
-  test('a PII-bearing suffix never rides onto an alias (r5 P1)', () => {
-    // Aliasing flips the route guard from park to pass, and a refresh runs
-    // neither the redaction bundle nor the SEO gate.
-    for (const body of [
-      '[services](/pest-control/?customer=Alice-Smith)',
-      '[services](/pest-control/?email=a@b.com)',
-      '[services](/pest-control/?phone=941-555-1234)',
       '[services](/pest-control/?utm_campaign=Alice-Smith)',
-      '[services](/pest-control/#Alice-Smith)',
-      '[services](/pest-control/?utm_source=a@b.com)',
+      '[services](/pest-control/?utm_campaign=alice-smith)',
+      '[services](/pest-control/?ref=9415551234)',
+      '[services](/pest-control/#alice-smith)',
+      '[services](/pest-control/?utm_source=blog)',
+      '[services](/pest-control/#pricing)',
+      '[services](/pest-control/?customer=Alice-Smith)',
     ]) {
-      expect(repairInventedInternalRoutes(body).body).toBe(body);
+      const r = repairInventedInternalRoutes(body);
+      expect(r.body).toBe(body);
+      expect(r.repairs).toEqual([]);
     }
-    // Known tracking params and plain anchors still ride along.
-    expect(repairInventedInternalRoutes('[x](/pest-control/?utm_source=blog)').body).toContain('/pest-control-services/?utm_source=blog');
-    expect(repairInventedInternalRoutes('[x](/pest-control/#pricing)').body).toContain('/pest-control-services/#pricing');
+    // Plain routes are unaffected.
+    expect(repairInventedInternalRoutes('[x](/pest-control/)').body).toBe('[x](/pest-control-services/)');
   });
 
   test('an empty domain list on a refresh is not read as hub-only (r3)', () => {
