@@ -391,6 +391,47 @@ describe('executeMerge repointed_ids journal record', () => {
     });
   });
 
+  it('journals the self-referral the merge deliberately cleared (winner was referred BY the loser)', async () => {
+    const winner = {
+      id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001',
+      referred_by_customer_id: LOSER, // the loser referred the winner pre-merge
+    };
+    const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001' };
+    const state = { journal: null };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) {
+          const where = q.args('where')?.[0];
+          // The self-referral clear: the FK sweep moved the pointer
+          // loser→winner, so this row now matches and is nulled.
+          if (where && where.referred_by_customer_id === WINNER) return 1;
+          return 1;
+        }
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
+      if (q.called('first')) return null;
+      if (q.called('update')) return 0;
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    // Without this the undo finds no row matching referred_by = winner,
+    // reads drift, and the winner's referral stays permanently null.
+    expect(recorded.winner_prior_values.referred_by_customer_id).toBe(LOSER);
+  });
+
   it('journals WHICH side supplied a derived Stripe profile (stripe_derived_from)', async () => {
     const winner = { id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001', stripe_customer_id: null };
     const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001', stripe_customer_id: null };
@@ -705,6 +746,16 @@ describe('revertMerge', () => {
       if (table === 'payment_method_consents' && q.called('select')) {
         return (tables.payment_method_consents && tables.payment_method_consents.rows) || [];
       }
+      // Invoice-child probes: payments matches via whereRaw on the metadata
+      // jsonb keys, credit-ledger via whereIn('invoice_id', …) — neither is
+      // an id verification.
+      if (table === 'payments' && q.called('whereRaw')) {
+        return (tables.payments && tables.payments.invoiceChildren) || [];
+      }
+      if (table === 'customer_credit_ledger' && q.called('whereIn')
+        && q.args('whereIn')?.[0] === 'invoice_id') {
+        return (tables.customer_credit_ledger && tables.customer_credit_ledger.invoiceChildren) || [];
+      }
       // Email-bound artifact probes — every EMAIL_BOUND_SURFACES table (the
       // fanout-registry mirror). Status filters may use whereIn — still a
       // probe, not an id verification.
@@ -751,7 +802,9 @@ describe('revertMerge', () => {
           state.verified.push({ table, forUpdate: q.called('forUpdate') });
           // Rows shaped by the verification's key column ('id', or a
           // REPOINT_PK_COLUMNS override like customer_refresh_tokens.jti).
+          // `verifiedRows` lets a test stamp updated_at (financial drift).
           const keyCol = q.args('whereIn')[0];
+          if (cfg.verifiedRows) return cfg.verifiedRows;
           return cfg.stillOnWinner.map((v) => ({ [keyCol]: v }));
         }
       }
@@ -1390,6 +1443,120 @@ describe('revertMerge', () => {
     expect(state.winnerPatch.email).toBe(null);
     expect(result.repointedBack['estimates.customer_id']).toBe(1);
     expect(state.journalUpdate.undone_at).toBeTruthy();
+  });
+
+  it('refuses (409, zero writes) when a payment recorded against a journaled invoice is outside the journal', async () => {
+    // The invoice was paid after the merge: the repoint loop would move the
+    // invoice back to the restored customer while the payment that settled
+    // it stays winner-owned (payments key on customer_id; this one is
+    // unjournaled). Probed in the PRE-WRITE pass so ordering can't defeat it.
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        payments: { invoiceChildren: [{ id: 'pay-new' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/payment\(s\) recorded against this merge's invoices/) });
+    // Zero writes: the refusal happened before any repoint.
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses when a credit-ledger entry outside the journal keys on a journaled invoice', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        customer_credit_ledger: { invoiceChildren: [{ id: 'led-new' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/credit-ledger entr\(ies\) recorded against this merge's invoices/) });
+    expect(state.repointedBack).toHaveLength(0);
+  });
+
+  it("a clean journaled invoice (no unjournaled children, untouched) still reverts", async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['payments.customer_id'] = ['pay-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // The only child payment is the journaled one — it moves back with
+        // the invoice, so nothing is separated.
+        payments: { stillOnWinner: ['pay-1'], invoiceChildren: [{ id: 'pay-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['invoices.customer_id']).toBe(1);
+    expect(result.repointedBack['payments.customer_id']).toBe(1);
+    expect(state.journalUpdate.undone_at).toBeTruthy();
+  });
+
+  it('refuses when a JOURNALED financial row itself was updated since the merge (drift on state about to move back)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: {
+          stillOnWinner: ['inv-1'],
+          // Still winner-owned, but touched after the merge (04:00).
+          verifiedRows: [{ id: 'inv-1', updated_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/invoices row\(s\) recorded by this merge were updated after it/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it("restores the winner's self-referral cleared by the merge; an operator-set referrer stays and reports", async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.winner_prior_values = { referred_by_customer_id: LOSER };
+    const ok = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), referred_by_customer_id: null }, // still the merge-written null
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(ok.trx));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // The winner was referred BY the loser pre-merge — that link comes back.
+    expect(ok.state.winnerPatch.referred_by_customer_id).toBe(LOSER);
+
+    // An operator set a different referrer since: leave it, report it.
+    jest.clearAllMocks();
+    const THIRD = 'dddddddd-0000-0000-0000-000000000009';
+    const edited = buildRevertTrx({
+      journal: JSON.parse(JSON.stringify(journal)),
+      winner: { ...baseWinner(), referred_by_customer_id: THIRD },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(edited.trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(edited.state.winnerPatch.referred_by_customer_id).toBeUndefined();
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customers.referred_by_customer_id', reason: 'winner_value_changed_since_merge' }),
+    ]));
   });
 
   it('refuses when a JOURNALED email-bound row was UPDATED since the merge (activity on state about to move back)', async () => {

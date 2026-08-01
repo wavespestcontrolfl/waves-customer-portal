@@ -1197,10 +1197,30 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       repointed['customers.account_credits'] = `moved ${loserCredits} cached credit to winner`;
     }
 
+    // Winner values the merge deliberately OVERWROTE (as opposed to
+    // fill-if-empty backfills) — journaled under
+    // repointed_ids.winner_prior_values so the undo can RESTORE them, not
+    // merely null them out. Covers the self-referral clear here, the
+    // address-tuple replacement, and the consent-stamp clear below.
+    // Pre-upgrade journals lack the key and keep the old behavior
+    // (overwritten values stay lost; restore by hand from the audit trail).
+    const winnerPriorValues = {};
+
     // Repointing referred_by can produce a self-referral if the loser had
     // referred the winner; a customer can't be their own referrer.
-    await trx('customers').where({ id: winnerId, referred_by_customer_id: winnerId })
+    const selfReferralCleared = await trx('customers')
+      .where({ id: winnerId, referred_by_customer_id: winnerId })
       .update({ referred_by_customer_id: null });
+    // Journal that deliberate clear: the FK sweep already moved the pointer
+    // loser→winner, so the undo's reverse repoint finds no row still
+    // matching referred_by_customer_id = winnerId and reads it as drift —
+    // without this record the winner's original "referred by the loser"
+    // link would stay permanently null. Only when the winner's PRE-MERGE
+    // value was the loser (a pre-existing self-reference restores to
+    // nothing, not to the loser).
+    if (selfReferralCleared && winner.referred_by_customer_id === loserId) {
+      winnerPriorValues.referred_by_customer_id = loserId;
+    }
 
     // Retire the loser's contact identity BEFORE backfilling the winner, so a
     // shared email can move over without tripping any uniqueness. Phone is
@@ -1220,14 +1240,6 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     });
 
     const backfills = {};
-    // Winner values the merge deliberately OVERWROTE (as opposed to
-    // fill-if-empty backfills) — journaled under
-    // repointed_ids.winner_prior_values so the undo can RESTORE them, not
-    // merely null them out. Covers the address-tuple replacement and the
-    // consent-stamp clear below. Pre-upgrade journals lack the key and keep
-    // the old behavior (overwritten values stay lost; restore by hand from
-    // the audit trail).
-    const winnerPriorValues = {};
     for (const field of BACKFILL_FIELDS) {
       if (isEmptyValue(winner[field]) && !isEmptyValue(loser[field])) backfills[field] = loser[field];
     }
@@ -1939,16 +1951,30 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // Non-`id` PKs (REPOINT_PK_COLUMNS) verify and repoint by their real
       // key column — the journal recorded those keys at merge time.
       const pkColumn = REPOINT_PK_COLUMNS[table] || 'id';
+      const isFinancial = REVERT_FINANCIAL_TABLES.has(table);
       let stillOnWinner = [];
       try {
         // Financial rows verify under FOR UPDATE so nothing can move them
         // between this check and the reverse repoint below; the repoint's
-        // affected-count check is the belt to this suspender.
+        // affected-count check is the belt to this suspender. They also
+        // read updated_at: a journaled financial row TOUCHED since the
+        // merge is activity, and moving it back would unwind state the
+        // touch depends on (untouched-merges contract).
         let verifyQuery = trx(table).whereIn(pkColumn, ids).where(column, winnerId);
-        if (REVERT_FINANCIAL_TABLES.has(table)) verifyQuery = verifyQuery.forUpdate();
-        stillOnWinner = (await verifyQuery.select(pkColumn)).map((r) => r[pkColumn]);
+        if (isFinancial) verifyQuery = verifyQuery.forUpdate();
+        const verified = await verifyQuery.select(isFinancial ? [pkColumn, 'updated_at'] : [pkColumn]);
+        if (isFinancial) {
+          const touched = countActivityRows(verified, {
+            keyColumn: pkColumn, journaledIds: new Set(ids), mergeAt,
+          });
+          if (touched) {
+            refuse(`${touched} ${table} row(s) recorded by this merge were updated after it — the undo reverts only untouched merges; reconcile them by hand`);
+          }
+        }
+        stillOnWinner = verified.map((r) => r[pkColumn]);
       } catch (e) {
-        if (REVERT_FINANCIAL_TABLES.has(table)) {
+        if (e && e.statusCode === 409) throw e;
+        if (isFinancial) {
           refuse(`Cannot verify ${table} ownership (${e.message}) — refusing to revert`);
         }
         skipped.push({ key, reason: `verify_failed: ${e.message}`, count: ids.length });
@@ -1962,6 +1988,54 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key, reason: 'rows_changed_since_merge', count: moved });
       }
       if (stillOnWinner.length) plans.push({ key, table, column, pkColumn, ids: stillOnWinner });
+    }
+
+    // Child financial rows acquired by a journaled INVOICE since the merge:
+    // a payment recorded against an invoice this undo moves back stays
+    // winner-owned (payments repoint by customer_id, and an unjournaled one
+    // is not in the plans), so the invoice would land on the restored
+    // customer while the money that settled it sits on the kept one. Probed
+    // HERE, in the pre-write pass, so no repoint ordering can defeat it.
+    // Linkage per table (verified against the schema):
+    //   payments — NO invoice_id column; invoices are referenced through
+    //     metadata jsonb (invoice_id / dispute_invoice_id /
+    //     waves_invoice_id), exactly as invoice.js resolves applied money.
+    //   customer_credit_ledger — real invoice_id column.
+    // (payment_plans and annual_prepay_terms also key on invoices, but they
+    // are themselves REVERT_FINANCIAL_TABLES: an unjournaled plan for the
+    // winner is not repointed and does not follow the invoice, while a
+    // journaled one is already covered by the drift refusal above.)
+    const journaledInvoiceIds = [...journaledIdsFor('invoices')];
+    if (journaledInvoiceIds.length) {
+      const invoiceChildProbes = [
+        {
+          table: 'payments',
+          query: (q) => q.whereRaw(
+            "(metadata::jsonb ->> 'invoice_id' = ANY(?) OR metadata::jsonb ->> 'dispute_invoice_id' = ANY(?) OR metadata::jsonb ->> 'waves_invoice_id' = ANY(?))",
+            [journaledInvoiceIds, journaledInvoiceIds, journaledInvoiceIds],
+          ),
+          label: 'payment(s)',
+        },
+        {
+          table: 'customer_credit_ledger',
+          query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
+          label: 'credit-ledger entr(ies)',
+        },
+      ];
+      for (const probe of invoiceChildProbes) {
+        let rows = [];
+        try {
+          rows = await probe.query(trx(probe.table)).select('id', 'updated_at');
+        } catch (e) {
+          refuse(`Cannot verify ${probe.table} against the invoices this merge moved (${e.message}) — refusing to revert`);
+        }
+        const activity = countActivityRows(rows, {
+          journaledIds: journaledIdsFor(probe.table), mergeAt,
+        });
+        if (activity) {
+          refuse(`${activity} ${probe.label} recorded against this merge's invoices are outside its journal — undoing would separate the invoice from the money that settled it; reconcile by hand`);
+        }
+      }
     }
 
     // Payment-method consents are IMMUTABLE authorizations bound to
