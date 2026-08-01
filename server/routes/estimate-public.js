@@ -18693,11 +18693,6 @@ module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
-// The cadence an outstanding estimate is quoted at when the customer has not
-// picked one — the same selector the accept path uses for a body with no
-// selectedFrequency, so the estimate PDF cannot describe a different default
-// than the one acceptance would price (codex #3120 r4).
-module.exports.defaultFrequencyFromList = defaultFrequencyFromList;
 module.exports.estimateRendersMonthlyBilling = estimateRendersMonthlyBilling;
 module.exports.addMissingBilledPerApplicationFlags = addMissingBilledPerApplicationFlags;
 module.exports.stripBilledPerApplicationDeep = stripBilledPerApplicationDeep;
