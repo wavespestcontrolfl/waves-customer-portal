@@ -3185,6 +3185,66 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       });
     }
 
+    // Optional first-visit intent — the date/time already promised to the
+    // customer (e.g. booked on the phone). Anchors the generated coverage
+    // series and gives visit 1 a real arrival window instead of the windowless
+    // term_start-anchored default. Must land inside the coverage window.
+    const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
+    const firstVisitDateInput = parseDateOnlyInput(req.body?.firstVisitDate, 'firstVisitDate');
+    if (firstVisitDateInput.error) return res.status(400).json({ error: firstVisitDateInput.error });
+    const firstVisitDate = firstVisitDateInput.date || null;
+    if (firstVisitDate && (firstVisitDate < termStart || firstVisitDate > termEnd)) {
+      return res.status(400).json({ error: `firstVisitDate must fall between ${termStart} and ${termEnd}` });
+    }
+    // A promised first visit anchors the whole series and is never moved
+    // afterwards, so refuse one that leaves no room for the visits sold — the
+    // tail would fall outside the term window and never be stamped prepaid.
+    if (firstVisitDate) {
+      const lastVisitDate = AnnualPrepayTimes._private.coverageScheduleDates(
+        firstVisitDate, visitCount, coverageCadence, null,
+      ).slice(-1)[0];
+      if (lastVisitDate && lastVisitDate > termEnd) {
+        return res.status(400).json({
+          error: `A first visit on ${firstVisitDate} pushes visit ${visitCount} to ${lastVisitDate}, past the term end (${termEnd}). Pick an earlier first visit or extend the term.`,
+        });
+      }
+    }
+    const firstVisitWindowStartRaw = cleanOptionalText(req.body?.firstVisitWindowStart);
+    const firstVisitWindowStart = firstVisitWindowStartRaw
+      ? AnnualPrepayTimes.normalizeWindowStart(firstVisitWindowStartRaw)
+      : null;
+    if (firstVisitWindowStartRaw && !firstVisitWindowStart) {
+      return res.status(400).json({ error: 'firstVisitWindowStart must be an on-the-hour 24-hour time like 08:00' });
+    }
+    if (firstVisitWindowStart && !firstVisitDate) {
+      return res.status(400).json({ error: 'firstVisitWindowStart requires firstVisitDate' });
+    }
+    // window_end is duration-driven, so a start with no room for the visit
+    // before midnight is refused rather than shortened.
+    if (firstVisitWindowStart && !AnnualPrepayTimes._private.addMinutesHHMM(firstVisitWindowStart, 60)) {
+      return res.status(400).json({ error: 'firstVisitWindowStart is too late in the day to fit a service visit' });
+    }
+    // Reject a promised time that already collides, so the operator picks
+    // another one while the customer is still on the phone. The seeder
+    // re-checks at payment time (the board can move in between) and drops the
+    // window rather than materializing an overlap.
+    if (firstVisitDate && firstVisitWindowStart) {
+      const conflict = await AnnualPrepayTimes.findVisitWindowConflict(db, {
+        scheduledDate: firstVisitDate,
+        windowStart: firstVisitWindowStart,
+        // A visit of this same coverage service already sitting at that hour is
+        // the one coverage will adopt, not a clash. The customer's OTHER
+        // services still count — they can't be performed simultaneously.
+        adoptableFor: { customerId: customer.id, coverageServiceType },
+      });
+      if (conflict) {
+        return res.status(409).json({
+          error: `${firstVisitWindowStart} on ${firstVisitDate} overlaps an existing visit. Pick another time.`,
+          conflictId: conflict.id,
+        });
+      }
+    }
+
     const note = cleanOptionalText(req.body?.note);
     const dueDateInput = parseDateOnlyInput(req.body?.dueDate, 'dueDate');
     if (dueDateInput.error) return res.status(400).json({ error: dueDateInput.error });
@@ -3389,6 +3449,8 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         coverageServiceType,
         coverageVisitCount: visitCount,
         coverageCadence,
+        firstVisitDate,
+        firstVisitWindowStart,
         conn: trx,
       });
       if (!term) throw new Error('Annual prepay term could not be created');
