@@ -67,7 +67,12 @@ async function recordProviderOptOutSuppression(phone, source) {
         'system',
         'Opt-out suppression write failed',
         `A Twilio 21610 opt-out for ${maskPhone(phone)} could not be saved to the suppression list (${source}). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
-        { metadata: { source, error: e.code || e.name || 'db_error' } },
+        // bell: true — a compliance backstop must ring even when the bell
+        // policy would suppress the 'system' category (codex P1): this alert
+        // exists precisely for the case where the canonical suppression
+        // write failed and other workflows can still text an opted-out
+        // number.
+        { bell: true, metadata: { source, error: e.code || e.name || 'db_error' } },
       );
     } catch (notifyErr) {
       logger.error(`[dropped-call-sms] opt-out suppression failure notify also failed: ${notifyErr.code || notifyErr.name || 'error'}`);
@@ -702,7 +707,7 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to, isR
 // reconcile for the card-insert leg).
 async function handleUndeliveredAddressRequestWithRetry(args = {}) {
   const first = await handleUndeliveredAddressRequest(args);
-  if (first.handled || !['no_log_row_and_sid_mismatch', 'already_handled_or_not_sent', 'no_claim_lead'].includes(first.reason)) {
+  if (first.handled || !['no_log_row_and_sid_mismatch', 'already_handled_or_not_sent', 'no_claim_lead', 'error'].includes(first.reason)) {
     return first;
   }
   setTimeout(() => {

@@ -7073,7 +7073,12 @@ const CallRecordingProcessor = {
         if (droppedMidIntake && leadId) {
           try {
             const DroppedCallSms = require('./dropped-call-sms');
-            let smsOutcome = { sent: false, skipped: 'not_eligible' };
+            // Card evidence must say WHY there is no text: a caller who asked
+            // on the call not to be contacted renders as do-not-contact, not
+            // "call them back" (codex P1).
+            let smsOutcome = v2Result?.extraction?.consent?.do_not_contact_request === true
+              ? { sent: false, skipped: 'policy_block', code: 'DNC_REQUESTED_ON_CALL' }
+              : { sent: false, skipped: 'not_eligible' };
             // A customer record created FROM THIS CALL is still a new
             // prospect (Step 3 mints one for any named live caller);
             // classification fails CLOSED to card-only.
