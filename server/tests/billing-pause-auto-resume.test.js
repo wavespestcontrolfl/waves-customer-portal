@@ -268,17 +268,20 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     expect(after).toContain('sendMembershipPaused');
   });
 
-  test('every downstream message tells the truth about whether the pause applied', () => {
-    // After a veto, the office SMS / health alert / autopay log claiming
-    // "service paused" would send an operator chasing state that does not
-    // exist. All of them key off pauseApplied now.
+  test('every downstream message distinguishes applied / settlement-veto / error', () => {
+    // "A payment settled" and "the write blew up" demand OPPOSITE operator
+    // reactions — conflating them hides an infrastructure failure behind a
+    // reassuring message. Three distinct states, defaulting to 'error' so a
+    // throw cannot masquerade as a veto.
     const pauseIdx = cronSrc.indexOf("service_pause_reason: 'autopay_final_failure'");
-    const block = cronSrc.slice(pauseIdx, pauseIdx + 4000);
-    expect(block).toContain("pauseApplied ? 'Service paused until card is updated.'");
-    expect(block).toContain("pauseApplied ? 'Service auto-paused.'");
-    expect(block).toContain('service_paused: pauseApplied');
+    const block = cronSrc.slice(Math.max(0, pauseIdx - 2600), pauseIdx + 4200);
+    expect(block).toContain("let pauseOutcome = 'error';");
+    expect(block).toContain("pauseOutcome = 'settlement_veto';");
+    expect(block).toContain("pauseOutcome = 'applied';");
+    expect(block).toContain("PAUSE WRITE FAILED");
+    expect(block).toContain("service_paused: pauseOutcome === 'applied'");
     expect(block).not.toContain('service_paused: true');
-    expect(block).toContain("pauseApplied ? ', service paused'");
+    expect(block).toContain('pause_outcome: pauseOutcome');
   });
 });
 
