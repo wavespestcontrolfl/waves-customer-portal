@@ -1447,7 +1447,10 @@ function isWithinApptCancelWindow({ request, serviceStart, now = new Date() }) {
   }
   const { CARD_HOLD_POST_START_GRACE_MS } = require('./estimate-card-holds');
   const msUntilStart = start.getTime() - now.getTime();
-  return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart <= windowMs;
+  // STRICT upper bound (Codex #3153 r10 P2): the disclosure says the fee
+  // applies to cancellations "less than N hours before" — a cancel at
+  // exactly the boundary is free, matching the stated terms.
+  return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart < windowMs;
 }
 
 async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date() }) {
@@ -1860,7 +1863,14 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'payer_billed' });
       return { charged: false, reason: 'payer_billed' };
     }
-    if (['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())) {
+    // A VOIDED invoice on a completed recap visit is an UNBILLED service
+    // with no pay-link fallback (Codex #3153 r10 P1) — unlike paid/
+    // prepaid/processing (money handled elsewhere), it needs the office.
+    if (String(invoice.status || '').toLowerCase() === 'void') {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'invoice_void' });
+      return { charged: false, reason: 'invoice_void' };
+    }
+    if (['paid', 'prepaid', 'processing'].includes(String(invoice.status || '').toLowerCase())) {
       return { charged: false, reason: `invoice_${String(invoice.status).toLowerCase()}` };
     }
     const subtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);

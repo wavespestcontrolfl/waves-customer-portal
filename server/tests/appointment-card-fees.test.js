@@ -472,6 +472,14 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(mockChargeSavedCard).not.toHaveBeenCalled();
   });
 
+  test('VOIDED recap invoice → office alert, never a silent unbilled visit (Codex #3153 r10)', async () => {
+    recapHandlers({ invoices: { first: () => ({ ...RECAP_INVOICE(), status: 'void' }) } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('invoice_void');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
   test('declined charge → charge_failed with office alert + autopay failure log', async () => {
     recapHandlers();
     mockChargeSavedCard.mockRejectedValueOnce(new Error('card_declined'));
@@ -631,6 +639,11 @@ describe('isWithinApptCancelWindow — fee window math', () => {
   test('cancel inside the window → fee applies', () => {
     const req = { cancel_window_hours: 24, fee_agreed_at: new Date(NOW.getTime() - 100 * HOUR) };
     expect(isWithinApptCancelWindow({ request: req, serviceStart: new Date(NOW.getTime() + 3 * HOUR), now: NOW })).toBe(true);
+  });
+  test('cancel at EXACTLY the disclosed boundary is FREE — "less than N hours" means strict (Codex #3153 r10)', () => {
+    const req = { cancel_window_hours: 24, fee_agreed_at: new Date(NOW.getTime() - 100 * HOUR) };
+    expect(isWithinApptCancelWindow({ request: req, serviceStart: new Date(NOW.getTime() + 24 * HOUR), now: NOW })).toBe(false);
+    expect(isWithinApptCancelWindow({ request: req, serviceStart: new Date(NOW.getTime() + 24 * HOUR - 1000), now: NOW })).toBe(true);
   });
   test('booking-age anchor: freshly agreed → free-cancel grace even inside 24h', () => {
     const req = { cancel_window_hours: 24, fee_agreed_at: new Date(NOW.getTime() - 10 * 60000) };
