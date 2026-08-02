@@ -2378,6 +2378,33 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
         await trx('service_records').where({ id: record.id }).update(recordUpdate);
         recordUpdated = true;
       }
+
+      // The audit rides the correction transaction (codex P2 #3152 round
+      // 19): concurrent corrections serialize on the row lock, so in-trx
+      // inserts land in COMMIT order — outside the transaction, whichever
+      // request finished its independent costing run first wrote its audit
+      // first, and activity_log.created_at could present "45 → 60" before
+      // "original → 45". The committed revision is frozen in metadata too,
+      // so readers can order by it even across clock skew. Atomic with the
+      // correction on purpose: an audit that can't be written rolls the
+      // correction back rather than leaving an unaudited financial-adjacent
+      // change (previousMinutes accuracy is already load-bearing per round
+      // 10 — this is the same posture).
+      await trx('activity_log').insert({
+        admin_user_id: req.technicianId,
+        customer_id: svc.customer_id,
+        action: 'time_on_site_adjusted',
+        description: `Time on site corrected to ${plan.minutes} min (was ${previousMinutes != null ? `${previousMinutes} min` : 'unrecorded'}) for ${svc.service_type || 'service'}`,
+        metadata: JSON.stringify({
+          scheduled_service_id: svc.id,
+          previous_minutes: previousMinutes,
+          new_minutes: plan.minutes,
+          end_stamps_rewritten: !!newEnd,
+          // Same value the raw COALESCE(seq,0)+1 bump commits — safe to
+          // compute in JS because this transaction holds the row lock.
+          correction_seq: (Number(lockedSvc?.time_on_site_correction_seq) || 0) + 1,
+        }),
+      });
     });
 
     // A failed recalc is SURFACED, not swallowed (codex P2 #3152 round 9):
@@ -2404,23 +2431,6 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     } catch (err) {
       logger.warn(`[time-on-site] job costing recalc failed for service ${svc.id}: ${err.message}`);
     }
-    try {
-      await db('activity_log').insert({
-        admin_user_id: req.technicianId,
-        customer_id: svc.customer_id,
-        action: 'time_on_site_adjusted',
-        description: `Time on site corrected to ${plan.minutes} min (was ${previousMinutes != null ? `${previousMinutes} min` : 'unrecorded'}) for ${svc.service_type || 'service'}`,
-        metadata: JSON.stringify({
-          scheduled_service_id: svc.id,
-          previous_minutes: previousMinutes,
-          new_minutes: plan.minutes,
-          end_stamps_rewritten: !!newEnd,
-        }),
-      });
-    } catch (err) {
-      logger.warn(`[time-on-site] activity_log insert failed for service ${svc.id}: ${err.message}`);
-    }
-
     res.json({
       success: true,
       timeOnSiteMinutes: plan.minutes,
@@ -4985,6 +4995,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // after-the-fact endpoint writes; stamped even when the end
             // instant was clamped (the MINUTES are the operator statement).
             lifecycleUpdates.time_on_site_adjusted_minutes = effectiveTimeOnSite;
+            // …and the monotonic revision advances with it (codex P2 #3152
+            // round 19): a live override IS a correction — without a bump,
+            // an ordinary status-route markComplete that loaded before this
+            // commit still matches the old revision under the default-on
+            // fence and overwrites the override's duration/end fields. A
+            // plain value is safe here: this transaction holds the row lock,
+            // so the locked row's seq cannot move underneath it. The
+            // in-memory svc adopts it so the post-commit markComplete
+            // callers fence on the revision this finalization created.
+            if (Object.prototype.hasOwnProperty.call(lockedSvcRow || svc, 'time_on_site_correction_seq')) {
+              const bumpedSeq = (Number((lockedSvcRow || svc).time_on_site_correction_seq) || 0) + 1;
+              lifecycleUpdates.time_on_site_correction_seq = bumpedSeq;
+              svc.time_on_site_correction_seq = bumpedSeq;
+            }
           }
           const structuredNotes = {
             visitOutcome,

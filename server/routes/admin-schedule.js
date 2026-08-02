@@ -5047,6 +5047,28 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       }
 
       if (detailsChanged) {
+        // Pre-FK legacy report records are found by a (customer, date, type)
+        // soft-join — changing either join field orphans them for every later
+        // lookup: the time-on-site PATCH then searches with the NEW tuple,
+        // misses the record, and returns a partial correction with the
+        // customer report left stale (codex P2 #3152 round 19). Resolve
+        // through the OLD tuple BEFORE it changes and stamp the durable FK,
+        // making later resolution tuple-independent. Ambiguous soft-join
+        // matches stay untouched — stamping one of several same-day rows
+        // could bind the wrong visit; FK-carrying records need no heal.
+        if (updates.scheduled_date !== undefined || updates.service_type !== undefined) {
+          const preTupleRow = await trx('scheduled_services').where({ id: req.params.id }).first();
+          const srCols = await trx('service_records').columnInfo();
+          if (preTupleRow && srCols.scheduled_service_id) {
+            const { record: legacyRecord, viaFk: legacyViaFk, ambiguous: legacyAmbiguous } = await require('../services/job-costing')
+              .resolveServiceRecord(trx, preTupleRow, srCols);
+            if (legacyRecord && !legacyViaFk && !legacyAmbiguous) {
+              await trx('service_records')
+                .where({ id: legacyRecord.id })
+                .update({ scheduled_service_id: req.params.id });
+            }
+          }
+        }
         // When the appointment's own date or arrival window changes, resync its
         // reminder row in the same transaction — otherwise the 72h/24h cron
         // texts the customer the old date/time. (Recurring children get the

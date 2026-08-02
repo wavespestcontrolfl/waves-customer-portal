@@ -522,10 +522,19 @@ async function calculateJobCost(scheduledServiceId, db, {
   await db.transaction(async (trx) => {
     const rowNow = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first();
     const norm = (v) => (v == null ? null : Number(v));
-    if (norm(rowNow?.time_on_site_adjusted_minutes) !== norm(svc.time_on_site_adjusted_minutes)) {
+    // The fence compares the monotonic correction seq as well as the minutes
+    // value (codex P2 #3152 round 19): two saves of the SAME minutes are
+    // distinct revisions — if the newer save's recalculation (pricing
+    // against newer products/expenses state) finishes first, the older run
+    // would pass a minutes-only check and land its stale snapshot last.
+    // Missing column (pre-migration) compares null === null and proceeds,
+    // same as the minutes leg.
+    if (norm(rowNow?.time_on_site_adjusted_minutes) !== norm(svc.time_on_site_adjusted_minutes)
+      || norm(rowNow?.time_on_site_correction_seq) !== norm(svc.time_on_site_correction_seq)) {
       logger.warn(
         `[job-costing] ${scheduledServiceId} — correction stamp moved during recalculation `
-        + `(${norm(svc.time_on_site_adjusted_minutes)} → ${norm(rowNow?.time_on_site_adjusted_minutes)}); skipping stale financial writes`,
+        + `(${norm(svc.time_on_site_adjusted_minutes)} rev ${norm(svc.time_on_site_correction_seq)} → `
+        + `${norm(rowNow?.time_on_site_adjusted_minutes)} rev ${norm(rowNow?.time_on_site_correction_seq)}); skipping stale financial writes`,
       );
       staleSkipped = true;
       return;

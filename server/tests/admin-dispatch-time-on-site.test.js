@@ -582,6 +582,9 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       previous_minutes: 139,
       new_minutes: 45,
       end_stamps_rewritten: true,
+      // The committed revision is frozen in the audit (codex P2 round 19)
+      // — COMPLETED_SVC has no prior seq, so this save is revision 1.
+      correction_seq: 1,
     });
     // The prior minutes were read from the LOCKED row inside the trx
     // (codex P2 round 10) — concurrent corrections serialize on the lock,
@@ -589,6 +592,15 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     const lockedRead = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.locked);
     expect(lockedRead).toBeTruthy();
     expect(source).toMatch(/const lockedSvc = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);\s*\n\s*previousMinutes = positiveNumber\(lockedSvc\?\.service_time_minutes\)/);
+    // The audit INSERT rides the correction transaction (codex P2 round
+    // 19): concurrent corrections serialize on the row lock, so in-trx
+    // audits land in commit order — outside it, whichever request finished
+    // its independent costing first wrote its audit first and created_at
+    // could invert the correction history.
+    const auditInsertAt = source.indexOf("await trx('activity_log').insert({");
+    const costingCallAt = source.indexOf('await JobCosting.calculateJobCost(svc.id);');
+    expect(auditInsertAt).toBeGreaterThan(-1);
+    expect(costingCallAt).toBeGreaterThan(auditInsertAt);
   });
 
   test('the tracker completed_at carries the adjusted instant for live corrections (codex P2 round 10)', () => {
@@ -1067,6 +1079,74 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     expect(fenceAt).toBeGreaterThan(-1);
     expect(jobCostsWriteAt).toBeGreaterThan(fenceAt);
     expect(writeThroughAt).toBeGreaterThan(jobCostsWriteAt);
+  });
+
+  test('the costing fence trips on the correction REVISION even when the minutes value is unchanged (codex P2 round 19)', async () => {
+    // Correction A and correction B both say 45 — distinct revisions. B's
+    // recalculation (pricing against newer financial inputs) finishes
+    // first; A's run re-reads the locked row, sees the seq moved, and must
+    // bail even though the minutes compare equal.
+    const { calculateJobCost: realCalculateJobCost } = jest.requireActual('../services/job-costing');
+    const writes = { jobCosts: [], recordUpdates: [] };
+    let svcReads = 0;
+    const svcAtRead = {
+      id: 'svc-1', customer_id: 'cust-1', status: 'completed',
+      service_time_minutes: 45, actual_duration_minutes: 45,
+      time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 1,
+      estimated_price: 129,
+    };
+    const dbFence = (table) => {
+      const chain = {
+        where: () => chain,
+        whereNot: () => chain,
+        whereBetween: () => chain,
+        leftJoin: () => chain,
+        orderBy: () => chain,
+        limit: () => chain,
+        count: () => chain,
+        forUpdate: () => chain,
+        columnInfo: async () => ({ scheduled_service_id: {}, revenue: {} }),
+        select: async () => [],
+        async first() {
+          if (table === 'scheduled_services') {
+            svcReads += 1;
+            return svcReads === 1 ? svcAtRead : { ...svcAtRead, time_on_site_correction_seq: 2 };
+          }
+          return null;
+        },
+        insert: async (r) => { writes.jobCosts.push(r); return [1]; },
+        update: async (u) => { writes.recordUpdates.push(u); return 1; },
+      };
+      chain.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
+      return chain;
+    };
+    dbFence.transaction = async (fn) => fn(dbFence);
+    const res = await realCalculateJobCost('svc-1', dbFence);
+    expect(res.staleSkipped).toBe(true);
+    expect(writes.jobCosts).toEqual([]);
+    expect(writes.recordUpdates).toEqual([]);
+    expect(costingSource).toMatch(/\|\| norm\(rowNow\?\.time_on_site_correction_seq\) !== norm\(svc\.time_on_site_correction_seq\)/);
+  });
+
+  test('a live override advances the revision, and tuple edits heal the legacy record link first (codex P2 round 19)', () => {
+    // The live-override finalization is a correction: without a seq bump
+    // the default-on tracker fence still matches the old revision and a
+    // racing status-route completion can overwrite the override.
+    expect(source).toMatch(/const bumpedSeq = \(Number\(\(lockedSvcRow \|\| svc\)\.time_on_site_correction_seq\) \|\| 0\) \+ 1;\s*\n\s*lifecycleUpdates\.time_on_site_correction_seq = bumpedSeq;\s*\n\s*svc\.time_on_site_correction_seq = bumpedSeq;/);
+    // update-details resolves pre-FK legacy records through the OLD
+    // (customer, date, type) tuple and stamps the durable FK BEFORE the
+    // tuple changes — otherwise the time-on-site PATCH searches with the
+    // new tuple and leaves the customer report stale.
+    const adminScheduleSource = fs.readFileSync(
+      path.join(__dirname, '../routes/admin-schedule.js'),
+      'utf8',
+    );
+    const healAt = adminScheduleSource.indexOf('resolveServiceRecord(trx, preTupleRow, srCols)');
+    const tupleUpdateAt = adminScheduleSource.indexOf("await trx('scheduled_services').where({ id: req.params.id }).update(updates);");
+    expect(healAt).toBeGreaterThan(-1);
+    expect(tupleUpdateAt).toBeGreaterThan(healAt);
+    expect(adminScheduleSource).toMatch(/if \(legacyRecord && !legacyViaFk && !legacyAmbiguous\) \{\s*\n\s*await trx\('service_records'\)\s*\n\s*\.where\(\{ id: legacyRecord\.id \}\)\s*\n\s*\.update\(\{ scheduled_service_id: req\.params\.id \}\);/);
   });
 
   test('an ambiguous legacy match contributes NOTHING to costing — nulled at resolution, not just at the write-through (codex P2 round 6)', () => {
