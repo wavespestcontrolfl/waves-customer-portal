@@ -364,6 +364,24 @@ describe('annual-prepay preview — priced from the committed series', () => {
     expect(body.blockReason).toMatch(/anchor the prepaid year/);
   });
 
+  // The mint refuses a window with no room for a 60-minute visit before
+  // midnight, which would have failed AFTER the appointment committed. The
+  // window is optional and coverage adopts the visit by date, so the sale
+  // survives without it.
+  test('a too-late window is dropped from the mint payload, not sold and then rejected', async () => {
+    stubTables();
+    const { body } = await preview({ windowStart: '23:00' });
+    expect(body.eligible).toBe(true);
+    expect(body.mintPayload.firstVisitDate).toBe(FUTURE_DATE);
+    expect(body.mintPayload.firstVisitWindowStart).toBeUndefined();
+  });
+
+  test('a window that fits is carried through', async () => {
+    stubTables();
+    const { body } = await preview({ windowStart: '08:00' });
+    expect(body.mintPayload.firstVisitWindowStart).toBe('08:00');
+  });
+
   test('a persisted estimate-origin series is refused — the quote lane owns it', async () => {
     stubTables({ visit: { ...COMMITTED_VISIT, source_estimate_id: 'est-1' } });
     const { body } = await preview({ scheduledServiceId: 'svc-1' });

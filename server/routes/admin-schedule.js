@@ -8079,8 +8079,20 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       ? String(input.firstVisitDateRaw).split('T')[0]
       : null;
     const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
-    const firstVisitWindowStart = firstVisitDate && input.windowStartRaw
+    const normalizedWindowStart = firstVisitDate && input.windowStartRaw
       ? AnnualPrepayTimes.normalizeWindowStart(String(input.windowStartRaw))
+      : null;
+    // The mint REFUSES a window with no room for a 60-minute visit before
+    // midnight (admin-customers.js — "too late in the day"), so a 23:00
+    // booking would have failed the mint AFTER the appointment committed
+    // (Codex #3161 r9 P2). The window is an optional convenience — it gives
+    // visit 1 an arrival time on the term — and coverage adopts the booked
+    // visit by DATE regardless, so drop the unusable window instead of
+    // refusing the sale. The booked appointment keeps its own 23:00 slot;
+    // only the term's stored arrival window is omitted.
+    const firstVisitWindowStart = normalizedWindowStart
+      && AnnualPrepayTimes._private.addMinutesHHMM(normalizedWindowStart, 60)
+      ? normalizedWindowStart
       : null;
     // A COMMITTED series must anchor on its own visit, never on today
     // (Codex #3161 r8 P2): a booking that commits just before ET midnight and

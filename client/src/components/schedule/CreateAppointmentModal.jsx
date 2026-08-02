@@ -1644,6 +1644,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (!fresh?.eligible) {
           throw new Error(`annual prepay ${fresh?.blockReason || 'is no longer available for this booking'}`);
         }
+        // The operator agreed to the total on screen. If re-pricing against
+        // the committed series produced a DIFFERENT one (a discount edited
+        // mid-booking, say), stop rather than send an amount nobody reviewed
+        // (Codex #3161 r9 P2) — the booking stands, the year is not invoiced.
+        const shown = Number(manualPrepay?.prepayTotal);
+        if (Number.isFinite(shown) && Math.round(shown * 100) !== Math.round(Number(fresh.prepayTotal) * 100)) {
+          throw new Error(`the price changed while booking — you approved ${formatMoney(shown)} but the committed visit prices at ${formatMoney(fresh.prepayTotal)}, so nothing was invoiced`);
+        }
         const minted = await adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
           method: 'POST',
           body: JSON.stringify(fresh.mintPayload),
