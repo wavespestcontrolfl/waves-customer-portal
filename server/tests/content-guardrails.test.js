@@ -2414,6 +2414,19 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('Per [CA][1], as of June 2026, Orkin charges a $199 fee.\n\nMore prose.\n\n[1]: https://www.consumeraffairs.com/x', OP)).toBeNull();
   });
 
+  test('shortcut and collapsed reference citations qualify (r14)', () => {
+    // The label lives in the FIRST bracket for these two forms.
+    expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 [source].\n\n[source]: https://www.consumeraffairs.com/x', OP)).toBeNull();
+    expect(findHardcodedPrice('Aptive charges a $199 fee as of July 2026 [source][].\n\n[source]: https://www.consumeraffairs.com/x', OP)).toBeNull();
+  });
+
+  test('OUR OWN links cannot source a competitor price (r14)', () => {
+    // Hub and spoke domains are navigation, not third-party evidence.
+    expect(findHardcodedPrice('Other companies charge a $199 cancellation fee as of July 2026 ([source](https://www.wavespestcontrol.com/pest-control-calculator/)).', OP)).not.toBeNull();
+    // A genuine third-party source still qualifies.
+    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
+  });
+
   test('the citation must be reader-VISIBLE, not an image or dangling ref (r13 P0)', () => {
     // Image destinations and unused reference definitions are stripped from
     // the rendered page, so neither is a citation a reader can follow.

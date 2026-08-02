@@ -307,6 +307,22 @@ function blankToRenderedText(s) {
 // [date]')", so the amount's paragraph must carry BOTH a citation link and a
 // date. Absent either, the draft parks for review.
 const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,30}\b(?:19|20)\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(?:19|20)\d{2}\b/i;
+// Hosts that can EVIDENCE a claim: the curated citation list, curated
+// competitor-fact sources, and editorially-approved external domains. Our own
+// hub and spoke domains are deliberately absent.
+function citationOnlyHosts({ operatorCitations = false } = {}) {
+  const hosts = new Set();
+  for (const d of String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(',')) {
+    const h = normalizeHost(d);
+    if (h) hosts.add(h);
+  }
+  if (operatorCitations) {
+    for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
+    for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
+  }
+  return hosts;
+}
+
 // URLs a READER can actually follow from this paragraph. An image
 // destination and an UNUSED reference definition are both stripped from the
 // rendered page, so neither is a citation — accepting them let an unrelated
@@ -322,11 +338,18 @@ function visibleCitationUrls(citationPara, renderedPara, citationDoc) {
   const bare = /https?:\/\/[^\s<>()"'\]]+/gi;
   while ((m = bare.exec(renderedPara)) !== null) push(m[0]);
   // Reference LINKS resolve to their definition; reference IMAGES do not.
-  const refUse = /(!)?\[[^\]\n]*\](?:\[([^\]\n]*)\])?/g;
+  // Full "[text][ref]", COLLAPSED "[ref][]" and SHORTCUT "[ref]" — the last
+  // two carry the label in the FIRST bracket, so reading only the second one
+  // parked compliant intercepts on formatting alone (Codex).
+  const refUse = /(!)?\[([^\]\n]*)\](?:\[([^\]\n]*)\])?/g;
   const usedRefs = new Set();
   while ((m = refUse.exec(citationPara)) !== null) {
     if (m[1]) continue; // image
-    const label = (m[2] || '').trim();
+    if (citationPara[m.index + m[0].length] === '(') continue; // inline link
+    // A DEFINITION line ("[label]: https://…") is not a use of itself —
+    // counting it made a dangling definition self-referencing (Codex).
+    if (citationPara[m.index + m[0].length] === ':') continue;
+    const label = ((m[3] || '').trim() || (m[2] || '').trim());
     if (label) usedRefs.add(label.toLowerCase());
   }
   if (usedRefs.size) {
@@ -358,7 +381,11 @@ function priceParagraphIsSourced(citationText, renderedText, index, opts = {}) {
   // The URL must be a CITATION the gate would actually accept — an
   // allowlisted host or a source this brief named. Any-URL-will-do let an
   // unrelated link stand in for the source (Codex).
-  const allowedHosts = allowedLinkHosts(opts);
+  // CITATION hosts only. allowedLinkHosts also carries every hub and spoke
+  // domain — navigation destinations, not third-party evidence — so a link
+  // to our own calculator was standing in as the source for a competitor's
+  // price (Codex).
+  const allowedHosts = citationOnlyHosts(opts);
   const exact = allowedExactSourceUrls(opts.requiredSourceUrls);
   const urls = visibleCitationUrls(para(citationText), para(renderedText), String(citationText || ''));
   const cited = urls.some((u) => {
