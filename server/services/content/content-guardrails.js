@@ -2685,7 +2685,9 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     }
     // Container prefixes again: ">     [x](/invented/)" is a blockquoted
     // indented code block, and a bare four-space pattern never saw it.
-    const indented = /(?:^[ \t>]*(?:[ ]{4}|\t)[^\n]*$\n?)+/gm;
+    // List markers are containers too: "-     [x](…)" and "1.    [x](…)"
+    // are indented code under a list item (Codex).
+    const indented = /(?:^[ \t>]*(?:[-*+]|\d+[.)])?[ \t]*(?:[ ]{4}|\t)[^\n]*$\n?)+/gm;
     let im;
     while ((im = indented.exec(text)) !== null) ranges.push([im.index, im.index + im[0].length]);
     const span = /(`+)(?:[^`]|(?!\1)`)*\1/g;

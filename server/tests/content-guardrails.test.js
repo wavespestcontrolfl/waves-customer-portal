@@ -2589,6 +2589,8 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     // attribute value.
     for (const body of [
       '>     [x](/invented/)',
+      '-     [x](/invented/)',
+      '1.    [x](/invented/)',
       '    [x](/invented/)',
       '\\[x](/invented/)',
       '<a title="[read more](/invented/)">y</a>',
