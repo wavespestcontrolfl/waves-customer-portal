@@ -2254,7 +2254,11 @@ async function handleChargeRefunded(charge) {
               }
             }
           } catch (fenceErr) {
-            logger.warn(`[stripe-webhook] fee fence re-check failed for ${refundId}: ${fenceErr.message}`);
+            // FAIL CLOSED (Codex #3153 r24 P0): writing the terminal marker
+            // without a verified fence could replay-skip settlement of
+            // money Stripe kept — throw so the event retries.
+            logger.error(`[stripe-webhook] fee fence re-check failed for ${refundId} — retrying event: ${fenceErr.message}`);
+            throw fenceErr;
           }
         }
         // Canonical refund attribution (Codex #3153 r17 P1):
@@ -2654,8 +2658,8 @@ async function handleRefundFailed(refund) {
         try {
           // Local pointer first (no Stripe round-trip for the common
           // non-fee case); fall back to trusted PI metadata for the rare
-          // crashed-before-pointer charge. A detection failure degrades to
-          // the unlocked fence (original behavior), never a lost event.
+          // crashed-before-pointer charge. A detection failure throws so
+          // the event retries — never an unlocked fence on uncertainty.
           const feePtr = await db('appointment_card_requests')
             .where({ no_show_payment_intent_id: piId })
             .first('id');
@@ -2668,7 +2672,10 @@ async function handleRefundFailed(refund) {
             }
           }
         } catch (detectErr) {
-          logger.warn(`[stripe-webhook] fee-lane detection for failed refund ${refundId} errored — fencing without the fee lock: ${detectErr.message}`);
+          // FAIL CLOSED (Codex #3153 r24 P0): fencing without the fee lock
+          // could lose the fence/marker race — throw so Stripe retries.
+          logger.error(`[stripe-webhook] fee-lane detection for failed refund ${refundId} errored — retrying event: ${detectErr.message}`);
+          throw detectErr;
         }
       }
       await db.transaction(async (trx) => {

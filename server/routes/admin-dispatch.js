@@ -2692,8 +2692,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
       try {
         const CardHolds = require('../services/estimate-card-holds');
         const feeResult = await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+        // charge_failed is RETRYABLE — the claim reverts to NULL and a
+        // later attempt may still collect (Codex #3153 r24 P0): the
+        // customer notice must use the cautious review copy, never an
+        // unequivocal "no charge".
         if (feeResult?.charged === true) noShowFeeOutcome = 'charged';
-        else if (feeResult?.reason === 'charge_review') noShowFeeOutcome = 'review';
+        else if (['charge_review', 'charge_failed'].includes(feeResult?.reason)) noShowFeeOutcome = 'review';
         // Appointment-card fee rail fallback: visits secured via /secure
         // carry the disclosed fee on appointment_card_requests instead of a
         // hold row (mutually exclusive lanes — the rail re-checks). Runs
@@ -2703,7 +2707,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
           const ApptCardRequests = require('../services/appointment-card-request');
           const apptFeeResult = await ApptCardRequests.chargeAppointmentNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
           if (apptFeeResult?.charged === true) noShowFeeOutcome = 'charged';
-          else if (apptFeeResult?.reason === 'charge_review') noShowFeeOutcome = 'review';
+          else if (['charge_review', 'charge_failed'].includes(apptFeeResult?.reason)) noShowFeeOutcome = 'review';
+        }
+        if (noShowFeeOutcome === 'review') {
+          try {
+            await require('../services/notification-service').notifyAdmin(
+              'billing',
+              'No-show fee needs review',
+              'The no-show fee did not settle cleanly (declined or parked) — review the customer\'s billing; a retry may still charge.',
+              { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_unsettled' } },
+            );
+          } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
         }
       } catch (e) {
         // A THROWN fee step means lane ownership was never resolved (Codex

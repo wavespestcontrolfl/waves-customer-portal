@@ -52,6 +52,13 @@ jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
+// Fee-lane detection's guarded fallback retrieves the PI when no local
+// pointer row exists; model Stripe answering "not a fee PI" so the
+// unlocked fence path stays exercisable (detection failures now throw).
+jest.mock('../services/stripe', () => ({
+  ...jest.requireActual('../services/stripe'),
+  retrievePaymentIntent: jest.fn(async (piId) => ({ id: piId, metadata: {} })),
+}));
 
 const db = require('../models/db');
 const AnnualPrepay = require('../services/annual-prepay-renewals');
@@ -516,6 +523,7 @@ describe('handleRefundFailed', () => {
     };
     db.mockImplementation((table) => {
       if (table === 'payments') return emptyQuery;
+      if (table === 'appointment_card_requests') return emptyQuery;
       if (table === 'stripe_failed_refunds') return fenceQuery;
       if (table === 'notifications') return { insert: notificationInsert };
       throw new Error(`Unexpected db table: ${table}`);
