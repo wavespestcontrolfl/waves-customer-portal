@@ -16,6 +16,7 @@ jest.mock('../services/logger', () => ({
 
 const mockState = {
   customer: null,
+  lockedReads: [],
   storedPausedAt: undefined,
   updates: [],
   interactions: [],
@@ -37,6 +38,7 @@ jest.mock('../models/db', () => {
     const q = { _table: table, _where: {}, _null: [] };
     q.where = (criteria) => { Object.assign(q._where, criteria); return q; };
     q.whereNull = (col) => { q._null.push(col); return q; };
+    q.forUpdate = () => { mockState.lockedReads.push(table); return q; };
     q.first = async () => {
       if (mockState.customerReadShouldFail) throw new Error('db read exploded');
       if (table !== 'customers' || !mockState.customer) return null;
@@ -75,6 +77,7 @@ const { maybeResumeBillingPauseOnPayment, AUTO_CLEARABLE_REASON } = require('../
 
 beforeEach(() => {
   mockState.customer = null;
+  mockState.lockedReads = [];
   mockState.storedPausedAt = undefined;
   mockState.updates = [];
   mockState.interactions = [];
@@ -214,6 +217,18 @@ describe('maybeResumeBillingPauseOnPayment', () => {
     expect(await maybeResumeBillingPauseOnPayment('cust-1')).toMatchObject({ resumed: false, reason: 'no_settlement_time' });
     expect(await maybeResumeBillingPauseOnPayment('cust-1', { settledAt: new Date('nope') })).toMatchObject({ resumed: false, reason: 'no_settlement_time' });
     expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('the pause read takes a ROW LOCK inside the transaction', async () => {
+    // An unlocked read races billing-cron's in-flight pause UPDATE: it sees
+    // the pre-pause row, answers not_paused, and the cron commits its pause
+    // after this webhook finishes — stranding a customer who just paid.
+    // FOR UPDATE makes the read wait for any concurrent pause write.
+    mockState.customer = { ...PAUSED };
+
+    await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_1', settledAt: new Date('2026-07-01T12:00:00Z') });
+
+    expect(mockState.lockedReads).toContain('customers');
   });
 
   test('the auto-clearable reason is pinned to the ladder-exhaustion value billing-cron writes', () => {

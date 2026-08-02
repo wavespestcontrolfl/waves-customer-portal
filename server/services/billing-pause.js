@@ -55,40 +55,52 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
       : null;
     if (!settledAt) return { resumed: false, reason: 'no_settlement_time' };
 
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .whereNull('deleted_at')
-      .first('id', 'service_paused_at', 'service_pause_reason');
-    if (!customer?.service_paused_at) return { resumed: false, reason: 'not_paused' };
-    if (customer.service_pause_reason !== AUTO_CLEARABLE_REASON) {
-      // An operator set this pause for their own reasons — a payment does
-      // not overrule a human decision.
-      return { resumed: false, reason: 'manual_pause' };
-    }
-    // A pause applied AFTER this payment settled was caused by failures this
-    // payment does not answer for — a delayed webhook for an old success
-    // must not clear it. With one exception: the clear now runs AFTER the
-    // webhook's durable ledger writes, so a pause the cron applied SECONDS
-    // after the settlement (the exhaustion racing the payment) legitimately
-    // postdates settledAt. The retry ladder is DAY-spaced
-    // (RETRY_DELAYS_DAYS), so no genuinely newer failure cycle can produce
-    // a pause within minutes of a settlement — an hour of slack separates
-    // the race (clear it) from a stale redelivery (leave it) with three
-    // orders of magnitude to spare on each side.
-    const RACE_SLACK_MS = 60 * 60 * 1000;
-    if (new Date(customer.service_paused_at).getTime() > settledAt.getTime() + RACE_SLACK_MS) {
-      return { resumed: false, reason: 'pause_newer_than_payment' };
-    }
+    // Read INSIDE the transaction with a row lock: billing-cron's pause
+    // UPDATE may have acquired this customer row and not yet committed, and
+    // an unlocked read would see the pre-pause version, answer not_paused,
+    // and let the cron commit its pause AFTER this webhook finishes —
+    // stranding a customer who just paid. FOR UPDATE waits for any
+    // in-flight pause write to commit before deciding. The mirror ordering
+    // is covered by the cron itself: when THIS lock is held first, its
+    // atomic whereNotExists sees the (already committed) paid row and
+    // vetoes the pause.
+    const outcome = await db.transaction(async (trx) => {
+      const customer = await trx('customers')
+        .where({ id: customerId })
+        .whereNull('deleted_at')
+        .forUpdate()
+        .first('id', 'service_paused_at', 'service_pause_reason');
+      if (!customer?.service_paused_at) return { resumed: false, reason: 'not_paused' };
+      if (customer.service_pause_reason !== AUTO_CLEARABLE_REASON) {
+        // An operator set this pause for their own reasons — a payment does
+        // not overrule a human decision.
+        return { resumed: false, reason: 'manual_pause' };
+      }
+      // A pause applied AFTER this payment settled was caused by failures
+      // this payment does not answer for — a delayed webhook for an old
+      // success must not clear it. With one exception: the clear runs AFTER
+      // the webhook's durable ledger writes, so a pause the cron applied
+      // SECONDS after the settlement (the exhaustion racing the payment)
+      // legitimately postdates settledAt. The retry ladder is DAY-spaced
+      // (RETRY_DELAYS_DAYS), so no genuinely newer failure cycle can
+      // produce a pause within minutes of a settlement — an hour of slack
+      // separates the race (clear it) from a stale redelivery (leave it)
+      // with three orders of magnitude to spare on each side.
+      const RACE_SLACK_MS = 60 * 60 * 1000;
+      if (new Date(customer.service_paused_at).getTime() > settledAt.getTime() + RACE_SLACK_MS) {
+        return { resumed: false, reason: 'pause_newer_than_payment' };
+      }
 
-    const pausedAt = customer.service_paused_at;
-    const pausedSince = etDateString(new Date(pausedAt));
+      const pausedAt = customer.service_paused_at;
+      const pausedSince = etDateString(new Date(pausedAt));
 
-    const resumed = await db.transaction(async (trx) => {
+      // Row is locked, but keep the CAS shape anyway — it is free, and it
+      // documents the invariant the manual endpoint shares.
       const cleared = await trx('customers')
         .where({ id: customerId, service_paused_at: pausedAt })
         .whereNull('deleted_at')
         .update({ service_paused_at: null, service_pause_reason: null });
-      if (!cleared) return false;
+      if (!cleared) return { resumed: false, reason: 'pause_changed' };
 
       await trx('customer_interactions').insert({
         customer_id: customerId,
@@ -122,13 +134,13 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
         trx,
       });
 
-      return true;
+      return { resumed: true, pausedSince };
     });
 
-    if (!resumed) return { resumed: false, reason: 'pause_changed' };
-
-    logger.info(`[billing-pause] auto-cleared for customer ${customerId} on payment ${context.paymentIntentId || '(unknown PI)'} (was paused ${pausedSince})`);
-    return { resumed: true, pausedSince };
+    if (outcome.resumed) {
+      logger.info(`[billing-pause] auto-cleared for customer ${customerId} on payment ${context.paymentIntentId || '(unknown PI)'} (was paused ${outcome.pausedSince})`);
+    }
+    return outcome;
   } catch (err) {
     // Infrastructure failure, not a business outcome. The pause stays for
     // now; the CALLER decides whether to surface it — the stripe-webhook
