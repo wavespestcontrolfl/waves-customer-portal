@@ -156,6 +156,33 @@ describe('endedAbruptly', () => {
     ]))).toBe(false);
   });
 
+  it("false for a completed call that just lacks a goodbye — 'No, that's all.' is not a drop", () => {
+    expect(endedAbruptly(mk([
+      'Agent: So we are set for Tuesday morning.',
+      'Caller: Yes.',
+      'Agent: Anything else I can help with today?',
+      "Caller: No, that's all.",
+    ]))).toBe(false);
+  });
+
+  it('false when the final utterance ends as a complete sentence (no positive cutoff evidence)', () => {
+    expect(endedAbruptly(mk([
+      'Agent: What area are you in?',
+      'Caller: Bayshore Gardens.',
+      'Agent: Great, we cover that.',
+      'Caller: Okay then.',
+    ]))).toBe(false);
+  });
+
+  it('true on connection-trouble language even when turns end with punctuation', () => {
+    expect(endedAbruptly(mk([
+      'Caller: It is one eight one one zero.',
+      'Agent: Sorry, you cut out.',
+      'Caller: Hello? Can you hear me?',
+      'Caller: Hello?',
+    ]))).toBe(true);
+  });
+
   it('false for transcripts too short to judge', () => {
     expect(endedAbruptly(mk(['Agent: Hello?', 'Caller: Hi —']))).toBe(false);
     expect(endedAbruptly('')).toBe(false);
@@ -415,6 +442,10 @@ describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
     expect(flip.payload.outcome).toBe('opted_out');
     const note = state.inserts.find((i) => i.table === 'lead_activities');
     expect(note.payload.description).toMatch(/Do NOT text/);
+    // No outreach queued for an opt-out: the only lead write is the status
+    // stamp, never a next_follow_up_at pull.
+    const followUpPulls = state.updates.filter((u) => u.table === 'leads' && u.payload.next_follow_up_at);
+    expect(followUpPulls).toHaveLength(0);
   });
 
   it('idempotent: the claim-outcome flip admits exactly one callback', async () => {

@@ -67,9 +67,25 @@ const STRONG_FAREWELL_RE = new RegExp(
 const WEAK_FAREWELL_RE = new RegExp(
   [
     'sounds good', "you're welcome", 'appreciate (it|you)', 'thank(s| you)',
+    // Ordinary closings without a literal goodbye — "No, that's all" is a
+    // completed call, not a drop (codex P1).
+    "that'?s (all|it)", 'nothing else', "(i'?m|we'?re) (good|all set)", 'all set',
   ].join('|'),
   'i'
 );
+// POSITIVE drop evidence, tier 1: the final utterance trails off without
+// sentence-terminal punctuation (mid-thought cutoff), or tier 2: the tail
+// carries connection-trouble language. Absence of a farewell alone is NOT
+// enough to call a completed conversation "dropped" (codex P1) — a
+// customer-facing "our call dropped" text needs precision over recall.
+const CONNECTION_TROUBLE_RE = /can you hear me|are you (there|still there)|hello\?|you cut out|lost you\b|breaking up/i;
+function finalTurnTrailsOff(finalTurn) {
+  // Strip the speaker label, then require the utterance to END mid-thought:
+  // no . ! or ? terminal (a comma, dash, or bare word is cutoff evidence).
+  const text = String(finalTurn || '').replace(/^\s*(Agent|Caller)\s*:\s*/i, '').trim();
+  if (!text) return false;
+  return !/[.!?]["')\]]?$/.test(text);
+}
 
 /**
  * Full drop-mid-intake detection: long enough to be a real conversation,
@@ -114,7 +130,9 @@ function endedAbruptly(transcription) {
   if (turns.length < 4) return false; // too short to judge — not "abrupt"
   const tail = turns.slice(-3).join(' ');
   const finalTurn = turns[turns.length - 1];
-  return !STRONG_FAREWELL_RE.test(tail) && !WEAK_FAREWELL_RE.test(finalTurn);
+  if (STRONG_FAREWELL_RE.test(tail) || WEAK_FAREWELL_RE.test(finalTurn)) return false;
+  // Positive cutoff evidence required — no-farewell alone is not a drop.
+  return finalTurnTrailsOff(finalTurn) || CONNECTION_TROUBLE_RE.test(tail);
 }
 
 function maskPhone(value) {
@@ -526,15 +544,18 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
       const now = new Date();
       // A DELAYED opt-out (21610 on the delivery callback) is the same
       // do-not-contact verdict as a synchronous one — the card and note must
-      // never instruct a callback for it (codex P1).
+      // never instruct a callback for it, and the follow-up pull below must
+      // NOT queue outreach for it (codex P1).
       const optedOut = String(errorCode || '') === '21610';
       if (lead) {
-        await trx('leads')
-          .where({ id: lead.id })
-          .where(function followUpMissingOrLater() {
-            this.whereNull('next_follow_up_at').orWhere('next_follow_up_at', '>', now);
-          })
-          .update({ next_follow_up_at: now, updated_at: now });
+        if (!optedOut) {
+          await trx('leads')
+            .where({ id: lead.id })
+            .where(function followUpMissingOrLater() {
+              this.whereNull('next_follow_up_at').orWhere('next_follow_up_at', '>', now);
+            })
+            .update({ next_follow_up_at: now, updated_at: now });
+        }
         await trx('leads').where({ id: lead.id }).update({
           extracted_data: trx.raw(
             "jsonb_set(COALESCE(extracted_data, '{}'::jsonb), '{dropped_call_sms_status}', to_jsonb(?::text))",
