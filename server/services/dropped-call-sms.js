@@ -354,7 +354,23 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
     logger.warn(`[dropped-call-sms] phone claim insert failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
     return { sent: false, skipped: 'claim_insert_failed' };
   }
-  if (!phoneClaimed) return { sent: false, skipped: 'already_sent_to_phone' };
+  if (!phoneClaimed) {
+    // Stale in-flight recovery: a worker that died between the claim insert
+    // and completion leaves outcome='claimed' forever, wedging the phone
+    // with no text ever sent (codex P2). Take over a 'claimed' row older
+    // than an hour — every live send completes in seconds.
+    try {
+      const recovered = await db('dropped_call_sms_claims')
+        .where({ phone, outcome: 'claimed' })
+        .where('created_at', '<', new Date(Date.now() - 60 * 60 * 1000))
+        .update({ lead_id: leadId, call_log_id: call.id || null, created_at: new Date() });
+      if (!recovered) return { sent: false, skipped: 'already_sent_to_phone' };
+      logger.info(`[dropped-call-sms] Recovered stale in-flight claim for ${maskPhone(phone)}`);
+    } catch (e) {
+      logger.warn(`[dropped-call-sms] stale claim recovery failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
+      return { sent: false, skipped: 'already_sent_to_phone' };
+    }
+  }
 
   try {
     return await sendClaimed({ leadId, extracted, call, phone, expectedCustomerId });

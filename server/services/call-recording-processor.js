@@ -7090,13 +7090,20 @@ const CallRecordingProcessor = {
               callNature: v2Result?.extraction?.call_nature,
               doNotContactRequested: v2Result?.extraction?.consent?.do_not_contact_request === true,
             });
-            if (genuineNewProspect) {
+            // TCPA: implied consent is PERSONAL to the inbound ANI. The
+            // resolved contact phone can be a DICTATED callback number —
+            // possibly someone else's handset — and must never receive the
+            // automated text (codex P1). No usable external ANI → card-only.
+            const smsAni = firstExternalPhone(call.from_phone);
+            if (genuineNewProspect && !smsAni) {
+              smsOutcome = { sent: false, skipped: 'no_usable_ani' };
+            } else if (genuineNewProspect) {
               // Inner catch: the review card below MUST still open when the
               // send path throws — a failed text plus no card is exactly the
               // silent-cold-lead outcome this lane prevents.
               try {
                 smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({
-                  leadId, extracted, call, phone, expectedCustomerId: customerId || null,
+                  leadId, extracted, call, phone: smsAni, expectedCustomerId: customerId || null,
                 });
               } catch (sendErr) {
                 logger.warn(`[call-proc] dropped-call text failed (card still opens): ${sendErr.message}`);
@@ -7117,6 +7124,21 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
+            // Reprocess refresh: the insert above no-ops when an open card
+            // already exists (first run: gate off / quiet hours / transient
+            // block with released claims). A successful send on THIS run
+            // must update that stale card or it keeps saying "not sent —
+            // call them back" after the text went out (codex P2).
+            if (smsOutcome.sent) {
+              await db('triage_items')
+                .where({ call_log_id: call.id, reason_code: 'call_dropped_mid_intake' })
+                .whereIn('status', ['open', 'in_progress'])
+                .update({
+                  payload: db.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'sent') - 'address_request_sms_code'"),
+                  updated_at: new Date(),
+                })
+                .catch((e) => logger.warn(`[call-proc] dropped-call card sent-refresh failed: ${e.code || e.name || 'db_error'}`));
+            }
             // A delivery bounce can race this insert (callback lands between
             // the awaited send and here — its card flip found no row). The
             // claim outcome is the bounce handler's authority: reconcile the

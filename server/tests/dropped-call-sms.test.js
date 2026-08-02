@@ -320,11 +320,19 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(res).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
   });
 
-  it('phone claim conflict (concurrent winner) — skips', async () => {
+  it('phone claim conflict with a CONSUMED claim — skips (stale recovery finds no claimed row)', async () => {
     state.insertResults.dropped_call_sms_claims = [[]];
+    state.updateResults.dropped_call_sms_claims = [0]; // stale-recovery update matches nothing
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('abandoned in-flight claim (worker died mid-send >1h ago) — recovered and re-sent', async () => {
+    state.insertResults.dropped_call_sms_claims = [[]]; // insert conflicts
+    state.updateResults.dropped_call_sms_claims = [1]; // stale takeover wins
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: true });
   });
 
   it('landline — claim kept and stamped, no send', async () => {
