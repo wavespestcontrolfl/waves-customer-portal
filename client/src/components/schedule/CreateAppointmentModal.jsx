@@ -1655,6 +1655,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           prepayNotice = `Annual prepay invoice${num} for ${formatMoney(fresh.prepayTotal)} was settled by account credit — nothing was sent to the customer.`;
         } else if (minted?.delivery?.ok === false) {
           prepayNotice = `Annual prepay invoice${num} created for ${formatMoney(fresh.prepayTotal)}, but sending it failed — send it from the customer's invoices.`;
+          // Blocking, not just the toast (Codex #3161 r5 P2): the modal
+          // unmounts ~1.2s after save and the toast renders at the top of a
+          // scrollable form, so an operator saving from the bottom would
+          // never see it — and the year's invoice would sit unsent.
+          alert(`Annual prepay invoice${num} for ${formatMoney(fresh.prepayTotal)} was created, but SENDING IT FAILED.\n\nThe customer has not received it. Send it from the customer's invoices.`);
         } else {
           prepayNotice = `Annual prepay invoice${num} sent for ${formatMoney(fresh.prepayTotal)}.`;
         }
