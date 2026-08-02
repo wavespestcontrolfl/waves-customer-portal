@@ -94,7 +94,7 @@ describe('maybeResumeBillingPauseOnPayment', () => {
   test('clears an autopay_final_failure pause when a payment settles', async () => {
     mockState.customer = { ...PAUSED };
 
-    const res = await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_1' });
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_1', settledAt: new Date('2026-07-01T12:00:00Z') });
 
     expect(res).toMatchObject({ resumed: true });
     const update = mockState.updates.find((u) => u.table === 'customers');
@@ -106,7 +106,7 @@ describe('maybeResumeBillingPauseOnPayment', () => {
   test('a MANUAL pause never auto-clears — a payment does not overrule a human', async () => {
     mockState.customer = { ...PAUSED, service_pause_reason: 'owner_hold_pending_dispute' };
 
-    const res = await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_1' });
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_1', settledAt: new Date('2026-07-01T12:00:00Z') });
 
     expect(res).toMatchObject({ resumed: false, reason: 'manual_pause' });
     expect(mockState.updates).toHaveLength(0);
@@ -117,7 +117,7 @@ describe('maybeResumeBillingPauseOnPayment', () => {
     mockState.customer = { ...PAUSED };
     mockState.storedPausedAt = '2026-06-01T09:00:00Z';
 
-    const res = await maybeResumeBillingPauseOnPayment('cust-1');
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', { settledAt: new Date('2026-07-01T12:00:00Z') });
 
     expect(res).toMatchObject({ resumed: false, reason: 'pause_changed' });
     expect(mockState.interactions).toHaveLength(0);
@@ -127,7 +127,7 @@ describe('maybeResumeBillingPauseOnPayment', () => {
   test('writes the system audit event inside the transaction, carrying the PI', async () => {
     mockState.customer = { ...PAUSED };
 
-    await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_42', source: 'stripe_webhook' });
+    await maybeResumeBillingPauseOnPayment('cust-1', { paymentIntentId: 'pi_42', source: 'stripe_webhook', settledAt: new Date('2026-07-01T12:00:00Z') });
 
     expect(mockState.auditEvents).toHaveLength(1);
     expect(mockState.auditEvents[0]).toMatchObject({
@@ -153,7 +153,7 @@ describe('maybeResumeBillingPauseOnPayment', () => {
     mockState.customer = { ...PAUSED };
     mockState.auditShouldFail = true;
 
-    await expect(maybeResumeBillingPauseOnPayment('cust-1')).resolves.toMatchObject({ resumed: false, reason: 'error' });
+    await expect(maybeResumeBillingPauseOnPayment('cust-1', { settledAt: new Date('2026-07-01T12:00:00Z') })).resolves.toMatchObject({ resumed: false, reason: 'error' });
 
     // The pause stays — the manual button covers it.
     expect(mockState.rolledBack).toBe(true);
@@ -162,17 +162,40 @@ describe('maybeResumeBillingPauseOnPayment', () => {
 
   test('NEVER throws — even the initial read failing resolves to an error result', async () => {
     mockState.customerReadShouldFail = true;
-    await expect(maybeResumeBillingPauseOnPayment('cust-1')).resolves.toMatchObject({ resumed: false, reason: 'error' });
+    await expect(maybeResumeBillingPauseOnPayment('cust-1', { settledAt: new Date('2026-07-01T12:00:00Z') })).resolves.toMatchObject({ resumed: false, reason: 'error' });
   });
 
   test('not-paused and missing-customer are quiet no-ops', async () => {
     mockState.customer = { id: 'cust-1', service_paused_at: null };
-    expect(await maybeResumeBillingPauseOnPayment('cust-1')).toMatchObject({ resumed: false, reason: 'not_paused' });
+    expect(await maybeResumeBillingPauseOnPayment('cust-1', { settledAt: new Date('2026-07-01T12:00:00Z') })).toMatchObject({ resumed: false, reason: 'not_paused' });
 
     mockState.customer = null;
-    expect(await maybeResumeBillingPauseOnPayment('cust-1')).toMatchObject({ resumed: false, reason: 'not_paused' });
+    expect(await maybeResumeBillingPauseOnPayment('cust-1', { settledAt: new Date('2026-07-01T12:00:00Z') })).toMatchObject({ resumed: false, reason: 'not_paused' });
 
     expect(await maybeResumeBillingPauseOnPayment(null)).toMatchObject({ resumed: false, reason: 'no_customer' });
+  });
+
+  test('a DELAYED webhook for a success older than the pause does NOT clear it', async () => {
+    // The pause was applied 2026-05-02; this success settled back in April —
+    // its failures-to-come are exactly what created the pause. Redelivery of
+    // the old event must not clear it.
+    mockState.customer = { ...PAUSED };
+
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', {
+      paymentIntentId: 'pi_old',
+      settledAt: new Date('2026-04-20T12:00:00Z'),
+    });
+
+    expect(res).toMatchObject({ resumed: false, reason: 'pause_newer_than_payment' });
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('refuses to clear without a settlement time — fail toward the pause staying', async () => {
+    mockState.customer = { ...PAUSED };
+
+    expect(await maybeResumeBillingPauseOnPayment('cust-1')).toMatchObject({ resumed: false, reason: 'no_settlement_time' });
+    expect(await maybeResumeBillingPauseOnPayment('cust-1', { settledAt: new Date('nope') })).toMatchObject({ resumed: false, reason: 'no_settlement_time' });
+    expect(mockState.updates).toHaveLength(0);
   });
 
   test('the auto-clearable reason is pinned to the ladder-exhaustion value billing-cron writes', () => {
@@ -197,9 +220,15 @@ describe('stripe-webhook wiring', () => {
     expect(between).toContain('estimate_deposit');
     expect(between).toContain('card_hold_no_show_fee');
     expect(between).toContain('findInvoiceForPaymentIntent');
-    // Falls back to the invoice's customer when the PI has no metadata id.
-    const callBlock = src.slice(callIdx - 600, callIdx + 300);
-    expect(callBlock).toContain('waves_customer_id');
-    expect(callBlock).toContain('invoiceForTenderGuard?.customer_id');
+    const callBlock = src.slice(callIdx - 900, callIdx + 500);
+    // Invoice owner FIRST — customer merges repoint invoices while stale PI
+    // metadata stays tied to the merged-away row.
+    const invoiceIdx = callBlock.indexOf('invoiceForTenderGuard?.customer_id');
+    const metadataIdx = callBlock.indexOf('waves_customer_id');
+    expect(invoiceIdx).toBeGreaterThan(-1);
+    expect(metadataIdx).toBeGreaterThan(invoiceIdx);
+    // The settlement moment rides along for the ordering guard.
+    expect(callBlock).toContain('settledAt');
+    expect(callBlock).toContain('eventCreated');
   });
 });

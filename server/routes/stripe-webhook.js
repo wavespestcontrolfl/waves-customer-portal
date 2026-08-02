@@ -921,14 +921,22 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // 'autopay_final_failure' pauses, and compare-and-swaps so a newer pause
   // is never wiped.
   {
-    const pausedCustomerId = paymentIntent.metadata?.waves_customer_id
-      || invoiceForTenderGuard?.customer_id
+    // Invoice owner FIRST: customer merges repoint invoices while old Stripe
+    // metadata stays tied to the merged-away row — the locally bound invoice
+    // is the authority whenever one exists, metadata only for genuinely
+    // invoice-less paths.
+    const pausedCustomerId = invoiceForTenderGuard?.customer_id
+      || paymentIntent.metadata?.waves_customer_id
       || null;
     if (pausedCustomerId) {
       const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
       await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
         paymentIntentId: piId,
         source: 'stripe_webhook',
+        // Stripe event.created (epoch seconds) — the settlement moment. The
+        // helper refuses to clear without it: a delayed redelivery of an old
+        // success must not clear a pause caused by newer failures.
+        settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
       });
     }
   }

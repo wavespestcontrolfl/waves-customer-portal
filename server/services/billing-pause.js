@@ -38,11 +38,22 @@ const AUTO_CLEARABLE_REASON = 'autopay_final_failure';
  * Never throws. Returns { resumed, reason }.
  *
  * @param {string} customerId
- * @param {object} [context] — { paymentIntentId, source } for the audit trail
+ * @param {object} [context] — { paymentIntentId, source, settledAt } for the
+ *   audit trail and the ordering guard. settledAt (Date) is REQUIRED to
+ *   clear: webhooks can arrive late, and a success that predates the pause
+ *   proves nothing about the tender that later exhausted the ladder.
  */
 async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
   if (!customerId) return { resumed: false, reason: 'no_customer' };
   try {
+    // The ordering guard needs a real settlement time. Without one we
+    // cannot tell a fresh payment from a delayed redelivery, so we do not
+    // clear — the manual button covers it (fail toward the pause staying).
+    const settledAt = context.settledAt instanceof Date && !Number.isNaN(context.settledAt.getTime())
+      ? context.settledAt
+      : null;
+    if (!settledAt) return { resumed: false, reason: 'no_settlement_time' };
+
     const customer = await db('customers')
       .where({ id: customerId })
       .whereNull('deleted_at')
@@ -52,6 +63,12 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
       // An operator set this pause for their own reasons — a payment does
       // not overrule a human decision.
       return { resumed: false, reason: 'manual_pause' };
+    }
+    // A pause applied AFTER this payment settled was caused by failures this
+    // payment does not answer for — a delayed webhook for an old success
+    // must not clear it.
+    if (new Date(customer.service_paused_at) > settledAt) {
+      return { resumed: false, reason: 'pause_newer_than_payment' };
     }
 
     const pausedAt = customer.service_paused_at;
@@ -85,6 +102,7 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
           pause_reason: AUTO_CLEARABLE_REASON,
           trigger: 'payment_succeeded',
           payment_intent_id: context.paymentIntentId || null,
+          settled_at: settledAt.toISOString(),
         },
         critical: true,
         trx,
