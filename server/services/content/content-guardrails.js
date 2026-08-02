@@ -2569,6 +2569,35 @@ const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\]|\n(?![ \t]*\n
  *   unlinks them before evaluate() can grandfather them (Codex r1). Counts
  *   are consumed, so a refresh still cannot ADD occurrences of a dead route.
  */
+// True when the anchor text carries anything the PII redactor recognizes.
+// Loaded lazily and failing CLOSED: if the detector cannot be loaded we
+// cannot prove the anchor is clean, so no repair happens.
+const PERSONAL_PII_TYPES = new Set(['name', 'email', 'phone', 'address', 'ssn', 'dob', 'card']);
+let piiRedactor;
+function anchorHasPii(anchorText) {
+  const text = String(anchorText || '').trim();
+  if (!text) return false;
+  return piiFindings(text);
+}
+
+// Does this text carry anything the PII redactor recognizes? Lazy and
+// FAIL-CLOSED: if the detector cannot load, nothing is proven clean.
+
+function piiFindings(text) {
+  try {
+    if (piiRedactor === undefined) piiRedactor = require('./pii-redactor');
+    const out = piiRedactor.redact(text);
+    // PERSON-identifying types only. The redactor also reports "url", which
+    // every internal link trips — counting that would refuse every repair.
+    return Boolean(out && Array.isArray(out.findings)
+      && out.findings.some((f) => PERSONAL_PII_TYPES.has(String(f && f.type || '').toLowerCase())));
+  } catch (_) {
+    // Detector unavailable → nothing is proven clean → no repair. This module
+    // has no logger, and the fail-closed return is the whole signal.
+    return true;
+  }
+}
+
 function repairInventedInternalRoutes(body, allowedInternalLinks = [], options = {}) {
   // Same external-link posture the GATE will apply to this draft — see the
   // call site below for why a permissive default is unsafe here.
@@ -2660,6 +2689,14 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     return ranges;
   })();
   const insideCode = (idx) => codeMask.some(([a, b]) => idx >= a && idx < b);
+  // The repair removes UNKNOWN_INTERNAL_ROUTE, which may be the draft's ONLY
+  // blocking finding — and the supporting-blog quality bundle carries no
+  // redaction check, so a customer name ANYWHERE in the body would then
+  // publish. If the body carries PII at all, nothing is repaired and the
+  // route finding stands (Codex). Adding a hard PII gate to the bundle
+  // instead would change publishing behaviour fleet-wide, which is an
+  // owner call, not a side effect of this lane.
+  if (piiFindings(text)) return { body: text, repairs: [] };
   const repairs = [];
   const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, bang, anchorText, open, dest, close, title, offset) => {
     if (insideCode(offset)) return whole;
@@ -2745,6 +2782,13 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) return whole;
     const left = exemptLeft.get(norm) || 0;
     if (left > 0) { exemptLeft.set(norm, left - 1); return whole; } // preserved legacy
+    // The rendered ANCHOR must be proven PII-free before any repair. Both
+    // aliasing and unlinking remove UNKNOWN_INTERNAL_ROUTE — the finding
+    // that parks the draft — and the supporting-blog bundle carries no
+    // `redaction_passed` check (content-quality-gate.js), so
+    // "[Alice Smith](/invented/)" would become publishable prose. Uses the
+    // repo's own detector rather than a private guess (Codex).
+    if (anchorHasPii(anchorText)) return whole;
     // REFRESH drafts are not repaired at all. Every repair converts a draft
     // the route gate would PARK into one it PASSES, and a refresh runs
     // neither the redaction bundle nor the SEO gate — so "[Alice Smith](/pest-control/)"

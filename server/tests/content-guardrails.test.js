@@ -2528,9 +2528,11 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
       expect(r.body).toBe(body);
       expect(r.repairs).toEqual([]);
     }
-    // A NEW page still repairs both ways — it runs the redaction bundle.
-    expect(repairInventedInternalRoutes(pii).body).toBe('Alice Smith');
-    expect(repairInventedInternalRoutes(aliasable).body).toContain('/pest-control-services/');
+    // A NEW page still repairs both ways — with a CLEAN anchor. A PII
+    // anchor is refused everywhere now (see the PII test below), because
+    // the supporting-blog bundle carries no redaction check.
+    expect(repairInventedInternalRoutes('[ant guide](/invented/)').body).toBe('ant guide');
+    expect(repairInventedInternalRoutes('[our services](/pest-control/)').body).toContain('/pest-control-services/');
   });
 
   test('a title-bearing unknown route is never unlinked (r8 P1)', () => {
@@ -2588,6 +2590,33 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     }
     // An EVEN backslash run is itself escaped, so the link is real.
     expect(repairInventedInternalRoutes('\\\\[x](/pest-control/)').body).toContain('/pest-control-services/');
+  });
+
+  test('a body carrying PII is never repaired at all (r10 P0)', () => {
+    // The repair removes UNKNOWN_INTERNAL_ROUTE, which can be the draft's
+    // ONLY blocking finding, and the supporting-blog quality bundle has no
+    // redaction check — so a name ANYWHERE in the body would then publish.
+    const body = 'Alice Smith called us. See [our services](/pest-control/).';
+    const r = repairInventedInternalRoutes(body);
+    expect(r.body).toBe(body);
+    expect(r.repairs).toEqual([]);
+    // A plain internal URL is not PII — the redactor reports "url" for every
+    // link, and counting that would refuse every repair.
+    expect(repairInventedInternalRoutes('[ants](https://www.wavespestcontrol.com/pest-library/ants/)').repairs.length).toBe(1);
+  });
+
+  test('the anchor must be proven PII-FREE before any repair (r10 P0)', () => {
+    // Both aliasing and unlinking remove UNKNOWN_INTERNAL_ROUTE — the
+    // finding that parks the draft — and the supporting-blog bundle has no
+    // redaction_passed check, so the name would become publishable prose.
+    for (const body of ['[Alice Smith](/pest-control/)', '[Alice Smith](/invented/)']) {
+      const r = repairInventedInternalRoutes(body);
+      expect(r.body).toBe(body);
+      expect(r.repairs).toEqual([]);
+    }
+    // Clean anchors repair normally.
+    expect(repairInventedInternalRoutes('[our services](/pest-control/)').body).toContain('/pest-control-services/');
+    expect(repairInventedInternalRoutes('[ant guide](/invented/)').body).toBe('ant guide');
   });
 
   test('literal code is never repaired (r7)', () => {
