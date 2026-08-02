@@ -1362,6 +1362,16 @@ function isLiteralExpression(expr) {
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
+  // MDX ESM: an "import"/"export" statement at the start of a line is
+  // executable module code, not prose, and no tag or expression scan sees it
+  // (Codex). Generated posts have no reason to carry either.
+  // No whitespace is required after the keyword — "import{x}from'y'" is
+  // valid — and the line may be indented with any Unicode space or a
+  // blockquote marker (Codex).
+  const esm = /^[\s>]*(import|export)(?=[\s{*'"(])/m.exec(body);
+  if (esm) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains an MDX "${esm[1]}" statement — generated posts publish as .mdx and must never declare modules. Remove it.`);
+  }
   // ANY MDX expression is executable at render, INCLUDING a component prop —
   // "<Comp onClick={fetch('https://named-source')} />" is as live as a
   // top-level one, and excluding tag interiors left exactly that hole
