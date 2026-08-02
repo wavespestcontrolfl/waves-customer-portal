@@ -1170,7 +1170,10 @@ async function sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, rea
     await require('./notification-service').notifyAdmin(
       'billing',
       `${feeLabel} charged`,
-      `${first} — ${feeText} ${feeLabel.toLowerCase()} on a one-time visit.`,
+      // Cadence-neutral (Codex #3153 r12 P2): this receipt path is shared
+      // with the appointment-card rail, which also covers recurring
+      // plan-choice visits — "one-time visit" would misinform billing staff.
+      `${first} — ${feeText} ${feeLabel.toLowerCase()} on a missed/late-cancelled appointment.`,
       // bell: false — a SUCCESSFUL fee charge is a billing FYI, not a money
       // failure; silenced under GATE_ADMIN_BELL_POLICY.
       { link: `/admin/customers/${customerId}`, bell: false, metadata: { invoiceId: invoice.id, reason } },

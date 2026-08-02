@@ -1905,13 +1905,32 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'above_accepted_amount' });
       return { charged: false, reason: 'above_accepted_amount' };
     }
+    // Auto Pay re-resolved at the CHARGE boundary (Codex #3153 r12 P1):
+    // the mint/lock awaits above leave a gap an opt-out or pause can
+    // commit inside — and a pause touches only the CUSTOMER row, which a
+    // method re-read alone cannot see. Lookup failure charges nothing.
+    let freshPm = null;
+    try {
+      const freshCustomer = await db('customers').where({ id: svc.customer_id })
+        .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+      freshPm = freshCustomer && await customerOnAutopay(freshCustomer)
+        ? await getChargeableAutopayMethod({ id: svc.customer_id }, db)
+        : null;
+    } catch (recheckErr) {
+      logger.warn(`[appt-card-request] charge-boundary Auto Pay re-check failed for visit ${scheduledServiceId} — not charging: ${recheckErr.message}`);
+      freshPm = null;
+    }
+    if (!isChargeableAutopayMethod(freshPm)) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'no_chargeable_method' });
+      return { charged: false, reason: 'no_chargeable_method' };
+    }
     const StripeService = require('./stripe');
     try {
       // maxAuthorizedSubtotal: the frozen cap is re-enforced against the
       // LOCKED invoice inside the charge service (Codex #3153 r7 P0) — the
       // preflight above compared an unlocked snapshot a concurrent edit
       // could outrun.
-      await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, { maxAuthorizedSubtotal: acceptedAmount });
+      await StripeService.chargeInvoiceWithSavedCard(invoice.id, freshPm.id, { maxAuthorizedSubtotal: acceptedAmount });
     } catch (err) {
       logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'charge_failed' });

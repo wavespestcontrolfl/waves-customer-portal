@@ -489,6 +489,14 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_failed', expect.anything());
   });
 
+  test('Auto Pay pause landing AFTER eligibility but before the charge → no charge (Codex #3153 r12 — boundary re-check)', async () => {
+    recapHandlers();
+    mockCustomerOnAutopay.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('no_chargeable_method');
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
   test('no chargeable autopay method → review alert (recap has no pay-link fallback)', async () => {
     recapHandlers();
     mockGetAutopayPm.mockResolvedValue(null);

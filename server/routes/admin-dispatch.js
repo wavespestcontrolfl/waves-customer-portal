@@ -7458,9 +7458,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const combinedReceiptArmed = await isOptInSmsTemplateEnabled('service_complete_paid_receipt')
         && await customerWantsReceiptTexts(svc.customer_id);
       try {
-        const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
+        const { customerOnAutopay: customerOnAutopayFresh, getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
         const autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
-        if (isChargeableAutopayMethod(autopayPm)) {
+        // Auto Pay re-resolved at the CHARGE boundary (Codex #3153 r12 P1):
+        // customerAutopayActive was computed early in this long handler — a
+        // pause/opt-out committing in between touches the CUSTOMER row,
+        // which the method re-read above cannot see. Lookup failure charges
+        // nothing (falls to the pay-link fallback like a missing method).
+        let autopayStillActive = false;
+        try {
+          const freshCustomer = await db('customers').where({ id: svc.customer_id })
+            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+          autopayStillActive = !!freshCustomer && await customerOnAutopayFresh(freshCustomer);
+        } catch (autopayRecheckErr) {
+          logger.warn(`[dispatch] charge-boundary Auto Pay re-check failed for visit ${svc.id} — not charging: ${autopayRecheckErr.message}`);
+        }
+        if (autopayStillActive && isChargeableAutopayMethod(autopayPm)) {
           // deferReceiptDelivery: with the combined text armed, the receipt
           // job is enqueued a few minutes out — nothing is pre-stamped, so a
           // crash/block anywhere before the combined text delivers leaves
