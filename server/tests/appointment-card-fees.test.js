@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
     chain.whereNull = record('whereNull');
     chain.whereIn = record('whereIn');
     chain.whereNot = record('whereNot');
+    chain.forUpdate = record('forUpdate');
     chain.orderBy = record('orderBy');
     chain.insert = (row) => {
       chain.calls.push(['insert', row]);
@@ -150,7 +151,14 @@ const REQUEST = () => ({
   fee_status: null,
 });
 
-function handlersWith({ request = REQUEST(), hold = null, pmRow = { id: 'pm-row-1' }, trx = {} } = {}) {
+function handlersWith({
+  request = REQUEST(),
+  hold = null,
+  pmRow = { id: 'pm-row-1' },
+  // The fee charge serializes payer state via FOR UPDATE on the
+  // scheduled_services row inside its transaction (Codex #3153 r15).
+  trx = { scheduled_services: { first: () => ({ id: 'svc-1', customer_id: 'cust-1' }) } },
+} = {}) {
   return {
     appointment_card_requests: { first: () => request },
     estimate_card_holds: { first: () => hold },
