@@ -397,11 +397,23 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
 
 // The pre-engine Open-Meteo week fetch, verbatim behavior (city-grid spike
 // guard, full-window trust rule). Returns `empty` on any miss.
-async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
-  // Sample the whole city (property cell + neighbour ring) in ONE multi-location call
-  // so a single spiked grid cell can be caught against the city median (see notes above).
-  const grid = citySampleGrid(lat, lon);
-  const url = new URL('https://api.open-meteo.com/v1/forecast');
+// The service week is always a COMPLETED window, so the reanalysis archive is
+// the right endpoint for it — /v1/forecast serves model output for past dates
+// and demonstrably zeroes real rain days. Measured across one SWFL service
+// week (2026-08-01): /v1/forecast reported 0.00" on two days the archive
+// scored at 0.055" and 0.382", weekly totals 1.12" vs 2.67". A volunteer rain
+// gauge a few miles away caught 1.28" in the same window, so the archive is
+// much closer to what actually fell. Verified same-day that the archive spans
+// through today (no reanalysis lag to design around) and supports BOTH the
+// multi-location grid and et0_fao_evapotranspiration, so the city-median spike
+// guard and the ET₀ target are unaffected. /v1/forecast stays as the fallback:
+// if the archive ever fails or returns an untrusted window we degrade to
+// exactly the previous behaviour rather than to nothing.
+const OPEN_METEO_ARCHIVE = 'https://archive-api.open-meteo.com/v1/archive';
+const OPEN_METEO_FORECAST = 'https://api.open-meteo.com/v1/forecast';
+
+function openMeteoWeekUrl(base, grid, range) {
+  const url = new URL(base);
   url.searchParams.set('latitude', grid.map((p) => p.lat.toFixed(4)).join(','));
   url.searchParams.set('longitude', grid.map((p) => p.lon.toFixed(4)).join(','));
   url.searchParams.set('daily', 'precipitation_sum,et0_fao_evapotranspiration');
@@ -409,7 +421,42 @@ async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
   url.searchParams.set('end_date', range.end);
   url.searchParams.set('precipitation_unit', 'inch');
   url.searchParams.set('timezone', 'America/New_York');
+  return url;
+}
 
+async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
+  // Sample the whole city (property cell + neighbour ring) in ONE multi-location call
+  // so a single spiked grid cell can be caught against the city median (see notes above).
+  const grid = citySampleGrid(lat, lon);
+  // The archive is only right for a CLOSED window. When the window's last day
+  // is still today, reanalysis has only the hours that have already been
+  // assimilated, so it understates a day that is still raining — the exact
+  // reason mergeMrmsIntoWeek refuses to let an MRMS "so far" total cap the
+  // model on the unclosed day. Same rule here: a window ending today keeps the
+  // forecast endpoint, which carries a full-day model value (codex #3153 P1).
+  const windowClosed = range.end < etTodayYmd();
+  const attempts = windowClosed
+    ? [
+      { endpoint: 'archive', url: openMeteoWeekUrl(OPEN_METEO_ARCHIVE, grid, range) },
+      { endpoint: 'forecast', url: openMeteoWeekUrl(OPEN_METEO_FORECAST, grid, range) },
+    ]
+    : [
+      { endpoint: 'forecast', url: openMeteoWeekUrl(OPEN_METEO_FORECAST, grid, range) },
+    ];
+
+  for (let i = 0; i < attempts.length; i += 1) {
+    const { endpoint, url } = attempts[i];
+    const isLast = i === attempts.length - 1;
+    const result = await fetchOpenMeteoWeekFrom({ url, range, empty, endpoint });
+    // An untrusted window from the archive is a reason to try the forecast
+    // endpoint, not a reason to give up — `empty` is only final on the last one.
+    if (result !== empty || isLast) return result;
+    logger.info(`[rain-engine] open-meteo ${endpoint} window unusable for ${range.start}..${range.end} — falling back`);
+  }
+  return empty;
+}
+
+async function fetchOpenMeteoWeekFrom({ url, range, empty, endpoint }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3500);
   try {
@@ -477,7 +524,7 @@ async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
     // engine mode, which this extracted fetcher doesn't know about.
     return value;
   } catch (err) {
-    logger.warn(`[application-conditions] service-week weather fetch failed: ${err.message}`);
+    logger.warn(`[application-conditions] service-week weather fetch failed (${endpoint}): ${err.message}`);
     return empty;
   } finally {
     clearTimeout(timeout);
