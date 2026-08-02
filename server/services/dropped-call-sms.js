@@ -186,9 +186,14 @@ function endedAbruptly(transcription) {
   if (turns.length < 4) return false; // too short to judge — not "abrupt"
   const tail = turns.slice(-3).join(' ');
   const finalTurn = turns[turns.length - 1];
-  if (STRONG_FAREWELL_RE.test(tail) || WEAK_FAREWELL_RE.test(finalTurn)) return false;
-  // Positive cutoff evidence required — no-farewell alone is not a drop.
-  return finalTurnTrailsOff(finalTurn) || CONNECTION_TROUBLE_RE.test(tail);
+  if (STRONG_FAREWELL_RE.test(tail)) return false;
+  // A weak farewell counts only at the CLOSE of the final utterance and
+  // never outranks positive cutoff evidence — "Thanks — now what is your
+  // service add" cut mid-word is a drop, not a thank-you ending (codex P2).
+  const finalText = String(finalTurn).replace(/^\s*[A-Za-z][A-Za-z0-9 ]{0,20}:\s*/, '').trim();
+  const trailsOff = finalTurnTrailsOff(finalTurn);
+  if (!trailsOff && WEAK_FAREWELL_RE.test(finalText.slice(-32))) return false;
+  return trailsOff || CONNECTION_TROUBLE_RE.test(tail);
 }
 
 function maskPhone(value) {
@@ -564,6 +569,18 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     return { sent: false, skipped: 'policy_block', code: result.code || null };
   }
 
+  // KNOWN pre-dispatch blocks (the outbound sms-guard rejecting a bad
+  // template render, or a provider-level feature gate) never reached
+  // Twilio — nothing ambiguous about them. Release the one-shot so a later
+  // drop can text once the copy/config is fixed (codex P2). Detection is by
+  // the classifier's reason string — the only surface the shared pipeline
+  // exposes for these.
+  if (/guard blocked|gate blocked/i.test(String(result.reason || ''))) {
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.warn(`[dropped-call-sms] Pre-dispatch block for ${maskPhone(phone)} (released): ${result.reason}`);
+    return { sent: false, skipped: 'pre_dispatch_block', code: result.code || null };
+  }
   if (result.terminal) {
     // Synchronous terminal Twilio rejection — the number will never accept
     // this text; keep the one-shot so a later drop doesn't retry it. The

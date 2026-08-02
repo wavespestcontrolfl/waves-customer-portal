@@ -222,6 +222,15 @@ describe('endedAbruptly', () => {
     ]))).toBe(true);
   });
 
+  it('weak farewell mid-utterance never outranks a cutoff — "Thanks — what is your service add" detects', () => {
+    expect(endedAbruptly(mk([
+      'Caller: Tomorrow morning is fine.',
+      'Agent: Great.',
+      'Caller: Ready when you are.',
+      'Agent: Thanks — now what is your service add',
+    ]))).toBe(true);
+  });
+
   it('false for transcripts too short to judge', () => {
     expect(endedAbruptly(mk(['Agent: Hello?', 'Caller: Hi —']))).toBe(false);
     expect(endedAbruptly('')).toBe(false);
@@ -502,6 +511,14 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: 'PROVIDER_FAILURE', providerErrorCode: '21606' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'sender_config_terminal', code: '21606' });
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
+  });
+
+  it('pre-dispatch guard block (bad template render) — released for a later drop', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_FAILURE', reason: 'sms-guard blocked' });
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'pre_dispatch_block', code: 'PROVIDER_FAILURE' });
     expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 
