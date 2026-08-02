@@ -2441,6 +2441,20 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 ([source](https://www.consumeraffairs.com/x)).', OP)).toBeNull();
   });
 
+  test('a URL inside an MDX expression is never a citation (r14 P0)', () => {
+    // Expressions execute at render and are not tags, so the raw-HTML
+    // allowlist never saw them — a brief-named URL could ride into code.
+    const N = { operatorCitations: true, requiredSourceUrls: ['https://legalclarity.org/a'] };
+    expect(guardrails._internals.externalLinkFinding('{fetch("https://legalclarity.org/a")}', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    expect(guardrails._internals.externalLinkFinding('{x = "https://evil.example/p.js"}', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    // A component PROP expression is just as live as a top-level one.
+    expect(guardrails._internals.externalLinkFinding('<Comp onClick={fetch("https://legalclarity.org/a")} />', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    expect(guardrails._internals.externalLinkFinding('<Comp src={"https://legalclarity.org/a"} />', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    // Component props and comments are unaffected.
+    expect(guardrails._internals.externalLinkFinding('<ComparisonTable columns={["Fee","Aptive"]} />', N)).toBeNull();
+    expect(guardrails._internals.externalLinkFinding('{/* a note */} Orkin charges a fee.', N)).toBeNull();
+  });
+
   test('the date must be GOVERNED by "as of" (r14)', () => {
     expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), Orkin charges a $199 fee. June 2026 was rainy.', OP)).not.toBeNull();
     expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();

@@ -1306,6 +1306,33 @@ const PASSIVE_HTML_TAGS = new Set([
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
+  // ANY MDX expression is executable at render, INCLUDING a component prop —
+  // "<Comp onClick={fetch('https://named-source')} />" is as live as a
+  // top-level one, and excluding tag interiors left exactly that hole
+  // (Codex). Real component props carry data, not URLs; links are Markdown.
+  {
+    for (let i = 0; i < body.length; i += 1) {
+      if (body[i] !== '{') continue;
+      let depth = 0;
+      let j = i;
+      for (; j < body.length; j += 1) {
+        const ch = body[j];
+        if (ch === '"' || ch === "'" || ch === '`') {
+          const q = ch; j += 1;
+          while (j < body.length && body[j] !== q) j += body[j] === '\\' ? 2 : 1;
+          continue;
+        }
+        if (ch === '{') depth += 1;
+        else if (ch === '}') { depth -= 1; if (depth === 0) break; }
+      }
+      if (j >= body.length) break;
+      const expr = body.slice(i, j + 1);
+      if (/:\/\//.test(expr)) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a URL inside an MDX expression — expressions execute at render and are never citations. Write the link as Markdown.');
+      }
+      i = j;
+    }
+  }
   for (const tag of eachTag(body)) {
     if (/^[A-Z]/.test(tag.name.charAt(0)) || /^[A-Z]/.test((/^<\/?([A-Za-z][\w-]*)/.exec(body.slice(tag.start, tag.end + 1)) || [])[1] || '')) continue;
     if (PASSIVE_HTML_TAGS.has(tag.name)) continue;
