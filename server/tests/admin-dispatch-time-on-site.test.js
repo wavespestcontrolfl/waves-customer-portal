@@ -725,8 +725,58 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       clock_out: new Date(clockIn.getTime() + 45 * 60000).toISOString(),
     }));
     expect(res.body.timeEntryCorrected).toBe(true);
-    // An entry already landed exactly on the corrected minutes no-ops.
-    expect(source).toMatch(/Math\.abs\(Number\(e\.duration_minutes\) - minutes\) > 0\.005/);
+    // Divergence is judged on the AGGREGATE at stored precision — an entry
+    // already landed exactly on the corrected minutes no-ops.
+    expect(source).toMatch(/const totalMinutes = jobEntries\.reduce\(\(s, e\) => s \+ \(Number\(e\.duration_minutes\) \|\| 0\), 0\);\s*\n\s*if \(Math\.abs\(totalMinutes - minutes\) <= 0\.005\) return;/);
+  });
+
+  test('duplicate entries matching the corrected minutes are DIVERGENT in aggregate — surfaced, not silently fine (codex P1, audit round 21)', async () => {
+    // Two duplicate 45-minute entries against a 45-minute correction total
+    // 90 timesheet minutes: each entry individually "matches", but the
+    // aggregate diverges and editing either one blindly could pick wrong —
+    // surface multiple_job_entries. A legitimate split (20 + 25 = 45) stays
+    // silent: the aggregate agrees.
+    const TimeTracking = require('../services/time-tracking');
+    const dup = (id, mins) => ({
+      id,
+      clock_in: new Date('2026-07-19T16:00:00.000Z'),
+      clock_out: new Date(new Date('2026-07-19T16:00:00.000Z').getTime() + mins * 60000),
+      duration_minutes: mins,
+      status: 'active',
+    });
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [dup('te-d1', 45), dup('te-d2', 45)],
+    });
+    mockDbCurrent = dbMock;
+    let res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(TimeTracking.adminEditEntry).not.toHaveBeenCalled();
+    expect(res.body.timeEntryCorrected).toBe(false);
+    expect(res.body.timeEntryCorrectionBlocked).toBe('multiple_job_entries');
+
+    const splitMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [dup('te-s1', 20), dup('te-s2', 25)],
+    });
+    mockDbCurrent = splitMock;
+    res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(TimeTracking.adminEditEntry).not.toHaveBeenCalled();
+    expect(res.body.timeEntryCorrected).toBeUndefined();
+    expect(res.body.timeEntryCorrectionBlocked).toBeUndefined();
   });
 
   test('a still-running linked timer is surfaced as entry_open, never silently fine (codex P1 round 20)', async () => {

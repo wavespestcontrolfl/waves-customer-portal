@@ -871,17 +871,22 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy }
         blocked = 'entry_open';
         return;
       }
-      // ANY divergence syncs — an increased re-correction (45 → 60) must
-      // move the entry too, not only an inflated-timer decrease. Compared
-      // at the stored hundredth-minute precision (codex P2 round 21): a
-      // one-minute tolerance left a 45.01–46.00 entry "silently fine"
-      // against a 45-minute correction. Half a hundredth absorbs float
-      // noise only; an entry this sync wrote lands exactly on the
-      // corrected minutes, so re-runs still no-op.
-      const divergent = jobEntries.filter((e) => Math.abs(Number(e.duration_minutes) - minutes) > 0.005);
-      if (divergent.length === 0) return;
-      if (jobEntries.length === 1 && divergent.length === 1 && divergent[0].clock_in) {
-        const entry = divergent[0];
+      // Divergence is judged on the AGGREGATE (codex P1, audit round 21):
+      // timesheets, utilization, and job costing all SUM the linked
+      // entries, and a legitimate split visit (20 + 25 against a 45-minute
+      // correction) is in sync while two duplicate 45s against 45 are not
+      // — a per-entry comparison called that duplicate shape "fine".
+      // ANY aggregate divergence syncs — an increased re-correction
+      // (45 → 60) must move the entry too, not only an inflated-timer
+      // decrease — compared at the stored hundredth-minute precision
+      // (codex P2 round 21): a one-minute tolerance left a 45.01–46.00
+      // entry silently unsynced. Half a hundredth absorbs float noise
+      // only; an entry this sync wrote lands exactly on the corrected
+      // minutes, so re-runs still no-op.
+      const totalMinutes = jobEntries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
+      if (Math.abs(totalMinutes - minutes) <= 0.005) return;
+      if (jobEntries.length === 1 && jobEntries[0].clock_in) {
+        const entry = jobEntries[0];
         const newClockOut = new Date(new Date(entry.clock_in).getTime() + minutes * 60000);
         await require('../services/time-tracking').adminEditEntry(entry.id, {
           clock_out: newClockOut.toISOString(),
