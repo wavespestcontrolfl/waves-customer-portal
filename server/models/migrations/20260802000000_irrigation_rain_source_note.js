@@ -141,7 +141,13 @@ exports.down = async function down(knex) {
       .where({ template_id: tpl.id })
       .whereNot({ id: current.id })
       .orderBy('version_number', 'desc');
-    const previous = candidates.find((v) => !JSON.stringify(asArray(v.blocks)).includes(VARIABLE)
+    // …and it must be a version that was actually PUBLISHED. A note-free row
+    // can also be an unapproved draft sitting in the editor; reactivating that
+    // would push never-reviewed copy to customers as a side effect of a
+    // rollback (codex #3156 r2).
+    const previous = candidates.find((v) => v.status !== 'draft'
+      && v.published_at != null
+      && !JSON.stringify(asArray(v.blocks)).includes(VARIABLE)
       && !String(v.text_body || '').includes(VARIABLE));
     // Nothing note-free to return to → leave the table alone rather than
     // activating a version that still has it.

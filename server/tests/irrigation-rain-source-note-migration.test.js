@@ -93,6 +93,7 @@ function fixture({ textBody = null } = {}) {
       preview_text: 'p',
       blocks: JSON.stringify(baseBlocks),
       text_body: textBody,
+      published_at: '2026-07-02T00:00:00.000Z',
     }],
   };
 }
@@ -156,6 +157,7 @@ describe('rain_source_note migration', () => {
     knex.__db.email_template_versions.push({
       id: 'v3', template_id: 't1', version_number: 3, status: 'active',
       subject: 's', preview_text: 'p', blocks: JSON.stringify(adminBlocks), text_body: null,
+      published_at: '2026-08-02T00:00:00.000Z',
     });
     knex.__db.email_templates[0].active_version_id = 'v3';
 
@@ -168,6 +170,23 @@ describe('rain_source_note migration', () => {
     // "one version number lower" logic would have reactivated v2, which does.
     expect(JSON.stringify(active.blocks)).not.toContain(VARIABLE);
     expect(active.id).toBe('v1');
+  });
+
+  test('down() never activates an unpublished DRAFT, even a note-free one', async () => {
+    const knex = makeKnex(fixture());
+    await migration.up(knex);
+    // Someone is mid-edit: a note-free draft with a higher version number than
+    // the copy this migration superseded. Rolling back must skip it.
+    knex.__db.email_template_versions.push({
+      id: 'draft1', template_id: 't1', version_number: 9, status: 'draft',
+      subject: 's', preview_text: 'p', blocks: JSON.stringify(baseBlocks),
+      text_body: null, published_at: null,
+    });
+
+    await migration.down(knex);
+
+    expect(knex.__db.email_templates[0].active_version_id).toBe('v1');
+    expect(knex.__db.email_template_versions.find((v) => v.id === 'draft1').status).toBe('draft');
   });
 
   test('down() leaves the table alone when no note-free version exists', async () => {
