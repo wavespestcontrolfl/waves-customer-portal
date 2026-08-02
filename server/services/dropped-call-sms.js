@@ -290,7 +290,7 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
   let phoneClaimed = false;
   try {
     const inserted = await db('dropped_call_sms_claims')
-      .insert({ phone, lead_id: leadId, outcome: 'claimed' })
+      .insert({ phone, lead_id: leadId, outcome: 'claimed', call_log_id: call.id || null })
       .onConflict('phone')
       .ignore()
       .returning('phone');
@@ -321,6 +321,13 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     .where(function ownershipGuard() {
       if (expectedCustomerId) this.whereNull('customer_id').orWhere('customer_id', expectedCustomerId);
       else this.whereNull('customer_id');
+    })
+    // The address must STILL be missing at claim time — a concurrent call or
+    // an operator can populate leads.address between detection and this
+    // dispatch, and texting for information already on file is the exact
+    // noise this lane must never make (codex P1). Atomic with the claim.
+    .where(function addressStillMissing() {
+      this.whereNull('address').orWhere('address', '');
     })
     .whereRaw("COALESCE(extracted_data->>'dropped_call_sms_status', '') = ''")
     .update({
@@ -497,7 +504,9 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
  * address_request_sms payload to 'undelivered'. Best-effort by contract —
  * never throws.
  */
-async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = {}) {
+const BOUNCE_RETRY_DELAY_MS = 90 * 1000;
+
+async function handleUndeliveredAddressRequest({ sid, status, errorCode, to, isRetry = false } = {}) {
   try {
     if (!sid) return { handled: false, reason: 'no_sid' };
     // sms_log by sid alone: a row of another message_type means this bounce
@@ -511,7 +520,7 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
     if (!phone) return { handled: false, reason: 'no_phone' };
 
     return await db.transaction(async (trx) => {
-      const claim = await trx('dropped_call_sms_claims').where({ phone }).first('lead_id', 'outcome', 'provider_sid');
+      const claim = await trx('dropped_call_sms_claims').where({ phone }).first('lead_id', 'outcome', 'provider_sid', 'call_log_id');
       if (!claim || !claim.lead_id) return { handled: false, reason: 'no_claim_lead' };
       // Without a SID-bound sms_log row, the ONLY safe correlation is the
       // provider SID stamped on the claim at send time — /status dispatches
@@ -523,6 +532,9 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
       if (!row && claim.provider_sid !== sid) {
         return { handled: false, reason: 'no_log_row_and_sid_mismatch' };
       }
+      // (A callback that beats BOTH correlation writes — no sms_log row AND
+      // no provider_sid yet — reaches the mismatch return above; the caller
+      // schedules one delayed retry for that sub-second window.)
       // Atomic idempotency gate: exactly one callback (Twilio retries them)
       // flips 'sent' -> 'undelivered'; every later one sees 0 rows.
       // Wins from BOTH states: 'sent' (normal) and 'claimed' (the callback
@@ -582,10 +594,17 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
       // with; the card may not exist YET (bounce raced the processor's
       // insert) — the processor reconciles from the claim outcome after its
       // insert, so a zero-row update here is safe.
-      await trx('triage_items')
+      // Scoped to the claim's originating call: a repeat dropped call can
+      // have its own card on the same phone (outcome already_sent_to_phone)
+      // and a delayed bounce for the FIRST message must not rewrite it
+      // (codex P1). Claims from before the column existed fall back to the
+      // phone match.
+      let cardQuery = trx('triage_items')
         .where({ reason_code: 'call_dropped_mid_intake' })
-        .whereIn('status', ['open', 'in_progress'])
-        .whereRaw("payload->>'caller_phone' = ?", [phone])
+        .whereIn('status', ['open', 'in_progress']);
+      if (claim.call_log_id) cardQuery = cardQuery.where({ call_log_id: claim.call_log_id });
+      else cardQuery = cardQuery.whereRaw("payload->>'caller_phone' = ?", [phone]);
+      await cardQuery
         .update({
           payload: optedOut
             ? trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered', 'address_request_sms_code', 'SUPPRESSED_PROVIDER_OPT_OUT_21610')")
@@ -605,6 +624,28 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
     logger.warn(`[dropped-call-sms] undelivered address-request handling failed: ${e.code || e.name || 'error'}`);
     return { handled: false, reason: 'error' };
   }
+}
+
+// One bounded in-process retry for the sub-second window where the carrier
+// callback beats BOTH correlation writes (sms_log insert AND provider_sid
+// stamp): /status has already answered 200 so Twilio will not retry, and a
+// refused-once bounce would leave the card permanently 'sent'. Best-effort
+// by design (lost on process restart — the window it covers is
+// milliseconds wide and double-covered by the processor's post-insert
+// reconcile for the card-insert leg).
+async function handleUndeliveredAddressRequestWithRetry(args = {}) {
+  const first = await handleUndeliveredAddressRequest(args);
+  if (first.handled || !['no_log_row_and_sid_mismatch', 'already_handled_or_not_sent', 'no_claim_lead'].includes(first.reason)) {
+    return first;
+  }
+  setTimeout(() => {
+    handleUndeliveredAddressRequest({ ...args, isRetry: true })
+      .then((second) => {
+        if (second.handled) logger.info('[dropped-call-sms] delayed bounce retry remediated after correlation race');
+      })
+      .catch((e) => logger.warn(`[dropped-call-sms] delayed bounce retry failed: ${e.code || e.name || 'error'}`));
+  }, BOUNCE_RETRY_DELAY_MS);
+  return first;
 }
 
 // Post-insert reconciliation (processor phase 2): a bounce callback can
@@ -630,6 +671,7 @@ async function terminalBounceOutcome(rawPhone) {
 module.exports = {
   sendDroppedCallAddressRequest,
   handleUndeliveredAddressRequest,
+  handleUndeliveredAddressRequestWithRetry,
   terminalBounceOutcome,
   endedAbruptly,
   detectDroppedMidIntake,

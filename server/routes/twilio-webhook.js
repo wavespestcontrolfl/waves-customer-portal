@@ -1025,7 +1025,7 @@ router.post('/status', async (req, res) => {
         // to now, and flips the open card to 'undelivered'.
         try {
           const DroppedCallSms = require('../services/dropped-call-sms');
-          void DroppedCallSms.handleUndeliveredAddressRequest({
+          void DroppedCallSms.handleUndeliveredAddressRequestWithRetry({
             sid: MessageSid,
             status: MessageStatus,
             errorCode: ErrorCode,

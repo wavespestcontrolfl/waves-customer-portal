@@ -20,6 +20,9 @@ exports.up = async function (knex) {
     // send-then-log race (phone alone would let another message's bounce
     // mutate this claim's lead and card).
     t.string('provider_sid', 64);
+    // Originating call — a delayed bounce must flip ONLY the card born from
+    // the call whose text bounced, never a sibling card sharing the phone.
+    t.uuid('call_log_id');
     t.timestamp('created_at').defaultTo(knex.fn.now());
   });
 };
