@@ -143,22 +143,38 @@ function cancelFeeLine() {
   return feeText ? `\n${feeText} fee only for last-minute cancels or no-shows.` : '';
 }
 
-// Fuller sentence for the /secure page (no SMS segment budget there). The
-// EXACT enforced window is part of the disclosure (Codex #3153 r3 P0): a
-// fee collected under an undisclosed cutoff is not consented — the page
-// states the same derived hours the render stamp freezes. Window source
-// unavailable → no disclosure at all (never enforce a term we can't state).
-function cancelFeeNote() {
-  const feeText = cancelFeeText();
-  if (!feeText) return '';
+// ONE coherent read of the fee disclosure (Codex #3153 r4 P1): the note in
+// the page payload and the values the render stamp freezes MUST come from
+// the same snapshot — a config refresh mid-request (while the GET awaits
+// the SetupIntent or plan context) must never let the row authorize terms
+// the response didn't show. The EXACT enforced window is part of the
+// disclosure (r3 P0): a fee collected under an undisclosed cutoff is not
+// consented. null = no disclosure (fee off, or source unavailable — never
+// enforce a term we can't state).
+function readCancelFeeDisclosure() {
   try {
-    const { cardHoldCancelWindowHours } = require('./estimate-card-holds');
+    const { cardHoldNoShowFee, cardHoldCancelWindowHours } = require('./estimate-card-holds');
+    const feeAmount = Number(cardHoldNoShowFee());
+    if (!(feeAmount > 0)) return null;
     const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
-    return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
+    const feeText = feeAmount % 1 ? `$${feeAmount.toFixed(2)}` : `$${feeAmount}`;
+    return {
+      feeAmount,
+      windowHours,
+      note: `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`,
+    };
   } catch (err) {
-    logger.warn(`[appt-card-request] cancel-window unavailable — omitting fee disclosure: ${err.message}`);
-    return '';
+    logger.warn(`[appt-card-request] fee disclosure unavailable — omitting: ${err.message}`);
+    return null;
   }
+}
+
+// Fuller sentence for the /secure page (no SMS segment budget there) —
+// kept for non-page callers; the page itself uses readCancelFeeDisclosure
+// so the note and the stamped terms share one snapshot.
+function cancelFeeNote() {
+  const disclosure = readCancelFeeDisclosure();
+  return disclosure ? disclosure.note : '';
 }
 
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
@@ -1070,12 +1086,15 @@ async function loadSecureCardPageData(token) {
   const customer = request.customer_id
     ? await db('customers').where({ id: request.customer_id }).first('id', 'first_name')
     : null;
+  // Read ONCE, up front: the payload note and the render stamp below both
+  // consume this same snapshot (Codex #3153 r4 P1).
+  const feeDisclosure = visitPriced ? readCancelFeeDisclosure() : null;
   const base = {
     firstName: customer?.first_name || null,
     serviceType: visit?.service_type || null,
     dateDisplay: visit ? dateLineFor(visit.scheduled_date).replace(/^ on /, '') : null,
     windowDisplay: visit?.window_display || null,
-    cancelFeeNote: visitPriced ? (cancelFeeNote() || null) : null,
+    cancelFeeNote: visitPriced ? (feeDisclosure ? feeDisclosure.note : null) : null,
   };
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
@@ -1204,9 +1223,6 @@ async function loadSecureCardPageData(token) {
   // a reload retries, and a row that raced to completed re-renders secured.
   let disclosureStamped = false;
   try {
-    const { cardHoldNoShowFee, cardHoldCancelWindowHours } = require('./estimate-card-holds');
-    const feeAmount = Number(cardHoldNoShowFee());
-    const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
     const disclosure = { updated_at: new Date() };
     // Monotonic-DOWN with sticky "nothing disclosed" sentinels (Codex #3153
     // r3 P0): completion cannot know WHICH open tab's render the customer
@@ -1225,14 +1241,17 @@ async function loadSecureCardPageData(token) {
     // and the completion lane routes to office review. Auto-secured
     // `satisfied` rows are different: their cap rests on the saved-method
     // enrollment consent, not this page.
-    if (base.cancelFeeNote && feeAmount > 0) {
+    // Fee/window come from the SAME feeDisclosure snapshot the payload's
+    // note was built from (Codex #3153 r4 P1) — never a fresh config read,
+    // which mid-request could diverge from what the response displays.
+    if (feeDisclosure) {
       disclosure.no_show_fee_amount = db.raw(
         'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
-        [feeAmount, feeAmount],
+        [feeDisclosure.feeAmount, feeDisclosure.feeAmount],
       );
       disclosure.cancel_window_hours = db.raw(
         'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
-        [windowHours, windowHours],
+        [feeDisclosure.windowHours, feeDisclosure.windowHours],
       );
     } else {
       disclosure.no_show_fee_amount = null;

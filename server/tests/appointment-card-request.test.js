@@ -942,6 +942,19 @@ describe('loadSecureCardPageData — page state machine', () => {
     }
   });
 
+  test('the page GET reads the fee disclosure ONCE — note and stamp share a single snapshot (Codex #3153 r4, source contract)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/appointment-card-request.js'), 'utf8');
+    const fn = src.slice(
+      src.indexOf('async function loadSecureCardPageData'),
+      src.indexOf('// ── No-show / late-cancel fee rail'),
+    );
+    expect(fn).toContain('readCancelFeeDisclosure()');
+    // A second config read inside the GET could diverge from the note the
+    // payload returns — the stamp must consume the same snapshot object.
+    expect(fn).not.toContain('cardHoldNoShowFee');
+    expect(fn).not.toContain('cardHoldCancelWindowHours');
+  });
+
   test('a FAILED disclosure stamp renders unavailable — never a form over terms the row does not carry (pre-push r2 P0)', async () => {
     mockTableHandlers.appointment_card_requests.update = (chain, patch) => ('accepted_amount' in patch ? 0 : 1);
     const res = await loadSecureCardPageData(REQUEST.token);
