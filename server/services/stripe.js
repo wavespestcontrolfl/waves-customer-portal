@@ -2235,7 +2235,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2349,12 +2349,14 @@ const StripeService = {
         // charge commits or commits first and is seen here. Opt-in
         // (null = unchanged behavior for every existing caller); a throw
         // rolls the whole transaction back with nothing consumed.
+        let lockedCustomerRow = null;
         if (requireAutopayForCustomerId != null) {
           const { customerOnAutopay, getChargeableAutopayMethod } = require('./autopay-eligibility');
           const lockedCustomer = await trx('customers')
             .where({ id: requireAutopayForCustomerId })
             .forUpdate()
-            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status', 'billing_mode', 'monthly_rate', 'waveguard_tier');
+          lockedCustomerRow = lockedCustomer || null;
           if (!lockedCustomer || !(await customerOnAutopay(lockedCustomer, { db: trx }))) {
             throw new Error('Auto Pay is no longer active for this customer.');
           }
@@ -2377,8 +2379,25 @@ const StripeService = {
           const lockedSvc = await trx('scheduled_services')
             .where({ id: requireSelfPayScheduledServiceId })
             .forUpdate()
-            .first('id', 'customer_id');
+            .first('id', 'customer_id', 'is_recurring');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
+          // Completion-lane revalidation under the locks (Codex #3153 r23
+          // P1): a billing-mode change (membership/prepay/per-application)
+          // or the visit turning recurring after the caller's snapshot
+          // must refuse — a one-time saved-card charge on top of dues or
+          // prepay coverage would double-collect. Opt-in; requires the
+          // customer lock above.
+          if (requireOneTimeLane) {
+            if (!lockedCustomerRow) throw new Error('One-time lane verification requires the customer lock.');
+            const { resolveBillingLane } = require('./billing-lane');
+            const lane = resolveBillingLane(lockedCustomerRow);
+            if (lockedCustomerRow.billing_mode === 'per_application'
+              || lane.mode === 'monthly_membership'
+              || lane.mode === 'annual_prepay'
+              || lockedSvc.is_recurring === true) {
+              throw new Error('The visit is no longer on the one-time completion lane. Review before charging.');
+            }
+          }
           // The locked visit must still belong to the invoice's customer
           // (Codex #3153 r16 P0): a reassignment racing the caller's
           // preflight could otherwise verify the NEW customer's self-pay

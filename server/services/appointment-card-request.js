@@ -2234,6 +2234,7 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
         maxAuthorizedSubtotal: acceptedAmount,
         requireAutopayForCustomerId: svc.customer_id,
         requireSelfPayScheduledServiceId: scheduledServiceId,
+        requireOneTimeLane: true,
       });
     } catch (err) {
       logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);

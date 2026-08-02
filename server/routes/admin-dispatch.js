@@ -2320,11 +2320,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // fee unless waiveCardHoldFee (admin-only, same gate as the single
       // path) releases it free; no-op for visits without a hold. Dark until
       // ONE_TIME_CARD_HOLD; best-effort — never blocks the committed cancels.
+      // Tracks the target actually being processed so a mid-loop throw
+      // alerts on the RIGHT visit (Codex #3153 r23 P2).
+      let seriesFeeTargetId = svc.id;
       try {
         const CardHolds = require('../services/estimate-card-holds');
         const ApptCardRequests = require('../services/appointment-card-request');
         const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
         for (const target of targets) {
+          seriesFeeTargetId = target.id;
           const holdResult = await CardHolds.handleCardHoldCancellation({
             scheduledServiceId: target.id,
             waiveFee,
@@ -2344,9 +2348,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
         }
       } catch (e) {
         // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
-        logger.error(`[admin-dispatch] series cancellation card-hold handling failed: ${e.message}`);
+        logger.error(`[admin-dispatch] series cancellation card-hold handling failed (target ${seriesFeeTargetId}): ${e.message}`);
         await require('../services/appointment-card-request')
-          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
+          .alertUnresolvedCancellationFee({ scheduledServiceId: seriesFeeTargetId, outcome: { released: false, reason: 'fee_step_error' } });
       }
 
       // Void any still-open invoices pre-minted for the cancelled visits so
@@ -7556,6 +7560,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // pause/opt-out, method-switch, and payer-assignment edits.
             requireAutopayForCustomerId: svc.customer_id,
             requireSelfPayScheduledServiceId: svc.id,
+            // The appointment lane also revalidates one-time-lane
+            // membership under the locks (Codex #3153 r23 P1) — a billing
+            // change racing this completion must refuse, never
+            // double-collect beside dues/prepay. Per-application keeps its
+            // own semantics (false).
+            requireOneTimeLane: apptCardOneTimeCharge,
             deferReceiptDelivery: combinedReceiptArmed,
           });
           const fresh = await db('invoices').where({ id: invoice.id }).first();

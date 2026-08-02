@@ -459,6 +459,7 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
       maxAuthorizedSubtotal: 250,
       requireAutopayForCustomerId: 'cust-1',
       requireSelfPayScheduledServiceId: 'svc-1',
+      requireOneTimeLane: true,
     });
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_success', expect.objectContaining({
       details: expect.objectContaining({ source: 'appointment_card_recap_completion' }),
