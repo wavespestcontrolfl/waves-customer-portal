@@ -92,6 +92,7 @@ describe('resolveOrphanSucceededPaymentIntentIfSettled', () => {
       if (table === 'invoices') return invoiceQuery;
       if (table === 'payments') return paymentQuery;
       if (table === 'stripe_orphan_charges') return orphanQuery;
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
 
@@ -109,6 +110,7 @@ describe('resolveOrphanSucceededPaymentIntentIfSettled', () => {
     };
     db.mockImplementation((table) => {
       if (table === 'invoices') return invoiceQuery;
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
 
@@ -190,6 +192,7 @@ describe('handleRefundFailed', () => {
       if (table === 'invoices') return dbInvoices;
       if (table === 'annual_prepay_terms') return dbPrepayTerms;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.transaction.mockImplementation(async (cb) => cb(trx));
@@ -418,6 +421,7 @@ describe('handleRefundFailed', () => {
       if (table === 'payments') return emptyQuery;
       if (table === 'estimate_deposits') return depQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     // Fence + notification commit in ONE transaction — the trx routes
@@ -466,6 +470,7 @@ describe('handleRefundFailed', () => {
       if (table === 'payments') return emptyQuery;
       if (table === 'estimate_deposits') return depQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.transaction.mockImplementation(async (cb) => cb(db));
@@ -502,6 +507,7 @@ describe('handleRefundFailed', () => {
       if (table === 'payments') return emptyQuery;
       if (table === 'estimate_deposits') return depQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.transaction.mockImplementation(async (cb) => cb(db));
@@ -563,6 +569,7 @@ describe('handleRefundFailed', () => {
     };
     db.mockImplementation((table) => {
       if (table === 'stripe_failed_refunds') return fenceQuery;
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.schema = { hasTable: jest.fn(async () => true) };
@@ -588,6 +595,7 @@ describe('handleRefundFailed', () => {
     db.mockImplementation((table) => {
       if (table === 'payments') return emptyQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
 

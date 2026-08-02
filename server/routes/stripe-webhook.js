@@ -2739,8 +2739,41 @@ async function handleRefundFailed(refund) {
     logger.warn(`[stripe-webhook] refund-failed invoice/term lookup failed: ${err.message}`);
   }
 
+  // Fee-lane rows unwind UNDER the fee PI advisory lock (Codex #3153 r24
+  // P1): settlement holds that lock while adopting marker values from a
+  // plain (non-FOR UPDATE) read — without the same lock here, the unwind
+  // can commit between settlement's read and write, and the stale adopted
+  // values would resurrect the bounced refund amount and stamped id while
+  // dropping failed_refund_ids. Lane from the row's own purpose metadata
+  // first; pointer fallback fails CLOSED (throw → Stripe retries).
+  let feeUnwindLockKey = null;
+  const feeLockPiId = piId || payment.stripe_payment_intent_id || null;
+  if (feeLockPiId) {
+    let rowPurpose = null;
+    try {
+      const pm = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
+      rowPurpose = pm?.purpose || null;
+    } catch { rowPurpose = null; }
+    if (rowPurpose === 'appointment_card_no_show_fee') {
+      feeUnwindLockKey = `appointment_card_no_show_fee:${feeLockPiId}`;
+    } else {
+      try {
+        const feePtr = await db('appointment_card_requests')
+          .where({ no_show_payment_intent_id: feeLockPiId })
+          .first('id');
+        if (feePtr) feeUnwindLockKey = `appointment_card_no_show_fee:${feeLockPiId}`;
+      } catch (detectErr) {
+        logger.error(`[stripe-webhook] fee-lane detection for refund unwind ${refundId} errored — retrying event: ${detectErr.message}`);
+        throw detectErr;
+      }
+    }
+  }
+
   let restoredInvoiceId = null;
   await db.transaction(async (trx) => {
+    if (feeUnwindLockKey) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [feeUnwindLockKey]);
+    }
     const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
     if (!row) return;
     let meta = {};
@@ -4185,65 +4218,19 @@ async function handleDisputeCreated(dispute) {
     const disputedPi = await StripeService.retrievePaymentIntent(dispute.payment_intent);
     if (disputedPi?.metadata?.purpose === 'appointment_card_no_show_fee') {
       const feeReq = { customer_id: disputedPi.metadata?.waves_customer_id || null };
-      const feePreRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id');
-      if (feePreRow) {
-        // Existing-row path runs UNDER the fee lock with a final-state
-        // re-read (Codex #3153 r22 P1): a concurrently-committing won
-        // closure stamps dispute_final + restores the invoice — the
-        // created event must never re-open reinstated money off a stale
-        // metadata read. Fee rows are fully handled here (return).
-        await db.transaction(async (trx) => {
-          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
-          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
-          if (!rowInLock) return;
-          let meta = {};
-          try {
-            meta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
-          } catch { meta = {}; }
-          if (meta.dispute_final && meta.dispute_id === dispute.id) {
-            logger.warn(`[stripe-webhook] fee dispute ${dispute.id} already closed (${meta.dispute_final}) — created event is a late replay, skipping`);
-            return;
-          }
-          // Invoice binding captured BEFORE the reopen clears the PI (Codex
-          // #3153 r23 P1) — dispute-closed(won) must still find it.
-          const feeInvoice = await trx('invoices').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status');
-          await trx('payments').where({ id: rowInLock.id }).update({
-            status: 'disputed',
-            failure_reason: `Dispute: ${reason}`,
-            metadata: JSON.stringify({
-              ...meta,
-              dispute_id: dispute.id,
-              ...(feeInvoice?.id ? { dispute_invoice_id: feeInvoice.id } : {}),
-            }),
-          });
-          // Reopen the fee invoice like the generic dispute path (r23 P1):
-          // clear paid_at (reminders/alerts must not read it as paid) and
-          // the PI/charge binding (a replacement payment must be mintable).
-          if (feeInvoice && ['paid', 'processing'].includes(String(feeInvoice.status || '').toLowerCase())) {
-            await trx('invoices').where({ id: feeInvoice.id }).update({
-              status: 'overdue',
-              paid_at: null,
-              stripe_payment_intent_id: null,
-              stripe_charge_id: null,
-              updated_at: trx.fn.now(),
-            });
-          }
-        });
-        try {
-          await NotificationService.notifyAdmin(
-            'dispute',
-            `Dispute created: $${amount}`,
-            `Dispute ${dispute.id} on charge ${chargeId} (${reason}) — a settled no-show fee was disputed. Respond with evidence in the Stripe dashboard.`,
-            { icon: '⚠️', link: '/admin/invoices' },
-          );
-        } catch { /* non-critical */ }
-        return;
-      }
-      if (!feePreRow) {
-        const marked = await db.transaction(async (trx) => {
-          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
-          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id');
-          if (rowInLock) return false;
+      // ONE locked transaction that branches on the row's presence UNDER
+      // the lock (Codex #3153 r24 P1): settlement can insert the fee row
+      // while we wait for the lock, and a pre-lock presence check would
+      // send that row down the generic dispute path outside the fee lock —
+      // where a racing won closure's dispute_final stamp could be erased
+      // and its restored invoice re-opened. Existing-row handling keeps the
+      // final-state re-read (r22 P1) and the invoice reopen semantics
+      // (r23 P1); the missing-row branch writes the durable pre-settlement
+      // marker. Fee PIs are fully handled here (return).
+      const feeOutcome = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
+        const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
+        if (!rowInLock) {
           await trx('payments').insert({
             customer_id: feeReq.customer_id || null,
             processor: 'stripe',
@@ -4258,24 +4245,57 @@ async function handleDisputeCreated(dispute) {
               dispute_id: dispute.id,
             }),
           });
-          return true;
-        });
-        if (marked) {
-          logger.warn(`[stripe-webhook] appointment fee PI ${dispute.payment_intent} disputed before settlement — durable dispute marker written`);
-          // The standard dispute notification still fires (Codex #3153 r19
-          // P1): the early return must not reduce a live dispute to a log
-          // line — the office needs to submit evidence in time.
-          try {
-            await NotificationService.notifyAdmin(
-              'dispute',
-              `Dispute created: $${amount}`,
-              `Dispute ${dispute.id} on charge ${chargeId} (${reason}) — a no-show fee was disputed before settlement. Respond with evidence in the Stripe dashboard.`,
-              { icon: '⚠️', link: '/admin/invoices' },
-            );
-          } catch { /* non-critical */ }
-          return;
+          return 'pre_settlement';
         }
+        let meta = {};
+        try {
+          meta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
+        } catch { meta = {}; }
+        if (meta.dispute_final && meta.dispute_id === dispute.id) {
+          logger.warn(`[stripe-webhook] fee dispute ${dispute.id} already closed (${meta.dispute_final}) — created event is a late replay, skipping`);
+          return 'settled';
+        }
+        // Invoice binding captured BEFORE the reopen clears the PI (Codex
+        // #3153 r23 P1) — dispute-closed(won) must still find it.
+        const feeInvoice = await trx('invoices').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status');
+        await trx('payments').where({ id: rowInLock.id }).update({
+          status: 'disputed',
+          failure_reason: `Dispute: ${reason}`,
+          metadata: JSON.stringify({
+            ...meta,
+            dispute_id: dispute.id,
+            ...(feeInvoice?.id ? { dispute_invoice_id: feeInvoice.id } : {}),
+          }),
+        });
+        // Reopen the fee invoice like the generic dispute path (r23 P1):
+        // clear paid_at (reminders/alerts must not read it as paid) and
+        // the PI/charge binding (a replacement payment must be mintable).
+        if (feeInvoice && ['paid', 'processing'].includes(String(feeInvoice.status || '').toLowerCase())) {
+          await trx('invoices').where({ id: feeInvoice.id }).update({
+            status: 'overdue',
+            paid_at: null,
+            stripe_payment_intent_id: null,
+            stripe_charge_id: null,
+            updated_at: trx.fn.now(),
+          });
+        }
+        return 'settled';
+      });
+      if (feeOutcome === 'pre_settlement') {
+        logger.warn(`[stripe-webhook] appointment fee PI ${dispute.payment_intent} disputed before settlement — durable dispute marker written`);
       }
+      // The standard dispute notification still fires (Codex #3153 r19
+      // P1): the early return must not reduce a live dispute to a log
+      // line — the office needs to submit evidence in time.
+      try {
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Dispute created: $${amount}`,
+          `Dispute ${dispute.id} on charge ${chargeId} (${reason}) — a ${feeOutcome === 'pre_settlement' ? 'no-show fee was disputed before settlement' : 'settled no-show fee was disputed'}. Respond with evidence in the Stripe dashboard.`,
+          { icon: '⚠️', link: '/admin/invoices' },
+        );
+      } catch { /* non-critical */ }
+      return;
     }
   }
 
