@@ -312,9 +312,21 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
           // stripeChargeId is supplied). Non-Stripe reconciliations
           // (check/cash) carry no stamp on purpose: they were recorded by a
           // human NOW, and created_at is honest for them.
+          // For ASYNC methods (ACH) charge.created is initiation, which
+          // PRECEDES true settlement — deliberately kept, because both
+          // consumers then err toward the pause STAYING: the cron veto sees
+          // an older timestamp (never a false veto), and the clear's
+          // ordering guard refuses stale evidence (never a false clear).
+          // The miss self-heals on the next settled payment or the manual
+          // button. An exact settlement time would need the balance
+          // transaction, which this endpoint does not fetch.
           ...(stripeChargeId && chargeDetails?.created
             ? { settled_event_at: new Date(chargeDetails.created * 1000).toISOString() }
             : {}),
+          // Payer ownership rides every ledger row (same marker the pause
+          // veto and auto-clear read) — a payer-funded reconciliation during
+          // a homeowner retry must not read as the homeowner's own tender.
+          ...(invoice.payer_id ? { payer_id: invoice.payer_id } : {}),
         }),
       });
 
