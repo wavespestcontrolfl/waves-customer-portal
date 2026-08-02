@@ -59,11 +59,13 @@ function stubTables({
     q.whereNull = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.count = jest.fn(() => q);
-    q.catch = jest.fn(async () => ({ n: addonCount }));
     q.first = jest.fn(async () => {
       if (table === 'customers') return customer;
       if (table === 'scheduled_services') return visit;
-      if (table === 'scheduled_service_addons') return { n: addonCount };
+      if (table === 'scheduled_service_addons') {
+        if (addonCount === 'throw') throw new Error('addon read failed');
+        return { n: addonCount };
+      }
       return term;
     });
     return q;
@@ -306,6 +308,22 @@ describe('annual-prepay preview — priced from the committed series', () => {
     const { body } = await preview({ scheduledServiceId: 'svc-1' });
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/linked quote/);
+  });
+
+  // Swallowing this read as "no add-ons" would send a primary-service annual
+  // invoice for a series that bills add-ons outside its coverage.
+  test('an unreadable add-on count refuses instead of assuming none', async () => {
+    stubTables({ visit: COMMITTED_VISIT, addonCount: 'throw' });
+    const { body } = await preview({ scheduledServiceId: 'svc-1' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/add-on lines/);
+  });
+
+  test('persisted add-on lines block it', async () => {
+    stubTables({ visit: COMMITTED_VISIT, addonCount: 2 });
+    const { body } = await preview({ scheduledServiceId: 'svc-1' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/add-on service lines/);
   });
 
   test('persisted booster months block it even when the client claims otherwise', async () => {

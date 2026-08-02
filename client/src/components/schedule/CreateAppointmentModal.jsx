@@ -1256,42 +1256,68 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Deliberately keyed on the scheduling inputs only.
   }, [services, apptDate, recurringCount, skipWeekends, weekendShift]);
 
-  // The booking shape the annual-prepay preview prices: the FIRST submit
-  // group, which is what a manual (quote-less) booking posts. Add-on lines
-  // and booster months are passed through as flags rather than filtered —
-  // the server owns the "can this be sold as prepay" answer, including the
-  // reason text the operator reads.
-  const manualPrepayQuery = useMemo(() => {
-    const group = groupServicesForAppointmentSubmit(services)[0] || null;
-    if (!selectedCustomer || !group || group.cadence === 'one_time') return null;
+  // The booking shape the annual-prepay preview prices, plus the reasons the
+  // CLIENT already knows make it unsellable (no server round-trip needed).
+  // Add-on lines and booster months are passed through as flags rather than
+  // filtered — the server owns those answers, including the reason text.
+  //
+  // targetKey identifies WHICH submitted series the prepay covers: a split
+  // save posts one series per cadence group, and the mint covers exactly one.
+  const manualPrepayPlan = useMemo(() => {
+    const groups = groupServicesForAppointmentSubmit(services);
+    const group = groups[0] || null;
+    if (!selectedCustomer || !group || group.cadence === 'one_time') {
+      return { query: null, localBlock: null, targetKey: null };
+    }
+    // A seasonal + year-round booking splits into TWO recurring series, each
+    // posted separately, but one prepay invoice covers ONE series (Codex
+    // #3161 r2 P1). Selling it here would prepay the first and leave the
+    // other billing per application under a toast that says the year is paid.
+    if (groups.filter((g) => g.cadence !== 'one_time').length > 1) {
+      return {
+        query: null,
+        targetKey: null,
+        localBlock: 'can’t be sold on a booking that splits into more than one recurring series — book them separately',
+      };
+    }
     const price = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
     return {
-      customerId: String(selectedCustomer.id),
-      serviceType: group.lines[0]?.name || '',
-      price: String(price),
-      cadence: group.cadence,
-      intervalDays: String(group.intervalDays || ''),
-      hasAddons: String(group.lines.length > 1),
-      hasBoosters: String(group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0)),
-      // The coverage seeder can't reproduce a weekend rule on the visits it
-      // fills in after the booked ones, so the server refuses those series —
-      // send it pre-save too, or the control would price a year it can't sell.
-      skipWeekends: String(!!skipWeekends),
-      firstVisitDate: String(apptDate || '').split('T')[0],
-      windowStart,
+      targetKey: groupKey(group),
+      localBlock: null,
+      query: {
+        customerId: String(selectedCustomer.id),
+        serviceType: group.lines[0]?.name || '',
+        price: String(price),
+        cadence: group.cadence,
+        intervalDays: String(group.intervalDays || ''),
+        hasAddons: String(group.lines.length > 1),
+        hasBoosters: String(group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0)),
+        // The coverage seeder can't reproduce a weekend rule on the visits it
+        // fills in after the booked ones, so the server refuses those series —
+        // send it pre-save too, or the control would price a year it can't sell.
+        skipWeekends: String(!!skipWeekends),
+        firstVisitDate: String(apptDate || '').split('T')[0],
+        windowStart,
+      },
     };
   }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends]);
+  const manualPrepayQuery = manualPrepayPlan.query;
 
   // Preview fetch. Runs whenever the control is on screen — NOT only once
   // armed — so the operator sees the real price on the button and an
-  // ineligible booking disables it with the reason BEFORE clicking, instead
-  // of arming a choice that can't be sold. Read-only and debounced, so
-  // typing a rate doesn't fire a request per keystroke; the LAST response
-  // wins via the cancelled flag.
+  // ineligible booking disables it with the reason BEFORE clicking. Read-only
+  // and debounced, so typing a rate doesn't fire a request per keystroke; the
+  // LAST response wins via the cancelled flag.
+  //
+  // Every query change CLEARS the previous answer and disarms the choice
+  // (Codex #3161 r2 P1): a price or cadence edit invalidates the total the
+  // operator agreed to, and leaving prepay armed against a stale-but-eligible
+  // response would invoice an amount they never saw.
   const manualPrepayQueryKey = manualPrepayQuery ? JSON.stringify(manualPrepayQuery) : '';
   useEffect(() => {
+    setManualPrepay(null);
+    setBillAsManualPrepay(false);
     if (!prepayOnBookAvailable || linkedEstimate || !manualPrepayQueryKey) {
-      setManualPrepay(null);
       setManualPrepayLoading(false);
       return undefined;
     }
@@ -1313,15 +1339,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return () => { cancelled = true; clearTimeout(timer); };
   }, [prepayOnBookAvailable, linkedEstimate, manualPrepayQueryKey]);
 
-  // Clearing the recurring plan, linking a quote, or editing the booking into
-  // an ineligible shape must not leave a stale prepay choice armed — the
-  // submit would then try to mint against a booking that can't carry it.
+  // Armed ONLY against a resolved, eligible, priced preview — never while one
+  // is in flight. This is the single condition the button and the submit both
+  // read, so a choice can't survive in a state where the operator hasn't seen
+  // the amount.
   const manualPrepayEligible = manualPrepay?.eligible === true;
+  const manualPrepayArmable = prepayOnBookAvailable && !linkedEstimate && !manualPrepayPlan.localBlock
+    && manualPrepayEligible && !manualPrepayLoading;
   useEffect(() => {
-    if (!prepayOnBookAvailable || !manualPrepayQuery || linkedEstimate || (manualPrepay && !manualPrepayEligible)) {
-      setBillAsManualPrepay(false);
-    }
-  }, [prepayOnBookAvailable, manualPrepayQuery, linkedEstimate, manualPrepay, manualPrepayEligible]);
+    if (!manualPrepayArmable) setBillAsManualPrepay(false);
+  }, [manualPrepayArmable]);
 
   // Compute window_end given a start time and a duration in minutes.
   const computeWindowEnd = (start, durationMin) => {
@@ -1378,6 +1405,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // one-time group also carried it, whichever request landed first would
     // accept the estimate (possibly as standard) and strand the prepay.
     let prepayAttachedThisSubmit = false;
+    // Set when the series the manual prepay choice priced is actually created.
+    let prepaySeriesId = null;
     for (const group of groups) {
       const key = groupKey(group);
       // Skip groups already created in a prior attempt of this submit
@@ -1529,6 +1558,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (attachAnnualPrepay) prepayAttachedThisSubmit = true;
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
+        // The series the prepay covers, matched by group identity — NOT
+        // "the first result" (a booking can post a one-time group first).
+        if (manualPrepayPlan.targetKey && key === manualPrepayPlan.targetKey && r?.id) {
+          prepaySeriesId = r.id;
+        }
         results.push(r);
       } catch (e) {
         // Idempotent retry recovery, PROVEN only (codex r20 P1 + r21 P0): a
@@ -1589,8 +1623,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // can change the rate or date after the last preview), and the server's
     // own mintPayload is what gets posted.
     let prepayNotice = '';
-    const committedSeriesId = results.find((r) => r?.id)?.id || null;
-    if (billAsManualPrepay && prepayOnBookAvailable && !linkedEstimate && manualPrepayQuery && committedSeriesId) {
+    // manualPrepayArmable is re-read here, not just at click time: it is false
+    // unless a resolved, eligible preview is on screen, so a choice armed and
+    // then invalidated by an edit can never reach the mint.
+    if (billAsManualPrepay && manualPrepayArmable && prepaySeriesId) {
       setSaving(true);
       try {
         // Price from the row the server actually persisted, never from the
@@ -1599,7 +1635,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // client-derived shape could invoice a per-visit amount this series
         // never carried. The endpoint re-derives cadence, coverage anchor and
         // every eligibility guard from that row too.
-        const params = new URLSearchParams({ scheduledServiceId: String(committedSeriesId) });
+        const params = new URLSearchParams({ scheduledServiceId: String(prepaySeriesId) });
         const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
         if (!fresh?.eligible) {
           throw new Error(`annual prepay ${fresh?.blockReason || 'is no longer available for this booking'}`);
@@ -2509,11 +2545,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             without one. Amounts, coverage and eligibility all come from the
             server preview; the button never shows a locally computed total. */}
         {prepayOnBookAvailable && !linkedEstimate && hasRecurringServices && selectedCustomer && (() => {
-          const eligible = manualPrepay?.eligible === true;
-          // Known-unsellable: a resolved preview that said no. An in-flight
-          // probe is NOT blocked (no reason to show yet) — it just can't be
-          // armed until it answers.
-          const blocked = !!manualPrepay && !eligible && !manualPrepayLoading;
+          const eligible = manualPrepayEligible;
+          // The reason to SHOW: a client-side refusal, or a resolved preview
+          // that said no. An in-flight probe has no reason yet.
+          const blockReason = manualPrepayPlan.localBlock
+            || (!!manualPrepay && !eligible && !manualPrepayLoading
+              ? (manualPrepay.blockReason || 'isn’t available for this booking')
+              : null);
+          // Clickable ONLY against a resolved eligible price (Codex #3161 r2
+          // P1) — an in-flight probe stays disabled, so the operator can never
+          // arm "pricing…" and save before the amount is known.
+          const armable = manualPrepayArmable;
           // Sized to the sibling "Collect prepayment" block (14px control,
           // 13px detail), not the estimate card's denser nested control.
           const segStyle = (active) => ({
@@ -2541,13 +2583,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 <button
                   type="button"
                   onClick={() => setBillAsManualPrepay(false)}
-                  style={segStyle(!billAsManualPrepay || !eligible)}
+                  style={segStyle(!billAsManualPrepay || !armable)}
                 >
                   Per visit
                 </button>
                 <button
                   type="button"
-                  disabled={blocked}
+                  disabled={!armable}
                   onClick={() => {
                     // Turning prepay ON turns OFF the in-person collection
                     // toggle: one records cash already taken, the other
@@ -2556,16 +2598,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     setCollectPrepay(false);
                   }}
                   style={{
-                    ...segStyle(billAsManualPrepay && eligible),
-                    ...(blocked ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+                    ...segStyle(billAsManualPrepay && armable),
+                    ...(armable ? {} : { opacity: 0.5, cursor: 'not-allowed' }),
                   }}
                 >
                   {prepayLabel}
                 </button>
               </div>
-              {blocked && (
+              {blockReason && (
                 <div style={{ fontSize: 13, color: D.muted, marginTop: 6 }}>
-                  Annual prepay {manualPrepay.blockReason || 'isn’t available for this booking'}.
+                  Annual prepay {blockReason}.
                 </div>
               )}
               {billAsManualPrepay && eligible && (

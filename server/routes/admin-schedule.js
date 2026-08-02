@@ -7835,11 +7835,20 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       if (anchor.source_estimate_id) {
         return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
       }
-      const addonCount = await db('scheduled_service_addons')
-        .where({ scheduled_service_id: anchor.id })
-        .count({ n: '*' })
-        .first()
-        .catch(() => ({ n: 0 }));
+      // Fail CLOSED on an unreadable add-on count (Codex #3161 r2 P2):
+      // swallowing the error as "no add-ons" would let a transient blip
+      // approve and SEND a primary-service annual invoice for a series that
+      // actually carries add-on lines billing outside its coverage.
+      let addonCount;
+      try {
+        addonCount = await db('scheduled_service_addons')
+          .where({ scheduled_service_id: anchor.id })
+          .count({ n: '*' })
+          .first();
+      } catch (addonErr) {
+        logger.warn(`[schedule:prepay-preview] add-on lookup failed for series ${anchor.id}: ${addonErr.message} — refusing`);
+        return blocked('couldn’t confirm the booked add-on lines — refresh and try again');
+      }
       const boosters = (() => {
         const raw = anchor.booster_months;
         if (!raw) return [];
