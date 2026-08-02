@@ -1016,6 +1016,24 @@ router.post('/status', async (req, res) => {
         } catch (e) {
           logger.error(`[twilio-status] voicemail quote-link bounce dispatch failed: ${e.message}`);
         }
+
+        // Dropped-call address-request bounce: same failure mode as the
+        // voicemail quote link — Twilio accepted at send time, the carrier
+        // bounced later (30006 landline past the fail-open pre-check), and
+        // the lead + review card still say "sent, watch for a reply" that
+        // can never come. The handler stamps the lead, pulls its follow-up
+        // to now, and flips the open card to 'undelivered'.
+        try {
+          const DroppedCallSms = require('../services/dropped-call-sms');
+          void DroppedCallSms.handleUndeliveredAddressRequest({
+            sid: MessageSid,
+            status: MessageStatus,
+            errorCode: ErrorCode,
+            to: To,
+          }).catch((e) => logger.error(`[twilio-status] dropped-call address-request bounce handling failed: ${e.message}`));
+        } catch (e) {
+          logger.error(`[twilio-status] dropped-call address-request bounce dispatch failed: ${e.message}`);
+        }
       }
     }
   } catch (err) {

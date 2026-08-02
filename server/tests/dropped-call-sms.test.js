@@ -37,6 +37,7 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const lineType = require('../services/messaging/validators/line-type');
 const {
   sendDroppedCallAddressRequest,
+  handleUndeliveredAddressRequest,
   endedAbruptly,
   detectDroppedMidIntake,
   eligibleNewProspect,
@@ -55,7 +56,7 @@ let state;
 
 function makeBuilder(table) {
   const b = {};
-  for (const m of ['where', 'whereRaw', 'whereNotIn', 'whereNull', 'select', 'onConflict', 'ignore', 'returning']) {
+  for (const m of ['where', 'whereIn', 'whereRaw', 'whereNotIn', 'whereNull', 'orWhere', 'select', 'onConflict', 'ignore', 'returning']) {
     b[m] = jest.fn(() => b);
   }
   b.first = jest.fn(() => {
@@ -91,6 +92,9 @@ beforeEach(() => {
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(IN_WINDOW);
   state = { firstResults: {}, updateResults: {}, insertResults: {}, insertError: {}, inserts: [], updates: [], deletes: [] };
   db.mockImplementation((table) => makeBuilder(table));
+  const trx = (table) => makeBuilder(table);
+  trx.raw = db.raw;
+  db.transaction = jest.fn(async (cb) => cb(trx));
 });
 
 afterEach(() => {
@@ -278,9 +282,9 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('policy block — claim kept (never retry a suppressed number)', async () => {
-    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'suppressed' });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED_MANUAL_DNC' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
-    expect(res).toEqual({ sent: false, skipped: 'policy_block' });
+    expect(res).toEqual({ sent: false, skipped: 'policy_block', code: 'SUPPRESSED_MANUAL_DNC' });
     expect(state.deletes).toHaveLength(0);
     const claimStamp = state.updates.filter((u) => u.table === 'dropped_call_sms_claims').pop();
     expect(claimStamp.payload.outcome).toBe('policy_block');
@@ -300,7 +304,54 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 
+  it('per-lead claim lost (ownership race / reprocess) — phone one-shot released, no send', async () => {
+    state.updateResults.leads = [0]; // the ownership-guarded claim update finds no row
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), expectedCustomerId: 'cust-9' });
+    expect(res).toEqual({ sent: false, skipped: 'lead_claim_lost' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
+  });
+
+  it('terminal provider rejection (unsubscribed / not SMS-capable) — claim kept', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: '21610' });
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'provider_terminal', code: '21610' });
+    expect(state.deletes).toHaveLength(0);
+    const claimStamp = state.updates.filter((u) => u.table === 'dropped_call_sms_claims').pop();
+    expect(claimStamp.payload.outcome).toBe('provider_terminal');
+  });
+
   it('MIN_CALL_SECONDS is exported for the processor eligibility check', () => {
     expect(MIN_CALL_SECONDS).toBe(120);
+  });
+});
+
+describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
+  it('ignores sids that are not address-request sends', async () => {
+    state.firstResults.sms_log = [null];
+    const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'undelivered', to: PHONE });
+    expect(res).toEqual({ handled: false, reason: 'not_address_request' });
+  });
+
+  it('remediates: stamps lead undelivered, pulls follow-up, flips the open card', async () => {
+    state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID }];
+    state.firstResults.leads = [{ id: LEAD_ID }];
+    const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'undelivered', errorCode: '30006', to: PHONE });
+    expect(res).toEqual({ handled: true, leadId: LEAD_ID });
+    const leadWrites = state.updates.filter((u) => u.table === 'leads');
+    expect(leadWrites.length).toBeGreaterThanOrEqual(2); // follow-up pull + status stamp
+    expect(state.updates.some((u) => u.table === 'triage_items')).toBe(true);
+    const note = state.inserts.find((i) => i.table === 'lead_activities');
+    expect(note.payload.description).toMatch(/never arrived/);
+    expect(note.payload.description).toMatch(/30006/);
+  });
+
+  it('idempotent: a second callback for the same sid is a no-op', async () => {
+    state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE }];
+    state.updateResults.sms_log = [0]; // claim already burned
+    const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'failed', to: PHONE });
+    expect(res).toEqual({ handled: false, reason: 'already_handled' });
+    expect(state.inserts).toHaveLength(0);
   });
 });

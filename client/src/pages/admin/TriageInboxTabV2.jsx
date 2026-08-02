@@ -124,11 +124,20 @@ export function ConfirmEvidence({ payload }) {
     p.caller_phone && p.matched_customer_name && { label: "On file", value: p.on_file_phone || "no primary phone" },
     // call_dropped_mid_intake: whether the automated address-request text
     // went out, so the office knows to watch for a reply vs. call back cold.
+    // A suppression block (DNC / wrong number) must NEVER render as "call
+    // them back" — surface the block so the office checks the record first.
     p.address_request_sms && {
       label: "Address text",
-      value: p.address_request_sms === "sent"
-        ? "sent — watch for their reply"
-        : `not sent (${String(p.address_request_sms).replace(/_/g, " ")}) — call them back`,
+      value: (() => {
+        const outcome = String(p.address_request_sms);
+        const code = p.address_request_sms_code ? String(p.address_request_sms_code) : "";
+        if (outcome === "sent") return "sent — watch for their reply";
+        if (outcome === "undelivered") return "text never arrived — call them back";
+        if (/SUPPRESS|DNC|WRONG_NUMBER/i.test(code) || /SUPPRESS|DNC|WRONG_NUMBER/i.test(outcome)) {
+          return `blocked (${(code || outcome).replace(/_/g, " ").toLowerCase()}) — do NOT contact; check the record first`;
+        }
+        return `not sent (${outcome.replace(/_/g, " ")}${code ? `: ${code}` : ""}) — call them back`;
+      })(),
     },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },

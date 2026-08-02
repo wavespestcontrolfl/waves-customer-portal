@@ -6719,6 +6719,42 @@ const CallRecordingProcessor = {
           }).catch(() => {});
         }
 
+        // Dropped-call detector, phase 1 of 2 (owner directive 2026-08-01): a
+        // LIVE inbound intake conversation that ran MIN_CALL_SECONDS+, ended
+        // with no farewell in the transcript tail, and captured no service
+        // address on either extraction leg is a drop-mid-intake — an engaged
+        // caller who got cut off (a 2026-07-27 live case: a long engaged
+        // call dropped at the address exchange and no callback happened).
+        // Detection + the bridge flag run HERE, before the enrichment write
+        // below consumes bridgeNeedsConfirmation into needs_confirmation and
+        // the ai_triage timeline note. The text + review card run in phase 2
+        // (after enrichment) because the enrichment write REBUILDS
+        // extracted_data and would clobber the send module's per-lead claim
+        // stamp.
+        let droppedMidIntake = false;
+        let droppedCallSeconds = 0;
+        if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
+          && !isOutboundCall(call) && transcription) {
+          try {
+            const DroppedCallSmsDetect = require('./dropped-call-sms');
+            // recordingDurationSeconds: fresh recording jobs can have
+            // duration_seconds unset while recording_duration_seconds is
+            // populated (the race this file already handles elsewhere).
+            droppedCallSeconds = recordingDurationSeconds(call);
+            droppedMidIntake = DroppedCallSmsDetect.detectDroppedMidIntake({
+              durationSeconds: droppedCallSeconds,
+              transcription,
+              extracted,
+              v2Extraction: v2Result?.status === 'valid' ? v2Result.extraction : null,
+            });
+            if (droppedMidIntake && !bridgeNeedsConfirmation.includes('call_dropped_mid_intake')) {
+              bridgeNeedsConfirmation.push('call_dropped_mid_intake');
+            }
+          } catch (dropErr) {
+            logger.warn(`[call-proc] dropped-call detection failed (non-blocking): ${dropErr.message}`);
+          }
+        }
+
         // Enrich lead with AI-extracted data. For an existing lead, only fill
         // fields that are still empty so we don't clobber Virginia's manual
         // edits when a follow-up call comes in. For a brand-new lead (just
@@ -6727,6 +6763,7 @@ const CallRecordingProcessor = {
         if (leadId) {
           const current = existingLead || (await db('leads').where({ id: leadId }).first());
           const isEmpty = (v) => v === null || v === undefined || v === '';
+
           const leadUpdates = {};
           if (extracted.first_name && isEmpty(current?.first_name)) leadUpdates.first_name = capitalizeName(extracted.first_name);
           if (extracted.last_name && isEmpty(current?.last_name)) leadUpdates.last_name = capitalizeName(extracted.last_name);
@@ -7023,73 +7060,58 @@ const CallRecordingProcessor = {
           }
         }
 
-        // Dropped-call detector (owner directive 2026-08-01): a LIVE intake
-        // conversation (not a voicemail) that ran MIN_CALL_SECONDS+, ended
-        // with no farewell in the transcript tail, and left the service
-        // address uncaptured is a drop-mid-intake — an engaged caller who got
-        // cut off (a 2026-07-27 live case: a long engaged call dropped at
-        // the address exchange and no callback ever happened). Always opens a
-        // call-back review card; when the caller is a genuine NEW prospect
-        // (valid V2 extraction whose call_nature is a sales inquiry, no
-        // linked customer, not spam) the gated one-shot address-request text
-        // also goes out — all send-side gates (feature gate, quiet hours,
-        // one-per-phone claim, landline, STOP suppression, template kill
-        // switch) live in the service. Best-effort: a detector or text
-        // failure never breaks call processing.
-        if (leadId && !voicemailLeadPath && !extracted.is_voicemail && !extracted.is_spam
-          && !isOutboundCall(call) && transcription) {
+        // Dropped-call detector, phase 2 of 2: the gated one-shot text (all
+        // send-side gates — feature gate, quiet hours, one-per-phone claim,
+        // landline, STOP suppression, template kill switch — live in the
+        // service) and the always-on review card. Runs after the enrichment
+        // write so the module's extracted_data claim stamp survives.
+        if (droppedMidIntake && leadId) {
           try {
             const DroppedCallSms = require('./dropped-call-sms');
-            // recordingDurationSeconds: fresh recording jobs can have
-            // duration_seconds unset while recording_duration_seconds is
-            // populated (the race this file already handles elsewhere).
-            const droppedCallSeconds = recordingDurationSeconds(call);
-            const v2Extraction = v2Result?.status === 'valid' ? v2Result.extraction : null;
-            const droppedMidIntake = DroppedCallSms.detectDroppedMidIntake({
-              durationSeconds: droppedCallSeconds,
-              transcription,
-              extracted,
-              v2Extraction,
+            let smsOutcome = { sent: false, skipped: 'not_eligible' };
+            // A customer record created FROM THIS CALL is still a new
+            // prospect (Step 3 mints one for any named live caller);
+            // classification fails CLOSED to card-only.
+            const genuineNewProspect = DroppedCallSms.eligibleNewProspect({
+              customerId,
+              createdCustomerFromCall,
+              isOutbound: isOutboundCall(call),
+              v2Status: v2Result?.status,
+              callNature: v2Result?.extraction?.call_nature,
             });
-            if (droppedMidIntake) {
-              let smsOutcome = { sent: false, skipped: 'not_eligible' };
-              // A customer record created FROM THIS CALL is still a new
-              // prospect (Step 3 mints one for any named live caller);
-              // classification fails CLOSED to card-only.
-              const genuineNewProspect = DroppedCallSms.eligibleNewProspect({
-                customerId,
-                createdCustomerFromCall,
-                isOutbound: isOutboundCall(call),
-                v2Status: v2Result?.status,
-                callNature: v2Result?.extraction?.call_nature,
-              });
-              if (genuineNewProspect) {
-                smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({ leadId, extracted, call, phone });
+            if (genuineNewProspect) {
+              // Inner catch: the review card below MUST still open when the
+              // send path throws — a failed text plus no card is exactly the
+              // silent-cold-lead outcome this lane prevents.
+              try {
+                smsOutcome = await DroppedCallSms.sendDroppedCallAddressRequest({
+                  leadId, extracted, call, phone, expectedCustomerId: customerId || null,
+                });
+              } catch (sendErr) {
+                logger.warn(`[call-proc] dropped-call text failed (card still opens): ${sendErr.message}`);
+                smsOutcome = { sent: false, skipped: 'send_error' };
               }
-              await db('triage_items')
-                .insert(buildTriageItem({
-                  callLogId: call.id,
-                  flag: 'call_dropped_mid_intake',
-                  extraction: v2Extraction,
-                  extraPayload: {
-                    caller_phone: phone || null,
-                    dropped_after_seconds: droppedCallSeconds || null,
-                    address_request_sms: smsOutcome.sent ? 'sent' : (smsOutcome.skipped || 'not_sent'),
-                  },
-                }))
-                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                .ignore();
-              // Mirror into the bridge list so the finalizer stamps
-              // review_status='open' and the lead timeline names the reason.
-              if (!bridgeNeedsConfirmation.includes('call_dropped_mid_intake')) {
-                bridgeNeedsConfirmation.push('call_dropped_mid_intake');
-              }
-              logger.info(`[call-proc] Dropped call mid-intake detected for ${maskSid(callSid)} — review card opened (sms: ${smsOutcome.sent ? 'sent' : smsOutcome.skipped || 'skipped'})`);
             }
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'call_dropped_mid_intake',
+                extraction: v2Result?.status === 'valid' ? v2Result.extraction : null,
+                extraPayload: {
+                  caller_phone: phone || null,
+                  dropped_after_seconds: droppedCallSeconds || null,
+                  address_request_sms: smsOutcome.sent ? 'sent' : (smsOutcome.skipped || 'not_sent'),
+                  ...(smsOutcome.code ? { address_request_sms_code: smsOutcome.code } : {}),
+                },
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+            logger.info(`[call-proc] Dropped call mid-intake for ${maskSid(callSid)} — review card opened (sms: ${smsOutcome.sent ? 'sent' : smsOutcome.skipped || 'skipped'})`);
           } catch (dropErr) {
-            logger.warn(`[call-proc] dropped-call detector failed (non-blocking): ${dropErr.message}`);
+            logger.warn(`[call-proc] dropped-call card/text failed (non-blocking): ${dropErr.message}`);
           }
         }
+
       } catch (leadErr) {
         logger.error(`[call-proc] Lead creation failed (non-blocking): ${leadErr.message}`);
       }
