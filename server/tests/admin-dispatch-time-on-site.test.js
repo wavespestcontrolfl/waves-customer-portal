@@ -696,6 +696,39 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(res.body.timeEntryCorrectionBlocked).toBe('approved_week');
   });
 
+  test('a sub-minute divergence syncs too — hundredth-minute precision, no one-minute blind spot (codex P2 round 21)', async () => {
+    // duration_minutes stores hundredths (adminEditEntry rounds to 0.01):
+    // 45.6 against a 45-minute correction IS a divergence — the old
+    // one-minute tolerance reported it as fully synced.
+    const TimeTracking = require('../services/time-tracking');
+    const clockIn = new Date('2026-07-19T16:00:00.000Z');
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [{
+        id: 'te-sub',
+        clock_in: clockIn,
+        clock_out: new Date(clockIn.getTime() + 45.6 * 60000),
+        duration_minutes: 45.6,
+        status: 'active',
+      }],
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(TimeTracking.adminEditEntry).toHaveBeenCalledWith('te-sub', expect.objectContaining({
+      clock_out: new Date(clockIn.getTime() + 45 * 60000).toISOString(),
+    }));
+    expect(res.body.timeEntryCorrected).toBe(true);
+    // An entry already landed exactly on the corrected minutes no-ops.
+    expect(source).toMatch(/Math\.abs\(Number\(e\.duration_minutes\) - minutes\) > 0\.005/);
+  });
+
   test('a still-running linked timer is surfaced as entry_open, never silently fine (codex P1 round 20)', async () => {
     // clock_out == null: the span keeps growing past the corrected minutes
     // and the audited edit workflow is for completed intervals — the

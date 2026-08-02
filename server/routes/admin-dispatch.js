@@ -872,8 +872,13 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy }
         return;
       }
       // ANY divergence syncs — an increased re-correction (45 → 60) must
-      // move the entry too, not only an inflated-timer decrease.
-      const divergent = jobEntries.filter((e) => Math.abs(Number(e.duration_minutes) - minutes) > 1);
+      // move the entry too, not only an inflated-timer decrease. Compared
+      // at the stored hundredth-minute precision (codex P2 round 21): a
+      // one-minute tolerance left a 45.01–46.00 entry "silently fine"
+      // against a 45-minute correction. Half a hundredth absorbs float
+      // noise only; an entry this sync wrote lands exactly on the
+      // corrected minutes, so re-runs still no-op.
+      const divergent = jobEntries.filter((e) => Math.abs(Number(e.duration_minutes) - minutes) > 0.005);
       if (divergent.length === 0) return;
       if (jobEntries.length === 1 && divergent.length === 1 && divergent[0].clock_in) {
         const entry = divergent[0];
