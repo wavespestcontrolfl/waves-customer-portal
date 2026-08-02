@@ -265,6 +265,10 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     // local write times lie. Stamped rows compare metadata.settled_event_at;
     // only unstamped (synchronous local) recordings fall back to created_at.
     expect(before).toContain("settled_event_at')::timestamptz >= ?");
+    // event.created is integer seconds — the anchor floors to the second so
+    // a same-second settlement cannot compare as earlier and slip the veto.
+    expect(before).toContain('Math.floor(attemptStartedAt.getTime() / 1000) * 1000');
+    expect(before).toMatch(/\[attemptAnchor\]/);
     expect(before).toMatch(/settled_event_at'\) IS NULL/);
     expect(before).not.toContain("orWhere('payments.updated_at'");
     // The veto mirrors the auto-clear's eligibility: a no-show fee and

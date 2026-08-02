@@ -1211,6 +1211,13 @@ const BillingCron = {
             // write; a webhook transaction still uncommitted at the
             // UPDATE's snapshot is caught by its own post-commit clear.
             const pausedAt = new Date();
+            // Stripe's event.created is INTEGER SECONDS; a settlement later
+            // in the same second as attemptStartedAt would stamp a floored
+            // settled_event_at that compares as earlier and slip the veto.
+            // Floor the anchor to the second — widening the veto by <1s is
+            // the safe direction (an extra veto self-heals via the clear;
+            // a missed one strands the customer).
+            const attemptAnchor = new Date(Math.floor(attemptStartedAt.getTime() / 1000) * 1000);
             const pausedRows = await db('customers')
               .where({ id: payment.customer_id })
               .whereNotExists(
@@ -1229,10 +1236,10 @@ const BillingCron = {
                   .whereNull('payments.statement_id')
                   .whereRaw("(payments.metadata->>'payer_id') IS NULL")
                   .where(function settledSinceAttempt() {
-                    this.whereRaw("(payments.metadata->>'settled_event_at')::timestamptz >= ?", [attemptStartedAt])
+                    this.whereRaw("(payments.metadata->>'settled_event_at')::timestamptz >= ?", [attemptAnchor])
                       .orWhere(function unstampedLocalRecording() {
                         this.whereRaw("(payments.metadata->>'settled_event_at') IS NULL")
-                          .andWhere('payments.created_at', '>=', attemptStartedAt);
+                          .andWhere('payments.created_at', '>=', attemptAnchor);
                       });
                   }),
               )
