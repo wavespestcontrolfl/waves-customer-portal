@@ -719,3 +719,83 @@ describe('snapshots', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Codex round 3 on #3159 — every one of these is a gap in a guard the earlier
+// rounds added, not in the original feature. Kept together so the shape stays
+// visible: a guard is only as good as the wording it actually recognises.
+// ---------------------------------------------------------------------------
+describe('setup-stage guards — round 3 gaps', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  // P1: the matcher knew "checked … traps" and passive "traps were
+  // inspected", but not the most natural re-check sentence of all.
+  test('active-voice inspection claims are caught, not just "checked"', () => {
+    for (const text of [
+      'We inspected 8 traps today.',
+      'We inspected the devices along the runway.',
+      'We re-inspected the traps in the attic.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('…while inspecting something that is not a trap still reads as setup prose', () => {
+    for (const text of [
+      'We inspected the roofline for entry points.',
+      'We set 8 traps today.',
+      'We placed the devices along the documented runways.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+
+  test('the match is proximity-based, and deliberately errs toward rejecting', () => {
+    // "inspected … the traps" in one sentence rejects even when the object of
+    // the inspection was something else. That is the intended bias: an
+    // over-rejection costs a narrative and falls back to safe deterministic
+    // copy, while an under-rejection PUBLISHES a contradiction — which is
+    // exactly what round 3's P1 was. Pinned so the trade-off is a decision
+    // rather than a surprise.
+    expect(setupContradictions('We inspected the exterior before placing the traps.').length)
+      .toBeGreaterThan(0);
+  });
+
+  test('the screen reaches the technician draft, so an inspection draft is refused', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { species: 'Roof rat', traps_checked: '8', trap_visit_type: 'Initial setup' },
+      chips: ['Continue trapping'],
+      activity: { score: 3 },
+      visitSequence: 1,
+      technicianReportBody: 'We inspected 8 traps today. Droppings were noted near the plenum.',
+    });
+    expect(result.body).not.toContain('inspected 8 traps');
+    expect(result).not.toHaveProperty('bodySource');
+  });
+
+  // P2: trap_actions is a CUSTOMER-FACING finding row, so suppressing these
+  // verbs in the body still left "Traps set: 8" beside "Trap service
+  // performed: Traps reset" on the rendered report.
+  test('follow-up-only trap actions cannot ride a declared setup', () => {
+    const submit = (trap_visit_type, trap_actions) => validateTypedFindings({
+      type: 'rodent_trapping',
+      values: { species: 'Roof rat', traps_checked: '8', trap_visit_type, trap_actions },
+      expectedType: 'rodent_trapping',
+      enforceRequired: true,
+    });
+
+    for (const action of ['Traps reset', 'Traps moved', 'Traps replaced', 'Bait/lure refreshed', 'Damaged or missing traps found']) {
+      expect(submit('Initial setup', action).ok).toBe(false);
+      // …and the same action is perfectly legal on a re-check.
+      expect(submit('Follow-up check', action).ok).toBe(true);
+    }
+
+    // Setup-compatible actions stay legal, alone and combined.
+    expect(submit('Initial setup', 'New traps added').ok).toBe(true);
+    expect(submit('Initial setup', 'New traps added, Exterior inspection completed').ok).toBe(true);
+    // One offender in a mixed list is enough to reject.
+    expect(submit('Initial setup', 'New traps added, Bait/lure refreshed').ok).toBe(false);
+  });
+});

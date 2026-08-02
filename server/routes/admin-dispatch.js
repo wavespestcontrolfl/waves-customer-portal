@@ -1873,11 +1873,15 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     width: liveConfig.width || 640,
     height: liveConfig.height || 340,
   })
-    .then((slice) => ({ ...slice, loaded: true }))
-    // `loaded: false` distinguishes THIS degraded shape from a property that
+    // `loaded: false` distinguishes a degraded shape from a property that
     // genuinely has no stations — both carry `stations: []` (codex P2 on
     // #3159). Consumers that only draw pins can ignore it; anything INFERRING
     // from the absence of stations must not treat a failed query as fact.
+    // The loader swallows its own query failure (so a station outage never
+    // takes down zone marking) and reports it via `loaded`, so this must
+    // FORWARD that value rather than stamp true — an earlier version stamped
+    // unconditionally here and the flag was inert (codex P2 round 3).
+    .then((slice) => ({ ...slice, loaded: slice.loaded !== false }))
     .catch(() => ({
       stations: [],
       nextStationNumber: 1,

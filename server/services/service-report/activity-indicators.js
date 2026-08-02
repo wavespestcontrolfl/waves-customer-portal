@@ -1206,6 +1206,25 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       errors.push('"No limitations" cannot be combined with other limitations');
     }
   }
+  // A declared trap SETUP cannot also have serviced traps that were not
+  // there yet (codex P2 on #3159). The deterministic body already suppresses
+  // these verbs on a setup, but trap_actions is a customer-facing finding
+  // row, so the report still published "Traps set: 8" beside "Trap service
+  // performed: Traps reset". Rejecting matches how every other rodent
+  // cross-field contradiction is handled above — this is inconsistent DATA,
+  // not a copy nicety, and the tech resolves it by correcting whichever
+  // field is wrong.
+  if (type === 'rodent_trapping' && String(values.trap_visit_type || '').trim() === 'Initial setup') {
+    const followUpOnly = String(values.trap_actions || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .filter((action) => SETUP_INCOMPATIBLE_TRAP_ACTIONS.includes(action));
+    if (followUpOnly.length) {
+      errors.push(
+        `Trap actions ${followUpOnly.map((a) => `"${a}"`).join(', ')} describe traps that were already out — `
+        + 'either clear them or set this visit to "Follow-up check"'
+      );
+    }
+  }
   // rodent_sanitation publishes "contamination was cleaned and sanitized"
   // copy — with evidence_cleaned retired (2026-07-23), the work chips are
   // the only proof cleanup happened. A submission whose only work chip is
@@ -1823,11 +1842,24 @@ function isInitialRodentTrapSetup(projectType, visitSequence, values = {}) {
 // visit is SUPPOSED to use (codex P2 on #3159).
 const TRAP_NOUN_RE = '(?:traps?|devices?)';
 const SETUP_RECHECK_RES = [
-  new RegExp(`\\b(?:re-?)?check(?:ed|ing)?\\b[^.!?]{0,40}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
+  // ACTIVE voice, both verbs: "we checked 8 traps", "we inspected 8 traps".
+  // `inspect` was missing on the first pass, so the single most natural
+  // re-check sentence walked through both screens (codex P1 on #3159).
+  new RegExp(`\\b(?:re-?)?(?:check|inspect)(?:ed|ing)?\\b[^.!?]{0,40}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
   new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,40}?\\bwere\\s+(?:re-?)?(?:check|inspect)(?:ed)?\\b`, 'i'),
   new RegExp(`\\b(?:re-?set|re-?bait(?:ed)?|rebait(?:ed)?|refresh(?:ed)?|re-?position(?:ed)?|moved)\\b[^.!?]{0,20}?\\bthe\\s+${TRAP_NOUN_RE}\\b`, 'i'),
   new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,20}?\\bwere\\s+re-?set\\b`, 'i'),
   new RegExp(`\\b(?:existing|previous(?:ly)?\\s+(?:set|placed))\\s+${TRAP_NOUN_RE}\\b`, 'i'),
+];
+// trap_actions values that presuppose traps were ALREADY on the property,
+// so they contradict a declared setup. 'New traps added' and 'Exterior
+// inspection completed' are legitimate on a setup and stay legal.
+const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
+  'Traps reset',
+  'Traps moved',
+  'Traps replaced',
+  'Bait/lure refreshed',
+  'Damaged or missing traps found',
 ];
 const SETUP_EMPTY_CAPTURE_RES = [
   /\bno\s+(?:new\s+)?captures?\b/i,

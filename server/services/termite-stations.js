@@ -564,10 +564,15 @@ async function syncStationsForCompletion(db, { customerId, serviceRecordId, entr
 // numbering for new pins matches what the sync will allocate in payload
 // order; `nextStationNumber` keeps the termite value for shape stability.
 async function loadStationsForPropertyMap(db, customerId, imageContext) {
+  // The query failure is swallowed here so a station outage never takes down
+  // zone marking — but callers that INFER from an empty roster need to tell
+  // "no stations" from "we could not look" (codex P2 on #3159). Every return
+  // shape below carries `loaded`; consumers that only draw pins ignore it.
+  let loaded = true;
   const rows = await db('termite_stations')
     .where({ customer_id: customerId })
     .orderBy('station_number')
-    .catch(() => []);
+    .catch(() => { loaded = false; return []; });
   const nextStationNumberByProgram = {};
   for (const program of STATION_PROGRAMS) {
     nextStationNumberByProgram[program] = rows
@@ -576,7 +581,9 @@ async function loadStationsForPropertyMap(db, customerId, imageContext) {
   }
   const active = rows.filter((row) => row.is_active !== false);
   if (!active.length) {
-    return { stations: [], nextStationNumber: nextStationNumberByProgram.termite, nextStationNumberByProgram };
+    return {
+      stations: [], nextStationNumber: nextStationNumberByProgram.termite, nextStationNumberByProgram, loaded,
+    };
   }
   const resolved = resolveZoneRowsImageDrift(active, imageContext);
   return {
@@ -590,6 +597,7 @@ async function loadStationsForPropertyMap(db, customerId, imageContext) {
     })),
     nextStationNumber: nextStationNumberByProgram.termite,
     nextStationNumberByProgram,
+    loaded,
   };
 }
 

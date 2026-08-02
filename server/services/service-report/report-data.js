@@ -2148,11 +2148,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let interiorOnlyLane = /\bbed\s*bugs?\b/i.test(
     `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
   );
+  // Rodent trapping joins the no-satellite-spray-outline lanes (owner
+  // 2026-08-02): nothing is sprayed on a trapping stop, so an exterior
+  // outline would be a claim the visit cannot support. Suppressed HERE, at
+  // the render point, rather than only by hiding the closeout button —
+  // the tech portal exposes a per-row "Trace treatment zone" action and the
+  // save endpoint accepts any service type, so a UI-only fix left three
+  // other ways to publish one, including traces saved before this change
+  // (codex P2 round 3). Same reasoning the bed-bug lane already documents.
+  let trapLaneNoSprayMap = false;
   if (!interiorOnlyLane && scheduledServiceRow) {
     try {
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
       const laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
       interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
+      trapLaneNoSprayMap = laneProfile?.findingsType === 'rodent_trapping';
     } catch { /* label fallback stands */ }
   }
   const structured = parseJsonObject(service.structured_notes);
@@ -2697,7 +2707,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // outline — a trace saved before the tracer was hidden for this lane
     // is stale exterior evidence on an interior treatment's report
     // (codex P2 r6; stable-key classification r9).
-    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id && !interiorOnlyLane) {
+    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id
+      && !interiorOnlyLane && !trapLaneNoSprayMap) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
