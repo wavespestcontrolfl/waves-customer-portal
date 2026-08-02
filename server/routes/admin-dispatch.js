@@ -7225,10 +7225,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let apptCardAcceptedAmount = null;
     let apptCardOverCap = false;
     let apptCardLaneUnresolved = false;
+    // Lane + cap detection is deliberately INDEPENDENT of current Auto Pay
+    // state (Codex #3153 r11 P1): a secured customer who pauses Auto Pay or
+    // drops their method before completion still owns a capped lane invoice
+    // — the credit fence below must see it. customerAutopayActive gates
+    // ONLY the Stripe charge (the composite charge condition further down).
     if (!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane
       && svc.is_recurring !== true
-      && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
-      && customerAutopayActive) {
+      && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id) {
       try {
         if (require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
           const laneRow = await db('appointment_card_requests')
