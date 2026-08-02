@@ -925,6 +925,9 @@ describe('setup matcher binds verbs to their objects (round 6)', () => {
       'We swapped out the old traps.',               // particle verb
       'We re-set the traps.',                        // hyphenated re- form
       'We repositioned two of the traps.',           // partitive object
+      'We checked all mechanical traps today.',      // unlisted modifier
+      'We inspected the snap traps.',                // compound noun
+      'We inspected the wooden rat traps in the attic.',
     ]) {
       expect(setupContradictions(text).length).toBeGreaterThan(0);
     }
@@ -941,6 +944,10 @@ describe('setup matcher binds verbs to their objects (round 6)', () => {
       // baiting/positioning are what a setup DOES — only their re- forms
       // contradict one.
       'We baited the traps as we set them.',
+      // The object phrase ends at a preposition or relative pronoun, so a
+      // trap mentioned in a LATER phrase is not the verb's object.
+      'We inspected the attic where the traps will sit.',
+      'We checked the crawlspace for entry points and set traps.',
     ]) {
       expect(setupContradictions(text)).toEqual([]);
     }

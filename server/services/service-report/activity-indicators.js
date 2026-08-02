@@ -1887,27 +1887,33 @@ const RECHECK_VERB = new RegExp('^(?:'
   + '|move[sd]?|moving'
   + ')$', 'i');
 const RECHECK_PARTICIPLE = /^(?:re-?)?(?:checked|inspected|reset|rebaited|refreshed|repositioned|replaced|swapped|moved)$/i;
-// Words that can sit between a verb and its object head without changing it:
-// determiners, quantifiers, numerals and the adjectives a trap phrase takes.
-const OBJECT_FILLER = /^(?:the|a|an|all|both|each|every|any|some|several|two|three|four|five|six|seven|eight|nine|ten|of|out|those|these|its|their|our|my|remaining|existing|previous|previously|damaged|missing|old|new|other|exterior|interior|attic|garage|first|second|\d+)$/i;
+// Where a verb's object phrase ENDS. Listing terminators rather than the
+// allowed modifiers is the only version that survives real prose: an
+// adjective allowlist can always be beaten by an unlisted one ("all
+// mechanical traps", "the snap traps" — codex P1 round 7), whereas the set
+// of words that start a NEW phrase is small and closed.
+//
+// Deliberately excluded: `of` (partitive — "two of the traps" is still one
+// object phrase) and particles like `out`/`up` ("swapped out the old traps").
+const OBJECT_PHRASE_END = /^(?:in|on|at|for|before|after|with|without|from|to|along|near|around|under|over|behind|beside|by|into|onto|across|through|during|against|where|which|that|when|while|who|whose|because|since|until)$/i;
 const PASSIVE_AUX = /\b(?:was|were|has\s+been|have\s+been|had\s+been|is\s+being|are\s+being)\b/i;
 
 function words(text) {
   return String(text).split(/[^A-Za-z0-9-]+/).filter(Boolean);
 }
 
-// True when a re-check VERB in this clause takes a trap as its object: scan
-// forward past filler to the first real noun and require it to be a trap.
-// "inspected the attic" binds to `attic` and does not match; "inspected all
-// 8 traps" binds to `traps` and does.
+// True when a re-check VERB in this clause takes a trap as its object: read
+// forward from the verb to the end of its object phrase and look for a trap
+// noun anywhere inside. "inspected the attic" ends at the clause and never
+// sees a trap; "inspected the exterior BEFORE placing the traps" ends at
+// `before`; "checked all mechanical traps" reaches `traps` regardless of
+// which adjectives sit in between.
 function activeRecheckOnTrap(clause) {
   const toks = words(clause);
   for (let i = 0; i < toks.length; i += 1) {
     if (!RECHECK_VERB.test(toks[i])) continue;
-    for (let j = i + 1; j < toks.length; j += 1) {
-      if (OBJECT_FILLER.test(toks[j])) continue;
+    for (let j = i + 1; j < toks.length && !OBJECT_PHRASE_END.test(toks[j]); j += 1) {
       if (TRAP_NOUNS.test(toks[j])) return toks.slice(i, j + 1).join(' ');
-      break; // the object head is something else — this verb is not about traps
     }
   }
   return null;
