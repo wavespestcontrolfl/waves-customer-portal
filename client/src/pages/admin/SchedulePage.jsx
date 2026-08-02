@@ -7932,6 +7932,32 @@ export function ZoneMarkingStep({
 // interior-infestation language).
 const STATION_PIN_R = 0.035; // normalized against the SHORT side (~12px @340)
 const STATION_TAP_RADIUS_PX = 22;
+// Frame size the pins and the tap math are authored against. Zooming shrinks
+// the rendered viewBox around this same frame — the satellite image and the
+// stored NORMALIZED pin coordinates never change, so a zoomed placement is
+// byte-identical to the same placement at 1× (no re-anchoring, no drift).
+const STATION_FRAME_W = 640;
+const STATION_FRAME_H = 340;
+// The Static Map basemap is fetched at scale=2, so 4× is where the imagery
+// itself runs out of detail — past that the tech is magnifying blur.
+const STATION_MAX_ZOOM = 4;
+const STATION_ZOOM_STEP = 2;
+// Pointer travel (in frame units at the current zoom) that turns a tap into a
+// pan. Below it the gesture still places/selects a pin, so the one-tap flow
+// survives the shaky thumb a phone in the field always has.
+const STATION_DRAG_SLOP = 6;
+const STATION_FULL_VIEW = { x: 0, y: 0, w: STATION_FRAME_W, h: STATION_FRAME_H };
+// Keep the window inside the basemap so zooming can never reveal blank space.
+// Rounded to 2dp: a pan otherwise writes a 15-decimal viewBox string on every
+// pointermove, and sub-hundredth precision is invisible on a 640-unit frame.
+function clampStationView(view) {
+  const round = (n) => Math.round(n * 100) / 100;
+  return {
+    ...view,
+    x: round(Math.min(Math.max(0, view.x), STATION_FRAME_W - view.w)),
+    y: round(Math.min(Math.max(0, view.y), STATION_FRAME_H - view.h)),
+  };
+}
 const STATION_STATUS_UI = {
   ok: { color: "#10b981", label: "OK" },
   activity: { color: "#ef4444", label: "Activity" },
@@ -7984,7 +8010,23 @@ export function StationMarkingStep({
   const [selectedKey, setSelectedKey] = useState(null);
   const [addMode, setAddMode] = useState(false);
   const [armedMoveKey, setArmedMoveKey] = useState(null);
+  // Magnifier over the SAME basemap (owner 2026-08-02: "when I mark rodent
+  // traps I can't zoom in and zoom out like I can with trace where we
+  // sprayed"). Deliberately NOT the tracer's approach — that one re-fetches
+  // the Static Map at a new Google zoom, which is fine for a throwaway trace
+  // but would re-project every stored pin here. This is a pure viewBox
+  // window: the image, the normalized pin coordinates, and the drift
+  // re-anchoring are all untouched, so a pin dropped at 4× lands exactly
+  // where the same tap would land at 1×.
+  const [view, setView] = useState(STATION_FULL_VIEW);
   const svgRef = useRef(null);
+  // Live pan gesture: null between gestures, else the pointer origin and the
+  // view it started from. `moved` latches once the drag passes the slop, and
+  // suppresses the pin tap that would otherwise fire on pointerup.
+  const gestureRef = useRef(null);
+
+  // A new basemap invalidates the window (and the pins re-anchor against it).
+  useEffect(() => { setView(STATION_FULL_VIEW); }, [map?.image?.url]);
 
   if (!map?.available || !map.image?.url) return null;
 
@@ -8000,14 +8042,26 @@ export function StationMarkingStep({
   const statusOf = (key) => statuses[key] || "ok";
   const activityCount = pinned.filter((station) => statusOf(station.key) === "activity").length;
 
+  // How much of the frame one rendered pixel covers. 1 at full view; 0.5 at
+  // 2×, 0.25 at 4× — the single factor every screen-space number below is
+  // divided by so pins, taps, and labels stay physically the same size.
+  const viewScale = view.w / STATION_FRAME_W;
+  const zoomLevel = Math.round(1 / viewScale);
+  const canPan = view.w < STATION_FRAME_W;
+
   const svgPointFromEvent = (evt) => {
     const el = svgRef.current;
     if (!el) return null;
     const rect = el.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
+    // Client px → viewBox units → normalized against the FULL frame, which
+    // is the coordinate space the pins persist in. At full view the two
+    // conversions cancel and this is the original 0-1 mapping.
+    const frameX = view.x + ((evt.clientX - rect.left) / rect.width) * view.w;
+    const frameY = view.y + ((evt.clientY - rect.top) / rect.height) * view.h;
     return {
-      x: Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width)),
-      y: Math.min(1, Math.max(0, (evt.clientY - rect.top) / rect.height)),
+      x: Math.min(1, Math.max(0, frameX / STATION_FRAME_W)),
+      y: Math.min(1, Math.max(0, frameY / STATION_FRAME_H)),
     };
   };
 
@@ -8015,19 +8069,73 @@ export function StationMarkingStep({
     let best = null;
     let bestDist = Infinity;
     pinned.forEach((station) => {
-      const dx = (station.shape.cx - pt.x) * 640;
-      const dy = (station.shape.cy - pt.y) * 340;
+      const dx = (station.shape.cx - pt.x) * STATION_FRAME_W;
+      const dy = (station.shape.cy - pt.y) * STATION_FRAME_H;
       const dist = Math.sqrt(dx * dx + dy * dy);
       if (dist < bestDist) {
         best = station;
         bestDist = dist;
       }
     });
-    return bestDist <= STATION_TAP_RADIUS_PX ? best : null;
+    // The tap target is a THUMB, so its tolerance is fixed in screen pixels —
+    // in frame units it has to shrink with the zoom, or a zoomed-in tap
+    // aimed at open ground half a house away would still grab a pin.
+    return bestDist <= STATION_TAP_RADIUS_PX * viewScale ? best : null;
+  };
+
+  const changeZoom = (factor) => {
+    if (disabled) return;
+    const next = Math.min(STATION_MAX_ZOOM, Math.max(1, zoomLevel * factor));
+    if (next === zoomLevel) return;
+    const w = STATION_FRAME_W / next;
+    const h = STATION_FRAME_H / next;
+    // Zoom about the current centre — the tech has already panned to the
+    // part of the property they're working on.
+    const cx = view.x + view.w / 2;
+    const cy = view.y + view.h / 2;
+    setView(clampStationView({ x: cx - w / 2, y: cy - h / 2, w, h }));
+  };
+
+  const handlePointerDown = (evt) => {
+    // Panning only exists while zoomed in; at full view the frame keeps its
+    // original tap-only behavior with no gesture state at all.
+    if (disabled || !canPan) return;
+    const el = svgRef.current;
+    const rect = el?.getBoundingClientRect();
+    if (!rect?.width || !rect?.height) return;
+    gestureRef.current = {
+      clientX: evt.clientX,
+      clientY: evt.clientY,
+      view,
+      rect,
+      moved: false,
+    };
+    if (evt.pointerId != null && el.setPointerCapture) {
+      try { el.setPointerCapture(evt.pointerId); } catch { /* not a real pointer event */ }
+    }
+  };
+
+  const handlePointerMove = (evt) => {
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    const dx = ((evt.clientX - gesture.clientX) / gesture.rect.width) * gesture.view.w;
+    const dy = ((evt.clientY - gesture.clientY) / gesture.rect.height) * gesture.view.h;
+    if (!gesture.moved && Math.abs(dx) + Math.abs(dy) <= STATION_DRAG_SLOP * viewScale) return;
+    gesture.moved = true;
+    // Drag the MAP, not the window: content follows the thumb.
+    setView(clampStationView({ ...gesture.view, x: gesture.view.x - dx, y: gesture.view.y - dy }));
   };
 
   const handlePointerUp = (evt) => {
+    const gesture = gestureRef.current;
+    gestureRef.current = null;
+    const el = svgRef.current;
+    if (evt.pointerId != null && el?.releasePointerCapture) {
+      try { el.releasePointerCapture(evt.pointerId); } catch { /* already released */ }
+    }
     if (disabled) return;
+    // That gesture was a pan — it must not also drop or select a pin.
+    if (gesture?.moved) return;
     const pt = svgPointFromEvent(evt);
     if (!pt) return;
     if (armedMoveKey) {
@@ -8083,13 +8191,32 @@ export function StationMarkingStep({
     const isSelected = station.key === selectedKey;
     const meta = STATION_STATUS_UI[statusOf(station.key)] || STATION_STATUS_UI.ok;
     const fill = showStatuses ? meta.color : "#64748b";
-    const cx = station.shape.cx * 640;
-    const cy = station.shape.cy * 340;
+    const cx = station.shape.cx * STATION_FRAME_W;
+    const cy = station.shape.cy * STATION_FRAME_H;
+    // Pins are UI chrome, not map features: scaling them by the view keeps
+    // them a constant size on screen, so zooming in reveals more IMAGE
+    // rather than growing the markers over the detail being aimed at.
     return (
       <g key={station.key}>
-        {isSelected && <circle cx={cx} cy={cy} r={17} fill="none" stroke={accent} strokeWidth={3} />}
-        <circle cx={cx} cy={cy} r={12} fill={fill} stroke="rgba(255,255,255,0.95)" strokeWidth={2.5} />
-        <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">
+        {isSelected && (
+          <circle cx={cx} cy={cy} r={17 * viewScale} fill="none" stroke={accent} strokeWidth={3 * viewScale} />
+        )}
+        <circle
+          cx={cx}
+          cy={cy}
+          r={12 * viewScale}
+          fill={fill}
+          stroke="rgba(255,255,255,0.95)"
+          strokeWidth={2.5 * viewScale}
+        />
+        <text
+          x={cx}
+          y={cy + 4 * viewScale}
+          textAnchor="middle"
+          fontSize={12 * viewScale}
+          fontWeight={700}
+          fill="#fff"
+        >
           {station.number}
         </text>
       </g>
@@ -8137,14 +8264,71 @@ export function StationMarkingStep({
       <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${hairline}` }}>
         <svg
           ref={svgRef}
-          viewBox="0 0 640 340"
+          viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
           style={{ display: "block", width: "100%", touchAction: "none", cursor: disabled ? "default" : "crosshair" }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={() => { gestureRef.current = null; }}
         >
-          <image href={map.image.url} x="0" y="0" width="640" height="340" preserveAspectRatio="xMidYMid slice" />
+          <image
+            href={map.image.url}
+            x="0"
+            y="0"
+            width={STATION_FRAME_W}
+            height={STATION_FRAME_H}
+            preserveAspectRatio="xMidYMid slice"
+          />
           {pinned.filter((station) => station.key !== selectedKey).map(renderPin)}
           {selected && selected.shape ? renderPin(selected) : null}
         </svg>
+        {/* Zoom stepper — deliberately the SAME affordance as the treatment-
+            zone tracer (position, 40px thumb target, glass chip), because the
+            owner asked for these two map tools to behave alike. It sits over
+            the frame rather than in the button row below so it stays under
+            the thumb while pins are being placed. */}
+        <div style={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+          {[
+            { label: "+", factor: STATION_ZOOM_STEP, blocked: zoomLevel >= STATION_MAX_ZOOM, name: "Zoom in" },
+            { label: "−", factor: 1 / STATION_ZOOM_STEP, blocked: zoomLevel <= 1, name: "Zoom out" },
+          ].map(({ label, factor, blocked, name }) => (
+            <button
+              key={name}
+              type="button"
+              aria-label={name}
+              disabled={disabled || blocked}
+              // Belt and braces with the tracer: never let the stepper start a
+              // pan gesture on the frame behind it.
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); changeZoom(factor); }}
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 8,
+                border: "none",
+                background: "rgba(15,25,35,0.72)",
+                color: "#fff",
+                fontSize: 22,
+                lineHeight: 1,
+                fontWeight: 600,
+                cursor: disabled || blocked ? "default" : "pointer",
+                opacity: disabled || blocked ? 0.35 : 1,
+                touchAction: "manipulation",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {/* Bottom-LEFT, opposite the required attribution: on a 390px phone
+            the frame is only ~172px tall, and the stepper already covers the
+            right edge — parking this in a third corner would leave barely any
+            unobstructed ground to pin on. */}
+        {canPan ? (
+          <div style={{ position: "absolute", bottom: 4, left: 6, padding: "3px 8px", borderRadius: 999, background: "rgba(15,25,35,0.72)", color: "#fff", fontSize: 11, fontWeight: 600, pointerEvents: "none" }}>
+            {zoomLevel}× · drag to pan
+          </div>
+        ) : null}
         {map.image.attributionText ? (
           <div style={{ position: "absolute", right: 6, bottom: 4, fontSize: 10, color: "#fff", textShadow: "0 1px 2px rgba(0,0,0,0.9)", pointerEvents: "none" }}>
             {map.image.attributionText}
@@ -9135,6 +9319,14 @@ export function CompletionPanel({
   // profile did not resolve (codex P2 r8).
   const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
     || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
+  // Rodent trapping skips the spray tracer for the same reason bed bug does:
+  // nothing is sprayed on a trapping stop, so "Trace where we sprayed" has
+  // nothing to trace and a spray outline on the report would be a claim the
+  // visit can't support (owner 2026-08-02). The trap map below owns this
+  // visit's spatial story. PRIMARY flow only — a trapping COMPANION riding a
+  // pest visit keeps the tracer, because that visit really did spray.
+  const isRodentTrappingVisit =
+    service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
@@ -12862,8 +13054,11 @@ export function CompletionPanel({
             {/* Interior-only treatments (bed bug) skip the tracer: it is a
                 SATELLITE perimeter tool, and an exterior spray outline on an
                 interior treatment's report would be wrong. Photos carry the
-                visual story; a room-level interior marker is its own lane. */}
-            {!quickComplete && !isBedBugVisit && (
+                visual story; a room-level interior marker is its own lane.
+                Rodent trapping skips it too — nothing is sprayed on a trapping
+                stop, and the trap map below is that visit's spatial story
+                (owner 2026-08-02). */}
+            {!quickComplete && !isBedBugVisit && !isRodentTrappingVisit && (
               <Field label="Treatment zone map">
                 <button
                   type="button"

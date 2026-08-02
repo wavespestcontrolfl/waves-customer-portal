@@ -34,7 +34,7 @@ const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
-const { findBannedCustomerCopy } = require('./activity-indicators');
+const { findBannedCustomerCopy, isInitialRodentTrapSetup } = require('./activity-indicators');
 const { validateCustomerCopy } = require('./premium-experience');
 const {
   EXTRA_FORBIDDEN,
@@ -47,7 +47,9 @@ const {
 // project-report surface and is out of scope) — the prompt generalized from rodent-
 // only wording (owner ask 2026-07-27, second lane). File name kept (no
 // renames); rodent remains a thin alias over the same engine.
-const PROMPT_VERSION = 'typed_report_narrative_v3'; // v3: + HUMAN_PROSE_RULES (owner style block 07-30)
+// v4: + visitStage, so the first visit of a rodent trapping program reads as
+// the setup it is instead of a routine re-check (owner 2026-08-02).
+const PROMPT_VERSION = 'typed_report_narrative_v4';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -209,6 +211,13 @@ function groundingFacts({
     recap: cleanText(recap),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
     reportTypeLabel: cleanText(reportTypeLabel || typedReport?.reportTypeLabel || typedReport?.typeLabel) || null,
+    // First visit of a rodent trapping program — the traps went out today and
+    // nothing has been re-checked yet. Without this the model reaches for the
+    // recurring "we checked the traps" story every time (owner 2026-08-02).
+    // Null on every other visit/type so those prompts are unchanged.
+    visitStage: isInitialRodentTrapSetup(typedReport?.type, typedReport?.visitSequence)
+      ? 'initial_trap_setup'
+      : null,
     todaysResult: typedReport?.todaysResult
       ? {
         headline: cleanText(typedReport.todaysResult.headline) || null,
@@ -269,6 +278,7 @@ function deterministicSummary(facts) {
       // rejects the reverse), and claiming "no captures" against it would
       // contradict the ratified Today's Result (codex round-3 P1).
       const typedCaptures = typedActivityState(facts, /captur/i);
+      const setup = facts.visitStage === 'initial_trap_setup';
       let clause = null;
       if (s.trapsWithCaptureRecorded > 0) {
         clause = `a capture recorded at ${s.trapsWithCaptureRecorded} trap${s.trapsWithCaptureRecorded === 1 ? '' : 's'}`;
@@ -276,10 +286,12 @@ function deterministicSummary(facts) {
         clause = `${typedCaptures.count} capture${typedCaptures.count === 1 ? '' : 's'} recorded`;
       } else if (typedCaptures.positive === true) {
         clause = 'captures recorded'; // typed positive without a count
-      } else if (typedCaptures.positive === false) {
+      } else if (typedCaptures.positive === false && !setup) {
+        // Traps placed today have had no chance to catch anything — a "no
+        // captures recorded" line on the setup visit reads as a failed check.
         clause = 'no captures recorded';
       }
-      parts.push(`${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were inspected${clause ? `, with ${clause}` : ''}.`);
+      parts.push(`${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were ${setup ? 'set' : 'inspected'}${clause ? `, with ${clause}` : ''}.`);
     } else if (s.program === 'rodent') {
       // Same sourcing rule as captures (codex round-7 P1, mirroring the
       // round-3 trapping fix): a zero-consumption claim is grounded only in
@@ -335,6 +347,7 @@ Rules:
 - Devices with a name in the facts (mechanical traps, monitoring devices) may be named. Products with a null name must only be described by their generic category — never guess or reconstruct a product name, and never mention chemicals, active ingredients, application rates, prices, or EPA details.
 - If photo evidence is provided, briefly and calmly reference what was documented — it shows the customer what the service is tracking.
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
+- When visitStage is "initial_trap_setup" this is the FIRST visit of the trapping program: the traps were placed today. Describe them as set/placed on this visit, say what happens next (we return to check them and adjust placements), and never write that traps were checked, re-checked, reset, or that no captures were found — nothing has had a chance to catch yet.
 - If the ratified result copy recommends a follow-up window or care instructions, carry them faithfully — never change the timing or drop the instruction.
 - If a next visit is provided, close with it, copying the date and arrival window EXACTLY as given in the facts — never restate, recompute, or reformat them.
 - Never say eliminated, guaranteed, pest-free, eradicated, infestation, toxic, poison, safe, or solved forever. Never blame the customer.

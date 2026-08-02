@@ -220,7 +220,10 @@ describe('combo trapping narrative (owner template §3)', () => {
       },
       chips: ['Continue trapping'],
       activity: { score: 2 },
-      visitSequence: 1,
+      // A follow-up stop: the traps were already out (reset, with a capture)
+      // and the combo modules ran alongside the re-check. Visit 1 is the
+      // trap-SETUP lane and has its own wording — covered separately below.
+      visitSequence: 2,
     });
     expect(result.body).toContain('We checked 6 traps, removed 1 capture and reset the traps today.');
     expect(result.body).toContain('We also completed exclusion work at the ac line penetration using rodent-resistant mesh and sealant.');
@@ -235,9 +238,158 @@ describe('combo trapping narrative (owner template §3)', () => {
       values: { species: 'Roof rat', traps_checked: '4', captures: '0', trap_actions: 'Traps reset' },
       chips: ['Continue trapping'],
       activity: { score: 1 },
-      visitSequence: 1,
+      visitSequence: 2,
     });
     expect(result.body).not.toContain('We also completed');
+  });
+});
+
+// Owner 2026-08-02: "the rodent trapping reports don't really account for the
+// fact that it was a first time trapping — it always assumes that it's a
+// secondary trapping. Typically these ARE first time trappings."
+describe('first-time trapping (visit 1 = the traps go out)', () => {
+  const SETUP_VALUES = {
+    species: 'Roof rat',
+    evidence_observed: 'Droppings, Rub marks / grease trails',
+    traps_checked: '8',
+    captures: '0',
+    trap_actions: 'New traps added',
+  };
+
+  test('visit 1 reads as a setup — traps SET, no re-check or empty-check wording', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: SETUP_VALUES,
+      chips: ['Continue trapping'],
+      activity: { score: 3 },
+      visitSequence: 1,
+    });
+    expect(result.body).toContain('We set 8 traps today.');
+    expect(result.body).toContain('The traps go out on this first visit');
+    expect(result.body).not.toMatch(/checked \d+ traps/);
+    // Traps placed today have had no chance to catch anything.
+    expect(result.body).not.toContain('found no new captures');
+    // The placement chip is already carried by the count sentence.
+    expect(result.body).not.toContain('added new traps');
+    expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
+  });
+
+  test('visit 2+ keeps the re-check story', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: SETUP_VALUES,
+      chips: ['Continue trapping'],
+      activity: { score: 3 },
+      visitSequence: 2,
+    });
+    expect(result.body).toContain('We checked 8 traps, found no new captures and added new traps today.');
+    expect(result.body).not.toContain('The traps go out on this first visit');
+  });
+
+  test('the setup visit relabels the count finding to "Traps set"', () => {
+    const setup = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      serviceKey: 'rodent_trapping_setup',
+      serviceLabel: 'Rodent Trapping',
+      values: SETUP_VALUES,
+      nextStepChips: ['Continue trapping'],
+      visitSequence: 1,
+      activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
+    });
+    expect(setup.findings.find((f) => f.fieldKey === 'traps_checked').customerLabel).toBe('Traps set');
+
+    const followUp = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      serviceKey: 'rodent_trapping_check',
+      serviceLabel: 'Rodent Trapping',
+      values: SETUP_VALUES,
+      nextStepChips: ['Continue trapping'],
+      visitSequence: 2,
+      activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
+    });
+    expect(followUp.findings.find((f) => f.fieldKey === 'traps_checked').customerLabel).toBe('Traps checked');
+  });
+
+  test('wildlife trapping is untouched — its own Trap installed chip already reads right', () => {
+    const result = buildTodaysResult({
+      projectType: 'wildlife_trapping',
+      reportTypeLabel: 'Wildlife Trapping Summary',
+      values: { target_animal: 'Raccoon', traps_checked: '3', trap_actions: 'Trap installed' },
+      chips: ['Continue trapping'],
+      activity: null,
+      visitSequence: 1,
+    });
+    expect(result.body).toContain('We checked 3 traps and installed traps today.');
+  });
+});
+
+// Owner 2026-08-02: the trapping report "isn't pulling in the Generate AI
+// report". The gauge branch silently dropped the reviewed body, so the
+// snapshot never stamped bodySource and report-data kept the generic recap.
+describe('tech-reviewed AI report copy on rodent trapping', () => {
+  const AI_BODY = 'We placed eight snap traps along the attic runways and the garage wall. '
+    + 'Droppings and rub marks were concentrated near the A/C plenum.';
+
+  test('the reviewed body drives the Today’s Result body and stamps bodySource', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { species: 'Roof rat', traps_checked: '8' },
+      chips: ['Continue trapping'],
+      activity: { score: 3 },
+      visitSequence: 1,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).toContain(AI_BODY);
+    expect(result.body).not.toContain('We set 8 traps today.');
+    expect(result.bodySource).toBe('technician_report');
+    // The gauge still owns the headline — AI copy never sets the reading.
+    expect(result.headline).toBe('Rodent activity was moderate today.');
+  });
+
+  test('a trend visit takes it too, headline still deterministic', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { species: 'Roof rat', traps_checked: '8' },
+      chips: ['Continue trapping'],
+      activity: { score: 2, trend: 'improving', trendWord: 'decreased' },
+      visitSequence: 3,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).toContain(AI_BODY);
+    expect(result.bodySource).toBe('technician_report');
+    expect(result.headline).toBe('Rodent activity has decreased since our last visit.');
+  });
+
+  test('the zero state keeps the template body — a draft must not outrank a typed zero', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { species: 'Roof rat', traps_checked: '8', captures: '0' },
+      chips: ['Monitor after no activity'],
+      activity: { score: 0 },
+      visitSequence: 2,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).not.toContain(AI_BODY);
+    expect(result).not.toHaveProperty('bodySource');
+  });
+
+  test('bait-station siblings are unchanged — the gauge body stays deterministic', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_bait_station',
+      reportTypeLabel: 'Rodent Bait Station Summary',
+      values: { stations_checked: '4', bait_consumption: 'Light' },
+      chips: ['Monitor for new activity'],
+      activity: { score: 2 },
+      visitSequence: 2,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).not.toContain(AI_BODY);
+    expect(result).not.toHaveProperty('bodySource');
   });
 });
 

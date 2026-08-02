@@ -1494,26 +1494,44 @@ function joinPhrases(parts) {
 // wildlife), composed from the sectioned checklist (counts + action chips)
 // instead of free text. Returns null when nothing trap-related was recorded
 // so the generic fallback chain applies.
-function trapActivitySentence(values = {}) {
+//
+// `initialSetup` = the FIRST visit of a trapping program (owner 2026-08-02:
+// "typically these are first time trappings" — the copy always read as a
+// recurring re-check). On that visit the traps are being PUT OUT, so the
+// count reads "set 8 traps" instead of "checked 8 traps", and the
+// add/reset chips fold into that setup rather than restating it.
+function trapActivitySentence(values = {}, { initialSetup = false } = {}) {
   const parts = [];
   const checked = Number(values.traps_checked);
   if (Number.isInteger(checked) && checked > 0) {
-    parts.push(`checked ${checked} trap${checked === 1 ? '' : 's'}`);
+    parts.push(`${initialSetup ? 'set' : 'checked'} ${checked} trap${checked === 1 ? '' : 's'}`);
   }
   const capturesRaw = values.captures;
   const captures = Number(capturesRaw);
   if (Number.isInteger(captures) && captures > 0) {
     parts.push(`removed ${captures} capture${captures === 1 ? '' : 's'}`);
-  } else if (capturesRaw != null && capturesRaw !== '' && captures === 0 && parts.length) {
+  } else if (
+    capturesRaw != null && capturesRaw !== '' && captures === 0 && parts.length
+    // Traps that went out today have had no chance to catch anything —
+    // "found no new captures" on a setup visit reads as a failed check.
+    && !initialSetup
+  ) {
     parts.push('found no new captures');
   }
   // Both trapping vocabularies: rodent ('Traps reset', 'New traps added')
   // and wildlife ('Trap installed', 'One-way door installed').
   const actions = String(values.trap_actions || '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  if (actions.includes('trap installed')) parts.push('installed traps');
-  if (actions.includes('new traps added')) parts.push('added new traps');
-  if (actions.includes('traps reset')) parts.push('reset the traps');
+  const placedTraps = actions.includes('trap installed') || actions.includes('new traps added');
+  if (initialSetup) {
+    // The count sentence already says the traps were set — the placement
+    // chips only speak when there was no count to carry them.
+    if (placedTraps && !parts.length) parts.push('set the traps');
+  } else {
+    if (actions.includes('trap installed')) parts.push('installed traps');
+    if (actions.includes('new traps added')) parts.push('added new traps');
+  }
+  if (actions.includes('traps reset') && !initialSetup) parts.push('reset the traps');
   if (actions.includes('traps moved')) parts.push('repositioned traps');
   if (actions.includes('one-way door installed')) parts.push('installed a one-way exit device');
   if (actions.includes('bait/lure refreshed')) parts.push('refreshed the bait');
@@ -1752,6 +1770,20 @@ function composedWorkSentence(projectType, values = {}) {
 }
 
 /**
+ * First visit of a rodent trapping program — the visit where the traps are
+ * PUT OUT rather than re-checked (owner 2026-08-02: the reports "always
+ * assume it's a secondary trapping"). visitSequence is the same first-visit
+ * notion the report already uses for the activity baseline and the "Progress
+ * Visit" label, so the copy, the gauge, and the report title all agree.
+ *
+ * Wildlife trapping is deliberately excluded: its checklist carries an
+ * explicit 'Trap installed' chip that already reads right on visit 1.
+ */
+function isInitialRodentTrapSetup(projectType, visitSequence) {
+  return projectType === 'rodent_trapping' && !(Number(visitSequence) > 1);
+}
+
+/**
  * Deterministic Today's Result copy (contract §6). AI may later polish the
  * recommendations field, but this template output always exists and always
  * sends — AI is never in the critical path.
@@ -1765,9 +1797,9 @@ function buildTodaysResult({
   visitSequence = 1,
   // Tech-reviewed AI report copy (the completion form's "Generate AI report"
   // output, parsed + banned-copy-screened by the complete route via
-  // technician-report-copy.js). Only the generic non-gauge default
-  // composition below uses it — zero states and every owner-specified story
-  // branch keep their approved wording.
+  // technician-report-copy.js). The generic non-gauge default composition
+  // and rodent trapping use it — zero states and every other owner-specified
+  // story branch keep their approved wording.
   technicianReportBody = null,
 }) {
   const indicator = ACTIVITY_INDICATORS[projectType];
@@ -1776,11 +1808,22 @@ function buildTodaysResult({
   // The free-text keys stay in the fallback chain so pre-v2 drafts still
   // produce a sentence.
   const isTrappingType = projectType === 'rodent_trapping' || projectType === 'wildlife_trapping';
+  // First visit of a rodent trapping program: the traps go out TODAY, so
+  // every "checked / reset / no captures yet" phrasing is wrong (owner
+  // 2026-08-02 — the reports "always assume it's a secondary trapping").
+  // visitSequence is the same first-visit notion the report already uses for
+  // the activity baseline and the "Progress Visit" label, so the whole
+  // report agrees with itself. Wildlife is untouched: its checklist carries
+  // an explicit 'Trap installed' chip that already reads right on visit 1.
+  const initialTrapSetup = isInitialRodentTrapSetup(projectType, visitSequence);
   const isBaitStationType = projectType === 'termite_bait_station' || projectType === 'rodent_bait_station';
   // Combo trapping visits (owner spec §3) append the exclusion/sanitation
   // module work to the trap sentence so the narrative covers the whole stop.
   const trapSentence = isTrappingType
-    && [trapActivitySentence(values), rodentComboModuleSentences(values)].filter(Boolean).join(' ');
+    && [
+      trapActivitySentence(values, { initialSetup: initialTrapSetup }),
+      rodentComboModuleSentences(values),
+    ].filter(Boolean).join(' ');
   const whatWeDid = trapSentence
     || (isBaitStationType && baitStationSentence(projectType, values))
     || composedWorkSentence(projectType, values)
@@ -2106,6 +2149,23 @@ function buildTodaysResult({
 
   if (indicator && activity && activity.score != null) {
     const noun = indicator.pestNoun;
+    // Rodent trapping honours the tech's reviewed "Generate AI report" copy
+    // the same way the generic default composition below does (owner
+    // 2026-08-02: the trapping report "isn't pulling in the Generate AI
+    // report" — the gauge branch silently dropped it). The headline stays
+    // deterministic and gauge-driven; only the body swaps, and only when a
+    // parsed, banned-copy-screened body exists. bodySource is stamped so the
+    // report's summary slot follows the same precedence every other typed
+    // report already uses (report-data.js). Zero states are excluded below,
+    // same rule as the default composition: a draft written before a late
+    // flip to "None observed" must not contradict the typed zero.
+    const trappingReportBody = projectType === 'rodent_trapping' ? technicianReportBody : null;
+    // One line of expectation-setting on the first trapping visit: nothing
+    // has been checked yet, so the customer is told what happens next
+    // instead of reading a re-check story.
+    const setupLine = initialTrapSetup
+      ? ' The traps go out on this first visit — we check them, record what they catch, and adjust placements from there.'
+      : '';
     if (visitSequence > 1 && activity.trendWord) {
       // Stable needs its own sentence shape — "has about the same as the
       // last visit since our last visit" is not English (Codex P2).
@@ -2114,22 +2174,24 @@ function buildTodaysResult({
         : `${noun} activity has ${activity.trend === 'worsening' ? 'increased' : 'decreased'} since our last visit.`;
       return {
         headline,
-        body: `${whatWeDid} ${nextStep}`,
+        body: `${trappingReportBody || whatWeDid} ${nextStep}`,
         nextStep,
+        ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
     if (activity.score === 0) {
       return {
         headline: `No active signs of ${noun.toLowerCase()} activity observed today.`,
-        body: `${whatWeDid} Continue monitoring and contact us if activity returns.`,
+        body: `${whatWeDid}${setupLine} Continue monitoring and contact us if activity returns.`,
         nextStep,
       };
     }
     const levelWord = SCORE_LEVEL_WORDS[activity.score] || 'activity';
     return {
       headline: `${noun} activity was ${levelWord.replace(' activity', '').toLowerCase()} today.`,
-      body: `${whatWeDid} ${nextStep}`,
+      body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
       nextStep,
+      ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -2195,6 +2257,12 @@ function buildTypedReportSnapshot({
     ? `${ACTIVITY_INDICATORS[projectType].programNoun || ACTIVITY_INDICATORS[projectType].pestNoun} Program — Progress Visit`
     : reportTypeLabel;
 
+  // On the first trapping visit the traps are being PUT OUT, so the count the
+  // tech entered is the number SET, not the number re-checked — the customer
+  // label follows (owner 2026-08-02). Same first-visit signal the Today's
+  // Result copy uses, so the finding row and the summary agree.
+  const initialTrapSetup = isInitialRodentTrapSetup(projectType, visitSequence);
+
   const items = [];
   for (const field of config.findingsFields || []) {
     // internal compliance fields (e.g. pollinator status, IRAC/FRAC) stay in
@@ -2219,7 +2287,9 @@ function buildTypedReportSnapshot({
     items.push({
       fieldKey: field.key,
       technicianLabel: field.label,
-      customerLabel: customerLabelForField(field.key, field.label),
+      customerLabel: initialTrapSetup && field.key === 'traps_checked'
+        ? 'Traps set'
+        : customerLabelForField(field.key, field.label),
       value,
       customerValueLabel,
       ...(customerValueParts && customerValueParts.length ? { customerValueParts } : {}),
@@ -2418,5 +2488,6 @@ module.exports = {
   trendDirection,
   buildTodaysResult,
   buildTypedReportSnapshot,
+  isInitialRodentTrapSetup,
   findingsSchemaForType,
 };
