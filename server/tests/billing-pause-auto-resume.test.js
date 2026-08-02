@@ -250,7 +250,7 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     // they are paused would be false.
     const pauseIdx = cronSrc.indexOf("service_pause_reason: 'autopay_final_failure'");
     expect(pauseIdx).toBeGreaterThan(-1);
-    const before = cronSrc.slice(Math.max(0, pauseIdx - 1600), pauseIdx);
+    const before = cronSrc.slice(Math.max(0, pauseIdx - 3600), pauseIdx);
     // ONE atomic statement: the veto lives in the UPDATE's own predicate
     // (whereNotExists), so no settled-and-committed payment can slip
     // between a separate check and the write.

@@ -86,6 +86,15 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
       // produce a pause within minutes of a settlement — an hour of slack
       // separates the race (clear it) from a stale redelivery (leave it)
       // with three orders of magnitude to spare on each side.
+      //
+      // The slack CANNOT admit an already-processed old payment: the
+      // webhook idempotency layer short-circuits duplicate events before
+      // the dispatch clear ever runs, so this code executes at most once
+      // per event — on its FIRST successful processing. The only delayed
+      // arrivals that reach here are events whose earlier deliveries
+      // errored (reclaim) — genuinely unprocessed money, where clearing is
+      // correct however long Stripe's backoff took, bounded by this guard
+      // to within the slack of the pause.
       const RACE_SLACK_MS = 60 * 60 * 1000;
       if (new Date(customer.service_paused_at).getTime() > settledAt.getTime() + RACE_SLACK_MS) {
         return { resumed: false, reason: 'pause_newer_than_payment' };
