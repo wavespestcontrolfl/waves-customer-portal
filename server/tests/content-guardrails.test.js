@@ -2475,6 +2475,18 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
   });
 
+  test('a code span or escaped bracket is not a citation (r15)', () => {
+    // Both render literal text — nothing a reader can click.
+    expect(findHardcodedPrice('Other companies charge a $199 fee as of July 2026 `[source](https://www.consumeraffairs.com/x)`.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Other companies charge a $199 fee as of July 2026 \\[source](https://www.consumeraffairs.com/x).', OP)).not.toBeNull();
+  });
+
+  test('HTML deletion elements are not attribution either (r15)', () => {
+    // Same as "~~": the reader sees the owner struck out and the price live.
+    expect(findHardcodedPrice('<del>Other companies charge</del> $89 per visit for local quarterly service.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('<s>Other companies charge</s> $89 per visit for local quarterly service.', OP)).not.toBeNull();
+  });
+
   test('shortcut and collapsed reference citations qualify (r14)', () => {
     // The label lives in the FIRST bracket for these two forms.
     expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 [source].\n\n[source]: https://www.consumeraffairs.com/x', OP)).toBeNull();

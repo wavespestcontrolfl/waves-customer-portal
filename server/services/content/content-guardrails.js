@@ -329,7 +329,13 @@ function citationOnlyHosts({ operatorCitations = false } = {}) {
 // destination and an UNUSED reference definition are both stripped from the
 // rendered page, so neither is a citation — accepting them let an unrelated
 // "![image](…)" or a dangling "[unused]: …" stand in for the source (Codex).
-function visibleCitationUrls(citationPara, renderedPara, citationDoc) {
+function visibleCitationUrls(citationParaRaw, renderedPara, citationDoc) {
+  // A code span renders literal text, not a link, and "\[" is an escaped
+  // bracket — neither produces something a reader can click, so neither is a
+  // citation (Codex). Blanked length-preservingly so offsets are unaffected.
+  const citationPara = String(citationParaRaw || '')
+    .replace(/(`+)(?:[^`]|(?!\1)`)*\1/g, blankSpan)
+    .replace(/\\[[\]()]/g, '  ');
   const out = [];
   const push = (u) => { if (u) out.push(String(u).replace(/[).,;:!?]+$/, '')); };
   // Inline links — NOT images.
@@ -410,7 +416,10 @@ function paragraphHasMarkup(text, index) {
   const paragraph = s.slice(start, rawEnd === -1 ? s.length : rawEnd);
   // Deletion markup is not an affirmative statement: "~~Other companies
   // charge~~ $89 per visit" leaves the price as the operative claim (Codex).
+  // The semantic ELEMENTS say the same thing and carry no attributes, so the
+  // attribute-free allowance below would otherwise wave them through.
   if (/~~/.test(paragraph)) return true;
+  if (/<\s*(?:del|s|strike)\b/i.test(paragraph)) return true;
   if (/\{|&[#A-Za-z]|<!/.test(paragraph)) return true; // expression, entity, comment
   // A tag with NO attributes cannot hide anything — it carries no hidden,
   // style, class or aria-hidden — so plain wrappers like <p> and <strong>
