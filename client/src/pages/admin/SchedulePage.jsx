@@ -1676,6 +1676,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               );
             }
           }
+          // The linked technician job timer feeds timesheets and
+          // utilization — when the server couldn't route it through the
+          // audited edit (approved week, several linked entries), the
+          // inflated span survives there until corrected by hand.
+          if (patchResult?.timeEntryCorrected === false) {
+            const timerReason =
+              patchResult?.timeEntryCorrectionBlocked === "approved_week"
+                ? "its week is already approved"
+                : patchResult?.timeEntryCorrectionBlocked === "multiple_job_entries"
+                  ? "several timer entries are linked to this visit"
+                  : "it could not be edited automatically";
+            alert(
+              `Duration corrected, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
+            );
+          }
         } catch (patchErr) {
           alert(
             `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,

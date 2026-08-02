@@ -58,6 +58,11 @@ jest.mock('../services/job-costing', () => ({
   calculateJobCost: jest.fn(async () => ({})),
   resolveServiceRecord: jest.requireActual('../services/job-costing').resolveServiceRecord,
 }));
+// The linked job timer flows through the AUDITED edit workflow — mocked so
+// the PATCH tests can assert the safe-path call without a real week lock.
+jest.mock('../services/time-tracking', () => ({
+  adminEditEntry: jest.fn(async () => ({})),
+}));
 
 const fs = require('fs');
 const path = require('path');
@@ -434,7 +439,7 @@ describe('route wiring contracts', () => {
 // Behavioral: the PATCH handler against a scripted knex mock
 // ---------------------------------------------------------------------------
 
-function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, legacyRows = null, columnInfoError = null }) {
+function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, legacyRows = null, columnInfoError = null, timeEntries = null }) {
   // `record` answers resolveServiceRecord's FK query (.first()); `legacyRows`
   // (when set) answers its awaited (customer, date, type) soft-join, so the
   // pre-FK shapes exercise the REAL legacy resolution path.
@@ -447,6 +452,8 @@ function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, le
       orderBy(col, dir) { op.orderBy = [col, dir]; return chain; },
       limit(n) { op.limited = n; return chain; },
       count(spec) { op.counted = spec; return chain; },
+      whereNot(col, val) { op.whereNot = [col, val]; return chain; },
+      select(...cols) { op.selected = cols; return chain; },
       forUpdate() { op.locked = true; return chain; },
       async first() {
         if (table === 'scheduled_services') return op.counted ? { c: 1 } : svc;
@@ -463,8 +470,10 @@ function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, le
         return recordCols;
       },
       then(resolve, reject) {
-        return Promise.resolve(table === 'service_records' && op.limited ? (legacyRows || []) : [])
-          .then(resolve, reject);
+        const rows = table === 'time_entries'
+          ? (timeEntries || [])
+          : (table === 'service_records' && op.limited ? (legacyRows || []) : []);
+        return Promise.resolve(rows).then(resolve, reject);
       },
     };
     chain.catch = () => chain;
@@ -601,6 +610,90 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     const costingCallAt = source.indexOf('await JobCosting.calculateJobCost(svc.id);');
     expect(auditInsertAt).toBeGreaterThan(-1);
     expect(costingCallAt).toBeGreaterThan(auditInsertAt);
+  });
+
+  test('an inflated linked job timer is corrected through the audited edit workflow (codex P1 round 20)', async () => {
+    // The forgotten closeout inflated the linked time_entries row too —
+    // timesheets and utilization read it directly. Exactly one closed,
+    // non-voided, inflated job entry = the safe shape: route it through
+    // adminEditEntry (originals preserved, day back to pending).
+    const TimeTracking = require('../services/time-tracking');
+    const clockIn = new Date('2026-07-19T16:00:00.000Z');
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [{
+        id: 'te-1',
+        clock_in: clockIn,
+        clock_out: new Date('2026-07-19T18:19:05.000Z'),
+        duration_minutes: 139,
+        status: 'active',
+      }],
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(TimeTracking.adminEditEntry).toHaveBeenCalledWith('te-1', expect.objectContaining({
+      clock_out: new Date(clockIn.getTime() + 45 * 60000).toISOString(),
+      edited_by: 'admin-1',
+      edit_reason: expect.stringContaining('45 min'),
+    }));
+    expect(res.body.timeEntryCorrected).toBe(true);
+    expect(res.body.timeEntryCorrectionBlocked).toBeUndefined();
+  });
+
+  test('an ambiguous or approved-week linked timer is surfaced, never forced (codex P1 round 20)', async () => {
+    const TimeTracking = require('../services/time-tracking');
+    // Several linked entries — editing one could pick the wrong clock.
+    const twoEntries = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [
+        { id: 'te-1', clock_in: new Date('2026-07-19T16:00:00.000Z'), clock_out: new Date('2026-07-19T18:19:05.000Z'), duration_minutes: 139, status: 'active' },
+        { id: 'te-2', clock_in: new Date('2026-07-19T13:00:00.000Z'), clock_out: new Date('2026-07-19T14:30:00.000Z'), duration_minutes: 90, status: 'active' },
+      ],
+    });
+    mockDbCurrent = twoEntries;
+    let res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(TimeTracking.adminEditEntry).not.toHaveBeenCalled();
+    expect(res.body.timeEntryCorrected).toBe(false);
+    expect(res.body.timeEntryCorrectionBlocked).toBe('multiple_job_entries');
+
+    // Approved week: the audited workflow refuses — surfaced, correction stands.
+    TimeTracking.adminEditEntry.mockRejectedValueOnce(new Error('Week is approved — reopen it before editing entries.'));
+    const oneEntry = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [{
+        id: 'te-9',
+        clock_in: new Date('2026-07-19T16:00:00.000Z'),
+        clock_out: new Date('2026-07-19T18:19:05.000Z'),
+        duration_minutes: 139,
+        status: 'active',
+      }],
+    });
+    mockDbCurrent = oneEntry;
+    res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body.timeEntryCorrected).toBe(false);
+    expect(res.body.timeEntryCorrectionBlocked).toBe('approved_week');
   });
 
   test('the tracker completed_at carries the adjusted instant for live corrections (codex P2 round 10)', () => {

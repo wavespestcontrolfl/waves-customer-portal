@@ -2407,6 +2407,48 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       });
     });
 
+    // Linked job timer (codex P1, pre-push audit round 20): the forgotten
+    // closeout that inflated the visit timer usually inflated the linked
+    // time_entries row too — job costing overrides it via the durable
+    // stamp, but timesheet detail, utilization, and actual-duration
+    // analytics read time_entries directly, so the visit would still look
+    // uncorrected there. Route the fix through the audited admin-edit
+    // workflow WHEN SAFE: exactly one non-voided closed job entry whose
+    // recorded span exceeds the corrected minutes. adminEditEntry preserves
+    // originals, recomputes the paid duration, and returns the day to
+    // pending for re-approval; an approved/immutable week or an ambiguous
+    // shape is SURFACED in the response instead of forced — the client
+    // warns that the timer needs a separate Timesheets correction.
+    let timeEntryCorrected = null; // null = no inflated linked entry to correct
+    let timeEntryCorrectionBlocked = null;
+    try {
+      const jobEntries = await db('time_entries')
+        .where({ job_id: svc.id, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status');
+      const closed = jobEntries.filter((e) => e.clock_out != null);
+      const inflated = closed.filter((e) => Number(e.duration_minutes) > plan.minutes + 1);
+      if (inflated.length > 0) {
+        if (jobEntries.length === 1 && inflated.length === 1 && inflated[0].clock_in) {
+          const entry = inflated[0];
+          const newClockOut = new Date(new Date(entry.clock_in).getTime() + plan.minutes * 60000);
+          await require('../services/time-tracking').adminEditEntry(entry.id, {
+            clock_out: newClockOut.toISOString(),
+            edit_reason: `Time-on-site correction: ${plan.minutes} min (visit ${svc.id})`,
+            edited_by: req.technicianId,
+          });
+          timeEntryCorrected = true;
+        } else {
+          timeEntryCorrected = false;
+          timeEntryCorrectionBlocked = jobEntries.length > 1 ? 'multiple_job_entries' : 'entry_shape';
+        }
+      }
+    } catch (err) {
+      timeEntryCorrected = false;
+      timeEntryCorrectionBlocked = /approved/i.test(String(err.message)) ? 'approved_week' : 'edit_failed';
+      logger.warn(`[time-on-site] linked job timer correction blocked for service ${svc.id}: ${err.message}`);
+    }
+
     // A failed recalc is SURFACED, not swallowed (codex P2 #3152 round 9):
     // the correction itself stands (costing is derived state any later
     // recalc heals from the durable stamp), but the response says so and
@@ -2438,6 +2480,8 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       recordUpdated,
       costingUpdated,
       ...(recordAmbiguous ? { recordAmbiguous: true } : {}),
+      ...(timeEntryCorrected != null ? { timeEntryCorrected } : {}),
+      ...(timeEntryCorrectionBlocked ? { timeEntryCorrectionBlocked } : {}),
     });
   } catch (err) { next(err); }
 });
