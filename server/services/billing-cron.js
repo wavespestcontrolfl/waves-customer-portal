@@ -636,6 +636,12 @@ const BillingCron = {
 
     for (const payment of failedPayments) {
       retried++;
+      // Anchor for the concurrent-settlement guard at the final-failure
+      // pause write below: a payment that settles while this attempt is in
+      // flight must veto the pause (owner ruling 2026-08-01 — paying
+      // resumes billing; racing webhook order must not strand a customer
+      // who just paid behind a pause their payment would have cleared).
+      const attemptStartedAt = new Date();
       const customer = await db('customers')
         .where({ id: payment.customer_id })
         .first();
@@ -1177,18 +1183,107 @@ const BillingCron = {
 
           // Pause service so we stop burning charges (next month's cron skips
           // customers with service_paused_at set) and so dispatch can see the
-          // billing issue before dispatching the next visit.
+          // billing issue before dispatching the next visit. pauseOutcome
+          // drives every downstream message — three DISTINCT states,
+          // because "a payment settled" (veto) and "the write blew up"
+          // (error) demand opposite operator reactions: the first needs
+          // nothing, the second needs someone to look at the pause that
+          // never landed.
+          let pauseOutcome = 'error';
           try {
-            const pausedAt = new Date();
-            await db('customers').where({ id: payment.customer_id }).update({
-              service_paused_at: pausedAt,
-              service_pause_reason: 'autopay_final_failure',
-            });
-            void AccountMembershipEmail.sendMembershipPaused({
-              customerId: payment.customer_id,
-              effectiveDate: pausedAt,
-              reason: 'Payment retry attempts were exhausted',
-            }).catch((emailErr) => logger.warn(`[billing-cron] service pause email failed for customer ${payment.customer_id}: ${emailErr.message}`));
+            // Concurrent-settlement guard, IN the UPDATE's predicate: if
+            // any payment of this customer's settled since this attempt
+            // began (a portal payment racing the exhaustion), pausing would
+            // strand them — the auto-clear in billing-pause.js only fires on
+            // settlements whose webhook ARRIVES after a pause exists.
+            // status='paid' ONLY (an ACH 'processing' row is accepted, not
+            // settled, and can still bounce; when it does settle, its
+            // succeeded webhook finds the pause and auto-clears it).
+            //
+            // WHEN it settled: webhook-recorded rows carry Stripe's own
+            // settlement moment in metadata.settled_event_at — local write
+            // times lie for those (a delayed redelivery of a days-old
+            // success creates/touches its row NOW and must not pose as
+            // fresh money). Rows WITHOUT the stamp are synchronous local
+            // recordings (stripe.js charge()), where created_at IS the
+            // settlement moment. One atomic statement, so no
+            // settled-and-committed payment slips between a check and the
+            // write; a webhook transaction still uncommitted at the
+            // UPDATE's snapshot is caught by its own post-commit clear.
+            // The pause is stamped with the ATTEMPT ANCHOR, not "now":
+            // service_paused_at then MEANS "the failure cycle this pause
+            // answers to began here", and the auto-clear's ordering guard
+            // becomes exact causality — a payment settling at-or-after this
+            // moment raced the pause and clears it; anything earlier is
+            // evidence the exhaustion already superseded. No heuristic
+            // window, no extra column. (Cosmetics unaffected: the Customer
+            // 360 banner renders the ET calendar date, and the attempt runs
+            // for seconds, not days.)
+            const pausedAt = attemptStartedAt;
+            // Stripe's event.created is INTEGER SECONDS; a settlement later
+            // in the same second as attemptStartedAt would stamp a floored
+            // settled_event_at that compares as earlier and slip the veto.
+            // Floor the anchor to the second — widening the veto by <1s is
+            // the safe direction (an extra veto self-heals via the clear;
+            // a missed one strands the customer).
+            const attemptAnchor = new Date(Math.floor(attemptStartedAt.getTime() / 1000) * 1000);
+            const pausedRows = await db('customers')
+              .where({ id: payment.customer_id })
+              // Never OVERWRITE an existing pause: a manual pause set while
+              // this retry was in flight would be silently converted into an
+              // auto-clearable autopay_final_failure one — and a later
+              // payment would clear a pause the UI promises only clears
+              // manually.
+              .whereNull('service_paused_at')
+              .whereNotExists(
+                db('payments')
+                  .select(db.raw('1'))
+                  .whereRaw('payments.customer_id = customers.id')
+                  .where('payments.status', 'paid')
+                  // MIRRORS the auto-clear's eligibility (stripe-webhook
+                  // maybeAutoClearBillingPauseForIntent): money the clear
+                  // would never fire on must not veto the pause either, or
+                  // the two sides disagree about the same dollar. A no-show
+                  // fee is not a balance payment, and statement/payer rows
+                  // are the PAYER's tender — neither says anything about
+                  // the homeowner's dead card.
+                  .whereRaw("(payments.metadata->>'purpose') IS DISTINCT FROM 'card_hold_no_show_fee'")
+                  .whereNull('payments.statement_id')
+                  .whereRaw("(payments.metadata->>'payer_id') IS NULL")
+                  .where(function settledSinceAttempt() {
+                    this.whereRaw("(payments.metadata->>'settled_event_at')::timestamptz >= ?", [attemptAnchor])
+                      .orWhere(function unstampedLocalRecording() {
+                        this.whereRaw("(payments.metadata->>'settled_event_at') IS NULL")
+                          .andWhere('payments.created_at', '>=', attemptAnchor);
+                      });
+                  }),
+              )
+              .update({
+                service_paused_at: pausedAt,
+                service_pause_reason: 'autopay_final_failure',
+              });
+            if (!pausedRows) {
+              // Two distinct reasons the UPDATE matched nothing, and they
+              // demand different messages: an existing pause (preserved) vs
+              // a settlement veto (customer just paid).
+              const existing = await db('customers')
+                .where({ id: payment.customer_id })
+                .first('service_paused_at', 'service_pause_reason');
+              if (existing?.service_paused_at) {
+                pauseOutcome = 'already_paused';
+                logger.warn(`[billing-cron] NOT pausing customer ${payment.customer_id} — an existing pause (${existing.service_pause_reason || 'no reason'}) is preserved`);
+              } else {
+                pauseOutcome = 'settlement_veto';
+                logger.warn(`[billing-cron] NOT pausing customer ${payment.customer_id} — a payment settled during the final retry attempt`);
+              }
+            } else {
+              pauseOutcome = 'applied';
+              void AccountMembershipEmail.sendMembershipPaused({
+                customerId: payment.customer_id,
+                effectiveDate: pausedAt,
+                reason: 'Payment retry attempts were exhausted',
+              }).catch((emailErr) => logger.warn(`[billing-cron] service pause email failed for customer ${payment.customer_id}: ${emailErr.message}`));
+            }
           } catch (pauseErr) {
             logger.error(`[billing-cron] Service pause failed: ${pauseErr.message}`);
           }
@@ -1197,7 +1292,7 @@ const BillingCron = {
           // sat on a dashboard — push-style SMS makes sure it lands).
           try {
             await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. Service paused until card is updated. Last error: ${err.message}`,
+              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. ${pauseOutcome === 'applied' ? 'Service paused until card is updated.' : pauseOutcome === 'settlement_veto' ? 'NOT paused — a payment settled during the attempt.' : pauseOutcome === 'already_paused' ? 'Existing pause preserved.' : 'PAUSE WRITE FAILED — customer is NOT paused, check logs.'} Last error: ${err.message}`,
               { messageType: 'internal_alert', link: '/admin/revenue' },
             );
           } catch (officeErr) {
@@ -1211,12 +1306,13 @@ const BillingCron = {
               alert_type: 'payment_failure',
               severity: 'high',
               title: `Payment failed after 3 retries — $${amount}`,
-              description: `Monthly payment for ${customer.first_name} ${customer.last_name} failed 3 times. Service auto-paused. Last error: ${err.message}`,
+              description: `Monthly payment for ${customer.first_name} ${customer.last_name} failed 3 times. ${pauseOutcome === 'applied' ? 'Service auto-paused.' : pauseOutcome === 'settlement_veto' ? 'Not paused — a payment settled during the attempt.' : pauseOutcome === 'already_paused' ? 'Existing pause preserved.' : 'PAUSE WRITE FAILED — customer is not paused; investigate.'} Last error: ${err.message}`,
               trigger_data: JSON.stringify({
                 payment_id: payment.id,
                 amount: payment.amount,
                 retry_count: newRetryCount,
-                service_paused: true,
+                service_paused: pauseOutcome === 'applied',
+                pause_outcome: pauseOutcome,
               }),
             });
           } catch (alertErr) {
@@ -1226,10 +1322,10 @@ const BillingCron = {
           await logAutopay(payment.customer_id, 'retry_failed', {
             amountCents: Math.round(parseFloat(payment.amount) * 100),
             paymentId: payment.id,
-            details: { source: 'autopay', retry_count: newRetryCount, reason: err.message, final: true, service_paused: true },
+            details: { source: 'autopay', retry_count: newRetryCount, reason: err.message, final: true, service_paused: pauseOutcome === 'applied', pause_outcome: pauseOutcome },
           });
 
-          logger.warn(`[billing-cron] ESCALATED: customer id=${customer.id} — 3 retries exhausted, service paused`);
+          logger.warn(`[billing-cron] ESCALATED: customer id=${customer.id} — 3 retries exhausted, pause outcome: ${pauseOutcome}`);
         } else {
           // Schedule next retry
           const nextRetry = new Date();
