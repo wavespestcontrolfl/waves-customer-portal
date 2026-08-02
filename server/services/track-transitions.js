@@ -739,13 +739,14 @@ async function markComplete(serviceId, opts = {}) {
   // much as one that commits after it — and the seq predicate only detects
   // post-load movement (codex P2 #3152 round 20). When the caller states no
   // revision (an ordinary status-route completion) and the loaded row
-  // already carries a correction revision WITH a completed_at (the
-  // unclosed-timer correction stamps its derived end proactively), the flip
-  // degrades to transition-only: stamping `now` over the corrected instant
-  // is the exact overwrite the fences exist to prevent.
+  // already carries ANY correction revision, the flip degrades to
+  // transition-only. Unconditional on completed_at (codex P2 round 26): a
+  // clamped or no-start correction bumps the seq while deliberately
+  // stamping NO end — the unknown-end posture — and a full update here
+  // would write wall-clock end stamps beside the corrected duration,
+  // exactly the pairing the correction chose not to make.
   const priorCorrectionOwnsRow = opts.expectedCorrectionSeq === undefined
-    && normStamp(svc.time_on_site_correction_seq) != null
-    && !!finiteDate(svc.completed_at);
+    && normStamp(svc.time_on_site_correction_seq) != null;
   let completedAtStamp = (!transitionStampMatches || priorCorrectionOwnsRow)
     ? null // the correction owns completed_at — the row's value stands
     : (opts.untrustedLifecycleSpan

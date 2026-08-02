@@ -780,12 +780,17 @@ describe('track-transitions lifecycle side effects', () => {
     // load: a correction committing inside the window turns the stale full
     // lifecycle write into the transition-only retry.
     jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    // Never corrected (seq null): the default fence predicates on null and
+    // the full lifecycle write runs — a correction committing mid-window
+    // bumps the seq and the fenced write misses. (Any PRE-EXISTING revision
+    // now degrades to transition-only up front — codex round 26 — so the
+    // fenced-full-write path is exclusively the never-corrected shape.)
     const svc = {
       id: 'job-f18',
       technician_id: 'tech-f18',
       track_state: 'on_property',
       actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
-      time_on_site_correction_seq: 1,
+      time_on_site_correction_seq: null,
     };
     const fencedUpdate = query(0);
     const retryUpdate = query(1);
@@ -799,7 +804,7 @@ describe('track-transitions lifecycle side effects', () => {
     expect(result.ok).toBe(true);
     expect(result.completedAt).toBeNull();
     expect(fencedUpdate.whereRaw).toHaveBeenCalledWith(
-      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [1],
+      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [null],
     );
     expect(Object.keys(retryUpdate.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
 
@@ -813,9 +818,35 @@ describe('track-transitions lifecycle side effects', () => {
     const result2 = await trackTransitions.markComplete('job-f18b', {});
     expect(result2.ok).toBe(true);
     expect(update2.whereRaw).toHaveBeenCalledWith(
-      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [1],
+      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [null],
     );
     expect(update2.update.mock.calls[0][0].completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
+  });
+
+  test('a prior correction WITHOUT a completed_at still owns the lifecycle — transition-only (codex P2 #3152 round 26)', async () => {
+    // Clamped/no-start corrections bump the seq while deliberately
+    // stamping NO end (unknown-end posture). A status-route completion
+    // must not pair wall-clock end stamps with that corrected duration.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f26',
+      technician_id: 'tech-f26',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      time_on_site_adjusted_minutes: 720,
+      time_on_site_correction_seq: 1,
+      completed_at: null,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-f26', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    expect(Object.keys(update.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
   });
 
   test('a correction that committed BEFORE the load owns completed_at — the flip is transition-only (codex P2 #3152 round 20)', async () => {

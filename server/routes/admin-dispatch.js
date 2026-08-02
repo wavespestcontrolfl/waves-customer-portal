@@ -909,7 +909,16 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy, 
       // entry silently unsynced. Half a hundredth absorbs float noise
       // only; an entry this sync wrote lands exactly on the corrected
       // minutes, so re-runs still no-op.
-      const totalMinutes = jobEntries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
+      //
+      // The no-op decision reads the LIVE set (codex P2 round 26): a
+      // payroll edit after the snapshot that changes a duration without
+      // changing the id-set would otherwise slip through — the snapshot
+      // total still agrees and the version fence on the edit path is never
+      // reached. A live-divergent timer falls through instead: the edit
+      // path's expected_updated_at (from the SNAPSHOT) then 409s and the
+      // conflict is surfaced; a payroll edit that already landed the
+      // corrected minutes stays silent, as it should.
+      const totalMinutes = liveEntries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
       if (Math.abs(totalMinutes - minutes) <= 0.005) return;
       if (jobEntries.length === 1 && jobEntries[0].clock_in) {
         // Crash-resume guard (codex P2 #3152 round 24): with no
@@ -2532,9 +2541,14 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
         } else if (clearedDerivedEnd) {
           // Mirror the row-side clearing (codex P2 #3152 round 25): the
           // record's end fields carry the same prior-derived instant and
-          // feed the customer timeline directly.
+          // feed the customer timeline directly. completed_at is EXEMPT on
+          // the record too (codex P2 round 26) — it is the durable
+          // completion stamp report logic keys off (mowing-history cap
+          // falls back to updated_at without it), same reasoning that
+          // keeps the scheduled_services stamp; only the duration-pair
+          // end fields clear.
           for (const field of BACKFILL_RECORD_END_FIELDS) {
-            if (recordCols[field]) recordUpdate[field] = null;
+            if (field !== 'completed_at' && recordCols[field]) recordUpdate[field] = null;
           }
         }
         if (recordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;

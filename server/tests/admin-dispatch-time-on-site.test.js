@@ -738,7 +738,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(res.body.timeEntryCorrected).toBe(true);
     // Divergence is judged on the AGGREGATE at stored precision — an entry
     // already landed exactly on the corrected minutes no-ops.
-    expect(source).toMatch(/const totalMinutes = jobEntries\.reduce\(\(s, e\) => s \+ \(Number\(e\.duration_minutes\) \|\| 0\), 0\);\s*\n\s*if \(Math\.abs\(totalMinutes - minutes\) <= 0\.005\) return;/);
+    expect(source).toMatch(/const totalMinutes = liveEntries\.reduce\(\(s, e\) => s \+ \(Number\(e\.duration_minutes\) \|\| 0\), 0\);\s*\n\s*if \(Math\.abs\(totalMinutes - minutes\) <= 0\.005\) return;/);
     // And the audited edit is DURATION-based: clock_out derives from the
     // service's own locked row, not from this sync's unlocked snapshot
     // (codex P1, audit round 21b) — a concurrent clock_in edit can no
@@ -904,6 +904,9 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       const recUpdate = dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload);
       expect(recUpdate.updatePayload.ended_at).toBeNull();
       expect(recUpdate.updatePayload.actual_end_time).toBeNull();
+      // The record's durable completion stamp survives the clearing —
+      // report logic falls back to updated_at without it (codex round 26).
+      expect(recUpdate.updatePayload).not.toHaveProperty('completed_at');
 
       // A GENUINE closeout end (not start + prior stamped minutes) is
       // preserved untouched even when this save derives no end.
