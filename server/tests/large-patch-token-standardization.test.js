@@ -140,12 +140,14 @@ describe('no source still produces the retired disease token', () => {
 
 describe('SpeedZone Southern turf and heat limits', () => {
   test('records the label temperature window', async () => {
+    // Written across independent statements so a partially populated row still
+    // gets its missing fields — see the off-label-ceiling test below.
     const { knex, calls } = mockKnex();
     await speedzone.up(knex);
-    const temps = calls.find((c) => c.row.max_temp_f !== undefined);
-    expect(temps.row.max_temp_f).toBe(85);
-    expect(temps.row.min_temp_f).toBe(50);
-    expect(temps.row.heat_restrictions).toBe(speedzone.HEAT_RESTRICTIONS);
+    const written = Object.assign({}, ...calls.map((c) => c.row));
+    expect(written.max_temp_f).toBe(85);
+    expect(written.min_temp_f).toBe(50);
+    expect(written.heat_restrictions).toBe(speedzone.HEAT_RESTRICTIONS);
   });
 
   test('keeps Floratam excluded and adds the Bitterblue the label also names', () => {
@@ -154,6 +156,28 @@ describe('SpeedZone Southern turf and heat limits', () => {
     // The unknown-cultivar guard must survive: an unidentified St. Augustine
     // could be Floratam, so it stays excluded too.
     expect(speedzone.NEXT_EXCLUDED).toContain('st_augustine_unknown_cultivar');
+  });
+
+  test('corrects an off-label ceiling instead of skipping the row', async () => {
+    // Requiring all three fields to be NULL meant a row already holding
+    // max_temp_f = 90 — the off-label ceiling this migration exists to remove
+    // — was skipped and kept it. Each field is now handled independently.
+    const { knex, calls } = mockKnex();
+    await speedzone.up(knex);
+    const ceiling = calls.find((c) => c.row.max_temp_f !== undefined);
+    const floor = calls.find((c) => c.row.min_temp_f !== undefined);
+    const prose = calls.find((c) => c.row.heat_restrictions !== undefined);
+    // Three separate statements, not one all-or-nothing update.
+    expect(ceiling).toBeDefined();
+    expect(floor).toBeDefined();
+    expect(prose).toBeDefined();
+    expect(ceiling).not.toBe(floor);
+    expect(ceiling.row.max_temp_f).toBe(85);
+    expect(floor.row.min_temp_f).toBe(50);
+    // The prose write must NOT also carry the numbers — that would recreate
+    // the all-or-nothing coupling.
+    expect(prose.row.max_temp_f).toBeUndefined();
+    expect(prose.row.min_temp_f).toBeUndefined();
   });
 
   test('the restriction text names the cultivars and both temperature bounds', () => {

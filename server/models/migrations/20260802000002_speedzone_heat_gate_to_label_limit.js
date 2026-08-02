@@ -44,6 +44,22 @@ async function shiftGateThreshold(knex, { from, to }) {
         logic: knex.raw("jsonb_set(logic, '{maxTempF}', ?::jsonb)", [String(to)]),
       });
 
+    // Same completeness point as the product gates below — the label's floor
+    // and seasonal windows recorded structurally, not just in prose.
+    await knex('lawn_protocol_gates')
+      .where('gate_key', 'speedzone_heat_gate')
+      .whereRaw("logic->>'maxTempF' = ?", [String(to)])
+      .whereRaw("NOT (logic ? 'minTempF')")
+      .update({
+        logic: knex.raw(
+          "logic || ?::jsonb",
+          [JSON.stringify({
+            minTempF: 50,
+            stAugustineSeasonalBlock: ['spring_green_up', 'fall_to_winter_transition'],
+          })],
+        ),
+      });
+
     // rule_text is what a technician actually reads — the numbers inside
     // `logic` are advisory metadata that nothing evaluates against live
     // weather, so this string is the gate in practice.
@@ -78,6 +94,31 @@ async function shiftGateThreshold(knex, { from, to }) {
       .whereRaw('product_name ILIKE ?', ['%speedzone%'])
       .update({
         gates: knex.raw("jsonb_set(gates, '{maxTempF}', ?::jsonb)", [String(to)]),
+      });
+
+    // Record the rest of the label's limits alongside the ceiling so the
+    // structured row is complete rather than half a rule.
+    //
+    // BE CLEAR ABOUT WHAT THIS DOES: nothing evaluates these numbers against
+    // live weather. `gates` is checked for PRESENCE (admin-lawn-assessment
+    // excludes gated products from auto-planning) and rendered into the SOP a
+    // technician reads; there is no plan matcher consuming maxTempF today, and
+    // that was already true of the ceiling before this change. These keys make
+    // the record complete and correct for whenever an evaluator does arrive —
+    // they are not, on their own, enforcement. The enforcement that reaches a
+    // person is the rule_text and visit copy updated above.
+    await knex('lawn_protocol_products')
+      .whereRaw("gates->>'maxTempF' = ?", [String(to)])
+      .whereRaw('product_name ILIKE ?', ['%speedzone%'])
+      .whereRaw("NOT (gates ? 'minTempF')")
+      .update({
+        gates: knex.raw(
+          "gates || ?::jsonb",
+          [JSON.stringify({
+            minTempF: 50,
+            stAugustineSeasonalBlock: ['spring_green_up', 'fall_to_winter_transition'],
+          })],
+        ),
       });
   }
 

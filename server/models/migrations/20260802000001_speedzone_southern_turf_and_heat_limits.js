@@ -51,19 +51,39 @@ exports.NEXT_EXCLUDED = NEXT_EXCLUDED;
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
-  // Temperature limits: only write while they are still unset, so a later
-  // hand-entered value wins over this backfill.
+  // Each safety field is handled INDEPENDENTLY, and the rule is "preserve
+  // stricter, correct laxer" rather than "skip if touched".
+  //
+  // Requiring all three to be NULL was wrong: a row already holding
+  // max_temp_f = 90 — an off-label ceiling — would have been skipped entirely
+  // and kept it, which is the exact condition this migration exists to remove.
+  // A partially populated row would likewise have kept its gaps.
+  //
+  // A stricter hand edit still wins: a ceiling below 85 or a floor above 50 is
+  // someone deliberately being more careful than the label, and is left alone.
+
+  // Ceiling: fill when unset, and pull down anything above the label limit.
   await knex('products_catalog')
     .whereRaw('LOWER(name) = LOWER(?)', [NAME])
-    .whereNull('max_temp_f')
-    .whereNull('min_temp_f')
+    .where(function whereLaxCeiling() {
+      this.whereNull('max_temp_f').orWhere('max_temp_f', '>', 85);
+    })
+    .update({ max_temp_f: 85, updated_at: new Date() });
+
+  // Floor: fill when unset, and raise anything below the label limit.
+  await knex('products_catalog')
+    .whereRaw('LOWER(name) = LOWER(?)', [NAME])
+    .where(function whereLaxFloor() {
+      this.whereNull('min_temp_f').orWhere('min_temp_f', '<', 50);
+    })
+    .update({ min_temp_f: 50, updated_at: new Date() });
+
+  // Prose: only when absent. Unlike a number, custom wording cannot be
+  // compared for strictness, so an existing note is never overwritten.
+  await knex('products_catalog')
+    .whereRaw('LOWER(name) = LOWER(?)', [NAME])
     .whereNull('heat_restrictions')
-    .update({
-      max_temp_f: 85,
-      min_temp_f: 50,
-      heat_restrictions: HEAT_RESTRICTIONS,
-      updated_at: new Date(),
-    });
+    .update({ heat_restrictions: HEAT_RESTRICTIONS, updated_at: new Date() });
 
   // Cultivar exclusions: only when the list is exactly what we recorded, so an
   // edited list is left alone.
