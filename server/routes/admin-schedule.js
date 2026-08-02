@@ -4410,11 +4410,31 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // Best-effort.
             try {
               const CardHolds = require('../services/estimate-card-holds');
-              await CardHolds.handleCardHoldCancellation({
+              const waiveFee = payload?.waiveCardHoldFee === true;
+              const holdResult = await CardHolds.handleCardHoldCancellation({
                 scheduledServiceId: id,
-                waiveFee: payload?.waiveCardHoldFee === true,
+                waiveFee,
               });
-            } catch (e) { logger.error(`[admin-schedule] bulk-cancel card-hold handling failed: ${e.message}`); }
+              // Appointment-card fee rail fallback for visits with no hold
+              // row (mutually exclusive lanes — the rail re-checks).
+              if (holdResult?.reason === 'no_hold') {
+                const ApptCardRequests = require('../services/appointment-card-request');
+                const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
+                  scheduledServiceId: id,
+                  waiveFee,
+                });
+                // Unresolved (non-released) fee outcomes must reach the
+                // office (Codex #3153 r16 P1) — never a silent success.
+                await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: apptFeeOutcome });
+              }
+            } catch (e) {
+              // A thrown fee step = unresolved lane ownership on an
+              // already-committed cancel (Codex #3153 r22 P1) — surface it,
+              // never a silent clean cancellation.
+              logger.error(`[admin-schedule] bulk-cancel card-hold handling failed: ${e.message}`);
+              await require('../services/appointment-card-request')
+                .alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: { released: false, reason: 'fee_step_error' } });
+            }
             break;
           }
           case 'mark_prepaid': {
@@ -7198,11 +7218,29 @@ router.put('/:id/status', async (req, res, next) => {
       // block the committed cancel.
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.handleCardHoldCancellation({
+        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
+        const holdResult = await CardHolds.handleCardHoldCancellation({
           scheduledServiceId: svc.id,
-          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+          waiveFee,
         });
-      } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
+        // Appointment-card fee rail fallback for visits with no hold row
+        // (mutually exclusive lanes — the rail re-checks). Same waive flag.
+        if (holdResult?.reason === 'no_hold') {
+          const ApptCardRequests = require('../services/appointment-card-request');
+          const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
+            scheduledServiceId: svc.id,
+            waiveFee,
+          });
+          // Unresolved (non-released) fee outcomes must reach the office
+          // (Codex #3153 r16 P1) — never a silent successful cancel.
+          await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: apptFeeOutcome });
+        }
+      } catch (e) {
+        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
+        logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`);
+        await require('../services/appointment-card-request')
+          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
+      }
     }
 
     // Outbound-callback booking confirmed by the office → arm the deferred

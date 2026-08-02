@@ -193,14 +193,86 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false }, trx = null) {
   const run = async (t) => {
+    // The lane check lives inside the visit-lock block — without a visit
+    // to lock it cannot be verified, so fail closed rather than silently
+    // skipping the revalidation.
+    if (requireOneTimeLane && requireSelfPayScheduledServiceId == null) {
+      return { applied: 0, skipped: 'lane_unverifiable' };
+    }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // Live payer SERIALIZED with the credit apply (Codex #3153 r21 P1):
+    // payer assignment updates scheduled_services while a reused invoice
+    // keeps payer_id null — the invoice-field check below can't see it.
+    // FOR UPDATE on the visit row + a re-resolve on this connection orders
+    // the credit against a concurrently-committing payer edit; a payer hit
+    // (or lookup failure — fail closed) consumes nothing. Opt-in.
+    if (requireSelfPayScheduledServiceId != null) {
+      try {
+        // Customer row FIRST (Codex #3153 r22 P1): payer assignment can
+        // live at the account level (customers.payer_id) — locking only
+        // the visit would let an account-default payer update commit
+        // between the resolve and the credit consumption. Same
+        // customer→service lock order as chargeInvoiceWithSavedCard.
+        const lockedCustomer = await t('customers')
+          .where({ id: invoice.customer_id })
+          .forUpdate()
+          .first('id', 'billing_mode', 'monthly_rate', 'waveguard_tier');
+        if (!lockedCustomer) return { applied: 0, skipped: 'customer_missing' };
+        const lockedSvc = await t('scheduled_services')
+          .where({ id: requireSelfPayScheduledServiceId })
+          .forUpdate()
+          .first('id', 'customer_id', 'is_recurring');
+        if (!lockedSvc) return { applied: 0, skipped: 'service_missing' };
+        if (String(lockedSvc.customer_id) !== String(invoice.customer_id)) {
+          return { applied: 0, skipped: 'customer_mismatch' };
+        }
+        // One-time-lane revalidation UNDER the locks (Codex #3153 r24 P1)
+        // — mirrors chargeInvoiceWithSavedCard's requireOneTimeLane: a
+        // billing-lane change (membership, annual prepay, per-application)
+        // or the visit turning recurring after the route's preflight must
+        // refuse the credit apply, not consume credit (or mark the invoice
+        // prepaid) beside dues or coverage.
+        if (requireOneTimeLane) {
+          const { resolveBillingLane } = require('./billing-lane');
+          const lane = resolveBillingLane(lockedCustomer);
+          if (lockedCustomer.billing_mode === 'per_application'
+            || lane.mode === 'monthly_membership'
+            || lane.mode === 'annual_prepay'
+            || lockedSvc.is_recurring === true) {
+            return { applied: 0, skipped: 'not_one_time_lane' };
+          }
+        }
+        const resolved = await require('./payer').resolveForInvoice({
+          database: t,
+          customerId: String(lockedSvc.customer_id),
+          scheduledServiceId: String(lockedSvc.id),
+          throwOnError: true,
+        });
+        if (resolved?.payerId) return { applied: 0, skipped: 'payer_billed' };
+      } catch (payerErr) {
+        logger.warn(`[customer-credit] live payer re-check failed for invoice ${invoiceId} — credit not applied: ${payerErr.message}`);
+        return { applied: 0, skipped: 'payer_check_failed' };
+      }
+    }
+    // Frozen-consent cap, enforced against the LOCKED invoice (Codex #3153
+    // r16 P1): the appointment-card completion lane's preflight compares an
+    // unlocked snapshot — an invoice edit racing this credit apply could
+    // otherwise consume customer credit (or flip the bill prepaid) above
+    // the amount the customer accepted. Opt-in; null = unchanged behavior.
+    if (maxAuthorizedSubtotal != null) {
+      const lockedSubtotalCents = Math.round(Number(invoice.subtotal != null ? invoice.subtotal : invoice.total || 0) * 100);
+      const lockedDiscountCents = Math.max(0, Math.round(Number(invoice.discount_amount || 0) * 100));
+      if (lockedSubtotalCents - lockedDiscountCents > Math.round(Number(maxAuthorizedSubtotal) * 100)) {
+        return { applied: 0, skipped: 'above_authorized_cap' };
+      }
+    }
     // Homeowner credit must never touch a third-party (payer-billed) invoice.
     if (invoice.payer_id) return { applied: 0, skipped: 'payer_billed' };
     try {
-      // eslint-disable-next-line global-require
+       
       require('./invoice-helpers').assertInvoiceCollectible(invoice.status);
     } catch {
       return { applied: 0, skipped: 'uncollectible' };
@@ -356,7 +428,7 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
     // Transition winner: give back the deposit dollars this invoice consumed
     // (credited → received, roll-forward-eligible). Restore-based-on-line-items
     // must run at most once per invoice, which the terminal gate guarantees.
-    // eslint-disable-next-line global-require
+     
     const { restoreDepositCreditForVoidedInvoice } = require('./estimate-deposits');
     await restoreDepositCreditForVoidedInvoice({ invoice: inv, trx });
   }
@@ -382,14 +454,14 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
  */
 async function runPostFullCoverageSideEffects(invoiceId) {
   try {
-    // eslint-disable-next-line global-require
+     
     await require('./invoice-followups').stopOnPayment(invoiceId);
   } catch (e) {
     logger.warn(`[account-credit] stopOnPayment after full coverage failed for ${invoiceId}: ${e.message}`);
   }
   try {
     const inv = await db('invoices').where({ id: invoiceId }).first();
-    // eslint-disable-next-line global-require
+     
     if (inv) await require('./annual-prepay-renewals').syncTermForInvoicePayment(inv);
   } catch (e) {
     logger.warn(`[account-credit] annual-prepay term sync after full coverage failed for ${invoiceId}: ${e.message}`);
@@ -412,7 +484,7 @@ async function runPostFullCoverageSideEffects(invoiceId) {
  */
 async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system', trx = null, deferFullCoverageSideEffects = false } = {}) {
   try {
-    // eslint-disable-next-line global-require
+     
     if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return null;
     const result = await applyAccountCreditToInvoice({ invoiceId, createdBy }, trx);
     // When a seam-time apply FULLY covers the invoice (now prepaid / paid_at), run

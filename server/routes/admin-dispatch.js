@@ -2683,10 +2683,22 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
 // and whether cancelling RIGHT NOW would charge the late-cancel fee. The
 // cancel UIs call this before the status flip so they only ask the
 // business-initiated-waive question when a fee would actually fire.
+// Covers BOTH fee lanes — the estimate card hold and the appointment-card
+// (/secure) rail — merged so the client confirm prompts work unchanged;
+// the lanes are mutually exclusive per visit (the appointment rail skips
+// any visit with a hold row).
 router.get('/:serviceId/card-hold', async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
-    res.json(await CardHolds.cardHoldCancelPreview(req.params.serviceId));
+    const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
+    if (holdPreview.held) return res.json(holdPreview);
+    const ApptCardRequests = require('../services/appointment-card-request');
+    const apptPreview = await ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId);
+    res.json({
+      held: apptPreview.secured === true,
+      feeApplies: apptPreview.feeApplies === true,
+      ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
+    });
   } catch (err) { next(err); }
 });
 
@@ -2913,16 +2925,47 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // fee unless waiveCardHoldFee (admin-only, same gate as the single
       // path) releases it free; no-op for visits without a hold. Dark until
       // ONE_TIME_CARD_HOLD; best-effort — never blocks the committed cancels.
-      try {
+      // Tracks the target actually being processed so a mid-loop throw
+      // alerts on the RIGHT visit (Codex #3153 r23 P2).
+      // Fee handling is isolated PER TARGET (Codex #3153 r25 P1): the
+      // cancels are already committed, so a thrown fee step on one target
+      // must alert that visit and CONTINUE — aborting the loop would leave
+      // every later already-cancelled target with neither a terminal fee
+      // stamp nor an alert, and the series retry (409: nothing cancellable)
+      // would never revisit them.
+      {
         const CardHolds = require('../services/estimate-card-holds');
+        const ApptCardRequests = require('../services/appointment-card-request');
         const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
         for (const target of targets) {
-          await CardHolds.handleCardHoldCancellation({
-            scheduledServiceId: target.id,
-            waiveFee,
-          });
+          try {
+            const holdResult = await CardHolds.handleCardHoldCancellation({
+              scheduledServiceId: target.id,
+              waiveFee,
+            });
+            // Appointment-card fee rail fallback: visits with no hold row may
+            // still carry the /secure lane's agreed fee (mutually exclusive
+            // lanes — the rail itself re-checks). Same waive flag.
+            if (holdResult?.reason === 'no_hold') {
+              const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
+                scheduledServiceId: target.id,
+                waiveFee,
+              });
+              // Unresolved (non-released) fee outcomes must reach the office
+              // (Codex #3153 r16 P1) — never a silent successful cancel.
+              await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: apptFeeOutcome });
+            }
+          } catch (e) {
+            // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
+            logger.error(`[admin-dispatch] series cancellation card-hold handling failed (target ${target.id}): ${e.message}`);
+            try {
+              await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: { released: false, reason: 'fee_step_error' } });
+            } catch (alertErr) {
+              logger.error(`[admin-dispatch] series cancellation fee alert failed (target ${target.id}): ${alertErr.message}`);
+            }
+          }
         }
-      } catch (e) { logger.error(`[admin-dispatch] series cancellation card-hold handling failed: ${e.message}`); }
+      }
 
       // Void any still-open invoices pre-minted for the cancelled visits so
       // dunning doesn't chase cancelled jobs. The helper enforces the
@@ -3180,11 +3223,29 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // hold exists. Best-effort — never block the committed status change.
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.handleCardHoldCancellation({
+        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
+        const holdResult = await CardHolds.handleCardHoldCancellation({
           scheduledServiceId: svc.id,
-          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+          waiveFee,
         });
-      } catch (e) { logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`); }
+        // Appointment-card fee rail fallback for visits with no hold row
+        // (mutually exclusive lanes — the rail re-checks). Same waive flag.
+        if (holdResult?.reason === 'no_hold') {
+          const ApptCardRequests = require('../services/appointment-card-request');
+          const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
+            scheduledServiceId: svc.id,
+            waiveFee,
+          });
+          // Unresolved (non-released) fee outcomes must reach the office
+          // (Codex #3153 r16 P1) — never a silent successful cancel.
+          await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: apptFeeOutcome });
+        }
+      } catch (e) {
+        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
+        logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`);
+        await require('../services/appointment-card-request')
+          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
+      }
 
       try {
         const result = await trackTransitions.cancel(svc.id, {
@@ -3245,9 +3306,49 @@ router.put('/:serviceId/status', async (req, res, next) => {
       try {
         const CardHolds = require('../services/estimate-card-holds');
         const feeResult = await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+        // charge_failed is RETRYABLE — the claim reverts to NULL and a
+        // later attempt may still collect (Codex #3153 r24 P0): the
+        // customer notice must use the cautious review copy, never an
+        // unequivocal "no charge".
         if (feeResult?.charged === true) noShowFeeOutcome = 'charged';
-        else if (feeResult?.reason === 'charge_review') noShowFeeOutcome = 'review';
-      } catch (e) { logger.error(`[admin-dispatch] no-show card-hold fee charge failed: ${e.message}`); }
+        else if (['charge_review', 'charge_failed'].includes(feeResult?.reason)) noShowFeeOutcome = 'review';
+        // Appointment-card fee rail fallback: visits secured via /secure
+        // carry the disclosed fee on appointment_card_requests instead of a
+        // hold row (mutually exclusive lanes — the rail re-checks). Runs
+        // only when the hold rail saw nothing chargeable for lane reasons
+        // (no hold, or the hold flag itself is off).
+        else if (['no_hold', 'feature_disabled'].includes(feeResult?.reason)) {
+          const ApptCardRequests = require('../services/appointment-card-request');
+          const apptFeeResult = await ApptCardRequests.chargeAppointmentNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+          if (apptFeeResult?.charged === true) noShowFeeOutcome = 'charged';
+          else if (['charge_review', 'charge_failed'].includes(apptFeeResult?.reason)) noShowFeeOutcome = 'review';
+        }
+        if (noShowFeeOutcome === 'review') {
+          try {
+            await require('../services/notification-service').notifyAdmin(
+              'billing',
+              'No-show fee needs review',
+              'The no-show fee did not settle cleanly (declined or parked) — review the customer\'s billing; a retry may still charge.',
+              { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_unsettled' } },
+            );
+          } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
+        }
+      } catch (e) {
+        // A THROWN fee step means lane ownership was never resolved (Codex
+        // #3153 r21 P1) — a retry can still charge, so the customer notice
+        // must use the cautious review copy, never an unequivocal "no
+        // charge", and the office needs to hear about it.
+        noShowFeeOutcome = 'review';
+        logger.error(`[admin-dispatch] no-show card-hold fee charge failed — outcome parked review: ${e.message}`);
+        try {
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'No-show fee needs review',
+            'The no-show fee step errored before lane ownership was resolved — review the customer\'s billing; a fee may still apply.',
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_step_error' } },
+          );
+        } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
+      }
 
       // Notify the customer we missed them and invite a reschedule.
       // Best-effort — a Twilio/template failure must not fail the
@@ -7966,13 +8067,102 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // bill (possibly flipping it prepaid) is a money movement the quiet path
     // promises not to make. The operator applies credit deliberately if it
     // belongs on the bill.
+    // Appointment-card one-time completion lane (owner-approved 2026-08-01,
+    // GATE_APPT_CARD_COMPLETION_CHARGE): the /secure lane's invite promises
+    // "your card is only charged after service is completed" — for a
+    // ONE-TIME visit whose card came through that lane (a completed or
+    // satisfied appointment_card_requests row: page consent or auto-secure
+    // under the same v10 enrollment consent), the completion invoice
+    // auto-charges through the SAME rail as per-application billing, capped
+    // at the visit's stamped estimated_price. Explicit membership /
+    // annual-prepay / per-application lanes are excluded (they have their
+    // own billing), as is any visit with an estimate_card_holds row (the
+    // hold rail owns estimate-flow one-time bookings). Every failure mode
+    // fails toward NOT auto-charging — the pay-link flow is the unchanged
+    // fallback. Detected BEFORE the account-credit auto-apply below (Codex
+    // #3153 r9 P1): an over-cap invoice on this lane must not consume
+    // credit either — partial credit would be drained on a bill the lane
+    // routes to review, and full coverage would flip it prepaid without
+    // the cap ever being evaluated.
+    let apptCardOneTimeCharge = false;
+    let apptCardAcceptedAmount = null;
+    let apptCardOverCap = false;
+    let apptCardLaneUnresolved = false;
+    // Lane + cap detection is deliberately INDEPENDENT of current Auto Pay
+    // state (Codex #3153 r11 P1): a secured customer who pauses Auto Pay or
+    // drops their method before completion still owns a capped lane invoice
+    // — the credit fence below must see it. customerAutopayActive gates
+    // ONLY the Stripe charge (the composite charge condition further down).
+    if (!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane
+      && svc.is_recurring !== true
+      && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id) {
+      try {
+        if (require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
+          const laneRow = await db('appointment_card_requests')
+            .where({ scheduled_service_id: svc.id })
+            .whereIn('status', ['completed', 'satisfied'])
+            .first('id', 'customer_id', 'accepted_amount');
+          const holdRow = laneRow ? await db('estimate_card_holds')
+            .where({ scheduled_service_id: svc.id })
+            .first('id') : null;
+          // The consent row must belong to the visit's CURRENT customer
+          // (Codex #3153 r19 P0) — a reassigned visit never rides a prior
+          // customer's consent into automatic collection.
+          apptCardOneTimeCharge = !!laneRow && !holdRow
+            && String(laneRow.customer_id) === String(svc.customer_id);
+          // The lane's cap is the amount FROZEN at consent (Codex #3153 r1
+          // P1) — appointment editors rewrite estimated_price, so the live
+          // value is not what the customer accepted. NULL (pre-migration
+          // row, unstamped render) → acceptedPerVisit stays null → the
+          // no-accepted-amount skip below routes to office review.
+          if (apptCardOneTimeCharge) {
+            apptCardAcceptedAmount = laneRow.accepted_amount != null && Number(laneRow.accepted_amount) > 0
+              ? Number(laneRow.accepted_amount) : null;
+            const preCreditSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
+            const preCreditNet = Math.round((preCreditSubtotal - Math.max(0, Number(invoice.discount_amount) || 0)) * 100) / 100;
+            apptCardOverCap = apptCardAcceptedAmount == null || preCreditNet > apptCardAcceptedAmount + 0.005;
+          }
+        }
+      } catch (e) {
+        // Lane state UNVERIFIABLE (Codex #3153 r10 P1): fail closed for
+        // credit too — an over-cap lane invoice we couldn't detect must
+        // not consume credit or flip prepaid past a never-evaluated cap.
+        // The charge lane already fails toward the pay link.
+        apptCardLaneUnresolved = true;
+        logger.warn(`[dispatch] appointment-card completion-lane check failed for visit ${svc.id} — no auto-charge, credit auto-apply suppressed: ${e.message}`);
+      }
+    }
     if (!isBackfillCompletion
       && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
+      // Over-cap appointment-lane invoices keep their credit untouched
+      // (Codex #3153 r9 P1) — the lane routes them to office review, and
+      // review must see the bill exactly as minted. An UNVERIFIABLE lane
+      // (lookup error) is treated the same (r10).
+      && !apptCardOverCap && !apptCardLaneUnresolved
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');
-        const creditResult = await applyAccountCreditToInvoice({ invoiceId: invoice.id });
+        // The appointment lane's frozen cap rides INTO the credit apply
+        // (Codex #3153 r16 P1) and is re-checked against the LOCKED
+        // invoice — the preflight fence above is an unlocked snapshot an
+        // invoice edit can outrun. NULL accepted amount = cap 0 (the lane
+        // is unchargeable, so credit must not touch its bill either).
+        const creditResult = await applyAccountCreditToInvoice({
+          invoiceId: invoice.id,
+          ...(apptCardOneTimeCharge ? {
+            maxAuthorizedSubtotal: apptCardAcceptedAmount != null ? apptCardAcceptedAmount : 0,
+            // Live payer serialized inside the credit transaction (Codex
+            // #3153 r21 P1) — a payer assigned after the invoice was
+            // pre-minted must not have the homeowner's credit consumed.
+            requireSelfPayScheduledServiceId: svc.id,
+            // One-time lane re-verified INSIDE the credit locks (Codex
+            // #3153 r24 P1): a lane change racing this route must not have
+            // credit consumed (or the invoice marked prepaid) for a visit
+            // that is no longer one-time — mirrors the saved-card guard.
+            requireOneTimeLane: true,
+          } : {}),
+        });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })
             .first('status', 'credit_applied', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
@@ -8020,12 +8210,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // whole rail leaves the exact no-chargeable-method posture — invoice
     // open and collectible, autoChargedReceiptPending/paymentFailedSmsContext
     // untouched — for explicit operator collection.
-    if (isBackfillCompletion && perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid
+    if (isBackfillCompletion && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed && invoice?.id && !alreadyPaid
       && customerAutopayActive) {
-      logger.info(`[dispatch] backfill completion: per-application auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
+      logger.info(`[dispatch] backfill completion: completion auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
     }
+    const completionChargeSource = perApplicationBilling ? 'per_application_completion' : 'appointment_card_completion';
     if (!isBackfillCompletion
-      && perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
       // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
@@ -8037,10 +8228,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // pre-tax SUBTOTAL is the comparator. An over-quote invoice routes to
       // office review and the customer keeps the normal pay-link flow —
       // never an unauthorized amount off-session.
-      const acceptedPerVisit = svc.estimated_price != null && Number(svc.estimated_price) > 0
-        ? Number(svc.estimated_price)
-        : (svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
-          ? Number(svc.cust_per_application_fee) : null);
+      // The appointment-card lane caps STRICTLY at the accepted_amount
+      // FROZEN on the lane row at consent (Codex #3153 r1 P1) — never the
+      // live visit price, which appointment editors rewrite. The
+      // per-application acceptance-fee fallback and the setup-fee
+      // allowances below are per-application concepts and never widen this
+      // lane's cap.
+      const acceptedPerVisit = apptCardOneTimeCharge
+        ? apptCardAcceptedAmount
+        : (svc.estimated_price != null && Number(svc.estimated_price) > 0
+          ? Number(svc.estimated_price)
+          : (perApplicationBilling && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
+            ? Number(svc.cust_per_application_fee) : null));
       const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
       // Manual-discount accepts gross the service line up and bring it back
       // with a negative discount line — invoices.subtotal is the PRE-discount
@@ -8066,7 +8265,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // reuses an already-minted invoice still gets the allowance). Lookup
       // failure fails toward office review, like everything else here.
       let planChoiceSetupFeeSelected = false;
-      if (!acceptMintedInvoice) {
+      if (perApplicationBilling && !acceptMintedInvoice) {
         try {
           // The selection row lives on WHICHEVER series visit the card
           // link was sent for (parent or child — Codex #2980 r2), so the
@@ -8090,7 +8289,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (Number.isFinite(sharedFee) && sharedFee > 0) WAVEGUARD_SETUP_FEE_ALLOWANCE = sharedFee;
       } catch (e) { /* keep the conservative literal */ }
       let setupFeeAllowance = 0;
-      if (acceptMintedInvoice || planChoiceSetupFeeSelected) {
+      if (perApplicationBilling && (acceptMintedInvoice || planChoiceSetupFeeSelected)) {
         try {
           const rawLines = invoice.line_items;
           const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
@@ -8113,7 +8312,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // No accepted amount to cap against (multi-service plan with no
         // row price or customer fee) — never auto-charge uncapped
         // (Codex #2680): route to office review, keep the pay-link flow.
-        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: no accepted per-visit amount on file to cap against — routed to office review`);
+        logger.warn(`[dispatch] completion auto-charge (${completionChargeSource}) skipped for visit ${svc.id}: no accepted per-visit amount on file to cap against — routed to office review`);
         try {
           await require('../services/notification-service').notifyAdmin(
             'billing',
@@ -8123,7 +8322,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           );
         } catch (e) { logger.warn(`[dispatch] uncapped-charge review alert failed: ${e.message}`); }
       } else if (netInvoiceSubtotal > capCeiling + 0.005) {
-        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: invoice subtotal $${netInvoiceSubtotal} (net of discounts) exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
+        logger.warn(`[dispatch] completion auto-charge (${completionChargeSource}) skipped for visit ${svc.id}: invoice subtotal $${netInvoiceSubtotal} (net of discounts) exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
         try {
           await require('../services/notification-service').notifyAdmin(
             'billing',
@@ -8145,14 +8344,61 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const combinedReceiptArmed = await isOptInSmsTemplateEnabled('service_complete_paid_receipt')
         && await customerWantsReceiptTexts(svc.customer_id);
       try {
-        const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
+        const { customerOnAutopay: customerOnAutopayFresh, getChargeableAutopayMethod, isChargeableAutopayMethod } = require('../services/autopay-eligibility');
         const autopayPm = await getChargeableAutopayMethod({ id: svc.customer_id }, db);
-        if (isChargeableAutopayMethod(autopayPm)) {
+        // Auto Pay re-resolved at the CHARGE boundary (Codex #3153 r12 P1):
+        // customerAutopayActive was computed early in this long handler — a
+        // pause/opt-out committing in between touches the CUSTOMER row,
+        // which the method re-read above cannot see. Lookup failure charges
+        // nothing (falls to the pay-link fallback like a missing method).
+        let autopayStillActive = false;
+        try {
+          const freshCustomer = await db('customers').where({ id: svc.customer_id })
+            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+          autopayStillActive = !!freshCustomer && await customerOnAutopayFresh(freshCustomer);
+        } catch (autopayRecheckErr) {
+          logger.warn(`[dispatch] charge-boundary Auto Pay re-check failed for visit ${svc.id} — not charging: ${autopayRecheckErr.message}`);
+        }
+        // Live payer re-resolve at the charge boundary (Codex #3153 r13
+        // P1): a payer assigned after the invoice was pre-minted lives only
+        // on scheduled_services — the reused invoice's payer_id stays null.
+        // Payer present (or lookup failure) → skip the charge exactly like
+        // a missing chargeable method; the payer flows own the bill.
+        let liveSelfPay = false;
+        try {
+          const boundaryPayer = await require('../services/payer').resolveForInvoice({
+            customerId: String(svc.customer_id),
+            scheduledServiceId: String(svc.id),
+            throwOnError: true,
+          });
+          liveSelfPay = !boundaryPayer?.payerId;
+        } catch (payerRecheckErr) {
+          logger.warn(`[dispatch] charge-boundary payer re-check failed for visit ${svc.id} — not charging: ${payerRecheckErr.message}`);
+        }
+        if (liveSelfPay && autopayStillActive && isChargeableAutopayMethod(autopayPm)) {
           // deferReceiptDelivery: with the combined text armed, the receipt
           // job is enqueued a few minutes out — nothing is pre-stamped, so a
           // crash/block anywhere before the combined text delivers leaves
           // the job to send the classic receipt when it comes due.
           await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {
+            // Atomic re-enforcement of the SAME ceiling the preflight above
+            // validated (Codex #3153 r7 P0): the charge service re-checks it
+            // against the LOCKED invoice, so an invoice edit racing this
+            // window refuses instead of charging above consent — the
+            // pay-link fallback takes over exactly like a decline.
+            maxAuthorizedSubtotal: capCeiling,
+            // Auto Pay + self-pay serialized inside the charge transaction
+            // (r13/r14): FOR UPDATE on the customer and scheduled-service
+            // rows orders the charge against concurrently-committing
+            // pause/opt-out, method-switch, and payer-assignment edits.
+            requireAutopayForCustomerId: svc.customer_id,
+            requireSelfPayScheduledServiceId: svc.id,
+            // The appointment lane also revalidates one-time-lane
+            // membership under the locks (Codex #3153 r23 P1) — a billing
+            // change racing this completion must refuse, never
+            // double-collect beside dues/prepay. Per-application keeps its
+            // own semantics (false).
+            requireOneTimeLane: apptCardOneTimeCharge,
             deferReceiptDelivery: combinedReceiptArmed,
           });
           const fresh = await db('invoices').where({ id: invoice.id }).first();
@@ -8174,7 +8420,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               && !invoice.receipt_sent_at;
             try {
               await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
-                details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id },
+                details: { source: completionChargeSource, invoice_id: invoice.id, scheduled_service_id: svc.id },
               });
             } catch (e) { /* log-only */ }
           } else if (freshStatus === 'processing') {
@@ -8187,7 +8433,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             payUrl = null;
             try {
               await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
-                details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id, ach_processing: true },
+                details: { source: completionChargeSource, invoice_id: invoice.id, scheduled_service_id: svc.id, ach_processing: true },
               });
             } catch (e) { /* log-only */ }
           }
@@ -8243,9 +8489,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           } catch (parkErr) {
             logger.error(`[dispatch] failed to park orphaned invoice ${invoice?.id} as processing: ${parkErr.message}`);
           }
-          logger.error(`[dispatch] per-application autopay charge fenced alternate collection for invoice ${invoice?.id} (${chargeErr.code}, PI ${chargeErr.stripePaymentIntentId || 'unknown'}, reconciliation=${reconciliationRequired}, fallbackSuppressed=${fallbackPolicy.suppressFallback})`);
+          logger.error(`[dispatch] completion autopay charge (${completionChargeSource}) fenced alternate collection for invoice ${invoice?.id} (${chargeErr.code}, PI ${chargeErr.stripePaymentIntentId || 'unknown'}, reconciliation=${reconciliationRequired}, fallbackSuppressed=${fallbackPolicy.suppressFallback})`);
         } else {
-          logger.warn(`[dispatch] per-application autopay charge failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
+          logger.warn(`[dispatch] completion autopay charge (${completionChargeSource}) failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
           // Arm the decline notice ONLY off the charge service's structured
           // decline facts — a real processor decline on the confirm. Guard
           // errors ("Invoice already paid", active-PI races), config and DB
@@ -8259,7 +8505,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
         try {
           await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
-            details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', collection_suppressed: fallbackPolicy.suppressFallback, collection_fenced: suppressAlternateCollection, reconciliation_required: reconciliationRequired, error: String(chargeErr.message || '').slice(0, 300) },
+            details: { source: completionChargeSource, invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', collection_suppressed: fallbackPolicy.suppressFallback, collection_fenced: suppressAlternateCollection, reconciliation_required: reconciliationRequired, error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }
       } // end try/catch — paired with the above-quote guard's else

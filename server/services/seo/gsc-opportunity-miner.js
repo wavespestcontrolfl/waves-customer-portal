@@ -1047,6 +1047,13 @@ class GscOpportunityMiner {
         service,
         city,
         signal_metadata: {
+          // `impressions` is the canonical key EVERY other bucket writes and
+          // the one content-brief-builder reads into gsc_signal. Omitting it
+          // here (recent/prior only) made every seasonal_rising draft fail
+          // the quality gate's gsc_signal_attached hard check — the evidence
+          // existed, the gate just couldn't see it. Keep the descriptive
+          // keys too; the growth story needs both windows.
+          impressions: recentImp,
           impressions_recent_14d: recentImp,
           impressions_prior_14d: priorImp,
           growth_pct: growth,

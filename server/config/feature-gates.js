@@ -34,6 +34,8 @@
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
+ *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
+ *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -67,6 +69,34 @@ const gates = {
   // carries no planContext and /secure renders exactly the card-only
   // experience; the select-plan endpoint 404s (unobservable while dark).
   securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
+
+  // Appointment-card fee rail (owner-approved 2026-08-01): auto-charge the
+  // no-show/late-cancel fee the /secure lane DISCLOSES against the card it
+  // captured, for visits with frozen fee terms on the appointment_card_
+  // requests row. Money surface — fail-closed ==='true' in EVERY
+  // environment. Gate off: chargeAppointmentNoShowFee returns
+  // feature_disabled, cancel previews report feeApplies:false, and every
+  // no_show/cancel path behaves byte-identically to today (the fee stays a
+  // manual office decision). Frozen terms still stamp while dark so the
+  // disclosed amount is enforceable the day the gate lights. Kill switch:
+  // unset or any non-'true' value.
+  apptCardNoShowFee: process.env.GATE_APPT_CARD_NO_SHOW_FEE === 'true',
+
+  // Completion auto-charge for one-time visits whose card came through the
+  // /secure lane (owner-approved 2026-08-01): the lane's SMS promises "your
+  // card is only charged after service is completed" — this gate makes that
+  // charge automatic (dispatch /complete AND the pest-recap closeout path),
+  // hard-capped at the accepted_amount FROZEN on the lane row at consent
+  // (+ disclosed tax/surcharge; never the live estimated_price, which
+  // appointment editors rewrite — Codex #3153 r1) with the same above-quote
+  // review routing as the per-application rail. Page-secured rows only get
+  // an accepted_amount when the /secure page DISPLAYED the price, which
+  // requires GATE_SECURE_PLAN_CHOICE — flip that gate first or completions
+  // route to office review instead of charging (Codex #3153 r2). Money
+  // surface — fail-closed ==='true' in EVERY environment. Gate off:
+  // completion invoices go out as pay links exactly as today. Kill switch:
+  // unset or any non-'true' value.
+  apptCardCompletionCharge: process.env.GATE_APPT_CARD_COMPLETION_CHARGE === 'true',
 
   // Annual prepay sold from the New Appointment modal on a booking with NO
   // linked quote. Operator-initiated, but it invoices a customer for a full
