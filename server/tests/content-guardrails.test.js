@@ -2572,6 +2572,24 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     }
   });
 
+  test('only RENDERED Markdown links are repaired (r10)', () => {
+    // Three shapes that look like links but are not: code in a blockquoted
+    // indented block, an escaped opener, and Markdown-ish text inside an
+    // attribute value.
+    for (const body of [
+      '>     [x](/invented/)',
+      '    [x](/invented/)',
+      '\\[x](/invented/)',
+      '<a title="[read more](/invented/)">y</a>',
+    ]) {
+      const r = repairInventedInternalRoutes(body);
+      expect(r.body).toBe(body);
+      expect(r.repairs).toEqual([]);
+    }
+    // An EVEN backslash run is itself escaped, so the link is real.
+    expect(repairInventedInternalRoutes('\\\\[x](/pest-control/)').body).toContain('/pest-control-services/');
+  });
+
   test('literal code is never repaired (r7)', () => {
     for (const body of [
       'Use `[x](/pest-control/)` in MDX.',

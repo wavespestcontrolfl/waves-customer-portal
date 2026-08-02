@@ -2646,18 +2646,29 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       const closerRe = new RegExp(`^[ \t>]*${om[1]}${om[2]}*[ \t]*$`, 'm');
       if (!closerRe.test(rest)) ranges.push([om.index, text.length - 1]);
     }
-    const indented = /(?:^(?:[ ]{4}|\t)[^\n]*$\n?)+/gm;
+    // Container prefixes again: ">     [x](/invented/)" is a blockquoted
+    // indented code block, and a bare four-space pattern never saw it.
+    const indented = /(?:^[ \t>]*(?:[ ]{4}|\t)[^\n]*$\n?)+/gm;
     let im;
     while ((im = indented.exec(text)) !== null) ranges.push([im.index, im.index + im[0].length]);
     const span = /(`+)(?:[^`]|(?!\1)`)*\1/g;
     let sm2;
     while ((sm2 = span.exec(text)) !== null) ranges.push([sm2.index, sm2.index + sm2[0].length]);
+    // A tag's own span, so "[read more](/invented/)" sitting in a title=
+    // attribute is not rewritten — it was never a rendered link.
+    for (const tag of eachTag(text)) ranges.push([tag.start, tag.end + 1]);
     return ranges;
   })();
   const insideCode = (idx) => codeMask.some(([a, b]) => idx >= a && idx < b);
   const repairs = [];
   const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, bang, anchorText, open, dest, close, title, offset) => {
     if (insideCode(offset)) return whole;
+    // "\\[x](/invented/)" displays the bracket literally. Count the run of
+    // preceding backslashes: an ODD number escapes the bracket, an even
+    // number is itself escaped and the link is real.
+    let bs = 0;
+    while (offset - 1 - bs >= 0 && text[offset - 1 - bs] === '\\') bs += 1;
+    if (bs % 2 === 1) return whole;
     if (bang) return whole; // image embed — never rewrite
     // Mismatched angle delimiters are MALFORMED Markdown. Repairing one would
     // hand evaluate() an allowlisted path and let a link that cannot render
