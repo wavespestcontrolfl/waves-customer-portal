@@ -725,6 +725,16 @@ async function markComplete(serviceId, opts = {}) {
   const normStamp = (v) => (v == null ? null : Number(v));
   const transitionStampMatches = opts.expectedCorrectionSeq === undefined
     || normStamp(svc.time_on_site_correction_seq) === normStamp(opts.expectedCorrectionSeq);
+  // The atomic predicate is on by DEFAULT (codex P2 #3152 round 18): the
+  // ordinary status-route completions pass no expectation, but their
+  // loadService→UPDATE window races the correction PATCH all the same — a
+  // caller with no stated revision fences against the revision THIS call
+  // observed at load, so a correction committing inside the window turns
+  // the full lifecycle write into the transition-only retry instead of a
+  // stale overwrite. A caller-stated revision keeps precedence.
+  const fenceSeq = opts.expectedCorrectionSeq !== undefined
+    ? opts.expectedCorrectionSeq
+    : (svc.time_on_site_correction_seq ?? null);
   let completedAtStamp = !transitionStampMatches
     ? null // a newer correction owns completed_at — the row's value stands
     : (opts.untrustedLifecycleSpan
@@ -734,8 +744,7 @@ async function markComplete(serviceId, opts = {}) {
   // Guarded on the column existing in the loaded row so pre-migration
   // environments skip the predicate (no stamps can exist there) — same
   // contract as the already-complete branch above.
-  const stampFenceActive = opts.expectedCorrectionSeq !== undefined
-    && Object.prototype.hasOwnProperty.call(svc, 'time_on_site_correction_seq');
+  const stampFenceActive = Object.prototype.hasOwnProperty.call(svc, 'time_on_site_correction_seq');
   const transitionOnlyFlip = () => db('scheduled_services')
     .where({ id: serviceId })
     .whereIn('track_state', transitionableStates)
@@ -750,7 +759,7 @@ async function markComplete(serviceId, opts = {}) {
       .modify((q) => {
         if (stampFenceActive) {
           q.whereRaw('time_on_site_correction_seq IS NOT DISTINCT FROM ?', [
-            opts.expectedCorrectionSeq == null ? null : Number(opts.expectedCorrectionSeq),
+            fenceSeq == null ? null : Number(fenceSeq),
           ]);
         }
       })

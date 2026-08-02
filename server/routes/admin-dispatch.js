@@ -2352,6 +2352,8 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
           // writes).
           structured_notes: trx.raw(
             `(COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb)
+             || jsonb_build_object('timeOnSiteRev',
+                  COALESCE(NULLIF(COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'timeOnSiteRev', ''), '0')::int + 1)
              || (CASE WHEN COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'timeOnSitePrior' IS NOT NULL
                   THEN '{}'::jsonb
                   ELSE jsonb_build_object('timeOnSitePrior', COALESCE(structured_notes::jsonb -> 'timeOnSite', 'null'::jsonb))

@@ -69,7 +69,16 @@ function timeOnSiteAdjustedPdfSignature(service) {
       ? JSON.parse(service.structured_notes)
       : (service?.structured_notes || {});
     if (notes?.timeOnSiteAdjusted !== true) return '';
-    return `-tos${minutesFromElapsed(notes.timeOnSite) || 0}`;
+    // Per-save revision (codex P2 #3152 round 18): a re-save of the SAME
+    // minutes (repairing previously clamped end stamps) changes rendered
+    // Time In/Out but not the value — with only the value in the key, a
+    // stale in-flight render's write-back would re-occupy the deterministic
+    // key after the PATCH nulled pdf_storage_key. The PATCH bumps
+    // structured_notes.timeOnSiteRev on every save; records corrected
+    // before the rev existed keep their value-only key (no cache bust).
+    const rev = Number(notes.timeOnSiteRev);
+    const revPart = Number.isFinite(rev) && rev > 0 ? `r${rev}` : '';
+    return `-tos${minutesFromElapsed(notes.timeOnSite) || 0}${revPart}`;
   } catch {
     return '';
   }

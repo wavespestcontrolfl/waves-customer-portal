@@ -773,6 +773,51 @@ describe('track-transitions lifecycle side effects', () => {
     expect(Object.keys(retryUpdate.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
   });
 
+  test('the fence is ON for callers with no stated revision — status-route completions are protected too (codex P2 #3152 round 18)', async () => {
+    // Ordinary PUT /:id/status completions pass no expectedCorrectionSeq,
+    // but their loadService→UPDATE window races the correction PATCH all
+    // the same. With no stated revision the fence uses the seq observed at
+    // load: a correction committing inside the window turns the stale full
+    // lifecycle write into the transition-only retry.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f18',
+      technician_id: 'tech-f18',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      time_on_site_correction_seq: 1,
+    };
+    const fencedUpdate = query(0);
+    const retryUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(fencedUpdate)
+      .mockReturnValueOnce(retryUpdate);
+
+    const result = await trackTransitions.markComplete('job-f18', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    expect(fencedUpdate.whereRaw).toHaveBeenCalledWith(
+      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [1],
+    );
+    expect(Object.keys(retryUpdate.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+
+    // Un-raced default caller: the fenced write matches and the full
+    // lifecycle update lands exactly as before.
+    const svc2 = { ...svc, id: 'job-f18b' };
+    const update2 = query(1);
+    db
+      .mockReturnValueOnce(query(svc2))
+      .mockReturnValueOnce(update2);
+    const result2 = await trackTransitions.markComplete('job-f18b', {});
+    expect(result2.ok).toBe(true);
+    expect(update2.whereRaw).toHaveBeenCalledWith(
+      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [1],
+    );
+    expect(update2.update.mock.calls[0][0].completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
+  });
+
   test('a fenced 0-row write whose retry also matches 0 rows reloads instead of guessing (codex P2 #3152 round 16)', async () => {
     // Both writes miss → the state (not the stamp) moved: another writer
     // completed the visit. Report the fresh row, write nothing.

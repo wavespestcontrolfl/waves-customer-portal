@@ -666,7 +666,11 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // completed_at alone is not a version token — a clamped newer
     // correction moves the stamp without moving completed_at, so the UPDATE
     // itself predicates on the stamp the caller's instant belongs to.
-    expect(trackerSource).toMatch(/whereRaw\('time_on_site_correction_seq IS NOT DISTINCT FROM \?', \[\s*\n\s*opts\.expectedCorrectionSeq == null \? null : Number\(opts\.expectedCorrectionSeq\),\s*\n\s*\]\)/);
+    expect(trackerSource).toMatch(/whereRaw\('time_on_site_correction_seq IS NOT DISTINCT FROM \?', \[\s*\n\s*fenceSeq == null \? null : Number\(fenceSeq\),\s*\n\s*\]\)/);
+    // The fence defaults to the revision the call observed at load, so
+    // status-route completions (no stated expectation) are fenced too
+    // (codex P2 round 18).
+    expect(trackerSource).toMatch(/const fenceSeq = opts\.expectedCorrectionSeq !== undefined\s*\n\s*\? opts\.expectedCorrectionSeq\s*\n\s*: \(svc\.time_on_site_correction_seq \?\? null\);/);
   });
 
   test('a repeat edit sends only the correction keys — prior preservation lives in the SQL CASE, not JS state', async () => {
@@ -1110,6 +1114,24 @@ describe('timeOnSiteAdjustedPdfSignature — stale in-flight renders cannot repu
     expect(timeOnSiteAdjustedPdfSignature({ structured_notes: null })).toBe('');
     expect(timeOnSiteAdjustedPdfSignature({})).toBe('');
     expect(timeOnSiteAdjustedPdfSignature({ structured_notes: 'not json{' })).toBe('');
+  });
+
+  test('the per-save revision changes the key even when the minutes do not (codex P2 round 18)', () => {
+    // A same-minutes re-save repairs end stamps — rendered content changed,
+    // value didn't. The rev keeps the stale in-flight render's write-back
+    // off the current key. Pre-rev corrected records keep their value-only
+    // key (no cache bust); junk revs contribute nothing.
+    expect(timeOnSiteAdjustedPdfSignature({
+      structured_notes: JSON.stringify({ timeOnSiteAdjusted: true, timeOnSite: 45, timeOnSiteRev: 1 }),
+    })).toBe('-tos45r1');
+    expect(timeOnSiteAdjustedPdfSignature({
+      structured_notes: { timeOnSiteAdjusted: true, timeOnSite: 45, timeOnSiteRev: 2 },
+    })).toBe('-tos45r2');
+    expect(timeOnSiteAdjustedPdfSignature({
+      structured_notes: { timeOnSiteAdjusted: true, timeOnSite: 45, timeOnSiteRev: 'junk' },
+    })).toBe('-tos45');
+    // The PATCH bumps the rev in the same atomic merge that writes the keys.
+    expect(source).toMatch(/jsonb_build_object\('timeOnSiteRev',\s*\n\s*COALESCE\(NULLIF\(COALESCE\(structured_notes::jsonb, '\{\}'::jsonb\) ->> 'timeOnSiteRev', ''\), '0'\)::int \+ 1\)/);
   });
 
   test('every storage-key composition site carries the component — write and expected sides in both modules', () => {
