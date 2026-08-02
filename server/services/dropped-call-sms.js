@@ -38,6 +38,10 @@ const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { readCachedLineType, cacheLineType, lookupLineType } = require('./messaging/validators/line-type');
+// sent:true is necessary but not sufficient — upstream suppressions (gate
+// off, template disabled, owner kill switch) report sent:true with a
+// sentinel providerMessageId and no SMS leaves the system.
+const { isRealProviderSend } = require('./sms-auto-send');
 
 const MESSAGE_TYPE = 'dropped_call_address_request';
 const MIN_CALL_SECONDS = 120;
@@ -337,6 +341,15 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     },
   });
 
+  if (result.sent && !isRealProviderSend(result)) {
+    // Upstream suppression sentinel — no text actually left. Never consumed
+    // the one-shot: release BOTH claims and report the suppression instead
+    // of telling the card to wait for a reply that was never sent.
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.info(`[dropped-call-sms] Suppression sentinel for ${maskPhone(phone)} (${result.providerMessageId || 'no-id'}) — released, not sent`);
+    return { sent: false, skipped: 'send_suppressed', code: result.providerMessageId || null };
+  }
   if (result.sent) {
     await stampStatus(leadId, 'sent');
     await stampPhoneClaim(phone, 'sent');
@@ -369,13 +382,22 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
   }
 
   if (result.terminal) {
-    // Synchronous terminal Twilio rejection (21610 unsubscribed, 21614 not
-    // SMS-capable, invalid destination) — the number will never accept this
-    // text; keep the one-shot so a later drop doesn't retry it (codex P2).
+    // Synchronous terminal Twilio rejection — the number will never accept
+    // this text; keep the one-shot so a later drop doesn't retry it. The
+    // meaningful value is providerErrorCode (result.code is the generic
+    // PROVIDER_FAILURE): 21610 = recipient unsubscribed, an OPT-OUT the card
+    // must render as do-not-contact, never "call them back"; 21614/invalid
+    // destination = not SMS-capable, still callable.
+    const providerCode = String(result.providerErrorCode || result.code || 'terminal');
+    const optedOut = providerCode === '21610';
     await stampStatus(leadId, 'blocked');
-    await stampPhoneClaim(phone, 'provider_terminal');
-    logger.info(`[dropped-call-sms] Terminal provider rejection for ${maskPhone(phone)}: ${result.code || 'terminal'}`);
-    return { sent: false, skipped: 'provider_terminal', code: result.code || null };
+    await stampPhoneClaim(phone, optedOut ? 'opted_out' : 'provider_terminal');
+    logger.info(`[dropped-call-sms] Terminal provider rejection for ${maskPhone(phone)}: ${providerCode}`);
+    return {
+      sent: false,
+      skipped: optedOut ? 'policy_block' : 'provider_terminal',
+      code: optedOut ? 'SUPPRESSED_PROVIDER_OPT_OUT_21610' : providerCode,
+    };
   }
   // Transient provider failure — never consumed: release for a later drop.
   await clearLeadClaim(leadId);

@@ -18,7 +18,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/messaging/send-customer-message', () => ({
-  sendCustomerMessage: jest.fn(async () => ({ sent: true })),
+  sendCustomerMessage: jest.fn(async () => ({ sent: true, providerMessageId: 'SM_real_sid' })),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (key, vars) => `Hello ${vars.first_name} — reply with your address${vars.callback_clause}.`),
@@ -312,13 +312,28 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 
-  it('terminal provider rejection (unsubscribed / not SMS-capable) — claim kept', async () => {
-    sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: '21610' });
+  it('terminal 21610 opt-out — claim kept, classified as suppression for the card', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: 'PROVIDER_FAILURE', providerErrorCode: '21610' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
-    expect(res).toEqual({ sent: false, skipped: 'provider_terminal', code: '21610' });
+    expect(res).toEqual({ sent: false, skipped: 'policy_block', code: 'SUPPRESSED_PROVIDER_OPT_OUT_21610' });
     expect(state.deletes).toHaveLength(0);
     const claimStamp = state.updates.filter((u) => u.table === 'dropped_call_sms_claims').pop();
+    expect(claimStamp.payload.outcome).toBe('opted_out');
+  });
+
+  it('terminal 21614 not-SMS-capable — claim kept, still renders callable', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: 'PROVIDER_FAILURE', providerErrorCode: '21614' });
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'provider_terminal', code: '21614' });
+    const claimStamp = state.updates.filter((u) => u.table === 'dropped_call_sms_claims').pop();
     expect(claimStamp.payload.outcome).toBe('provider_terminal');
+  });
+
+  it('suppression sentinel sent:true (gate-blocked) — released, reported not sent', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'send_suppressed', code: 'gate-blocked' });
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 
   it('MIN_CALL_SECONDS is exported for the processor eligibility check', () => {
