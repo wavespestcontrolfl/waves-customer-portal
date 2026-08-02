@@ -1471,9 +1471,15 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
   if (!start) {
     try {
       const { scheduledServiceApptTime } = require('./appointment-reminders');
-      start = await scheduledServiceApptTime(scheduledServiceId);
+      // throwOnError (Codex #3153 r20 P1): a FAILED lookup must not fall
+      // into the terminal released stamp below — that would permanently
+      // waive the fee over a transient DB blip. charge_review keeps it
+      // reviewable; terminal release is reserved for a SUCCESSFUL lookup
+      // that genuinely finds no appointment time.
+      start = await scheduledServiceApptTime(scheduledServiceId, { throwOnError: true });
     } catch (err) {
-      logger.warn(`[appt-card-request] appt-time resolution for no-show fee failed — not charging: ${err.message}`);
+      logger.error(`[appt-card-request] appt-time resolution for no-show fee FAILED — parking review: ${err.message}`);
+      return { charged: false, reason: 'charge_review' };
     }
   }
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);

@@ -2239,12 +2239,12 @@ async function handleChargeRefunded(charge) {
       const markerWritten = await db.transaction(async (trx) => {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${charge.payment_intent}`]);
         const rowInLock = await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).first('id');
-        if (rowInLock) return false;
+        if (rowInLock) return null;
         // Canonical refund attribution (Codex #3153 r17 P1):
         // stripe_refund_id + metadata.stamped_refund_ids are what
         // handleRefundFailed uses to unwind a bounced refund; refund_status
         // 'full' matches the statement pre-settlement marker vocabulary.
-        await trx('payments').insert({
+        const [markerRow] = await trx('payments').insert({
           customer_id: charge.metadata?.waves_customer_id || null,
           processor: 'stripe',
           payment_date: etDateString(),
@@ -2260,11 +2260,36 @@ async function handleChargeRefunded(charge) {
             pre_settlement_refund: true,
             ...(refundId ? { stamped_refund_ids: [refundId] } : {}),
           }),
-        });
-        return true;
+        }).returning(['id', 'customer_id']);
+        return markerRow || { id: null, customer_id: charge.metadata?.waves_customer_id || null };
       });
       if (markerWritten) {
         logger.warn(`[stripe-webhook] appointment fee PI ${charge.payment_intent} refunded before settlement — durable refund marker written`);
+        // Standard refund communications still fire (Codex #3153 r20 P1):
+        // the early return must not swallow the customer email + admin
+        // notification the shared tail sends. sendRefundIssued is
+        // idempotent by refund id.
+        if (markerWritten.customer_id) {
+          PaymentLifecycleEmail.sendRefundIssued({
+            customerId: markerWritten.customer_id,
+            paymentId: markerWritten.id,
+            refundId: refundId || chargeId,
+            refundAmount: refundAmountDollars,
+            refundDate,
+            refundReason,
+          }).catch((emailErr) => {
+            logger.warn(`[stripe-webhook] fee pre-settlement refund email failed for charge ${chargeId}: ${emailErr.message}`);
+          });
+        }
+        try {
+          await triggerNotification('payment_refunded', {
+            amount: refundAmountDollars,
+            isFullRefund,
+            invoiceId: null,
+          });
+        } catch (e) {
+          logger.warn(`[stripe-webhook] fee pre-settlement refund triggerNotification failed: ${e.message}`);
+        }
         return;
       }
     }
