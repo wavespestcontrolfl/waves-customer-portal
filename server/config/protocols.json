@@ -65,7 +65,7 @@
           "visit": 4,
           "month": "Apr",
           "primary": "Acelepryn Xtra liquid preventive ($6.78)\n★ SpeedZone Southern + NIS WEATHER-GATED ($5.95)\nK-Flow 0-0-25 liquid K ($2.18)",
-          "secondary": "Primo Maxx PGR Premium only ($1.91)\nDismiss if sedge ($4.36)\n★ IF forecast >85°F → Celsius WG instead of SpeedZone",
+          "secondary": "Primo Maxx PGR Premium only ($1.91)\nDismiss if sedge ($4.36)\n★ IF forecast >85°F → Celsius WG instead of SpeedZone\n★ VERIFY turf is past spring green-up — label prohibits SpeedZone on St. Augustine during green-up",
           "material_cost": "36.13",
           "labor_cost": "26.96",
           "tiers": {
@@ -154,7 +154,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "K-Flow returns (soil-test gated). SpeedZone safe — temps <85°F. N rate: 0 lb.",
+          "notes": "K-Flow returns (soil-test gated). SpeedZone ONLY if forecast <85\u00b0F \u2014 verify, Sep here often exceeds it; Celsius WG fallback. N rate: 0 lb.",
           "conditional_cost": "0.55"
         },
         {
