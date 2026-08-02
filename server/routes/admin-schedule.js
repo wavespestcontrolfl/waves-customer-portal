@@ -7933,6 +7933,26 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
     }
 
+    // Coverage-seeding math must match the math the BOOKING used, or the
+    // prepaid visits the seeder adds land on different days than the series
+    // the operator sold (Codex #3161 r6 P1). The booking dates month-interval
+    // cadences with addETMonthsByWeekday — ordinal weekday, "4th Tuesday" —
+    // while coverageScheduleDates walks addMonthsSameDay. That only bites
+    // when coverage has to CREATE visits the booking didn't: an ongoing
+    // booking pre-seeds 4, so a 12-visit monthly or 6-visit bimonthly year
+    // gets its tail seeded on the day of the month instead of the booked
+    // weekday. Quarterly and slower are fully pre-seeded (coverage adopts
+    // them), and every_6_weeks is day-gap arithmetic in BOTH places, so both
+    // stay eligible. Booking the full year explicitly (a finite count) also
+    // stays eligible — every visit then exists to be adopted.
+    const MONTH_BASED_COVERAGE = new Set(['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'annual']);
+    const ONGOING_PRESEEDED_VISITS = 4;
+    if (input.bookedVisitCount == null
+      && visitsPerYear > ONGOING_PRESEEDED_VISITS
+      && MONTH_BASED_COVERAGE.has(coverageCadence)) {
+      return blocked(`isn’t available on an ongoing ${coverageCadence} series — the booking only pre-seeds ${ONGOING_PRESEEDED_VISITS} visits and the prepaid year’s remaining ${visitsPerYear - ONGOING_PRESEEDED_VISITS} would be scheduled by day-of-month instead of the booked weekday. Enter ${visitsPerYear} in Visits to book the whole year`);
+    }
+
     // A capped series sells FEWER visits than the prepaid year covers (Codex
     // #3161 r3 P2): booking 2 quarterly visits then selling a 4-visit year
     // would have the coverage seeder schedule the 2 extra visits the operator

@@ -162,7 +162,9 @@ describe('annual-prepay preview — pricing', () => {
   });
 
   test('a discount-class program takes the percentage instead of a waiver', async () => {
-    const { body } = await preview({ serviceType: 'Monthly Lawn Care', price: '120', cadence: 'monthly' });
+    // Ongoing monthly is refused (coverage-math guard below), so the
+    // discount-class pricing case books the full year.
+    const { body } = await preview({ serviceType: 'Monthly Lawn Care', price: '120', cadence: 'monthly', recurringCount: '12' });
     expect(body.eligible).toBe(true);
     expect(body.visitsPerYear).toBe(12);
     expect(body.annualBase).toBe(1440);
@@ -441,6 +443,44 @@ describe('annual-prepay preview — visit cap and renewal window', () => {
     const { body } = await preview({});
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/already has an annual prepay term/);
+  });
+});
+
+// The booking dates month-interval cadences by ordinal weekday; the coverage
+// seeder walks same-day-of-month. That only diverges for the visits coverage
+// has to CREATE, i.e. an ongoing series whose year exceeds the 4 the booking
+// pre-seeds.
+describe('annual-prepay preview — coverage math must match the booked recurrence', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    stubTables();
+  });
+
+  test.each([
+    ['Monthly Lawn Care', 'monthly', '120'],
+    ['Bimonthly Pest Control', 'bimonthly', '150'],
+  ])('refuses an ongoing %s series (year exceeds the pre-seeded 4)', async (serviceType, cadence, price) => {
+    const { body } = await preview({ serviceType, cadence, price });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/only pre-seeds 4 visits/);
+  });
+
+  test('the same monthly plan IS sellable when the whole year is booked', async () => {
+    const { body } = await preview({ serviceType: 'Monthly Lawn Care', cadence: 'monthly', price: '120', recurringCount: '12' });
+    expect(body.eligible).toBe(true);
+    expect(body.prepayTotal).toBe(1368);
+  });
+
+  test('quarterly is unaffected — 4 visits are all pre-seeded and adopted', async () => {
+    const { body } = await preview({});
+    expect(body.eligible).toBe(true);
+  });
+
+  test('every-6-weeks is unaffected — day-gap arithmetic on both sides', async () => {
+    const { body } = await preview({ cadence: 'custom', intervalDays: '42' });
+    expect(body.eligible).toBe(true);
+    expect(body.visitsPerYear).toBe(9);
   });
 });
 
