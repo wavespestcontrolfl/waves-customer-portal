@@ -352,6 +352,18 @@ describe('annual-prepay preview — priced from the committed series', () => {
     expect(status).toBe(404);
   });
 
+  // A booking that commits just before ET midnight and previews just after
+  // has a persisted date that now reads as past. Anchoring on today instead
+  // would start the term AFTER the booked visit, so coverage could never
+  // adopt it and would seed a replacement while the original billed per
+  // application.
+  test('refuses rather than silently re-anchoring when the booked date is no longer future', async () => {
+    stubTables({ visit: { ...COMMITTED_VISIT, scheduled_date: etDateString(addETDays(new Date(), -1)) } });
+    const { body } = await preview({ scheduledServiceId: 'svc-1' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/anchor the prepaid year/);
+  });
+
   test('a persisted estimate-origin series is refused — the quote lane owns it', async () => {
     stubTables({ visit: { ...COMMITTED_VISIT, source_estimate_id: 'est-1' } });
     const { body } = await preview({ scheduledServiceId: 'svc-1' });

@@ -7878,6 +7878,7 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         }
       }
       input = {
+        mode: 'committed',
         bookedVisitCount,
         customerId: String(anchor.customer_id || visit.customer_id || ''),
         coverageServiceType: String(anchor.service_type || '').trim(),
@@ -7893,6 +7894,7 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     } else {
       const draftCount = Number.parseInt(req.query.recurringCount, 10);
       input = {
+        mode: 'draft',
         bookedVisitCount: Number.isInteger(draftCount) && draftCount >= 2 ? draftCount : null,
         customerId: String(req.query.customerId || '').trim(),
         coverageServiceType: String(req.query.serviceType || '').trim(),
@@ -8042,6 +8044,15 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     const firstVisitWindowStart = firstVisitDate && input.windowStartRaw
       ? AnnualPrepayTimes.normalizeWindowStart(String(input.windowStartRaw))
       : null;
+    // A COMMITTED series must anchor on its own visit, never on today
+    // (Codex #3161 r8 P2): a booking that commits just before ET midnight and
+    // previews just after it has a persisted date validScheduleDate now reads
+    // as past. Falling back to today would start the term after the booked
+    // visit, so coverage could not adopt it — the visit would bill per
+    // application while the seeder scheduled a replacement inside the window.
+    if (input.mode === 'committed' && !firstVisitDate) {
+      return blocked('couldn’t anchor the prepaid year on the booked visit — its date is no longer in the future. Refresh, and mint from Customer 360 if this visit still needs prepay');
+    }
     const termStart = firstVisitDate || today;
 
     // Surface an existing term as a block rather than letting the mint 409
