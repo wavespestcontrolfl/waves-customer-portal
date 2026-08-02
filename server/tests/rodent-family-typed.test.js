@@ -272,8 +272,28 @@ describe('trap setup vs. re-check — the tech declares it', () => {
     // rodent inspection already scored the property.
     const result = todaysResult({ ...SETUP_VALUES, trap_visit_type: 'Initial setup' }, 4);
     expect(result.body).toContain('We set 8 traps today.');
-    expect(result.body).toContain('The traps go out on this first visit');
+    expect(result.body).toContain('We return to check them, record what they catch');
     expect(result.body).not.toMatch(/checked \d+ traps/);
+  });
+
+  // codex P2 round 2 on #3159: this is the MAIN case the selector exists for
+  // — trapping that starts after a rodent inspection already scored the
+  // property. Production supplies visitSequence > 1 AND a trendWord for it,
+  // which routed it into the trend branch and dropped the setup guidance.
+  // The earlier later-visit test missed it by not supplying a trendWord.
+  test('a setup on a TREND visit keeps both the trend headline and the setup guidance', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { ...SETUP_VALUES, trap_visit_type: 'Initial setup' },
+      chips: ['Continue trapping'],
+      activity: { score: 2, trend: 'improving', trendWord: 'decreased' },
+      visitSequence: 3,
+    });
+    expect(result.headline).toBe('Rodent activity has decreased since our last visit.');
+    expect(result.body).toContain('We set 8 traps today.');
+    expect(result.body).toContain('We return to check them, record what they catch');
+    expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
   test('a re-check declared on visit 1 reads as a re-check', () => {
@@ -281,7 +301,7 @@ describe('trap setup vs. re-check — the tech declares it', () => {
     // or by the customer), so visit 1 is genuinely a check.
     const result = todaysResult({ ...SETUP_VALUES, trap_visit_type: 'Follow-up check' }, 1);
     expect(result.body).toContain('We checked 8 traps, found no new captures and added new traps today.');
-    expect(result.body).not.toContain('The traps go out on this first visit');
+    expect(result.body).not.toContain('We return to check them, record what they catch');
   });
 
   test('the declared value drives the count label, not the visit number', () => {
@@ -363,7 +383,7 @@ describe('trap setup vs. re-check — the tech declares it', () => {
       1,
     );
     expect(result.body).toContain('We set 8 traps and removed 1 capture today.');
-    expect(result.body).not.toContain('The traps go out on this first visit');
+    expect(result.body).not.toContain('We return to check them, record what they catch');
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
@@ -377,7 +397,7 @@ describe('trap setup vs. re-check — the tech declares it', () => {
       visitSequence: 1,
     });
     expect(result.body).toContain('We set 8 traps today.');
-    expect(result.body).toContain('The traps go out on this first visit');
+    expect(result.body).toContain('We return to check them, record what they catch');
     expect(result.body).not.toMatch(/checked \d+ traps/);
     // Traps placed today have had no chance to catch anything.
     expect(result.body).not.toContain('found no new captures');
@@ -396,7 +416,7 @@ describe('trap setup vs. re-check — the tech declares it', () => {
       visitSequence: 2,
     });
     expect(result.body).toContain('We checked 8 traps, found no new captures and added new traps today.');
-    expect(result.body).not.toContain('The traps go out on this first visit');
+    expect(result.body).not.toContain('We return to check them, record what they catch');
   });
 
   test('the setup visit relabels the count finding to "Traps set"', () => {
@@ -509,6 +529,60 @@ describe('tech-reviewed AI report copy on rodent trapping', () => {
     expect(result).not.toHaveProperty('bodySource');
     // The gauge headline is untouched — only the body refuses the draft.
     expect(result.headline).toBe('Rodent activity has decreased since our last visit.');
+  });
+
+  // codex P1 round 2 on #3159. The draft prompt never receives
+  // trap_visit_type, and the tech can flip the selector AFTER generating —
+  // so a re-check draft could ride onto a declared setup, stamped and
+  // published, with the setup line appended right after it.
+  test('a draft contradicting a declared setup is refused, not published', () => {
+    const RECHECK_DRAFT = 'We checked 8 traps and found no captures today. '
+      + 'Droppings were noted near the plenum.';
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { species: 'Roof rat', traps_checked: '8', captures: '0', trap_visit_type: 'Initial setup' },
+      chips: ['Continue trapping'],
+      activity: { score: 3 },
+      visitSequence: 1,
+      technicianReportBody: RECHECK_DRAFT,
+    });
+    expect(result.body).not.toContain('checked 8 traps');
+    expect(result).not.toHaveProperty('bodySource');
+    // Falls back to the deterministic sentence, which is stage-correct
+    // because it is composed from the same declaration.
+    expect(result.body).toContain('We set 8 traps today.');
+  });
+
+  test('a stage-CORRECT draft on a declared setup is still used', () => {
+    const SETUP_DRAFT = 'We set 8 traps along the attic runways and the garage wall. '
+      + 'Droppings and rub marks were concentrated near the A/C plenum.';
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { species: 'Roof rat', traps_checked: '8', trap_visit_type: 'Initial setup' },
+      chips: ['Continue trapping'],
+      activity: { score: 3 },
+      visitSequence: 1,
+      technicianReportBody: SETUP_DRAFT,
+    });
+    expect(result.body).toContain(SETUP_DRAFT);
+    expect(result.bodySource).toBe('technician_report');
+  });
+
+  test('a re-check visit never runs the setup screen over its draft', () => {
+    const RECHECK_DRAFT = 'We checked 8 traps and found no captures today.';
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { species: 'Roof rat', traps_checked: '8', captures: '0', trap_visit_type: 'Follow-up check' },
+      chips: ['Continue trapping'],
+      activity: { score: 3 },
+      visitSequence: 2,
+      technicianReportBody: RECHECK_DRAFT,
+    });
+    expect(result.body).toContain(RECHECK_DRAFT);
+    expect(result.bodySource).toBe('technician_report');
   });
 
   test('bait-station siblings are unchanged — the gauge body stays deterministic', () => {

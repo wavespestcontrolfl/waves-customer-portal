@@ -34,7 +34,11 @@ const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
-const { findBannedCustomerCopy, isInitialRodentTrapSetup } = require('./activity-indicators');
+const {
+  findBannedCustomerCopy,
+  isInitialRodentTrapSetup,
+  setupContradictions,
+} = require('./activity-indicators');
 const { validateCustomerCopy } = require('./premium-experience');
 const {
   EXTRA_FORBIDDEN,
@@ -1281,40 +1285,14 @@ function contradictedActivityWording(text, facts) {
 // station facts still ground the checked count and a typed `captures: 0`
 // still grounds negative capture wording, so "we checked 8 traps and found
 // no captures" cleared every fail-closed check while flatly contradicting
-// visitStage. Re-check and empty-check verbs are the two shapes the model
-// reaches for, so both reject and fall back to the deterministic setup copy.
+// visitStage.
 //
-// Scoped to trap nouns so ordinary setup prose survives: "we checked the
-// roofline for entry points" is a legitimate inspection sentence on a setup
-// visit and must not reject.
-const TRAP_NOUN_RE = '(?:traps?|devices?)';
-const SETUP_RECHECK_RES = [
-  new RegExp(`\\b(?:re-?)?check(?:ed|ing)?\\b[^.!?]{0,40}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
-  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,40}?\\bwere\\s+(?:re-?)?(?:check|inspect)(?:ed)?\\b`, 'i'),
-  new RegExp(`\\b(?:re-?)?(?:set|reset|rebait(?:ed)?|refresh(?:ed)?|reposition(?:ed)?|moved)\\b[^.!?]{0,20}?\\bthe\\s+${TRAP_NOUN_RE}\\b`, 'i'),
-  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,20}?\\bwere\\s+reset\\b`, 'i'),
-  new RegExp(`\\b(?:existing|previous(?:ly)?\\s+(?:set|placed))\\s+${TRAP_NOUN_RE}\\b`, 'i'),
-];
-const SETUP_EMPTY_CAPTURE_RES = [
-  /\bno\s+(?:new\s+)?captures?\b/i,
-  /\bnothing\s+(?:was\s+)?(?:caught|captured)\b/i,
-  /\bcaptures?\s+(?:were|was)\s+not\s+recorded\b/i,
-  /\b(?:traps?|devices?)\s+(?:were|was)\s+empty\b/i,
-];
-
+// The matcher itself lives in activity-indicators (`setupContradictions`)
+// because the typed snapshot runs the SAME test over the tech's AI report
+// body — one definition, so the two lanes cannot drift apart.
 function setupWordingProblems(text, facts) {
   if (facts.visitStage !== 'initial_trap_setup') return [];
-  const str = String(text || '');
-  const problems = [];
-  for (const rx of SETUP_RECHECK_RES) {
-    const match = str.match(rx);
-    if (match) problems.push(`setup_recheck_claim:${match[0].trim().toLowerCase()}`);
-  }
-  for (const rx of SETUP_EMPTY_CAPTURE_RES) {
-    const match = str.match(rx);
-    if (match) problems.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
-  }
-  return problems;
+  return setupContradictions(text);
 }
 
 // Invented product/chemical identifiers reject independently of the

@@ -1872,7 +1872,18 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     zoom,
     width: liveConfig.width || 640,
     height: liveConfig.height || 340,
-  }).catch(() => ({ stations: [], nextStationNumber: 1, nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 } }));
+  })
+    .then((slice) => ({ ...slice, loaded: true }))
+    // `loaded: false` distinguishes THIS degraded shape from a property that
+    // genuinely has no stations — both carry `stations: []` (codex P2 on
+    // #3159). Consumers that only draw pins can ignore it; anything INFERRING
+    // from the absence of stations must not treat a failed query as fact.
+    .catch(() => ({
+      stations: [],
+      nextStationNumber: 1,
+      nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 },
+      loaded: false,
+    }));
 
   return {
     available: true,
@@ -1885,6 +1896,9 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
       attributionText: liveConfig.attributionText || '',
     },
     stations: stationSlice.stations,
+    // false = the station query failed and the empty array above is a
+    // fallback, not a fact about the property.
+    stationsLoaded: stationSlice.loaded !== false,
     nextStationNumber: stationSlice.nextStationNumber,
     nextStationNumberByProgram: stationSlice.nextStationNumberByProgram,
     stationCap: TermiteStations.MAX_ACTIVE_STATIONS,

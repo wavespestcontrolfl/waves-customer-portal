@@ -1807,6 +1807,55 @@ function isInitialRodentTrapSetup(projectType, visitSequence, values = {}) {
   return !(Number(visitSequence) > 1);
 }
 
+// Wording that CONTRADICTS a declared trap setup. Lives here rather than in
+// the narrative module because two independent lanes need the same test and
+// the narrative already imports from this file (importing back would cycle):
+//   1. the LLM Visit Summary  (rodent-report-narrative's fail-closed guards)
+//   2. the tech's AI report body, which is free prose screened only for
+//      banned copy — the draft prompt never receives trap_visit_type, and the
+//      tech can flip the selector after generating, so a body saying "we
+//      checked 8 traps and found no captures" could ride onto a declared
+//      setup (codex P1 on #3159).
+//
+// Anchored to trap nouns so ordinary setup prose survives: "we checked the
+// roofline for entry points" is a legitimate sentence on a setup visit. The
+// re-verbs deliberately exclude a bare "set" — that is the wording a setup
+// visit is SUPPOSED to use (codex P2 on #3159).
+const TRAP_NOUN_RE = '(?:traps?|devices?)';
+const SETUP_RECHECK_RES = [
+  new RegExp(`\\b(?:re-?)?check(?:ed|ing)?\\b[^.!?]{0,40}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
+  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,40}?\\bwere\\s+(?:re-?)?(?:check|inspect)(?:ed)?\\b`, 'i'),
+  new RegExp(`\\b(?:re-?set|re-?bait(?:ed)?|rebait(?:ed)?|refresh(?:ed)?|re-?position(?:ed)?|moved)\\b[^.!?]{0,20}?\\bthe\\s+${TRAP_NOUN_RE}\\b`, 'i'),
+  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,20}?\\bwere\\s+re-?set\\b`, 'i'),
+  new RegExp(`\\b(?:existing|previous(?:ly)?\\s+(?:set|placed))\\s+${TRAP_NOUN_RE}\\b`, 'i'),
+];
+const SETUP_EMPTY_CAPTURE_RES = [
+  /\bno\s+(?:new\s+)?captures?\b/i,
+  /\bnothing\s+(?:was\s+)?(?:caught|captured)\b/i,
+  /\bcaptures?\s+(?:were|was)\s+not\s+recorded\b/i,
+  /\b(?:traps?|devices?)\s+(?:were|was)\s+empty\b/i,
+];
+
+/**
+ * Returns the setup-contradicting phrases found in `text` (empty when clean).
+ * Callers decide what to do with them — the narrative rejects and falls back
+ * to its deterministic summary; the typed snapshot falls back to the
+ * deterministic "what we did" sentence.
+ */
+function setupContradictions(text) {
+  const str = String(text || '');
+  const found = [];
+  for (const rx of SETUP_RECHECK_RES) {
+    const match = str.match(rx);
+    if (match) found.push(`setup_recheck_claim:${match[0].trim().toLowerCase()}`);
+  }
+  for (const rx of SETUP_EMPTY_CAPTURE_RES) {
+    const match = str.match(rx);
+    if (match) found.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
+  }
+  return found;
+}
+
 /**
  * Deterministic Today's Result copy (contract §6). AI may later polish the
  * recommendations field, but this template output always exists and always
@@ -2187,8 +2236,21 @@ function buildTodaysResult({
     // would have published a draft written while activity still looked
     // heavy (codex P1 on #3159). Same rule as the default composition: a
     // draft must never outrank the typed zero it predates.
-    const trappingReportBody = projectType === 'rodent_trapping' && activity.score !== 0
+    // A draft that contradicts the declared stage is refused outright
+    // (codex P1 on #3159): the AI-report prompt never receives
+    // trap_visit_type, and the tech can flip the selector AFTER generating,
+    // so a body reading "we checked 8 traps and found no captures" could
+    // otherwise ride onto a declared setup — stamped bodySource, published
+    // to both Today's Result and the summary slot, with the setup line
+    // appended right after it. Falls back to the deterministic sentence,
+    // which is always stage-correct because it is composed from the same
+    // declaration.
+    const rawTrappingBody = projectType === 'rodent_trapping' && activity.score !== 0
       ? technicianReportBody
+      : null;
+    const trappingReportBody = rawTrappingBody
+      && !(initialTrapSetup && setupContradictions(rawTrappingBody).length)
+      ? rawTrappingBody
       : null;
     // One line of expectation-setting on a trap-setup visit: nothing has
     // been checked yet, so the customer is told what happens next instead of
@@ -2201,9 +2263,17 @@ function buildTodaysResult({
     // longer applies. Deliberately NOT a validation rejection — a completion
     // is never blocked on copy, and a setup that catches something the same
     // day is a real (if rare) state.
+    //
+    // Wording note: forward-looking only. An earlier draft opened with "the
+    // traps go out on this first visit", which contradicted the trend
+    // headline on a setup declared AFTER an earlier rodent-family visit —
+    // the main case the selector exists for (trapping that follows an
+    // inspection). Restating "the traps went out today" also just echoed the
+    // sentence before it, so the line now carries only what the customer
+    // does not already know.
     const capturesRecorded = Number(values.captures) > 0;
     const setupLine = initialTrapSetup && !capturesRecorded
-      ? ' The traps go out on this first visit — we check them, record what they catch, and adjust placements from there.'
+      ? ' We return to check them, record what they catch, and adjust placements from there.'
       : '';
     if (visitSequence > 1 && activity.trendWord) {
       // Stable needs its own sentence shape — "has about the same as the
@@ -2213,7 +2283,12 @@ function buildTodaysResult({
         : `${noun} activity has ${activity.trend === 'worsening' ? 'increased' : 'decreased'} since our last visit.`;
       return {
         headline,
-        body: `${trappingReportBody || whatWeDid} ${nextStep}`,
+        // setupLine belongs here too (codex P2 on #3159): a setup declared
+        // after an earlier rodent-family visit lands in THIS branch —
+        // visitSequence > 1 with a resolved trendWord — and that is the
+        // main case the selector exists for. Omitting the guidance here
+        // dropped it from exactly the reports that needed it most.
+        body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
         nextStep,
         ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
       };
@@ -2528,5 +2603,6 @@ module.exports = {
   buildTodaysResult,
   buildTypedReportSnapshot,
   isInitialRodentTrapSetup,
+  setupContradictions,
   findingsSchemaForType,
 };

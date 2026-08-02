@@ -8974,7 +8974,16 @@ export function CompletionPanel({
         // the field and an untouched-by-the-map property (traps predating
         // the trap map) is exactly the case they override. Never
         // overwrites a value already on the form.
-        if (stationProgram === "trapping") {
+        //
+        // stationsLoaded false means the station query FAILED and the empty
+        // array is a fallback (the server converts that error into a
+        // successful payload). Inferring "Initial setup" from it would
+        // silently satisfy the required selector with the wrong value on a
+        // follow-up, and freeze "the traps were newly set" into the customer
+        // report (codex P2 on #3159). Leave it blank instead — the field is
+        // required, so a tech pick is the worst case, and a wrong default is
+        // strictly worse than one tap.
+        if (stationProgram === "trapping" && res.stationsLoaded !== false) {
           const existingTraps = (Array.isArray(res.stations) ? res.stations : [])
             .filter((station) => (station.program || "termite") === "trapping").length;
           prefillTrapVisitType(existingTraps > 0 ? "Follow-up check" : "Initial setup");

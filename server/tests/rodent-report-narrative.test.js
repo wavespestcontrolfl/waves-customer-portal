@@ -497,3 +497,45 @@ test('a model that ignores the setup rule falls back to the deterministic setup 
   expect(out).toContain('7 of 7 traps were set');
   expect(out).not.toContain('checked 7 traps');
 });
+
+// codex P2 round 2 on #3159: the first setup guard's re-verb alternation
+// included a bare `set` behind an optional `re-?`, so it flagged "set the
+// traps" — the exact wording the prompt asks for — and bounced compliant
+// output to the deterministic fallback.
+test('plain setup wording is not mistaken for a re-check', () => {
+  const facts = groundingFacts(setupInput());
+  for (const text of [
+    'We set the traps around the attic today.',
+    'We set the devices along the runways we documented.',
+  ]) {
+    expect(ungroundedClaims(text, facts).filter((p) => p.startsWith('setup_'))).toEqual([]);
+  }
+  // …while the re- forms it exists to catch still reject.
+  for (const text of [
+    'We reset the traps along the roofline.',
+    'We re-set the traps.',
+    'The traps were reset.',
+    'We repositioned the traps near the plenum.',
+  ]) {
+    expect(ungroundedClaims(text, facts).filter((p) => p.startsWith('setup_')).length)
+      .toBeGreaterThan(0);
+  }
+});
+
+test('a compliant setup narrative survives end to end', async () => {
+  // Deliberately stays inside every OTHER guard too (no invented locations,
+  // no capture claim — "what they catch" reads as one to the capture guard),
+  // so a failure here means the SETUP guard fired, not a neighbour.
+  const summary = 'We set 7 traps today to begin tracking the roof rat activity documented at '
+    + 'the property. Activity is moderate, and this visit sets the baseline future visits will '
+    + 'measure against. We return to adjust placements as needed. Your next visit is scheduled '
+    + 'for Monday, August 3, arriving 8–10 AM.';
+  const out = await applyRodentReportNarrative(setupInput(), {
+    callModel: jest.fn().mockResolvedValue({ ok: true, json: { summary } }),
+  });
+  // The module appends the ratified next-step sentence to accepted output,
+  // so the model's text is CONTAINED rather than returned verbatim.
+  expect(out).toContain(summary);
+  // i.e. it did NOT bounce to the deterministic fallback
+  expect(out).not.toContain('7 of 7 traps were set');
+});
