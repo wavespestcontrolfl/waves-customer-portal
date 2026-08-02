@@ -249,7 +249,14 @@ const PURPOSE_POLICY = {
     allowExactPrice: false,
     maxSegments: 2,
     requireConsent: 'transactional',
-    prefsColumn: 'billing_reminder',
+    // NO per-purpose opt-out (owner ruling 2026-08-01): billing notices are
+    // account-operational — you get them because you have a balance, like a
+    // receipt. The old notification_prefs.billing_reminder column defaulted
+    // FALSE and silently muted billing texts for 1,164 of 1,174 customers
+    // who never chose anything; it is now IGNORED everywhere (the physical
+    // column drop follows in a separate deploy, expand/contract).
+    // sms_enabled (STOP) remains the master kill switch, and
+    // billing_channel still routes email-preferring customers to email.
     channelColumn: 'billing_channel',
     // 'opt_in' like payment_receipt: an unconditional gate would turn an
     // email-preferring customer's billing reminder into silence for any

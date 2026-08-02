@@ -4123,7 +4123,6 @@ function BillingTab({ customer }) {
   const [yearFilter, setYearFilter] = useState('All');
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
-  const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
   const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
@@ -4239,7 +4238,6 @@ function BillingTab({ customer }) {
         setBillingPrefsLoadError(!prefsData);
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
-          setBillingSmsEnabled(!!prefsData.billingReminder);
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
@@ -4850,7 +4848,6 @@ function BillingTab({ customer }) {
     setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
-      billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
       // No email on file (or email messages opted out portal-wide) → the
       // dropdowns render locked to Text; persist what is shown so an
@@ -5494,13 +5491,17 @@ function BillingTab({ customer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
+          {/* No on/off toggle (owner ruling 2026-08-01): billing reminders
+              are account-operational — every customer gets them, like
+              receipts. Only the delivery method is a choice; STOP remains
+              the master kill switch. */}
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Billing reminder texts</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get text reminders for upcoming or overdue billing items.</div>
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Billing reminders</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>How you receive reminders for upcoming or overdue billing items.</div>
           </div>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
-            const selectable = billingSmsEnabled && hasBillingEmail;
+            const selectable = hasBillingEmail;
             return (
               <select
                 value={hasBillingEmail ? billingReminderChannel : 'sms'}
@@ -5518,24 +5519,6 @@ function BillingTab({ customer }) {
               </select>
             );
           })()}
-          <button
-            type="button"
-            onClick={() => setBillingSmsEnabled(!billingSmsEnabled)}
-            aria-label={`Billing reminder texts ${billingSmsEnabled ? 'enabled' : 'disabled'}`}
-            style={{
-              width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
-              background: billingSmsEnabled ? B.yellow : `${B.wavesBlue}55`,
-              position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
-            }}
-          >
-            <div style={{
-              width: 22, height: 22, borderRadius: 11, background: '#fff',
-              position: 'absolute', top: 5,
-              left: billingSmsEnabled ? 24 : 2,
-              transition: 'left 0.2s ease',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-            }} />
-          </button>
         </div>
 
         <div style={{
