@@ -4122,6 +4122,45 @@ async function handleDisputeCreated(dispute) {
     if (disputedPi?.metadata?.purpose === 'appointment_card_no_show_fee') {
       const feeReq = { customer_id: disputedPi.metadata?.waves_customer_id || null };
       const feePreRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id');
+      if (feePreRow) {
+        // Existing-row path runs UNDER the fee lock with a final-state
+        // re-read (Codex #3153 r22 P1): a concurrently-committing won
+        // closure stamps dispute_final + restores the invoice — the
+        // created event must never re-open reinstated money off a stale
+        // metadata read. Fee rows are fully handled here (return).
+        await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
+          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
+          if (!rowInLock) return;
+          let meta = {};
+          try {
+            meta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
+          } catch { meta = {}; }
+          if (meta.dispute_final && meta.dispute_id === dispute.id) {
+            logger.warn(`[stripe-webhook] fee dispute ${dispute.id} already closed (${meta.dispute_final}) — created event is a late replay, skipping`);
+            return;
+          }
+          await trx('payments').where({ id: rowInLock.id }).update({
+            status: 'disputed',
+            failure_reason: `Dispute: ${reason}`,
+            metadata: JSON.stringify({ ...meta, dispute_id: dispute.id }),
+          });
+          // Reopen the fee invoice (paid → overdue) when this PI backs it.
+          const feeInvoice = await trx('invoices').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status');
+          if (feeInvoice && ['paid', 'processing'].includes(String(feeInvoice.status || '').toLowerCase())) {
+            await trx('invoices').where({ id: feeInvoice.id }).update({ status: 'overdue', updated_at: trx.fn.now() });
+          }
+        });
+        try {
+          await NotificationService.notifyAdmin(
+            'dispute',
+            `Dispute created: $${amount}`,
+            `Dispute ${dispute.id} on charge ${chargeId} (${reason}) — a settled no-show fee was disputed. Respond with evidence in the Stripe dashboard.`,
+            { icon: '⚠️', link: '/admin/invoices' },
+          );
+        } catch { /* non-critical */ }
+        return;
+      }
       if (!feePreRow) {
         const marked = await db.transaction(async (trx) => {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
@@ -4575,9 +4614,22 @@ async function handleDisputeClosed(dispute) {
       feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
     } catch { feeMeta = {}; }
     if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_dispute === true && !feeMeta.invoice_id) {
-      if (String(feeRow.status || '').toLowerCase() === 'disputed') {
-        await db('payments').where({ id: feeRow.id }).update({ status: 'paid' });
-      }
+      // Flip the marker settleable UNDER the fee lock, stamping the final
+      // state (Codex #3153 r22 P1) — a racing created event re-reads
+      // dispute_final under the same lock and skips instead of reopening.
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
+        const rowInLock = await trx('payments').where({ id: feeRow.id }).first('id', 'status', 'metadata');
+        if (!rowInLock) return;
+        let lockedMeta = {};
+        try {
+          lockedMeta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
+        } catch { lockedMeta = {}; }
+        await trx('payments').where({ id: rowInLock.id }).update({
+          ...(String(rowInLock.status || '').toLowerCase() === 'disputed' ? { status: 'paid' } : {}),
+          metadata: JSON.stringify({ ...lockedMeta, dispute_id: dispute.id, dispute_final: status }),
+        });
+      });
       const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
       await resettleAppointmentFeeFromPi(dispute.payment_intent);
     }

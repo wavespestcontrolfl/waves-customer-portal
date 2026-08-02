@@ -205,6 +205,16 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     // (or lookup failure — fail closed) consumes nothing. Opt-in.
     if (requireSelfPayScheduledServiceId != null) {
       try {
+        // Customer row FIRST (Codex #3153 r22 P1): payer assignment can
+        // live at the account level (customers.payer_id) — locking only
+        // the visit would let an account-default payer update commit
+        // between the resolve and the credit consumption. Same
+        // customer→service lock order as chargeInvoiceWithSavedCard.
+        const lockedCustomer = await t('customers')
+          .where({ id: invoice.customer_id })
+          .forUpdate()
+          .first('id');
+        if (!lockedCustomer) return { applied: 0, skipped: 'customer_missing' };
         const lockedSvc = await t('scheduled_services')
           .where({ id: requireSelfPayScheduledServiceId })
           .forUpdate()

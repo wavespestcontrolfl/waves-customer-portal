@@ -2342,7 +2342,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
             await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: apptFeeOutcome });
           }
         }
-      } catch (e) { logger.error(`[admin-dispatch] series cancellation card-hold handling failed: ${e.message}`); }
+      } catch (e) {
+        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
+        logger.error(`[admin-dispatch] series cancellation card-hold handling failed: ${e.message}`);
+        await require('../services/appointment-card-request')
+          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
+      }
 
       // Void any still-open invoices pre-minted for the cancelled visits so
       // dunning doesn't chase cancelled jobs. The helper enforces the
@@ -2617,7 +2622,12 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // (Codex #3153 r16 P1) — never a silent successful cancel.
           await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: apptFeeOutcome });
         }
-      } catch (e) { logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`); }
+      } catch (e) {
+        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
+        logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`);
+        await require('../services/appointment-card-request')
+          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
+      }
 
       try {
         const result = await trackTransitions.cancel(svc.id, {

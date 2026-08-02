@@ -4427,7 +4427,14 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // office (Codex #3153 r16 P1) — never a silent success.
                 await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: apptFeeOutcome });
               }
-            } catch (e) { logger.error(`[admin-schedule] bulk-cancel card-hold handling failed: ${e.message}`); }
+            } catch (e) {
+              // A thrown fee step = unresolved lane ownership on an
+              // already-committed cancel (Codex #3153 r22 P1) — surface it,
+              // never a silent clean cancellation.
+              logger.error(`[admin-schedule] bulk-cancel card-hold handling failed: ${e.message}`);
+              await require('../services/appointment-card-request')
+                .alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: { released: false, reason: 'fee_step_error' } });
+            }
             break;
           }
           case 'mark_prepaid': {
@@ -7195,7 +7202,12 @@ router.put('/:id/status', async (req, res, next) => {
           // (Codex #3153 r16 P1) — never a silent successful cancel.
           await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: apptFeeOutcome });
         }
-      } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
+      } catch (e) {
+        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
+        logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`);
+        await require('../services/appointment-card-request')
+          .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
+      }
     }
 
     // Outbound-callback booking confirmed by the office → arm the deferred
