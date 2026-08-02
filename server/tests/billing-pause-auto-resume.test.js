@@ -198,9 +198,9 @@ describe('maybeResumeBillingPauseOnPayment', () => {
   });
 
   test('a settlement within clock-skew of the pause anchor still clears (the true race)', async () => {
-    // The pause timestamp IS the attempt anchor; a settlement 30s before it
-    // is within integer-second + NTP skew of "during the attempt".
-    mockState.customer = { ...PAUSED, service_paused_at: '2026-05-02T12:00:30Z' };
+    // The pause timestamp IS the attempt anchor; one second of slop is
+    // integer-second flooring plus NTP drift, nothing more.
+    mockState.customer = { ...PAUSED, service_paused_at: '2026-05-02T12:00:01Z' };
 
     const res = await maybeResumeBillingPauseOnPayment('cust-1', {
       paymentIntentId: 'pi_race',
@@ -208,6 +208,19 @@ describe('maybeResumeBillingPauseOnPayment', () => {
     });
 
     expect(res).toMatchObject({ resumed: true });
+  });
+
+  test('a payment FIVE MINUTES before the failure cycle does not clear its pause', async () => {
+    // 09:56 payment, 10:00 exhaustion: the failure superseded it. Skew
+    // tolerance must never widen into a race window.
+    mockState.customer = { ...PAUSED, service_paused_at: '2026-05-02T10:00:00Z' };
+
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', {
+      paymentIntentId: 'pi_pre_cycle',
+      settledAt: new Date('2026-05-02T09:56:00Z'),
+    });
+
+    expect(res).toMatchObject({ resumed: false, reason: 'settled_before_pause_cycle' });
   });
 
   test('a payment HALF AN HOUR before the failure cycle does not clear its pause', async () => {

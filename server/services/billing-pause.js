@@ -85,10 +85,12 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
       // evidence the exhaustion already superseded — a customer who paid at
       // 09:30 and whose final retry failed at 10:00 stays paused, no matter
       // when the 09:30 event's first delivery lands. CLOCK_SKEW_MS covers
-      // Stripe's integer-second event.created plus NTP drift between our
-      // clock (the anchor) and Stripe's (the settlement) — it is skew
-      // tolerance, not a race window.
-      const CLOCK_SKEW_MS = 5 * 60 * 1000;
+      // exactly what its name says: Stripe's integer-second event.created
+      // (up to 999ms of floor) plus NTP drift between our clock (the
+      // anchor) and Stripe's (the settlement) — single-digit seconds
+      // matches billing-cron's second-floored predicate. Anything wider
+      // becomes a race window that re-admits pre-cycle payments.
+      const CLOCK_SKEW_MS = 2 * 1000;
       if (settledAt.getTime() < new Date(customer.service_paused_at).getTime() - CLOCK_SKEW_MS) {
         return { resumed: false, reason: 'settled_before_pause_cycle' };
       }
