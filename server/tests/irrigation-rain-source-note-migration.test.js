@@ -201,6 +201,49 @@ describe('rain_source_note migration', () => {
     expect(knex.__db.email_templates[0].active_version_id).not.toBe('draft1');
   });
 
+  test('down() keeps the variable ALLOWED when it declines to revert', async () => {
+    const knex = makeKnex(fixture());
+    await migration.up(knex);
+    // Admin publishes real changes on top → rollback must decline…
+    knex.__db.email_template_versions.push({
+      id: 'v3', template_id: 't1', version_number: 3, status: 'active',
+      subject: 's', preview_text: 'p',
+      blocks: JSON.stringify([{ type: 'heading', content: 'ADMIN' }, { type: 'paragraph', content: `{{${VARIABLE}}}` }]),
+      text_body: null, published_at: '2026-08-02T00:00:00.000Z',
+    });
+    knex.__db.email_templates[0].active_version_id = 'v3';
+
+    await migration.down(knex);
+
+    // …and because the live copy still references the variable, stripping it
+    // from allowed_variables would make the next admin publish fail
+    // validation with "Disallowed variables".
+    const tpl = knex.__db.email_templates[0];
+    expect(JSON.parse(tpl.allowed_variables)).toContain(VARIABLE);
+  });
+
+  test('down() drops the variable only once the content revert happened', async () => {
+    const knex = makeKnex(fixture());
+    await migration.up(knex);
+    await migration.down(knex);
+    const tpl = knex.__db.email_templates[0];
+    expect(JSON.parse(tpl.allowed_variables)).not.toContain(VARIABLE);
+  });
+
+  test('down() does NOT discard a subject-only admin edit', async () => {
+    const knex = makeKnex(fixture());
+    await migration.up(knex);
+    // Blocks identical to our own output; only the subject changed. The
+    // structural check has to notice, or the edit is silently lost.
+    const ours = knex.__db.email_template_versions.find((v) => v.id !== 'v1');
+    ours.subject = 'ADMIN SUBJECT';
+
+    await migration.down(knex);
+
+    expect(knex.__db.email_templates[0].active_version_id).toBe(ours.id);
+    expect(ours.subject).toBe('ADMIN SUBJECT');
+  });
+
   test('down() leaves the table alone when no note-free version exists', async () => {
     const knex = makeKnex(fixture());
     // Every version carries the note → nothing safe to return to.

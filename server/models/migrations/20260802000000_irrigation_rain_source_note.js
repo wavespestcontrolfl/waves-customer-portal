@@ -122,68 +122,76 @@ exports.down = async function down(knex) {
     const tpl = await knex('email_templates').where({ template_key: key }).first();
     if (!tpl) continue;
 
+    // ROLLBACK IS DELIBERATELY CONSERVATIVE (codex #3156 r1-r4).
+    //
+    // Two goals conflict once a human touches the template: remove the note,
+    // and don't destroy newer copy. So this undoes ONLY the case it created,
+    // identified structurally — the active version carries the note, nothing
+    // is published on top of it, and stripping the note reproduces its
+    // published predecessor exactly (blocks, text body, subject and preview).
+    // Anything else means someone has moved the template on, and the rollback
+    // declines rather than overwriting them.
+    //
+    // Ordering matters: the allowed/optional metadata is only stripped when
+    // the content revert actually happens. Removing it first would leave a
+    // skipped template whose live version still references
+    // {{rain_source_note}} while the variable is no longer allowed, and the
+    // next admin publish would fail validation with "Disallowed variables".
+    let reverted = false;
+
+    if (tpl.active_version_id) {
+      const current = await knex('email_template_versions').where({ id: tpl.active_version_id }).first();
+      if (current) {
+        const all = await knex('email_template_versions')
+          .where({ template_id: tpl.id })
+          .orderBy('version_number', 'desc');
+
+        const carriesNote = (v) => JSON.stringify(asArray(v.blocks)).includes(VARIABLE)
+          || String(v.text_body || '').includes(VARIABLE);
+        const isNewest = !all.some((v) => Number(v.version_number) > Number(current.version_number));
+
+        if (carriesNote(current) && isNewest) {
+          const stripNote = (blocks) => asArray(blocks)
+            .filter((b) => !(b && b.type === 'paragraph' && String(b.content || '').includes(VARIABLE)));
+          const trim = (t) => String(t || '').replace(/\s+$/, '');
+          const currentStripped = JSON.stringify(stripNote(current.blocks));
+          const currentText = trim(String(current.text_body || '').replace(`{{${VARIABLE}}}`, ''));
+
+          const previous = all.find((v) => Number(v.version_number) < Number(current.version_number)
+            && v.status !== 'draft'
+            && v.published_at != null
+            && !carriesNote(v)
+            && JSON.stringify(asArray(v.blocks)) === currentStripped
+            && trim(v.text_body) === currentText
+            // Subject and preview are part of a version too: an admin who
+            // changed only the subject line leaves blocks identical, and
+            // reverting would silently discard that edit (codex r4).
+            && (v.subject || null) === (current.subject || null)
+            && (v.preview_text || null) === (current.preview_text || null));
+
+          if (previous) {
+            await knex('email_template_versions').where({ id: previous.id }).update({
+              status: 'active', updated_at: new Date(),
+            });
+            await knex('email_template_versions').where({ id: current.id }).update({
+              status: 'archived', updated_at: new Date(),
+            });
+            await knex('email_templates').where({ id: tpl.id }).update({
+              active_version_id: previous.id, last_published_at: new Date(), updated_at: new Date(),
+            });
+            reverted = true;
+          }
+        }
+      }
+    }
+
+    // Only now is it safe to drop the variable — the live version no longer
+    // references it.
+    if (!reverted) continue;
     await knex('email_templates').where({ id: tpl.id }).update({
       allowed_variables: JSON.stringify(asArray(tpl.allowed_variables).filter((v) => v !== VARIABLE)),
       optional_variables: JSON.stringify(asArray(tpl.optional_variables).filter((v) => v !== VARIABLE)),
       updated_at: new Date(),
-    });
-
-    // ROLLBACK IS DELIBERATELY CONSERVATIVE (codex #3156 r1-r3).
-    //
-    // Two goals conflict once anyone else touches the template: remove the
-    // note, and don't destroy newer copy. Earlier attempts traded one failure
-    // for the other — picking the numeric predecessor could reactivate a
-    // version that still had the note, and picking the newest note-free
-    // version could throw away an administrator's later edit (or, before the
-    // previous fix, publish an unapproved draft).
-    //
-    // So this only undoes the case it actually created: the active version is
-    // the one this migration published (it carries the note AND nothing has
-    // been published on top of it), and its immediate predecessor is a
-    // published, note-free row. Anything else means a human has moved the
-    // template on since, and a rollback has no business overwriting them —
-    // skip it and leave the note in place for them to remove deliberately.
-    if (!tpl.active_version_id) continue;
-    const current = await knex('email_template_versions').where({ id: tpl.active_version_id }).first();
-    if (!current) continue;
-
-    const all = await knex('email_template_versions')
-      .where({ template_id: tpl.id })
-      .orderBy('version_number', 'desc');
-
-    const currentCarriesNote = JSON.stringify(asArray(current.blocks)).includes(VARIABLE)
-      || String(current.text_body || '').includes(VARIABLE);
-    const isNewest = !all.some((v) => Number(v.version_number) > Number(current.version_number));
-    if (!currentCarriesNote || !isNewest) continue;
-
-    // Identify OUR version structurally: stripping the note must reproduce the
-    // predecessor EXACTLY. If an administrator changed anything else — even
-    // while inheriting the note paragraph — the comparison fails and we leave
-    // their copy alone. `isNewest` alone can't tell the two apart, since their
-    // version also carries the note and also sits on top.
-    const stripNote = (blocks) => asArray(blocks)
-      .filter((b) => !(b && b.type === 'paragraph' && String(b.content || '').includes(VARIABLE)));
-    const stripNoteText = (text) => String(text || '').replace(`{{${VARIABLE}}}`, '').replace(/\s+$/, '');
-    const currentStripped = JSON.stringify(stripNote(current.blocks));
-    const currentText = stripNoteText(current.text_body);
-
-    const previous = all.find((v) => Number(v.version_number) < Number(current.version_number)
-      && v.status !== 'draft'
-      && v.published_at != null
-      && !JSON.stringify(asArray(v.blocks)).includes(VARIABLE)
-      && !String(v.text_body || '').includes(VARIABLE)
-      && JSON.stringify(asArray(v.blocks)) === currentStripped
-      && String(v.text_body || '').replace(/\s+$/, '') === currentText);
-    if (!previous) continue;
-
-    await knex('email_template_versions').where({ id: previous.id }).update({
-      status: 'active', updated_at: new Date(),
-    });
-    await knex('email_template_versions').where({ id: current.id }).update({
-      status: 'archived', updated_at: new Date(),
-    });
-    await knex('email_templates').where({ id: tpl.id }).update({
-      active_version_id: previous.id, last_published_at: new Date(), updated_at: new Date(),
     });
   }
 };
