@@ -362,7 +362,10 @@ describe('off-Stripe payment paths honor the same contract', () => {
 
   test('reconcile passes the Stripe charge\'s own settlement time when it has one', () => {
     const rs = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-payments-reconcile.js'), 'utf8');
-    expect(rs).toContain('settledAt: chargeDetails?.created ? new Date(chargeDetails.created * 1000) : new Date()');
+    // The balance transaction is created at charge SUCCESS — settlement for
+    // ACH — and is fetched via expand on the existing retrieve.
+    expect(rs).toContain("expand: ['balance_transaction']");
+    expect(rs).toContain('chargeDetails?.balance_transaction?.created || chargeDetails?.created');
     // And the reconciled ledger row carries payer ownership like every
     // other write path.
     expect(rs).toContain('...(invoice.payer_id ? { payer_id: invoice.payer_id } : {})');

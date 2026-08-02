@@ -138,7 +138,11 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     if (stripeChargeId) {
       if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
       try {
-        chargeDetails = await stripe.charges.retrieve(stripeChargeId);
+        // balance_transaction is created when the charge SUCCEEDS — for
+        // async methods (ACH) that is settlement, not initiation, so its
+        // timestamp is the authoritative settlement moment the billing-pause
+        // machinery compares against.
+        chargeDetails = await stripe.charges.retrieve(stripeChargeId, { expand: ['balance_transaction'] });
       } catch (e) {
         return res.status(400).json({ error: `Stripe charge lookup failed: ${e.message}` });
       }
@@ -312,16 +316,13 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
           // stripeChargeId is supplied). Non-Stripe reconciliations
           // (check/cash) carry no stamp on purpose: they were recorded by a
           // human NOW, and created_at is honest for them.
-          // For ASYNC methods (ACH) charge.created is initiation, which
-          // PRECEDES true settlement — deliberately kept, because both
-          // consumers then err toward the pause STAYING: the cron veto sees
-          // an older timestamp (never a false veto), and the clear's
-          // ordering guard refuses stale evidence (never a false clear).
-          // The miss self-heals on the next settled payment or the manual
-          // button. An exact settlement time would need the balance
-          // transaction, which this endpoint does not fetch.
-          ...(stripeChargeId && chargeDetails?.created
-            ? { settled_event_at: new Date(chargeDetails.created * 1000).toISOString() }
+          // The authoritative settlement moment: the balance transaction is
+          // created when the charge SUCCEEDS (for ACH that is settlement,
+          // not initiation); charge.created is the fallback for the rare
+          // charge whose bt did not expand — older-than-true, which errs
+          // toward the pause staying, never toward a false veto/clear.
+          ...(stripeChargeId && (chargeDetails?.balance_transaction?.created || chargeDetails?.created)
+            ? { settled_event_at: new Date((chargeDetails.balance_transaction?.created || chargeDetails.created) * 1000).toISOString() }
             : {}),
           // Payer ownership rides every ledger row (same marker the pause
           // veto and auto-clear read) — a payer-funded reconciliation during
@@ -375,10 +376,11 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     if (!invoice.payer_id) {
       try {
         const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+        const settledEpoch = chargeDetails?.balance_transaction?.created || chargeDetails?.created || null;
         await maybeResumeBillingPauseOnPayment(invoice.customer_id, {
           paymentIntentId: chargeDetails?.payment_intent || null,
           source: 'admin_payment_reconcile',
-          settledAt: chargeDetails?.created ? new Date(chargeDetails.created * 1000) : new Date(),
+          settledAt: settledEpoch ? new Date(settledEpoch * 1000) : new Date(),
         });
       } catch (pauseErr) {
         logger.warn(`[reconcile] billing-pause auto-clear failed: ${pauseErr.message}`);
