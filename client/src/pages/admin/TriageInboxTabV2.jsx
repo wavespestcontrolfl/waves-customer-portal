@@ -133,7 +133,11 @@ export function ConfirmEvidence({ payload }) {
         const code = p.address_request_sms_code ? String(p.address_request_sms_code) : "";
         if (outcome === "sent") return "sent — watch for their reply";
         if (outcome === "undelivered") return "text never arrived — call them back";
-        if (/SUPPRESS|DNC|WRONG_NUMBER/i.test(code) || /SUPPRESS|DNC|WRONG_NUMBER/i.test(outcome)) {
+        // Every recipient-terminal verdict the service can emit: STOP-list
+        // suppressions, per-purpose/SMS opt-outs, explicit no-consent, DNC,
+        // wrong number, provider opt-out (21610).
+        const DNC_RE = /SUPPRESS|DNC|WRONG_NUMBER|OPTED_OUT|OPT_OUT|NO_CONSENT|NO_MARKETING/i;
+        if (DNC_RE.test(code) || DNC_RE.test(outcome)) {
           return `blocked (${(code || outcome).replace(/_/g, " ").toLowerCase()}) — do NOT contact; check the record first`;
         }
         return `not sent (${outcome.replace(/_/g, " ")}${code ? `: ${code}` : ""}) — call them back`;

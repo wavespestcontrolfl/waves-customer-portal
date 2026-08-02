@@ -463,8 +463,19 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
     if (!phone) return { handled: false, reason: 'no_phone' };
 
     return await db.transaction(async (trx) => {
-      const claim = await trx('dropped_call_sms_claims').where({ phone }).first('lead_id', 'outcome');
+      const claim = await trx('dropped_call_sms_claims').where({ phone }).first('lead_id', 'outcome', 'created_at');
       if (!claim || !claim.lead_id) return { handled: false, reason: 'no_claim_lead' };
+      // Without a SID-bound sms_log row, phone-alone correlation could
+      // misattribute an UNRELATED SMS's bounce to this claim (codex P1).
+      // The send-then-log race window is seconds — accept the log-less path
+      // only while the claim is fresh; a stale claim without a matching log
+      // row is somebody else's bounce.
+      if (!row) {
+        const ageMs = Date.now() - new Date(claim.created_at || 0).getTime();
+        if (!Number.isFinite(ageMs) || ageMs > 15 * 60 * 1000) {
+          return { handled: false, reason: 'no_log_row_and_claim_stale' };
+        }
+      }
       // Atomic idempotency gate: exactly one callback (Twilio retries them)
       // flips 'sent' -> 'undelivered'; every later one sees 0 rows.
       const flipped = await trx('dropped_call_sms_claims')

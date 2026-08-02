@@ -375,7 +375,7 @@ describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
 
   it('remediates: flips the claim, stamps the lead, pulls follow-up, flips the open card', async () => {
     state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE, message_type: 'dropped_call_address_request' }];
-    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent' }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent', created_at: new Date() }];
     state.firstResults.leads = [{ id: LEAD_ID }];
     const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'undelivered', errorCode: '30006', to: PHONE });
     expect(res).toEqual({ handled: true, leadId: LEAD_ID });
@@ -388,13 +388,21 @@ describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
     expect(note.payload.description).toMatch(/30006/);
   });
 
-  it('sms_log row missing (send-then-log race) — still remediates via the claim row', async () => {
+  it('sms_log row missing (send-then-log race) — still remediates via a FRESH claim row', async () => {
     state.firstResults.sms_log = [null];
-    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent' }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent', created_at: new Date(Date.now() - 60 * 1000) }];
     state.firstResults.leads = [{ id: LEAD_ID }];
     const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'failed', to: PHONE });
     expect(res).toEqual({ handled: true, leadId: LEAD_ID });
     expect(state.updates.some((u) => u.table === 'triage_items')).toBe(true);
+  });
+
+  it('sms_log row missing AND claim stale — refuses (phone alone is not authoritative)', async () => {
+    state.firstResults.sms_log = [null];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent', created_at: new Date(Date.now() - 2 * 60 * 60 * 1000) }];
+    const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'failed', to: PHONE });
+    expect(res).toEqual({ handled: false, reason: 'no_log_row_and_claim_stale' });
+    expect(state.updates.filter((u) => u.table === 'dropped_call_sms_claims')).toHaveLength(0);
   });
 
   it('idempotent: the claim-outcome flip admits exactly one callback', async () => {
