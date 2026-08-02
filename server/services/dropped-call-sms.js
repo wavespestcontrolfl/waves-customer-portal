@@ -53,7 +53,21 @@ async function recordProviderOptOutSuppression(phone, source) {
   try {
     await recordSuppression({ phone, reason: 'opt_out', source });
   } catch (e) {
-    logger.warn(`[dropped-call-sms] global opt-out suppression write failed for ${maskPhone(phone)}: ${e.code || e.name || 'db_error'}`);
+    // A failed write here means OTHER workflows may keep texting an
+    // opted-out number — that must never fail silently (codex P1). The
+    // admin bell is the backstop: the office records the suppression by
+    // hand. Notification itself is best-effort too.
+    logger.warn(`[dropped-call-sms] global opt-out suppression write FAILED for ${maskPhone(phone)}: ${e.code || e.name || 'db_error'}`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'system',
+        'Opt-out suppression write failed',
+        `A Twilio 21610 opt-out for ${maskPhone(phone)} could not be saved to the suppression list (${source}). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
+        { metadata: { source, error: e.code || e.name || 'db_error' } },
+      );
+    } catch (notifyErr) {
+      logger.error(`[dropped-call-sms] opt-out suppression failure notify also failed: ${notifyErr.code || notifyErr.name || 'error'}`);
+    }
   }
 }
 
