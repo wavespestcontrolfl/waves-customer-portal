@@ -64,3 +64,35 @@ describe('appointment card fee-rails migration', () => {
     expect(state.dropped).toEqual([]);
   });
 });
+
+// accepted_amount rides its own migration (Codex #3153 r1 P1 — the frozen
+// completion-charge cap) so the already-deployed fee-rails migration is
+// never edited in place.
+const acceptedAmountMigration = require('../models/migrations/20260801500000_appointment_card_accepted_amount');
+
+describe('appointment card accepted_amount migration', () => {
+  test('up adds accepted_amount when missing', async () => {
+    const { knex, state } = buildKnex();
+    await acceptedAmountMigration.up(knex);
+    expect(state.added).toEqual(['accepted_amount']);
+  });
+
+  test('up is idempotent — existing column left alone', async () => {
+    const { knex, state } = buildKnex({ existingColumns: ['accepted_amount'] });
+    await acceptedAmountMigration.up(knex);
+    expect(state.added).toEqual([]);
+    expect(knex.schema.alterTable).not.toHaveBeenCalled();
+  });
+
+  test('up no-ops when the table does not exist', async () => {
+    const { knex } = buildKnex({ hasTable: false });
+    await acceptedAmountMigration.up(knex);
+    expect(knex.schema.hasColumn).not.toHaveBeenCalled();
+  });
+
+  test('down drops exactly accepted_amount', async () => {
+    const { knex, state } = buildKnex({ existingColumns: ['accepted_amount'] });
+    await acceptedAmountMigration.down(knex);
+    expect(state.dropped).toEqual(['accepted_amount']);
+  });
+});

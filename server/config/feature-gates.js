@@ -85,11 +85,13 @@ const gates = {
   // Completion auto-charge for one-time visits whose card came through the
   // /secure lane (owner-approved 2026-08-01): the lane's SMS promises "your
   // card is only charged after service is completed" — this gate makes that
-  // charge automatic, hard-capped at the visit's stamped estimated_price
-  // (+ disclosed tax/surcharge) with the same above-quote review routing as
-  // the per-application rail. Money surface — fail-closed ==='true' in
-  // EVERY environment. Gate off: completion invoices go out as pay links
-  // exactly as today. Kill switch: unset or any non-'true' value.
+  // charge automatic (dispatch /complete AND the pest-recap closeout path),
+  // hard-capped at the accepted_amount FROZEN on the lane row at consent
+  // (+ disclosed tax/surcharge; never the live estimated_price, which
+  // appointment editors rewrite — Codex #3153 r1) with the same above-quote
+  // review routing as the per-application rail. Money surface — fail-closed
+  // ==='true' in EVERY environment. Gate off: completion invoices go out as
+  // pay links exactly as today. Kill switch: unset or any non-'true' value.
   apptCardCompletionCharge: process.env.GATE_APPT_CARD_COMPLETION_CHARGE === 'true',
 
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An

@@ -463,13 +463,27 @@ async function submitRecap({
   // exists (normal recaps stay no-bill). Best-effort — never blocks the recap.
   try {
     const CardHolds = require('./estimate-card-holds');
-    await CardHolds.chargeCardHoldForRecapCompletion({
+    const holdResult = await CardHolds.chargeCardHoldForRecapCompletion({
       scheduledServiceId: serviceId,
       serviceRecordId: recordId,
       // A re-completed NOT-performed visit (incomplete / inspection-only /
       // declined) must not auto-charge a full completion fee — route to review.
       priorNonPerformed: recapPriorNonPerformed,
     });
+    // Appointment-card completion lane (Codex #3153 r1 P1): a one-time visit
+    // whose card came through the /secure link makes the same "charged after
+    // completion" promise but has no hold row — without this fallback a
+    // recap closeout leaves it uncharged forever. Runs ONLY when the hold
+    // rail positively owns nothing here; any other hold outcome (charged,
+    // review, failed) means that rail handled or parked the visit.
+    if (!holdResult?.charged && ['no_hold', 'feature_disabled'].includes(holdResult?.reason)) {
+      const ApptCards = require('./appointment-card-request');
+      await ApptCards.chargeAppointmentCardForRecapCompletion({
+        scheduledServiceId: serviceId,
+        serviceRecordId: recordId,
+        priorNonPerformed: recapPriorNonPerformed,
+      });
+    }
   } catch (err) {
     logger.warn(`[pest-recap] card-hold completion charge failed for ${serviceId}: ${err.message}`);
   }

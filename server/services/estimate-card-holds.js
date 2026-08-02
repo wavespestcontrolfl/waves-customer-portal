@@ -547,6 +547,43 @@ async function alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId, r
 // then charge it via chargeCardHoldOnCompletion (which releases the hold if the
 // invoice is already settled). Normal non-card-hold recaps stay no-bill. No-op
 // when the flag is off or no hold exists. Never throws into the recap flow.
+// Resolve-or-mint the recap-path completion invoice inside a transaction-
+// scoped advisory lock keyed on the visit. createFromService isn't
+// trx-aware, but the lock (held for this block's duration) serializes the
+// find-or-create across connections: a concurrent recap submit blocks here,
+// then finds the just-committed invoice instead of minting a second one.
+// Reuse is by service_record_id OR (pre-completion Charge-now/Tap-to-Pay)
+// scheduled_service_id, back-linking the latter like the /complete path.
+// Shared with the appointment-card recap lane (Codex #3153 r1 P1) — the ONE
+// lock key covers both rails, so the two lanes can never mint duplicate
+// invoices for the same visit.
+async function resolveOrMintRecapCompletionInvoice({ scheduledServiceId, serviceRecordId, serviceType = null }) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`card_hold_recap_invoice:${scheduledServiceId}`]);
+    const bySr = await trx('invoices').where({ service_record_id: serviceRecordId })
+      .whereNot('status', 'void').orderBy('created_at', 'desc').first('id');
+    if (bySr?.id) return bySr.id;
+    const bySs = await trx('invoices').where({ scheduled_service_id: scheduledServiceId })
+      .whereNot('status', 'void').orderBy('created_at', 'desc').first('id', 'service_record_id');
+    if (bySs?.id) {
+      if (!bySs.service_record_id) {
+        await trx('invoices').where({ id: bySs.id })
+          .update({ service_record_id: serviceRecordId, updated_at: trx.fn.now() }).catch(() => {});
+      }
+      return bySs.id;
+    }
+    // Mint. Omit taxRate so create() auto-computes county-aware tax from the
+    // customer's property_type (commercial AND business taxable; residential 0).
+    const InvoiceService = require('./invoice');
+    const inv = await InvoiceService.createFromService(serviceRecordId, {
+      description: serviceType || undefined,
+      useScheduledReplay: true,
+      dueDate: etDateString(),
+    });
+    return inv?.id || null;
+  });
+}
+
 async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRecordId, priorNonPerformed = false }) {
   if (!isCardHoldEnabled()) return { charged: false, reason: 'feature_disabled' };
   if (!serviceRecordId) return { charged: false, reason: 'no_service_record' };
@@ -583,36 +620,10 @@ async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRec
 
   let invoiceId = null;
   try {
-    // Resolve-or-mint the completion invoice inside a transaction-scoped advisory
-    // lock keyed on the visit. createFromService isn't trx-aware, but the lock
-    // (held for this block's duration) serializes the find-or-create across
-    // connections: a concurrent recap submit blocks here, then finds the just-
-    // committed invoice instead of minting a second one. Reuse is by
-    // service_record_id OR (pre-completion Charge-now/Tap-to-Pay)
-    // scheduled_service_id, back-linking the latter like the /complete path.
-    invoiceId = await db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`card_hold_recap_invoice:${scheduledServiceId}`]);
-      const bySr = await trx('invoices').where({ service_record_id: serviceRecordId })
-        .whereNot('status', 'void').orderBy('created_at', 'desc').first('id');
-      if (bySr?.id) return bySr.id;
-      const bySs = await trx('invoices').where({ scheduled_service_id: scheduledServiceId })
-        .whereNot('status', 'void').orderBy('created_at', 'desc').first('id', 'service_record_id');
-      if (bySs?.id) {
-        if (!bySs.service_record_id) {
-          await trx('invoices').where({ id: bySs.id })
-            .update({ service_record_id: serviceRecordId, updated_at: trx.fn.now() }).catch(() => {});
-        }
-        return bySs.id;
-      }
-      // Mint. Omit taxRate so create() auto-computes county-aware tax from the
-      // customer's property_type (commercial AND business taxable; residential 0).
-      const InvoiceService = require('./invoice');
-      const inv = await InvoiceService.createFromService(serviceRecordId, {
-        description: ss?.service_type || undefined,
-        useScheduledReplay: true,
-        dueDate: etDateString(),
-      });
-      return inv?.id || null;
+    invoiceId = await resolveOrMintRecapCompletionInvoice({
+      scheduledServiceId,
+      serviceRecordId,
+      serviceType: ss?.service_type || null,
     });
   } catch (err) {
     logger.error('[estimate-card-holds] recap completion invoice resolve/create failed', { scheduledServiceId, error: err.message });
@@ -1165,6 +1176,7 @@ module.exports = {
   hasHeldCard,
   chargeCardHoldOnCompletion,
   chargeCardHoldForRecapCompletion,
+  resolveOrMintRecapCompletionInvoice,
   chargeNoShowFee,
   releaseCardHold,
   handleCardHoldCancellation,

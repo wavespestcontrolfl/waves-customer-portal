@@ -44,13 +44,19 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 let mockGateOn = true;
+let mockCompletionGateOn = true;
 jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn((name) => (name === 'apptCardNoShowFee' ? mockGateOn : false)),
+  isEnabled: jest.fn((name) => {
+    if (name === 'apptCardNoShowFee') return mockGateOn;
+    if (name === 'apptCardCompletionCharge') return mockCompletionGateOn;
+    return false;
+  }),
   gates: {},
 }));
 
 const mockAttach = jest.fn(async () => {});
 const mockSendFeeReceipt = jest.fn(async () => {});
+const mockResolveOrMintInvoice = jest.fn(async () => 'inv-r1');
 jest.mock('../services/estimate-card-holds', () => ({
   CARD_HOLD_POST_START_GRACE_MS: 2 * 3600000,
   NO_SHOW_FEE_MAX_AGE_MS: 48 * 3600000,
@@ -58,6 +64,14 @@ jest.mock('../services/estimate-card-holds', () => ({
   cardHoldCancelWindowHours: jest.fn(() => 24),
   attachCardHoldPaymentMethod: (...a) => mockAttach(...a),
   sendNoShowFeeReceipt: (...a) => mockSendFeeReceipt(...a),
+  resolveOrMintRecapCompletionInvoice: (...a) => mockResolveOrMintInvoice(...a),
+}));
+jest.mock('../services/billing-lane', () => ({
+  resolveBillingLane: jest.fn(() => ({ mode: 'one_time' })),
+}));
+const mockLogAutopay = jest.fn();
+jest.mock('../services/autopay-log', () => ({
+  logAutopay: (...a) => mockLogAutopay(...a),
 }));
 
 let mockApptTime = null;
@@ -67,9 +81,11 @@ jest.mock('../services/appointment-reminders', () => ({
 
 const mockChargeOffSession = jest.fn();
 const mockRetrievePaymentIntent = jest.fn();
+const mockChargeSavedCard = jest.fn(async () => ({ id: 'pi_recap_1' }));
 jest.mock('../services/stripe', () => ({
   chargeSavedPaymentMethodOffSession: (...a) => mockChargeOffSession(...a),
   retrievePaymentIntent: (...a) => mockRetrievePaymentIntent(...a),
+  chargeInvoiceWithSavedCard: (...a) => mockChargeSavedCard(...a),
   savePaymentMethod: jest.fn(async () => ({ id: 'pm-row-9', method_type: 'card' })),
   retrieveSetupIntent: jest.fn(),
   createAppointmentCardSetupIntent: jest.fn(),
@@ -86,7 +102,13 @@ jest.mock('../services/invoice', () => ({
 // Collaborators of the module's OTHER paths — mocked so requiring the module
 // never pulls live integrations into this suite.
 jest.mock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => null) }));
-jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn(async () => false) }));
+const mockCustomerOnAutopay = jest.fn(async () => false);
+const mockGetAutopayPm = jest.fn(async () => null);
+jest.mock('../services/autopay-eligibility', () => ({
+  customerOnAutopay: (...a) => mockCustomerOnAutopay(...a),
+  getChargeableAutopayMethod: (...a) => mockGetAutopayPm(...a),
+  isChargeableAutopayMethod: (m) => !!m && !!m.stripe_payment_method_id,
+}));
 jest.mock('../services/payment-method-consents', () => ({
   findConsentedChargeableCard: jest.fn(async () => null),
   hasEnrollmentScopedConsent: jest.fn(async () => false),
@@ -108,6 +130,7 @@ const {
   chargeAppointmentNoShowFee,
   handleAppointmentCardCancellation,
   appointmentCardCancelPreview,
+  chargeAppointmentCardForRecapCompletion,
   settleAppointmentNoShowFee,
   isWithinApptCancelWindow,
 } = require('../services/appointment-card-request');
@@ -147,6 +170,11 @@ beforeEach(() => {
   mockDbTouches = [];
   mockTrxTouches = [];
   mockChargeOffSession.mockResolvedValue({ id: 'pi_fee_1' });
+  mockCompletionGateOn = true;
+  mockResolveOrMintInvoice.mockResolvedValue('inv-r1');
+  mockChargeSavedCard.mockResolvedValue({ id: 'pi_recap_1' });
+  mockCustomerOnAutopay.mockResolvedValue(false);
+  mockGetAutopayPm.mockResolvedValue(null);
 });
 
 describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
@@ -188,6 +216,197 @@ describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
     const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
     expect(res.reason).toBe('card_hold_lane');
     expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  test('completed row WITHOUT fee_agreed_at (no durable consent marker) → no_fee_consent, never charged', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_agreed_at: null } });
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('no_fee_consent');
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  test('completed row without a frozen window → no_agreed_fee (partial stamps never charge)', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), cancel_window_hours: null } });
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('no_agreed_fee');
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  test('hold lookup FAILURE fails closed — never read as absence (Codex #3153 r1)', async () => {
+    mockTableHandlers = handlersWith();
+    mockTableHandlers.estimate_card_holds.first = () => { throw new Error('db blip'); };
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ charged: false, reason: 'hold_lookup_failed' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  test("in-flight fee_status 'charging' → charge_review skip, never a second claim", async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'charging' } });
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('charge_review');
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('unresolved fee states on the cancellation path (Codex #3153 r1)', () => {
+  test.each(['charging', 'charge_review'])('fee_status %s → NON-released canonical charge_review (offboarding must not refund)', async (feeStatus) => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: feeStatus } });
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1', waiveFee: true });
+    expect(res).toEqual({ handled: false, released: false, reason: 'charge_review' });
+  });
+
+  test('hold lookup failure on cancel → NON-released charge_review (lane exclusivity unverifiable)', async () => {
+    mockTableHandlers = handlersWith();
+    mockTableHandlers.estimate_card_holds.first = () => { throw new Error('db blip'); };
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ handled: false, released: false, reason: 'charge_review' });
+  });
+
+  test("resolved fee_status 'charged' stays a clean release — the fee event is closed", async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'charged' } });
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ handled: false, released: true, reason: 'fee_charged' });
+  });
+
+  test("resolved fee_status 'waived' stays a clean release", async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'waived' } });
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ handled: false, released: true, reason: 'fee_waived' });
+  });
+});
+
+describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex #3153 r1)', () => {
+  const LANE_ROW = () => ({ id: 'req-1', customer_id: 'cust-1', accepted_amount: '250.00' });
+  const RECAP_SVC = () => ({ id: 'svc-1', customer_id: 'cust-1', service_type: 'Rodent Trapping', is_recurring: false, prepaid_amount: null });
+  const RECAP_CUSTOMER = () => ({ id: 'cust-1', billing_mode: null, monthly_rate: null, waveguard_tier: null });
+  const RECAP_INVOICE = () => ({ id: 'inv-r1', status: 'sent', payer_id: null, subtotal: '250.00', total: '266.25', discount_amount: null });
+
+  function recapHandlers(overrides = {}) {
+    mockTableHandlers = {
+      appointment_card_requests: { first: () => LANE_ROW() },
+      estimate_card_holds: { first: () => null },
+      scheduled_services: { first: () => RECAP_SVC() },
+      customers: { first: () => RECAP_CUSTOMER() },
+      invoices: { first: () => RECAP_INVOICE() },
+      ...overrides,
+    };
+    mockCustomerOnAutopay.mockResolvedValue(true);
+    mockGetAutopayPm.mockResolvedValue({ id: 'pm-row-1', stripe_payment_method_id: 'pm_x', method_type: 'card' });
+  }
+
+  test('gate off → feature_disabled, nothing touched', async () => {
+    recapHandlers();
+    mockCompletionGateOn = false;
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res).toEqual({ charged: false, reason: 'feature_disabled' });
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('happy path: invoice minted through the SHARED lock helper, charged with the saved autopay method, autopay-logged', async () => {
+    recapHandlers();
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res).toEqual({ charged: true, invoiceId: 'inv-r1' });
+    expect(mockResolveOrMintInvoice).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' }));
+    expect(mockChargeSavedCard).toHaveBeenCalledWith('inv-r1', 'pm-row-1', {});
+    expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_success', expect.objectContaining({
+      details: expect.objectContaining({ source: 'appointment_card_recap_completion' }),
+    }));
+  });
+
+  test('no lane row → no_lane_row, silent skip (normal recaps stay no-bill)', async () => {
+    recapHandlers({ appointment_card_requests: { first: () => null } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('no_lane_row');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('hold row present → card_hold_lane (that rail already ran on this recap)', async () => {
+    recapHandlers({ estimate_card_holds: { first: () => ({ id: 'hold-1' }) } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('card_hold_lane');
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('hold lookup failure fails closed with an office alert', async () => {
+    recapHandlers({ estimate_card_holds: { first: () => { throw new Error('db blip'); } } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('hold_lookup_failed');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('prior non-performed re-completion → review alert, never an auto-charge', async () => {
+    recapHandlers();
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1', priorNonPerformed: true });
+    expect(res.reason).toBe('prior_non_performed');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('field-prepaid visit → manual review (never charge on top of a prepayment)', async () => {
+    recapHandlers({ scheduled_services: { first: () => ({ ...RECAP_SVC(), prepaid_amount: '100.00' }) } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('prepaid_visit_manual');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+  });
+
+  test('NULL accepted_amount (pre-migration row) → review, never a live-price fallback', async () => {
+    recapHandlers({ appointment_card_requests: { first: () => ({ ...LANE_ROW(), accepted_amount: null }) } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('no_accepted_amount');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('invoice above the FROZEN accepted amount → above_accepted_amount review, no charge', async () => {
+    recapHandlers({ invoices: { first: () => ({ ...RECAP_INVOICE(), subtotal: '300.00' }) } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('above_accepted_amount');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('declined charge → charge_failed with office alert + autopay failure log', async () => {
+    recapHandlers();
+    mockChargeSavedCard.mockRejectedValueOnce(new Error('card_declined'));
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('charge_failed');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_failed', expect.anything());
+  });
+
+  test('no chargeable autopay method → review alert (recap has no pay-link fallback)', async () => {
+    recapHandlers();
+    mockGetAutopayPm.mockResolvedValue(null);
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('no_chargeable_method');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+  });
+
+  test('explicit billing lane (monthly membership) → other_billing_lane, that rail owns billing', async () => {
+    recapHandlers();
+    require('../services/billing-lane').resolveBillingLane.mockReturnValueOnce({ mode: 'monthly_membership' });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('other_billing_lane');
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+});
+
+describe('pest-recap wiring (source contract)', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/pest-recap.js'), 'utf8');
+
+  test('the recap closeout runs the appointment-card fallback ONLY when the hold rail positively owns nothing', () => {
+    expect(src).toContain("['no_hold', 'feature_disabled'].includes(holdResult?.reason)");
+    expect(src).toContain('chargeAppointmentCardForRecapCompletion({');
+  });
+
+  test('the fallback runs AFTER the hold rail and forwards the prior-non-performed guard', () => {
+    const holdIdx = src.indexOf('chargeCardHoldForRecapCompletion({');
+    const apptIdx = src.indexOf('chargeAppointmentCardForRecapCompletion({');
+    expect(holdIdx).toBeGreaterThan(-1);
+    expect(apptIdx).toBeGreaterThan(holdIdx);
+    const apptCall = src.slice(apptIdx, src.indexOf('});', apptIdx));
+    expect(apptCall).toContain('priorNonPerformed: recapPriorNonPerformed');
   });
 });
 

@@ -7266,6 +7266,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // fails toward NOT auto-charging — the pay-link flow is the unchanged
     // fallback.
     let apptCardOneTimeCharge = false;
+    let apptCardAcceptedAmount = null;
     if (!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane
       && svc.is_recurring !== true
       && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
@@ -7275,11 +7276,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const laneRow = await db('appointment_card_requests')
             .where({ scheduled_service_id: svc.id })
             .whereIn('status', ['completed', 'satisfied'])
-            .first('id');
+            .first('id', 'accepted_amount');
           const holdRow = laneRow ? await db('estimate_card_holds')
             .where({ scheduled_service_id: svc.id })
             .first('id') : null;
           apptCardOneTimeCharge = !!laneRow && !holdRow;
+          // The lane's cap is the amount FROZEN at consent (Codex #3153 r1
+          // P1) — appointment editors rewrite estimated_price, so the live
+          // value is not what the customer accepted. NULL (pre-migration
+          // row, unstamped render) → acceptedPerVisit stays null → the
+          // no-accepted-amount skip below routes to office review.
+          if (apptCardOneTimeCharge) {
+            apptCardAcceptedAmount = laneRow.accepted_amount != null && Number(laneRow.accepted_amount) > 0
+              ? Number(laneRow.accepted_amount) : null;
+          }
         }
       } catch (e) {
         logger.warn(`[dispatch] appointment-card completion-lane check failed for visit ${svc.id} — no auto-charge: ${e.message}`);
@@ -7309,14 +7319,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // pre-tax SUBTOTAL is the comparator. An over-quote invoice routes to
       // office review and the customer keeps the normal pay-link flow —
       // never an unauthorized amount off-session.
-      // The appointment-card lane caps STRICTLY at the visit's stamped
-      // price — the per-application acceptance-fee fallback and the
-      // setup-fee allowances below are per-application concepts and never
-      // widen this lane's cap.
-      const acceptedPerVisit = svc.estimated_price != null && Number(svc.estimated_price) > 0
-        ? Number(svc.estimated_price)
-        : (perApplicationBilling && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
-          ? Number(svc.cust_per_application_fee) : null);
+      // The appointment-card lane caps STRICTLY at the accepted_amount
+      // FROZEN on the lane row at consent (Codex #3153 r1 P1) — never the
+      // live visit price, which appointment editors rewrite. The
+      // per-application acceptance-fee fallback and the setup-fee
+      // allowances below are per-application concepts and never widen this
+      // lane's cap.
+      const acceptedPerVisit = apptCardOneTimeCharge
+        ? apptCardAcceptedAmount
+        : (svc.estimated_price != null && Number(svc.estimated_price) > 0
+          ? Number(svc.estimated_price)
+          : (perApplicationBilling && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
+            ? Number(svc.cust_per_application_fee) : null));
       const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
       // Manual-discount accepts gross the service line up and bring it back
       // with a negative discount line — invoices.subtotal is the PRE-discount
