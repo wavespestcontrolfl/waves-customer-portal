@@ -128,30 +128,54 @@ exports.down = async function down(knex) {
       updated_at: new Date(),
     });
 
-    // Roll back to the newest version that does NOT carry the note, rather
-    // than to whichever version number is one lower (codex #3156 r1). After an
-    // up/down/up cycle, or once an administrator publishes their own edit, the
-    // numeric predecessor is not necessarily the copy this migration
-    // superseded — reactivating it could both discard a newer edit AND leave
-    // {{rain_source_note}} in place, failing to undo anything.
+    // ROLLBACK IS DELIBERATELY CONSERVATIVE (codex #3156 r1-r3).
+    //
+    // Two goals conflict once anyone else touches the template: remove the
+    // note, and don't destroy newer copy. Earlier attempts traded one failure
+    // for the other — picking the numeric predecessor could reactivate a
+    // version that still had the note, and picking the newest note-free
+    // version could throw away an administrator's later edit (or, before the
+    // previous fix, publish an unapproved draft).
+    //
+    // So this only undoes the case it actually created: the active version is
+    // the one this migration published (it carries the note AND nothing has
+    // been published on top of it), and its immediate predecessor is a
+    // published, note-free row. Anything else means a human has moved the
+    // template on since, and a rollback has no business overwriting them —
+    // skip it and leave the note in place for them to remove deliberately.
     if (!tpl.active_version_id) continue;
     const current = await knex('email_template_versions').where({ id: tpl.active_version_id }).first();
     if (!current) continue;
-    const candidates = await knex('email_template_versions')
+
+    const all = await knex('email_template_versions')
       .where({ template_id: tpl.id })
-      .whereNot({ id: current.id })
       .orderBy('version_number', 'desc');
-    // …and it must be a version that was actually PUBLISHED. A note-free row
-    // can also be an unapproved draft sitting in the editor; reactivating that
-    // would push never-reviewed copy to customers as a side effect of a
-    // rollback (codex #3156 r2).
-    const previous = candidates.find((v) => v.status !== 'draft'
+
+    const currentCarriesNote = JSON.stringify(asArray(current.blocks)).includes(VARIABLE)
+      || String(current.text_body || '').includes(VARIABLE);
+    const isNewest = !all.some((v) => Number(v.version_number) > Number(current.version_number));
+    if (!currentCarriesNote || !isNewest) continue;
+
+    // Identify OUR version structurally: stripping the note must reproduce the
+    // predecessor EXACTLY. If an administrator changed anything else — even
+    // while inheriting the note paragraph — the comparison fails and we leave
+    // their copy alone. `isNewest` alone can't tell the two apart, since their
+    // version also carries the note and also sits on top.
+    const stripNote = (blocks) => asArray(blocks)
+      .filter((b) => !(b && b.type === 'paragraph' && String(b.content || '').includes(VARIABLE)));
+    const stripNoteText = (text) => String(text || '').replace(`{{${VARIABLE}}}`, '').replace(/\s+$/, '');
+    const currentStripped = JSON.stringify(stripNote(current.blocks));
+    const currentText = stripNoteText(current.text_body);
+
+    const previous = all.find((v) => Number(v.version_number) < Number(current.version_number)
+      && v.status !== 'draft'
       && v.published_at != null
       && !JSON.stringify(asArray(v.blocks)).includes(VARIABLE)
-      && !String(v.text_body || '').includes(VARIABLE));
-    // Nothing note-free to return to → leave the table alone rather than
-    // activating a version that still has it.
+      && !String(v.text_body || '').includes(VARIABLE)
+      && JSON.stringify(asArray(v.blocks)) === currentStripped
+      && String(v.text_body || '').replace(/\s+$/, '') === currentText);
     if (!previous) continue;
+
     await knex('email_template_versions').where({ id: previous.id }).update({
       status: 'active', updated_at: new Date(),
     });

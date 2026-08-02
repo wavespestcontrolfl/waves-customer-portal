@@ -148,12 +148,25 @@ describe('rain_source_note migration', () => {
     expect(knex.__db.email_template_versions).toHaveLength(2);
   });
 
-  test('down() returns to the newest NOTE-FREE version, not merely the lower number', async () => {
+  test('down() undoes its own change when nothing was published on top', async () => {
+    const knex = makeKnex(fixture());
+    await migration.up(knex);
+    await migration.down(knex);
+    expect(knex.__db.email_templates[0].active_version_id).toBe('v1');
+    expect(knex.__db.email_template_versions.find((v) => v.id === 'v1').status).toBe('active');
+  });
+
+  test('down() does NOT clobber an administrator version published on top', async () => {
     const knex = makeKnex(fixture());
     await migration.up(knex);
 
-    // An administrator publishes their own edit on top — it inherits the note.
-    const adminBlocks = [...baseBlocks.slice(0, 1), { type: 'paragraph', content: `{{${VARIABLE}}}` }, ...baseBlocks.slice(1)];
+    // An admin edits after us: their copy inherits the note paragraph AND
+    // changes real content. That content is what must not be destroyed.
+    const adminBlocks = [
+      { type: 'heading', content: 'ADMIN REWROTE THIS' },
+      { type: 'paragraph', content: `{{${VARIABLE}}}` },
+      ...baseBlocks.slice(1),
+    ];
     knex.__db.email_template_versions.push({
       id: 'v3', template_id: 't1', version_number: 3, status: 'active',
       subject: 's', preview_text: 'p', blocks: JSON.stringify(adminBlocks), text_body: null,
@@ -163,20 +176,17 @@ describe('rain_source_note migration', () => {
 
     await migration.down(knex);
 
-    const active = knex.__db.email_template_versions.find(
-      (v) => v.id === knex.__db.email_templates[0].active_version_id,
-    );
-    // Whatever it lands on, it must NOT still contain the note — the old
-    // "one version number lower" logic would have reactivated v2, which does.
-    expect(JSON.stringify(active.blocks)).not.toContain(VARIABLE);
-    expect(active.id).toBe('v1');
+    // Their version stays live. Reverting to v1 would silently destroy it, and
+    // the note is theirs to remove deliberately.
+    expect(knex.__db.email_templates[0].active_version_id).toBe('v3');
+    expect(knex.__db.email_template_versions.find((v) => v.id === 'v3').status).toBe('active');
+    expect(JSON.stringify(knex.__db.email_template_versions.find((v) => v.id === 'v3').blocks))
+      .toContain('ADMIN REWROTE THIS');
   });
 
   test('down() never activates an unpublished DRAFT, even a note-free one', async () => {
     const knex = makeKnex(fixture());
     await migration.up(knex);
-    // Someone is mid-edit: a note-free draft with a higher version number than
-    // the copy this migration superseded. Rolling back must skip it.
     knex.__db.email_template_versions.push({
       id: 'draft1', template_id: 't1', version_number: 9, status: 'draft',
       subject: 's', preview_text: 'p', blocks: JSON.stringify(baseBlocks),
@@ -185,8 +195,10 @@ describe('rain_source_note migration', () => {
 
     await migration.down(knex);
 
-    expect(knex.__db.email_templates[0].active_version_id).toBe('v1');
+    // The draft has a higher version number, so it is also "newer" — the
+    // migration must decline to act rather than publish unreviewed copy.
     expect(knex.__db.email_template_versions.find((v) => v.id === 'draft1').status).toBe('draft');
+    expect(knex.__db.email_templates[0].active_version_id).not.toBe('draft1');
   });
 
   test('down() leaves the table alone when no note-free version exists', async () => {
