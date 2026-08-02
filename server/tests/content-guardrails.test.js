@@ -2252,7 +2252,9 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
   // Operator provenance unlocks the exemption — the same boundary as the
   // .gov/.edu citation allowance (Codex P1: mined drafts keep the full hard
   // block, or an injected attribution publishes arbitrary prices).
-  const OP = { thirdPartyCitations: true };
+  // A competitor-price draft is ALWAYS an operator draft, so the citation
+  // allowlist is in scope — the source URL must be one the gate accepts.
+  const OP = { thirdPartyCitations: true, operatorCitations: true };
   // The exemption now requires the amount's paragraph to carry BOTH a
   // citation link and an "as of <date>" — the manifest's global sourcing
   // rule. Fixtures that expect an exemption must therefore be sourced.
@@ -2355,6 +2357,28 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('Per [ConsumerAffairs](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
   });
 
+  test('executable markup is banned outright in generated posts (r12 P0)', () => {
+    // This is what ends the "is this URL in an executable position?"
+    // question — there is no executable position to be in.
+    const N = { operatorCitations: true, requiredSourceUrls: ['https://legalclarity.org/x'] };
+    for (const body of [
+      '<script src="https://legalclarity.org/x"></script>',
+      '<iframe src="https://legalclarity.org/x"></iframe>',
+      '<object data="https://legalclarity.org/x"></object>',
+      '<embed src="https://legalclarity.org/x">',
+    ]) {
+      expect(guardrails._internals.externalLinkFinding(body, N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    }
+    // The same URL as a plain citation is fine.
+    expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/x for steps.', N)).toBeNull();
+  });
+
+  test('exact-source matching respects URL path and PORT (r12 P0)', () => {
+    const P = { operatorCitations: true, requiredSourceUrls: ['https://x.example.com:8443/a'] };
+    expect(guardrails._internals.externalLinkFinding('See https://x.example.com:8443/a today.', P)).toBeNull();
+    expect(guardrails._internals.externalLinkFinding('See https://x.example.com:9999/a today.', P)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+  });
+
   test('exact-source matching respects URL path case (r12 P0)', () => {
     const N = { operatorCitations: true, requiredSourceUrls: ['https://legalclarity.org/Report'] };
     expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/Report today.', N)).toBeNull();
@@ -2366,6 +2390,14 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('{/* as of June 2026 https://x.com/y */} Orkin charges a $199 fee.', OP)).not.toBeNull();
     expect(findHardcodedPrice('<!-- as of June 2026 https://x.com/y --> Orkin charges a $199 fee.', OP)).not.toBeNull();
     expect(findHardcodedPrice('Per (https://x.com/y) {/* as of June 2026 */} Orkin charges a $199 fee.', OP)).not.toBeNull();
+  });
+
+  test('the citation must be an ALLOWED source, not just any URL (r12 P0)', () => {
+    expect(findHardcodedPrice('Per https://random-blog.example.com/x, as of June 2026, Orkin charges a $199 fee.', OP)).not.toBeNull();
+    // A curated host, or a source this brief named, both qualify.
+    expect(findHardcodedPrice('Per https://www.consumeraffairs.com/x, as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
+    expect(findHardcodedPrice('Per https://legalclarity.org/a, as of June 2026, Orkin charges a $199 fee.',
+      { ...OP, requiredSourceUrls: ['https://legalclarity.org/a'] })).toBeNull();
   });
 
   test('a cited price must actually BE cited — source AND date (r12)', () => {

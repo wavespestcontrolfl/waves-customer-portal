@@ -310,7 +310,7 @@ const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,30}\b(?:19|20)\d{2}\b|\b(?:jan|feb|mar|
 // Reads RENDERED text: a date or URL parked in a comment or a reference
 // definition is invisible to the customer and cannot satisfy a sourcing
 // rule that exists for their benefit (Codex).
-function priceParagraphIsSourced(citationText, renderedText, index) {
+function priceParagraphIsSourced(citationText, renderedText, index, opts = {}) {
   const para = (text) => {
     const t = String(text || '');
     const start = (() => { const i = t.lastIndexOf('\n\n', index); return i === -1 ? 0 : i + 2; })();
@@ -321,7 +321,18 @@ function priceParagraphIsSourced(citationText, renderedText, index) {
   // blanks them, so an ordinary "[ConsumerAffairs](https://…)" citation
   // could never qualify (Codex). Hidden content is still blanked there, so
   // a URL buried in a comment does not count. The DATE must be rendered.
-  if (!/https?:\/\//i.test(para(citationText))) return false;
+  // The URL must be a CITATION the gate would actually accept — an
+  // allowlisted host or a source this brief named. Any-URL-will-do let an
+  // unrelated link stand in for the source (Codex).
+  const allowedHosts = allowedLinkHosts(opts);
+  const exact = allowedExactSourceUrls(opts.requiredSourceUrls);
+  const urls = para(citationText).match(/https?:\/\/[^\s<>()"'\]]+/gi) || [];
+  const cited = urls.some((u) => {
+    const raw = u.replace(/[).,;:!?]+$/, '');
+    if (exact.has(normalizeSourceUrl(raw) || '\u0000')) return true;
+    try { return hostAllowed(normalizeHost(new URL(raw).hostname), allowedHosts); } catch { return false; }
+  });
+  if (!cited) return false;
   return AS_OF_DATE_RE.test(para(renderedText));
 }
 
@@ -389,7 +400,7 @@ function isInsideTableMarkup(text, index) {
  * ONE price policy. Exported for seo-completion-gate (its previous private
  * copy had drifted: no comma support, no regulatory exemption).
  */
-function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false } = {}) {
+function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false, operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const s = String(text || '');
   // Attribution is decided against what READERS SEE. Comments and tag
   // attributes are stripped at render, so "{/* other companies charge */} $89
@@ -467,7 +478,7 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
       && !isMarkdownTableRow(s, tokenIndex)
       && !isInsideTableMarkup(s, tokenIndex)
       && !paragraphHasMarkup(s, tokenIndex)
-      && priceParagraphIsSourced(citationText, proseText, tokenIndex)
+      && priceParagraphIsSourced(citationText, proseText, tokenIndex, { operatorCitations, requiredSourceUrls })
       && isThirdPartyPriceCitation(proseText, tokenIndex, s)) continue;
     return match[0].trim();
   }
@@ -1005,7 +1016,9 @@ function normalizeSourceUrl(u) {
   try {
     const url = new URL(raw);
     const path = `${url.pathname}${url.search}${url.hash}`.replace(/\/+$/, '');
-    return `${url.protocol.toLowerCase()}//${url.hostname.toLowerCase()}${path}`;
+    // url.host keeps a non-default PORT — dropping it let a named source
+    // match the same path on a different port (Codex).
+    return `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}${path}`;
   } catch { return null; }
 }
 
@@ -1201,9 +1214,19 @@ const DEST_CONTROL_RE = new RegExp([
 ].join('|'), 'i');
 
 
+// Generated posts publish as executable .mdx, and nothing in a blog post
+// needs to ship code. Banning these tags outright is what finally ends the
+// "is this URL in an executable position?" question: there IS no executable
+// position, so a named citation URL cannot be turned into one (Codex).
+const EXECUTABLE_TAG_RE = /<\s*(script|iframe|object|embed|applet|frame|frameset)\b/i;
+
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
+  const execTag = EXECUTABLE_TAG_RE.exec(body);
+  if (execTag) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains an executable/embedding tag ("<${execTag[1]}") — generated posts publish as .mdx and must never ship code or embed third-party frames. Remove it.`);
+  }
   if (DEST_CONTROL_RE.test(body)) {
     return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link destination with embedded control characters (tab/newline) — browsers strip these while parsing, which can smuggle an executable scheme. Remove them.');
   }
@@ -2786,7 +2809,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // citation hosts, but only true competitor-intercept briefs may cite
     // competitor prices (Codex: seed lanes auto-publish informational posts
     // and must keep the full price guard).
-    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices }),
+    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices, operatorCitations, requiredSourceUrls }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
