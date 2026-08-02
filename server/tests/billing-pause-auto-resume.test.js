@@ -193,14 +193,13 @@ describe('maybeResumeBillingPauseOnPayment', () => {
       settledAt: new Date('2026-04-20T12:00:00Z'),
     });
 
-    expect(res).toMatchObject({ resumed: false, reason: 'pause_newer_than_payment' });
+    expect(res).toMatchObject({ resumed: false, reason: 'settled_before_pause_cycle' });
     expect(mockState.updates).toHaveLength(0);
   });
 
-  test('a pause applied SECONDS after the settlement (the race) still clears', async () => {
-    // The clear runs after the webhook's durable writes, so the cron's pause
-    // can legitimately postdate settledAt by seconds. The ladder is
-    // day-spaced, so an hour of slack cannot admit a stale redelivery.
+  test('a settlement within clock-skew of the pause anchor still clears (the true race)', async () => {
+    // The pause timestamp IS the attempt anchor; a settlement 30s before it
+    // is within integer-second + NTP skew of "during the attempt".
     mockState.customer = { ...PAUSED, service_paused_at: '2026-05-02T12:00:30Z' };
 
     const res = await maybeResumeBillingPauseOnPayment('cust-1', {
@@ -209,6 +208,20 @@ describe('maybeResumeBillingPauseOnPayment', () => {
     });
 
     expect(res).toMatchObject({ resumed: true });
+  });
+
+  test('a payment HALF AN HOUR before the failure cycle does not clear its pause', async () => {
+    // The reviewer's case: pay at 09:30, final retry fails at 10:00 — the
+    // exhaustion supersedes that payment, however late its webhook arrives.
+    mockState.customer = { ...PAUSED, service_paused_at: '2026-05-02T10:00:00Z' };
+
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', {
+      paymentIntentId: 'pi_before_cycle',
+      settledAt: new Date('2026-05-02T09:30:00Z'),
+    });
+
+    expect(res).toMatchObject({ resumed: false, reason: 'settled_before_pause_cycle' });
+    expect(mockState.updates).toHaveLength(0);
   });
 
   test('refuses to clear without a settlement time — fail toward the pause staying', async () => {
@@ -268,6 +281,9 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     // event.created is integer seconds — the anchor floors to the second so
     // a same-second settlement cannot compare as earlier and slip the veto.
     expect(before).toContain('Math.floor(attemptStartedAt.getTime() / 1000) * 1000');
+    // The pause timestamp IS the attempt anchor — that is what makes the
+    // clear's ordering guard exact causality instead of a heuristic window.
+    expect(before).toContain('const pausedAt = attemptStartedAt;');
     expect(before).toMatch(/\[attemptAnchor\]/);
     expect(before).toMatch(/settled_event_at'\) IS NULL/);
     expect(before).not.toContain("orWhere('payments.updated_at'");

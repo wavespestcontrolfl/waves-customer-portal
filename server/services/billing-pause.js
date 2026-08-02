@@ -76,28 +76,21 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
         // not overrule a human decision.
         return { resumed: false, reason: 'manual_pause' };
       }
-      // A pause applied AFTER this payment settled was caused by failures
-      // this payment does not answer for — a delayed webhook for an old
-      // success must not clear it. With one exception: the clear runs AFTER
-      // the webhook's durable ledger writes, so a pause the cron applied
-      // SECONDS after the settlement (the exhaustion racing the payment)
-      // legitimately postdates settledAt. The retry ladder is DAY-spaced
-      // (RETRY_DELAYS_DAYS), so no genuinely newer failure cycle can
-      // produce a pause within minutes of a settlement — an hour of slack
-      // separates the race (clear it) from a stale redelivery (leave it)
-      // with three orders of magnitude to spare on each side.
-      //
-      // The slack CANNOT admit an already-processed old payment: the
-      // webhook idempotency layer short-circuits duplicate events before
-      // the dispatch clear ever runs, so this code executes at most once
-      // per event — on its FIRST successful processing. The only delayed
-      // arrivals that reach here are events whose earlier deliveries
-      // errored (reclaim) — genuinely unprocessed money, where clearing is
-      // correct however long Stripe's backoff took, bounded by this guard
-      // to within the slack of the pause.
-      const RACE_SLACK_MS = 60 * 60 * 1000;
-      if (new Date(customer.service_paused_at).getTime() > settledAt.getTime() + RACE_SLACK_MS) {
-        return { resumed: false, reason: 'pause_newer_than_payment' };
+      // EXACT causality, not a heuristic window: billing-cron stamps
+      // service_paused_at with the failed attempt's START, so this pause
+      // "answers to" every settlement from that moment on. A payment that
+      // settled at-or-after the anchor raced the pause — clear it, however
+      // late its webhook arrives (delivery latency must not change the
+      // business outcome). A payment that settled BEFORE the anchor is
+      // evidence the exhaustion already superseded — a customer who paid at
+      // 09:30 and whose final retry failed at 10:00 stays paused, no matter
+      // when the 09:30 event's first delivery lands. CLOCK_SKEW_MS covers
+      // Stripe's integer-second event.created plus NTP drift between our
+      // clock (the anchor) and Stripe's (the settlement) — it is skew
+      // tolerance, not a race window.
+      const CLOCK_SKEW_MS = 5 * 60 * 1000;
+      if (settledAt.getTime() < new Date(customer.service_paused_at).getTime() - CLOCK_SKEW_MS) {
+        return { resumed: false, reason: 'settled_before_pause_cycle' };
       }
 
       const pausedAt = customer.service_paused_at;

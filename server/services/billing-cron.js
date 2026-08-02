@@ -1210,7 +1210,16 @@ const BillingCron = {
             // settled-and-committed payment slips between a check and the
             // write; a webhook transaction still uncommitted at the
             // UPDATE's snapshot is caught by its own post-commit clear.
-            const pausedAt = new Date();
+            // The pause is stamped with the ATTEMPT ANCHOR, not "now":
+            // service_paused_at then MEANS "the failure cycle this pause
+            // answers to began here", and the auto-clear's ordering guard
+            // becomes exact causality — a payment settling at-or-after this
+            // moment raced the pause and clears it; anything earlier is
+            // evidence the exhaustion already superseded. No heuristic
+            // window, no extra column. (Cosmetics unaffected: the Customer
+            // 360 banner renders the ET calendar date, and the attempt runs
+            // for seconds, not days.)
+            const pausedAt = attemptStartedAt;
             // Stripe's event.created is INTEGER SECONDS; a settlement later
             // in the same second as attemptStartedAt would stamp a floored
             // settled_event_at that compares as earlier and slip the veto.
