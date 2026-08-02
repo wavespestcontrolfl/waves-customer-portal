@@ -127,11 +127,13 @@ const {
   pestPressureVisibilitySignature,
 } = require('../services/pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
+const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
   reportPdfStorageKey,
+  timeOnSiteAdjustedPdfSignature,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
@@ -965,7 +967,7 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
 
     const service = await db('service_records')
       .where({ report_view_token: req.params.token })
-      .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'report_template_version', 'client_pest_rating', 'structured_notes');
+      .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'report_template_version', 'client_pest_rating', 'structured_notes', 'scheduled_service_id', 'is_callback');
     if (!service || service.report_template_version !== 'service_report_v1') {
       return res.status(404).json({ error: 'Report not found' });
     }
@@ -985,10 +987,17 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
     // requireRecurringFrequency all gate visibility; a rating must not
     // be storable for a report where the card doesn't render. Reusing
     // buildPestPressureCustomerView keeps the gate logic in one place.
+    // Profile-resolved one-time exclusion (codex r6): the label heuristic
+    // inside the view misses one-time services whose names carry no cadence
+    // word — without this, an untyped Fire Ant / Tick Control report shows
+    // the rating picker and the submitted rating recreates the pressure
+    // history the completion write already refuses.
+    const oneTimeExcluded = await isOneTimePressureExcludedRecord(service, db);
     const eligibilityView = buildPestPressureCustomerView({
       config,
       scoreRow: null,
       serviceRecord: service,
+      oneTimeExcluded,
     });
     if (!eligibilityView || !eligibilityView.canCaptureClientRating) {
       // canCaptureClientRating === false also covers the "already rated"
@@ -1082,6 +1091,7 @@ router.post('/:token/pest-pressure/client-rating', reportEventLimiter, async (re
       scoreRow: updatedScore,
       serviceRecord: updatedService,
       historyRows,
+      oneTimeExcluded,
     });
 
     return res.json({ pestPressure, submittedRating: rounded });
@@ -1266,7 +1276,7 @@ router.get('/:token', async (req, res, next) => {
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
       const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1325,7 +1335,7 @@ router.get('/:token', async (req, res, next) => {
       }
       try {
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature,
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service),
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {

@@ -152,7 +152,11 @@ async function attemptInboxCase(c, classify, shouldSkipAutoAction) {
  * transient blip downgrades observed drift to "could not verify" and the
  * regression notification never fires.
  */
-async function runCase(attempt) {
+async function runCase(rawAttempt) {
+  // Fixture cases replay through the LIVE classifier / fact-check gate, so
+  // their dispatches must not land on those policies' live metrics lanes.
+  const { runAsReplay } = require('../llm-dispatch-metrics');
+  const attempt = () => runAsReplay(rawAttempt);
   const first = await attempt();
   if (first.status !== 'fail') return { ...first, flaky: false };
   const second = await attempt();
@@ -166,8 +170,21 @@ async function runCase(attempt) {
 }
 
 async function defaultNotify(row) {
-  const db = require('../../models/db');
-  await db('notifications').insert(row);
+  // Through NotificationService (not a raw insert) so the admin bell policy
+  // chokepoint covers eval_regression bells. create() swallows insert errors
+  // into null — rethrow to preserve the raw insert's DB-failure behavior;
+  // intentional policy suppression is a truthy sentinel and reads as success.
+  const NotificationService = require('../notification-service');
+  const created = await NotificationService.create({
+    recipientType: row.recipient_type,
+    category: row.category,
+    title: row.title,
+    body: row.body,
+    icon: row.icon,
+    link: row.link,
+    metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
+  });
+  if (!created) throw new Error('notification insert failed');
 }
 
 /**

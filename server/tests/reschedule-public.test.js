@@ -7,7 +7,11 @@
 const mockDb = jest.fn();
 mockDb.schema = { hasTable: jest.fn(async () => true) };
 jest.mock('../models/db', () => mockDb);
+jest.mock('../services/weather-forecast', () => ({
+  getDailyRainOutlookBounded: jest.fn().mockResolvedValue(null),
+}));
 
+const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const reschedulePublicRouter = require('../routes/reschedule-public');
 const { smsLineFor } = require('../services/reschedule-link');
 const smsMigration = require('../models/migrations/20260702000011_reschedule_link_sms_templates');
@@ -16,6 +20,8 @@ const emailMigration = require('../models/migrations/20260702000012_reschedule_l
 const {
   eligibility, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
+  loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
+  seriesScopeMismatch,
 } = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
@@ -180,8 +186,11 @@ describe('reschedule-public AI search window', () => {
 
 describe('reschedule-link SMS clause', () => {
   test('renders the embed clause for a URL and empty string for none', () => {
+    // Deliberately terse: this clause is 42 chars of prose in front of a
+    // ~43-char link, and shortening it is what lands the 72h reminder in a
+    // SINGLE segment (159 slots) instead of two.
     expect(smsLineFor('https://portal.wavespestcontrol.com/l/abc12'))
-      .toBe('Need a different time? Reschedule online: https://portal.wavespestcontrol.com/l/abc12\n\n');
+      .toBe('Reschedule here: https://portal.wavespestcontrol.com/l/abc12\n\n');
     expect(smsLineFor(null)).toBe('');
     expect(smsLineFor('')).toBe('');
   });
@@ -240,5 +249,195 @@ describe('email template migration helpers', () => {
     expect(withVariable(['a'], 'reschedule_url')).toEqual(['a', 'reschedule_url']);
     expect(withVariable(['a', 'reschedule_url'], 'reschedule_url')).toEqual(['a', 'reschedule_url']);
     expect(withVariable('["a"]', 'reschedule_url')).toEqual(['a', 'reschedule_url']);
+  });
+});
+
+describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
+  afterEach(() => {
+    delete process.env.GATE_RAINOUT_MOVE_BANNER;
+    jest.clearAllMocks();
+  });
+
+  const SVC = {
+    id: 'svc-1',
+    scheduled_date: '2026-07-04',
+    window_start: '09:00:00',
+    latitude: '27.4',
+    longitude: '-82.4',
+  };
+  const LOG = {
+    reason_code: 'weather_rain',
+    initiated_by: 'tech',
+    original_date: '2026-07-03',
+    original_window: '12:00:00-14:00:00',
+    new_date: '2026-07-04',
+    new_window: '09:00:00-10:00:00',
+    created_at: '2026-07-02T15:00:00.000Z',
+  };
+
+  function wireLog(row) {
+    mockDb.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(row),
+    }));
+  }
+
+  test('gate off: always null, no queries', async () => {
+    wireLog(LOG);
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a recent weather move the visit still sits on returns was/now + forecast chances', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog(LOG);
+    getDailyRainOutlookBounded.mockResolvedValueOnce({
+      '2026-07-03': { rainChance: 80 },
+      '2026-07-04': { rainChance: 15 },
+    });
+
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toEqual({
+      reasonCode: 'weather_rain',
+      from: { date: '2026-07-03', windowStart: '12:00' },
+      to: { date: '2026-07-04', windowStart: '09:00' },
+      fromChance: 80,
+      toChance: 15,
+    });
+    expect(getDailyRainOutlookBounded).toHaveBeenCalledWith('27.4', '-82.4', { deadlineMs: 1500 });
+  });
+
+  test('forecast failure or no coverage is fail-open: move present, chips null', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog(LOG);
+    getDailyRainOutlookBounded.mockRejectedValueOnce(new Error('nws down'));
+
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toMatchObject({ fromChance: null, toChance: null });
+    expect(move.from.date).toBe('2026-07-03');
+  });
+
+  test('a non-weather newest log row means no banner — later moves supersede the story', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, reason_code: 'customer_request' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+  });
+
+  test('a series rain-out (reason weather_rain_series) still banners with the normalized reason (codex P2)', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, reason_code: 'weather_rain_series' });
+    getDailyRainOutlookBounded.mockResolvedValueOnce({
+      '2026-07-03': { rainChance: 80 },
+      '2026-07-04': { rainChance: 15 },
+    });
+
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toMatchObject({ reasonCode: 'weather_rain', fromChance: 80, toChance: 15 });
+  });
+
+  test('a customer-initiated move keeping the weather reason is the customer\'s pick, not a banner (codex r3)', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    // reschedule-sms reply flow logs customer_sms with the original
+    // weather_* reason; the self-serve page logs customer_self_serve.
+    wireLog({ ...LOG, initiated_by: 'customer_sms' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+    wireLog({ ...LOG, initiated_by: 'customer_self_serve' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+  });
+
+  test('a weather move the visit no longer sits on (date or start changed) means no banner', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, new_date: '2026-07-05' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+
+    wireLog({ ...LOG, new_window: '13:00:00-14:00:00' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+  });
+
+  test('a stale move ages out', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    const staleMs = (WEATHER_MOVE_MAX_AGE_DAYS + 1) * 86400000;
+    wireLog({ ...LOG, created_at: new Date(NOW.getTime() - staleMs).toISOString() });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+  });
+
+  test('non-rain reasons render the banner without rain chips and never fetch the forecast (codex r4)', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, reason_code: 'weather_wind' });
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toMatchObject({ reasonCode: 'weather_wind', fromChance: null, toChance: null });
+    expect(getDailyRainOutlookBounded).not.toHaveBeenCalled();
+  });
+
+  test('missing coordinates skip the forecast but keep the banner', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog(LOG);
+    const move = await loadWeatherMove({ ...SVC, latitude: null, longitude: null }, NOW);
+    expect(move).toMatchObject({ fromChance: null, toChance: null });
+    // Bounded lookup is still invoked; it no-ops on null coords itself.
+    expect(getDailyRainOutlookBounded).toHaveBeenCalledWith(null, null, { deadlineMs: 1500 });
+  });
+
+  test('the non-weather Quick Move reasons get the banner with no chips and no forecast fetch', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    for (const reasonCode of ['running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow']) {
+      wireLog({ ...LOG, reason_code: reasonCode });
+      const move = await loadWeatherMove(SVC, NOW);
+      expect(move).toMatchObject({
+        reasonCode,
+        from: { date: '2026-07-03', windowStart: '12:00' },
+        to: { date: '2026-07-04', windowStart: '09:00' },
+        fromChance: null,
+        toChance: null,
+      });
+    }
+    expect(getDailyRainOutlookBounded).not.toHaveBeenCalled();
+  });
+});
+
+describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
+  afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+
+  test('GET→POST scope pin: gate flips, missing disclosure, and anchor-date races all reject (codex P1 r1+r2)', () => {
+    const series = { is_recurring: true, scheduled_date: '2026-08-13' };
+    const ok = { disclosed_collective: true, disclosed_current_date: '2026-08-13' };
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    expect(seriesScopeMismatch(series, ok)).toBe(false);
+    // Disclosed legacy while the gate is collective → mismatch.
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_collective: false })).toBe(true);
+    // FAIL CLOSED: a pre-deploy page omits the disclosure entirely.
+    expect(seriesScopeMismatch(series, {})).toBe(true);
+    expect(seriesScopeMismatch(series, undefined)).toBe(true);
+    // Anchor date moved since the render (dispatch race) → mismatch, both
+    // when the disclosed date is stale and when it is absent.
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_current_date: '2026-08-12' })).toBe(true);
+    expect(seriesScopeMismatch(series, { disclosed_collective: true })).toBe(true);
+    // Gate now off: a collective disclosure mismatches; legacy matches.
+    delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+    expect(seriesScopeMismatch(series, ok)).toBe(true);
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_collective: false })).toBe(false);
+    // Non-series visits never pin.
+    expect(seriesScopeMismatch({ is_recurring: false }, {})).toBe(false);
+  });
+
+  test('gate on: ANY date change re-anchors a series visit — both directions, any size', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const rec = { is_recurring: true, scheduled_date: '2026-08-13' };
+    expect(shouldReanchor(rec, '2026-08-14')).toBe(true);  // 1-day push-back
+    expect(shouldReanchor(rec, '2026-08-12')).toBe(true);  // 1-day pull-forward
+    expect(shouldReanchor(rec, '2026-09-13')).toBe(true);  // big push-back
+    expect(shouldReanchor(rec, '2026-08-13')).toBe(false); // time-only move: no delta
+    // Non-recurring and boosters never shift the base plan.
+    expect(shouldReanchor({ is_recurring: false, scheduled_date: '2026-08-13' }, '2026-08-20')).toBe(false);
+    expect(shouldReanchor({ is_recurring: false, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-08-20')).toBe(false);
+  });
+
+  test('gate off: the 07-13 pull-forward threshold behavior is unchanged', () => {
+    const rec = { is_recurring: true, scheduled_date: '2026-08-13' };
+    expect(shouldReanchor(rec, '2026-08-12')).toBe(false);
+    expect(shouldReanchor(rec, '2026-09-13')).toBe(false);
+    expect(shouldReanchor(rec, '2026-07-16')).toBe(true); // 28-day pull still re-anchors
+    expect(collectiveAnchorActive()).toBe(false);
   });
 });

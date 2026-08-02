@@ -17,10 +17,11 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
+const { buildAppointmentLink } = require('./appointment-link');
 
 // Service states for which a reminder must never fire. A reminder row can be
 // armed (cancelled=false) while its underlying scheduled_service moved into one
@@ -379,6 +380,55 @@ async function renderTemplate(templateKey, vars, context = {}) {
   return null;
 }
 
+// Appointment-page copy ladder (GATE_APPOINTMENT_PAGE). The _v2 rows are
+// the short link-first bodies that point at /appointment/:token — the same
+// gate that makes that page reachable, so copy and destination can never
+// go live apart. Semantics mirror the rain-out v3 ladder:
+//   - gate off            -> render the original row, unchanged;
+//   - _v2 renders         -> use it;
+//   - _v2 row ABSENT      -> rolled-back migration, fall back to the
+//                            original so the customer still gets a text;
+//   - _v2 row DISABLED    -> that is the ops kill switch: return null so
+//                            the send stops rather than silently reverting
+//                            to long copy the operator just turned off.
+// v2Vars is a lazy async FACTORY, not an object: building the v2 vars mints
+// a never-expiring appointment short link, so it must run only when the v2
+// body will actually render — gate on AND the row present and active. An
+// eager build minted an unreachable short_codes row on every legacy send
+// and every email-only delivery (codex r2).
+async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars, context = {}) {
+  if (process.env.GATE_APPOINTMENT_PAGE === 'true') {
+    const v2Key = `${baseKey}_v2`;
+    // Fail-soft like renderTemplate: a transient DB error here must not
+    // escape — the confirmation path would mark the reminder sent without
+    // delivering, and the call-booking path would skip its card-request
+    // funnel. Unknowable v2 state = stop this send (same direction as the
+    // kill switch: never guess between v2 and legacy copy).
+    let row;
+    try {
+      row = await db('sms_templates').where({ template_key: v2Key }).first('id', 'is_active');
+    } catch (err) {
+      logger.warn(`[appt-remind] ${v2Key} state lookup failed (${err.message}) - skipping send rather than guessing`);
+      return null;
+    }
+    if (row) {
+      if (row.is_active === false) {
+        logger.warn(`[appt-remind] ${v2Key} disabled - skipping send rather than reverting to legacy copy`);
+        return null;
+      }
+      const body = await renderTemplate(v2Key, await v2VarsFactory(), context);
+      if (body) return body;
+      // Active row that failed to render (audited upstream) keeps the same
+      // stop-don't-revert semantics as the kill switch.
+      logger.warn(`[appt-remind] ${v2Key} did not render - skipping send rather than reverting to legacy copy`);
+      return null;
+    }
+    // Row absent = rolled-back migration; fall back so the customer still
+    // gets a text.
+  }
+  return renderTemplate(baseKey, legacyVars, context);
+}
+
 async function renderRequiredTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -396,6 +446,49 @@ async function renderRequiredTemplate(templateKey, vars, context = {}) {
 const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
+
+// The customer-facing arrival phrase ("between 8:00 AM and 10:00 AM") for the
+// {window} placeholder in the 72h/24h reminders. Delegates to
+// spokenArrivalWindow so this and TwilioService.sendServiceReminder cannot
+// drift — getTemplate suppresses the whole SMS on an unresolved placeholder,
+// so every reminder sender must supply {window} the same way.
+// Pure ET clock math (never wall-clock arithmetic on the Date), so a DST
+// boundary can't stretch or shrink the quoted window.
+function formatArrivalWindow(apptTime) {
+  const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+  try {
+    const { hour, minute } = etParts(apptTime);
+    return spokenArrivalWindow(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+  } catch {
+    return UNKNOWN_ARRIVAL_WINDOW;
+  }
+}
+
+// The {window} value for appointment_confirmation_v2. All THREE confirmation
+// senders (this file, call-recording-processor, estimate-public) resolve it
+// here so they cannot drift the way {time} did: estimate acceptance was
+// passing an arrival RANGE into {time} while the other two passed an exact
+// start, so the same placeholder meant two different things (codex r9).
+// window_start off the booked row is the canonical source — the call
+// pipeline's EXTRACTED preferred time can differ from what was actually
+// booked, and the row exists at render time on every path (codex r4/r5).
+// Fail-soft by construction: spokenArrivalWindow returns the UNKNOWN phrase
+// rather than null, so a missing or unreadable window degrades the sentence
+// instead of leaving {window} unresolved — an unresolved placeholder makes
+// getTemplate suppress the ENTIRE message.
+async function confirmationArrivalWindow({ scheduledServiceId = null, windowStart = null } = {}) {
+  const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+  try {
+    let start = windowStart;
+    if (!start && scheduledServiceId) {
+      const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('window_start');
+      start = row?.window_start || null;
+    }
+    return spokenArrivalWindow(String(start || '').slice(0, 5));
+  } catch {
+    return UNKNOWN_ARRIVAL_WINDOW;
+  }
+}
 
 // Admin-disambiguation parentheticals only — frequency words ("Monthly",
 // "Bi-Monthly", "Semiannual"), interval phrases ("Every 6 Weeks"), and
@@ -661,7 +754,7 @@ async function isLandline(customerId, phone) {
 
 // ── Send SMS with landline guard ──
 
-async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}) {
+async function safeSend(customerId, phone, body, messageType = 'appointment_reminder', purpose = 'appointment', identityTrustLevel = 'phone_matches_customer', metaExtra = {}, preDispatchCheck = null) {
   if (!body) {
     logger.warn(`[appt-remind] Empty SMS body for customer ${customerId}, skipping ${messageType}`);
     return false;
@@ -684,6 +777,10 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
     customerId,
     identityTrustLevel,
     metadata: { original_message_type: messageType, ...metaExtra },
+    // Optional caller-supplied final recheck at the provider handoff —
+    // race-sensitive senders (the admin reschedule notice) abort here if
+    // the appointment moved or went terminal while validators ran.
+    ...(typeof preDispatchCheck === 'function' ? { preDispatchCheck } : {}),
   });
   if (result.blocked || result.sent === false) {
     logger.warn(`[appt-remind] SMS blocked for customer ${customerId}: ${result.code || 'unknown'} ${result.reason || ''}`);
@@ -692,7 +789,7 @@ async function safeSend(customerId, phone, body, messageType = 'appointment_remi
   return true;
 }
 
-async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}) {
+async function safeSendAppointment(customer, prefs, renderBody, messageType = 'appointment_reminder', purpose = 'appointment', metaExtra = {}, sendOptions = {}) {
   const contacts = getAppointmentContacts(customer, prefs);
   if (!contacts.length) {
     logger.warn(`[appt-remind] No appointment contact for customer ${customer?.id || 'unknown'}, skipping SMS`);
@@ -729,7 +826,7 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
     const identityTrustLevel = isServiceContactRole(contact.role)
       ? 'service_contact_authorized'
       : 'phone_matches_customer';
-    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra);
+    const sent = await safeSend(customer.id, contact.phone, body, messageType, purpose, identityTrustLevel, metaExtra, sendOptions.preDispatchCheck || null);
     sentAny = sentAny || sent;
   }
   return sentAny;
@@ -851,7 +948,6 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Self-serve reschedule deep link — one mint shared by the SMS clause
       // and the email CTA. Best-effort: a null link renders clean copy.
       const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
-
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
       const sent = await deliverAppointmentNotice({
@@ -864,8 +960,27 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         rescheduleUrl: reschedule.url,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
-          return renderTemplate(
+          return renderAppointmentPageTemplate(
             'appointment_confirmation',
+            async () => {
+              // Confirm-first label ONLY when there is something to confirm:
+              // a self-booked visit is inserted already confirmed
+              // (routes/booking.js), and asking that customer to "view and
+              // confirm" points at a page with no Confirm button.
+              const svcRow = await db('scheduled_services')
+                .where({ id: scheduledServiceId })
+                .first('status', 'customer_confirmed');
+              const alreadyConfirmed = String(svcRow?.status || '').toLowerCase() === 'confirmed'
+                || !!svcRow?.customer_confirmed;
+              const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
+                customerId,
+                label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
+              });
+              // {window}, not {time} — the v2 body quotes the 2-hour arrival
+              // promise, and every sender resolves it through the one helper.
+              const window = await confirmationArrivalWindow({ scheduledServiceId });
+              return { first_name: firstName, service_type: serviceLabel, date, time, day, window, appointment_line: appointmentLink.line };
+            },
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
@@ -1590,7 +1705,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1678,9 +1793,19 @@ const AppointmentReminders = {
               rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-                return renderTemplate(
+                return renderAppointmentPageTemplate(
                   'reminder_24h',
-                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
+                  // v2: the page carries the detail — body keeps the arrival
+                  // window + fee disclosure and hands off to the link.
+                  // BOTH var sets carry {window} AND {time}: getTemplate
+                  // suppresses the whole SMS on an unresolved placeholder,
+                  // and this render must survive either body shape (v2 or
+                  // legacy) plus an admin edit that reintroduces {time}.
+                  async () => {
+                    const appointment24 = await buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id });
+                    return { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 };
+                  },
+                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1827,6 +1952,30 @@ const AppointmentReminders = {
         return null;
       }
 
+      // Optional stale-move guard: a caller that committed its own schedule
+      // write earlier (IB batch mover) passes the slot it committed; if a
+      // NEWER reschedule has already landed a different date/start on the
+      // service row, this invocation is stale. Enforced ATOMICALLY below —
+      // the reminder UPDATE itself carries a WHERE EXISTS on the service
+      // row still holding the expected slot, so a move that lands between
+      // any read here and the write makes the update miss instead of
+      // stomping the winner's reminder state.
+      const expectGuard = (query) => {
+        if (!(options.expectSchedule && options.expectSchedule.date)) return query;
+        const expectStart = options.expectSchedule.windowStart
+          ? String(options.expectSchedule.windowStart).slice(0, 5)
+          : null;
+        return query.whereExists(function whereServiceStillAtSlot() {
+          this.select(1)
+            .from('scheduled_services')
+            .where('scheduled_services.id', scheduledServiceId)
+            .whereRaw('scheduled_services.scheduled_date = ?::date', [String(options.expectSchedule.date)])
+            .modify((q) => {
+              if (expectStart) q.whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [expectStart]);
+            });
+        });
+      };
+
       const newApptTime = parseETDateTime(newTime);
       if (isNaN(newApptTime.getTime())) {
         logger.error(`[appt-remind] Reschedule: invalid time ${newTime}`);
@@ -1912,9 +2061,13 @@ const AppointmentReminders = {
         rescheduleUpdate.confirmation_sent = true;
         rescheduleUpdate.confirmation_sent_at = new Date();
       }
-      await db('appointment_reminders')
-        .where({ id: record.id })
-        .update(rescheduleUpdate);
+      const syncedRows = await expectGuard(
+        db('appointment_reminders').where({ id: record.id }),
+      ).update(rescheduleUpdate);
+      if (options.expectSchedule && syncedRows === 0) {
+        logger.info(`[appt-remind] Reschedule sync skipped for ${scheduledServiceId} — the service no longer holds the caller's slot`);
+        return { skippedStale: true };
+      }
 
       if (!sendNotification) {
         logger.info(`[appt-remind] Reschedule notice suppressed for ${scheduledServiceId}`);
@@ -1991,16 +2144,23 @@ const AppointmentReminders = {
     }
   },
 
-  async markRescheduleNoticeSent(scheduledServiceIds) {
+  async markRescheduleNoticeSent(scheduledServiceIds, options = {}) {
     try {
       const ids = Array.isArray(scheduledServiceIds)
         ? [...new Set(scheduledServiceIds.filter(Boolean))]
         : [scheduledServiceIds].filter(Boolean);
       if (!ids.length) return { updated: 0 };
 
+      // Optional per-service guard ({ [serviceId]: { appointmentTime,
+      // updatedAt } }): the close lands only while the row still matches the
+      // caller's pre-send snapshot, making guard + close one conditional
+      // UPDATE — a newer reschedule that re-armed for its own slot keeps its
+      // fallback reminders and the zero-row update is the concurrency signal.
+      const guardsByServiceId = options.guardsByServiceId || null;
+
       const records = await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
-        .select('id', 'appointment_time', 'suppressed_by_sibling');
+        .select('id', 'scheduled_service_id', 'appointment_time', 'suppressed_by_sibling');
 
       const now = new Date();
       let updated = 0;
@@ -2009,17 +2169,29 @@ const AppointmentReminders = {
         // its flags from the appointment time would put it back in the cron's
         // send set alongside the slot's owner (duplicate reminders).
         if (record.suppressed_by_sibling) continue;
-        const { alreadyInside72hWindow, alreadyInside24hWindow } = reminderFlagsCoveredByNotice(record.appointment_time, now);
-        await db('appointment_reminders')
-          .where({ id: record.id })
-          .update({
-            reminder_72h_sent: alreadyInside72hWindow,
-            reminder_72h_sent_at: alreadyInside72hWindow ? new Date() : null,
-            reminder_24h_sent: alreadyInside24hWindow,
-            reminder_24h_sent_at: alreadyInside24hWindow ? new Date() : null,
-            updated_at: new Date(),
-          });
-        updated++;
+        const guard = guardsByServiceId ? guardsByServiceId[record.scheduled_service_id] : null;
+        // Judge the covered windows against the GUARDED time when one is
+        // supplied — that is the slot the caller's notice actually promised.
+        const flagTime = guard ? guard.appointmentTime : record.appointment_time;
+        const { alreadyInside72hWindow, alreadyInside24hWindow } = reminderFlagsCoveredByNotice(flagTime, now);
+        let query = db('appointment_reminders').where({ id: record.id });
+        if (guard) {
+          query = query
+            .where('appointment_time', guard.appointmentTime)
+            .where('updated_at', guard.updatedAt);
+        }
+        const changed = await query.update({
+          reminder_72h_sent: alreadyInside72hWindow,
+          reminder_72h_sent_at: alreadyInside72hWindow ? new Date() : null,
+          reminder_24h_sent: alreadyInside24hWindow,
+          reminder_24h_sent_at: alreadyInside24hWindow ? new Date() : null,
+          updated_at: new Date(),
+        });
+        if (guard && changed === 0) {
+          logger.info(`[appt-remind] reschedule-notice close skipped for ${record.scheduled_service_id} — reminder row moved on under the guard`);
+          continue;
+        }
+        updated += changed;
       }
 
       return { updated };
@@ -2033,6 +2205,16 @@ const AppointmentReminders = {
    * Handle appointment cancellation — mark cancelled and notify customer.
    */
   async handleCancellation(scheduledServiceId, options = {}) {
+    // Optional out-param: callers that surface send results to the operator
+    // pass options.outcome = {} and read notificationSent/notificationError
+    // off it afterwards. The return contract (record | null) is unchanged —
+    // existing callers ignore the return value.
+    const outcome = (options.outcome && typeof options.outcome === 'object') ? options.outcome : null;
+    const reportOutcome = (sent, error) => {
+      if (!outcome) return;
+      outcome.notificationSent = sent;
+      outcome.notificationError = error;
+    };
     try {
       const sendNotification = options.sendNotification !== false;
       const record = await db('appointment_reminders')
@@ -2041,6 +2223,7 @@ const AppointmentReminders = {
 
       if (!record) {
         logger.info(`[appt-remind] Cancellation: no reminder record for ${scheduledServiceId}`);
+        reportOutcome(false, 'No reminder record for this visit — no cancellation text was sent');
         return null;
       }
 
@@ -2062,7 +2245,7 @@ const AppointmentReminders = {
         const date = formatDate(apptTime);
 
         const serviceLabel = smsServiceLabelStored(record.service_type);
-        await safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderRequiredTemplate('appointment_cancelled', {
             first_name: firstName,
@@ -2075,12 +2258,20 @@ const AppointmentReminders = {
             entity_id: scheduledServiceId,
           });
         }, 'appointment_cancelled', 'appointment_cancellation');
-        logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
+        if (noticeSent) {
+          logger.info(`[appt-remind] Cancellation notice sent for customer ${record.customer_id}`);
+        }
+        reportOutcome(noticeSent, noticeSent
+          ? null
+          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)');
+      } else {
+        reportOutcome(false, 'Customer not found');
       }
 
       return record;
     } catch (err) {
       logger.error(`[appt-remind] handleCancellation failed: ${err.message}`);
+      reportOutcome(false, err.message);
       return null;
     }
   },
@@ -2210,9 +2401,21 @@ const AppointmentReminders = {
    * contact path as single-appointment cancellation.
    */
   async handleSeriesCancellation(scheduledServiceIds, representativeScheduledServiceId, options = {}) {
+    // Same optional out-param contract as handleCancellation — callers that
+    // surface send results pass options.outcome = {} and read
+    // notificationSent/notificationError afterwards.
+    const outcome = (options.outcome && typeof options.outcome === 'object') ? options.outcome : null;
+    const reportOutcome = (sent, error) => {
+      if (!outcome) return;
+      outcome.notificationSent = sent;
+      outcome.notificationError = error;
+    };
     try {
       const ids = [...new Set((scheduledServiceIds || []).filter(Boolean))];
-      if (!ids.length) return null;
+      if (!ids.length) {
+        reportOutcome(false, 'No appointments to notify about');
+        return null;
+      }
 
       await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
@@ -2238,6 +2441,7 @@ const AppointmentReminders = {
       }
       if (!record) {
         logger.info(`[appt-remind] Series cancellation: no reminder records for ${ids.length} appointment(s)`);
+        reportOutcome(false, 'No reminder records for these visits — no cancellation text was sent');
         return { cancelledCount: ids.length };
       }
 
@@ -2246,7 +2450,7 @@ const AppointmentReminders = {
         const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
-        await safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderTemplate(
             'appointment_series_cancelled',
@@ -2254,12 +2458,20 @@ const AppointmentReminders = {
             { workflow: 'appointment_series_cancelled', entity_type: 'scheduled_service', entity_id: representativeScheduledServiceId || record.scheduled_service_id },
           );
         }, 'appointment_series_cancelled', 'appointment_cancellation');
-        logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);
+        if (noticeSent) {
+          logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);
+        }
+        reportOutcome(noticeSent, noticeSent
+          ? null
+          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)');
+      } else {
+        reportOutcome(false, 'Customer not found');
       }
 
       return { ...record, cancelledCount: ids.length };
     } catch (err) {
       logger.error(`[appt-remind] handleSeriesCancellation failed: ${err.message}`);
+      reportOutcome(false, err.message);
       return null;
     }
   },
@@ -2286,6 +2498,15 @@ AppointmentReminders.resolveChannelPrefsRow = resolveChannelPrefsRow;
 // the cron's 24.25h / start-in-the-future cutoffs.
 AppointmentReminders.reminder72hStillReachable = reminder72hStillReachable;
 AppointmentReminders.reminder24hStillReachable = reminder24hStillReachable;
+// Shared appointment-notice fanout (recipient routing, opt-in holds,
+// landline guard) — the admin reschedule notice sends through this instead
+// of texting customers.phone directly, so appointment_notify_primary and
+// service-contact routing always apply.
+AppointmentReminders.safeSendAppointment = safeSendAppointment;
+// Sanitized customer-facing service label (strips admin suffixes; the
+// reminder row's stored value already folds in add-on lines) — shared so
+// the admin reschedule notice renders the same label as every reminder.
+AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 
 AppointmentReminders._test = {
   maskPhone,
@@ -2300,5 +2521,13 @@ AppointmentReminders._test = {
 
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).
 AppointmentReminders._internals = { isLandline };
+
+// Shared with the OTHER booking-confirmation senders (estimate acceptance,
+// call pipeline) so gate-on means link-first copy everywhere, not only for
+// this service's own confirmation path.
+AppointmentReminders.renderAppointmentPageTemplate = renderAppointmentPageTemplate;
+// Exported for the other two confirmation senders (call-recording-processor,
+// estimate-public) so all three quote the arrival window identically.
+AppointmentReminders.confirmationArrivalWindow = confirmationArrivalWindow;
 
 module.exports = AppointmentReminders;

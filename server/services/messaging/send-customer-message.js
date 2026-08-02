@@ -46,8 +46,9 @@ const { validateRequiredIds, validateIdentityTrust, resolveTrustLevel } = requir
 const { validateNoCustomerEmoji } = require('./validators/voice');
 const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
+const { normalizeGsmPunctuation } = require('./gsm-normalize');
 const { persistAudit } = require('./audit');
-const { sendViaTwilio } = require('./providers/twilio-sms');
+const { sendViaTwilio, mediaUrlsAllowed } = require('./providers/twilio-sms');
 const { isEnabled } = require('../../config/feature-gates');
 
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
@@ -142,6 +143,31 @@ async function sendCustomerMessage(input) {
   const { preDispatchCheck, ...inputRest } = input;
   const normalizedTo = normalizeRecipient(input.to);
   const sendInput = { ...inputRest, to: normalizedTo };
+  // Typographic punctuation (curly quotes, em dashes, real ellipses) forces
+  // the whole body into UCS-2 — 67 chars/segment instead of 153 — silently
+  // multiplying segment count, and multi-segment texts have failed to reach
+  // handsets that still ACK delivery. Normalizing at this choke point covers
+  // every source at once: templates, hardcoded builders, interpolated
+  // variables, AI drafts, and manual admin sends. Before countSegments so
+  // the audit row records what actually goes to the provider.
+  // Customer/lead audiences ONLY: internal briefings (audience 'internal')
+  // are redirected to bell/push inside TwilioService.sendSMS, where GSM
+  // encoding is irrelevant and bullets/punctuation must stay verbatim —
+  // internal bodies that DO continue to Twilio are normalized at that
+  // boundary instead, after the redirect check. Media sends (MMS) are also
+  // exempt: MMS is not segment-encoded, so rewriting a human-authored
+  // caption buys nothing. The exemption uses the provider's OWN
+  // authorization predicate — unauthorized media URLs are dropped by the
+  // provider and the message goes out as plain SMS, so it must be
+  // normalized here or the audit row's body/segment metadata would
+  // disagree with what was delivered.
+  const sendHasMedia = Array.isArray(sendInput.metadata?.mediaUrls)
+    && sendInput.metadata.mediaUrls.length > 0
+    && mediaUrlsAllowed(sendInput);
+  if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
+    && ['customer', 'lead'].includes(sendInput.audience) && !sendHasMedia) {
+    sendInput.body = normalizeGsmPunctuation(sendInput.body);
+  }
 
   // 4. Load contact state once (consent + suppression share the lookup)
   let contactState = await loadContactState(sendInput);

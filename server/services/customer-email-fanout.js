@@ -52,6 +52,7 @@ const { randomUUID } = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
+const { lockTriageCall } = require('../utils/triage-locks');
 
 // Mirrors customer-address-fanout (which mirrors SENDABLE_ESTIMATE_STATUSES in
 // routes/admin-estimates.js and CLOSED_STATUSES in intelligence-bar/leads-tools.js).
@@ -63,7 +64,11 @@ const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unr
 
 // Mirrors OPEN_STATES in routes/admin-triage.js.
 const OPEN_REVIEW_STATES = ['open', 'in_progress'];
-const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
+// customer_email_missing (codex round-7 P2): a call that booked WITHOUT an
+// email files this card; once a valid email lands on the profile the card's
+// job is done — same lifecycle as the read-back cards, same resolution
+// safety (only a syntactically valid NEW address settles any of these).
+const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid', 'customer_email_missing'];
 
 function emailKey(value) {
   const s = String(value ?? '').trim().toLowerCase();
@@ -88,7 +93,80 @@ function emailKey(value) {
  *   confirmation_sent_at on success — otherwise the row sits pending forever
  *   and campaigns (status='active' only) never reach them.
  */
-async function propagateCustomerEmailChange({ before, after, source = 'customer edit' }, conn = db) {
+/**
+ * Resolve every open email review card (EMAIL_REVIEW_REASON_CODES) for the
+ * customer's calls and keep call_log.review_status in sync. Standalone so the
+ * CALL-path email writes can settle cards too (codex round-9 P2, PR #3119):
+ * backfillCustomerFromAppointmentContact and the phone-match upsert write
+ * customers.email directly, bypassing propagateCustomerEmailChange — without
+ * this, a caller who booked email-less and supplied the email on a LATER
+ * call kept an open customer_email_missing card forever.
+ *
+ * Same validity gate as the fanout: an invalid `email` resolves nothing.
+ * `reasonCodes` narrows WHICH cards settle (always intersected with
+ * EMAIL_REVIEW_REASON_CODES): the call path passes ['customer_email_missing']
+ * only — a call-captured email is unverified BY DESIGN, so it must never
+ * settle the email_unverified / email_invalid read-back cards the bridge
+ * files for that very capture (codex round-10 P2). An OPERATOR-asserted
+ * email (the fanout) settles all three.
+ * Returns the number of cards resolved; never throws on a no-op.
+ */
+async function resolveOpenEmailReviewCards({ customerId, email, source = 'customer edit', reasonCodes = EMAIL_REVIEW_REASON_CODES }, conn = db) {
+  if (!customerId || !cleanValidEmailOrNull(email)) return 0;
+  const codes = reasonCodes.filter((c) => EMAIL_REVIEW_REASON_CODES.includes(c));
+  if (!codes.length) return 0;
+  const now = new Date();
+  const openItems = await conn('triage_items')
+    .whereIn('reason_code', codes)
+    .whereIn('status', OPEN_REVIEW_STATES)
+    .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
+    .select('id', 'call_log_id');
+  if (!openItems.length) return 0;
+  // Shared per-call lock contract (utils/triage-locks.js) with the nightly
+  // auto-resolve sweep and admin-triage: sorted acquisition BEFORE any card
+  // write, inside a transaction, so overlapping writers on the same call
+  // serialize instead of deadlocking (an aborted deadlock here would roll
+  // back the caller's email edit).
+  const resolveCards = async (trx) => {
+    const callIds = [...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))].sort();
+    for (const callId of callIds) await lockTriageCall(trx, callId);
+    const updated = await trx('triage_items')
+      .whereIn('id', openItems.map((i) => i.id))
+      .whereIn('status', OPEN_REVIEW_STATES)
+      .update({
+        status: 'resolved',
+        resolution_note: `Email corrected on the customer record (${String(source).slice(0, 100)})`,
+        resolved_at: now,
+        updated_at: now,
+      });
+    for (const callId of callIds) {
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: callId })
+        .whereIn('status', OPEN_REVIEW_STATES)
+        .count('* as n')
+        .first();
+      await trx('call_log')
+        .where({ id: callId })
+        .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
+    }
+    return updated;
+  };
+  return conn.isTransaction ? resolveCards(conn) : conn.transaction(resolveCards);
+}
+
+/**
+ * `reviewReasonCodes` narrows which review cards the fanout settles, exactly
+ * as in resolveOpenEmailReviewCards. The CALL path passes
+ * ['customer_email_missing'] when it REPLACES a garbled stored email with a
+ * call capture: the retargeting (leads, estimates, newsletter tokens, open
+ * sends) must run because an old address really is out there, but the capture
+ * is still unverified BY DESIGN, so it must not settle the email_unverified /
+ * email_invalid read-back cards filed for that very capture (round-10 P2).
+ * An OPERATOR-asserted edit keeps the default and settles all three.
+ */
+async function propagateCustomerEmailChange({
+  before, after, source = 'customer edit', reviewReasonCodes = EMAIL_REVIEW_REASON_CODES,
+}, conn = db) {
   const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0, heldDripResumed: 0 };
   let pendingConfirmation = null;
   let heldNewsletterResume = null;
@@ -98,7 +176,15 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // address before it fans out anywhere or settles a review card — an
   // operator typo like "foo@bar" must not overwrite deliverable copies or
   // resolve an email_invalid card with another invalid value.
-  const oldEmail = emailKey(before && before.email);
+  // A stored value with no at-sign ("not-an-email", a garbled call capture)
+  // is still a REAL string sitting in the snapshot columns — emailKey drops
+  // it to '', which skipped every retarget below and left leads, estimates,
+  // automations and queued sends permanently bound to it (codex round-24 P2).
+  // Fall back to the normalized raw value: it can only ADD matches that
+  // previously matched nothing, and an empty/absent old value still yields ''
+  // (nothing to retarget), which is the pre-existing behavior.
+  const oldEmail = emailKey(before && before.email)
+    || String((before && before.email) ?? '').trim().toLowerCase();
   const newEmail = cleanValidEmailOrNull(after && after.email) || '';
   if (!customerId || !newEmail || oldEmail === newEmail) return counts;
 
@@ -125,6 +211,25 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   let priorHoldTargets = [];
   let heldCallIds = [];
   if (await conn.schema.hasTable('first_touch_holds')) {
+    // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
+    // first_touch_holds rows → triage_items. This fan-out settles review
+    // cards (resolveOpenEmailReviewCards below) and writes review evidence
+    // for the held calls AFTER taking the hold-row locks here — acquiring
+    // the advisory locks at that later point would be the exact AB-BA
+    // inversion against admin-triage (which holds advisory and then waits
+    // on these hold rows). Pre-lock every call of the customer, sorted:
+    // per-call advisory locks are cheap, contention is per-customer, and
+    // re-acquiring one later (the card resolve) is a no-op. A call created
+    // AFTER this snapshot cannot cycle: its hold row is not among the rows
+    // locked below, so a concurrent advisory-holder on it never waits on
+    // this transaction. Outside a transaction the pg_advisory_xact_lock
+    // releases immediately (same non-guarantee as the FOR UPDATE below for
+    // non-transactional callers — unchanged behavior).
+    if (conn.isTransaction) {
+      const callRows = await conn('call_log').where({ customer_id: customerId }).select('id');
+      const callIds = [...new Set(callRows.map((r) => r.id).filter(Boolean))].sort();
+      for (const callId of callIds) await lockTriageCall(conn, callId);
+    }
     const lockedHolds = await conn('first_touch_holds')
       .where({ customer_id: customerId })
       .forUpdate()
@@ -497,32 +602,9 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // keep call_log.review_status in sync (mirrors transitionCore in
   // routes/admin-triage.js). Scoped to email reason codes only: address or
   // booking reviews on the same call are untouched.
-  const openItems = await conn('triage_items')
-    .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-    .whereIn('status', OPEN_REVIEW_STATES)
-    .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
-    .select('id', 'call_log_id');
-  if (openItems.length) {
-    counts.reviewCards += await conn('triage_items')
-      .whereIn('id', openItems.map((i) => i.id))
-      .whereIn('status', OPEN_REVIEW_STATES)
-      .update({
-        status: 'resolved',
-        resolution_note: `Email corrected on the customer record (${String(source).slice(0, 100)})`,
-        resolved_at: now,
-        updated_at: now,
-      });
-    for (const callId of [...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))]) {
-      const stillOpen = await conn('triage_items')
-        .where({ call_log_id: callId })
-        .whereIn('status', OPEN_REVIEW_STATES)
-        .count('* as n')
-        .first();
-      await conn('call_log')
-        .where({ id: callId })
-        .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
-    }
-  }
+  counts.reviewCards += await resolveOpenEmailReviewCards({
+    customerId, email: newEmail, source, reasonCodes: reviewReasonCodes,
+  }, conn);
 
 
   // A correction that answers a call's read-back BEFORE the processor's
@@ -1259,4 +1341,4 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
 // new synced surface.
 const EMAIL_FANOUT_DISCLOSURE = 'an email change also updates every open send still targeting the old email address (leads, estimates, newsletter, automations, queued template sends, referral promoter, billing pref, contracts, booking recovery) and resolves open email review cards';
 
-module.exports = { propagateCustomerEmailChange, resendPendingConfirmation, emailKey, EMAIL_FANOUT_DISCLOSURE };
+module.exports = { propagateCustomerEmailChange, resolveOpenEmailReviewCards, resendPendingConfirmation, emailKey, EMAIL_FANOUT_DISCLOSURE };

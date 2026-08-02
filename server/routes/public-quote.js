@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { generateEstimate, normalizeRoachType } = require('../services/pricing-engine');
+const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
@@ -180,23 +180,55 @@ function recurringQuoteLines(estimate) {
   );
 }
 
-function derivePerApplication(estimate) {
-  const recurring = recurringQuoteLines(estimate);
-  if (recurring.length !== 1) return null;
-  const line = recurring[0];
-  // Mosquito engine lines expose perVisit/visits, not perApp/visitsPerYear
-  // (codex 2642 r3) — accept both shapes.
+// One recurring line → the price the customer is actually charged each time
+// we treat, or null when this line can't be expressed that way.
+// Recurring lines billed MONTHLY by design: their visit count is an
+// operational cadence, not a billing unit — rodent bait is "quarterly visits
+// (4/yr) — billed monthly to customer" (service-pricing.js) — so an
+// annual÷visits figure would present a billing unit the customer never pays
+// (codex #3124 r2, superseding r1's derive-from-annual direction for these).
+//
+// Residential termite bait is NOT in this set (codex #3124 r4): standalone
+// termite bait is billed PER APPLICATION (owner 2026-07-20 — see
+// estimate-converter.js supportsConverterFollowUpSeeding), and the engine
+// emits it with an explicit perApp + visitsPerYear ({service:'termite_bait',
+// monthly:24, perApp:72, visitsPerYear:4, annual:288} — verified against
+// generateEstimate). Blacklisting it stripped the per-application pair from
+// termite-only quotes and dropped the whole recurring_lines breakdown from
+// every bundle containing one. The COMMERCIAL variants stay excluded: they
+// carry perApp/perVisit too, but commercial is exempt from the
+// per-application unit rule and bills monthly (AGENTS.md).
+const MONTHLY_BILLED_SERVICE_KEYS = new Set([
+  'rodent_bait',
+  'commercial_rodent_bait',
+  // Rider folded into the bait line at conversion, never a standalone charge —
+  // listing it separately would double-count the hardware uplift.
+  'termite_station_rental',
+  'commercial_termite_bait',
+]);
+
+function perApplicationForLine(line) {
+  if (MONTHLY_BILLED_SERVICE_KEYS.has(String(line.service || '').trim())) return null;
+  // A line qualifies only when it carries an EXPLICIT per-application signal
+  // (perApp, or the perVisit that palm/mosquito shapes use) — monthly-billed
+  // station lines deliberately emit neither, and that absence is the design
+  // signal, not a data gap.
   const perAppRaw = Number(line.perApp) > 0
     ? Number(line.perApp)
     : (Number(line.perVisit) > 0 ? Number(line.perVisit) : 0);
   if (!(perAppRaw > 0)) return null;
+  // Cadence: mosquito lines expose visits, lawn lines a numeric frequency,
+  // pest lines visitsPerYear with a STRING frequency, palm appsPerYear
+  // (codex 2642 r1/r3; #3124 r2).
   const visits = Number(line.visitsPerYear) > 0
     ? Number(line.visitsPerYear)
     : Number(line.visits) > 0
       ? Number(line.visits)
-      : Number(line.frequency) > 0
-        ? Number(line.frequency)
-        : null;
+      : Number(line.appsPerYear) > 0
+        ? Number(line.appsPerYear)
+        : Number(line.frequency) > 0
+          ? Number(line.frequency)
+          : null;
   if (!visits) return null;
   // Exact cents (codex 2642 r1: whole-dollar rounding drifted the headline
   // from the monthly/annual math), preferring the DISCOUNTED annual over the
@@ -207,6 +239,70 @@ function derivePerApplication(estimate) {
     amount: Math.round(exact * 100) / 100,
     visitsPerYear: visits,
   };
+}
+
+function derivePerApplication(estimate) {
+  const recurring = recurringQuoteLines(estimate);
+  if (recurring.length !== 1) return null;
+  return perApplicationForLine(recurring[0]);
+}
+
+// Customer-facing name per recurring engine service key. The raw rows from
+// pricePestControl / priceLawnCare / priceRodentBait carry only a `service`
+// key ('pest_control', 'rodent_bait') and no name — echoing that key would
+// print "pest_control" on the quote widget, or force the external consumer to
+// invent its own mapping (codex #3124 r1). Shapes match the existing
+// customer-facing copy in BOOKING_FUNNEL_SERVICE_LABELS / UPSELL_LABELS.
+const RECURRING_LINE_LABELS = {
+  pest_control: 'Pest Control',
+  lawn_care: 'Lawn Care',
+  mosquito: 'Mosquito & No-See-Um Control',
+  tree_shrub: 'Tree & Shrub Care',
+  palm_injection: 'Palm Tree Injections',
+  foam_recurring: 'Recurring Foam Treatment',
+  termite_bait: 'Termite Bait Monitoring',
+  termite_bond: 'Termite Bond',
+  trap_only_retainer: 'Rodent Trapping Retainer',
+  commercial_pest: 'Commercial Pest Control',
+  commercial_lawn: 'Commercial Lawn Care',
+  commercial_mosquito: 'Commercial Mosquito Control',
+  commercial_tree_shrub: 'Commercial Tree & Shrub Care',
+};
+
+// An engine-supplied display name wins; otherwise the service key must map to
+// server-owned copy. Returns '' for an unrecognized key so the breakdown is
+// dropped entirely rather than leaking an internal identifier.
+function recurringLineDisplayLabel(line) {
+  const supplied = String(line.name || line.label || line.displayName || '').trim();
+  if (supplied) return supplied;
+  const key = String(line.service || '').trim();
+  return RECURRING_LINE_LABELS[key] || '';
+}
+
+// Per-service per-application breakdown, so a MULTI-service quote can be
+// quoted the way it bills instead of falling back to a combined monthly
+// total — the unit rule applies to the public quote widget exactly as it does
+// to the estimate page (AGENTS.md "Per application price copy").
+//
+// All-or-nothing on purpose: a partial breakdown would let the widget show
+// two of three charged services and read as the whole plan. Callers that get
+// null keep whatever single-service figure derivePerApplication produced.
+function derivePerApplicationBreakdown(estimate) {
+  const recurring = recurringQuoteLines(estimate);
+  if (recurring.length === 0) return null;
+  const lines = [];
+  for (const line of recurring) {
+    const perApp = perApplicationForLine(line);
+    if (!perApp) return null;
+    const label = recurringLineDisplayLabel(line);
+    if (!label) return null;
+    lines.push({
+      label,
+      per_application: perApp.amount,
+      visits_per_year: perApp.visitsPerYear,
+    });
+  }
+  return lines;
 }
 
 // Which SURFACE converted the visitor (Ask Waves chat vs the classic wizard) —
@@ -244,6 +340,19 @@ function normalizePublicQuotePestFrequency(value) {
   return aliases[raw] || 'quarterly';
 }
 
+// Customer-facing name of the roach add-on, per species, from the SAME
+// admin-editable display config the engine's line item uses
+// (pest_base.initial_roach.display via db-bridge — pricingConstants.PEST is
+// the live merged object, so admin renames apply here without a restart).
+// A quote-wizard roach fee always prices at the recurring-add-on scale keys
+// (regular / german), never regular_standalone. Fallbacks mirror
+// pricePestInitialRoach's, for a stale config row predating the display key.
+function publicQuoteRoachDisplayName(roachType) {
+  const configured = pricingConstants.PEST?.pestInitialRoach?.display?.[roachType]?.name;
+  if (typeof configured === 'string' && configured.trim()) return configured.trim();
+  return roachType === 'german' ? 'German Cockroach Treatment' : 'Cockroach Treatment';
+}
+
 function publicQuotePestLabel(pest = {}) {
   const frequency = normalizePublicQuotePestFrequency(pest.frequency);
   const labels = {
@@ -254,11 +363,15 @@ function publicQuotePestLabel(pest = {}) {
   const base = labels[frequency] || 'Quarterly Pest Control';
   // The engine prices a roach-knockdown modifier on the pest line when
   // roachType is set (the cockroach estimate/chip path) — reflect it in the
-  // lead's service-interest label so the office sees what was quoted. Same
-  // normalization as the engine: raw values like 'no'/'FALSE'/garbage
-  // normalize to 'none' and price no knockdown, so they must not label one.
-  return normalizeRoachType(pest.roachType || 'none').roachType !== 'none'
-    ? `${base} + Roach Knockdown`
+  // lead's service-interest label so the office sees what was quoted, under
+  // the configured per-species customer-facing name (codex #3078 r3: the
+  // hardcoded suffix ignored admin renames AND labeled German-roach quotes
+  // with the regular name). Same normalization as the engine: raw values
+  // like 'no'/'FALSE'/garbage normalize to 'none' and price no knockdown,
+  // so they must not label one.
+  const { roachType } = normalizeRoachType(pest.roachType || 'none');
+  return roachType !== 'none'
+    ? `${base} + ${publicQuoteRoachDisplayName(roachType)}`
     : base;
 }
 
@@ -334,7 +447,44 @@ function compactServiceInterestPart(value) {
     'rodent control': 'Rodent',
     'tree & shrub care': 'Tree/Shrub',
   };
-  return labels[key] || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '');
+  return labels[key]
+    || compactRoachInterestPart(key)
+    || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '');
+}
+
+// Compact form of the roach add-on suffix. The customer-facing name is
+// admin-configurable (pest_base.initial_roach.display), so match the CURRENT
+// configured names plus the shipped defaults (covers labels stored before a
+// rename) instead of a fixed string. Without this, the renamed suffix blew
+// the 32-char customers.lead_service_interest cap — "Quarterly Pest +
+// Cockroach Treatment" is 36 chars, so buildCompactCustomerServiceInterest
+// silently dropped the roach requirement from the lead record (codex #3078
+// r3; the retired "Roach Knockdown" suffix was exactly at the cap).
+function compactRoachInterestPart(normalizedKey) {
+  const display = pricingConstants.PEST?.pestInitialRoach?.display || {};
+  const candidates = [
+    ...Object.entries(display).map(([scaleKey, cfg]) => [scaleKey, cfg?.name]),
+    ['german', 'German Cockroach Treatment'],
+    ['regular', 'Cockroach Treatment'],
+  ];
+  for (const [scaleKey, name] of candidates) {
+    if (typeof name !== 'string') continue;
+    const normalized = name.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (normalized && normalized === normalizedKey) {
+      return String(scaleKey).startsWith('german') ? 'German Roach' : 'Roach';
+    }
+  }
+  // Fallback for labels stored under a SINCE-RENAMED configured name (codex
+  // #3078 r4: /upsell recompacts the lead's stored full label, and a
+  // no-longer-configured suffix over the 32-char budget silently dropped the
+  // roach requirement). Any roach-worded part compacts to the stable short
+  // form; species from the wording. A configured name with no roach wording
+  // is matched only while configured — an alias history would need
+  // persistence, and every shipped/observed name carries 'roach'.
+  if (/\broach\b|cockroach/.test(normalizedKey)) {
+    return normalizedKey.includes('german') ? 'German Roach' : 'Roach';
+  }
+  return null;
 }
 
 function buildCompactCustomerServiceInterest(parts = []) {
@@ -547,7 +697,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? (Number(lotSqFt) || sqft * 4)));
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
-    // density, landscape complexity, near-water, large-driveway) flow into the
+    // density, landscape complexity, near-water) flow into the
     // pricing engine so public quotes match what admin /estimate would price.
     // Same per-visit modifiers as admin (pool cage size defaults to medium:
     // small +$5, medium +$8, large +$12, oversized +$18; moderate shrubs/trees
@@ -608,7 +758,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
         complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,
         nearWater: ep.nearWater === 'YES' || ep.nearWater === true,
-        largeDriveway: ep.hasLargeDriveway === true || ep.largeDriveway === true,
       },
       services: {},
     };
@@ -1388,11 +1537,22 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       ? 'Manual review needed'
       : isOneTimeOnly
         ? `$${oneTimeTotal.toFixed(2)} one-time`
-        : emailPerApp
-          ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
-          : emailMultiRecurring
-            ? 'Priced per application — full breakdown inside'
-            : `$${monthly.toFixed(2)}/mo`;
+        // Commercial contract check FIRST (codex #3128 r5): commercial
+        // pricers emit perApp + visit counts and the wizard supports
+        // multi-service commercial selections, so both residential branches
+        // below would otherwise describe a pay-monthly proposal per
+        // application. Commercial is the documented exemption.
+        : commercialDetected
+          ? `$${monthly.toFixed(2)}/mo`
+          : emailPerApp
+            ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
+            : emailMultiRecurring
+              ? 'Priced per application — full breakdown inside'
+              // Last resort: a residential recurring line whose
+              // per-application price could not be derived. Recurring work is
+              // never described as a flat monthly charge (audit 2026-08-01) —
+              // defer to the estimate rather than invent a cadence.
+              : 'Priced per application — full breakdown inside';
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'
       : commercialDetected
@@ -1559,6 +1719,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       response.per_application = perApplication.amount;
       response.visits_per_year = perApplication.visitsPerYear;
     }
+    // Additive: lets the quote widget quote a multi-service plan per service,
+    // per application, instead of a combined monthly total. Single-service
+    // quotes get a one-entry array that agrees with per_application above.
+    const perApplicationLines = derivePerApplicationBreakdown(estimate);
+    if (perApplicationLines) {
+      response.recurring_lines = perApplicationLines;
+    }
     // Multi-service recurring quotes have no single per-application price;
     // the result page uses this to avoid falling back to the combined
     // monthly total (codex 2642 r3).
@@ -1719,6 +1886,7 @@ module.exports._internals = {
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
+  derivePerApplicationBreakdown,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,

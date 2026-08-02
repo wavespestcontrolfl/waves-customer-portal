@@ -564,3 +564,46 @@ describe('SEO gate: the stand-in city link must match the brief CITY', () => {
     expect(codes(r)).not.toContain('P1_MISSING_SERVICE_LINK');
   });
 });
+
+describe('sourced competitor prices survive the SEO price check (r13)', () => {
+  const { detectHardcodedPrice } = SeoCompletionGate._internals;
+  const brief = {
+    gsc_signal: { bucket: 'operator_intercept', intercept: true },
+    voice_constraints: { operator_brief: { sources: ['https://www.consumeraffairs.com/homeowners/aptive.html'] } },
+  };
+  const sourced = 'Aptive charges a $199 cancellation fee as of July 2026 ([source](https://www.consumeraffairs.com/homeowners/aptive.html)).';
+
+  test('a sourced+dated intercept price is accepted here too', () => {
+    // Without the citation context this gate parked the exact intercepts the
+    // change exists to permit — the run-context guardrail passed them.
+    expect(detectHardcodedPrice(sourced, brief)).toBe(false);
+  });
+
+  test('an UNSOURCED intercept price still parks', () => {
+    expect(detectHardcodedPrice('Aptive charges a $199 cancellation fee.', brief)).toBe(true);
+  });
+
+  test('a non-intercept brief keeps the full guard', () => {
+    expect(detectHardcodedPrice(sourced, { gsc_signal: { bucket: 'seasonal_rising' } })).toBe(true);
+  });
+});
+
+describe('a brief-level price ban reaches this gate too (r13)', () => {
+  const { detectHardcodedPrice } = SeoCompletionGate._internals;
+  const banned = {
+    gsc_signal: { bucket: 'operator_intercept', intercept: true },
+    voice_constraints: { operator_brief: {
+      verify_notes: ['GATE RULE: NO TruGreen dollar amounts anywhere in the post'],
+      sources: ['https://www.consumeraffairs.com/x'],
+    } },
+  };
+  const sourced = 'Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.';
+
+  test('the ban outranks the generic framing exemption here', () => {
+    expect(detectHardcodedPrice('TruGreen charges $89 per visit, though pricing varies by contract', banned)).toBe(true);
+  });
+
+  test('the ban outranks a fully sourced citation too', () => {
+    expect(detectHardcodedPrice(sourced, banned)).toBe(true);
+  });
+});

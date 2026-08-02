@@ -4,6 +4,7 @@
 // full render against the seeded template bodies proving every variable the
 // builder emits resolves (and the ruling-critical wording is present).
 const {
+  isCommercialEstimate,
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   START_DATE_FALLBACK,
@@ -14,6 +15,7 @@ const {
   systemLabelFor,
 } = require('../services/termite-program-agreement');
 const { DEFAULT_TEMPLATES } = require('../models/migrations/20260729000001_seed_termite_program_agreements');
+const { TEMPLATE_V2 } = require('../models/migrations/20260730000001_termite_program_agreements_v2');
 const {
   buildCustomerDocumentContext,
   renderDocumentTemplate,
@@ -146,6 +148,24 @@ describe('buildTermiteProgramAgreementValues', () => {
     expect(prepared.templateKey).toBe(RENTAL_TEMPLATE_KEY);
     expect(prepared.values.program.rental_per_application).toBe('$31');
     expect(prepared.values.program.combined_per_application).toBe('$103');
+  });
+
+  test('fail-closed: explicit non-quarterly visit count parks (template promises 4 applications/year)', () => {
+    const data = ownedEstData();
+    data.result.lineItems[0].visitsPerYear = 3;
+    data.result.lineItems[0].annual = 216;
+    expect(buildTermiteProgramAgreementValues({}, data)).toBeNull();
+  });
+
+  test('fail-closed: explicit zero/nonnumeric visit counts park instead of coercing to quarterly', () => {
+    for (const bad of [0, 'abc', '']) {
+      const data = ownedEstData();
+      data.result.lineItems[0].visitsPerYear = bad;
+      expect(buildTermiteProgramAgreementValues({}, data)).toBeNull();
+    }
+    const ok = ownedEstData();
+    ok.result.lineItems[0].visitsPerYear = '4';
+    expect(buildTermiteProgramAgreementValues({}, ok)).not.toBeNull();
   });
 
   test('fail-closed: owned program without an install price builds nothing', () => {
@@ -286,6 +306,23 @@ describe('classifyExistingAgreement', () => {
     expect(classifyExistingAgreement(row, estimate)).toBe('ignore');
   });
 
+  test('an open row on a STALE template version supersedes even for the same estimate', () => {
+    const active = new Set(['v2-id']);
+    const row = openRow({ document_template_version_id: 'v1-id' });
+    expect(classifyExistingAgreement(row, estimate, new Date(), { activeVersionIds: active })).toBe('supersede');
+    const current = openRow({ document_template_version_id: 'v2-id' });
+    expect(classifyExistingAgreement(current, estimate, new Date(), { activeVersionIds: active })).toBe('blocks');
+  });
+
+  test("a stale-version row for a DIFFERENT property is ignored — reconciled independently, never cancelled by another property's accept", () => {
+    const active = new Set(['v2-id']);
+    const otherProperty = openRow({
+      document_template_version_id: 'v1-id',
+      document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-9', address: '400 Other St, Venice FL' } }),
+    });
+    expect(classifyExistingAgreement(otherProperty, estimate, new Date(), { activeVersionIds: active })).toBe('ignore');
+  });
+
   test('matching estimate id blocks regardless of address text', () => {
     const row = openRow({
       document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-1', address: 'totally different text' } }),
@@ -334,6 +371,112 @@ describe('render against the seeded templates', () => {
     for (const seed of DEFAULT_TEMPLATES) {
       const used = [...new Set([...seed.body.matchAll(/\{\{\s*([a-z0-9_.]+)\s*\}\}/gi)].map((m) => m[1]))].sort();
       expect(used).toEqual([...seed.variables].sort());
+    }
+  });
+});
+
+describe('isCommercialEstimate', () => {
+  test('flags commercial inputs, property types, tier, and commercial service keys', () => {
+    expect(isCommercialEstimate({}, { inputs: { isCommercial: true } })).toBe(true);
+    expect(isCommercialEstimate({}, { inputs: { isCommercial: 'YES' } })).toBe(true);
+    expect(isCommercialEstimate({}, { inputs: { isCommercial: 'NO' } })).toBe(false);
+    expect(isCommercialEstimate({}, { inputs: { propertyType: 'Multifamily' } })).toBe(true);
+    expect(isCommercialEstimate({ waveguard_tier: 'Commercial' }, {})).toBe(true);
+    expect(isCommercialEstimate({}, { recurring: { services: [{ service: 'commercial_pest' }] } })).toBe(true);
+    expect(isCommercialEstimate({}, ownedEstData())).toBe(false);
+  });
+
+  test('persisted multi-unit property types park (Duplex/condo/townhome)', () => {
+    for (const pt of ['Duplex', 'Condo', 'Townhome', 'Townhouse', 'Triplex', 'Apartment Building']) {
+      expect(isCommercialEstimate({}, { inputs: { propertyType: pt } })).toBe(true);
+    }
+    expect(isCommercialEstimate({}, { inputs: { propertyType: 'Single Family' } })).toBe(false);
+  });
+
+  test('top-level legacy commercial markers park (isCommercial/category/commercialSubtype at data root)', () => {
+    expect(isCommercialEstimate({}, { isCommercial: true })).toBe(true);
+    expect(isCommercialEstimate({}, { isCommercial: 'YES' })).toBe(true);
+    expect(isCommercialEstimate({}, { category: 'COMMERCIAL' })).toBe(true);
+    expect(isCommercialEstimate({}, { commercialSubtype: 'office_retail' })).toBe(true);
+    expect(isCommercialEstimate({}, { category: 'RESIDENTIAL' })).toBe(false);
+  });
+
+  test('canonical commercial property types and engine markers park (Office/Restaurant/School/HOA/Government)', () => {
+    for (const pt of ['Office', 'Restaurant', 'School', 'HOA Common Area', 'Government Municipal', 'Warehouse', 'Medical Office', 'Business Park', 'Daycare']) {
+      expect(isCommercialEstimate({}, { engineInputs: { propertyType: pt } })).toBe(true);
+      expect(isCommercialEstimate({}, { inputs: { propertyType: pt } })).toBe(true);
+    }
+    expect(isCommercialEstimate({}, { engineInputs: { category: 'COMMERCIAL' } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineInputs: { commercialSubtype: 'restaurant_food_service' } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineRequest: { profile: { commercialRiskType: 'food' } } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Single Family', category: 'RESIDENTIAL' } })).toBe(false);
+    expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Mobile Home' } })).toBe(false);
+  });
+
+  test('every persisted input generation parks (engineInputs / engineRequest.profile / enriched)', () => {
+    expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Duplex' } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineInputs: { isCommercial: true } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineRequest: { profile: { propertyType: 'Townhome' } } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineRequest: { profile: { isCommercial: 'YES' } } })).toBe(true);
+    expect(isCommercialEstimate({}, { enriched: { propertyType: 'Condo' } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Single Family' } })).toBe(false);
+    expect(isCommercialEstimate({}, { engineRequest: { profile: { propertyType: 'Single Family' } } })).toBe(false);
+  });
+
+  test('commercial termite key marks the program present so the park runs (not no_termite_program)', () => {
+    const facts = collectTermiteFacts({
+      result: { lineItems: [{ service: 'commercial_termite_bait', monthly: 120 }] },
+    });
+    expect(facts.hasProgram).toBe(true);
+    expect(isCommercialEstimate({}, { result: { lineItems: [{ service: 'commercial_termite_bait' }] } })).toBe(true);
+  });
+});
+
+describe('v2 templates (active version — owner-approved 2026-07-29)', () => {
+  const v2ByKey = Object.fromEntries(TEMPLATE_V2.map((t) => [t.template_key, t]));
+
+  function renderV2(prepared) {
+    const seed = v2ByKey[prepared.templateKey];
+    const context = buildCustomerDocumentContext(CUSTOMER, prepared.values);
+    return renderDocumentTemplate({
+      template: { template_key: seed.template_key, name: seed.title },
+      version: { title: seed.title, body: seed.body },
+      context,
+    });
+  }
+
+  test('purchase v2 resolves every variable and carries the 5E-14.105 load-bearing terms', () => {
+    const rendered = renderV2(buildTermiteProgramAgreementValues({}, ownedEstData()));
+    expect(rendered.unresolvedVariables).toEqual([]);
+    expect(rendered.body).toContain('DOES NOT COVER: DRYWOOD TERMITES');
+    expect(rendered.body).toContain('IT IS NOT A');
+    expect(rendered.body).toContain('WARRANTY OR BOND');
+    expect(rendered.body).toContain('Structural repair price under this agreement: NONE');
+    expect(rendered.body).toContain('60 days to correct the condition');
+    expect(rendered.body).toContain('TRANSFER TO A NEW OWNER');
+    expect(rendered.body).toContain('FDACS-13692');
+    expect(rendered.body).toContain('FDACS-13671');
+    expect(rendered.body).not.toMatch(/first year of (warranty )?coverage included/i);
+    expect(rendered.body).not.toContain('[OWNER/ATTORNEY DECISION');
+  });
+
+  test('rental v2 resolves every variable and carries the hardware + removal terms', () => {
+    const rendered = renderV2(buildTermiteProgramAgreementValues({}, rentedEstData()));
+    expect(rendered.unresolvedVariables).toEqual([]);
+    expect(rendered.body).toContain('remain the property of Waves Pest Control');
+    expect(rendered.body).toContain('NOT A PAYMENT PLAN');
+    expect(rendered.body).toContain('hardware replacement cost');
+    expect(rendered.body).toContain('Waves will retrieve its stations');
+    expect(rendered.body).toContain('TRANSFER TO A NEW OWNER');
+    expect(rendered.body).not.toContain('[OWNER/ATTORNEY DECISION');
+  });
+
+  test('v2 variable lists exactly match body usage (same merge fields as v1 — builder unchanged)', () => {
+    for (const seed of TEMPLATE_V2) {
+      const used = [...new Set([...seed.body.matchAll(/\{\{\s*([a-z0-9_.]+)\s*\}\}/gi)].map((m) => m[1]))].sort();
+      expect(used).toEqual([...seed.variables].sort());
+      const v1 = DEFAULT_TEMPLATES.find((t) => t.template_key === seed.template_key);
+      expect([...seed.variables].sort()).toEqual([...v1.variables].sort());
     }
   });
 });

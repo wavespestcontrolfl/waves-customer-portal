@@ -24,10 +24,12 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { generateEstimate } = require('../pricing-engine');
 const {
+  acquireAutomatedEstimateLocks,
   automatedDuplicateBlock,
+  listOpenEstimatesByCustomerId,
   listOpenEstimatesByPhone,
   phoneLookupValues,
-  withAutomatedEstimatePhoneLock,
+  withAutomatedEstimateDedupeLocks,
 } = require('../estimate-automation-duplicates');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
 const { sameStreetAddress } = require('./address-compare');
@@ -81,9 +83,10 @@ function lineRequiresReview(line = {}) {
 // final quoted address), so its pool/cage, shrub density, landscape
 // complexity, and water adjacency feed real per-feature adjustments —
 // without this a caged-pool, heavy-landscaping home green-laned at the
-// bare-property price. Deliberately NOT mapped: tree density and large
-// driveway for pest (retired from pest pricing on main by #2794 — wiring
-// them here would add money that vanishes at merge). treeDensity still
+// bare-property price. Deliberately NOT mapped: tree density for pest
+// (retired from pest pricing on main by #2794) and large driveway anywhere
+// (retired estimator-wide 2026-07-30) — wiring either here would add money
+// that vanishes at merge. treeDensity still
 // flows top-level for the tree & shrub pricer's density-estimate fallback.
 // Enriched merge fields carry literal 'UNKNOWN' when neither records nor
 // vision resolved them — that must stay OFF the engine input.
@@ -635,6 +638,40 @@ function resolveDraftCustomerPhone(intent, context) {
     || null;
 }
 
+// Which phone numbers the duplicate guard must consult, in order: the
+// draft's own phone always; the TRUSTED LINKED customer's own number
+// whenever it differs by last-10. The link's provenance is irrelevant —
+// what matters is that the draft is being written against a customer whose
+// open estimates live under a DIFFERENT number, so a sender-phone-only
+// check cannot see them:
+//   - address grounding (off-file sender, thread named the customer's
+//     property);
+//   - a service-contact sender (spouse/tenant/manager matched on
+//     customers.service_contact*_phone — loadCustomerByPhone's
+//     includeServiceContacts branch links the real customer while the
+//     sender's number stays their own).
+// TRUSTED means the same bar the draft's own customer_id link uses: a
+// customer object with an ambiguity-free match. An ambiguous shared-phone
+// match is not a link (customer_id stays null there), so its number must
+// not widen the dedupe either. Pure so the rule is directly pinnable.
+// The customer the draft is actually being written FOR, or null. Same bar
+// the estimate's own customer_id column uses (see createDraftEstimate): an
+// ambiguous shared-phone match is not a link and must not widen the dedupe
+// or take an identity lock in somebody else's name.
+function trustedLinkedCustomer(context) {
+  return (context?.customer?.id && !context?.customerPhoneAmbiguous) ? context.customer : null;
+}
+
+function dedupePhonesForContext(customerPhone, context) {
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const phones = customerPhone ? [customerPhone] : [];
+  const linkedPhone = trustedLinkedCustomer(context)?.phone || null;
+  if (linkedPhone && last10(linkedPhone).length === 10 && last10(linkedPhone) !== last10(customerPhone)) {
+    phones.push(linkedPhone);
+  }
+  return phones;
+}
+
 // Engine tier keys are lowercase; customers.waveguard_tier's CHECK allows
 // only the title-case labels.
 const WAVEGUARD_TIER_LABELS = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
@@ -673,15 +710,36 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   const { priorQualifyingServices: _nestedPrior, ...unstampedEngineInputs } = engineInput || {};
   const storedEngineInputs = stampPestCurveVersion(unstampedEngineInputs, engineResult);
 
-  // Serialization: the phone advisory lock covers callers with a usable
-  // number. WITHOUT one, withAutomatedEstimatePhoneLock degrades to a bare
+  // EVERY key the duplicate guard below reads must be locked before the
+  // read and stay locked through the insert. Locking only the sender while
+  // reading the linked customer's number too is not serialization: a
+  // concurrent request from that customer's own number holds a DIFFERENT
+  // lock, both transactions see no open estimate, and both insert (no
+  // uniqueness constraint catches it). One spec drives both the locks and
+  // the reads so they can never drift apart.
+  //
+  // IDENTITY is in the spec because phone keys alone do not cover the
+  // family: an estimate stores ONE customer_phone, so the row a coordinator
+  // just inserted for customer B is filed under the coordinator's number
+  // and is invisible to a phone-keyed read from B's own line or from a
+  // SECOND service contact — and two different service contacts share no
+  // phone key at all, so nothing would serialize them either.
+  const dedupePhones = dedupePhonesForContext(customerPhone, context);
+  const dedupeCustomerId = trustedLinkedCustomer(context)?.id || null;
+  const dedupeLockSpec = {
+    phones: dedupePhones,
+    customerIds: dedupeCustomerId ? [dedupeCustomerId] : [],
+  };
+
+  // Serialization: the phone advisory locks cover callers with a usable
+  // number. WITHOUT one, withAutomatedEstimatePhoneLocks degrades to a bare
   // (lock-less, transaction-less) callback — two overlapping runs of the
   // same call (forced reprocess while the first composer is in flight)
   // would both see no draft and insert twice. Fall back to a CALL-scoped
   // advisory lock with an in-lock recheck for this call's existing draft.
   const runSerialized = (callback) => {
     if (phoneLookupValues(customerPhone).last10) {
-      return withAutomatedEstimatePhoneLock(customerPhone, callback);
+      return withAutomatedEstimateDedupeLocks(dedupeLockSpec, callback);
     }
     if (!call?.id) return callback(db);
     return db.transaction(async (trx) => {
@@ -705,6 +763,13 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           },
         };
       }
+      // No draft phone of our own, but a linked customer's number and
+      // identity can still be read by the guard below — lock them here, in
+      // the same canonical order every other caller uses. Lock order across
+      // namespaces is fixed (call lock first, dedupe locks after) and
+      // nothing else in the codebase ever takes the call-scoped lock, so no
+      // cycle exists.
+      await acquireAutomatedEstimateLocks(trx, dedupeLockSpec);
       return callback(trx);
     });
   };
@@ -719,9 +784,39 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // through. Only when every open estimate has a known, street-different
     // address is this a different quote; an unknown address on either side
     // keeps the conservative block.
-    const openEstimates = await listOpenEstimatesByPhone(customerPhone, { database: trx });
-    if (openEstimates.length) {
-      const conflicting = conflictingOpenEstimate(openEstimates, intent.address);
+    // A LINKED-CUSTOMER draft (address-grounded sender, or a service-contact
+    // sender matched on a contact slot) is written for a customer whose own
+    // open estimates live under THEIR phone and are invisible to a
+    // sender-phone check, letting duplicate drafts through. Consult every
+    // dedupe phone (context.phone keeps its meaning everywhere else:
+    // transcripts and SMS threading still key on the sender); the address
+    // bypass applies across the union. Draft-phone rows stay FIRST so the
+    // no-address fallback (newest open estimate blocks) is unchanged.
+    const allOpen = [];
+    const seenEstimateIds = new Set();
+    const absorb = (rows) => {
+      for (const row of rows) {
+        if (seenEstimateIds.has(row.id)) continue;
+        seenEstimateIds.add(row.id);
+        allOpen.push(row);
+      }
+    };
+    for (const phone of dedupePhones) {
+      absorb(await listOpenEstimatesByPhone(phone, { database: trx }));
+    }
+    // IDENTITY read, not just phones: an estimate carries ONE
+    // customer_phone, so the draft a coordinator (or another service
+    // contact) already inserted for this customer is filed under THEIR
+    // number and no phone key can see it — the shared lock above serializes
+    // those writers, but a phone-keyed read would still find nothing and
+    // insert a second draft for the same customer/property. Address scoping
+    // is unchanged: conflictingOpenEstimate still lets a genuinely
+    // different property through.
+    if (dedupeCustomerId) {
+      absorb(await listOpenEstimatesByCustomerId(dedupeCustomerId, { database: trx }));
+    }
+    if (allOpen.length) {
+      const conflicting = conflictingOpenEstimate(allOpen, intent.address);
       if (conflicting) return { duplicateBlock: automatedDuplicateBlock(conflicting) };
       logger.info('[estimator-engine] duplicate guard bypassed — all open estimates are for different properties');
     }
@@ -851,5 +946,5 @@ module.exports = {
   isCommercialRelationshipRed,
   conflictingOpenEstimate,
   resolveDraftCustomerPhone,
-  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES, lookupFeatureModifiers, resolveDraftCustomerPhone },
+  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES, lookupFeatureModifiers, resolveDraftCustomerPhone, dedupePhonesForContext },
 };

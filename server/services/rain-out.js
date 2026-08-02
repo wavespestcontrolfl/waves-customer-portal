@@ -36,6 +36,35 @@ const WEATHER_PHRASES = {
   weather_heat: 'extreme heat',
 };
 
+// Non-weather "Quick Move" reasons: the same move-first flow and SMS
+// machinery, but the lead states the real operational cause and the copy
+// makes no weather claims (no forecast fetch, no forecast link, no
+// better-day/efficacy clauses — those already gate on rain/lightning).
+// customer_noshow here is the SOFT path — visit rebooked + texted; the
+// terminal no_show status flip (card-hold fee, invoice void, missed-you
+// notice) stays on the appointment detail sheet. The rebooker's
+// reschedule_log row (reason_code customer_noshow, customer_id) feeds the
+// 2-in-90-days missed-appointment outreach counter automatically
+// (workflows/missed-appointment.js counts rows by that reason code).
+// All four are dark until the owner flips GATE_QUICKMOVE_EXTRA_REASONS:
+// the chips are hidden in both sheets (options payload flag) and commit()
+// rejects the codes, so the kill switch is a plain unset.
+const EXTRA_REASON_LEADS = {
+  running_late: "we're running behind schedule today",
+  equipment_issue: 'we had equipment trouble today',
+  tech_emergency: 'an emergency came up on our end',
+  customer_noshow: 'we missed you today',
+};
+function extraReasonsEnabled() {
+  return process.env.GATE_QUICKMOVE_EXTRA_REASONS === 'true';
+}
+function isExtraReason(reasonCode) {
+  return Object.prototype.hasOwnProperty.call(EXTRA_REASON_LEADS, reasonCode);
+}
+function isValidReason(reasonCode) {
+  return !!WEATHER_PHRASES[reasonCode] || (isExtraReason(reasonCode) && extraReasonsEnabled());
+}
+
 // Customer-facing lead for the moved SMS, grounded in what we actually know
 // instead of a fixed "heavy rain rolled through" claim (owner call,
 // 2026-07-18). A same-day push means the tech is standing in the weather —
@@ -43,6 +72,7 @@ const WEATHER_PHRASES = {
 // degrades to an honest generic when we don't (NWS is fail-open). Non-rain
 // reasons state the real operational constraint rather than a weather label.
 function composeWeatherLead({ reasonCode, isSameDay, hour, todayChance }) {
+  if (EXTRA_REASON_LEADS[reasonCode]) return EXTRA_REASON_LEADS[reasonCode];
   if (reasonCode === 'weather_wind') return 'winds are too high to spray safely today';
   if (reasonCode === 'weather_lightning') return "there's lightning in the area";
   if (reasonCode === 'weather_heat') return "today's heat is too extreme to treat safely";
@@ -98,7 +128,7 @@ function windowRainChance(hours, dateStr, windowStartHHMM) {
   return max;
 }
 
-// " Tomorrow morning looks a lot better — just a 10% chance of rain around
+// " Tomorrow morning looks a lot better - just a 10% chance of rain around
 // your new time." Only claims what the forecast supports. Preferred source
 // is the HOURLY chance scored on the actual booked arrival window (that's
 // what lets us say morning vs afternoon, and lets a same-day push say
@@ -120,8 +150,8 @@ function composeBetterDayClause({
     const startHour = Math.floor((hhmmToMinutes(windowStart) ?? 0) / 60);
     const label = isSameDay ? 'Later today' : `${day} ${partOfDay(startHour)}`;
     return windowChance <= 20
-      ? ` ${label} looks a lot better — just a ${windowChance}% chance of rain around your new time.`
-      : ` ${label} looks better — a ${windowChance}% chance of rain around your new time.`;
+      ? ` ${label} looks a lot better - just a ${windowChance}% chance of rain around your new time.`
+      : ` ${label} looks better - a ${windowChance}% chance of rain around your new time.`;
   }
 
   if (isSameDay || newChance == null || newChance > 40) return '';
@@ -129,8 +159,8 @@ function composeBetterDayClause({
   const label = dayLabel(chosenDate, todayStr);
   if (!label) return '';
   return newChance <= 20
-    ? ` ${label} looks a lot better — just a ${newChance}% chance of rain.`
-    : ` ${label} looks better — a ${newChance}% chance of rain.`;
+    ? ` ${label} looks a lot better - just a ${newChance}% chance of rain.`
+    : ` ${label} looks better - a ${newChance}% chance of rain.`;
 }
 
 // Explains WHY rain moves a spray visit. Dark until the owner flips
@@ -140,7 +170,7 @@ function composeEfficacyClause({ reasonCode, serviceType }) {
   if (process.env.GATE_RAINOUT_EFFICACY_NOTE !== 'true') return '';
   if (reasonCode !== 'weather_rain') return '';
   if (EFFICACY_EXEMPT_SERVICE.test(String(serviceType || ''))) return '';
-  return '\n\nWhy the move? Treatments need a few rain-free hours to bond — applying right before rain washes them away before they can work.';
+  return '\n\nWhy the move? Treatments need a few rain-free hours to bond - applying right before rain washes them away before they can work.';
 }
 
 // Statuses a rain-out may move. Mirrors the rebooker's reschedulable +
@@ -270,6 +300,10 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order',
       // Stamped service-address fields feed the moved-SMS forecast copy.
       'lat', 'lng', 'service_address_zip',
+      // Collective anchoring needs recurrence membership for EVERY route
+      // stop, not just the anchor — omitting it silently routed recurring
+      // siblings down the single-visit path (codex P1).
+      'is_recurring',
     );
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
@@ -331,7 +365,11 @@ async function getOptions(serviceId) {
   const { isBlackoutDate } = require('./scheduling/blackout-dates');
   const sameDay = (await isBlackoutDate(todayStr)) ? [] : sameDayOptions();
 
-  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain');
+  // probeSpanMinutes: 60 — the sheet OFFERS what commit() actually BOOKS
+  // (the on-the-hour one-hour block), not the visit's stored span: a 2h
+  // stored window would hide bookable options and a sub-hour one would
+  // offer slots the commit then SLOT_TAKENs (codex P2).
+  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', { probeSpanMinutes: 60 });
 
   // Rain badges — best effort, never blocking. Customer coords first,
   // falling back to nothing (options render without percentages).
@@ -378,6 +416,9 @@ async function getOptions(serviceId) {
     sameDay,
     days,
     remainingRouteCount: route.length,
+    // Both sheets render the non-weather reason chips only when the gate is
+    // on — the server is still the enforcer (commit() rejects the codes).
+    extraReasonsEnabled: extraReasonsEnabled(),
   };
 }
 
@@ -402,7 +443,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   const lng = job.lng ?? customer.longitude;
   const zip = job.service_address_zip || customer.zip;
 
-  const forecastLink = forecastLinkForZip(zip);
+  // A non-weather move makes no weather claims: no forecast link and no
+  // NWS decoration below — the fixed operational lead is the whole story.
+  const forecastLink = isExtraReason(reasonCode) ? null : forecastLinkForZip(zip);
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
 
   // Forecast decoration is fail-open (same rule as the options sheet):
@@ -417,7 +460,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   const isSameDay = String(chosen.date) === todayStr;
   let outlook = null;
   let hourly = null;
-  if (lat != null && lng != null && !forecastHealth.degraded) {
+  if (lat != null && lng != null && !forecastHealth.degraded && !isExtraReason(reasonCode)) {
     const fetched = await Promise.race([
       Promise.all([
         getDailyRainOutlook(lat, lng).catch(() => null),
@@ -439,38 +482,83 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     first_name: customer.first_name || 'there',
     service_type: (job.service_type || 'service').toLowerCase(),
     new_option: customerArrivalOption(chosen.date, chosen.window),
-    alt_clause: altClause,
-    forecast_clause: forecastClause,
   };
+  // v2/legacy only — v3's link_clause replaces both (the page the link
+  // opens carries the forecast, so a second weather.gov URL is redundant).
+  const longFormVars = { alt_clause: altClause, forecast_clause: forecastClause };
   const renderContext = {
     workflow: 'tech_rain_out',
     entity_type: 'scheduled_service',
     entity_id: serviceId,
   };
 
-  // rain_out_moved_v2 is the forecast-grounded template this PR's
-  // migration seeds; the legacy rain_out_moved row stays untouched so an
-  // older server (or a rolled-back deploy) keeps rendering it. The legacy
-  // fallback fires ONLY when the v2 ROW is absent (a rolled-back
-  // migration) — an existing-but-disabled v2 row is the ops kill switch
-  // and must stop the send, not reroute it to old copy. The legacy row
-  // is retired in the cleanup PR once this deploy is verified.
-  let body = await renderSmsTemplate('rain_out_moved_v2', {
-    ...sharedVars,
-    weather_lead: composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance }),
-    better_day_clause: composeBetterDayClause({
-      reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
-      windowChance, windowStart: chosen.window?.start,
-    }),
-    efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
-  }, renderContext);
+  const weatherLead = composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance });
+
+  // Template ladder, newest first. Each rung falls through ONLY when its
+  // ROW is absent (a rolled-back migration) — an existing-but-disabled row
+  // is the ops kill switch and must stop the send, not reroute it to older
+  // copy. original_message_type must track whichever rung rendered, since
+  // twilio.js keys its per-template kill switch on it (the #2891 lesson:
+  // stamping a retired key suppresses every send as a sentinel "success").
+  //
+  //   v3 (GATE_RAINOUT_MOVE_BANNER) — short link-first copy; the detail
+  //     (was/now slots, forecast, efficacy note) lives on the /reschedule
+  //     page's weather banner, which the same gate turns on.
+  //   v2 — forecast-grounded long copy; today's default while the gate is
+  //     dark, and the fallback if the v3 migration is rolled back.
+  //   legacy rain_out_moved — retired in prod (is_active=false) but the
+  //     row is load-bearing as the absent-v2 fallback body; never delete.
+  let body = null;
+  let renderedKey = null;
+  if (process.env.GATE_RAINOUT_MOVE_BANNER === 'true') {
+    body = await renderSmsTemplate('rain_out_moved_v3', {
+      ...sharedVars,
+      weather_lead: weatherLead,
+      // "forecast" only when the page's banner will actually show one —
+      // a non-weather move renders the banner without weather chips.
+      link_clause: rescheduleUrl
+        ? (isExtraReason(reasonCode)
+          ? ` New time & other options: ${rescheduleUrl}`
+          : ` New time, forecast & other options: ${rescheduleUrl}`)
+        : ' Need a different time? Reply to this message.',
+    }, renderContext);
+    if (body) {
+      renderedKey = 'rain_out_moved_v3';
+    } else {
+      const v3Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v3' }).first('id');
+      if (v3Row) {
+        logger.warn(`[rain-out] rain_out_moved_v3 disabled — moved ${serviceId} without SMS`);
+        return { sent: false, reason: 'missing_template' };
+      }
+    }
+  }
+  if (!body) {
+    body = await renderSmsTemplate('rain_out_moved_v2', {
+      ...sharedVars,
+      ...longFormVars,
+      weather_lead: weatherLead,
+      better_day_clause: composeBetterDayClause({
+        reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
+        windowChance, windowStart: chosen.window?.start,
+      }),
+      efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
+    }, renderContext);
+    if (body) renderedKey = 'rain_out_moved_v2';
+  }
   if (!body) {
     const v2Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v2' }).first('id');
-    if (!v2Row) {
+    // The legacy body's grammar is weather-only ("{weather_phrase} rolled
+    // through your area") — a non-weather move can't render it honestly,
+    // so that edge (v2 migration rolled back) falls through to the
+    // missing-template path: visit moved, sheet reports the customer was
+    // NOT texted, operator follows up manually.
+    if (!v2Row && !isExtraReason(reasonCode)) {
       body = await renderSmsTemplate('rain_out_moved', {
         ...sharedVars,
+        ...longFormVars,
         weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
       }, renderContext);
+      if (body) renderedKey = 'rain_out_moved_v2';
     }
   }
   if (!body) {
@@ -487,12 +575,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     customerId: customer.id,
     identityTrustLevel: 'phone_matches_customer',
     // original_message_type doubles as the per-template ops kill-switch key
-    // (twilio.js isTemplateActive) and MUST be the v2 template's key: the
-    // legacy rain_out_moved row is retired (is_active=false), and stamping
-    // the legacy key suppresses every send as a sentinel "success". An
-    // absent v2 row (rolled-back migration) counts as active there, so the
-    // legacy-render fallback above still texts.
-    metadata: { original_message_type: 'rain_out_moved_v2', reason_code: reasonCode },
+    // (twilio.js isTemplateActive) and MUST be the key of the rung that
+    // actually rendered: the legacy rain_out_moved row is retired
+    // (is_active=false), and stamping a retired key suppresses every send
+    // as a sentinel "success". The legacy-render fallback stamps the v2 key
+    // for the same reason — an absent v2 row (rolled-back migration) counts
+    // as active there, so the fallback still texts.
+    metadata: { original_message_type: renderedKey, reason_code: reasonCode },
   });
   if (result?.blocked || result?.sent === false) {
     return { sent: false, reason: result.code || result.reason || 'blocked' };
@@ -514,6 +603,8 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
  * @param {string} args.serviceId       the job the tech is acting on
  * @param {string} args.technicianId    acting tech (route scope filter)
  * @param {string} args.reasonCode      weather_rain | weather_wind | weather_lightning | weather_heat
+ *                                       | running_late | equipment_issue | tech_emergency
+ *                                       | customer_noshow (extra reasons need GATE_QUICKMOVE_EXTRA_REASONS)
  * @param {string} args.scope           'job' | 'route' (this job + the rest of today's route)
  * @param {object} args.target          { date, window: {start, end} } — the ANCHOR books exactly
  *                                       this window (what the tech saw). On a same-day route push
@@ -527,9 +618,36 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
 async function commit({ serviceId, technicianId, reasonCode, scope, target, notifyCustomer = true, initiatedBy = 'tech' }) {
   const service = await loadServiceWithCustomer(serviceId);
   if (!service) return { ok: false, reason: 'not_found' };
-  if (!WEATHER_PHRASES[reasonCode]) return { ok: false, reason: 'bad_reason' };
+  if (!isValidReason(reasonCode)) return { ok: false, reason: 'bad_reason' };
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
+  }
+  // A no-show is about THIS customer only — route scope would move every
+  // remaining stop, text each unrelated customer "we missed you", and stamp
+  // each with a customer_noshow log row that counts toward the
+  // missed-appointment outreach threshold (codex P1). The sheets hide the
+  // scope toggle for this reason; the server is the enforcer.
+  if (reasonCode === 'customer_noshow' && scope === 'route') {
+    return { ok: false, reason: 'noshow_route_scope' };
+  }
+  // "Running behind" can only push a same-day visit LATER. The generic
+  // same-day options are now+2h/+4h with no regard for the current window,
+  // so a morning Quick Move on an afternoon visit could otherwise pull it
+  // earlier while the SMS claims we ran behind (codex P2). Day moves are
+  // exempt — landing earlier on a DIFFERENT day contradicts nothing. The
+  // sheets filter their same-day presets to match; this is the enforcer.
+  if (reasonCode === 'running_late') {
+    const currentDateStr = service.scheduled_date
+      ? String(service.scheduled_date instanceof Date
+          ? service.scheduled_date.toISOString()
+          : service.scheduled_date).slice(0, 10)
+      : null;
+    const currentStartMin = hhmmToMinutes(service.window_start);
+    const targetStartMin = hhmmToMinutes(target.window.start);
+    if (currentDateStr && String(target.date) === currentDateStr
+        && currentStartMin != null && targetStartMin != null && targetStartMin <= currentStartMin) {
+      return { ok: false, reason: 'target_not_later' };
+    }
   }
 
   const todayStr = etDateString();
@@ -644,17 +762,95 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       newWindow = { start: toHHMM(job.window_start), end: toHHMM(job.window_end) };
     }
 
+    // Collective anchoring (owner ruling 2026-07-30, GATE_COLLECTIVE_SERIES_ANCHOR):
+    // a DAY move of a series child shifts its whole future series by the
+    // same delta, so the customer's next visit lands ~an interval after the
+    // treatment that actually happened. Same-day time pushes have no date
+    // delta and never touch the series; boosters (is_recurring=false) never
+    // shift the base plan. A rain-out must never fail because a future
+    // sibling collides: the atomic series shift is tried first, and when it
+    // can't commit, the visit still moves alone while the un-shifted series
+    // parks as a schedule_conflict admin card (hands-off + exception-based).
+    const jobDateStr = job.scheduled_date
+      ? String(job.scheduled_date instanceof Date ? job.scheduled_date.toISOString() : job.scheduled_date).slice(0, 10)
+      : null;
+    const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
+      && !!job.is_recurring
+      && String(target.date) !== jobDateStr;
+    // Owner rule: windows are ALWAYS on the hour. The series mover writes
+    // its anchor's start to every shifted occurrence, so an off-hour
+    // TECH-SUPPLIED target (custom input passes the routes' date-only
+    // validation) would mint a whole off-hour series — normalize through
+    // the same on-the-hour block the options sheet books (codex P1).
+    // Scoped to the rain-out's own anchor: route SIBLINGS keep their
+    // existing windows on a day move, and rounding a legacy half-hour
+    // window would silently shift that customer's time.
+    if (wantsSeriesShift && job.id === serviceId
+      && (hhmmToMinutes(newWindow?.start) ?? 0) % 60 !== 0) {
+      newWindow = oneHourWindow(newWindow.start);
+    }
+    let shiftedOccurrences = null;
     try {
-      // excludeServiceIds = the CURRENT row only (see the exclusion
-      // rationale above the loop). Every other member's row — old position
-      // or committed new one — stays visible to the rebooker's occupancy
-      // probe: an already-committed position is real occupancy, and hiding
-      // it let another actor re-move a committed member into a later
-      // member's target unseen.
-      await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
-        allowLive: true,
-        excludeServiceIds: [job.id],
-      });
+      if (wantsSeriesShift) {
+        try {
+          const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
+            allowLive: true,
+            // Pin the anchor to the state this loop read — a concurrent
+            // move means the delta is stale and the series must not shift.
+            expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
+          });
+          shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
+            ? seriesResult.rescheduledOccurrences
+            : null;
+        } catch (err) {
+          logger.warn(`[rain-out] collective series shift failed for ${job.id} (${err.message}) — moving the visit alone and parking the series`);
+        }
+      }
+      if (!shiftedOccurrences) {
+        // excludeServiceIds = the CURRENT row only (see the exclusion
+        // rationale above the loop). Every other member's row — old position
+        // or committed new one — stays visible to the rebooker's occupancy
+        // probe: an already-committed position is real occupancy, and hiding
+        // it let another actor re-move a committed member into a later
+        // member's target unseen.
+        //
+        // Fallback-after-series keeps the anchor CAS (codex P1): the series
+        // call may have rejected precisely BECAUSE the anchor moved
+        // concurrently (expectAnchor), and re-reading the now-current row
+        // would let this fallback overwrite the newer choice. The same
+        // expected-state predicate makes the single path 409 instead —
+        // caught below as a per-member failure the tech re-runs.
+        await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
+          allowLive: true,
+          excludeServiceIds: [job.id],
+          ...(wantsSeriesShift
+            ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
+            : {}),
+        });
+        if (wantsSeriesShift) {
+          // The visit moved but the series could not shift atomically —
+          // park it for the office instead of failing the rain-out.
+          try {
+            const NotificationService = require('./notification-service');
+            // notifyAdmin swallows DB errors and resolves null (codex P2) —
+            // a falsy result means the cadence is intentionally broken with
+            // NO card prompting repair. Log at error with full context (the
+            // durable signal Sentry picks up); the moved visit itself is
+            // committed and must not read as retryable.
+            const card = await NotificationService.notifyAdmin(
+              'schedule_conflict',
+              'Rain-out series shift needs a look',
+              `A rain-out moved a recurring visit to ${target.date} but its future visits could not shift with it (a later occurrence conflicts). The plan's cadence no longer follows the moved visit — adjust from dispatch.`,
+              { metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, targetDate: target.date, reasonCode } }
+            );
+            if (!card) {
+              logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — series cadence broken with no admin card; targetDate=${target.date} reason=${reasonCode}`);
+            }
+          } catch (notifyErr) {
+            logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${notifyErr.message}`);
+          }
+        }
+      }
     } catch (err) {
       // One job racing to completed/cancelled must not strand the rest
       // of a bulk rain-out — record and continue. This member did NOT move:
@@ -670,6 +866,98 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // a throwing provider/audit wrapper, a failed forecast fetch —
     // must never mark the job failed, or the tech retries and
     // double-reschedules / double-texts an already-moved appointment.
+
+    // Series shift committed: re-arm every shifted SIBLING's reminders as a
+    // SILENT move — sendNotification:false WITHOUT coverDueWindows. The
+    // rain-out sends only the anchor's SMS and no series notice, so a
+    // sibling shifted inside its 24h window must keep that window pending
+    // for the cron's normal day-before reminder; covering it would strand
+    // the customer with no message at all (codex P1 — coverDueWindows is
+    // reserved for callers that send their own notice). The anchor's
+    // re-arm stays with the calling route.
+    if (shiftedOccurrences) {
+      const AppointmentReminders = require('./appointment-reminders');
+      for (const occ of shiftedOccurrences) {
+        if (String(occ.id) === String(job.id)) continue;
+        try {
+          await AppointmentReminders.handleReschedule(
+            occ.id,
+            `${String(occ.date).split('T')[0]}T${toHHMM(occ.windowStart) || newWindow.start}`,
+            {
+              sendNotification: false,
+              // Atomic stale-guard (codex P1): another actor can re-move a
+              // sibling between the series trx commit and this sequential
+              // loop — the re-arm must no-op unless the row still holds the
+              // slot we shifted it to, or the customer gets a reminder for
+              // the wrong appointment.
+              expectSchedule: {
+                date: String(occ.date).split('T')[0],
+                windowStart: toHHMM(occ.windowStart) || null,
+              },
+            }
+          );
+        } catch (err) {
+          logger.error(`[rain-out] series reminder sync failed for ${occ.id}: ${err.message}`);
+        }
+      }
+      // Live boards track every shifted sibling, not just the loop's own
+      // jobs — the admin/tech callers broadcast only their route ids, so
+      // future-date siblings would sit stale on any open board (codex P2).
+      // Per-occurrence isolation like the public series path.
+      try {
+        const { emitDispatchJobUpdate } = require('./dispatch-assignment');
+        for (const occ of shiftedOccurrences) {
+          if (String(occ.id) === String(job.id)) continue;
+          try {
+            await emitDispatchJobUpdate({ jobId: occ.id, actorId: null });
+          } catch (err) {
+            logger.error(`[rain-out] board broadcast failed for ${occ.id}: ${err.message}`);
+          }
+        }
+      } catch (err) {
+        logger.error(`[rain-out] board broadcast unavailable: ${err.message}`);
+      }
+      // Kept-tech double-books were committed UNASSIGNED by the rebooker —
+      // park them for reassignment, same as the public series path.
+      const conflicted = shiftedOccurrences
+        .filter((occ) => occ.conflicted)
+        .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+      if (conflicted.length) {
+        try {
+          const NotificationService = require('./notification-service');
+          const card = await NotificationService.notifyAdmin(
+            'schedule_conflict',
+            'Rain-out series shift needs a look',
+            `A rain-out shifted a recurring series; ${conflicted.length} future visit(s) landed on already-booked windows and were left UNASSIGNED (${conflicted.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
+            { metadata: { scheduledServiceId: job.id, conflicts: conflicted, reasonCode } }
+          );
+          if (!card) {
+            logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — unassigned siblings with no admin card: ${JSON.stringify(conflicted)}`);
+          }
+        } catch (err) {
+          logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${err.message}`);
+        }
+      }
+    }
+
+    // Soft no-show: the rebooker just logged the occurrence (reason_code
+    // customer_noshow with the missed slot's original_date/window), but
+    // only the terminal path and nightly sweep ever ran the outreach
+    // threshold — two soft no-shows would accumulate without the promised
+    // 2-in-90-days task (codex r2). Evaluate WITHOUT inserting a second
+    // occurrence row. Best-effort: never fails the committed move.
+    if (reasonCode === 'customer_noshow') {
+      try {
+        const MissedAppointment = require('./workflows/missed-appointment');
+        await MissedAppointment.evaluateThreshold(
+          job.customer_id || service.cust_id || service.customer_id,
+          'quick_move_no_show',
+        );
+      } catch (err) {
+        logger.warn(`[rain-out] no-show outreach evaluation failed for ${job.id}: ${err.message}`);
+      }
+    }
+
     const chosen = { date: target.date, window: newWindow };
     let sms = { sent: false, reason: 'not_requested' };
     if (notifyCustomer) {
@@ -706,5 +994,6 @@ module.exports = {
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
+    EXTRA_REASON_LEADS, isValidReason,
   },
 };

@@ -57,9 +57,47 @@ const PRIORITY_CLASS = {
   low: "bg-zinc-300",
 };
 
+// Human labels for the bell-policy category overrides (keys come from
+// GET /admin/push/preferences → bellCategories; unknown keys fall back to
+// a title-cased version of the raw category).
+const BELL_CATEGORY_LABELS = {
+  alert: "Operational alerts",
+  system: "System events",
+  service: "Service events",
+  lead: "Lead activity (non-new-lead)",
+  estimate: "Estimate activity (views, expiries)",
+  agents: "Agent runs",
+  newsletter: "Newsletter",
+  content: "Content engine",
+  knowledge: "Knowledge base",
+  review: "Reviews",
+  credential: "Credential expiry",
+  stale_visit_sweep: "Stale visit sweep",
+  wdo_report_attention: "WDO report attention",
+  schedule: "Schedule changes",
+  schedule_conflict: "Schedule conflicts",
+  email_digest: "Email digest",
+  token_alert: "Token alerts",
+  tax: "Tax",
+  payout: "Payout deposits",
+  call_pipeline_drift: "Call pipeline drift",
+  social_compliance_rejected: "Social compliance rejections",
+  customer: "Customer account events",
+  eval_regression: "Eval regressions",
+  "service-prefs": "Service preference changes",
+  email_alert: "Email alerts (complaints, lead review)",
+  email_rescue: "Email rescued from spam",
+  email_rescue_review: "Spam rescue needs review",
+};
+
+const bellCategoryLabel = (cat) =>
+  BELL_CATEGORY_LABELS[cat] ||
+  String(cat).replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+
 export default function PushSettingsV2() {
   const [pushOn, setPushOn] = useState(false);
   const [prefs, setPrefs] = useState([]);
+  const [catPrefs, setCatPrefs] = useState([]);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState("");
@@ -68,8 +106,14 @@ export default function PushSettingsV2() {
   useEffect(() => {
     isPushEnabled({ apiBase: API_BASE, verifyServer: true }).then(setPushOn);
     adminFetch("/admin/push/preferences")
-      .then((r) => setPrefs(r.preferences || []))
-      .catch(() => setPrefs([]));
+      .then((r) => {
+        setPrefs(r.preferences || []);
+        setCatPrefs(r.bellCategories || []);
+      })
+      .catch(() => {
+        setPrefs([]);
+        setCatPrefs([]);
+      });
   }, []);
 
   const showToast = (msg) => {
@@ -108,7 +152,7 @@ export default function PushSettingsV2() {
     try {
       await adminFetch("/admin/push/preferences", {
         method: "PUT",
-        body: JSON.stringify({ preferences: prefs }),
+        body: JSON.stringify({ preferences: [...prefs, ...catPrefs] }),
       });
       showToast("Preferences saved");
     } catch (e) {
@@ -270,6 +314,47 @@ export default function PushSettingsV2() {
             </div>{" "}
           </div>
         ))}
+
+        {/* Bell categories — admin bell policy overrides */}
+        {catPrefs.length > 0 && (
+          <div className="mb-3">
+            {" "}
+            <div className="px-3 py-1.5 text-11 uppercase tracking-label text-ink-tertiary font-medium">
+              Bell categories
+            </div>{" "}
+            <div className="px-3 pb-2 text-12 text-ink-tertiary">
+              Applies when the admin bell policy is on: these categories are
+              silenced from the bell by default. Toggle one on to ring the
+              bell for it again.
+            </div>{" "}
+            <div className="bg-white border-hairline rounded-md overflow-hidden">
+              {catPrefs.map((c, i) => (
+                <div
+                  key={c.key}
+                  className={cn(
+                    "flex items-center justify-between gap-3 p-3 min-h-[44px]",
+                    i > 0 && "border-t border-zinc-200",
+                  )}
+                >
+                  {" "}
+                  <span className="text-13 text-ink-secondary">
+                    {bellCategoryLabel(c.category)}
+                  </span>{" "}
+                  <Switch
+                    checked={!!c.bell_enabled}
+                    onChange={(v) =>
+                      setCatPrefs((cur) =>
+                        cur.map((p) =>
+                          p.key === c.key ? { ...p, bell_enabled: v } : p,
+                        ),
+                      )
+                    }
+                  />{" "}
+                </div>
+              ))}
+            </div>{" "}
+          </div>
+        )}
 
         {toast && (
           <div className="fixed bottom-6 right-6 px-4 py-2.5 bg-zinc-900 text-white rounded-md text-13 font-medium shadow-lg z-[300]">

@@ -479,10 +479,13 @@ describe('evaluate (full gate)', () => {
     const commonSum = HARD_CHECKS.reduce((s, c) => s + c.weight, 0);
     for (const [pageType, checks] of Object.entries(PAGE_TYPE_CHECKS)) {
       const hardSum = commonSum + checks.filter((c) => c.isHard).reduce((s, c) => s + c.weight, 0);
-      const softChecks = checks.filter((c) => !c.isHard);
-      // With >= 2 soft checks the threshold must demand soft compliance
-      // beyond the hard checks; a single-soft bundle's one-worst-miss
-      // floor legitimately equals its hard sum (that one soft may miss).
+      // Weight-0 soft checks (blog_meta_soft_cta) are signal-only BY DESIGN
+      // (owner ruling 2026-07-30) — they can't demand score, so only
+      // WEIGHTED soft checks count toward the strict inequality.
+      const softChecks = checks.filter((c) => !c.isHard && c.weight > 0);
+      // With >= 2 weighted soft checks the threshold must demand soft
+      // compliance beyond the hard checks; a single-soft bundle's
+      // one-worst-miss floor legitimately equals its hard sum.
       if (softChecks.length >= 2) {
         expect(MIN_TOTAL_SCORES[pageType]).toBeGreaterThan(hardSum);
       } else {
@@ -961,13 +964,20 @@ describe('meta phone-token contract (owner rule 2026-07-29)', () => {
 });
 
 describe('meta contract bundle checks + refinements (owner rule 2026-07-29)', () => {
-  const { checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract } = require('../services/content/content-quality-gate')._internals;
+  const { checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract, checkBlogMetaSoftCta } = require('../services/content/content-quality-gate')._internals;
   const BLOG = { target_page_type: 'supporting-blog' };
 
-  test('blog meta without a soft CTA fails', () => {
-    const r = checkMetaPhoneTokenPresent({ meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' }, BLOG);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('blog_meta_missing_soft_cta');
+  test('blog meta without a soft CTA passes the hard contract but flags the soft check (owner ruling 2026-07-30)', () => {
+    const draft = { meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' };
+    expect(checkMetaPhoneTokenPresent(draft, BLOG).ok).toBe(true);
+    const soft = checkBlogMetaSoftCta(draft, BLOG);
+    expect(soft.ok).toBe(false);
+    expect(soft.reason).toBe('blog_meta_missing_soft_cta');
+  });
+
+  test('soft-CTA soft check skips page targets and empty metas', () => {
+    expect(checkBlogMetaSoftCta({ meta_description: 'No CTA here at all in this page meta text.' }, { target_page_type: 'page' }).ok).toBe(true);
+    expect(checkBlogMetaSoftCta({ frontmatter: {} }, BLOG).ok).toBe(true);
   });
 
   test('expanded salesy phrases are rejected on blog metas', () => {
@@ -996,10 +1006,19 @@ describe('meta contract round-3 hardening (Codex findings)', () => {
   const BLOG = { target_page_type: 'supporting-blog' };
   const PAGE = { target_page_type: 'page' };
 
-  test('soft CTA must END the meta — a mid-meta mention with a promotional tail fails', () => {
+  test('soft CTA must END the meta — a mid-meta mention flags the SOFT check only (never the hard contract)', () => {
+    const draft = { meta_description: 'Learn more about chinch bugs. Damage from these insects shows up first in the sunniest strips of a Southwest Florida lawn each summer season.' };
+    expect(checkBlogMetaContract(draft).ok).toBe(true);
+    const { checkBlogMetaSoftCta } = require('../services/content/content-quality-gate')._internals;
+    const soft = checkBlogMetaSoftCta(draft, BLOG);
+    expect(soft.ok).toBe(false);
+    expect(soft.reason).toBe('blog_meta_missing_soft_cta');
+  });
+
+  test('a mid-meta brand-availability pitch is sales copy even with an informational closer (r12)', () => {
     const r = checkBlogMetaContract({ meta_description: 'Learn more about chinch bugs. Professional lawn treatment is available from Waves whenever you need a local turf expert in Southwest Florida.' });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('blog_meta_missing_soft_cta');
+    expect(r.reason).toBe('blog_meta_sales_copy');
   });
 
   test('literal phone in a publishable title fails on every lane', () => {
@@ -1030,9 +1049,135 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     }
   });
 
-  test('sales terms cannot ride in through the about-clause', () => {
+  test('sales terms cannot ride in through the about-clause — still HARD (Codex P1: not demoted with the CTA)', () => {
     const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about saving big with Waves.` });
     expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('decimal price in the closer still HARD-fails (r3: decimal dot is not a sentence boundary)', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}A treatment estimate starts at $49.99.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('domain dots do not fragment transactional sentences (r8/r11: subdomains included)', () => {
+    for (const host of ['wavespestcontrol.com', 'booking.wavespestcontrol.com']) {
+      const r = checkBlogMetaContract({ meta_description: `${LEAD}Contact ${host} for pricing on quarterly pest service.` });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('blog_meta_sales_copy');
+    }
+  });
+
+  test('aggregate damage statistics are NOT price assertions (r13: "estimate of termite damage is $5 billion")', () => {
+    const r = checkBlogMetaContract({ meta_description: 'The national estimate of termite damage is $5 billion each year across the US. This guide covers the warning signs homeowners see first.' });
+    expect(r.ok).toBe(true);
+  });
+
+  test('dotted initialisms do not fragment transactional sentences (r13: "Contact the U.S. team for pricing")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Contact the U.S. team for pricing on quarterly pest service.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('ordinary verb "deal" in a CTA is NOT sales copy (r12: "how homeowners deal with ants")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about how homeowners deal with ants.` });
+    expect(r.ok).toBe(true);
+  });
+
+  test('brand-backed availability HARD-fails (r12: "plans are available from Waves")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Quarterly pest plans are available from Waves for Southwest Florida homeowners.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('ranged direct-price assertions HARD-fail (r11: "estimate runs from $99 to $149")', () => {
+    const r = checkBlogMetaContract({ meta_description: 'A professional treatment estimate runs from $99 to $149 for most homes, with quarterly plans built around year-round pest pressure.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('informational CTA subjects are NOT sales copy (r9: "Learn more about a county damage estimate.")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about a county damage estimate.` });
+    expect(r.ok).toBe(true);
+  });
+
+  test('direct price assertions on service nouns HARD-fail; damage-cost stats do not (r10)', () => {
+    const priced = checkBlogMetaContract({ meta_description: 'A professional treatment estimate costs $99 for most Southwest Florida homes, with quarterly plans built around year-round pest pressure.' });
+    expect(priced.ok).toBe(false);
+    expect(priced.reason).toBe('blog_meta_sales_copy');
+    const stat = checkBlogMetaContract({ meta_description: 'Repairing termite damage costs $2,000 on average across the region. This guide covers the prevention steps that matter most here.' });
+    expect(stat.ok).toBe(true);
+  });
+
+  test('a statistic closer with currency stays publishable (r7: no bare symbol check — intent lives in the frame)', () => {
+    for (const tail of [
+      'Termites cause more than $5 billion in property damage every year.',
+      'Chinch bugs hit about 40% of St. Augustine lawns in Southwest Florida.',
+    ]) {
+      expect(checkBlogMetaContract({ meta_description: `${LEAD}${tail}` }).ok).toBe(true);
+    }
+  });
+
+  test('informational sales nouns in the closer do NOT hard-fail (r3: transactional usage only)', () => {
+    for (const tail of [
+      'A guide to what quarterly pest plans offer Southwest Florida homeowners.',
+      'An estimate of the damage helps you plan repairs before the rainy season arrives.',
+    ]) {
+      expect(checkBlogMetaContract({ meta_description: `${LEAD}${tail}` }).ok).toBe(true);
+    }
+  });
+
+  test('transactional non-CTA closers still HARD-fail (r4: solicitation verb or availability marketing)', () => {
+    for (const tail of ['Ask Waves for a quote on treatment.', 'A professional treatment estimate is available today.']) {
+      const r = checkBlogMetaContract({ meta_description: `${LEAD}${tail}` });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('blog_meta_sales_copy');
+    }
+  });
+
+  test('a sales sentence followed by an informational closer still HARD-fails (r5: every sentence scanned)', () => {
+    const r = checkBlogMetaContract({ meta_description: 'Learn more about saving big with Waves. This guide explains common pests in Southwest Florida and what treatment involves for homes.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('plain availability is NOT transactional (r5: "available in the county public record" passes hard)', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}A damage estimate is available in the county public record.` });
+    expect(r.ok).toBe(true);
+  });
+
+  test('mid-meta damage stats with currency stay publishable (currency is closer-only by design)', () => {
+    for (const meta of [
+      'Termites cause $5 billion in damage across the US every year. This guide covers the warning signs Southwest Florida homeowners see first.',
+      'Repair costs range from $2 billion to $5 billion nationally. This guide covers the warning signs Southwest Florida homeowners see first.',
+    ]) {
+      expect(checkBlogMetaContract({ meta_description: meta }).ok).toBe(true);
+    }
+  });
+
+  test('price-marketing frames mid-meta still HARD-fail (r6: "starts at $49.99" before an informational closer)', () => {
+    const r = checkBlogMetaContract({ meta_description: 'A treatment estimate starts at $49.99 for most homes here. This guide explains common pests in Southwest Florida and what treatment involves.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('brand-as-subject offers are sales copy (r6: "Waves offers quarterly pest plans")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Waves offers quarterly pest plans for Southwest Florida homeowners.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('space-separated phone digits still HARD-fail (r6: "941 297 2606")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Call 941 297 2606 for identification help with local species.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_must_not_carry_phone');
+  });
+
+  test('bare 10-digit phone in a blog meta still HARD-fails (r4: separator-less number slips the shaped regex)', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Call 9412972606 for treatment details.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_must_not_carry_phone');
   });
 });
 

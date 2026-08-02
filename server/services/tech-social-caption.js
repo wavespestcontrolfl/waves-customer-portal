@@ -148,7 +148,8 @@ async function generateCaptions({ vision, techNote, location, photoType } = {}) 
   ].filter(Boolean).join('\n');
 
   const text = `${CAPTION_TASK.replace(/\{LOCATION\}/g, loc.name)}\n\n--- INPUTS ---\n${facts}`;
-  const payload = { system: BRAND_PREAMBLE, text, jsonMode: true, maxTokens: 1200 };
+  const { HUMAN_PROSE_RULES } = require('./llm/human-prose-rules');
+  const payload = { system: `${BRAND_PREAMBLE}\n\n${HUMAN_PROSE_RULES}`, text, jsonMode: true, maxTokens: 1200 };
 
   // Public captions are VOICE-owned customer copy (registry: social posts),
   // same policy as the admin social-media paths — not the content lane.

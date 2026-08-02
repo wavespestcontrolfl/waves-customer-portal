@@ -546,6 +546,11 @@ describe("TwilioService.sendServiceReminder", () => {
         first_name: "Sam",
         service_type: "Pest Control",
         time: "8:00 AM",
+        // The 2-hour arrival range the reminder copy now states outright
+        // ("...is tomorrow, {window}."). Same unresolved-placeholder contract
+        // as the clause vars below: this sender must pass it or getTemplate
+        // returns null and the reminder is silently skipped.
+        window: "between 8:00 AM and 10:00 AM",
         // No reschedule token resolvable under this mock — the clause var is
         // still passed (empty) so the template renders with clean copy
         // instead of an unresolved {reschedule_line} suppressing the SMS.
@@ -595,7 +600,9 @@ describe("TwilioService legacy customer SMS helpers", () => {
 
     expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
       "service_complete",
-      { first_name: "Sam" },
+      // service_type + portal_url joined 2026-07-30: the seeded body needs
+      // {portal_url}, and rendering without it suppressed this path entirely.
+      { first_name: "Sam", service_type: "Pest Control", portal_url: expect.stringContaining("http") },
       { workflow: "service_complete", entity_type: "service_record", entity_id: "record-1" },
     );
     expect(sendCustomerMessage).toHaveBeenCalledWith(

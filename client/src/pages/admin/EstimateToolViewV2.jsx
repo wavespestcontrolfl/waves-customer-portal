@@ -321,6 +321,82 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// The turf-relevant slice of the request-profile build, SHARED between
+// doGenerate and the stale-imagery /turf-preview effect so the previewed
+// number can never drift from the priced one (pre-push P1 #3098 — the
+// preview once kept the lookup-time footprint while doGenerate recomputed
+// it). Every transform here reaches computeTurfArea through
+// translateV2CallToV1Input: dims + bed area (blank field → explicit 0),
+// the footprintUnknown clear + footprint recompute, pool/cage (hardscape),
+// densities/complexity (turf-factor score), and propertyType (hardscape
+// brackets). Service-specific fields (palms, trenching, Bora-Care, slab,
+// commercial) stay in doGenerate — they don't feed turf.
+function buildTurfRequestProfile(baseProfile, form) {
+  const manualNumber = (value, fallback = 0) => {
+    const n = parseInt(value, 10);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const profile = {
+    ...baseProfile,
+    homeSqFt: manualNumber(
+      form.homeSqFt,
+      Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0,
+    ),
+    lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
+    stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
+    estimatedBedAreaSf: manualNumber(
+      form.bedArea,
+      Number(baseProfile.estimatedBedAreaSf) || 0,
+    ),
+  };
+  // footprintUnknown (association aggregate, story count unknown): the
+  // summed living area over a defaulted story count is NOT a ground-floor
+  // footprint — deriving one here would hand pricing the exact fake slab
+  // the lookup suppressed (codex P1 #2721). A story count the operator
+  // MANUALLY entered supplies exactly the missing datum, so the flag
+  // clears and derivation (and footprint-driven pricing) resumes off the
+  // corrected value (codex P2 r7 #2721). The edit flag alone is not
+  // enough — a cleared/invalid Stories box would fall back to the
+  // default and re-derive the fake slab (codex P2 r8 #2721).
+  if (
+    profile.footprintUnknown === true &&
+    form._storiesEdited &&
+    Number(form.stories) >= 1
+  )
+    profile.footprintUnknown = false;
+  if (profile.homeSqFt && profile.footprintUnknown !== true)
+    profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
+  profile.pool = form.hasPool === "YES" ? "YES" : "NO";
+  profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
+  profile.poolCageSize =
+    form.hasPoolCage === "YES" ? form.poolCageSize || "MEDIUM" : "NONE";
+  profile.poolCageSizeInferred =
+    !!baseProfile.poolCageSizeInferred &&
+    !form._poolCageSizeEdited &&
+    profile.poolCage === "YES" &&
+    profile.poolCageSize === "MEDIUM";
+  profile.storiesSource = form._storiesEdited
+    ? "manual"
+    : baseProfile.storiesSource;
+  profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
+  profile.treeDensity = form.treeDensity || profile.treeDensity;
+  profile.landscapeComplexity =
+    form.landscapeComplexity || profile.landscapeComplexity;
+  profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
+  profile.propertyType = form.propertyType || profile.propertyType;
+  // Commercial classification follows the FORM, exactly like the pricing
+  // request — a lookup-classified commercial corrected to residential (or
+  // vice versa) must preview through the same branch it will price through
+  // (commercial changes the hardscape model; pre-push P1 #3098).
+  const formIsCommercial = isCommercialEstimateInput(form);
+  profile.isCommercial = formIsCommercial;
+  profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
+  profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
+  profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
+  profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
+  return profile;
+}
+
 function summarizeEstimateSend(data) {
   const parts = [];
   if (data?.channels?.sms) {
@@ -1465,7 +1541,7 @@ function firstVisitFeesForCustomerPreview(E, pestTier) {
   if (Number.isFinite(roachPrice) && roachPrice > 0) {
     rows.push({
       service: "pest_initial_roach",
-      name: roachItem.displayName || roachItem.label || roachItem.name || "Initial Roach Knockdown",
+      name: roachItem.displayName || roachItem.label || roachItem.name || "Cockroach Treatment",
       price: roachPrice,
       detail: roachItem.detail || roachItem.det || roachItem.note || "",
       waivedWithPrepay: false,
@@ -2013,7 +2089,6 @@ export default function EstimateToolViewV2({
     hasPool: "NO",
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
-    hasLargeDriveway: "NO",
     shrubDensity: "MODERATE",
     treeDensity: "MODERATE",
     landscapeComplexity: "MODERATE",
@@ -2803,6 +2878,76 @@ export default function EstimateToolViewV2({
     setVerifySaveState("");
   }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
 
+  // Live engine preview for the stale-imagery turf fallback (codex P1 r2 +
+  // pre-push P1 r3 #3098). profile.turfFallbackPreviewSf is computed from
+  // lookup-time facts; when the rep edits the fields that feed pricing,
+  // re-ask /turf-preview so the displayed number keeps tracking what
+  // /calculate-estimate will price. The payload is the SAME profile shape
+  // doGenerate builds (spread profile + the identical form overrides,
+  // parseInt semantics and the blank-bed-area→0 default included) so the
+  // server can run it through the real translate/engine boundary.
+  // Debounced; a sequence counter drops out-of-order responses. Null while
+  // no fresh answer — the render falls back to the profile's lookup-time
+  // value.
+  const [staleImageryPreviewSf, setStaleImageryPreviewSf] = useState(null);
+  const staleImageryPreviewSeq = useRef(0);
+  const turfUnobservable = enrichedProfile?.turfObservation === "unobservable";
+  useEffect(() => {
+    setStaleImageryPreviewSf(null);
+    if (!turfUnobservable) return undefined;
+    const seq = ++staleImageryPreviewSeq.current;
+    const timer = setTimeout(async () => {
+      try {
+        // The SAME builder doGenerate uses — preview and priced request
+        // share one profile construction by design.
+        const previewProfile = buildTurfRequestProfile(enrichedProfile || {}, form);
+        // Preview only renders while Confirmed Sq Ft is blank.
+        delete previewProfile.measuredTurfSf;
+        const r = await fetch("/api/admin/estimator/turf-preview", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+          body: JSON.stringify({ profile: previewProfile }),
+        });
+        if (!r.ok) return;
+        const data = await r.json();
+        if (seq !== staleImageryPreviewSeq.current) return;
+        const sf = Number(data?.turfSf);
+        // Zero is a REAL engine answer (footprint + hardscape can consume
+        // the lot) — coercing it to null would fall back to a stale
+        // positive number (codex P2 r4 #3098). Null only for no-answer.
+        setStaleImageryPreviewSf(Number.isFinite(sf) && sf >= 0 ? Math.round(sf) : null);
+      } catch {
+        // Fall back to the lookup-time profile value.
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [
+    turfUnobservable,
+    enrichedProfile,
+    form.lotSqFt,
+    form.homeSqFt,
+    form.stories,
+    form.bedArea,
+    form.propertyType,
+    form.isCommercial,
+    form.commercialSubtype,
+    form.commercialRiskType,
+    form.treeShrubDensity,
+    form.mosquitoPressure,
+    form.hasPool,
+    form.hasPoolCage,
+    form.poolCageSize,
+    form._poolCageSizeEdited,
+    form._storiesEdited,
+    form.shrubDensity,
+    form.treeDensity,
+    form.landscapeComplexity,
+    form.nearWater,
+  ]);
+
   const saveVerifiedValues = useCallback(async () => {
     const fields = {};
     if (String(form.homeSqFt || "").trim() !== "") fields.squareFootage = Number(form.homeSqFt);
@@ -3012,9 +3157,20 @@ export default function EstimateToolViewV2({
       return;
     }
     if (key === "__custom__") {
+      // "Custom…" is a hardcoded sentinel, not a catalog row, so there is no
+      // discount_type to source the manual type from the way the preset
+      // branch below does. Leaving the type alone meant a fresh form kept
+      // its "NONE" default, buildManualDiscountPayload returned null, and
+      // the operator's amount was dropped with no warning at all. Seed
+      // PERCENT (the common custom case) while preserving a type the
+      // operator already chose, so switching presets never clobbers it.
       setForm((f) => ({
         ...f,
         manualDiscountPreset: key,
+        manualDiscountType:
+          f.manualDiscountType && f.manualDiscountType !== "NONE"
+            ? f.manualDiscountType
+            : "PERCENT",
       }));
       return;
     }
@@ -3116,7 +3272,6 @@ export default function EstimateToolViewV2({
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
-      if (ep.largeDriveway) upd.hasLargeDriveway = "YES";
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
       if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
       if (ep.landscapeComplexity)
@@ -3368,7 +3523,6 @@ export default function EstimateToolViewV2({
         upd.landscapeComplexity = data.landscape_complexity;
       if (data.has_pool) upd.hasPool = "YES";
       if (data.has_pool_cage) upd.hasPoolCage = "YES";
-      if (data.has_large_driveway) upd.hasLargeDriveway = "YES";
       if (data.near_water) upd.nearWater = "YES";
       if (data.property_type || data.category) {
         Object.assign(upd, resolveLookupPropertyTypeAutofill(data.property_type, data.category));
@@ -3471,6 +3625,16 @@ export default function EstimateToolViewV2({
       const selectedManualPreset = discountPresets.find(
         (x) => x.discount_key === form.manualDiscountPreset,
       );
+      // An amount with no type is the silent-drop case: every guard below is
+      // itself gated on type !== NONE, and buildManualDiscountPayload returns
+      // null for a NONE type — so without this the estimate regenerated at
+      // full price with no error and the discount vanished. Fail loudly.
+      if (manualDiscountType === "NONE" && manualDiscountValue > 0) {
+        alert(
+          "Pick a discount type (Percent % or Dollar $) — a discount amount with no type is not applied.",
+        );
+        return null;
+      }
       if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
         alert("Manual discount amount must be greater than zero.");
         return null;
@@ -3689,61 +3853,34 @@ export default function EstimateToolViewV2({
         Number(baseProfile.treeCount || baseProfile.estimatedTreeCount) || 0,
       );
       const measuredTurfSf = optionalNumber(form.measuredTurfSf);
-      const profile = {
-        ...baseProfile,
-        homeSqFt: manualNumber(
-          form.homeSqFt,
-          Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0,
-        ),
-        lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
-        stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
-        estimatedBedAreaSf: manualNumber(
-          form.bedArea,
-          Number(baseProfile.estimatedBedAreaSf) || 0,
-        ),
-        // Palm pricing requires an explicit positive integer. The property-level
-        // count is used only as a prefill/default; the palmInjection service
-        // payload below carries the number of palms treated for this line.
-        ...(() => {
-          const fallback = parsePositiveInteger(baseProfile.palmCount)
-            ?? parsePositiveInteger(baseProfile.palmInventory?.palmCount)
-            ?? parsePositiveInteger(baseProfile.estimatedPalmCount);
-          const value = propertyPalmCount ?? fallback;
-          return value
-            ? {
-                palmCount: value,
-                estimatedPalmCount: value,
-                palmInventory: { ...(baseProfile.palmInventory || {}), palmCount: value },
-              }
-            : {};
-        })(),
-        estimatedTreeCount: treeCount,
-        treeCount,
-      };
+      // Turf-relevant transforms (dims, bed area, footprint, pool/cage,
+      // densities, type) live in buildTurfRequestProfile, SHARED with the
+      // stale-imagery /turf-preview effect — edit them there, not here
+      // (pre-push P1 #3098).
+      const profile = buildTurfRequestProfile(baseProfile, form);
+      // Palm pricing requires an explicit positive integer. The property-level
+      // count is used only as a prefill/default; the palmInjection service
+      // payload below carries the number of palms treated for this line.
+      Object.assign(profile, (() => {
+        const fallback = parsePositiveInteger(baseProfile.palmCount)
+          ?? parsePositiveInteger(baseProfile.palmInventory?.palmCount)
+          ?? parsePositiveInteger(baseProfile.estimatedPalmCount);
+        const value = propertyPalmCount ?? fallback;
+        return value
+          ? {
+              palmCount: value,
+              estimatedPalmCount: value,
+              palmInventory: { ...(baseProfile.palmInventory || {}), palmCount: value },
+            }
+          : {};
+      })());
+      profile.estimatedTreeCount = treeCount;
+      profile.treeCount = treeCount;
       if (measuredTurfSf !== undefined) {
         profile.measuredTurfSf = measuredTurfSf;
       } else {
         delete profile.measuredTurfSf;
       }
-      // footprintUnknown (association aggregate, story count unknown): the
-      // summed living area over a defaulted story count is NOT a ground-floor
-      // footprint — deriving one here would hand pricing the exact fake slab
-      // the lookup suppressed (codex P1 #2721). A story count the operator
-      // MANUALLY entered supplies exactly the missing datum, so the flag
-      // clears and derivation (and footprint-driven pricing) resumes off the
-      // corrected value (codex P2 r7 #2721). The edit flag alone is not
-      // enough — a cleared/invalid Stories box would fall back to the
-      // default and re-derive the fake slab (codex P2 r8 #2721).
-      if (
-        profile.footprintUnknown === true &&
-        form._storiesEdited &&
-        Number(form.stories) >= 1
-      )
-        profile.footprintUnknown = false;
-      if (profile.homeSqFt && profile.footprintUnknown !== true)
-        profile.footprint = Math.round(
-          profile.homeSqFt / (profile.stories || 1),
-        );
       if (trenchingPerimeterLF) profile.perimeterLF = trenchingPerimeterLF;
       if (boracareSqft) {
         profile.atticSqFt = boracareSqft;
@@ -3758,30 +3895,9 @@ export default function EstimateToolViewV2({
         delete profile.woodTreatmentSqFt;
       }
       if (preslabSqft) profile.slabSqFt = preslabSqft;
-      profile.pool = form.hasPool === "YES" ? "YES" : "NO";
-      profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
-      profile.poolCageSize =
-        form.hasPoolCage === "YES" ? form.poolCageSize || "MEDIUM" : "NONE";
-      profile.poolCageSizeInferred =
-        !!baseProfile.poolCageSizeInferred &&
-        !form._poolCageSizeEdited &&
-        profile.poolCage === "YES" &&
-        profile.poolCageSize === "MEDIUM";
-      profile.storiesSource = form._storiesEdited
-        ? "manual"
-        : baseProfile.storiesSource;
-      profile.hasLargeDriveway = form.hasLargeDriveway === "YES";
-      profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
-      profile.treeDensity = form.treeDensity || profile.treeDensity;
-      profile.landscapeComplexity =
-        form.landscapeComplexity || profile.landscapeComplexity;
-      profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
-      profile.propertyType = form.propertyType || profile.propertyType;
-      profile.isCommercial = formIsCommercial;
-      profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
-      profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
-      profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
-      profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
+      // pool/cage, storiesSource, densities, nearWater, propertyType, and
+      // the form-driven commercial classification are all set by
+      // buildTurfRequestProfile above.
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
@@ -4208,7 +4324,6 @@ export default function EstimateToolViewV2({
       hasPool: "NO",
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
-      hasLargeDriveway: "NO",
       nearWater: "NO",
       shrubDensity: "MODERATE",
       treeDensity: "MODERATE",
@@ -4407,6 +4522,21 @@ export default function EstimateToolViewV2({
     parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
     0;
   const lotEstimateTurfSqFt = (() => {
+    // Stale-imagery conflict (turfObservation 'unobservable'): show the
+    // number the pricing engine will ACTUALLY use — its building/hardscape
+    // legacy fallback — not the local 20%/15% heuristic below. Live value
+    // from /turf-preview tracks form edits; the profile's lookup-time
+    // turfFallbackPreviewSf covers the gap until it answers.
+    const enginePreview = parseNonNegativeInteger(
+      turfUnobservable
+        ? (staleImageryPreviewSf ?? enrichedProfile?.turfFallbackPreviewSf)
+        : null,
+    );
+    // Zero included: an engine 0 (footprint + hardscape consume the lot) is
+    // the authoritative answer, not a miss — falling through to the local
+    // heuristic would display a positive area the engine won't price
+    // (codex P2 r4 #3098).
+    if (enginePreview !== null) return enginePreview;
     if (lotSqFtForTurf <= 0) return null;
     const pct = parseNonNegativeNumber(enrichedProfile?.imperviousSurfacePercent) ?? 20;
     const open = Math.round(lotSqFtForTurf * (1 - Math.min(1, pct / 100)));
@@ -4866,7 +4996,6 @@ export default function EstimateToolViewV2({
                       hasPool: "NO",
                       hasPoolCage: "NO",
                       poolCageSize: "MEDIUM",
-                      hasLargeDriveway: "NO",
                       shrubDensity: "MODERATE",
                       treeDensity: "MODERATE",
                       landscapeComplexity: "MODERATE",
@@ -5344,15 +5473,6 @@ export default function EstimateToolViewV2({
                     ]}
                   />
                 </FieldV2>{" "}
-                <FieldV2 label="Large Driveway">
-                  <SelectV2
-                    k="hasLargeDriveway"
-                    options={[
-                      { value: "NO", label: "No" },
-                      { value: "YES", label: "Yes" },
-                    ]}
-                  />
-                </FieldV2>{" "}
               </div>
               {form.hasPoolCage === "YES" && (
                 <FieldV2 label="Pool Cage Size">
@@ -5542,6 +5662,14 @@ export default function EstimateToolViewV2({
                     </span>
                     <span>{turfSliderMax.toLocaleString()} sf</span>
                   </div>
+                  {enrichedProfile?.turfObservation === "unobservable" &&
+                    confirmedTurfSqFt === null && (
+                      <div className="mt-2 text-11 text-amber-700">
+                        Low confidence — satellite imagery appears to predate
+                        construction, so this lot-based estimate is unverified.
+                        Confirm sq ft before pricing.
+                      </div>
+                    )}
                   {needsTurfConfirmation && (
                     <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
                       AI turf is over 20,000 sf. Confirm treatable lawn area
@@ -5582,7 +5710,7 @@ export default function EstimateToolViewV2({
                         ]}
                       />
                     </FieldV2>{" "}
-                    <FieldV2 label="Roach Activity on Initial Visit">
+                    <FieldV2 label="Roach Activity">
                       <SelectV2
                         k="roachModifier"
                         options={[
@@ -5600,7 +5728,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>{" "}
                   </div>{" "}
                   <div className="text-11 text-ink-secondary mt-2">
-                    Adds a one-time Initial Roach Knockdown line to recurring pest. This is not a recurring per-visit multiplier.
+                    Adds a one-time Cockroach Treatment line to recurring pest. This is not a recurring per-visit multiplier.
                   </div>
                 </div>
               )}
@@ -7587,12 +7715,7 @@ export default function EstimateToolViewV2({
                         {E.property?.poolCage === "YES" ||
                         E.property?.poolCage === true
                           ? ` (caged${E.property?.poolCageSize ? `: ${String(E.property.poolCageSize).toLowerCase()}` : ""})`
-                          : ""}{" "}
-                        | Driveway:{" "}
-                        {E.property?.largeDriveway === "YES" ||
-                        E.property?.largeDriveway === true
-                          ? "Large"
-                          : "Normal"}
+                          : ""}
                         <br />
                         Shrubs:{" "}
                         {E.property?.shrubDensity ||
@@ -8271,7 +8394,7 @@ export default function EstimateToolViewV2({
                           {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} className="text-ink-secondary">
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
-                                ? "Skipped standalone native cockroach charge because recurring pest already includes Initial Native Roach Knockdown."
+                                ? "Skipped standalone native cockroach charge because recurring pest already includes the Cockroach Treatment."
                                 : item.skippedReason}
                             </div>
                           ))}

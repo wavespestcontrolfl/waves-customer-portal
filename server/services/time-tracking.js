@@ -232,6 +232,27 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
       throw new Error('Must be clocked in to start a job.');
     }
 
+    // Job lookup FIRST, and LOCKED (codex P2 #3152 round 25): the
+    // time-on-site correction's linked-timer sync holds this visit's
+    // scheduled_services row lock across its membership check and audited
+    // edit — an unlocked insert here could land a new job timer between
+    // that check and the edit, making the sync report success against a
+    // set that just changed. Taking the same row lock serializes timer
+    // creation with the sync (either the insert commits first and the
+    // membership check sees it, or it waits until the sync's report is
+    // already honest at its commit point). Ordered before the
+    // time_entries writes below so every path locks scheduled_services
+    // before touching time_entries.
+    let customerId = null;
+    let serviceType = null;
+    if (jobId) {
+      const job = await trx('scheduled_services').where({ id: jobId }).forUpdate().first();
+      if (job) {
+        customerId = job.customer_id;
+        serviceType = job.service_type;
+      }
+    }
+
     // Close any other active job entry.
     const now = new Date();
     await trx('time_entries')
@@ -242,17 +263,6 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
         duration_minutes: completedDurationSql(trx, now),
         updated_at: now,
       });
-
-    // Lookup job details.
-    let customerId = null;
-    let serviceType = null;
-    if (jobId) {
-      const job = await trx('scheduled_services').where({ id: jobId }).first();
-      if (job) {
-        customerId = job.customer_id;
-        serviceType = job.service_type;
-      }
-    }
 
     const [created] = await trx('time_entries')
       .insert({
@@ -537,7 +547,10 @@ async function getStatus(technicianId) {
 /**
  * Admin edit an entry — preserves originals.
  */
-async function adminEditEntry(entryId, { clock_in, clock_out, entry_type, notes, edit_reason, edited_by }) {
+async function adminEditEntry(entryId, {
+  clock_in, clock_out, entry_type, notes, edit_reason, edited_by,
+  target_duration_minutes, expected_updated_at,
+}) {
   const updated = await db.transaction(async (trx) => {
     // Read without a row lock first so we can acquire the advisory week locks
     // in the same order as approval. The locked re-read below detects a move
@@ -558,6 +571,19 @@ async function adminEditEntry(entryId, { clock_in, clock_out, entry_type, notes,
       staffWorkDate(entry.clock_in),
       requestedWorkDate,
     ]);
+    // Optimistic version check (codex P2 #3152 round 22): an automated
+    // caller (the time-on-site linked-timer sync) states the updated_at it
+    // observed — if a payroll admin edited the entry between that snapshot
+    // and this locked read, the edit is rejected instead of silently
+    // replacing the newer manual correction. Callers that pass nothing
+    // (the interactive admin edit route) keep last-write-wins.
+    if (expected_updated_at !== undefined) {
+      const observed = expected_updated_at ? new Date(expected_updated_at).getTime() : null;
+      const current = entry.updated_at ? new Date(entry.updated_at).getTime() : null;
+      if (observed !== current) {
+        throw staffTimeHttpError(409, 'Entry changed since it was read; reload before editing.');
+      }
+    }
 
     const updates = {
       status: 'edited',
@@ -582,6 +608,26 @@ async function adminEditEntry(entryId, { clock_in, clock_out, entry_type, notes,
 
     if (clock_in) updates.clock_in = new Date(clock_in);
     if (clock_out) updates.clock_out = new Date(clock_out);
+    // Duration-based edit (codex P1 #3152, pre-push audit): the caller
+    // states the INTERVAL and the clock_out is derived from the LOCKED
+    // row's start (or the clock_in supplied in this same edit) — a
+    // clock_out precomputed from an unlocked snapshot races a concurrent
+    // clock_in edit and saves a duration different from the one intended.
+    // Explicit clock_out wins when both are passed.
+    if (!clock_out && Number.isFinite(Number(target_duration_minutes)) && Number(target_duration_minutes) > 0) {
+      const baseIn = updates.clock_in || entry.clock_in;
+      const derivedOut = new Date(new Date(baseIn).getTime() + Number(target_duration_minutes) * 60000);
+      // Never fabricate future paid time (codex P1 #3152 round 24): a
+      // corrected duration exceeding the elapsed span since clock_in would
+      // derive a clock_out ahead of the wall clock — the visit lifecycle
+      // clamps ITS end for exactly this input, and payroll must not record
+      // minutes that have not happened. Rejected, not clamped: a clamped
+      // timer would silently disagree with the operator's stated minutes.
+      if (derivedOut.getTime() > Date.now()) {
+        throw staffTimeHttpError(400, 'Target duration extends the entry into the future; correct the timer manually once the interval has elapsed.');
+      }
+      updates.clock_out = derivedOut;
+    }
     if (entry_type) updates.entry_type = entry_type;
     if (notes !== undefined) updates.notes = notes;
 

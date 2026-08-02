@@ -118,17 +118,11 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
 
     // House rule at the send boundary: check the OUTGOING body — the text
     // that will actually reach the customer — not the stored suggestion.
-    // The composer keeps the draft linkage across textarea edits, so an
-    // operator who REMOVED a hallucinated price must be allowed through
-    // (price-free correction), while a body still carrying one (pre-rollout
-    // card sent verbatim, or a price typed back in under the agent link) is
-    // refused. The card is NOT retired — the operator can edit and resend,
-    // or send a deliberate quote as a plain manual message (no draft link).
-    const suggestMode = require('../services/sms-suggest-mode');
-    if (outgoingBody && suggestMode.hasPriceQuote(outgoingBody)) {
-      logger.info(`[agent-review] outgoing agent-linked body quotes a price (decision ${decision.id}) — refusing send`);
-      return null;
-    }
+    // (The former price-quote refusal here is retired — owner ruling
+    // 2026-07-30, house_voice_v10: real dollar amounts from the customer's
+    // BILLING facts may be texted. The operator reviewing the card is the
+    // gate; the drafter's verifier checks every figure against the facts
+    // block; auto-send still refuses amount-bearing drafts.)
 
     // STALENESS: a card is only sendable while its anchoring inbound is
     // still the newest customer message on the thread. Drafting lanes that
@@ -453,6 +447,26 @@ router.post('/sms', async (req, res, next) => {
         ...result,
         error: result.reason || result.code || 'SMS send blocked/failed',
       });
+    }
+
+    // A reply from the Comms composer is a first response to any open lead
+    // with this phone — stamp the Speed-to-Lead clock (SLA truth only; lead
+    // status/linkage untouched). Operator-approved AI drafts count too: a
+    // human chose to send them. Gated on a REAL provider send —
+    // sendCustomerMessage reports sent:true with a sentinel providerMessageId
+    // on suppression paths (gate off, template disabled, owner-SMS kill)
+    // where nothing actually left. Fail-soft — bookkeeping never breaks a send.
+    try {
+      const { isRealProviderSend } = require('../services/sms-auto-send');
+      if (isRealProviderSend(result)) {
+        const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+        await stampFirstResponseByContact({
+          phone: to,
+          performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+        });
+      }
+    } catch (stampErr) {
+      logger.warn(`[admin-communications] first-response stamp failed: ${stampErr.message}`);
     }
 
     if (verifiedAgentDecision && verifiedAgentDraft) {
@@ -1465,7 +1479,7 @@ router.post('/rewrite-sms', async (req, res) => {
     // the two env vars diverge. Blank output is rejected so a content-filtered
     // success still reaches the other provider.
     const routed = await require('../services/llm/call').dispatchWithFallback(
-      { primary: MODELS.ROUTES.smsToneRewrite, fallback: MODELS.TEXT_POLICIES.customerCopy.fallback },
+      { name: 'smsToneRewrite', primary: MODELS.ROUTES.smsToneRewrite, fallback: MODELS.TEXT_POLICIES.customerCopy.fallback },
       { text: rewritePrompt, jsonMode: false, maxTokens: 500 },
       { validate: (result) => (String(result.text || '').trim() ? null : 'empty_response') },
     );
@@ -1619,6 +1633,21 @@ router.post('/schedule-sms', async (req, res, next) => {
     } catch (scheduleErr) {
       if (scheduleErr.statusCode === 409) return res.status(409).json({ error: scheduleErr.message });
       throw scheduleErr;
+    }
+
+    // Scheduling a reply is the operator's response act — stamp the
+    // Speed-to-Lead clock NOW (the scheduled-SMS cron replays human and
+    // automation rows under one entry point, so fire time can't tell them
+    // apart; the decision to respond already happened here). If the queued
+    // send later fails, the failure alert lane surfaces it.
+    try {
+      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+      await stampFirstResponseByContact({
+        phone: to,
+        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+      });
+    } catch (stampErr) {
+      logger.warn(`[admin-communications] scheduled-reply first-response stamp failed: ${stampErr.message}`);
     }
 
     res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });

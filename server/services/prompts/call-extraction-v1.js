@@ -78,6 +78,7 @@ SCHEDULING STATUS — This is the most important field for downstream routing:
 - Do NOT set status to "confirmed" for unrelated business advice, SEO, marketing, construction advice, or non-Waves services.
 - DO set status to "confirmed" when a builder explicitly books a Waves pre-slab/preconstruction termite or soil-treatment field-service appointment with a specific date and time.
 - Do NOT set status to "confirmed" for admin calls about invoices, payments, receipts, compliance reports, stickers, certificates, W-9s, or paperwork — unless the caller ALSO books a new field-service visit.
+- agent_committed_booking: true ONLY when OUR agent, in the agent's OWN words, commits to the confirmed slot ("we'll confirm it for noon on Sunday", "you're on the schedule for Tuesday at 10", "we'll see you then"). The caller requesting, agreeing, or asserting that we committed is NEVER an agent commitment. Leave false/null when the agent hedges ("I'll have to check", "someone will call you back") or no specific slot was committed. When true, pin an evidence quote of the AGENT's commitment sentence with speaker "agent" — choose the sentence that states the agreed DAY and TIME ("we'll confirm it for noon on Sunday"), not a bare acknowledgment.
 - follow_up_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks for the follow-up"). A generic "call us if it comes back" is NOT a follow-up visit.
 - follow_up_start_at: ISO 8601 Eastern Time datetime ONLY when a specific follow-up date (and time) was explicitly agreed. Most calls: null — the office schedules the follow-up at the standard interval.
 
@@ -144,7 +145,7 @@ SECONDARY CONTACT (a SECOND person who is a party to the service):
 
 SERVICE REQUEST:
 - primary_service_category: Map caller's request to the best enum value.
-- specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Control Service"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.
+- specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Treatment"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.
 - quoted_price_usd: The total price in US dollars that the agent quoted AND the caller accepted for the service being booked (e.g. agent says "that runs around 350 total" and the caller agrees -> 350). Use the TOTAL package price when quoted as a total across multiple treatments. null when no price was quoted, the caller did not accept, or the amount is uncertain/a range. Never estimate or invent a price.
 - If caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, or treatment before a concrete pour: use "termite" as primary_service_category.
 - ASSESSMENT vs FORMAL INSPECTION: a caller who SUSPECTS a pest problem or wants someone to come look, diagnose, or check ("I think I have termites", "something is eating my lawn", "can someone come take a look") maps to the "Waves Assessment" catalog service — NOT a formal inspection. "WDO Inspection Service" is ONLY for an explicitly requested wood-destroying-organism REPORT: real-estate sale/closing/refinance, lender or VA requirement, "termite letter"/"clearance letter", or the caller literally asking for a WDO inspection. The pre-slab/soil-treatment rule above still wins for pre-construction requests.
@@ -204,6 +205,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
 - scheduling.confirmed_start_at (the quote must contain the agreed date AND time)
+- scheduling.agent_committed_booking (when true — the AGENT's commitment sentence; speaker must be "agent")
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)

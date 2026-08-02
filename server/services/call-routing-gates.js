@@ -59,6 +59,23 @@ function checkTcpaConsent(extraction, opts = {}) {
   return { canSms: false, canEmail: true, reason: 'sms_consent_not_given' };
 }
 
+// v2-1.1.0: agent-commitment authorization (gated demotion of
+// caller_not_authorized) changed what canAutoRoute can decide — the
+// route_decisions migration contract requires a version bump so reprocessing
+// a call writes a NEW decision row instead of being onConflict-ignored into
+// the stale pre-rule one. EVERY consumer must use these constants: the
+// producer and same-run outcome update take V2_DECISION_VERSION (they own
+// only rows this code writes); history-spanning readers (admin review
+// queues) take V2_DECISION_VERSIONS so pre-bump rows stay visible.
+// v2-1.2.0: unknown-relationship callers no longer hard-block on
+// caller_not_authorized, and an AV-localized in-area premise no longer
+// hard-blocks a confirmed booking on address_unverified (owner ruling
+// 2026-07-31) — both change what canAutoRoute can decide, so reprocessing
+// must write a new decision row instead of onConflict-ignoring into the
+// pre-rule one.
+const V2_DECISION_VERSION = 'v2-1.2.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0'];
+
 function buildRouteDecision({
   callLogId,
   extraction,
@@ -72,13 +89,40 @@ function buildRouteDecision({
 
   return {
     call_log_id: callLogId,
-    decision_version: 'v2-1.0.0',
+    decision_version: V2_DECISION_VERSION,
     mode,
     validator_recommendation: routingResult?.allowed
       ? (scheduling.status === 'confirmed' ? 'auto_create_appointment' : 'upsert_customer_only')
       : 'needs_review',
     final_action_taken: action,
-    blocked_reasons: JSON.stringify(finalTriageFlags.length > 0 ? finalTriageFlags : (routingResult?.reason ? [routingResult.reason] : [])),
+    // Only ACTUAL vetoes reach the audit record (codex round-5 P2 +
+    // round-7 P2). Two failure modes to avoid:
+    //   - the central gates return reasons that are not triage flags
+    //     (address_not_validated / off_hour_start) — the reason itself is
+    //     the veto and must lead;
+    //   - a call held on a hard flag can simultaneously carry ADVISORY
+    //     flags (prior_complaint_unresolved, competing_quotes_active, an
+    //     unknown model flag). finalTriageFlags contains those too, so
+    //     serializing it recorded advisories as vetoes and the AI feedback
+    //     aggregation counted them as such. The triage_flags path uses
+    //     routingResult.appointmentBlockingFlags — exactly the flags that
+    //     blocked. Central-gate and scheduling returns carry no blocking
+    //     flags by construction (the flag stage passed), so they fall back
+    //     to [] — never to finalTriageFlags.
+    blocked_reasons: JSON.stringify(
+      routingResult?.allowed
+        ? []
+        : [
+          ...(routingResult?.reason && routingResult.reason !== 'triage_flags' ? [routingResult.reason] : []),
+          // Fallback when appointmentBlockingFlags is absent: a named
+          // NON-flag reason (central gates, low_confidence, scheduling)
+          // means the flag stage passed — record nothing extra. No reason
+          // at all is the legacy shape some callers/tests still produce —
+          // keep its historical finalTriageFlags behavior.
+          ...(routingResult?.appointmentBlockingFlags
+            ?? (routingResult?.reason && routingResult.reason !== 'triage_flags' ? [] : finalTriageFlags)),
+        ],
+    ),
     allowed_reasons: JSON.stringify(routingResult?.allowed ? ['all_gates_passed'] : []),
     ai_validation_model: extraction?.meta?.extraction_model || null,
     ai_validation_prompt_version: extraction?.meta?.extraction_prompt_version || null,
@@ -114,6 +158,14 @@ function buildTriageItem({
     // showing up as a booking that needs a time.
     not_confirmed: 'time_ambiguous',
     confirmed_without_start_time: 'time_ambiguous',
+    // Confirmed at a :15/:30/:45 start — window_start is always HH:00:00
+    // (owner rule), so the office places it on an hour boundary rather than
+    // the pipeline silently rounding a time the caller was told.
+    off_hour_start: 'time_ambiguous',
+    // Auto-route needs a positively validated address (or a dispatch to the
+    // customer's verified on-file one). Nothing to fix on the time — the
+    // office confirms WHERE the visit goes.
+    address_not_validated: 'address_review',
     cancellation_request: 'time_ambiguous',
     after_hours_emergency: 'time_ambiguous',
     existing_appointment_coordination: 'time_ambiguous',
@@ -154,6 +206,9 @@ function buildTriageItem({
     // the same contact-confirm job as the two name_review flags above.
     email_unverified: 'name_review',
     email_invalid: 'name_review',
+    // Booking proceeded WITHOUT an email (advisory, owner ruling 2026-07-31)
+    // — the office collects it on the confirmation touch.
+    customer_email_missing: 'name_review',
     voicemail: 'service_unknown',
     // Shadow address/identity bridge reasons (deriveCallReviewBridge).
     missing_last_name: 'name_review',
@@ -169,6 +224,10 @@ function buildTriageItem({
     // is not on any of that customer's phone slots — the office confirms the
     // identity and saves the number to the account if it's really them.
     caller_phone_not_on_file: 'customer_field_conflict',
+    // The intake call died mid-conversation before the service address was
+    // captured — the office calls the prospect back (an address-request text
+    // may also have gone out; the payload says which).
+    call_dropped_mid_intake: 'address_review',
     unassigned_auto_booking: 'time_ambiguous',
     // Advisory schedule-clash / time-sanity cards for AI call bookings
     // (call-recording-processor): the visit BOOKED as normal — the card
@@ -216,6 +275,9 @@ function buildTriageItem({
     'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
     'reschedule_or_cancel', 'cancellation_request',
     'existing_appointment_coordination', 'auto_booking_skipped_after_approval',
+    // The off-hour card's whole job is to show the agreed time so the office
+    // can place it on an hour boundary — it needs the scheduling payload.
+    'off_hour_start',
   ]);
   if (SCHEDULING_PAYLOAD_FLAGS.has(flag) && extraction?.scheduling) {
     const s = extraction.scheduling;
@@ -256,4 +318,6 @@ module.exports = {
   checkTcpaConsent,
   buildRouteDecision,
   buildTriageItem,
+  V2_DECISION_VERSION,
+  V2_DECISION_VERSIONS,
 };

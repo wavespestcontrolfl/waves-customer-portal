@@ -47,7 +47,6 @@ const NEWSLETTER_TYPES = {
       'weekend_picks',
       'family_or_low_key_pick',
       'road_trip_pick',
-      'homeowner_minute',
       'waves_cta',
     ],
     // AI-generated customer copy → the hallucinated-claim hard-block

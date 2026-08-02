@@ -395,7 +395,6 @@ function resolveFeatureConcretePct(property = {}) {
   let concretePct = SPECIALTY.trenching.concretePctBase;
   if (f.poolCage) concretePct = SPECIALTY.trenching.concretePctCage;
   else if (f.pool) concretePct = SPECIALTY.trenching.concretePctPool;
-  if (f.largeDriveway) concretePct += SPECIALTY.trenching.concretePctDriveway;
   return Math.min(concretePct, SPECIALTY.trenching.concretePctCap);
 }
 
@@ -1244,9 +1243,7 @@ function calculatePestProductionDiagnostics(property) {
     poolCage: f.poolCage ? (cfg.poolCageMinutes?.[poolCageSize] || 0) : 0,
     pool: !f.poolCage && f.pool ? (cfg.poolNoCageMinutes || 0) : 0,
     shrubs: cfg.shrubMinutes?.[f.shrubs] || 0,
-    trees: cfg.treeMinutes?.[f.trees] || 0,
     complexity: cfg.complexityMinutes?.[f.complexity] || 0,
-    largeDriveway: f.largeDriveway ? (cfg.largeDrivewayMinutes || 0) : 0,
     nearWater: f.nearWater ? (cfg.nearWaterMinutes || 0) : 0,
     attachedGarage: hasAttachedGarageForPest(property) ? (cfg.attachedGarageMinutes || 0) : 0,
     outbuildings: outbuildingCount * (cfg.outbuildingMinutes || 0),
@@ -1264,7 +1261,10 @@ function calculatePestProductionDiagnostics(property) {
   else if (lotSqFt > (cfg.manualReviewLotSqFt || 20000)) manualReviewReasons.push('large_lot');
   if (poolCageSize === 'oversized') lowConfidenceReasons.push('oversized_pool_cage');
   else if (poolCageSize === 'large') manualReviewReasons.push('large_pool_cage');
-  if (f.complexity === 'complex' && (f.shrubs === 'heavy' || f.trees === 'heavy')) manualReviewReasons.push('complex_heavy_vegetation');
+  // Tree density is excluded from pest entirely (owner directive 2026-07-30,
+  // extending the 2026-07-16 price retirement to production diagnostics) —
+  // only shrubs trigger the heavy-vegetation review flag now.
+  if (f.complexity === 'complex' && f.shrubs === 'heavy') manualReviewReasons.push('complex_heavy_vegetation');
   if (outbuildingCount >= 2) manualReviewReasons.push('multiple_outbuildings');
   if (estimatedMinutes >= (cfg.lowConfidenceMinutes || 60)) lowConfidenceReasons.push('estimated_service_time_60_plus');
   else if (estimatedMinutes >= (cfg.manualReviewMinutes || 45)) manualReviewReasons.push('estimated_service_time_45_plus');
@@ -1708,15 +1708,30 @@ function pricePestInitialRoach(property, options = {}) {
     ...roachMeta.roachWarnings,
     ...severityMeta.warnings,
     ...(severityMeta.severity === 'severe' && isGerman
-      ? ['Severe German roach activity should use German Roach Cleanout, not only Initial German Roach Knockdown.']
+      ? ['Severe German roach activity should use German Roach Cleanout, not only the one-time German Cockroach Treatment.']
       : []),
   ]);
+  // Customer-facing name + treatment-visit count come from the admin-editable
+  // display config (pest_base.initial_roach.display via db-bridge). Owner
+  // 2026-07-30: the name carries no "Initial", and the configured treatment
+  // count renders on the estimate. Fallbacks keep the line well-formed if a
+  // stale config row predates the display key.
+  const displayConfig = PEST.pestInitialRoach?.display?.[scaleKey] || {};
+  const label = typeof displayConfig.name === 'string' && displayConfig.name.trim()
+    ? displayConfig.name.trim()
+    : (isGerman ? 'German Cockroach Treatment' : 'Cockroach Treatment');
+  const treatments = Number.isFinite(Number(displayConfig.treatments)) && Number(displayConfig.treatments) > 0
+    ? Math.round(Number(displayConfig.treatments))
+    : 1;
+  const treatmentsNote = `Includes ${treatments} treatment visit${treatments === 1 ? '' : 's'}.`;
+  const baseDetail = isGerman
+    ? 'Heavier treatment for German roaches (the small indoor / kitchen kind) — interior spray, gel bait at hot spots, and a growth regulator to break the breeding cycle.'
+    : 'Heavier treatment for SWFL native roaches (American / palmetto, smoky brown, Australian, Florida woods) — interior spray, bait at hot spots, and perimeter granular.';
   return {
     service: 'pest_initial_roach',
-    label: isGerman ? 'Initial German Roach Knockdown' : 'Initial Native Roach Knockdown',
-    detail: isGerman
-      ? 'Heavier first visit for German roaches (the small indoor / kitchen kind) — interior spray, gel bait at hot spots, and a growth regulator to break the breeding cycle.'
-      : 'Heavier first visit for SWFL native roaches (American / palmetto, smoky brown, Australian, Florida woods) — interior spray, bait at hot spots, and perimeter granular.',
+    label,
+    detail: `${baseDetail} ${treatmentsNote}`,
+    treatments,
     price,
     requestedRoachType: roachMeta.requestedRoachType,
     roachType,
@@ -1863,7 +1878,6 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
   const complexityMinutes = lawnComplexityMinutes({
     landscapeComplexity: complexity,
     shrubDensity: shrubs,
-    hasLargeDriveway: features.largeDriveway,
     hasPrivacyFence: (property.fenceType || features.gate || features.accessDifficulty || '')
       .toString().toLowerCase().includes('privacy'),
   });

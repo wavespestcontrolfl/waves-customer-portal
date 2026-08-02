@@ -488,7 +488,7 @@ class GoogleBusinessService {
       await NotificationService.notifyAdmin(
         'review',
         `Unlinked Google review from ${reviewer}`,
-        `${stars}★ review at ${locName} couldn't be matched to a customer${snippet}. Open Reviews to match it, or mark the customer as already-reviewed.`,
+        `${stars}-star review at ${locName} couldn't be matched to a customer${snippet}. Open Reviews to match it, or mark the customer as already-reviewed.`,
         {
           link: '/admin/reviews',
           metadata: {

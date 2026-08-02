@@ -158,12 +158,29 @@ function productPromptLines(products) {
   }).join('\n');
 }
 
+function safeTextList(value, { maxItems = 8, maxItemChars = 200 } = {}) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => cleanText(item).slice(0, maxItemChars))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
 function buildPrompt(input = {}) {
   const serviceType = cleanText(input.serviceType) || 'service';
   const areas = safeAreas(input.areasTreated || input.areasServiced);
   const notes = cleanText(input.notes || input.technicianNotes);
   const outcome = normalizeOutcome(input.visitOutcome);
   const products = safeProducts(input.products);
+  // Structured closeout fields ground the recap the same way they ground
+  // the AI report (owner 2026-07-30): what was found, what's next, and the
+  // tech's activity read.
+  const observations = safeTextList(input.observations);
+  const recommendations = safeTextList(input.recommendations);
+  const rating = Number.isInteger(input.pestActivityRating)
+    && input.pestActivityRating >= 0 && input.pestActivityRating <= 5
+    ? input.pestActivityRating
+    : null;
 
   return `Write one customer-facing SMS recap for a Waves Pest Control & Lawn Care service visit.
 
@@ -183,7 +200,7 @@ Inputs:
 Service type: ${serviceType}
 Visit outcome: ${outcome}
 Areas treated: ${areas.length ? areas.join(', ') : 'not specified'}
-Technician notes: ${notes || 'not specified'}${products.length ? `\nSolutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):\n${productPromptLines(products)}` : ''}${String(input.visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(input.visitContext).trim()}` : ''}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
+Technician notes: ${notes || 'not specified'}${observations.length ? `\nTechnician observations (what was found on site — describe in plain language):\n${observations.map((o) => `- ${o}`).join('\n')}` : ''}${recommendations.length ? `\nTechnician recommendations (future advice — frame as recommended next steps, never as completed work):\n${recommendations.map((r) => `- ${r}`).join('\n')}` : ''}${rating != null ? `\nPest activity the technician observed, on a 0 (none) to 5 (severe) scale: ${rating} — reflect the level in plain reassuring language, never quote the number or the scale.` : ''}${products.length ? `\nSolutions the technician applied (context only — describe the work in plain language, NEVER name these products or chemicals to the customer):\n${productPromptLines(products)}` : ''}${String(input.visitContext || '').trim() ? `\nVisit context (season, weather, expectations — use to set accurate plain-language expectations; do not copy verbatim):\n${String(input.visitContext).trim()}` : ''}${input.commsContext ? `\n\nRecent customer communications (context only — never quote them back):\n${input.commsContext}` : ''}
 
 Return only the recap text.`;
 }

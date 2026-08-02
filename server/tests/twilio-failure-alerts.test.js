@@ -103,6 +103,13 @@ describe('Twilio failure alerts', () => {
       errorMessage: 'Twilio failed for [phone] and SM...abcdef sent to [email]',
       fromMasked: '***7612',
       toMasked: '***1212',
+      // Owner ruling 2026-07-30: the bell shows the real numbers (the
+      // twilio_failure trigger is allowContactDetails). remoteName/customerId
+      // stay null here — the customers lookup is unavailable in this mock.
+      fromPhone: '+19413187612',
+      toPhone: '+19415551212',
+      remoteName: null,
+      customerId: null,
       sidMasked: 'SM...abcdef',
       dedupeKey: expect.stringMatching(/^twilio:[a-f0-9]{16}$/),
     }));

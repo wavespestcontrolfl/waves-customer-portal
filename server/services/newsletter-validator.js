@@ -177,9 +177,6 @@ function validateNewsletterDraft(send, opts = {}) {
   if (isFlagshipType(send.newsletter_type)) {
     if (send.html_body) {
       const bodyText = send.html_body.replace(/<[^>]+>/g, ' ').toLowerCase();
-      if (!['homeowner minute', 'homeowner tip', 'quick tip', 'before heading out'].some((s) => bodyText.includes(s))) {
-        warnings.push('No Homeowner Minute section detected');
-      }
       if (!['schedule service', 'book', 'call us', 'reply to this email', 'wavespestcontrol.com'].some((s) => bodyText.includes(s))) {
         warnings.push('No Waves CTA detected');
       }

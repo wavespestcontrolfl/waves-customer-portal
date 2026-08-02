@@ -309,11 +309,31 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(state.firstTables).toHaveLength(0);
   });
 
+  test('thumbtack mail is hard-skipped even with an extracted contact (owner ruling 2026-07-30)', async () => {
+    const state = setupDb();
+
+    const result = await handleLeadInquiry(
+      makeEmail({ from_address: 'do-not-reply@pro.thumbtack.com', from_name: 'Thumbtack' }),
+      makeClassification({
+        extracted: {
+          person_name: 'Sam Homeowner',
+          email: 'sam.homeowner@gmail.com',
+          phone: '941-555-9876',
+          service_interest: 'termite',
+        },
+      })
+    );
+
+    expect(result).toEqual({ action: 'skipped_automated_sender' });
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(insertsFor(state, 'notifications')).toHaveLength(0);
+  });
+
   test('automated sender with a real extracted contact creates the lead WITHOUT storing the automated address', async () => {
     const state = setupDb();
 
     const result = await handleLeadInquiry(
-      makeEmail({ from_address: 'do-not-reply@thumbtack.com', from_name: 'Thumbtack' }),
+      makeEmail({ from_address: 'notifications@leadrelay.example.com', from_name: 'Lead Relay' }),
       makeClassification({
         extracted: {
           person_name: 'Sam Homeowner',
@@ -472,15 +492,19 @@ describe('lead-guard helpers', () => {
     expect(isHardSkippedLeadSender(null)).toBe(false);
   });
 
-  test('isAutomatedSender matches no-reply local parts and relay domains', () => {
+  test('isAutomatedSender matches no-reply local parts', () => {
     expect(isAutomatedSender('do-not-reply@thumbtack.com')).toBe(true);
     expect(isAutomatedSender('noreply@anything.example.com')).toBe(true);
     expect(isAutomatedSender('no-reply@anything.example.com')).toBe(true);
     expect(isAutomatedSender('donotreply@anything.example.com')).toBe(true);
     expect(isAutomatedSender('notifications@anything.example.com')).toBe(true);
-    expect(isAutomatedSender('leads@mail.thumbtack.com')).toBe(true);
     expect(isAutomatedSender('jane.prospect@example.com')).toBe(false);
     expect(isAutomatedSender('')).toBe(false);
+  });
+
+  test('thumbtack is a hard-skipped marketplace solicitor on every subdomain (owner ruling 2026-07-30)', () => {
+    expect(isHardSkippedLeadSender('do-not-reply@pro.thumbtack.com')).toBe(true);
+    expect(isHardSkippedLeadSender('leads@mail.thumbtack.com')).toBe(true);
   });
 
   test('isWavesAutoAckReply requires a reply prefix + the auto-ack subject', () => {

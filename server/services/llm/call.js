@@ -367,16 +367,32 @@ async function dispatchWithFallback(policy, payload = {}, { validate } = {}) {
       continue;
     }
 
-    return {
+    const outcome = {
       ...result,
       provider: route.provider,
       model: result.model || route.model,
       fallbackUsed: index > 0,
       failures,
     };
+    recordDispatchOutcome(policy, outcome);
+    return outcome;
   }
 
-  return { ok: false, reason: 'all_providers_failed', failures };
+  const outcome = { ok: false, reason: 'all_providers_failed', failures };
+  recordDispatchOutcome(policy, outcome);
+  return outcome;
+}
+
+// Passive observability (GATE_LLM_DISPATCH_METRICS, dark by default): one
+// llm_dispatch_log row per completed chain, consumed by the daily exception
+// digest. Lazy-required and fire-and-forget so the metrics path can never
+// slow down or break the dispatch it observes.
+function recordDispatchOutcome(policy, outcome) {
+  try {
+    require('../llm-dispatch-metrics').recordDispatch(policy, outcome);
+  } catch (err) {
+    logger.debug(`[llm] dispatch metrics skipped: ${err.message}`);
+  }
 }
 
 // Direct-SDK Anthropic create with the same sampling-controls strip-retry

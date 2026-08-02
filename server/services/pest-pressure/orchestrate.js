@@ -136,11 +136,19 @@ async function calculateAndPersistForServiceRecord(serviceRecordId, knex = db) {
   }
   const serviceRecord = await knex('service_records')
     .where({ id: serviceRecordId })
-    .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'structured_notes');
+    .first('id', 'customer_id', 'service_type', 'service_line', 'service_date', 'status', 'structured_notes', 'scheduled_service_id', 'is_callback');
   if (!serviceRecord) {
     return null;
   }
   if (serviceRecordSuppressesCustomerArtifacts(serviceRecord)) {
+    return null;
+  }
+  // One-time treatments never write pressure history (form-independent —
+  // codex r6): guards EVERY writer (completion, customer rating recalc,
+  // any future sweep), not just the completion route's own gate. The
+  // re-service/callback exception lives inside the helper.
+  const { isOneTimePressureExcludedRecord } = require('./one-time-exclusion');
+  if (await isOneTimePressureExcludedRecord(serviceRecord, knex)) {
     return null;
   }
 

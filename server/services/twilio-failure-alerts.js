@@ -78,6 +78,56 @@ function remotePartyDigits(direction, from, to) {
   return String(e164).replace(/\D/g, '');
 }
 
+// Who is on the other end of the failed call/message. Owner ruling (Adam,
+// 2026-07-30): the admin bell must show the real number and, when the phone
+// maps to exactly one live customer, their name and record id — fully masked
+// alerts were untriageable. Log lines keep masking (maskPhone/maskSid); only
+// the notification payload is enriched. Any lookup error degrades to a
+// nameless alert, never a suppressed one.
+async function resolveRemoteParty(direction, from, to) {
+  const dir = String(direction || '').toLowerCase();
+  if (dir !== 'inbound' && dir !== 'outbound') return null;
+  const raw = dir === 'inbound' ? from : to;
+  const e164 = toE164(raw);
+  if (!e164 || !isLikelyE164(e164)) return null;
+  const digits = String(e164).replace(/\D/g, '');
+  const party = { name: null, customerId: null };
+  // Last-10 matching is a NANP convention — a non-NANP caller (+44 20 7946
+  // 0958) shares its last ten digits with an unrelated US number (+1 207 946
+  // 0958) and would falsely name that customer. toE164 preserves foreign
+  // country codes, so gate on them: international callers stay nameless (the
+  // real number still shows in the alert body).
+  if (String(e164).startsWith('+') && !String(e164).startsWith('+1')) return party;
+  try {
+    // Match every customer contact slot, not just the primary phone — the
+    // pipeline records spouses/tenants into the service-contact slots (same
+    // column set as call-recording-processor's CONTACT_MATCH_PHONE_COLS).
+    // LIVE customers only (whereLiveCustomer — customers.active is true for
+    // leads too, so a bare deleted_at check would let a stale lead/churned
+    // row suppress or mislabel the one live match). Enrich only an
+    // UNAMBIGUOUS match: two live customers sharing the number stay nameless
+    // rather than naming the wrong one.
+    const { whereLiveCustomer } = require('./customer-stages');
+    const key = digits.slice(-10);
+    const phoneCols = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+    const matches = await whereLiveCustomer(db('customers'))
+      .where(function anyContactSlot() {
+        for (const col of phoneCols) {
+          this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);
+        }
+      })
+      .orderBy('updated_at', 'desc')
+      .limit(2);
+    if (Array.isArray(matches) && matches.length === 1) {
+      party.name = [matches[0].first_name, matches[0].last_name].filter(Boolean).join(' ') || null;
+      party.customerId = matches[0].id || null;
+    }
+  } catch (err) {
+    logger.warn(`[twilio-alerts] remote-party lookup failed: ${err.message}`);
+  }
+  return party;
+}
+
 // Atomically claim the alert window for this key. Exactly one concurrent
 // caller gets a row back; everyone else is inside an open window and skips.
 // Any DB error fails OPEN — a broken dedupe layer must never eat a failure
@@ -265,6 +315,7 @@ async function alertTwilioFailure(input = {}) {
     : ['twilio', channel || 'unknown', direction || 'unknown', phase || 'unknown', eventId, normalizedStatus, errorCode || 'no-code'].join(':'));
   const dedupeKey = publicDedupeKey(rawDedupeKey);
   const safeErrorMessage = sanitizeFailureText(errorMessage);
+  const remote = await resolveRemoteParty(direction, from, to);
 
   const notification = {
     logLine:
@@ -281,6 +332,10 @@ async function alertTwilioFailure(input = {}) {
       errorMessage: safeErrorMessage,
       fromMasked: maskPhone(from),
       toMasked: maskPhone(to),
+      fromPhone: from || null,
+      toPhone: to || null,
+      remoteName: remote?.name || null,
+      customerId: remote?.customerId || null,
       link,
       dedupeKey,
     },

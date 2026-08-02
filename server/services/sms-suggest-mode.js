@@ -45,7 +45,7 @@ const ESCALATION_INTENTS = new Set(['customer_issue_needs_review']);
 // draft must NEVER reach a customer with one — the few-shot exemplars contain
 // them, and prompt instructions alone aren't a guarantee. This is the
 // deterministic, verifier-independent guard the delivery paths fail closed on.
-const REDACTION_PLACEHOLDER_RE = /\[(name|phone|email|ssn|card|address|url|zip)\]/i;
+const REDACTION_PLACEHOLDER_RE = /\[(name|phone|email|ssn|card|address|url|zip|redacted)\]/i;
 function hasRedactionPlaceholder(text) {
   return REDACTION_PLACEHOLDER_RE.test(String(text || ''));
 }
@@ -598,7 +598,12 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
 
 /** Pure verdict for a send derived from a reviewed draft: verbatim or edited. */
 function classifySendVerdict(sentBody, suggestedMessage) {
-  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  // GSM canonicalization on both sides: the send path normalizes what
+  // actually goes out (curly quotes → straight, em dash → hyphen), so a
+  // crash-recovered sms_log body would byte-differ from an UNCHANGED
+  // smart-punctuation suggestion and be misclassified as 'corrected'.
+  const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
+  const normalize = (value) => normalizeGsmPunctuation(String(value || '')).replace(/\s+/g, ' ').trim();
   return normalize(sentBody) === normalize(suggestedMessage) ? 'accepted' : 'corrected';
 }
 

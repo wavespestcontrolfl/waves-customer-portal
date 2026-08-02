@@ -31,7 +31,34 @@ jest.mock('../utils/portal-url', () => ({
   publicPortalUrl: jest.fn(() => 'https://portal.wavespestcontrol.com'),
 }));
 
-const { extractContactNameFromSms } = require('../routes/twilio-webhook')._internals;
+const { extractContactNameFromSms, intakeOutcome } = require('../routes/twilio-webhook')._internals;
+
+describe('a scope-vetoed intake reply still reaches normal inbound notification handling', () => {
+  // The intake state machine refusing to QUOTE ("this is for Friday's
+  // visit, please treat the backyard" → existing-job coordination, no
+  // draft) used to return handled:true, which made the SMS handler return
+  // immediately — before the sms_reply bell, the push, and the owner
+  // forward. Real, time-sensitive service instructions then existed only in
+  // the communications log for someone to find by hand. Suppressing the
+  // DRAFT was correct; suppressing the NOTIFICATION was not.
+  test('terminal (refused-to-quote) results continue into the notification path', () => {
+    expect(intakeOutcome({ handled: true, terminal: true, next: 'awaiting_service' }))
+      .toBe('continue_without_quote');
+    expect(intakeOutcome({ handled: true, terminal: true, next: 'awaiting_address' }))
+      .toBe('continue_without_quote');
+  });
+
+  test('a reply the machine ANSWERED is still consumed end to end (unchanged)', () => {
+    expect(intakeOutcome({ handled: true, next: 'estimate_drafted' })).toBe('consumed');
+    expect(intakeOutcome({ handled: true, next: 'awaiting_address' })).toBe('consumed');
+  });
+
+  test('a non-intake message is untouched', () => {
+    expect(intakeOutcome({ handled: false })).toBe('continue');
+    expect(intakeOutcome(null)).toBe('continue');
+    expect(intakeOutcome(undefined)).toBe('continue');
+  });
+});
 
 describe('twilio inbound SMS contact name extraction', () => {
   test('extracts obvious self-introduction names from lead SMS bodies', () => {

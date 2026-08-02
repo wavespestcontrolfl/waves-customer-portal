@@ -1800,16 +1800,43 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
     expect(html.match(/kicker/g)).toHaveLength(5);
   });
 
-  test('TOC: fold-out with a bare read-time summary; entries are REAL event names only', async () => {
+  test('TOC: centered fold-out, bare read-time summary; witty entries that never give the events away', async () => {
     const html = await assembleBeehiivNewsletter(draft());
     expect(html).toContain('<details>');
     expect(html).toContain('~5-minute read');
+    expect(html).toMatch(/<summary[^>]*text-align:center/);
     expect(html).not.toContain('weekend pick');
     expect(html).not.toContain('North Port to Tampa');
-    expect(html).not.toContain('tap for the list');
-    expect(html).toContain('<strong>Official Event 0</strong>');
-    // No trailing curiosity-title text after the name.
-    expect(html).not.toMatch(/Official Event 0<\/strong><\/a> <em/);
+    // Curiosity titles tease; official names NEVER appear in the list
+    // (owner 2026-07-30 — supersedes the real-names directive).
+    expect(html).toMatch(/<a href="#evt-curiosity-title-0"[^>]*>🎸 <strong>Curiosity Title 0<\/strong><\/a>/);
+    expect(html).not.toMatch(/<li[^>]*>[^<]*<a[^>]*>[^<]*<strong>Official Event 0/);
+    // ENFORCED tease: a model title echoing the official name falls back
+    // to a generic no-spoilers entry.
+    const leaky = await assembleBeehiivNewsletter({
+      selectedSubject: 'T',
+      events: [mk(1, { title: 'Official Event 1' })],
+    });
+    expect(leaky).toContain('Weekend pick #1');
+    expect(leaky).not.toMatch(/<a[^>]*>🎭 <strong>Official Event 1<\/strong><\/a>/);
+  });
+
+  test('no wave-divider squiggle in the flagship; all event visuals share one size cap', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).not.toContain('waves-divider');
+    // GIF fallback carries the same 280px cap as still photos.
+    const withArt = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { imageUrl: 'https://cdn.example.com/a.jpg' })] });
+    expect(withArt).toMatch(/<img src="https:\/\/cdn\.example\.com\/a\.jpg"[^>]*max-height:280px/);
+    // Capped event GIFs are mso-hidden like still photos — Word ignores
+    // max-height and would render them at natural size. Intro/PI GIFs
+    // stay uncapped and mso-visible.
+    const { gifBlock } = require('../services/newsletter-draft');
+    const capped = gifBlock('https://media2.giphy.com/media/x/g.gif', 'cap', { capHeight: true });
+    expect(capped).toContain('<!--[if !mso]><!-->');
+    expect(capped).toContain('max-height:280px');
+    const natural = gifBlock('https://media2.giphy.com/media/x/g.gif', 'cap');
+    expect(natural).not.toContain('[if !mso]');
+    expect(natural).not.toContain('max-height');
   });
 
   test('TOC links target real anchors: <a name> + matching h2 id per event', async () => {
@@ -1817,6 +1844,20 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
     expect(html).toContain('href="#evt-curiosity-title-0"');
     expect(html).toContain('<a name="evt-curiosity-title-0"></a>');
     expect(html).toMatch(/<h2 id="evt-curiosity-title-0" class="dm-chip"/);
+  });
+
+  test('duplicate image urls render ONCE — repeats fall back to their GIF slot; Homeowner Minute never renders', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'T',
+      homeownerMinute: 'A tip that must not render.',
+      events: [
+        mk(1, { imageUrl: 'https://cdn.example.com/shared.jpg' }),
+        mk(2, { imageUrl: 'https://cdn.example.com/shared.jpg' }),
+      ],
+    });
+    expect(html.match(/https:\/\/cdn\.example\.com\/shared\.jpg/g)).toHaveLength(1);
+    expect(html).not.toContain('Homeowner Minute');
+    expect(html).not.toContain('A tip that must not render');
   });
 
   test('DB-locked price renders (FREE wins over priceText); labels chip line renders', async () => {
@@ -1841,7 +1882,6 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
       introText: 'Big weekend **ahead**.',
       transitionLine: "Let's get into it",
       events: [mk(1), mk(3, { isFree: true })],
-      homeownerMinute: 'Check your _screens_.',
       closingHeading: 'That is the scoop, crew',
       closingText: 'Go outside.',
       closingChecklist: ['Hydrate like it\'s your job'],
@@ -1863,7 +1903,8 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
     expect(text).toContain("[ ] Hydrate like it's your job");
     expect(text).toContain('P.S. Forward this to a friend.');
     expect(text).not.toContain('Schedule a visit');
-    expect(text).toContain('== Homeowner Minute ==');
+    // Homeowner Minute retired from the flagship (owner 2026-07-30).
+    expect(text).not.toContain('Homeowner Minute');
     const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
     expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');
     expect(text).not.toContain('**');
@@ -1975,7 +2016,7 @@ describe('newsletter greeting personalization + render polish', () => {
     expect(plainBulletText('Sit-down meal at a Cortez staple')).toBe('Sit-down meal at a Cortez staple');
   });
 
-  test('assembly: 22px greeting carries the name token; divider renders at 48px', async () => {
+  test('assembly: 22px greeting carries the name token; flagship has no divider squiggle', async () => {
     const html = await assembleBeehiivNewsletter({
       selectedSubject: 'Test',
       greeting: 'Hey there!',
@@ -1987,17 +2028,18 @@ describe('newsletter greeting personalization + render polish', () => {
     });
     expect(html).toContain(`Hey there${GREETING_NAME_TOKEN}!`);
     expect(html).toMatch(/font-size:22px[^>]*>👋/);
-    expect(html).toContain('width="48"');
+    expect(html).not.toContain('waves-divider');
     expect(html).not.toContain('width="100"');
   });
 
-  test('wrapNewsletter local-guide chrome uses the 2026 logo (glass footer, 44px)', () => {
+  test('wrapNewsletter local-guide chrome uses the canonical portal Waves logo (glass footer, 44px)', () => {
     // The 88px header logo was retired with the pre-glass theme (#2428);
-    // the glass wrapper carries the 2026 logo in the footer at 44px.
+    // the glass wrapper carries the CANONICAL portal logo in the footer
+    // at 44px — the 2026 AI re-render is retired (owner 2026-07-30).
     const { wrapNewsletter } = require('../services/email-template');
     const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
-    expect(html).toContain('waves-logo-2026.png');
-    expect(html).not.toContain('/waves-logo.png');
+    expect(html).toContain('/waves-logo.png');
+    expect(html).not.toContain('waves-logo-2026.png');
     expect(html).toContain('width="44"');
   });
 });

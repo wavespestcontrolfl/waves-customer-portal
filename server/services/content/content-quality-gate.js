@@ -33,7 +33,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
-const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
+const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, metaHasSalesCopy, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
@@ -147,11 +147,12 @@ const PAGE_TYPE_CHECKS = {
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
-    // Owner rule 2026-07-29: blog metas carry NO phone, nothing salesy, and
-    // end with a soft CTA ("Learn more on the Waves blog"). Weight 0 hard
-    // gate — without it a freshly authored blog meta bypassed the metadata-
-    // lane check entirely.
+    // Owner rule 2026-07-29: blog metas carry NO phone and nothing salesy.
+    // Weight 0 hard gate — without it a freshly authored blog meta bypassed
+    // the metadata-lane check entirely. The soft-CTA ending was demoted out
+    // of the hard contract 2026-07-30 (owner ruling) to the soft check below.
     { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
+    { name: 'blog_meta_soft_cta', weight: 0, evaluate: checkBlogMetaSoftCta },
     { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
   ],
   metadata: [
@@ -165,6 +166,10 @@ const PAGE_TYPE_CHECKS = {
     // like title_meta_spam_free: pure hard gate, no score contribution, so
     // the metadata threshold math is unchanged.
     { name: 'meta_phone_token_present', weight: 0, isHard: true, evaluate: checkMetaPhoneTokenPresent },
+    // Blog-target rewrites lost the soft-CTA nudge when it left the hard
+    // contract (2026-07-30 ruling) — same weight-0 soft signal as the
+    // supporting-blog bundle; skips page targets via target_page_type.
+    { name: 'blog_meta_soft_cta', weight: 0, evaluate: checkBlogMetaSoftCta },
   ],
   links: [],
   gbp: [],
@@ -1068,10 +1073,35 @@ function pageMetaPhoneResult(m) {
   return { ok: true };
 }
 function blogMetaContractResult(m) {
-  if (PHONE_TOKEN_RE.test(m) || LITERAL_PHONE_IN_META_RE.test(m)) {
+  // BARE_PHONE_DIGITS_RE: a separator-less "9412972606" slips the shaped
+  // literal-phone regex and the PII scan (known business number) — Codex r4.
+  if (PHONE_TOKEN_RE.test(m) || LITERAL_PHONE_IN_META_RE.test(m) || BARE_PHONE_DIGITS_RE.test(m)) {
     return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
   }
   if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };
+  // Sales-copy shapes stay HARD in every sentence — "Learn more about
+  // saving big with Waves." is sales copy SALESY_META_RE alone misses (the
+  // gerund), even when an informational closer follows it. This rejection
+  // used to live inside endsWithSoftCta; demoting the CTA requirement must
+  // not demote it (Codex P1s, 2026-07-30).
+  if (metaHasSalesCopy(m)) return { ok: false, reason: 'blog_meta_sales_copy' };
+  // Soft-CTA ending is NOT part of the hard contract (owner ruling
+  // 2026-07-30: an otherwise-clean draft must never park on it) — it's the
+  // weight-0 soft check blog_meta_soft_cta instead.
+  return { ok: true };
+}
+
+// Owner ruling 2026-07-30: the soft-CTA ending ("Learn more…") is a nudge,
+// not a publish blocker — drafts that passed every other check were being
+// hard-parked on this alone. Weight-0 SOFT: the miss stays visible in
+// soft_failures / reviewer notes (and feeds back to the writer on redraft)
+// but contributes nothing to scores, thresholds, or ok.
+function checkBlogMetaSoftCta(draft, brief) {
+  // Metadata lane can target non-blog pages, whose metas have no CTA
+  // contract (they carry {{cityPhone}} instead — see pageMetaPhoneResult).
+  if (brief?.target_page_type === 'page') return { ok: true, reason: 'page_meta_has_no_cta_contract' };
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  if (!m) return { ok: true, reason: 'no_meta_to_check' };
   // The CTA must END the meta (last sentence), not merely appear somewhere —
   // "Learn more about X. Professional treatment available…" is not the shape.
   if (!endsWithSoftCta(m)) return { ok: false, reason: 'blog_meta_missing_soft_cta' };
@@ -1166,5 +1196,5 @@ module.exports._internals = {
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
-  checkAuthoredMetaLength,
+  checkBlogMetaSoftCta, checkAuthoredMetaLength,
 };

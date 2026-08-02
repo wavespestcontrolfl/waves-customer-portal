@@ -193,6 +193,7 @@ function mapWater(waterContext, waterSnapshot = null) {
       confidence: waterSnapshot.confidence || 'medium',
       explanation: snapshotWaterExplanation(waterSnapshot, grassLabel),
       source: 'area_snapshot',
+      rainProvider: 'area',
       // A POSITIVE stored per-week irrigation figure means the customer has a real
       // schedule on file — the "add your watering schedule" CTA should not show. A
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
@@ -212,6 +213,9 @@ function mapWater(waterContext, waterSnapshot = null) {
     confidence: advice.profileMissing ? 'low' : (advice.rainKnown ? 'high' : 'medium'),
     explanation: waterExplanation(advice, target, grassLabel),
     source: 'irrigation_advice',
+    // True provider of rainfallInches7d (open_meteo | fawn) — the Source row
+    // credits the real one (codex P2 r6).
+    rainProvider: waterContext.rainfall7dProvider || null,
     // The customer has a usable irrigation schedule on file only when the advice
     // engine says the profile is present. profileMissing already accounts for a
     // 0/absent/disabled schedule (irrigation <= 0), so trust it directly — a raw
@@ -361,7 +365,10 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   const mowShort = mowing && mowing.status === 'too_short';
   const damage = (diagnosis || []).find((c) => c.key === 'damage_disease_signals');
   const damageBad = damage && (damage.status === 'needs_attention' || damage.status === 'watch');
-  if (overwatering || effectiveWaterStatus === 'surplus') {
+  // A vision-only overwatering flag must not override an active coverage
+  // (dry-spots) story — the two are contradictory on the same page; only a
+  // measured surplus may carry the "too much water" claim alongside it.
+  if (effectiveWaterStatus === 'surplus' || (overwatering && !coverageWatch)) {
     return 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
   }
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
@@ -371,7 +378,12 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
     return 'The dry-looking areas are most likely uneven sprinkler coverage plus mowing a notch too short — not the whole lawn needing more water.';
   }
   if (coverageWatch) {
-    return 'Total water is on target, so the lighter areas point to uneven sprinkler coverage rather than the lawn needing more water overall.';
+    // "Total water is on target" is a measurement claim — only make it when
+    // the week's water was actually measured as balanced. Unknown rain weeks
+    // get the coverage observation without the on-target assertion.
+    return effectiveWaterStatus === 'balanced'
+      ? 'Total water is on target, so the lighter areas point to uneven sprinkler coverage rather than the lawn needing more water overall.'
+      : 'A few lighter areas are worth watching — that pattern usually points to uneven sprinkler coverage rather than the whole lawn needing more water.';
   }
   if (mowShort && damageBad) {
     return 'Short mowing is likely amplifying heat and stress in the thinner areas — raising the cut height should help them recover.';
@@ -496,9 +508,26 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // in the photos. When the photo analysis mentions dry/drought/uneven/coverage,
   // the Water row must NOT read "Strong" — downgrade it to a coverage "watch" so it
   // never contradicts the photo caption (the report's biggest trust bug).
-  const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`.toLowerCase();
-  // MOISTURE-specific signals only (not generic "stress", which can be heat/insect).
-  const drySignal = /\b(dry|drought|tan|uneven|irrigation|coverage|wilt|moisture)\b/.test(obsText);
+  // "dry out"/"drying out"/"dries out" is WET-area aftercare ("let the damp
+  // areas dry out") — strip those phrases before testing so they can't
+  // satisfy the dry regex (codex P1 r11), alongside the r8 removals of
+  // 'moisture'/'irrigation' (both appear in wet observations and flipped a
+  // confirmed-overwatering read into a dry-coverage story).
+  const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`
+    .toLowerCase()
+    .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '');
+  // DRY-specific signals only — not generic "stress" (heat/insect).
+  // "uneven"/"coverage" need MOISTURE context: the repo uses "uneven" for
+  // ordinary color variation and "coverage" for turf density, and a bare
+  // match converted non-moisture observations into customer-facing drought
+  // claims (codex P1 r22).
+  const drySignal = /\b(dry|drier|drought|tan|wilt)\b/.test(obsText)
+    || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
+    // Reversed order — "irrigation is uneven across the west side"
+    // (codex P2 r36). Bounded gap so the subject and qualifier stay in
+    // the same clause.
+    || /\b(?:irrigation|water(?:ing)?|sprinkler|moisture)\b[^.!?]{0,30}\buneven\b/i.test(obsText)
+    || /\b(?:sprinkler|irrigation|water)\s+coverage\b/.test(obsText);
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly
   // amount (this is the "95 Strong vs photo says drought" contradiction).
@@ -517,6 +546,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const mowing = mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
 
+  // Aftercare is computed early enough for the insight builder to reconcile
+  // its damp-area advice with a label-required watering-in (codex P1 r32).
+  const aftercare = buildAftercare(applications);
   const insights = buildLawnInsightCards({
     categories,
     water: water ? {
@@ -530,6 +562,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     grassLabel,
     customerConcern,
     treatmentKinds: treatment ? treatment.kinds : [],
+    waterInRequired: aftercare.waterInRequired === true,
   });
 
   // Field photos for the horizontal strip (best photo first), plus ONE consolidated
@@ -616,7 +649,6 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       { label: beforeAfter.after.label, url: beforeAfter.after.url, score: beforeAfter.after.score },
     ]
     : null;
-  const aftercare = buildAftercare(applications);
   // Reconcile watering-in with the water story: when the weekly total is already
   // above target the report tells the customer to EASE BACK on irrigation, and a
   // bare "give the lawn a normal watering" instruction two cards later reads like a

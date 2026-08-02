@@ -22,7 +22,7 @@
           "name": "9x applications/yr"
         },
         {
-          "mo": 71,
+          "mo": 66,
           "recommended": false,
           "name": "12x applications/yr"
         }
@@ -66,10 +66,10 @@
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 2881,
-      "annualAfterDiscount": 2304.8,
-      "monthlyTotal": 192.07,
-      "savings": 576.2,
+      "annualBeforeDiscount": 2821,
+      "annualAfterDiscount": 2256.8,
+      "monthlyTotal": 188.07,
+      "savings": 564.2,
       "serviceCount": 4
     },
     "results": {
@@ -85,7 +85,7 @@
           "name": "9x applications/yr"
         },
         {
-          "mo": 71,
+          "mo": 66,
           "recommended": true,
           "name": "12x applications/yr"
         }
@@ -146,8 +146,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2403.8,
-      "year2": 2304.8
+      "year1": 2355.8,
+      "year2": 2256.8
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -508,7 +508,7 @@
           "name": "9x applications/yr"
         },
         {
-          "mo": 74,
+          "mo": 69,
           "recommended": false,
           "name": "12x applications/yr"
         }
@@ -587,7 +587,7 @@
           "name": "9x applications/yr"
         },
         {
-          "mo": 66,
+          "mo": 62,
           "recommended": false,
           "name": "12x applications/yr"
         }

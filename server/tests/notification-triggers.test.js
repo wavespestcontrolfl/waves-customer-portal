@@ -173,7 +173,9 @@ describe('notification trigger push tags', () => {
   });
 
   test('phone redaction leaves digit runs inside identifiers alone', () => {
-    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+    // payment_failed: any non-exempt trigger — twilio_failure is
+    // allowContactDetails (owner ruling 2026-07-30) and skips redaction.
+    const safe = __private.sanitizeNotificationPayload('payment_failed', {
       // Hashed dedupe keys and hex digests contain 10+ digit runs ~3% of the
       // time; masking them corrupted the stored key so dedupe never matched.
       dedupeKey: 'twilio:1a2345678901bcde',
@@ -188,7 +190,7 @@ describe('notification trigger push tags', () => {
   });
 
   test('phone redaction masks extension-suffixed numbers by the PHONE last four', () => {
-    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+    const safe = __private.sanitizeNotificationPayload('payment_failed', {
       message: 'call +19415551234x123 or 19415552222 ext 99 today',
     });
 
@@ -198,7 +200,7 @@ describe('notification trigger push tags', () => {
   });
 
   test('phone redaction still masks URL-encoded numbers', () => {
-    const safe = __private.sanitizeNotificationPayload('twilio_failure', {
+    const safe = __private.sanitizeNotificationPayload('payment_failed', {
       message: 'Lookup phone=%2B19415551212&Fields=caller_name failed',
     });
 

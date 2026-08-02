@@ -110,17 +110,30 @@ describe('computeSignificance — paired run comparison', () => {
  */
 function makeSummaryDb({ active = 0, total = 0, runs = [] } = {}) {
   const dbi = (table) => {
-    const builder = { _wheres: [], _first: false, _limit: null };
+    const builder = { _wheres: [], _whereRaws: [], _first: false, _limit: null };
     const rec = (name) => (...args) => {
       if (name === 'where' && typeof args[0] === 'object') builder._wheres.push(args[0]);
+      if (name === 'whereRaw') builder._whereRaws.push({ sql: args[0], params: args[1] || [] });
       if (name === 'first') builder._first = true;
       if (name === 'limit') builder._limit = args[0];
       return builder;
     };
-    for (const m of ['where', 'whereIn', 'whereNot', 'orderBy', 'limit', 'count', 'select', 'first']) builder[m] = rec(m);
+    for (const m of ['where', 'whereRaw', 'whereIn', 'whereNot', 'orderBy', 'limit', 'count', 'select', 'first']) builder[m] = rec(m);
+    // The one raw predicate evaluateExamGate uses is the voice-profile pin:
+    // COALESCE(voice_profile_version, -1) = ?. Model it faithfully; THROW on
+    // any other raw SQL so future query drift fails this harness loudly
+    // instead of silently filtering wrong (this suite sat red for days when
+    // whereRaw was added to the code but not this stub).
+    const applyWhereRaws = (row) => builder._whereRaws.every(({ sql, params }) => {
+      if (/COALESCE\(voice_profile_version, -1\) = \?/.test(sql)) {
+        return (row.voice_profile_version ?? -1) === (params[0] ?? -1);
+      }
+      throw new Error(`makeSummaryDb: unmodeled whereRaw "${sql}" — extend the stub`);
+    });
     builder.then = (resolve, reject) => Promise.resolve().then(() => {
       if (table === 'sms_sealed_eval_items') return [{ total: String(total), active }];
-      let rows = runs.filter((r) => builder._wheres.every((w) => Object.entries(w).every(([k, v]) => r[k] === v)));
+      let rows = runs.filter((r) => builder._wheres.every((w) => Object.entries(w).every(([k, v]) => r[k] === v))
+        && applyWhereRaws(r));
       if (builder._limit != null) rows = rows.slice(0, builder._limit);
       return builder._first ? rows[0] : rows;
     }).then(resolve, reject);

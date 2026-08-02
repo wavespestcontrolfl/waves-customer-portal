@@ -62,12 +62,37 @@ describe('voicemailCallbackAlertPlan', () => {
     })).toBeNull();
   });
 
-  test('no alert without service intent (plain call-me-back voicemail)', () => {
+  test('unknown caller without service intent stays bell-free (solicitor/robocall voicemails)', () => {
     expect(voicemailCallbackAlertPlan({
       extracted: wdoVoicemail({ matched_service: null, requested_service: null }),
       voicemailChannel: true,
       voicemailLeadPath: false,
       vmPhone: TEST_PHONE,
+      knownCustomer: false,
+      transcript: 'hey give me a call back when you can',
+    })).toBeNull();
+  });
+
+  test('KNOWN customer without service intent rings the bell (owner ruling 2026-07-30)', () => {
+    const plan = voicemailCallbackAlertPlan({
+      extracted: wdoVoicemail({ matched_service: null, requested_service: null }),
+      voicemailChannel: true,
+      voicemailLeadPath: false,
+      vmPhone: TEST_PHONE,
+      knownCustomer: true,
+      transcript: 'hey Adam, call me back when you can',
+    });
+    expect(plan).toMatchObject({ name: 'Sam Example', service: null, phone: TEST_PHONE });
+  });
+
+  test('known customer dead-air voicemail never rings (pocket dial)', () => {
+    expect(voicemailCallbackAlertPlan({
+      extracted: wdoVoicemail({ matched_service: null, requested_service: null, first_name: null, last_name: null }),
+      voicemailChannel: true,
+      voicemailLeadPath: false,
+      vmPhone: TEST_PHONE,
+      knownCustomer: true,
+      transcript: '[VOICEMAIL] [NO SPEECH]',
     })).toBeNull();
   });
 
@@ -115,24 +140,28 @@ describe('customer_voicemail_callback trigger registry entry', () => {
     expect(entry.group).toBe('Communication');
   });
 
-  test('build links to the Calls tab and masks the phone', () => {
+  test('build links to the Calls tab with a banner-first title and the real callback number', () => {
+    // Owner ruling 2026-07-30: the WHO leads the title (banners truncate)
+    // and the callback number is shown unmasked — a masked number is
+    // undialable. The trigger is allowContactDetails for exactly this.
+    expect(entry.allowContactDetails).toBe(true);
     const built = entry.build({
       name: 'Sam Example',
       service: 'WDO Inspection',
       phone: TEST_PHONE,
       customerId: 'cust-1',
     });
-    expect(built.title).toBe('Voicemail callback needed');
+    expect(built.title).toBe('Voicemail — Sam Example');
     expect(built.body).toContain('Sam Example');
     expect(built.body).toContain('WDO Inspection');
-    expect(built.body).not.toContain('5550006');
+    expect(built.body).toContain(TEST_PHONE);
     // Voicemails render under the Calls tab — ?thread= would open the SMS
     // view instead.
     expect(built.link).toBe('/admin/communications#tab=calls');
 
     const anon = entry.build({ phone: TEST_PHONE });
+    expect(anon.title).toBe(`Voicemail — ${TEST_PHONE}`);
     expect(anon.link).toBe('/admin/communications#tab=calls');
-    expect(anon.body).not.toContain('5550006');
   });
 
   test('push tag is unique per call so one caller cannot hide another', () => {

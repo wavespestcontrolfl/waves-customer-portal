@@ -4,6 +4,7 @@ const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } =
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
+const { isOneTimePressureExcludedRecord } = require('../pest-pressure/one-time-exclusion');
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
@@ -207,7 +208,13 @@ async function attachApprovedReportProductFacts(knex, products = []) {
         'approved_for_service_report',
       );
   } catch {
-    return products;
+    // Signal the failure instead of silently returning bare rows (codex P2
+    // r41): a legacy row with product_id but null product_category loses
+    // its class identity when this lookup fails, and downstream honesty
+    // passes would treat the visit as "no corrective products applied".
+    const marked = products.slice();
+    marked.catalogEnrichmentFailed = true;
+    return marked;
   }
   const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
   return products.map((product) => {
@@ -268,7 +275,7 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null } = {}) {
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null } = {}) {
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
   const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
@@ -305,6 +312,19 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     fawnSnapshot.rainfall_last_7d,
     fawnSnapshot.precipitation_7d,
   );
+  // Which provider actually supplied the weekly figure — the customer-facing
+  // Source row must credit the real one (codex P2 #3093 r6: a FAWN fallback
+  // week was labeled Open-Meteo).
+  //
+  // The completion figure no longer means "Open-Meteo": with GATE_RAIN_MRMS
+  // live it can be MRMS observations, or a per-day mrms+open_meteo blend, and
+  // fetchServiceWeekWeather already reports which via rainSource. Hardcoding
+  // 'open_meteo' here mislabeled every MRMS week the moment the gate flipped.
+  // Fall back to 'open_meteo' only when the weather call gave us no source at
+  // all, which is what the pre-engine path did.
+  const rainfall7dProvider = completionRainfall7dInches != null
+    ? (completionRainSource || 'open_meteo')
+    : (rainfallInches7d != null ? 'fawn' : null);
   const dailyInputs = [irrigationInchesPerDay, rainfallInchesToday].filter((value) => value != null);
   const weeklyInputs = [irrigationInchesPerWeek, rainfallInches7d].filter((value) => value != null);
 
@@ -346,6 +366,7 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     rainfallSource: rainfallInches7d == null && rainfallInchesToday != null
       ? 'fawn_daily_observation'
       : (rainfallInches7d != null ? 'fawn_7_day_observation' : null),
+    rainfall7dProvider,
     // Per-day rainfall over the trailing 7 days at the client's lat/lng (same
     // Open-Meteo source as rainfallInches7d), raw as [{ date, inches }]. The
     // report's 7-day chart renders from this so it matches the weekly total and
@@ -485,6 +506,30 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // require cycle.
 async function resolveTracedExteriorZone(record, knex = db) {
   if (!record?.scheduled_service_id) return false;
+  // Interior-only treatments (bed bug): a trace saved before the tracer was
+  // hidden for this lane is stale EXTERIOR evidence — never let it drive
+  // the exterior dry-down timer. Single choke point for the report payload,
+  // the re-entry context, and the completion SMS (codex P2 r8). Callers
+  // with the resolved profile pass interior_only_lane (stable key, r9).
+  if (record.interior_only_lane === true
+    || /\bbed\s*bugs?\b/i.test(String(record.service_type || ''))) return false;
+  // No caller classification at all (dynamic-context/reentry paths load
+  // only service_records.*): resolve the stable lane HERE — a relabeled
+  // bed-bug appointment must not slip the label regex (codex P2 r12).
+  // Fail-soft: resolver errors fall through to the ordinary trace lookup.
+  if (record.interior_only_lane === undefined) {
+    try {
+      const scheduledRow = await knex('scheduled_services')
+        .where({ id: record.scheduled_service_id })
+        .first('id', 'service_id', 'service_type');
+      if (scheduledRow) {
+        if (/\bbed\s*bugs?\b/i.test(String(scheduledRow.service_type || ''))) return false;
+        const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+        const laneProfile = await resolveCompletionProfileForScheduledService(scheduledRow, knex);
+        if (laneProfile?.serviceKey === 'bed_bug_treatment') return false;
+      }
+    } catch { /* label fallback above already ran; proceed to the lookup */ }
+  }
   try {
     return !!(await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })
@@ -1355,13 +1400,23 @@ function stripLiveOnlyScheduleFields(data) {
   return data;
 }
 
-function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
+function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {}, interiorOnlyLane = false } = {}) {
   const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
   const concernText = structuredCustomerConcern(structured);
   // A positive activity rating recorded at completion means SOMETHING was
   // seen — synthesizing "all zones clear" beside it re-creates the exact
   // contradiction the insert guard now prevents (codex P1 #3043 r2).
   const rating = Number(service.client_pest_rating);
+  // Infestation-class interior lanes (bed bug, untyped post-20260731400000)
+  // never INFER "no activity" from blank optional fields — the visit exists
+  // because activity was found; only an EXPLICIT 0 rating states the zero
+  // (mirrors the completion-side insert guard, codex P2 r7). Raw-null check
+  // first: Number(null) coerces to 0, which would read a MISSING rating as
+  // an explicit zero (codex P2 r8).
+  if ((interiorOnlyLane || /\bbed\s*bugs?\b/i.test(String(service.service_type || '')))
+    && !(service.client_pest_rating != null && Number(service.client_pest_rating) === 0)) {
+    return false;
+  }
   return visitOutcome === 'completed'
     && !(protocol.observations || []).length
     && !(protocol.recommendations || []).length
@@ -1771,8 +1826,17 @@ async function lawnPhotoUrl(photo) {
   }
 }
 
-async function loadLinkedLawnAssessment(service, knex = db) {
+// failClosed (issue #3135): the RENDER path treats an unreadable assessment as
+// "no assessment" and degrades the card, which is right for a page. A caller
+// that fences a SEND cannot do that — swallowing a transient error there would
+// dispatch an unfenced attachment, indistinguishable from a genuine non-lawn
+// record. Those callers opt in and get the error propagated instead.
+async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false } = {}) {
   if (!service?.customer_id) return null;
+  const swallow = (err) => {
+    if (failClosed) throw err;
+    return null;
+  };
 
   const baseCriteria = { customer_id: service.customer_id, confirmed_by_tech: true };
   const byRecord = service.id
@@ -1781,7 +1845,7 @@ async function loadLinkedLawnAssessment(service, knex = db) {
       .orderBy('confirmed_at', 'desc')
       .orderBy('created_at', 'desc')
       .first()
-      .catch(() => null)
+      .catch(swallow)
     : null;
   if (byRecord) return byRecord;
 
@@ -1792,7 +1856,7 @@ async function loadLinkedLawnAssessment(service, knex = db) {
       .orderBy('confirmed_at', 'desc')
       .orderBy('created_at', 'desc')
       .first()
-      .catch(() => null)
+      .catch(swallow)
     : null;
   if (byService) return byService;
 
@@ -1967,6 +2031,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
   let completionEt0Inches = null;
   let completionDailyRain = null;
   let completionRainConfidence = null;
+  let completionRainSource = null;
   try {
     const weekWeather = await fetchServiceWeekWeather({
       latitude: service.customer_latitude ?? service.latitude ?? service.lat,
@@ -1979,6 +2044,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     // 'low' when the pinpoint week was a single-cell model spike and we fell back to
     // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
     completionRainConfidence = weekWeather.rainConfidence;
+    // Which provider actually supplied it — drives the customer-facing Source row.
+    completionRainSource = weekWeather.rainSource;
   } catch (e) { /* non-blocking */ }
   const waterContext = buildLawnWaterContext({
     assessment,
@@ -1994,6 +2061,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     completionEt0Inches,
     completionDailyRain,
     completionRainConfidence,
+    completionRainSource,
   });
 
   return {
@@ -2066,11 +2134,27 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServiceRow = service.scheduled_service_id
     ? await knex('scheduled_services')
       .where({ id: service.scheduled_service_id })
-      .first('service_type')
+      .first('id', 'service_id', 'service_type')
       .catch(() => null)
     : null;
   const linkedServiceName = String(scheduledServiceRow?.service_type || '').trim()
     || serviceDisplayName(service);
+  // Interior-only lane classification (bed bug): display labels are
+  // admin-editable, so the report-time guards (stale-trace suppression,
+  // exterior re-entry evidence, no-activity synth) key on the linked
+  // profile's STABLE service key, with the label regex as the
+  // unlinked/legacy fallback (codex P2 r9). Fail-soft: a resolver error
+  // leaves the label fallback standing.
+  let interiorOnlyLane = /\bbed\s*bugs?\b/i.test(
+    `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
+  );
+  if (!interiorOnlyLane && scheduledServiceRow) {
+    try {
+      const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+      const laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
+      interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
+    } catch { /* label fallback stands */ }
+  }
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -2087,8 +2171,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
     : Promise.resolve(null);
+  // The render-time treatment guard must know when this load FAILED versus
+  // legitimately returned no rows — an outage-empty product list would let
+  // stale recommendation copy publish unreconciled (codex P1 r25).
+  let productsLoadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
-    knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
+    knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
@@ -2104,6 +2192,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('termite_station_checks').where({ service_record_id: service.id }).catch(() => []),
   ]);
   const products = await attachApprovedReportProductFacts(knex, rawProducts);
+  // A failed catalog enrichment degrades class identity the same way a
+  // failed base load does (codex P2 r41): rows with product_id but null
+  // product_category can no longer be recognized as fungicide/herbicide,
+  // so honesty passes must treat the product picture as UNKNOWN, not "no
+  // corrective products applied".
+  if (products.catalogEnrichmentFailed
+    && rawProducts.some((p) => p.product_id && !String(p.product_category || '').trim())) {
+    productsLoadFailed = true;
+  }
 
   const areaLabels = locationAreaLabels([
     ...parseJsonArray(service.areas_serviced),
@@ -2165,6 +2262,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+
   for (const observation of protocol.observations) {
     if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
     findings.push({
@@ -2179,6 +2277,116 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  // Render-time treatment reconciliation (codex P1 r19): the completion SMS
+  // links this report immediately — a customer can open it BEFORE the
+  // grounded regen or stored-copy sanitize lands, and nothing shown can be
+  // retracted. Reconcile recommendation-derived copy against today's
+  // applications in-memory as the last line of defense (pure, no DB/LLM);
+  // storage is healed separately by the completion pipeline.
+  // Guard outcome, consulted again after the narrative overlay (codex P1 r28).
+  let lawnTreatmentGuard = null;
+  if (serviceLine === 'lawn' && lawnAssessment?.scores) {
+    try {
+      const { treatmentGuard } = require('../knowledge-bridge');
+      const guardProducts = products.map((p) => ({
+        product_name: p.product_name,
+        product_id: p.product_id || null,
+        product_category: p.product_category || p.approved_report_product_facts?.category || null,
+      }));
+      // FAIL CLOSED on unverifiable categories (codex P1 r24):
+      // attachApprovedReportProductFacts fail-softs to unenriched rows on a
+      // catalog outage, which would make this guard silently skip. Verify
+      // independently: rows still missing a category but carrying a
+      // product_id get one direct catalog lookup — an ERROR there means the
+      // applied classes are UNKNOWN, and recommendation-derived copy is
+      // suppressed outright rather than trusted.
+      let categoriesVerified = !productsLoadFailed;
+      const unresolvedIds = [...new Set(guardProducts.filter((p) => !p.product_category && p.product_id).map((p) => String(p.product_id)))];
+      if (unresolvedIds.length) {
+        try {
+          const catRows = await knex('products_catalog').whereIn('id', unresolvedIds).select('id', 'category');
+          const catById = new Map(catRows.map((c) => [String(c.id), c.category]));
+          for (const gp of guardProducts) {
+            if (!gp.product_category && gp.product_id) gp.product_category = catById.get(String(gp.product_id)) || null;
+          }
+        } catch {
+          categoriesVerified = false;
+        }
+      }
+      lawnTreatmentGuard = { verified: categoriesVerified, guardProducts, treatmentGuard };
+      if (!categoriesVerified) {
+        const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        const NEUTRAL_RECS = {
+          summary: NEUTRAL_SUMMARY,
+          recommendations: [],
+          nextVisitFocus: 'Recheck the areas treated today and confirm how the lawn is responding to the applications.',
+          customerTip: '',
+        };
+        if (lawnAssessment.scores.recommendations) lawnAssessment.scores.recommendations = { ...NEUTRAL_RECS };
+        if (lawnAssessment.recommendations) lawnAssessment.recommendations = { ...NEUTRAL_RECS };
+        lawnAssessment.scores.aiSummary = NEUTRAL_SUMMARY;
+        lawnAssessment.aiSummary = NEUTRAL_SUMMARY;
+        if (lawnAssessment.snapshot && typeof lawnAssessment.snapshot === 'object') {
+          lawnAssessment.snapshot.summary = NEUTRAL_SUMMARY;
+          if (Array.isArray(lawnAssessment.snapshot.findings)) lawnAssessment.snapshot.findings = [];
+          if (Array.isArray(lawnAssessment.snapshot.nextWatchItems)) lawnAssessment.snapshot.nextWatchItems = [];
+        }
+        if (Array.isArray(lawnAssessment.recommendationCards)) lawnAssessment.recommendationCards = [];
+        if (lawnAssessment.customerSummary) lawnAssessment.customerSummary = NEUTRAL_SUMMARY;
+        console.warn('[report-data] product categories unverifiable (catalog lookup failed) — recommendation-derived copy suppressed for this render');
+      } else if (guardProducts.length) {
+        // Products-aware (codex P1 r26): name-phrased deferrals ("Hold off
+        // on Celsius WG") and unresolved-category rows are checked too.
+        const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        const sanitizeRecsInPlace = (host, key) => {
+          const recs = host?.[key];
+          if (!recs || typeof recs !== 'object') return;
+          const { parsed } = treatmentGuard.sanitizeRecommendationsAgainstTreatment(
+            JSON.parse(JSON.stringify(recs)), guardProducts,
+          );
+          host[key] = parsed;
+        };
+        // BOTH data shapes: scores.* AND the duplicated top-level fields —
+        // reconcileLawnReport reads top-level recommendations.nextVisitFocus
+        // and buildLawnReportV2 reads top-level aiSummary (codex P1 r20).
+        sanitizeRecsInPlace(lawnAssessment.scores, 'recommendations');
+        sanitizeRecsInPlace(lawnAssessment, 'recommendations');
+        if (treatmentGuard.contradictsAppliedProducts(lawnAssessment.scores.aiSummary, guardProducts)) {
+          lawnAssessment.scores.aiSummary = NEUTRAL_SUMMARY;
+        }
+        if (treatmentGuard.contradictsAppliedProducts(lawnAssessment.aiSummary, guardProducts)) {
+          lawnAssessment.aiSummary = NEUTRAL_SUMMARY;
+        }
+        // Legacy snapshot + recommendation cards feed the public report
+        // assistant (/api/reports/:token/ask) directly — reconcile those
+        // customer-facing shapes too (codex P1 r23).
+        const contradicts = (text) => treatmentGuard.contradictsAppliedProducts(text, guardProducts);
+        const snap = lawnAssessment.snapshot;
+        if (snap && typeof snap === 'object') {
+          if (contradicts(snap.summary)) snap.summary = NEUTRAL_SUMMARY;
+          if (Array.isArray(snap.findings)) {
+            snap.findings = snap.findings.filter((f) => !contradicts(`${f?.customerCopy || ''} ${f?.title || ''}`));
+          }
+          if (Array.isArray(snap.nextWatchItems)) {
+            snap.nextWatchItems = snap.nextWatchItems.filter((item) => !contradicts(item));
+          }
+        }
+        if (Array.isArray(lawnAssessment.recommendationCards)) {
+          lawnAssessment.recommendationCards = lawnAssessment.recommendationCards.filter(
+            (card) => !contradicts(`${card?.title || ''} ${card?.customerCopy || ''} ${card?.reason || ''}`),
+          );
+        }
+        // customerSummary was COPIED from snapshot.summary before this guard
+        // ran — reconcile the copy too (heading, dynamic hero, and the
+        // report assistant all render it — codex P1 r27).
+        if (contradicts(lawnAssessment.customerSummary)) {
+          lawnAssessment.customerSummary = NEUTRAL_SUMMARY;
+        }
+      }
+    } catch (guardErr) {
+      console.warn(`[report-data] render-time treatment reconciliation skipped: ${guardErr.message}`);
+    }
+  }
   // Mowing height-of-cut — surfaced at the top level (not inside lawnAssessment)
   // so it shows on lawn reports even when there's no vision assessment. Null when
   // not a lawn visit or no reading was captured. The trend is capped at THIS
@@ -2215,12 +2423,43 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Typed reports carry their real findings in the snapshot (rendered by
   // TypedFindingsCard) — the legacy no-activity fallback would contradict
   // e.g. an active cockroach visit's snapshot.
-  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
+  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal
+    && !(serviceLine === 'lawn' && productsLoadFailed)
+    && shouldAddNoActivityFinding({ service, structured, protocol, interiorOnlyLane })) {
     findings.push({
       id: `no-activity-${service.id}`,
       zoneId: null,
       ...buildNoActivityFinding(serviceLine),
     });
+  }
+
+  // LAWN honesty pass (owner report audit 2026-07-30), mirroring the pest pass
+  // above but keyed on treatment evidence: a "No lawn issues observed" row
+  // (persisted at closeout OR the render-time fallback just above) must not
+  // sit on the same page as a visit that applied corrective product classes
+  // (fungicide/herbicide) — routine lawn visits are fertilizer + preventive
+  // insecticide only. Product rows are the ONLY trigger: keyword-matching the
+  // raw technician notes would fire on negated statements ("no weeds or
+  // disease observed") and derive customer copy from unparsed prose (codex
+  // P1 #3093). The softened wording claims nothing beyond the record: no
+  // structured corrective finding was logged.
+  if (serviceLine === 'lawn' && findings.some((f) => f.category === 'no_activity')) {
+    // Enriched rows, not rawProducts: legacy rows with a null
+    // product_category recover it from the catalog via
+    // attachApprovedReportProductFacts (codex P2 r17).
+    // An outage-empty application set is NOT proof the visit applied
+    // nothing — the absolute "no lawn issues" claim must soften on that
+    // path too (codex P1 r30).
+    const correctiveApplied = productsLoadFailed || products.some((p) =>
+      /fungicide|herbicide/i.test(String(p.product_category || p.approved_report_product_facts?.category || '')));
+    if (correctiveApplied) {
+      for (const finding of findings) {
+        if (finding.category === 'no_activity') {
+          finding.title = 'No corrective findings logged this visit';
+          finding.detail = 'See your technician’s visit summary for what was applied and observed today; no separate corrective finding was logged.';
+        }
+      }
+    }
   }
 
   // Pest Pressure is computed by the pest-pressure orchestrator on report
@@ -2255,6 +2494,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // types can detect to the 'pest' line and slip past the recurring-label
   // gates, which would leak the pressure UI (or its insufficient-data
   // placeholder) onto e.g. a cockroach cleanout report. Explicit gate.
+  // Untyped one-time treatments get the same treatment via the resolved
+  // completion profile (codex r6): their labels carry no cadence word, so
+  // the view's label heuristic alone would render the placeholder card
+  // with a live rating picker.
+  const pestPressureOneTimeExcluded = typedSnapshot
+    ? false
+    : await isOneTimePressureExcludedRecord(service, knex);
   const pestPressure = typedSnapshot
     ? null
     : buildPestPressureCustomerView({
@@ -2262,6 +2508,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       scoreRow: pestPressureRow,
       serviceRecord: service,
       historyRows: pestPressureHistory,
+      oneTimeExcluded: pestPressureOneTimeExcluded,
     });
   const activity = typedSnapshot
     ? await loadActivityCustomerView(knex, { snapshot: typedSnapshot, service }).catch(() => null)
@@ -2408,6 +2655,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceLine,
     serviceType: service.service_type,
     workflowEvents,
+    // Typed specialty reports name the actual service in the completed event.
+    serviceLabel: typedSnapshot ? (linkedServiceName || null) : null,
     customerInteraction: service.customer_interaction || structured.customerInteraction || structured.customer_interaction || null,
     config: visitTimelineConfig,
   });
@@ -2444,7 +2693,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // break report rendering. Gated by GATE_TREATMENT_ZONE_MAP.
   let tracedTreatmentZone = null;
   try {
-    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id) {
+    // Interior-only treatments (bed bug) never render a satellite spray
+    // outline — a trace saved before the tracer was hidden for this lane
+    // is stale exterior evidence on an interior treatment's report
+    // (codex P2 r6; stable-key classification r9).
+    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id && !interiorOnlyLane) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -2455,15 +2708,28 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS
         ).catch(() => null);
         if (tracedSnapshotUrl) {
+          // lawn_highlight rows may carry the transparent highlight layer —
+          // the report pulses it over the snapshot (owner 2026-07-30).
+          // Fail-soft: no mask (legacy rows, spray/outline saves, presign
+          // hiccup) just means a static image.
+          let tracedMaskUrl = null;
+          if (tracedRow.capture_mode === 'lawn_highlight' && tracedRow.mask_s3_key) {
+            tracedMaskUrl = await PhotoService.getViewUrl(
+              tracedRow.mask_s3_key,
+              PhotoService.CUSTOMER_DWELL_TTL_SECONDS
+            ).catch(() => null);
+          }
           tracedTreatmentZone = {
             snapshotUrl: tracedSnapshotUrl,
+            maskUrl: tracedMaskUrl,
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
-            // 'lawn' | 'perimeter' | 'interior' | null (legacy rows predate
-            // the column) — the client only claims "treated lawn area" /
-            // interior coverage for rows actually captured by those
-            // workflows (codex P1 #3038; interior owner 2026-07-29).
+            // 'lawn' | 'lawn_highlight' | 'perimeter' | 'interior' | null
+            // (legacy rows predate the column) — the client only claims
+            // "highlighted"/"treated lawn area"/interior coverage for rows
+            // actually captured by those workflows (codex P1 #3038; interior
+            // owner 2026-07-29; lawn_highlight codex P1 #3075).
             captureMode: tracedRow.capture_mode || null,
             label: tracedRow.capture_mode === 'interior'
               ? 'Interior and perimeter treatment traced on-site by your technician.'
@@ -2589,7 +2855,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
-  const payloadTracedExteriorZone = await resolveTracedExteriorZone(service, knex);
+  // Pass the already-resolved classification so the resolver does not
+  // re-resolve the profile for the report payload path.
+  const payloadTracedExteriorZone = interiorOnlyLane
+    ? false
+    : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex);
   const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),
@@ -2784,6 +3054,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         // 'low' when the series is the city-collective fallback → chart shows "Limited
         // data this week" instead of implying a precise per-address reading we don't have.
         reportV2.rain7dConfidence = lawnAssessment.waterContext?.dailyRain7dConfidence || null;
+        // Which provider measured these days — the chart prints the NOAA
+        // attribution + "local totals may vary" only when the numbers really
+        // are radar/gauge derived, never over a pure model week.
+        reportV2.rain7dSource = lawnAssessment.waterContext?.rainfall7dProvider || null;
       }
 
       // Next scheduled lawn visit. Honest-precision rule: a CONFIDENT date only from
@@ -2849,11 +3123,50 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       }
 
       if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
-        reportV2 = await applyLawnReportNarrative(reportV2, {
-          grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
-          observations: lawnAssessment?.observations || '',
-          customerConcern: structuredCustomerConcern(structured),
-        }).catch(() => reportV2);
+        // The overlay rewrites customer-facing prose and validates only
+        // banned-copy + rain-window rules — it can reintroduce advice that
+        // contradicts today's applications (codex P1 r28). Skip it entirely
+        // when treatment data is unverifiable, and reconcile its output
+        // against the guard otherwise, restoring the deterministic string
+        // for any field it contradicted.
+        if (lawnTreatmentGuard && !lawnTreatmentGuard.verified) {
+          console.warn('[report-data] lawn narrative overlay skipped — treatment data unverifiable');
+        } else {
+          const preOverlay = JSON.parse(JSON.stringify(reportV2));
+          reportV2 = await applyLawnReportNarrative(reportV2, {
+            grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
+            observations: lawnAssessment?.observations || '',
+            customerConcern: structuredCustomerConcern(structured),
+          }).catch(() => reportV2);
+          if (lawnTreatmentGuard?.guardProducts?.length) {
+            const { treatmentGuard: tg, guardProducts: gp } = lawnTreatmentGuard;
+            const bad = (text) => tg.contradictsAppliedProducts(text, gp);
+            const restore = (host, prev, key) => {
+              if (host && prev && typeof host[key] === 'string' && bad(host[key])) host[key] = prev[key];
+            };
+            restore(reportV2.snapshot, preOverlay.snapshot, 'statusHeadline');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'mainWatch');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'customerAction');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'rootCause');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'wavesNext');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'treatmentSummary');
+            restore(reportV2.water, preOverlay.water, 'explanation');
+            restore(reportV2.mowing, preOverlay.mowing, 'recommendation');
+            restore(reportV2.treatment, preOverlay.treatment, 'summary');
+            restore(reportV2, preOverlay, 'todaysResult');
+            restore(reportV2, preOverlay, 'smsSummary');
+            (reportV2.diagnosis || []).forEach((d, i) => {
+              const prev = preOverlay.diagnosis?.[i];
+              restore(d, prev, 'explanation');
+              restore(d, prev, 'customerExplanation');
+            });
+            (reportV2.insights || []).forEach((ins, i) => {
+              const prev = preOverlay.insights?.[i];
+              ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'].forEach((k) => restore(ins, prev, k));
+            });
+            if (reportV2.followUp && preOverlay.followUp) restore(reportV2.followUp, preOverlay.followUp, 'reason');
+          }
+        }
       }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
@@ -3369,6 +3682,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
 module.exports = {
   buildReportV1Data,
+  // Pure — exported so the rainfall-provenance contract can be tested against
+  // the real implementation rather than a copy of it.
+  buildLawnWaterContext,
   resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,

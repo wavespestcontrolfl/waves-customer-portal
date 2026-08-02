@@ -127,9 +127,13 @@ describe('applyVerifiedOverrides', () => {
 
 describe('getCachedLookup', () => {
   const freshRow = {
-    property_record: { squareFootage: 1348 },
+    // _source 'county': records WITHOUT county evidence age out on the
+    // short roll-miss TTL (tested below) — the base-TTL fixtures model the
+    // common county-backed case.
+    property_record: { squareFootage: 1348, _source: 'county' },
     lat: '26.9897000',
     lng: '-82.1390000',
+    data_saved_at: new Date(Date.now() - 3600000).toISOString(),
     expires_at: new Date(Date.now() + 86400000).toISOString(),
   };
 
@@ -177,6 +181,56 @@ describe('getCachedLookup', () => {
     expect(await getCachedLookup('100 Main St')).toBeNull();
   });
 
+  it('invalidates pre-marker park rows outright (cached before the park guards)', async () => {
+    // Cached while the GIS lane still retained park parcels: park-wide
+    // dimensions under a hybrid source, park identity in _parcel, no
+    // multiSitusParcel marker. hasCountyEvidence counts this as county
+    // evidence, so only the outright invalidation catches it.
+    const preMarkerPark = {
+      squareFootage: 2800,
+      lotSize: 200000,
+      _source: 'hybrid',
+      _parcel: { parcelId: '900000100', dorUseCode: '28', landUseDescription: 'Mobile Home Parks (1555)', residentialUnits: 226 },
+    };
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: preMarkerPark } });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+
+    // The same identity WITH the marker is a post-guard record — still a hit.
+    const marked = { ...preMarkerPark, _raw: { multiSitusParcel: { situsCount: 226, parkConfirmed: true } } };
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: marked } });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+  });
+
+  it('roll-miss rows (no county evidence) age out on the short TTL', async () => {
+    const aiOnly = { squareFootage: 1200, _source: 'ai' };
+    const days = (n) => new Date(Date.now() - n * 86400000).toISOString();
+
+    // Inside the short window → still a hit.
+    mockDbHandler = () => fakeTable({
+      row: { ...freshRow, property_record: aiOnly, data_saved_at: days(5) },
+    });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+
+    // Past the short window — stored expires_at (180d) still says fresh,
+    // but a re-run can now resolve the roll (multi-situs split), so miss.
+    mockDbHandler = () => fakeTable({
+      row: { ...freshRow, property_record: aiOnly, data_saved_at: days(30) },
+    });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+
+    // County-backed rows keep the base TTL at the same age.
+    mockDbHandler = () => fakeTable({
+      row: { ...freshRow, data_saved_at: days(30) },
+    });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+
+    // No data timestamp = can't prove freshness — fail toward live lookup.
+    mockDbHandler = () => fakeTable({
+      row: { ...freshRow, property_record: aiOnly, data_saved_at: null },
+    });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+  });
+
   it('kill switch disables reads but not override reads', async () => {
     process.env.PROPERTY_LOOKUP_CACHE_DISABLED = '1';
     mockDbHandler = () => fakeTable({
@@ -190,6 +244,49 @@ describe('getCachedLookup', () => {
     mockDbHandler = () => { throw new Error('db down'); };
     expect(await getCachedLookup('100 Main St')).toBeNull();
     expect(await getVerifiedOverrides('100 Main St')).toBeNull();
+  });
+
+  it('stale-imagery-conflict rows age out on the SHORT TTL despite a long stored expiry', async () => {
+    // The 33 prod rows poisoned before the guard shipped carry the 180-day
+    // expires_at — the read-side short TTL is what actually refreshes them.
+    const conflictRow = {
+      ...freshRow,
+      property_record: {
+        squareFootage: 2362,
+        stories: 2,
+        lotSize: 6985,
+        yearBuilt: new Date().getFullYear() - 1,
+        // County-backed record: keeps main's roll-miss short TTL out of this
+        // test's way so it isolates the stale-imagery TTL behavior.
+        _source: 'county',
+        _fieldEvidence: { squareFootage: { sourceType: 'county' }, yearBuilt: { sourceType: 'county' } },
+      },
+      ai_analysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
+      expires_at: new Date(Date.now() + 180 * 86400000).toISOString(),
+    };
+
+    // Past the 21-day short TTL → miss, even though expires_at is months out.
+    mockDbHandler = () => fakeTable({
+      row: { ...conflictRow, data_saved_at: new Date(Date.now() - 30 * 86400000).toISOString() },
+    });
+    expect(await getCachedLookup('100 Sample Build Ct')).toBeNull();
+
+    // Inside the short TTL → still a hit.
+    mockDbHandler = () => fakeTable({
+      row: { ...conflictRow, data_saved_at: new Date(Date.now() - 86400000).toISOString() },
+    });
+    expect(await getCachedLookup('100 Sample Build Ct')).toBeTruthy();
+
+    // A normal completed-property row (impervious measured > 0) at the same
+    // age keeps the standard TTL — no false eviction.
+    mockDbHandler = () => fakeTable({
+      row: {
+        ...conflictRow,
+        ai_analysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 85 },
+        data_saved_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+      },
+    });
+    expect(await getCachedLookup('100 Paved Ct')).toBeTruthy();
   });
 });
 
@@ -236,6 +333,18 @@ describe('saveLookup', () => {
     expect(writes[0][1].data_saved_at.toISOString()).toBe(lookupStart);
   });
 
+  it('writes the short roll-miss TTL for records without county evidence', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    await saveLookup('100 Main St', {
+      ...result,
+      propertyRecord: { county: '', _source: 'ai', _aiProviders: ['gemini'] },
+    });
+    const expiresMs = writes[0][1].expires_at.getTime() - Date.now();
+    expect(expiresMs).toBeLessThanOrEqual(21 * 86400000);
+    expect(expiresMs).toBeGreaterThan(20 * 86400000);
+  });
+
   it('never caches a failed lookup and respects the kill switch', async () => {
     const writes = [];
     mockDbHandler = () => fakeTable({ writes });
@@ -265,6 +374,32 @@ describe('saveLookup', () => {
   it('fails open on db errors', async () => {
     mockDbHandler = () => { throw new Error('db down'); };
     await expect(saveLookup('100 Main St', result)).resolves.toBeUndefined();
+  });
+
+  it('a stale-imagery-conflict save gets the short TTL, a normal save keeps the base TTL', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    const conflictResult = {
+      ...result,
+      propertyRecord: {
+        ...result.propertyRecord,
+        squareFootage: 2362,
+        stories: 2,
+        lotSize: 6985,
+        yearBuilt: new Date().getFullYear() - 1,
+        _fieldEvidence: { squareFootage: { sourceType: 'county' }, yearBuilt: { sourceType: 'county' } },
+      },
+      aiAnalysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
+    };
+    await saveLookup('100 Sample Build Ct, Parrish, FL 34219', conflictResult);
+    await saveLookup('2965 Rock Creek Dr, Port Charlotte, FL 33948', result);
+
+    const conflictExpiry = writes[0][1].expires_at.getTime() - Date.now();
+    const normalExpiry = writes[1][1].expires_at.getTime() - Date.now();
+    // Short (vacant-parcel) TTL = 21 days; base TTL = 180 days.
+    expect(conflictExpiry).toBeLessThanOrEqual(21 * 86400000);
+    expect(conflictExpiry).toBeGreaterThan(20 * 86400000);
+    expect(normalExpiry).toBeGreaterThan(179 * 86400000);
   });
 });
 

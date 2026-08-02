@@ -621,6 +621,41 @@ export function visitWorkSummary(data = {}, fallback = '') {
     completed.length ? `${completed.length} area${completed.length === 1 ? '' : 's'} serviced` : null,
     photoCount ? `${photoCount} photo${photoCount === 1 ? '' : 's'} documented` : null,
   ].filter(Boolean);
+  // Typed specialty reports (bed bug etc.) often carry no applications or
+  // coverage rows, which left this cell on the generic fallback even though
+  // the typed findings record exactly what was done — derive it from them.
+  if (!appCount && !completed.length) {
+    const typedFindings = Array.isArray(data.typedReport?.findings) ? data.typedReport.findings : [];
+    const work = typedFindings.find((f) => f?.fieldKey === 'work_completed');
+    // Count only from authoritative arrays — legacy snapshots persist the
+    // chips as one comma-joined string, and splitting display text would
+    // shred labels containing commas (ratified rule, see the findings-card
+    // chips above). Legacy strings get a countless neutral phrase instead.
+    const workParts = Array.isArray(work?.customerValueParts) && work.customerValueParts.length
+      ? work.customerValueParts
+      : (Array.isArray(work?.value) && work.value.length ? work.value : null);
+    const hasLegacyWorkText = !workParts
+      && [work?.customerValueLabel, work?.value].some((v) => typeof v === 'string' && v.trim());
+    const rooms = typedFindings.find((f) => f?.fieldKey === 'rooms_treated');
+    const roomsText = [rooms?.customerValueLabel, rooms?.value]
+      .map((v) => (typeof v === 'string' ? v.trim() : ''))
+      .find(Boolean) || '';
+    // "service steps", not "treatments" — work chips include inspection and
+    // recommendation entries, and a visit of only those must not make a
+    // customer-facing treatment claim.
+    const actionPart = workParts
+      ? `${workParts.length} service step${workParts.length === 1 ? '' : 's'} completed`
+      : (hasLegacyWorkText ? 'Service work completed' : null);
+    const typedParts = [
+      actionPart,
+      // Rooms only RIDE ALONG with an action — work_completed is optional,
+      // and a bare location ("Primary bedroom") is not a statement of what
+      // Waves did (codex P2, post-merge on #3111).
+      actionPart && roomsText && roomsText.length <= 40 ? roomsText : null,
+      photoCount ? `${photoCount} photo${photoCount === 1 ? '' : 's'} documented` : null,
+    ].filter(Boolean);
+    if (typedParts.length) return typedParts.join(' · ');
+  }
   return parts.length ? parts.join(' · ') : fallback;
 }
 
@@ -782,14 +817,34 @@ function dynamicHeroSummary(data) {
   return 'Your routine service is complete.';
 }
 
-function conditionRows(conditions = {}) {
+function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource = null } = {}) {
+  // Lawn reports show the week's rain (the number the water card and 7-day
+  // chart are built from) so every rain figure on the page agrees; other
+  // lines keep the trailing-24h capture (owner 2026-07-30).
+  const usingWeeklyRain = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn));
+  const rainRow = usingWeeklyRain
+    ? ['Rain this week', weeklyRainIn, ' in']
+    : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
+  // Credit the weekly figure's ACTUAL provider when it differs from the
+  // point-capture source — the property-week series is Open-Meteo, but the
+  // area-snapshot fallback's rainfall is local area records, not Open-Meteo
+  // (codex P2 #3093 ×2).
+  const sourceValue = usingWeeklyRain && weeklyRainSource
+    ? (conditions.source
+      ? (String(conditions.source).toLowerCase().includes(String(weeklyRainSource).toLowerCase())
+        ? conditions.source
+        : `${conditions.source} + ${weeklyRainSource}`)
+      // No point-capture source on the record — the weekly figure still has
+      // a known provider, and the Source row must credit it (codex P2 r14).
+      : weeklyRainSource)
+    : conditions.source;
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
     ['Humidity', conditions.humidity_pct ?? conditions.humidity, '%'],
     ['Wind', conditions.wind_mph ?? conditions.wind, ' mph'],
-    ['Rain last 24 hr', conditions.rain_24h_in, ' in'],
+    rainRow,
     ['Sky', conditions.sky ?? conditions.cloudCover, ''],
-    ['Source', conditions.source, ''],
+    ['Source', sourceValue, ''],
   ];
   return rows
     .filter(([, value]) => value !== null && value !== undefined && value !== '')
@@ -1112,10 +1167,13 @@ function conditionInterpretation(conditions = {}) {
     return 'Wind was elevated, so treatment was adjusted to match label and site conditions.';
   }
   if (Number.isFinite(rain) && rain > 0.25) {
-    return 'Recent rainfall was noted. Treatment decisions were adjusted for site conditions.';
+    return 'Rainfall in the 24 hours before treatment was noted. Treatment decisions were adjusted for site conditions.';
   }
   if (hasRain && hasWind && rain <= 0.1 && wind <= 10) {
-    return 'Weather was suitable for treatment. Low rainfall and moderate wind supported exterior application.';
+    // rain_24h_in is a point-in-time 24-hour capture — a wet week can end
+    // in a dry final day, and unqualified "low rainfall" beside the weekly
+    // "Rain this week" row reads as a contradiction (codex P2 r39).
+    return 'Weather was suitable for treatment. Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
   }
   if ((!hasRain || rain <= 0.1) && (!hasWind || wind <= 10)) {
     return 'Weather was marked suitable for treatment.';
@@ -1486,7 +1544,11 @@ function PressureTrendCard({ context, neighborhood, mode, token, embedded = fals
       <div className="pressure-trend-layout">
         <div>
           {!embedded && <h2>{pressureHeadline}</h2>}
-          <p className="pressure-summary">{context.customerSummary}</p>
+          {/* Embedded inside the Pest Pressure gauge card the gauge's own
+              summary already tells the score story — repeat only the
+              main-driver line, not the headline/summary (owner 2026-07-30:
+              one seamless box, no duplicate copy). */}
+          {!embedded && <p className="pressure-summary">{context.customerSummary}</p>}
           {current?.mainDriver && <p className="sr-muted">Main driver this visit: {current.mainDriver}</p>}
         </div>
         <PressureTrendChart points={context.points || []} neighborhood={neighborhood} summary={context.customerSummary} />
@@ -1954,6 +2016,29 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           live={mode === 'live'}
+          weeklyRainIn={data.serviceLine === 'lawn'
+            // Legacy lawn payloads (no reportV2) still carry the weekly
+            // total on the water context — the all-lawn weekly-rain
+            // invariant must hold on those permanent links too (codex P2
+            // r32).
+            ? (data.reportV2?.water?.rainInches ?? data.lawnAssessment?.waterContext?.rainfallInches7d ?? null)
+            : null}
+          weeklyRainSource={{
+            // MRMS is NOAA's gauge-corrected radar estimate; a mixed week
+            // takes measurements where radar had them and the model on the
+            // gaps, and the Source row has to say so rather than crediting
+            // one provider for both. Unmapped keys fall through to null (no
+            // Source row) instead of printing a raw enum at the customer.
+            open_meteo: 'Open-Meteo',
+            fawn: 'FAWN',
+            area: 'local area rain records',
+            mrms: 'NOAA radar + rain gauges',
+            'mrms+open_meteo': 'NOAA radar + rain gauges, with Open-Meteo on gaps',
+            property_point: 'Open-Meteo',
+            city_collective: 'Open-Meteo (local area)',
+          }[
+            data.reportV2?.water?.rainProvider || data.lawnAssessment?.waterContext?.rainfall7dProvider
+          ] || null}
         />
       </div>
     </section>
@@ -2120,8 +2205,8 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false }) {
-  const rows = conditionRows(conditions);
+function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null, weeklyRainSource = null }) {
+  const rows = conditionRows(conditions, { weeklyRainIn, weeklyRainSource });
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);
@@ -4040,7 +4125,10 @@ function normalizeVisitTimelineEventType(type) {
   return key;
 }
 
-function serviceCompletedDescription(serviceLine) {
+function serviceCompletedDescription(serviceLine, serviceLabel) {
+  // Typed specialty reports name the actual service — "the pest control
+  // service" reads wrong under a Bed Bug Treatment header.
+  if (serviceLabel) return `Your technician completed your ${serviceLabel} and finalized the report.`;
   const descriptions = {
     pest: 'Your technician completed the pest control service and finalized the report.',
     lawn: 'Your technician completed the lawn service and finalized the report.',
@@ -4060,11 +4148,11 @@ function timelineDefaultLabel(type) {
   return formatEnumLabel(type);
 }
 
-function timelineDefaultDescription(type, serviceLine, occurredAt) {
+function timelineDefaultDescription(type, serviceLine, occurredAt, serviceLabel = null) {
   if (type === 'technician_en_route') return 'Your technician was on the way to the property.';
   if (type === 'technician_on_site') return 'Your technician was recorded at the property.';
   if (type === 'service_completed') {
-    return occurredAt ? serviceCompletedDescription(serviceLine) : 'The service was marked complete.';
+    return occurredAt ? serviceCompletedDescription(serviceLine, serviceLabel) : 'The service was marked complete.';
   }
   return '';
 }
@@ -4098,7 +4186,7 @@ function normalizeVisitTimelineConfig(config = {}) {
   return merged;
 }
 
-function normalizeVisitTimelineEvent(event = {}, index = 0, serviceLine = 'default', config = DEFAULT_VISIT_TIMELINE_CONFIG) {
+function normalizeVisitTimelineEvent(event = {}, index = 0, serviceLine = 'default', config = DEFAULT_VISIT_TIMELINE_CONFIG, serviceLabel = null) {
   const type = normalizeVisitTimelineEventType(event.type);
   if (!PRIMARY_VISIT_TIMELINE_TYPES.has(type)) return null;
   const occurredAt = firstValidTimelineValue(
@@ -4113,7 +4201,7 @@ function normalizeVisitTimelineEvent(event = {}, index = 0, serviceLine = 'defau
     event.customerDescription
     || event.customerVisibleDescription
     || event.customer_visible_description
-    || timelineDefaultDescription(type, serviceLine, occurredAt)
+    || timelineDefaultDescription(type, serviceLine, occurredAt, serviceLabel)
     || '',
   ).trim();
   const source = event.source || (type === 'service_completed' ? 'service_report' : 'bouncie');
@@ -4322,9 +4410,14 @@ export function normalizeVisitTimeline({
   const hasServerTimeline = Boolean(source);
   const { arrivedAt, completedAt } = timelineAnchorTimes(timingSource, visitTiming);
   const reportCompleted = source?.status === 'completed' || completedTimelineReport(timingSource, workflowEvents);
+  // Typed specialty reports carry the linked service name — the completed
+  // event then says "your Bed Bug Treatment" instead of the per-line generic.
+  const typedServiceLabel = timingSource?.typedReport && typeof timingSource?.serviceDisplayName === 'string'
+    ? timingSource.serviceDisplayName.trim() || null
+    : null;
   const rawSourceEvents = Array.isArray(source?.events) ? source.events : workflowEvents;
   const nextEvents = (Array.isArray(rawSourceEvents) ? rawSourceEvents : [])
-    .map((event, index) => normalizeVisitTimelineEvent(event, index, normalizedServiceLine, resolvedConfig))
+    .map((event, index) => normalizeVisitTimelineEvent(event, index, normalizedServiceLine, resolvedConfig, typedServiceLabel))
     .filter(Boolean);
 
   const enRouteAt = firstValidTimelineValue(
@@ -4378,8 +4471,8 @@ export function normalizeVisitTimeline({
       source: 'service_report',
       confidence: completedAt ? 'high' : 'medium',
       status: 'completed',
-      customerDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine) : 'The service was marked complete.',
-      customerVisibleDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine) : 'The service was marked complete.',
+      customerDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine, typedServiceLabel) : 'The service was marked complete.',
+      customerVisibleDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine, typedServiceLabel) : 'The service was marked complete.',
       sortOrder: 3,
     });
   }
@@ -4479,7 +4572,7 @@ export function timelineEventsWithReportTiming(workflowEvents = [], customerInte
   }).events;
 }
 
-function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, customerInteraction, visitTiming, timingSource, loading = false }) {
+function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, customerInteraction, visitTiming, timingSource, loading = false, priorVisits = [] }) {
   const timeline = normalizeVisitTimeline({
     visitTimeline,
     workflowEvents,
@@ -4516,12 +4609,20 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
 
   if (!timeline.enabled) return null;
 
+  // Typed trend programs (bed bug) fold their cross-visit history into this
+  // card (owner 2026-07-31: one timeline story, not a separate "Visit
+  // history" card): prior visits lead as dated rows, today's events follow.
+  const historyRows = (Array.isArray(priorVisits) ? priorVisits : []).filter((v) => v && v.serviceDate);
   return (
     <section data-glass="card" className="sr-section service-workflow-section" id="service-timeline">
       <div className="coverage-section-header">
         <div>
           <h2>{timeline.title || 'Visit Timeline'}</h2>
-          <p className="map-context-copy">{timeline.intro || "Here’s a simple summary of today’s service visit."}</p>
+          <p className="map-context-copy">
+            {historyRows.length
+              ? 'Here’s a simple summary of this visit and your recent service history.'
+              : (timeline.intro || 'Here’s a simple summary of today’s service visit.')}
+          </p>
         </div>
       </div>
 
@@ -4530,6 +4631,19 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
       ) : (
         <>
           <ol className="service-workflow-timeline">
+            {historyRows.map((visit) => (
+              <li className="workflow-event workflow-status-completed" key={visit.serviceRecordId || visit.serviceDate}>
+                <span className="workflow-event-icon" aria-hidden="true">
+                  <CheckCircle2 size={16} strokeWidth={2} />
+                </span>
+                <div className="workflow-event-body">
+                  <div className="workflow-event-heading">
+                    <h3>{formatTimelineDate(visit.serviceDate)}</h3>
+                  </div>
+                  {visit.headline && <p>{visit.headline}</p>}
+                </div>
+              </li>
+            ))}
             {events.map((event) => {
               const Icon = workflowIconForType(event.type);
               return (
@@ -4875,7 +4989,7 @@ function LegacyReport({ data, token, glass = false }) {
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
       </div>
-      <BrandFooter />
+      <BrandFooter appBadges={false} />
     </div>
   );
 }
@@ -4943,6 +5057,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // slots lower down. `isV2LeadLayout` is the shared gate for that reordering.
   const isTreeShrubV2 = data.serviceLine === 'tree_shrub' && !!data.reportV2;
   const isV2LeadLayout = (isLawnReport && !!data.reportV2) || isTreeShrubV2;
+  // RULE (owner 2026-07-30): the pressure trend and the Pest Pressure gauge
+  // render as ONE box, not two stacked cards. When the gauge will render,
+  // the trend embeds inside it (replacing the gauge's own history chart);
+  // the standalone trend card remains only for layouts with no gauge.
+  const pressureGaugeVisible = !data.activity
+    && !data.pestReportV2
+    && !data.mosquitoReportV2
+    && !!data.pestPressure
+    && data.pestPressure.enabled !== false
+    && data.pestPressure.showOnCustomerReport !== false;
   const proofMoments = Array.isArray(data.proofMoments)
     ? data.proofMoments
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
@@ -4973,6 +5097,24 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   });
   const hasPestPressure = Boolean(data.pestPressure && data.pestPressure.showOnCustomerReport !== false && data.pestPressure.enabled !== false);
   const hasReentry = Boolean(dynamicContext.reentry);
+  // Bed bug: the typed narrative owns the report's ONE summary surface even
+  // without a Pest/Mosquito V2 hero (owner 2026-07-31) — Today's Result
+  // carries the narrative body and the legacy Visit Summary card is
+  // suppressed, the same single-summary pattern as the V2 paths. Narrative
+  // is live-only upstream, so pdf/static keep the legacy layout untouched.
+  const typedNarrativeOwnsSummary = data.summarySource === 'typed_narrative'
+    && data.typedReport?.type === 'bed_bug'
+    && !data.pestReportV2 && !data.mosquitoReportV2;
+  // Bed bug also folds its cross-visit activity history into the Visit
+  // Timeline card (one chronological story) — the standalone "Visit
+  // history" card is suppressed only when the merged rows actually render.
+  const typedTimelineVisits = Array.isArray(data.typedVisitTimeline?.visits)
+    ? data.typedVisitTimeline.visits.filter(Boolean)
+    : [];
+  const mergeTypedVisitHistory = data.typedReport?.type === 'bed_bug'
+    && typedTimelineVisits.length >= 2
+    && normalizedVisitTimeline.enabled
+    && (normalizedVisitTimeline.events || []).length > 0;
   // Lawn and tree & shrub reports don't show the per-area Coverage map — the
   // lawn-intelligence/assessment surfaces tell that story instead. Pest V2
   // hides it too (the "Where we protected" diagram replaces the lettered map).
@@ -4994,6 +5136,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     || Boolean(data.rodentReportRefresh && data.serviceCoverage?.enabled === false)
     || ((data.serviceLine === 'lawn'
       || /tree|shrub/.test(String(data.serviceLine || ''))
+      // Pest reports drop the generic lettered coverage card (owner
+      // 2026-07-30: "we don't use this") — the card returns only when the
+      // tech traced a real spray map, which renders in this same slot.
+      || data.serviceLine === 'pest'
       // Mosquito V2's habitat diagram replaces the lettered map the same way.
       || Boolean(data.mosquitoReportV2))
       && !data.treatmentMap?.traced?.snapshotUrl);
@@ -8100,19 +8246,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Staff-only shadow reports keep the internal notice on top. */}
         {mode === 'live' && data.internalOnly && <InternalReviewBar />}
 
+        {/* RULE (owner 2026-07-30, supersedes the 07-28 audit placement):
+            the report tools — Download PDF / Share / Print / Portal Login —
+            render at the TOP of EVERY service report, above the Waves AI
+            bar. */}
+        {mode === 'live' && !data.internalOnly && (
+          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />
+        )}
+
         {/* Ask Waves floats with the customer: sticky under the shell header for
             the whole scroll (owner ask 2026-07-09). Live only — the pdf/static
             document keeps the legacy section below instead. */}
         <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
-
-        {/* Utility bar sits BELOW the greeting/result: on a phone the stacked
-            Download/Share/Print/Login buttons used to fill the entire first
-            screen before the customer saw their own report (audit 2026-07-28). */}
-        {mode === 'live' && !data.internalOnly && (
-          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />
-        )}
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
@@ -8123,7 +8270,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <TodaysResultCard
           typedReport={data.typedReport}
-          bodyOverride={data.summarySource === 'typed_narrative' && (data.pestReportV2 || data.mosquitoReportV2)
+          bodyOverride={data.summarySource === 'typed_narrative'
+            && (data.pestReportV2 || data.mosquitoReportV2 || typedNarrativeOwnsSummary)
             ? cleanVisitSummary(data.summary)
             : null}
         />
@@ -8150,6 +8298,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             customerInteraction={data.customerInteraction}
             visitTiming={data.visitTiming}
             timingSource={data}
+            priorVisits={mergeTypedVisitHistory ? typedTimelineVisits.filter((v) => !v.isCurrent) : []}
           />
         )}
 
@@ -8167,6 +8316,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               token={token}
               mode={mode}
               tracedMap={data.treatmentMap?.traced || null}
+              /* Pressure trend rides INSIDE the hero (owner 2026-07-30:
+                 "merge into one block") — the standalone card below is
+                 suppressed whenever this slot is filled. */
+              pressureTrendSlot={dynamicContext.pressureTrend && data.pestReportV2?.status ? (
+                <PressureTrendCard
+                  context={dynamicContext.pressureTrend}
+                  neighborhood={dynamicContext.neighborhoodPressure}
+                  mode={mode}
+                  token={token}
+                  embedded
+                />
+              ) : null}
             />
           </div>
         )}
@@ -8219,8 +8380,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* Pest/Mosquito V2 own the summary slot (the dashboard above carries
             the id="visit-summary" anchor), so the legacy Visit Summary
-            paragraph is suppressed for them to avoid showing the report twice. */}
-        {!data.pestReportV2 && !data.mosquitoReportV2 && (
+            paragraph is suppressed for them to avoid showing the report twice.
+            Bed bug's typed narrative owns the summary the same way (it renders
+            as the Today's Result body above) — quick-nav's #visit-summary
+            anchor only renders on non-live modes, where the narrative never
+            applies and this section still mounts. */}
+        {!data.pestReportV2 && !data.mosquitoReportV2 && !typedNarrativeOwnsSummary && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
@@ -8316,7 +8481,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             there — same pattern as LawnProgramOverviewCard below. */}
         {!data.reportV2 && <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />}
 
-        {dynamicContext.pressureTrend && (
+        {/* Standalone trend card: only for layouts that embed it nowhere
+            else — the gauge card hosts it on recurring reports, and the pest
+            V2 hero hosts it on dashboard reports (owner 2026-07-30). */}
+        {dynamicContext.pressureTrend && !pressureGaugeVisible && !data.pestReportV2?.status && (
           <PressureTrendCard
             context={dynamicContext.pressureTrend}
             neighborhood={dynamicContext.neighborhoodPressure}
@@ -8339,12 +8507,28 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hero on typed visits so the reading still shows exactly once. */}
         {((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
           ? <ActivityCard data={data.activity} />
-          : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />)}
+          : (
+            <PestPressureCard
+              data={data.pestPressure}
+              token={mode === 'live' ? token : null}
+              trendSection={dynamicContext.pressureTrend && pressureGaugeVisible ? (
+                <PressureTrendCard
+                  context={dynamicContext.pressureTrend}
+                  neighborhood={dynamicContext.neighborhoodPressure}
+                  mode={mode}
+                  token={token}
+                  embedded
+                />
+              ) : null}
+            />
+          ))}
 
         {/* D2: cross-visit timeline right under the gauge — the same trend
             neighborhood. Server ships it only for typed trend programs with
-            2+ visits, so this renders nothing everywhere else. */}
-        <TypedVisitTimelineCard timeline={data.typedVisitTimeline} />
+            2+ visits, so this renders nothing everywhere else. Bed bug folds
+            these rows into the Visit Timeline card instead (owner 2026-07-31)
+            — suppressed here only when the merged rows actually rendered. */}
+        {!mergeTypedVisitHistory && <TypedVisitTimelineCard timeline={data.typedVisitTimeline} />}
 
         {/* Companion typed sections (combined services): primary content
             first, then one block per companion — heading, Today's Result,
@@ -8522,7 +8706,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             sms_preview keep the quiet document sign-off so the print
             pipeline stays byte-identical. */}
         {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-        <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
+        <BrandFooter variant={mode === 'live' ? undefined : 'document'} appBadges={false} />
       </div>
     </div>
   );

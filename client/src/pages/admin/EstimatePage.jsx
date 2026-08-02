@@ -813,7 +813,6 @@ function EstimateToolView() {
     hasPool: "NO",
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
-    hasLargeDriveway: "NO",
     hasAttachedGarage: "NO",
     shrubDensity: "MODERATE",
     treeDensity: "MODERATE",
@@ -1389,9 +1388,17 @@ function EstimateToolView() {
       return;
     }
     if (key === "__custom__") {
+      // Mirrors EstimateToolViewV2: "Custom…" is a sentinel with no catalog
+      // row to source a type from, and leaving the type at its "NONE" default
+      // silently dropped the operator's amount. Seed PERCENT, preserving a
+      // type already chosen.
       setForm((f) => ({
         ...f,
         manualDiscountPreset: key,
+        manualDiscountType:
+          f.manualDiscountType && f.manualDiscountType !== "NONE"
+            ? f.manualDiscountType
+            : "PERCENT",
         manualDiscountEligibilityConfirmed: false,
         manualDiscountEligibilityOverrideReason: "",
       }));
@@ -1495,7 +1502,6 @@ function EstimateToolView() {
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
-      if (ep.largeDriveway) upd.hasLargeDriveway = "YES";
       // detectAttachedGarage always returns a boolean — assign BOTH outcomes
       // so a prior property's YES can never survive into the next lookup and
       // bill its $5/visit against the wrong home (hook P0 on #3040 r3).
@@ -1700,7 +1706,6 @@ function EstimateToolView() {
         upd.landscapeComplexity = data.landscape_complexity;
       if (data.has_pool) upd.hasPool = "YES";
       if (data.has_pool_cage) upd.hasPoolCage = "YES";
-      if (data.has_large_driveway) upd.hasLargeDriveway = "YES";
       if (data.near_water) upd.nearWater = "YES";
       const termiteFootprint =
         data.footprint_sqft ||
@@ -1873,6 +1878,13 @@ function EstimateToolView() {
         const selectedManualPreset = discountPresets.find(
           (x) => x.discount_key === form.manualDiscountPreset,
         );
+        // An amount with no type is the silent-drop case (mirrors V2).
+        if (manualDiscountType === "NONE" && manualDiscountValue > 0) {
+          alert(
+            "Pick a discount type (Percent % or Dollar $) — a discount amount with no type is not applied.",
+          );
+          return null;
+        }
         if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
           alert("Manual discount amount must be greater than zero.");
           return null;
@@ -2053,7 +2065,6 @@ function EstimateToolView() {
         profile.storiesSource = form._storiesEdited
           ? "manual"
           : profile.storiesSource;
-        profile.hasLargeDriveway = form.hasLargeDriveway === "YES";
         // Server key: translateV2CallToV1Input forwards `attachedGarage`
         // (property-lookup-v2), not hasAttachedGarage — the wrong key would
         // silently drop the $5/visit adjustment on the authoritative path.
@@ -2151,13 +2162,6 @@ function EstimateToolView() {
           else if (sd === "LIGHT")
             add("pest", "Light shrubs: -$5/visit", -5, "down");
           else add("pest", "Shrubs: not specified", 0, "info");
-          const td = p.treeDensity || p.trees;
-          if (td === "HEAVY") add("pest", "Heavy trees: +$6/visit", 6, "up");
-          else if (td === "MODERATE")
-            add("pest", "Moderate trees: $0/visit", 0, "info");
-          else if (td === "LIGHT")
-            add("pest", "Light trees: -$5/visit", -5, "down");
-          else add("pest", "Trees: not specified", 0, "info");
           const lc = p.landscapeComplexity || p.complexity;
           if (lc === "COMPLEX")
             add("pest", "Complex landscape: +$3/visit", 3, "up");
@@ -2168,8 +2172,6 @@ function EstimateToolView() {
           if (nw && nw !== "NONE" && nw !== "NO" && nw !== false)
             add("pest", "Near water: +$3/visit", 3, "up");
           else add("pest", "No water nearby: $0/visit", 0, "info");
-          if (p.hasLargeDriveway)
-            add("pest", "Large driveway: +$3/visit", 3, "up");
           if (p.yearBuilt)
             add(
               "property",
@@ -2209,6 +2211,13 @@ function EstimateToolView() {
     const selectedManualPreset = discountPresets.find(
       (x) => x.discount_key === form.manualDiscountPreset,
     );
+    // An amount with no type is the silent-drop case (mirrors V2).
+    if (manualDiscountType === "NONE" && manualDiscountValue > 0) {
+      alert(
+        "Pick a discount type (Percent % or Dollar $) — a discount amount with no type is not applied.",
+      );
+      return null;
+    }
     if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
       alert("Manual discount amount must be greater than zero.");
       return;
@@ -2243,7 +2252,6 @@ function EstimateToolView() {
       roachSeverity: form.germanRoachSeverity || "light",
       hasPool: yesNo(form.hasPool),
       hasPoolCage: yesNo(form.hasPoolCage),
-      hasLargeDriveway: yesNo(form.hasLargeDriveway),
       attachedGarage: yesNo(form.hasAttachedGarage),
       nearWater: yesNo(form.nearWater),
       isAfterHours: yesNo(form.isAfterHours),
@@ -2418,7 +2426,6 @@ function EstimateToolView() {
       hasPool: "NO",
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
-      hasLargeDriveway: "NO",
       hasAttachedGarage: "NO",
       nearWater: "NO",
       shrubDensity: "MODERATE",
@@ -2670,7 +2677,6 @@ function EstimateToolView() {
                       hasPool: "NO",
                       hasPoolCage: "NO",
                       poolCageSize: "MEDIUM",
-                      hasLargeDriveway: "NO",
                       hasAttachedGarage: "NO",
                       shrubDensity: "MODERATE",
                       treeDensity: "MODERATE",
@@ -3187,15 +3193,6 @@ function EstimateToolView() {
                     ]}
                   />
                 </Field>{" "}
-                <Field label="Large Driveway">
-                  <Select
-                    k="hasLargeDriveway"
-                    options={[
-                      { value: "NO", label: "No" },
-                      { value: "YES", label: "Yes" },
-                    ]}
-                  />
-                </Field>{" "}
               </div>
               {form.hasPoolCage === "YES" && (
                 <Field label="Pool Cage Size">
@@ -3352,7 +3349,7 @@ function EstimateToolView() {
                         ]}
                       />
                     </Field>{" "}
-                    <Field label="Roach Activity on Initial Visit">
+                    <Field label="Roach Activity">
                       <Select
                         k="roachModifier"
                         options={[
@@ -3370,7 +3367,7 @@ function EstimateToolView() {
                     </Field>{" "}
                   </div>{" "}
                   <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
-                    Adds a one-time Initial Roach Knockdown line to recurring pest. This is not a recurring per-visit multiplier.
+                    Adds a one-time Cockroach Treatment line to recurring pest. This is not a recurring per-visit multiplier.
                   </div>
                 </div>
               )}
@@ -4856,12 +4853,7 @@ function EstimateToolView() {
                         {E.property?.poolCage === "YES" ||
                         E.property?.poolCage === true
                           ? ` (caged${E.property?.poolCageSize ? `: ${String(E.property.poolCageSize).toLowerCase()}` : ""})`
-                          : ""}{" "}
-                        | Driveway:{" "}
-                        {E.property?.largeDriveway === "YES" ||
-                        E.property?.largeDriveway === true
-                          ? "Large"
-                          : "Normal"}
+                          : ""}
                         <br />
                         Shrubs:{" "}
                         {E.property?.shrubDensity ||
@@ -5076,8 +5068,9 @@ function EstimateToolView() {
                                 {R.pestRoachMod === "GERMAN"
                                   ? "German"
                                   : "Native"}{" "}
-                                roach initial is added as a one-time knockdown,
-                                not a recurring per-visit premium.
+                                cockroach treatment is added as a one-time
+                                first-visit charge, not a recurring per-visit
+                                premium.
                               </div>
                             )}
                           </div>
@@ -5575,7 +5568,7 @@ function EstimateToolView() {
                           {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} style={{ color: C.muted }}>
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
-                                ? "Skipped standalone native cockroach charge because recurring pest already includes Initial Native Roach Knockdown."
+                                ? "Skipped standalone native cockroach charge because recurring pest already includes the Cockroach Treatment."
                                 : item.skippedReason}
                             </div>
                           ))}

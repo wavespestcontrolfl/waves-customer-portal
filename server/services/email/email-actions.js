@@ -404,18 +404,23 @@ const LEAD_HARD_SKIP_SENDERS = [
 // marketplace's own call-tracking number and relay address, so the
 // automated-sender "real contact extracted" heuristic passes on the
 // marketplace's own details and mints junk leads (two "Boris" leads off
-// team@bark.com + Bark's (424) call-tracking number, 2026-07-20). Distinct
-// from AUTOMATED_RELAY_DOMAINS (Thumbtack), whose notifications DO carry
-// the prospect's contact. Never a lead; the email itself stays in the
+// team@bark.com + Bark's (424) call-tracking number, 2026-07-20).
+// Thumbtack moved here 2026-07-30 (owner ruling: "Thumbtack is not a lead,
+// this is marketing fluff") — its "Customer X needs Pest Control" mails are
+// pay-to-quote solicitations with a view-quote link and no prospect contact;
+// every one since 07-08 dead-ended at automated_sender_no_contact and rang a
+// review bell anyway. If Adam later pays for Thumbtack leads with real
+// contact info, move it back to AUTOMATED_RELAY_DOMAINS.
+// Never a lead; the email itself stays in the
 // inbox — auto-trash remains an admin blocked_email_senders decision.
-const LEAD_MARKETPLACE_SOLICITOR_DOMAINS = ['bark.com'];
+const LEAD_MARKETPLACE_SOLICITOR_DOMAINS = ['bark.com', 'thumbtack.com'];
 
-// Automated/no-reply senders and relay domains (e.g. Thumbtack lead
-// notifications). These CAN carry a real prospect, so a lead is still created
-// when the classifier extracted a real contact — but the automated
-// from_address must never be stored as the lead's email.
+// Automated/no-reply senders and relay domains: these CAN carry a real
+// prospect, so a lead is still created when the classifier extracted a real
+// contact — but the automated from_address must never be stored as the
+// lead's email.
 const AUTOMATED_SENDER_LOCAL_PARTS = ['do-not-reply', 'no-reply', 'noreply', 'donotreply', 'notifications'];
-const AUTOMATED_RELAY_DOMAINS = ['thumbtack.com'];
+const AUTOMATED_RELAY_DOMAINS = [];
 
 // Subject of the Waves auto-acknowledgment automation email
 // ("Thanks for reaching out to Waves, {{first_name}}" — seeded in
@@ -530,15 +535,18 @@ async function flagLeadNeedsReview(email, classification, reason) {
   });
 
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'email_alert',
-      title: `Possible lead needs review: ${email.from_name || email.from_address}`,
-      body: classification.summary || email.subject,
-      icon: '\uD83D\uDCE7',
-      link: '/admin/email',
-      metadata: JSON.stringify({ emailId: email.id, reason }),
-    });
+    // Through NotificationService so the admin bell policy chokepoint
+    // covers this bell (was a raw insert).
+    await require('../notification-service').notifyAdmin(
+      'email_alert',
+      `Possible lead needs review: ${email.from_name || email.from_address}`,
+      classification.summary || email.subject,
+      {
+        icon: '\uD83D\uDCE7',
+        link: '/admin/email',
+        metadata: { emailId: email.id, reason },
+      },
+    );
   } catch (e) { /* non-critical */ }
 
   // Ids only in logs — sender addresses and subjects are PII (subjects can
@@ -655,19 +663,22 @@ async function handleLeadInquiry(email, classification) {
       }
       if (followUpDraft?.created) {
         try {
-          await db('notifications').insert({
-            recipient_type: 'admin',
-            category: 'new_lead',
-            title: `Email follow-up completed a quote request — draft estimate ready`,
-            body: classification.summary || email.subject,
-            icon: '📧',
-            link: '/admin/estimates',
-            metadata: JSON.stringify({
-              emailId: email.id,
-              leadId: existingLead.id,
-              estimateId: followUpDraft.estimateId,
-            }),
-          });
+          // Through NotificationService so the admin bell policy chokepoint
+          // covers this bell (was a raw insert).
+          await require('../notification-service').notifyAdmin(
+            'new_lead',
+            `Email follow-up completed a quote request — draft estimate ready`,
+            classification.summary || email.subject,
+            {
+              icon: '📧',
+              link: '/admin/estimates',
+              metadata: {
+                emailId: email.id,
+                leadId: existingLead.id,
+                estimateId: followUpDraft.estimateId,
+              },
+            },
+          );
         } catch (e) { /* non-critical */ }
       }
     }
@@ -787,25 +798,27 @@ async function handleLeadInquiry(email, classification) {
   }
   const drafted = emailDraft?.created === true;
 
-  // Notification
+  // Notification — through NotificationService so the admin bell policy
+  // chokepoint covers this bell (was a raw insert).
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'new_lead',
-      title: drafted
+    await require('../notification-service').notifyAdmin(
+      'new_lead',
+      drafted
         ? `New lead from email: ${firstName} ${lastName} — draft estimate ready`
         : `New lead from email: ${firstName} ${lastName}`,
-      body: drafted
+      drafted
         ? `${classification.summary || email.subject} Draft estimate created — review and send.`
         : (classification.summary || email.subject),
-      icon: '\uD83D\uDCE7',
-      link: drafted ? '/admin/estimates' : '/admin/email',
-      metadata: JSON.stringify({
-        emailId: email.id,
-        leadId: lead.id,
-        ...(drafted ? { estimateId: emailDraft.estimateId } : {}),
-      }),
-    });
+      {
+        icon: '\uD83D\uDCE7',
+        link: drafted ? '/admin/estimates' : '/admin/email',
+        metadata: {
+          emailId: email.id,
+          leadId: lead.id,
+          ...(drafted ? { estimateId: emailDraft.estimateId } : {}),
+        },
+      },
+    );
   } catch (e) { /* non-critical */ }
 
   logger.info(`[email-actions] Lead created: ${lead.id} — ${extracted.service_interest || 'general'}`);
@@ -1102,15 +1115,18 @@ async function handleComplaint(email, classification) {
 
   // Urgent notification
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'email_alert',
-      title: `Complaint from ${email.from_name || email.from_address}`,
-      body: classification.summary || email.subject,
-      icon: '\u26A0\uFE0F',
-      link: '/admin/email',
-      metadata: JSON.stringify({ emailId: email.id, customerId: customer?.id }),
-    });
+    // Through NotificationService so the admin bell policy chokepoint
+    // covers this bell (was a raw insert).
+    await require('../notification-service').notifyAdmin(
+      'email_alert',
+      `Complaint from ${email.from_name || email.from_address}`,
+      classification.summary || email.subject,
+      {
+        icon: '\u26A0\uFE0F',
+        link: '/admin/email',
+        metadata: { emailId: email.id, customerId: customer?.id },
+      },
+    );
   } catch (e) { /* non-critical */ }
 
   logger.warn(`[email-actions] COMPLAINT received (email ${email.id})`);

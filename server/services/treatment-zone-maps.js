@@ -73,6 +73,9 @@ async function saveTreatmentZoneMap({
   zoom = null,
   address = null,
   snapshotPngBuffer = null,
+  // Transparent grass-highlight layer (lawn_highlight saves only) — the
+  // report animates this over the snapshot (owner 2026-07-30).
+  maskPngBuffer = null,
   captureMode = null,
   knex = db,
 }) {
@@ -103,9 +106,28 @@ async function saveTreatmentZoneMap({
     );
   }
 
+  let maskKey = null;
+  if (maskPngBuffer) {
+    if (!config.s3?.bucket) throw operationalError('S3 not configured', 500);
+    if (maskPngBuffer.length > MAX_SNAPSHOT_BYTES) {
+      throw operationalError('Mask exceeds the 8MB limit', 413);
+    }
+    maskKey =
+      `${TREATMENT_ZONE_PREFIX}${scheduledServiceId}/` +
+      `${Date.now()}-${crypto.randomBytes(4).toString('hex')}-mask.png`;
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: config.s3.bucket,
+        Key: maskKey,
+        Body: maskPngBuffer,
+        ContentType: 'image/png',
+      })
+    );
+  }
+
   const existing = await knex('treatment_zone_maps')
     .where({ scheduled_service_id: scheduledServiceId })
-    .first('id', 'snapshot_s3_key');
+    .first('id', 'snapshot_s3_key', 'mask_s3_key');
 
   const record = {
     scheduled_service_id: scheduledServiceId,
@@ -119,17 +141,23 @@ async function saveTreatmentZoneMap({
     zoom: finiteOrNull(zoom),
     address: address ? String(address).slice(0, 300) : null,
     snapshot_s3_key: snapshotKey || existing?.snapshot_s3_key || null,
-    // 'lawn' (turf outline) vs 'perimeter' (building spray trace) vs
-    // 'interior' (building footprint + interior wash, owner 2026-07-29) —
-    // anything else stores NULL, same as legacy rows (codex P1 #3038).
-    // 'lawn' and 'interior' are AREA claims: only a closed loop of 3+ points
-    // qualifies; an open lawn trace downgrades to unlabeled and an open
-    // interior trace downgrades to 'perimeter' (still true of the line it
-    // draws) so the report never presents a line as a treated area (codex
-    // P2 #3038, mirrors the client gate).
+    // The mask FOLLOWS the snapshot: a new snapshot without a mask (spray/
+    // outline-fallback save) must CLEAR any stale mask — a leftover
+    // highlight layer would pulse over a snapshot it doesn't match.
+    mask_s3_key: maskKey || (snapshotKey ? null : existing?.mask_s3_key || null),
+    // 'lawn' (turf outline) vs 'lawn_highlight' (grass mask baked into the
+    // snapshot — codex P1 #3075: the report must only claim "highlighted"
+    // when a highlight was actually saved) vs 'perimeter' (building spray
+    // trace) vs 'interior' (building footprint + interior wash, owner
+    // 2026-07-29) — anything else stores NULL, same as legacy rows (codex
+    // P1 #3038). Lawn modes and 'interior' are AREA claims: only a closed
+    // loop of 3+ points qualifies; open lawn traces downgrade to unlabeled
+    // and an open interior trace downgrades to 'perimeter' (still true of
+    // the line it draws) so the report never presents a line as a treated
+    // area (codex P2 #3038, mirrors the client gate).
     capture_mode: (() => {
-      const mode = ['lawn', 'perimeter', 'interior'].includes(captureMode) ? captureMode : null;
-      if (mode === 'lawn' && (!closedLoop || points.length < 3)) return null;
+      const mode = ['lawn', 'lawn_highlight', 'perimeter', 'interior'].includes(captureMode) ? captureMode : null;
+      if ((mode === 'lawn' || mode === 'lawn_highlight') && (!closedLoop || points.length < 3)) return null;
       if (mode === 'interior' && (!closedLoop || points.length < 3)) return 'perimeter';
       return mode;
     })(),
@@ -150,6 +178,16 @@ async function saveTreatmentZoneMap({
       );
     } catch (err) {
       logger.warn(`[treatment-zone] stale snapshot delete failed: ${err.message}`);
+    }
+  }
+  // Replaced or cleared mask: same best-effort cleanup.
+  if (existing?.mask_s3_key && existing.mask_s3_key !== record.mask_s3_key) {
+    try {
+      await s3.send(
+        new DeleteObjectCommand({ Bucket: config.s3.bucket, Key: existing.mask_s3_key })
+      );
+    } catch (err) {
+      logger.warn(`[treatment-zone] stale mask delete failed: ${err.message}`);
     }
   }
 

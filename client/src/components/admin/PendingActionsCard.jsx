@@ -73,7 +73,10 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
       if (decision === "confirm" && body.success === false) {
         setStatus(action.id, "failed", body.result?.error || "The action could not be completed");
       } else {
-        setStatus(action.id, done);
+        // A committed action can still carry a partial-failure warning
+        // (e.g. stops moved but some customers weren't texted) — surface it
+        // instead of a bare "Done".
+        setStatus(action.id, done, (decision === "confirm" && body.result?.warning) || null);
       }
       if (onResolved) onResolved(action, decision, body);
     } catch (err) {
@@ -136,7 +139,7 @@ export default function PendingActionsCard({ actions, variant = "dark", onResolv
               ))}
             </div>
 
-            {status === "failed" && (
+            {(status === "failed" || (status === "confirmed" && errorById[action.id])) && (
               <div
                 style={dark ? { fontSize: 14, color: D.red, marginBottom: 8 } : undefined}
                 className={dark ? undefined : "text-[14px] text-alert-fg mb-2"}

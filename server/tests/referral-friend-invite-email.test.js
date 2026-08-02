@@ -75,7 +75,7 @@ describe('referral.friend_invite renders as a branded friend-facing email', () =
   test('renders in the branded glass chrome', () => {
     const rendered = renderTemplate({ template, version, payload });
     // The glass wrapper stamps the 2026 logo + the cool page wash.
-    expect(rendered.html).toContain('waves-logo-2026.png');
+    expect(rendered.html).toContain('waves-logo.png');
     expect(rendered.html.toLowerCase()).toContain('background');
   });
 });

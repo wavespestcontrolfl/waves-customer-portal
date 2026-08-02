@@ -638,10 +638,13 @@ describe('rescueSpamFolder scan window', () => {
     db.mockImplementation((table) => {
       const b = orig(table);
       if (table === 'notifications') {
-        b.insert = jest.fn(() => {
-          const p2 = Promise.reject(new Error('db down'));
-          return { returning: jest.fn(async () => { throw new Error('db down'); }), then: p2.then.bind(p2), catch: p2.catch.bind(p2) };
-        });
+        // Lazy rejection: the bell now lands via NotificationService, which
+        // awaits .returning('*') — an eagerly-rejected `then` promise would
+        // be orphaned and crash the run as an unhandled rejection.
+        b.insert = jest.fn(() => ({
+          returning: jest.fn(async () => { throw new Error('db down'); }),
+          then: (resolve, reject) => Promise.reject(new Error('db down')).then(resolve, reject),
+        }));
       }
       return b;
     });

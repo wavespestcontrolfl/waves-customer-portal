@@ -253,6 +253,11 @@ router.post('/:key/versions', async (req, res, next) => {
     const payload = validateVersionPayload(req.body || {});
     const publish = req.body?.publish !== false;
     const version = await db.transaction(async (trx) => {
+      // Serialize version-number allocation on the template row: the v2
+      // compliance migration locks it the same way before computing
+      // MAX(version_number)+1, so concurrent allocators can't pick the
+      // same number and abort on the unique constraint.
+      await trx('document_templates').where({ id: loaded.template.id }).forUpdate().first('id');
       const versionNumber = await nextVersionNumber(loaded.template.id, trx);
       const [row] = await trx('document_template_versions').insert({
         template_id: loaded.template.id,
@@ -291,8 +296,24 @@ router.post('/versions/:id/publish', async (req, res, next) => {
     const version = await db('document_template_versions').where({ id: req.params.id }).first();
     if (!version) return res.status(404).json({ error: 'Document template version not found' });
     await db.transaction(async (trx) => {
+      const template = await trx('document_templates')
+        .where({ id: version.template_id })
+        .forUpdate()
+        .first('id', 'active_version_id', 'status');
+      // Idempotent re-publish of the already-active version is a no-op:
+      // published_at is the ROLLOUT moment (the termite reconciliation
+      // reads it as its lower bound), so advancing it without an actual
+      // activation would shift those windows forward and orphan stale
+      // requests / misissues from the real rollout interval.
+      if (template && template.active_version_id === version.id && template.status === 'active') return;
       await trx('document_template_versions').where({ id: version.id }).update({
-        published_at: version.published_at || trx.fn.now(),
+        // Activation IS the rollout moment: downstream consumers (e.g. the
+        // termite-agreement expired-recovery cutoff) read the ACTIVE
+        // version's published_at as "when this wording went live", so a
+        // reactivated older version must carry the reactivation time —
+        // keeping its original timestamp would let requests that
+        // deliberately expired long before the reactivation be revived.
+        published_at: trx.fn.now(),
       });
       await trx('document_templates').where({ id: version.template_id }).update({
         active_version_id: version.id,
@@ -303,7 +324,12 @@ router.post('/versions/:id/publish', async (req, res, next) => {
     });
     const template = await db('document_templates').where({ id: version.template_id }).first();
     const loaded = await loadTemplateByKey(template.template_key);
-    res.json({ template: serializeTemplate(loaded.template, loaded.activeVersion), version: serializeVersion(version) });
+    // Re-read the version: activation advances published_at (the rollout
+    // moment), and the response must not report the stale pre-activation
+    // timestamp under `version` while `template.activeVersion` shows the
+    // new one.
+    const freshVersion = await db('document_template_versions').where({ id: version.id }).first();
+    res.json({ template: serializeTemplate(loaded.template, loaded.activeVersion), version: serializeVersion(freshVersion || version) });
   } catch (err) { next(err); }
 });
 
@@ -358,6 +384,14 @@ router.post('/:key/contracts', async (req, res, next) => {
 
     const values = req.body?.values || {};
     const context = buildCustomerDocumentContext(customer, values);
+    // The agreement may cover a property that differs from the customer's
+    // primary address (rental/second property): buildCustomerDocumentContext
+    // rebuilds customer.address from the row, so an explicit
+    // propertyAddress override is the only way a manual issue can name the
+    // accepted property — same override the accept-time service applies
+    // from estimate.address. Manual-prep bells carry the address to paste.
+    const propertyAddress = String(req.body?.propertyAddress || '').trim();
+    if (propertyAddress) context.customer = { ...context.customer, address: propertyAddress };
     const rendered = renderDocumentTemplate({
       template: loaded.template,
       version: loaded.activeVersion,
@@ -377,6 +411,72 @@ router.post('/:key/contracts', async (req, res, next) => {
     const recipientPhone = cleanRecipientName(req.body?.recipientPhone) || customer.phone || null;
 
     const contract = await db.transaction(async (trx) => {
+      // Termite program agreements carry a service-wide invariant (one
+      // live request per property) enforced under a per-customer advisory
+      // lock by the accept-time service, the reconciliation sweeps, and
+      // the v2 migration rollback. This generic issuance path must
+      // serialize on the same key, or its insert can race a rollback's
+      // replacement re-check and leave two live signing flows.
+      const { PROGRAM_TEMPLATE_KEYS, normalizeAddress } = require('../services/termite-program-agreement');
+      if (PROGRAM_TEMPLATE_KEYS.includes(loaded.template.template_key)) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customer.id}`]);
+        // Revalidate AFTER the lock: this request may have waited behind
+        // the v2 migration rollback (or a publish) — the render above was
+        // captured before the wait, and inserting it unchecked would put a
+        // just-deactivated version's wording back in front of the
+        // customer. Pointer or status moved → abort; the admin reloads and
+        // reissues from the now-active version.
+        const live = await trx('document_templates')
+          .where({ id: loaded.template.id })
+          .forUpdate()
+          .first('active_version_id', 'status');
+        if (!live || live.status !== 'active' || live.active_version_id !== loaded.activeVersion.id) {
+          const staleErr = new Error('Document template changed while issuing — reload and try again.');
+          staleErr.status = 409;
+          throw staleErr;
+        }
+        // One live program request per customer/property — the same
+        // invariant the accept-time service, the sweeps, and the rollback
+        // enforce. A manual issue is a replacement: supersede the prior
+        // open requests instead of stacking a second live signing flow
+        // (or inserting beside a source a rollback just restored).
+        // Conditional cancel: a signature committed concurrently wins.
+        const openPrior = await trx('customer_contracts')
+          .where({ customer_id: customer.id, contract_type: 'document_template' })
+          .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+          .whereIn('status', ['draft', 'sent', 'viewed'])
+          .forUpdate()
+          .select('id', 'document_variables_snapshot');
+        const newAddress = normalizeAddress(context.customer?.address);
+        for (const prior of openPrior) {
+          // Per-PROPERTY, mirroring classifyExistingAgreement: a provably
+          // different property's open request keeps its signing flow;
+          // unprovable addresses stay conservative (supersede — one live
+          // flow when properties can't be distinguished).
+          let ps = prior.document_variables_snapshot;
+          if (typeof ps === 'string') { try { ps = JSON.parse(ps); } catch { ps = null; } }
+          const priorAddress = normalizeAddress(ps?.estimate?.address || ps?.customer?.address);
+          if (priorAddress && newAddress && priorAddress !== newAddress) continue;
+          const cancelled = await trx('customer_contracts')
+            .where({ id: prior.id })
+            .whereIn('status', ['draft', 'sent', 'viewed'])
+            .update({
+              status: 'cancelled',
+              cancelled_at: new Date(),
+              cancelled_reason: 'Superseded by a newer manually issued program agreement',
+              updated_at: new Date(),
+            });
+          if (!cancelled) continue;
+          await trx('customer_contract_events').insert({
+            contract_id: prior.id,
+            customer_id: customer.id,
+            event_type: 'cancelled',
+            actor_type: 'admin',
+            actor_id: req.technicianId || null,
+            metadata: jsonb({ reason: 'superseded_by_manual_reissue' }, {}),
+          });
+        }
+      }
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
         created_by: req.technicianId || null,
@@ -424,7 +524,10 @@ router.post('/:key/contracts', async (req, res, next) => {
       signingUrl,
       rendered,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 function cleanRecipientName(value) {

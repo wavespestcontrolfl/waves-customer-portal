@@ -109,7 +109,7 @@ const SERVICE_MAP = {
     areaField: 'homeSqFt',
   },
   pest_initial_roach: {
-    label: 'Initial Roach Knockdown',
+    label: 'Cockroach Treatment',
     serviceTypes: ['Roach Treatment', 'Pest Control'],
     areaField: 'homeSqFt',
   },

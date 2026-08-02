@@ -8,6 +8,7 @@ const { buildReentryContext } = require('./reentry');
 const { buildSinceLastVisitContext } = require('./since-last-visit');
 const { loadActiveConfig, loadScoreForServiceRecord } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
+const { isOneTimePressureExcludedRecord } = require('../pest-pressure/one-time-exclusion');
 const {
   getProtocolWindowContext,
   summarizeProtocolContext,
@@ -298,11 +299,17 @@ async function buildServiceReportDynamicContext({
       const configPromise = pestPressureConfig === undefined
         ? loadActiveConfig(knex).catch(() => null)
         : Promise.resolve(pestPressureConfig);
-      const [config, scoreRow] = await Promise.all([
+      const [config, scoreRow, oneTimeExcluded] = await Promise.all([
         configPromise,
         loadScoreForServiceRecord(knex, record.id).catch(() => null),
+        // Profile-resolved one-time exclusion (codex r7): a one-time
+        // treatment for a customer with PRIOR recurring scores would
+        // otherwise get a pressure trend whose "current" point is an
+        // earlier visit — the omit decision suppresses the trend,
+        // since-last-visit, and neighborhood context together.
+        isOneTimePressureExcludedRecord(record, knex),
       ]);
-      const view = buildPestPressureCustomerView({ config, scoreRow, serviceRecord: record });
+      const view = buildPestPressureCustomerView({ config, scoreRow, serviceRecord: record, oneTimeExcluded });
       omitDecision = (view === null);
     } catch (err) {
       logger.warn('[service-report-dynamic] pest-pressure visibility check failed', { message: err.message });

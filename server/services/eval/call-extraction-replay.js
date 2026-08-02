@@ -56,7 +56,12 @@ function failureLines(run) {
 
 async function attemptReplay(runReplay, options) {
   try {
-    const run = await runReplay(options);
+    // Replay drives the LIVE v2 extractor over a fixed fixture. Tag its LLM
+    // dispatches as replay traffic so the deliberately-hard fixture cases
+    // can't dilute the live callExtraction lane's fallback/failure rates or
+    // keep it looking active after real call processing stops.
+    const { runAsReplay } = require('../llm-dispatch-metrics');
+    const run = await runAsReplay(() => runReplay(options));
     return {
       status: isFailedRun(run) ? 'fail' : 'pass',
       run,
@@ -73,8 +78,22 @@ async function attemptReplay(runReplay, options) {
 }
 
 async function defaultNotify(row) {
-  const db = require('../../models/db');
-  await db('notifications').insert(row);
+  // Through NotificationService (not a raw insert) so the admin bell policy
+  // chokepoint covers eval_regression bells. create() swallows insert errors
+  // into null — rethrow so callers keep their DB-failure handling (the email
+  // channel fires either way); intentional policy suppression is a truthy
+  // sentinel and correctly reads as success.
+  const NotificationService = require('../notification-service');
+  const created = await NotificationService.create({
+    recipientType: row.recipient_type,
+    category: row.category,
+    title: row.title,
+    body: row.body,
+    icon: row.icon,
+    link: row.link,
+    metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
+  });
+  if (!created) throw new Error('notification insert failed');
 }
 
 // Internal ops email (company inbox), mirroring the admin notification.

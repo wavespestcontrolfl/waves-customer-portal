@@ -153,7 +153,7 @@ const SERVICE_LABEL = {
   flea_package: 'Flea Treatment Package',
   german_roach: 'German Roach',
   german_roach_initial: 'German Roach Initial (3-Visit)',
-  pest_initial_roach: 'Initial Roach Knockdown',
+  pest_initial_roach: 'Cockroach Treatment',
   stinging: 'Stinging Insect',
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
@@ -792,10 +792,10 @@ function mapV1ToLegacyShape(v1Result) {
   lineItems.forEach(li => {
     if (RECURRING_SERVICES.has(li.service) && !isUnpricedCommercialManual(li)) return;
     // Prefer the engine's own label when present (e.g. pest_initial_roach
-    // emits 'Initial Native Roach Knockdown' vs 'Initial German Roach
-    // Knockdown' — SERVICE_LABEL flattens both to a generic name and would
-    // drop the species distinction). Fall back to the SERVICE_LABEL map for
-    // legacy services that don't set a label themselves.
+    // emits the admin-configured display name, 'Cockroach Treatment' vs
+    // 'German Cockroach Treatment' — SERVICE_LABEL flattens both to a
+    // generic name and would drop the species distinction). Fall back to
+    // the SERVICE_LABEL map for legacy services that don't set a label.
     const name = li.display?.name || li.label || labelFor(li.service);
     const quoteRequired = !!li.quoteRequired || !!li.requiresCustomQuote;
     const price = quoteRequired ? null : effectiveOneTimePrice(li);
@@ -837,6 +837,10 @@ function mapV1ToLegacyShape(v1Result) {
         ...measurementMetadataFields(li),
         ...termiticideMetadataFields(li),
       };
+      // Treatment-visit count (pest_initial_roach display config) — the
+      // public estimate view reads it off the persisted item to render
+      // "Includes N treatment visits" on the fee card.
+      if (li.treatments !== undefined) item.treatments = li.treatments;
       if (li.spacing !== undefined) item.spacing = li.spacing;
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;
@@ -983,7 +987,7 @@ function mapV1ToLegacyShape(v1Result) {
 
   // Project v1 features back onto flat v2-shape keys so EstimatePage's
   // client-side modifiers fallback (which predates Session 11a and reads
-  // `p.poolCage === 'YES'`, `p.shrubDensity`, `p.hasLargeDriveway`, etc.)
+  // `p.poolCage === 'YES'`, `p.shrubDensity`, etc.)
   // renders correctly without touching the engine output shape.
   const vp = v1Result.property || {};
   const vf = vp.features || {};
@@ -993,7 +997,6 @@ function mapV1ToLegacyShape(v1Result) {
     pool: vf.pool ? 'YES' : 'NO',
     poolCage: vf.poolCage ? 'YES' : 'NO',
     poolCageSize: vf.poolCageSize || (vf.poolCage ? 'medium' : 'none'),
-    hasLargeDriveway: !!vf.largeDriveway,
     shrubDensity: upper(vf.shrubs),
     treeDensity: upper(vf.trees),
     landscapeComplexity: upper(vf.complexity),

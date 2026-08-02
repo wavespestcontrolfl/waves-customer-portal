@@ -8,6 +8,7 @@
  * deterministic buildTreatmentSummary sentence — a report never renders
  * without an applied-solutions line because a model was down.
  */
+const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 const crypto = require('crypto');
 const db = require('../../models/db');
 const MODELS = require('../../config/models');
@@ -15,7 +16,7 @@ const { dispatchWithFallback } = require('../llm/call');
 const { buildTreatmentSummary, METHOD_PHRASES } = require('./treatment-summary');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'treatment_narrative_v2';
+const PROMPT_VERSION = 'treatment_narrative_v3'; // v3: + HUMAN_PROSE_RULES (owner style block 07-30)
 
 // Request-path budget: a report read ships the deterministic sentence after
 // this long and lets generation finish in the background.
@@ -69,6 +70,8 @@ function productFactLines(products = []) {
 function buildTreatmentNarrativePrompt({ serviceLine, products, findingsText, photoSummary }) {
   const lineNoun = serviceLine === 'lawn' ? 'lawn' : serviceLine === 'tree_shrub' ? 'landscape plants (trees, shrubs, palms, and beds)' : 'property';
   return `You are writing the "What we applied today" section of a customer-facing service report for Waves Pest Control & Lawn Care in Southwest Florida. The reader is the homeowner; the subject is their ${lineNoun}.
+
+${HUMAN_PROSE_RULES}
 
 Explain the treatment like a knowledgeable, friendly plant-health professional:
 - WHY each product was chosen, tied directly to what was found on this visit.

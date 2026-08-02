@@ -14,6 +14,9 @@ const {
   STALE_CLAIM_WINDOW_MS,
 } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
+// Admin bell rows go through NotificationService (not raw inserts) so the
+// GATE_ADMIN_BELL_POLICY chokepoint covers them.
+const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
@@ -285,6 +288,61 @@ async function recordCardHoldNoShowFeePayment(paymentIntent) {
   } catch (err) {
     logger.error(`[stripe-webhook] failed to settle card-hold no-show fee ${piId}: ${err.message}`);
     throw err;
+  }
+}
+
+// Resolve the customer whose own money just settled and clear their billing
+// pause if one is waiting on exactly that (billing-pause.js owns the rules).
+// Skips the three non-arrears purposes: a statement is the PAYER's money, an
+// estimate deposit and a no-show fee are not balance payments. A matched
+// invoice is the customer authority (merges repoint invoices while stale PI
+// metadata keeps the merged-away id) — and a PAYER-billed invoice yields no
+// candidate at all, without metadata fallthrough: the payer's tender proves
+// nothing about the homeowner's dead card, which is why they are paused.
+async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) {
+  if (paymentIntent?.metadata?.waves_statement_id) return;
+  if (paymentIntent?.metadata?.purpose === 'estimate_deposit') return;
+  if (paymentIntent?.metadata?.purpose === 'card_hold_no_show_fee') return;
+  const invoice = await findInvoiceForPaymentIntent(paymentIntent);
+  // Require a QUALIFYING LEDGER ROW before clearing — "Stripe says the PI
+  // succeeded" is not the same as "we accepted it as settled customer
+  // money". Quarantined tender mismatches and orphaned late duplicates
+  // never write a customer payments row (they land in their own review
+  // tables), and a disputed payment's row has left status='paid' — none of
+  // them should re-enable billing. The exclusions mirror billing-cron's
+  // pause veto exactly, so both sides of the race read one source of
+  // truth. If a quarantine later resolves into a real settlement, THAT
+  // write's own processing re-runs this dispatch and clears then.
+  const ledgerRow = await db('payments')
+    .where({ stripe_payment_intent_id: paymentIntent.id, status: 'paid' })
+    .whereNull('statement_id')
+    .whereRaw("(payments.metadata->>'purpose') IS DISTINCT FROM 'card_hold_no_show_fee'")
+    .whereRaw("(payments.metadata->>'payer_id') IS NULL")
+    .first('id', 'customer_id');
+  if (!ledgerRow) return;
+  // OWNERSHIP, in authority order: the matched invoice (payer-billed yields
+  // NOTHING — the payer's tender proves nothing about the homeowner's dead
+  // card, and no fallthrough: the invoice answers the question); else the
+  // LEDGER row's customer_id — customer merges repoint payments rows while
+  // PI metadata stays frozen on the merged-away id; immutable metadata only
+  // as the last resort.
+  const pausedCustomerId = invoice
+    ? (invoice.payer_id ? null : invoice.customer_id)
+    : (ledgerRow.customer_id || paymentIntent?.metadata?.waves_customer_id || null);
+  if (!pausedCustomerId) return;
+  const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+  const result = await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
+    paymentIntentId: paymentIntent.id,
+    source: 'stripe_webhook',
+    settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
+  });
+  // Business no-ops (not paused, manual pause, ordering refusal) end here.
+  // An INFRASTRUCTURE failure must not be swallowed: the handler's durable
+  // writes are already committed and idempotent, so throwing lets the event
+  // 500 and Stripe redeliver — the retry re-runs the clear instead of the
+  // pause silently surviving a transient DB error forever.
+  if (result?.reason === 'error') {
+    throw new Error(`billing-pause auto-clear failed for customer ${pausedCustomerId} (PI ${paymentIntent.id}): ${result.error?.message || 'unknown'}`);
   }
 }
 
@@ -605,6 +663,16 @@ router.post(
       switch (event.type) {
         case 'payment_intent.succeeded':
           await handlePaymentIntentSucceeded(event.data.object, event.created);
+          // Auto-clear a billing pause on the customer's OWN settled money
+          // (owner ruling 2026-08-01: billing goes back to normal once they
+          // pay). AFTER the handler so every durable ledger write of
+          // whichever branch it took (invoice paid, orphan, quarantine) has
+          // landed first — clearing before the paid row exists loses the
+          // race where billing-cron pauses in between and this event never
+          // fires again. The helper never throws, only clears
+          // 'autopay_final_failure' pauses, compare-and-swaps so a newer
+          // pause is never wiped, and requires the settlement moment.
+          await maybeAutoClearBillingPauseForIntent(event.data.object, event.created);
           break;
 
         case 'payment_intent.processing':
@@ -858,14 +926,12 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     if (eventType === 'failed' && reverted) {
       const reasonMsg = paymentIntent.last_payment_error?.message || 'bank/card declined';
       try {
-        await db('notifications').insert({
-          recipient_type: 'admin',
-          category: 'payment',
-          title: `⚠️ Statement payment failed: S-${statementId}`,
-          body: `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
-          icon: '⚠️',
-          link: '/admin/payers',
-        });
+        await NotificationService.notifyAdmin(
+          'payment',
+          `Statement payment failed: S-${statementId}`,
+          `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
+          { icon: '⚠️', link: '/admin/payers' },
+        );
       } catch (e) { logger.error(`[stripe-webhook] statement S-${statementId} failure notification insert failed: ${e.message}`); }
       logger.warn(`[stripe-webhook] statement S-${statementId} payment FAILED after confirmation via PI ${piId} (${reasonMsg}) — reverted to payable`);
     }
@@ -1093,6 +1159,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // Update payments table
   const paymentUpdates = {
     status: 'paid',
+    // knex gives updated_at a default but never auto-touches it, and the
+    // billing-cron pause-veto guard reads it to see an in-place ACH
+    // settlement — without this stamp that guard is blind to the flip.
+    updated_at: new Date(),
     stripe_charge_id: paymentIntent.latest_charge || null,
     // An async-settling row (ACH) was inserted with a "(bank payment
     // pending)" description and metadata.payment_state='processing'; the
@@ -1100,7 +1170,22 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     // forever on settled bank payments. REPLACE is a no-op for rows without
     // the marker. Constant strings only — no request-derived input.
     description: db.raw("REPLACE(description, ' (bank payment pending)', '')"),
-    metadata: db.raw(`jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"')`),
+    // payment_state flip + the Stripe settlement moment in one expression —
+    // the billing-cron pause veto reads settled_event_at, so a delayed
+    // redelivery (updated_at = now, settlement = days ago) cannot pose as
+    // fresh money. Parameterized: the timestamp is bound, never interpolated.
+    metadata: invoiceForTenderGuard?.payer_id
+      // Payer-funded ACH rows already 'processing' at deploy time predate
+      // the payer_id stamp on the processing insert — backfill it at the
+      // flip so the pause veto and the auto-clear can exclude them.
+      ? db.raw(
+        `jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text)), '{payer_id}', to_jsonb(?::text))`,
+        [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString(), String(invoiceForTenderGuard.payer_id)],
+      )
+      : db.raw(
+        `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text))`,
+        [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString()],
+      ),
     // Cash basis: the row was stamped with the INITIATION day when
     // payment_intent.processing arrived; restamp to the SETTLEMENT day so
     // revenue lands in the period the money actually cleared (an ACH
@@ -1242,7 +1327,19 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoiceAmountDue(invoice));
       const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
       await trx('payments').insert({
-        customer_id: invoice.customer_id,
+        // OWNERSHIP COMES FROM THE LOCKED ROW, never the pre-lock read.
+        // `invoice` was fetched BEFORE this transaction took FOR UPDATE on
+        // it, so any writer that repoints invoices.customer_id — a customer
+        // merge is the live one — can commit while we wait on that lock and
+        // move the invoice to a different customer. Inserting
+        // `invoice.customer_id` then attaches this payment to the PREVIOUS
+        // owner: the invoice sits on one account and the money that settled
+        // it on another, which reconciliation reads as both a missing
+        // payment and an unexplained one. `lockedInvoice` is the post-wait
+        // re-read, so it always names the invoice's CURRENT owner. No extra
+        // lock is needed — settlement must never be blocked into failure by
+        // one, and this ordering does not add any.
+        customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         stripe_charge_id: paymentIntent.latest_charge || null,
@@ -1268,6 +1365,15 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           charged_amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
           payment_method: details.paymentMethod || paymentIntent.payment_method_types?.[0] || null,
           payment_state: 'paid',
+          // Stripe's settlement moment, NOT this handler's run time — the
+          // billing-cron pause veto compares this, so a delayed redelivery
+          // of an old success (row created now) cannot pose as fresh money.
+          settled_event_at: eventCreated ? new Date(eventCreated * 1000).toISOString() : null,
+          // Payer ownership rides the ledger row: the pause veto and the
+          // auto-clear both exclude payer-funded money by this marker — a
+          // payer-billed invoice settling during a homeowner's failed retry
+          // must not read as the homeowner's own tender.
+          ...(lockedInvoice.payer_id ? { payer_id: lockedInvoice.payer_id } : {}),
         }),
       });
       if (matchingAmbiguousAttempt) {
@@ -1693,34 +1799,14 @@ async function scheduleReviewAfterPaidInvoice(piId) {
       .first();
     if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
 
-    const serviceRecord = await db('service_records')
-      .where({ id: paidInvoice.service_record_id })
-      .select('structured_notes')
-      .first();
-    let structuredNotes = serviceRecord?.structured_notes || {};
-    if (typeof structuredNotes === 'string') {
-      try { structuredNotes = JSON.parse(structuredNotes); } catch { structuredNotes = {}; }
-    }
-    if (structuredNotes.requestReview === false) {
-      logger.info(`[stripe-webhook] Skipping paid-invoice review request for invoice ${paidInvoice.invoice_number || paidInvoice.id}: completion opted out`);
-      return;
-    }
-    if (structuredNotes.visitOutcome && structuredNotes.visitOutcome !== 'completed') {
-      logger.info(`[stripe-webhook] Skipping paid-invoice review request for invoice ${paidInvoice.invoice_number || paidInvoice.id}: visit outcome ${structuredNotes.visitOutcome}`);
-      return;
-    }
-
+    // Shared guards + enrollment (also used by the admin record-payment path
+    // for off-Stripe settlements): honors the completion's requestReview
+    // intent + visit outcome, dedupes/idempotent under webhook retries.
     const ReviewService = require('../services/review-request');
-    // ReviewService.create dedupes by service_record_id (returns the
-    // existing row instead of inserting), so this is safe under webhook
-    // retries.
-    const request = await ReviewService.create({
-      customerId: paidInvoice.customer_id,
-      serviceRecordId: paidInvoice.service_record_id,
-      triggeredBy: 'auto',
-      delayMinutes: 120,
-    });
-    logger.info(`[stripe-webhook] Queued review request ${request.id} after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    const outcome = await ReviewService.enrollForPaidInvoice(paidInvoice, { source: 'stripe_webhook' });
+    if (outcome.enrolled) {
+      logger.info(`[stripe-webhook] Queued review outreach after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    }
   } catch (err) {
     logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
   }
@@ -2442,14 +2528,23 @@ async function handleRefundFailed(refund) {
   // no-payments case it throws for the same reason — nothing else was
   // written, so the retry is a clean re-run.
   const insertBounceNotification = async (conn, body) => {
-    await conn('notifications').insert({
-      recipient_type: 'admin',
+    // Through NotificationService (connection: conn keeps it inside the
+    // caller's transaction) so the admin bell policy chokepoint covers it.
+    // bell: true — a failed refund is a money failure and must keep ringing
+    // under GATE_ADMIN_BELL_POLICY. create() swallows insert errors into
+    // null; rethrow so the transactional/throw-on-failure contract above
+    // holds and Stripe retries the event.
+    const notif = await NotificationService.create({
+      recipientType: 'admin',
       category: 'billing',
       title: `Refund FAILED at the bank: $${failedDollars.toFixed(2)}`,
       body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). ${body}`,
       icon: '⚠️',
       link: '/admin/invoices',
+      bell: true,
+      connection: conn,
     });
+    if (!notif) throw new Error('refund-failure notification insert failed');
   };
 
   if (!payment) {
@@ -3160,25 +3255,23 @@ async function handlePayoutEvent(payout, eventType) {
 
   try {
     if (eventType === 'payout.paid') {
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'payout',
-        title: `Payout deposited: $${(payout.amount / 100).toFixed(2)}`,
-        body: `Stripe payout of $${(payout.amount / 100).toFixed(2)} has been deposited to your Capital One account.`,
-        icon: '\uD83C\uDFE6',
-        link: '/admin/banking',
-      });
+      await NotificationService.notifyAdmin(
+        'payout',
+        `Payout deposited: $${(payout.amount / 100).toFixed(2)}`,
+        `Stripe payout of $${(payout.amount / 100).toFixed(2)} has been deposited to your Capital One account.`,
+        { icon: '\uD83C\uDFE6', link: '/admin/banking' },
+      );
     }
 
     if (eventType === 'payout.failed') {
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'payout',
-        title: `Payout FAILED: $${(payout.amount / 100).toFixed(2)}`,
-        body: `Payout failed: ${payout.failure_message || 'Unknown reason'}. Check your bank details.`,
-        icon: '\u26A0\uFE0F',
-        link: '/admin/banking',
-      });
+      await NotificationService.notifyAdmin(
+        'payout',
+        `Payout FAILED: $${(payout.amount / 100).toFixed(2)}`,
+        `Payout failed: ${payout.failure_message || 'Unknown reason'}. Check your bank details.`,
+        // bell: a failed payout is a money failure, not a payout FYI \u2014 it
+        // must ring even though the payout category is silenced by default.
+        { icon: '\u26A0\uFE0F', link: '/admin/banking', bell: true },
+      );
     }
   } catch (err) {
     logger.error(`[stripe-webhook] Payout notification failed: ${err.message}`);
@@ -3490,6 +3583,10 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
     charged_amount: amount,
     payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
     payment_state: 'processing',
+    // Payer ownership survives the processing->paid flip (the flip only
+    // jsonb_sets payment_state and settled_event_at), so the pause veto and
+    // the auto-clear can exclude payer-funded ACH money too.
+    ...(invoice?.payer_id ? { payer_id: invoice.payer_id } : {}),
   });
 
   if (!invoice?.id) {
@@ -3618,10 +3715,13 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
           metadata: paymentMetadata,
         });
     } else {
-      if (!invoice?.customer_id) return;
+      if (!lockedInvoice?.customer_id) return;
 
       await trx('payments').insert({
-        customer_id: invoice.customer_id,
+        // Post-lock owner, never the pre-lock read — see the succeeded-PI
+        // path above: a merge can repoint this invoice while we wait on its
+        // FOR UPDATE, and `invoice` still names the old owner.
+        customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         payment_date: etDateString(),
@@ -4027,14 +4127,12 @@ async function handleDisputeCreated(dispute) {
         }
       });
       try {
-        await db('notifications').insert({
-          recipient_type: 'admin',
-          category: 'dispute',
-          title: `⚠️ Statement dispute opened: $${amount}`,
-          body: `Statement S-${disputedStmt.id} chargeback (${reason}). PI ${dispute.payment_intent}. Charge ${chargeId}.`,
-          icon: '⚠️',
-          link: '/admin/payers',
-        });
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Statement dispute opened: $${amount}`,
+          `Statement S-${disputedStmt.id} chargeback (${reason}). PI ${dispute.payment_intent}. Charge ${chargeId}.`,
+          { icon: '⚠️', link: '/admin/payers' },
+        );
       } catch (err) { logger.error(`[stripe-webhook] Statement dispute notification failed: ${err.message}`); }
       return;
     }
@@ -4126,14 +4224,12 @@ async function handleDisputeCreated(dispute) {
 
   // Admin notification
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'dispute',
-      title: `\u26A0\uFE0F Dispute opened: $${amount}`,
-      body: `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
-      icon: '\u26A0\uFE0F',
-      link: '/admin/invoices',
-    });
+    await NotificationService.notifyAdmin(
+      'dispute',
+      `Dispute opened: $${amount}`,
+      `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
+      { icon: '\u26A0\uFE0F', link: '/admin/invoices' },
+    );
   } catch (err) {
     logger.error(`[stripe-webhook] Dispute notification failed: ${err.message}`);
   }
@@ -4352,14 +4448,12 @@ async function handleDisputeClosed(dispute) {
   }
 
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'dispute',
-      title: `Dispute ${status}: $${amount}`,
-      body: `Dispute on charge ${chargeId} closed as ${status}.`,
-      icon: status === 'won' ? '\u2705' : '\u274C',
-      link: '/admin/invoices',
-    });
+    await NotificationService.notifyAdmin(
+      'dispute',
+      `Dispute ${status}: $${amount}`,
+      `Dispute on charge ${chargeId} closed as ${status}.`,
+      { icon: status === 'won' ? '\u2705' : '\u274C', link: '/admin/invoices' },
+    );
   } catch { /* non-critical */ }
 }
 
@@ -4462,3 +4556,4 @@ module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucc
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
 module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
+module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;

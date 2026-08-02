@@ -266,8 +266,8 @@ describe('schema 1.2.0 — secondary_contact is additive', () => {
     return payload;
   }
 
-  test('current SCHEMA_VERSION is 1.7.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.7.0');
+  test('current SCHEMA_VERSION is 1.8.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.8.0');
   });
 
   test('a payload WITHOUT secondary_contact still validates (1.1.0-shape unchanged)', () => {
@@ -531,20 +531,31 @@ describe('persistCallSecondaryContact', () => {
       first_name: 'Melissa', last_name: 'Realtor', phone: '+14074933469',
       email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
     };
-    expect(validatePhoneCallAppointmentCustomer(base, {}, '+14074933469').missing).toContain('email');
-    const withSlot = { ...base, service_contact_email: 'joseph.haught89431@gmail.com' };
-    expect(validatePhoneCallAppointmentCustomer(withSlot, {}, '+14074933469').missing).not.toContain('email');
+    // Email moved from REQUIRED to ADVISORY on 2026-07-31 (owner ruling): a
+    // booking is never held for a missing email, so this now asserts the
+    // slot email satisfies the CAPTURE check (clears the advisory) rather
+    // than clearing a block. `missing` stays empty either way.
+    const noSlot = validatePhoneCallAppointmentCustomer(base, {}, '+14074933469');
+    expect(noSlot.advisory).toContain('email');
+    expect(noSlot.missing).not.toContain('email');
+    const withSlot = validatePhoneCallAppointmentCustomer({ ...base, service_contact_email: 'joseph.haught89431@gmail.com' }, {}, '+14074933469');
+    expect(withSlot.advisory).not.toContain('email');
+    expect(withSlot.ok).toBe(true);
   });
 
-  test('PERSISTED-OR-REVIEW: an email that exists only in the extraction never satisfies the gate', () => {
+  test('PERSISTED-OR-REVIEW: an email that exists only in the extraction never satisfies the capture check', () => {
     // appointment-email's recipient resolver reads STORED addresses only
     // (customer.email + service-contact slots). The gated persistence runs
     // BEFORE this gate on a freshly re-read customer row, so a successfully
     // stored secondary email passes via slotEmail (test above). When it was
     // NOT stored — GATE_CALL_SECONDARY_CONTACT off, slots full, race, or a
-    // persistCallSecondaryContact skip — the booking must hold as
-    // missing_required_customer_fields for the office rather than
-    // auto-create an appointment whose named recipient is unreachable.
+    // persistCallSecondaryContact skip — the address is treated as NOT
+    // captured.
+    //
+    // Since 2026-07-31 that raises the `email` ADVISORY (office collects it
+    // on the confirmation touch) instead of holding the booking — the owner
+    // ruled a call that agreed a time must book. PERSISTED-OR-REVIEW still
+    // decides WHICH emails count; it just no longer gates the appointment.
     const base = {
       first_name: 'Melissa', last_name: 'Realtor', phone: '+14074933469',
       email: null, address_line1: '11530 Water Poppy Ter', city: 'Lakewood Ranch', state: 'FL', zip: '34202',
@@ -553,12 +564,15 @@ describe('persistCallSecondaryContact', () => {
     const res = validatePhoneCallAppointmentCustomer(base, {
       secondary_contact: { first_name: 'Joseph', last_name: 'Haught', email: 'joseph.haught89431@gmail.com', role: 'home_buyer', wants_notifications: true },
     }, '+14074933469');
-    expect(res.missing).toContain('email');
-    // Access contact without intent — same hold.
+    expect(res.advisory).toContain('email');
+    expect(res.missing).not.toContain('email');
+    expect(res.ok).toBe(true); // books; the office collects the email
+    // Access contact without intent — same advisory.
     const resAccess = validatePhoneCallAppointmentCustomer(base, {
       secondary_contact: { first_name: 'Rigo', email: 'rigo@example.com', role: 'home_seller', wants_notifications: false, notes: 'access contact' },
     }, '+14074933469');
-    expect(resAccess.missing).toContain('email');
+    expect(resAccess.advisory).toContain('email');
+    expect(resAccess.ok).toBe(true);
   });
 
   test('lender is an agent-type slot role: a slot-phone hit alone never auto-links (serves many buyers)', () => {

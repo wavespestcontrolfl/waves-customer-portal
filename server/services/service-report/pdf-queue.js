@@ -8,6 +8,7 @@ const {
   getHealthyStoredReportPdf,
   putReportPdf,
   reportPdfStorageKey,
+  timeOnSiteAdjustedPdfSignature,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
 const { summaryCopySignature } = require('./technician-report-copy');
@@ -159,7 +160,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   }
   try {
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature,
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -178,21 +179,109 @@ async function renderAndStoreServiceReportPdf(recordId, {
   }
 }
 
-async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } = {}) {
+// Durable lawn-PDF correction marker helpers (codex P1 #3093 r30).
+// Version of the stored lawn recommendations — changes on every write
+// (generation, sanitize), so an unchanged value across a render proves the
+// render did not straddle a copy change.
+// Both helpers THROW on a query error so callers can distinguish "no lawn
+// assessment exists" (safe to clear the marker) from "we could not read"
+// (must retain it) — swallowing the error made two nulls compare equal and
+// cleared the marker after a raced render (codex P1 #3093 r33).
+async function lawnRecommendationVersion(assessmentId, knex = db) {
+  const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+  if (!row) return null;
+  return crypto.createHash('sha1')
+    .update(`${typeof row.recommendations === 'string' ? row.recommendations : JSON.stringify(row.recommendations || '')}|${row.ai_summary || ''}|${row.updated_at ? new Date(row.updated_at).toISOString() : ''}`)
+    .digest('hex');
+}
+
+async function lawnAssessmentIdForRecord(recordId, knex = db) {
+  // Deterministic newest-row selection matching loadLinkedLawnAssessment
+  // (codex P1 r36): the back-link index is non-unique, and an unordered
+  // .first() could fence against an OLDER assessment while the actual one
+  // was still being grounded — clearing the marker on the wrong evidence.
+  const row = await knex('lawn_assessments')
+    .where({ service_record_id: recordId })
+    .orderBy('confirmed_at', 'desc')
+    .orderBy('created_at', 'desc')
+    .first('id');
+  if (row?.id) return row.id;
+  // Legacy assessments are linked only through the scheduled service —
+  // the report builder still renders them via loadLinkedLawnAssessment's
+  // by-service fallback, so the fence must resolve through the SAME path
+  // or it compares two nulls and clears the marker for a row that can
+  // still change (codex P1 r38). Unlike the report builder, errors THROW
+  // here (r33 semantics): unreadable fence state retains the marker.
+  const record = await knex('service_records').where({ id: recordId }).first('id', 'customer_id', 'scheduled_service_id');
+  const scheduledServiceId = record?.scheduled_service_id;
+  if (!record?.customer_id || !scheduledServiceId) return null;
+  const byService = await knex('lawn_assessments')
+    .where({ customer_id: record.customer_id, confirmed_by_tech: true, service_id: scheduledServiceId })
+    .orderBy('confirmed_at', 'desc')
+    .orderBy('created_at', 'desc')
+    .first('id');
+  return byService?.id || null;
+}
+
+// ATOMIC key removal (codex P2 #3093 r31): a read-modify-write of the whole
+// structured_notes column can clobber completionSmsStatus / sentSmsBody
+// written concurrently, which would defeat the resend guard.
+async function clearLawnPdfCorrectionMarker(recordId, knex = db) {
+  await knex('service_records')
+    .where({ id: recordId })
+    .update({
+      structured_notes: knex.raw("(COALESCE(structured_notes::jsonb, '{}'::jsonb) - ?)", ['lawnPdfCorrectionPending']),
+    });
+}
+
+// forceFresh: skip the stored-object lookup and render anew — held email
+// deliveries must attach a render produced AFTER final copy settled, and no
+// fence can cover every render path (the public report route renders
+// synchronously without a job row — codex P1 #3093 r23).
+async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, forceFresh = false } = {}) {
   // technician_notes + service_data ride along for the summary-copy key
   // component, service_type/service_line for the mosquito-V2 component —
   // the expected key must match what renderAndStore writes.
   const service = await knex('service_records')
     .where({ id: recordId })
-    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id');
+    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
+  // DURABLE correction marker (codex P1 #3093 r30): completion sets
+  // structured_notes.lawnPdfCorrectionPending when lawn copy may still
+  // change after the first render. Any render path — including the public
+  // report route on a box that never ran the completion callback — then
+  // renders FRESH until a post-settlement render clears it. Covers the
+  // no-email / process-restart path the in-process callback cannot.
+  let correctionPending = false;
+  try {
+    const notes = typeof service?.structured_notes === 'string'
+      ? JSON.parse(service.structured_notes) : (service?.structured_notes || {});
+    correctionPending = notes && notes.lawnPdfCorrectionPending === true;
+  } catch { correctionPending = false; }
+  const mustRenderFresh = forceFresh || correctionPending;
+  // Version captured BEFORE the render: the marker may only be cleared when
+  // the recommendation copy did not change during the render AND no
+  // generation is in flight afterwards — otherwise this render may have
+  // loaded pre-grounding copy (codex P1 r31).
+  let lawnAssessmentId = null;
+  let recVersionBefore = null;
+  let fenceReadOk = true;
+  if (correctionPending) {
+    try {
+      lawnAssessmentId = await lawnAssessmentIdForRecord(recordId, knex);
+      recVersionBefore = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
+    } catch (fenceErr) {
+      fenceReadOk = false;
+      logger.warn(`[pdf-queue] correction-fence pre-read failed for ${recordId} — marker retained: ${fenceErr.message}`);
+    }
+  }
   const pestPressureConfig = await loadActiveConfig(knex).catch(() => null);
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service),
     })
     : null;
-  const stored = service?.pdf_storage_key === expectedPdfStorageKey
+  const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
     ? await getHealthyStoredReportPdf(service.pdf_storage_key)
     : null;
   if (stored) return { pdf: stored, key: service.pdf_storage_key, rendered: false };
@@ -204,6 +293,53 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db } =
     allowUnstoredPdf: true,
     pestPressureConfig,
   });
+  // A completed fresh render satisfies the pending correction — but only
+  // once the copy can no longer change (no generation in flight).
+  if (correctionPending && !rendered.storageFailed && fenceReadOk) {
+    try {
+      if (!lawnAssessmentId) {
+        // No linked assessment (stray marker on a non-lawn record) —
+        // nothing can generate, clear directly.
+        await clearLawnPdfCorrectionMarker(recordId, knex);
+      } else {
+        // The entire check-and-clear runs under the SAME advisory lock
+        // generation registration takes (codex P1 r40): a run registering
+        // between the reads and the marker deletion was a TOCTOU that left
+        // a permanently stale PDF. Inside the lock nothing can register,
+        // so the observed state holds through the clear.
+        await knex.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${lawnAssessmentId}`]);
+          const freshRow = await trx('lawn_assessments').where({ id: lawnAssessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+          const recVersionAfter = freshRow ? crypto.createHash('sha1')
+            .update(`${typeof freshRow.recommendations === 'string' ? freshRow.recommendations : JSON.stringify(freshRow.recommendations || '')}|${freshRow.ai_summary || ''}|${freshRow.updated_at ? new Date(freshRow.updated_at).toISOString() : ''}`)
+            .digest('hex') : null;
+          const copyStableAcrossRender = recVersionBefore === recVersionAfter;
+          let payload = freshRow?.recommendations;
+          if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+          const isObj = payload && typeof payload === 'object' && !Array.isArray(payload);
+          // Live lease check from the row we hold under the lock — a
+          // separate query would read outside the fence.
+          const runs = (isObj && payload._generationRuns && typeof payload._generationRuns === 'object') ? payload._generationRuns : {};
+          const stillGenerating = Object.values(runs).some((exp) => {
+            const t = Date.parse(exp);
+            return Number.isFinite(t) && t > Date.now();
+          });
+          // The copy must also be SETTLED — grounded or sanitation-final
+          // (codex P1 r39): between grounded-generation failure and a
+          // sanitize retry there is no live lease, so "stable and not
+          // generating" can hold while the copy still awaits correction.
+          const copySettled = !!(isObj && (payload._groundedInApplications || payload._sanitizationFinal));
+          if (!stillGenerating && copyStableAcrossRender && copySettled) {
+            await trx('service_records').where({ id: recordId }).update({
+              structured_notes: trx.raw("(COALESCE(structured_notes::jsonb, '{}'::jsonb) - ?)", ['lawnPdfCorrectionPending']),
+            });
+          }
+        });
+      }
+    } catch (clearErr) {
+      logger.warn(`[pdf-queue] correction-marker clear skipped for ${recordId} — retained: ${clearErr.message}`);
+    }
+  }
   return {
     pdf: rendered.pdf,
     key: rendered.key,

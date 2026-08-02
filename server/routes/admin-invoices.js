@@ -1542,7 +1542,15 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       // invoice.total, so they MUST be linked or the receipt falls back to the
       // pre-credit total instead of the amount actually received.
       if (row.payer_id || Number(row.credit_applied) > 0) {
-        paymentRow.metadata = JSON.stringify({ invoice_id: row.id });
+        paymentRow.metadata = JSON.stringify({
+          invoice_id: row.id,
+          // Payer ownership rides the ledger row itself: billing-cron's
+          // pause veto and the webhook auto-clear both exclude payer-funded
+          // money by metadata.payer_id — without this stamp a manually
+          // recorded third-party payment would read as the homeowner's own
+          // tender and veto a pause their dead card earned.
+          ...(row.payer_id ? { payer_id: row.payer_id } : {}),
+        });
       }
       await trx('payments').insert(paymentRow);
       return row;
@@ -1564,6 +1572,41 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       await FollowUps.stopOnPayment(id);
     } catch (err) {
       logger.warn(`[admin-invoices:record-payment] stopOnPayment failed: ${err.message}`);
+    }
+
+    // The automatic-clear contract does not stop at Stripe: a check/cash/
+    // Zelle payment recorded here is the customer paying, and the Customer
+    // 360 banner promises the pause clears when a payment succeeds. NOT for
+    // payer-funded rows — the payer's tender proves nothing about the
+    // homeowner's card. The settlement moment is NOW (a human recorded
+    // money they are holding). The helper owns every other rule (reason
+    // gate, causality, locking); a failure logs — the operator who just
+    // recorded the payment sees the banner still up and has the button.
+    if (!updatedInvoice.payer_id) {
+      try {
+        const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+        await maybeResumeBillingPauseOnPayment(updatedInvoice.customer_id, {
+          paymentIntentId: null,
+          source: 'admin_record_payment',
+          settledAt: new Date(),
+        });
+      } catch (pauseErr) {
+        logger.warn(`[admin-invoices:record-payment] billing-pause auto-clear failed: ${pauseErr.message}`);
+      }
+    }
+
+    // A completion invoice delivered unpaid deferred its review ask to
+    // payment — an off-Stripe settlement (cash/check/Zelle) never reaches the
+    // Stripe webhook, so trigger the same shared enrollment here (Codex P2,
+    // PR #3104 r2). Guards (completion opt-out, visit outcome, dedupe,
+    // cap/cooldown) all live in the helper; standalone invoices no-op.
+    if (updatedInvoice.status === 'paid') {
+      try {
+        const ReviewService = require('../services/review-request');
+        await ReviewService.enrollForPaidInvoice(updatedInvoice, { source: 'record_payment' });
+      } catch (err) {
+        logger.warn(`[admin-invoices:record-payment] review enrollment failed: ${err.message}`);
+      }
     }
 
     // Fire-and-forget: a manually recorded payment (check/cash/Zelle) may
@@ -1827,6 +1870,19 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
     }
 
+    // Full-credit settlement is a payment event too: a completion invoice
+    // delivered unpaid deferred its review ask to payment, and this path
+    // reaches neither the Stripe webhook nor record-payment — enroll here or
+    // the requested ask is permanently lost (Codex P2, PR #3104 r3). Guards
+    // (completion opt-out, visit outcome, dedupe) live in the helper;
+    // standalone invoices no-op.
+    try {
+      const ReviewService = require('../services/review-request');
+      await ReviewService.enrollForPaidInvoice(covered, { source: 'apply_credit' });
+    } catch (err) {
+      logger.warn(`[admin-invoices:apply-credit] review enrollment failed: ${err.message}`);
+    }
+
     // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a
     // payment-held WDO report — nudge the release sweep.
     require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });
@@ -2082,7 +2138,15 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
         // that over-collects the now-applied credit. Re-clamp the balance to the FRESH
         // amount due and re-validate the installment against it.
         const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first();
-        const lockedAmountDue = lockedInvoice ? invoiceAmountDue(lockedInvoice) : amountDue;
+        // The invoice can vanish between the pre-transaction read and this
+        // lock (hard delete during a cleanup) — refuse rather than insert a
+        // plan attributed from a stale snapshot of a row that no longer
+        // exists.
+        if (!lockedInvoice) {
+          const e = new Error('Invoice no longer exists');
+          e.statusCode = 409; throw e;
+        }
+        const lockedAmountDue = invoiceAmountDue(lockedInvoice);
         const lockedTotalBalance = Math.min(totalBalance, lockedAmountDue);
         if (!(lockedTotalBalance > 0)) {
           const e = new Error('Invoice has no remaining balance after applied account credit — no payment plan needed');
@@ -2094,7 +2158,13 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
         }
         const [createdPlan] = await trx('payment_plans')
           .insert({
-            customer_id: invoice.customer_id,
+            // Attribute from the LOCKED row, never the pre-transaction read:
+            // this insert runs after WAITING on the invoice row lock, and a
+            // customer merge/undo can repoint invoices.customer_id in that
+            // window — a plan pinned to the stale owner would govern the
+            // invoice's collection path under the wrong customer (same bug
+            // class as the settlement-ownership fix in stripe-webhook.js).
+            customer_id: lockedInvoice.customer_id,
             invoice_id: invoice.id,
             payment_method_id: paymentMethodId,
             total_balance: lockedTotalBalance,
@@ -2129,13 +2199,16 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
       throw err;
     }
 
+    // Post-commit attribution rides the CREATED plan row (returning('*')),
+    // which carries the locked-row customer_id the plan was inserted with.
+    const planCustomerId = paymentPlan.customer_id || invoice.customer_id;
     const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
     const emailResult = await PaymentLifecycleEmail.sendPaymentPlanConfirmed({
-      customerId: invoice.customer_id,
+      customerId: planCustomerId,
       paymentPlanId: paymentPlan.id,
       paymentMethodId,
       plan: paymentPlan,
-      idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${invoice.customer_id}`,
+      idempotencyKey: `payment.plan_confirmed:${paymentPlan.id}:${planCustomerId}`,
     }).catch((err) => ({ ok: false, error: err.message }));
 
     try {
@@ -2149,7 +2222,7 @@ router.post('/:id/payment-plan', requireAdmin, async (req, res, next) => {
     }
 
     await db('activity_log').insert({
-      customer_id: invoice.customer_id,
+      customer_id: planCustomerId,
       action: 'payment_plan_created',
       description: `Payment plan created for invoice ${invoice.invoice_number || invoice.id}: `
         + `$${paymentAmount.toFixed(2)} ${paymentFrequency} toward $${Number(paymentPlan.total_balance).toFixed(2)} — ${createdBy}`,

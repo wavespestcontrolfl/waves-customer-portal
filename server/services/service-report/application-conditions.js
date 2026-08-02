@@ -170,10 +170,6 @@ function rainWindowEndingOn(serviceDate, days = 7) {
 const _rainCache = new Map();
 const RAIN_TTL_MS = 6 * 60 * 60 * 1000; // 6h
 
-function rainCacheKey(lat, lon, end) {
-  return `${Number(lat).toFixed(2)},${Number(lon).toFixed(2)},${end}`;
-}
-
 // ── City-collective rainfall (single-cell model-spike guard) ────────────────────
 // Open-Meteo's daily precipitation_sum is a per-grid-cell modelled value. On summer
 // convective days a single cell can carry a spurious 3–8" bullseye its own neighbours
@@ -241,20 +237,183 @@ function resolveWeekRain(propSeries = [], cellSeriesList = []) {
 // NOTE: Open-Meteo returns et0_fao_evapotranspiration in the precipitation unit
 // (inches here). Eyeball a real report once — a ~25× value would mean it came
 // back in mm.
+// ── Rain engine mode (GATE_RAIN_MRMS) ───────────────────────────────────────────
+// 'off'    (unset/anything else): Open-Meteo only — the pre-engine behavior,
+//          zero extra external calls.
+// 'shadow' : fetch MRMS too, log the weekly delta vs Open-Meteo, but RETURN
+//            the Open-Meteo result — a week of these logs is the flip evidence.
+// 'live'   ('true'): MRMS-primary ladder is what reports/emails consume.
+// Kill switch = unset the var.
+function rainMrmsMode() {
+  const raw = String(process.env.GATE_RAIN_MRMS || '').toLowerCase();
+  if (raw === 'true') return 'live';
+  if (raw === 'shadow') return 'shadow';
+  return 'off';
+}
+
+function etTodayYmd() {
+  // en-CA formats as YYYY-MM-DD; the ET calendar day decides whether the
+  // window's last day is still accumulating.
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+// Merge an MRMS daily series into the Open-Meteo week. Pure — exported for
+// tests. Returns the merged value or null when MRMS adds nothing usable
+// (caller keeps the Open-Meteo result).
+//
+// Per-day ladder: a CLOSED day takes the MRMS observation when present and
+// falls back to the Open-Meteo estimate on a gap; the UNCLOSED visit day
+// takes the larger of MRMS-so-far and the Open-Meteo day value (the model
+// includes hours that haven't happened yet — the observation is a floor,
+// never a cap). A day with neither source fails the whole merge: partial
+// windows are never trusted as weekly totals (same rule as the OM path).
+function mergeMrmsIntoWeek({ om, mrms, todayYmd } = {}) {
+  if (!mrms || !Array.isArray(mrms.days) || !mrms.days.length) return null;
+  const round2 = (n) => (Number.isFinite(Number(n)) ? Math.round(Number(n) * 100) / 100 : null);
+  const omByDate = new Map((om?.dailyRain || []).map((d) => [d.date, d.inches]));
+  const days = [];
+  let mrmsDays = 0;
+  for (const day of mrms.days) {
+    const omVal = Number.isFinite(Number(omByDate.get(day.date))) ? Number(omByDate.get(day.date)) : null;
+    const mrmsVal = day.inches;
+    let inches = null;
+    let provider = null;
+    if (day.date === todayYmd) {
+      // The unclosed day NEEDS the model value: MRMS alone is an explicitly
+      // partial "so far" accumulation, and accepting it as a full day would
+      // understate the week (codex P2 #3096 r2). Only a missing MODEL value
+      // fails the merge — a missing MRMS row for today (delayed IEM
+      // backfill) just uses the model for that day and keeps the closed-day
+      // measurements (codex P2 r3: the inverse outage must not discard six
+      // good MRMS days).
+      if (omVal == null) return null;
+      if (mrmsVal != null) {
+        inches = Math.max(mrmsVal, omVal);
+        provider = mrmsVal >= omVal ? 'mrms' : 'open_meteo';
+      } else {
+        inches = omVal;
+        provider = 'open_meteo';
+      }
+    } else if (mrmsVal != null) {
+      inches = mrmsVal;
+      provider = 'mrms';
+    } else if (omVal != null) {
+      inches = omVal;
+      provider = 'open_meteo';
+    } else {
+      return null;
+    }
+    if (provider === 'mrms') mrmsDays += 1;
+    days.push({ date: day.date, inches: round2(inches), provider });
+  }
+  if (!mrmsDays) return null;
+  return {
+    rainInches: round2(days.reduce((sum, d) => sum + (d.inches || 0), 0)),
+    // MRMS carries no evapotranspiration — ET₀ stays the Open-Meteo value.
+    et0Inches: om?.et0Inches ?? null,
+    dailyRain: days,
+    // Measured days are high-trust by nature; the 'low' city-collective badge
+    // only survives when Open-Meteo days that used it are still in the mix.
+    rainConfidence: days.some((d) => d.provider === 'open_meteo') && om?.rainConfidence === 'low' ? 'low' : null,
+    rainSource: mrmsDays === days.length ? 'mrms' : 'mrms+open_meteo',
+  };
+}
+
 async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}) {
   const empty = { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null };
   const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
   const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
   const range = rainWindowEndingOn(serviceDate, 7);
   if (lat == null || lon == null || !range) return empty;
-  const key = rainCacheKey(lat, lon, range.end);
+  const mode = rainMrmsMode();
+  // Mode participates in the key so a gate flip never serves the other
+  // mode's cached week for up to 6h. A window ending TODAY is still
+  // accumulating — cache it briefly (30 min) so afternoon convection shows
+  // up instead of being pinned behind the 6h TTL (codex P2 #3096 r2);
+  // closed windows keep the full TTL.
+  // Key precision is MODE-SCOPED (codex P2 #3096 r4+r5): shadow/live use
+  // four decimals (~11 m) because MRMS resolves ~1 km cells and two-decimal
+  // keys collide neighbouring properties into one cached week; OFF mode
+  // keeps the legacy two-decimal (~1.1 km) key — that coarseness is what
+  // batches the Monday sweep's ~500 sequential Open-Meteo lookups for
+  // nearby customers, and off-mode results are city-grid data anyway.
+  const keyCoords = mode === 'off'
+    ? `${lat.toFixed(2)},${lon.toFixed(2)}`
+    : `${lat.toFixed(4)},${lon.toFixed(4)}`;
+  const key = `${mode}|${keyCoords},${range.end}`;
+  const windowUnclosed = range.end >= etTodayYmd();
+  // TTL is decided at WRITE time and stored with the entry — recomputing at
+  // read let an entry cached just before ET midnight inherit the 6h TTL
+  // after midnight and pin the partial visit-day value (codex P2 #3096 r3).
+  const ttlMs = windowUnclosed ? 30 * 60 * 1000 : RAIN_TTL_MS;
   const cached = _rainCache.get(key);
-  if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
+  if (cached && Date.now() - cached.at < (cached.ttlMs ?? RAIN_TTL_MS)) return cached.value;
 
-  // Sample the whole city (property cell + neighbour ring) in ONE multi-location call
-  // so a single spiked grid cell can be caught against the city median (see notes above).
-  const grid = citySampleGrid(lat, lon);
-  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  // The two sources are independent — fetch concurrently so a slow pair
+  // costs max(timeouts), not their sum (codex P2 #3096).
+  const mrmsPromise = mode !== 'off'
+    ? require('../mrms-qpe').fetchMrmsDailyRain({ latitude: lat, longitude: lon, start: range.start, end: range.end }).catch(() => null)
+    : Promise.resolve(null);
+  const [om, mrms] = await Promise.all([
+    fetchOpenMeteoServiceWeek({ lat, lon, range, empty }),
+    mrmsPromise,
+  ]);
+  let value = om;
+  if (mode !== 'off') {
+    const merged = mergeMrmsIntoWeek({ om, mrms, todayYmd: etTodayYmd() });
+    // Coordinates are location PII and must not land in persistent logs
+    // (codex P1 #3096) — an opaque hash still lets a week of shadow lines
+    // be grouped per property.
+    const loc = require('crypto').createHash('sha256').update(`${lat.toFixed(4)},${lon.toFixed(4)}`).digest('hex').slice(0, 8);
+    // Telemetry must not bias the shadow experiment (codex P2 r2): missing
+    // sources are logged as explicit 'unavailable' outcomes — never as a
+    // numeric delta against zero, and never silently skipped — so the
+    // live-flip evidence includes availability, not just agreement.
+    const omWeek = om.rainInches;
+    const mrmsWeek = merged ? merged.rainInches : null;
+    const delta = (mrmsWeek != null && omWeek != null)
+      ? Math.round((mrmsWeek - omWeek) * 100) / 100
+      : null;
+    logger.info(`[rain-engine] mode=${mode} mrms=${mrmsWeek ?? 'unavailable'} om=${omWeek ?? 'unavailable'} delta=${delta ?? 'n/a'} source=${merged ? merged.rainSource : 'open_meteo_only'} loc=${loc} end=${range.end}`);
+    if (merged && mode === 'live') value = merged;
+    if (!merged && mode === 'live') {
+      logger.warn(`[rain-engine] mode=live but MRMS unusable for ${range.start}..${range.end} loc=${loc} — Open-Meteo fallback`);
+    }
+  }
+  if (value.rainInches != null || value.et0Inches != null) {
+    // Short retry TTL whenever an independent input is missing (codex P2
+    // r5+r6): et0Inches null (Open-Meteo outage survived by MRMS) retries
+    // ET₀ once the model recovers; in LIVE mode a week that isn't pure MRMS
+    // (merge failed → modeled, or gap days filled by the model) retries the
+    // primary source so IEM's late backfills upgrade it instead of being
+    // pinned behind the 6h TTL.
+    const missingIndependentInput = value.et0Inches == null
+      || (mode === 'live' && value.rainSource !== 'mrms');
+    const effectiveTtlMs = missingIndependentInput ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
+    _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value });
+  }
+  return value;
+}
+
+// The pre-engine Open-Meteo week fetch, verbatim behavior (city-grid spike
+// guard, full-window trust rule). Returns `empty` on any miss.
+// The service week is always a COMPLETED window, so the reanalysis archive is
+// the right endpoint for it — /v1/forecast serves model output for past dates
+// and demonstrably zeroes real rain days. Measured across one SWFL service
+// week (2026-08-01): /v1/forecast reported 0.00" on two days the archive
+// scored at 0.055" and 0.382", weekly totals 1.12" vs 2.67". A volunteer rain
+// gauge a few miles away caught 1.28" in the same window, so the archive is
+// much closer to what actually fell. Verified same-day that the archive spans
+// through today (no reanalysis lag to design around) and supports BOTH the
+// multi-location grid and et0_fao_evapotranspiration, so the city-median spike
+// guard and the ET₀ target are unaffected. /v1/forecast stays as the fallback:
+// if the archive ever fails or returns an untrusted window we degrade to
+// exactly the previous behaviour rather than to nothing.
+const OPEN_METEO_ARCHIVE = 'https://archive-api.open-meteo.com/v1/archive';
+const OPEN_METEO_FORECAST = 'https://api.open-meteo.com/v1/forecast';
+
+function openMeteoWeekUrl(base, grid, range) {
+  const url = new URL(base);
   url.searchParams.set('latitude', grid.map((p) => p.lat.toFixed(4)).join(','));
   url.searchParams.set('longitude', grid.map((p) => p.lon.toFixed(4)).join(','));
   url.searchParams.set('daily', 'precipitation_sum,et0_fao_evapotranspiration');
@@ -262,7 +421,42 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   url.searchParams.set('end_date', range.end);
   url.searchParams.set('precipitation_unit', 'inch');
   url.searchParams.set('timezone', 'America/New_York');
+  return url;
+}
 
+async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
+  // Sample the whole city (property cell + neighbour ring) in ONE multi-location call
+  // so a single spiked grid cell can be caught against the city median (see notes above).
+  const grid = citySampleGrid(lat, lon);
+  // The archive is only right for a CLOSED window. When the window's last day
+  // is still today, reanalysis has only the hours that have already been
+  // assimilated, so it understates a day that is still raining — the exact
+  // reason mergeMrmsIntoWeek refuses to let an MRMS "so far" total cap the
+  // model on the unclosed day. Same rule here: a window ending today keeps the
+  // forecast endpoint, which carries a full-day model value (codex #3153 P1).
+  const windowClosed = range.end < etTodayYmd();
+  const attempts = windowClosed
+    ? [
+      { endpoint: 'archive', url: openMeteoWeekUrl(OPEN_METEO_ARCHIVE, grid, range) },
+      { endpoint: 'forecast', url: openMeteoWeekUrl(OPEN_METEO_FORECAST, grid, range) },
+    ]
+    : [
+      { endpoint: 'forecast', url: openMeteoWeekUrl(OPEN_METEO_FORECAST, grid, range) },
+    ];
+
+  for (let i = 0; i < attempts.length; i += 1) {
+    const { endpoint, url } = attempts[i];
+    const isLast = i === attempts.length - 1;
+    const result = await fetchOpenMeteoWeekFrom({ url, range, empty, endpoint });
+    // An untrusted window from the archive is a reason to try the forecast
+    // endpoint, not a reason to give up — `empty` is only final on the last one.
+    if (result !== empty || isLast) return result;
+    logger.info(`[rain-engine] open-meteo ${endpoint} window unusable for ${range.start}..${range.end} — falling back`);
+  }
+  return empty;
+}
+
+async function fetchOpenMeteoWeekFrom({ url, range, empty, endpoint }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3500);
   try {
@@ -326,10 +520,11 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
       rainConfidence: suspect ? 'low' : null,
       rainSource: source,
     };
-    _rainCache.set(key, { at: Date.now(), value });
+    // Caching moved to fetchServiceWeekWeather — the cache key carries the
+    // engine mode, which this extracted fetcher doesn't know about.
     return value;
   } catch (err) {
-    logger.warn(`[application-conditions] service-week weather fetch failed: ${err.message}`);
+    logger.warn(`[application-conditions] service-week weather fetch failed (${endpoint}): ${err.message}`);
     return empty;
   } finally {
     clearTimeout(timeout);
@@ -383,6 +578,8 @@ module.exports = {
   et0SumToInches,
   rainWindowEndingOn,
   resolveWeekRain,
+  mergeMrmsIntoWeek,
+  rainMrmsMode,
   normalizeFawnConditions,
   weatherCodeLabel,
 };

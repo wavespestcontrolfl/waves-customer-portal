@@ -1586,11 +1586,70 @@ async function cancelAppointment(input) {
   const appt = await db('scheduled_services').where('id', appointment_id).first();
   if (!appt) return { error: 'Appointment not found' };
 
-  await db('scheduled_services').where('id', appointment_id).update({
-    status: 'cancelled',
-    notes: reason ? `${appt.notes || ''}\nCancelled: ${reason}`.trim() : appt.notes,
-    updated_at: new Date(),
-  });
+  // Terminal statuses are one-way (#2717) — that guard lives in the ROUTE
+  // callers, not transitionJobStatus, so this tool must enforce it itself
+  // (Codex r4): cancelling a completed visit would erase delivered work and
+  // trigger the follow-up re-park hook for a treatment that already
+  // happened. Idempotent on an already-cancelled row; every other terminal
+  // state is an error, matching rescheduleAppointment above.
+  if (String(appt.status) === 'cancelled') {
+    // Retry of an already-committed cancellation: the post-commit re-park
+    // hook may have failed transiently on the first attempt, and this early
+    // return is the only path a retry reaches — re-attempt the
+    // dedup-guarded re-park here, exactly like the alreadyNoShow status
+    // routes (Codex r5 on PR #3091).
+    {
+      const { handleFollowupChildCancellation } = require('../typed-followup-obligation');
+      void handleFollowupChildCancellation({ jobId: appointment_id, toStatus: 'cancelled' }).catch(() => {});
+    }
+    return {
+      success: true,
+      appointment_id,
+      already_cancelled: true,
+      date: appt.scheduled_date,
+      service_type: appt.service_type,
+    };
+  }
+  if (TERMINAL_APPOINTMENT_STATUSES.includes(String(appt.status))) {
+    return { error: `This appointment is already ${appt.status} and can't be cancelled.` };
+  }
+
+  // Route through the SHARED status writer, not a direct status update
+  // (Codex r3 on PR #3091): transitionJobStatus is where the cross-cutting
+  // cancellation behavior lives — the atomic racing-transition guard, the
+  // job_status_history audit row, socket board updates, overdue-alert
+  // auto-resolution, and the follow-up obligation re-park hook. A direct
+  // UPDATE silently skipped all of it. The reason append rides the SAME
+  // caller-owned transaction as the transition (Codex r5): a crash between
+  // separate writes would report failure for a committed cancellation, and
+  // the retry's already_cancelled return would never persist the reason.
+  try {
+    const { transitionJobStatus } = require('../job-status');
+    await db.transaction(async (trx) => {
+      await transitionJobStatus({
+        jobId: appointment_id,
+        fromStatus: appt.status,
+        toStatus: 'cancelled',
+        transitionedBy: null,
+        notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
+        trx,
+      });
+      if (reason) {
+        await trx('scheduled_services').where('id', appointment_id).update({
+          notes: `${appt.notes || ''}\nCancelled: ${reason}`.trim(),
+          updated_at: new Date(),
+        });
+      }
+    });
+  } catch (err) {
+    if (err && err.message && err.message.includes('not in state')) {
+      return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };
+    }
+    if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+      return { error: 'This outbound-callback booking is pending office review — confirm or reject it there instead.' };
+    }
+    throw err;
+  }
 
   const customer = await db('customers').where('id', appt.customer_id).first();
 

@@ -118,7 +118,36 @@ export function ConfirmEvidence({ payload }) {
     // it's being asked to verify (or save to the account).
     p.caller_phone && { label: "Caller dialed from", value: p.caller_phone },
     p.caller_phone && p.matched_customer_name && { label: "Linked to", value: p.matched_customer_name },
-    p.caller_phone && { label: "On file", value: p.on_file_phone || "no primary phone" },
+    // "On file" only makes sense on the phone-mismatch card (matched customer
+    // present) — the dropped-call card also carries caller_phone but has no
+    // account to compare against.
+    p.caller_phone && p.matched_customer_name && { label: "On file", value: p.on_file_phone || "no primary phone" },
+    // call_dropped_mid_intake: whether the automated address-request text
+    // went out, so the office knows to watch for a reply vs. call back cold.
+    // A suppression block (DNC / wrong number) must NEVER render as "call
+    // them back" — surface the block so the office checks the record first.
+    p.address_request_sms && {
+      label: "Address text",
+      value: (() => {
+        const outcome = String(p.address_request_sms);
+        const code = p.address_request_sms_code ? String(p.address_request_sms_code) : "";
+        if (outcome === "sent") return "sent — watch for their reply";
+        // Every recipient-terminal verdict the service can emit: STOP-list
+        // suppressions, per-purpose/SMS opt-outs, explicit no-consent, DNC,
+        // wrong number, provider opt-out (21610). Checked BEFORE the
+        // undelivered rendering — a delayed 21610 bounce is an opt-out, not
+        // a "call them back".
+        // Specific opt-out/DNC codes only — a bare SUPPRESS match would also
+        // catch SUPPRESSED_NON_MOBILE (landline), which means "SMS can't
+        // reach them, CALL them", the opposite instruction.
+        const DNC_RE = /SUPPRESSED_MANUAL|SUPPRESSED_OPT_OUT|SUPPRESSED_PROVIDER|SUPPRESSED_WRONG|SUPPRESSED_OTHER|OPTED_OUT|OPT_OUT|NO_CONSENT|NO_MARKETING|DNC|WRONG_NUMBER/i;
+        if (outcome === "undelivered" && !DNC_RE.test(code)) return "text never arrived — call them back";
+        if (DNC_RE.test(code) || DNC_RE.test(outcome)) {
+          return `blocked (${(code || outcome).replace(/_/g, " ").toLowerCase()}) — do NOT contact; check the record first`;
+        }
+        return `not sent (${outcome.replace(/_/g, " ")}${code ? `: ${code}` : ""}) — call them back`;
+      })(),
+    },
     p.address_as_heard && { label: "Heard", value: p.address_as_heard },
     p.address_recovered && { label: "Matched to", value: p.address_recovered },
     !p.address_recovered && addressCandidates.length > 0 && { label: "Did you mean", value: addressCandidates.join(" · ") },

@@ -138,7 +138,11 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
     if (stripeChargeId) {
       if (!stripe) return res.status(503).json({ error: 'Stripe not configured' });
       try {
-        chargeDetails = await stripe.charges.retrieve(stripeChargeId);
+        // balance_transaction is created when the charge SUCCEEDS — for
+        // async methods (ACH) that is settlement, not initiation, so its
+        // timestamp is the authoritative settlement moment the billing-pause
+        // machinery compares against.
+        chargeDetails = await stripe.charges.retrieve(stripeChargeId, { expand: ['balance_transaction'] });
       } catch (e) {
         return res.status(400).json({ error: `Stripe charge lookup failed: ${e.message}` });
       }
@@ -303,6 +307,27 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         metadata: JSON.stringify({
           invoice_id: invoiceId,
           source: 'admin_payment_reconcile',
+          // The CHARGE's settlement moment, not the reconciliation moment:
+          // billing-cron's pause veto reads settled_event_at, and a row
+          // created at reconcile time without it would fall back to
+          // created_at — making a weeks-old charge look like money settled
+          // during the current failed attempt. chargeDetails.created is
+          // Stripe's epoch-seconds charge timestamp (verified above when a
+          // stripeChargeId is supplied). Non-Stripe reconciliations
+          // (check/cash) carry no stamp on purpose: they were recorded by a
+          // human NOW, and created_at is honest for them.
+          // The authoritative settlement moment: the balance transaction is
+          // created when the charge SUCCEEDS (for ACH that is settlement,
+          // not initiation); charge.created is the fallback for the rare
+          // charge whose bt did not expand — older-than-true, which errs
+          // toward the pause staying, never toward a false veto/clear.
+          ...(stripeChargeId && (chargeDetails?.balance_transaction?.created || chargeDetails?.created)
+            ? { settled_event_at: new Date((chargeDetails.balance_transaction?.created || chargeDetails.created) * 1000).toISOString() }
+            : {}),
+          // Payer ownership rides every ledger row (same marker the pause
+          // veto and auto-clear read) — a payer-funded reconciliation during
+          // a homeowner retry must not read as the homeowner's own tender.
+          ...(invoice.payer_id ? { payer_id: invoice.payer_id } : {}),
         }),
       });
 
@@ -340,6 +365,26 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       await AnnualPrepayRenewals.syncTermForInvoicePayment({ id: invoiceId, status: 'paid', paid_at: new Date() });
     } catch (e) {
       logger.warn(`[reconcile] annual prepay activation skipped: ${e.message}`);
+    }
+
+    // Same automatic-clear contract as the webhook and record-payment: a
+    // reconciled payment is the customer paying. Settlement moment = the
+    // Stripe charge's own timestamp when we have one (the ordering guard
+    // then correctly refuses charges that predate the failure cycle), or
+    // NOW for check/cash. Skipped for payer-billed invoices — the payer's
+    // tender proves nothing about the homeowner's card.
+    if (!invoice.payer_id) {
+      try {
+        const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+        const settledEpoch = chargeDetails?.balance_transaction?.created || chargeDetails?.created || null;
+        await maybeResumeBillingPauseOnPayment(invoice.customer_id, {
+          paymentIntentId: chargeDetails?.payment_intent || null,
+          source: 'admin_payment_reconcile',
+          settledAt: settledEpoch ? new Date(settledEpoch * 1000) : new Date(),
+        });
+      } catch (pauseErr) {
+        logger.warn(`[reconcile] billing-pause auto-clear failed: ${pauseErr.message}`);
+      }
     }
 
     logger.info(`[reconcile] invoice ${invoice.invoice_number} marked paid via ${collectedVia}${stripeChargeId ? ` (${stripeChargeId})` : ''}`);

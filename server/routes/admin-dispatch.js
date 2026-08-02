@@ -68,18 +68,28 @@ const {
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const CompanionCompletions = require('../services/service-report/companion-completions');
+// The follow-up override chain (German knockdown windows, two-treatment
+// package rules, species gating) lives in ONE place — the obligation module
+// — shared by /complete, /schedule-followup, and the shared status writer's
+// cancellation re-park hook. Route-local copies drifted (Codex r1–r2 on
+// PR #3091 found four leak shapes between them).
 const {
-  projectFollowupSuggestion,
-} = require('../services/project-completion');
-// German knockdown follow-up window → suggestion interval (owner spec §8B).
-// 'As needed' intentionally absent: it keeps the profile's default interval
-// (the report copy for it is interval-free, so no date can contradict it).
-const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 };
-// Two-treatment package keys (20260712300000 cutover): the ALERT follow-up
-// policy means visit 1 owes an included second visit — and ONLY visit 1;
-// an included follow-up completing must not mint a third (Codex r3).
-// Trapping programs deliberately chain and are excluded.
-const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment']);
+  typedFollowupVerdict,
+  typedFollowupObligationForCompletedSource,
+  parkFollowupAlert,
+  TWO_TREATMENT_PACKAGE_KEYS,
+  FOLLOWUP_CHILD_INACTIVE_STATUSES,
+} = require('../services/typed-followup-obligation');
+
+// Report/track egress (AGENTS.md): entry-code shapes that must never persist
+// into customer-visible completion text. Three shapes: a code word near a
+// location word ("gate ... code"), a code word followed by digits
+// ("pin 9921"), and the bare shorthand of a code-carrying location word
+// followed directly by a code-shaped number ("Gate 1234", "lockbox is
+// 2468" — codex r3). Ordinary copy ("entry points treated", "gate was
+// open") never trips; a street address near the word "gate" may — that
+// false positive fails closed and the tech rephrases.
+const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}[a-z]?\d{2,4}(?:[-\s]\d{2,4}){0,2}|\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,12}\b(?:[a-z]?\d{3,8}|[a-z]?\d{2,4}(?:[-\s]\d{2,4}){1,2})\b)/i;
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -91,6 +101,8 @@ const {
 } = require('../services/track-transition-alerts');
 const {
   finiteDate,
+  positiveNumber,
+  positiveMinutesBetween,
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
@@ -784,6 +796,292 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
   return toETNoonServiceDate(serviceDate);
 }
 
+// Live time-on-site override (forgotten-closeout fix, same-day leg): the
+// completion panel's timer keeps running when a visit isn't closed out
+// promptly, and a live completion ships that inflated elapsed verbatim into
+// the duration columns. An admin may instead type corrected minutes — the
+// wire contract is TYPE-based on the existing timeOnSite field: a string is
+// the panel's auto-elapsed timer (unchanged behavior), a NUMBER is an
+// operator-typed override (only backfill bodies carry numbers today).
+// ADMIN-ONLY, fail-closed like backfillCompletionPlan: the tech portal never
+// sends numbers, so a numeric value on a technician token is tampering or a
+// client bug — 403, never silently degraded. Out-of-range from an admin is a
+// 400 (unlike backfill's degrade-to-unknown: the admin is live at the panel
+// and can correct the typo; the backlog-closeout must-land argument doesn't
+// apply). Backfill bodies pass through untouched — the backfill sanitizer
+// owns that branch. Pure for testability (_test).
+// Timer-vs-operator classification is the SHARED rule in
+// completion-attempts (isOperatorTimeOnSite) — the intake gate here and the
+// idempotency MODE hash must never disagree about what counts as an
+// operator-entered duration (codex P2 #3152 round 14). Non-timer shapes —
+// bare "45", "45 min", numbery arrays — are operator input wearing a string
+// costume and take the admin gate (codex P1 round 13).
+//
+// Timer-SHAPED strings are additionally validated against the server's own
+// span (codex P1 round 14): the format alone cannot distinguish the panel's
+// real timer from a forged "45:00", but the server owns the start stamp.
+// Within this tolerance the client's second-level precision is kept
+// (network latency + modest clock drift); outside it the server-derived
+// span is recorded instead.
+const LIVE_TIMER_TOLERANCE_MINUTES = 5;
+
+// Server-derived minutes rendered in the panel timer's own "H:MM:SS" shape,
+// so a substituted value flows through every downstream type-based contract
+// (structured_notes freeze, the numeric-means-adjusted signals) exactly
+// like a genuine timer submission.
+function minutesAsElapsedString(minutes) {
+  const whole = Math.max(0, Math.round(minutes));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}:00`;
+}
+
+// Linked job timer sync — shared by the after-the-fact PATCH and the live
+// completion override (codex P1, pre-push audit round 20): job costing
+// overrides the inflated entry via the durable stamp, but timesheet detail,
+// utilization, and actual-duration analytics read time_entries directly.
+// Revision-fenced under the scheduled_services row lock, which is HELD
+// through the audited edit so concurrent corrections' syncs serialize in
+// commit order; a request that finds a NEWER revision than the one it
+// committed skips — the newest correction's own pass lands the truth. The
+// safe shape is exactly one non-voided, CLOSED job entry diverging from the
+// corrected minutes in either direction; everything else is surfaced as a
+// blocked reason (entry_open / multiple_job_entries / entry_shape /
+// approved_week / edit_failed) rather than forced.
+async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy, entriesSnapshot = null }) {
+  let corrected = null; // null = no divergent linked entry to correct
+  let blocked = null;
+  try {
+    await db.transaction(async (timerTrx) => {
+      const rowNow = await timerTrx('scheduled_services').where({ id: serviceId }).forUpdate().first();
+      const rowSeqNow = rowNow?.time_on_site_correction_seq == null
+        ? null
+        : Number(rowNow.time_on_site_correction_seq);
+      if (rowSeqNow != null && committedSeq != null && rowSeqNow > committedSeq) return;
+      // The version boundary is the CORRECTION, not this post-commit sync
+      // (codex P2 #3152 round 23): callers capture the entry snapshot
+      // inside the correction transaction, so a payroll edit landing
+      // between the correction's commit and this sync carries a newer
+      // updated_at than the snapshot and the audited edit 409s instead of
+      // silently replacing it. The LIVE set is still read for the
+      // membership recheck below; on the crash-resume path (no transaction
+      // ran in this process, no snapshot to hand over) it is also the
+      // divergence input — but never an edit basis, see the resume guard.
+      const liveEntries = await timerTrx('time_entries')
+        .where({ job_id: serviceId, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+      let jobEntries = liveEntries;
+      if (entriesSnapshot !== null) {
+        // Membership recheck (codex P2 #3152 round 24): a job timer
+        // started for this visit after the snapshot means the snapshot's
+        // aggregate no longer describes payroll reality — editing the
+        // snapshotted row could report success while the true total stays
+        // wrong. Versions and values still come from the SNAPSHOT (the
+        // correction's ordering boundary); only the id-set is compared.
+        const snapIds = entriesSnapshot.map((e) => String(e.id)).sort().join(',');
+        const liveIds = liveEntries.map((e) => String(e.id)).sort().join(',');
+        if (snapIds !== liveIds) {
+          corrected = false;
+          blocked = 'entry_conflict';
+          return;
+        }
+        jobEntries = entriesSnapshot;
+      }
+      if (jobEntries.length === 0) return;
+      // A still-running linked timer cannot be silently "fine" — the span
+      // keeps growing past the corrected minutes and the audited edit
+      // workflow is for completed intervals. Surface it (codex P1, audit
+      // round 20c) so the admin closes/fixes it in Timesheets.
+      const open = jobEntries.filter((e) => e.clock_out == null);
+      if (open.length > 0) {
+        corrected = false;
+        blocked = 'entry_open';
+        return;
+      }
+      // Divergence is judged on the AGGREGATE (codex P1, audit round 21):
+      // timesheets, utilization, and job costing all SUM the linked
+      // entries, and a legitimate split visit (20 + 25 against a 45-minute
+      // correction) is in sync while two duplicate 45s against 45 are not
+      // — a per-entry comparison called that duplicate shape "fine".
+      // ANY aggregate divergence syncs — an increased re-correction
+      // (45 → 60) must move the entry too, not only an inflated-timer
+      // decrease — compared at the stored hundredth-minute precision
+      // (codex P2 round 21): a one-minute tolerance left a 45.01–46.00
+      // entry silently unsynced. Half a hundredth absorbs float noise
+      // only; an entry this sync wrote lands exactly on the corrected
+      // minutes, so re-runs still no-op.
+      //
+      // The no-op decision reads the LIVE set (codex P2 round 26): a
+      // payroll edit after the snapshot that changes a duration without
+      // changing the id-set would otherwise slip through — the snapshot
+      // total still agrees and the version fence on the edit path is never
+      // reached. A live-divergent timer falls through instead: the edit
+      // path's expected_updated_at (from the SNAPSHOT) then 409s and the
+      // conflict is surfaced; a payroll edit that already landed the
+      // corrected minutes stays silent, as it should.
+      const totalMinutes = liveEntries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
+      if (Math.abs(totalMinutes - minutes) <= 0.005) return;
+      if (jobEntries.length === 1 && jobEntries[0].clock_in) {
+        // Crash-resume guard (codex P2 #3152 round 24): with no
+        // transaction-time snapshot there is no version that predates the
+        // correction — a fresh updated_at would bless a NEWER payroll edit
+        // for overwrite. A divergent timer on the resume path is surfaced,
+        // never edited. (An already-agreeing timer returned at the
+        // aggregate check above, so resumes stay quiet when the first run
+        // finished its sync.)
+        if (entriesSnapshot === null) {
+          corrected = false;
+          blocked = 'entry_conflict';
+          return;
+        }
+        const entry = jobEntries[0];
+        // Duration-based edit (codex P1, audit round 21b): adminEditEntry
+        // derives the clock_out from ITS locked row's start, so a
+        // concurrent clock_in edit between this snapshot and the save can
+        // never produce a duration different from the corrected minutes.
+        await require('../services/time-tracking').adminEditEntry(entry.id, {
+          target_duration_minutes: minutes,
+          // Optimistic version (codex P2 round 22): a payroll admin's edit
+          // landing between this snapshot and the audited edit's locked
+          // read rejects the sync instead of being silently replaced — the
+          // 409 surfaces below as entry_conflict.
+          expected_updated_at: entry.updated_at ?? null,
+          edit_reason: `Time-on-site correction: ${minutes} min (visit ${serviceId})`,
+          edited_by: editedBy,
+        });
+        corrected = true;
+      } else {
+        corrected = false;
+        blocked = jobEntries.length > 1 ? 'multiple_job_entries' : 'entry_shape';
+      }
+    });
+  } catch (err) {
+    corrected = false;
+    blocked = /approved/i.test(String(err.message))
+      ? 'approved_week'
+      : (/changed since it was read/i.test(String(err.message))
+        ? 'entry_conflict'
+        : (/into the future/i.test(String(err.message)) ? 'exceeds_elapsed' : 'edit_failed'));
+    logger.warn(`[time-on-site] linked job timer sync blocked for service ${serviceId}: ${err.message}`);
+  }
+  return { corrected, blocked };
+}
+
+function liveTimeOnSitePlan({ timeOnSite, role, backfill = false, service = {}, now = new Date() } = {}) {
+  const isEmpty = timeOnSite == null || timeOnSite === '';
+  if (backfill === true || isEmpty) {
+    return { adjusted: false, effectiveTimeOnSite: timeOnSite };
+  }
+  if (!CompletionAttempts.isOperatorTimeOnSite(timeOnSite)) {
+    // Panel-timer shape — validate the claim against the server's span.
+    const claimedMinutes = minutesFromElapsed(timeOnSite);
+    const realStart = BACKFILL_INFERRED_START_FIELDS
+      .map((field) => finiteDate(service?.[field]))
+      .find(Boolean) || null;
+    if (!realStart) {
+      // No row-backed start = no reference to validate against. An admin
+      // keeps their value (they hold the typed override anyway); any other
+      // role records unknown rather than trusting an unverifiable claim —
+      // the genuine no-start panel submits "0:00", which carries no
+      // duration either way.
+      return role === 'admin'
+        ? { adjusted: false, effectiveTimeOnSite: timeOnSite }
+        : { adjusted: false, effectiveTimeOnSite: null };
+    }
+    // With a row-backed start and a valid `now`, a null from
+    // positiveMinutesBetween means the elapsed span rounded to zero (or the
+    // start sits ahead of the clock) — NOT "unknown". Trusting the claim on
+    // that null let a check-in-and-immediately-submit freeze any
+    // timer-shaped value ("720:00") into the report (codex P1 #3152 round
+    // 17). Zero IS the server's reference span: the claim survives only
+    // within tolerance of it, otherwise the server-derived timer is
+    // recorded, exactly like every other divergent claim.
+    const serverMinutes = positiveMinutesBetween(realStart, finiteDate(now) || new Date()) ?? 0;
+    if (claimedMinutes != null && Math.abs(claimedMinutes - serverMinutes) <= LIVE_TIMER_TOLERANCE_MINUTES) {
+      return { adjusted: false, effectiveTimeOnSite: timeOnSite };
+    }
+    return { adjusted: false, effectiveTimeOnSite: minutesAsElapsedString(serverMinutes) };
+  }
+  if (role !== 'admin') {
+    return {
+      adjusted: false,
+      status: 403,
+      error: {
+        error: 'Adjusting time on site is an office override — admin login required',
+        code: 'time_on_site_admin_only',
+      },
+    };
+  }
+  const minutes = backfillTimeOnSiteMinutes(timeOnSite);
+  if (!minutes) {
+    return {
+      adjusted: false,
+      status: 400,
+      error: {
+        error: `Adjusted time on site must be between 1 and ${BACKFILL_MAX_TIME_ON_SITE_MINUTES} minutes`,
+        code: 'time_on_site_invalid',
+      },
+    };
+  }
+  return { adjusted: true, effectiveTimeOnSite: minutes };
+}
+
+// End instant for an operator-typed duration against a live row: with a real
+// row-backed start, the honest end is start + minutes — stamping it keeps
+// every timestamp-pair reader (report visit-timeline, publicTimingFields,
+// the PDF's Time In/Out, job-costing's span fallback) in agreement with the
+// typed duration, with no read-side changes. Returns null when there is no
+// row-backed start (buildCompletionLifecycleUpdates then back-derives the
+// start from the wall-clock end) or when start + minutes lands in the future
+// (typed minutes exceed the actual elapsed — e.g. a late check-in; a future
+// end stamp would be a lie, so the wall-clock end stays and the explicit
+// duration columns win in every priority-ordered reader). Pure (_test).
+function adjustedCompletionEndInstant(service = {}, minutes, now = new Date()) {
+  const explicitMinutes = backfillTimeOnSiteMinutes(minutes);
+  const realStart = BACKFILL_INFERRED_START_FIELDS
+    .map((field) => finiteDate(service?.[field]))
+    .find(Boolean) || null;
+  const nowInstant = finiteDate(now) || new Date();
+  if (!realStart || !explicitMinutes) return null;
+  const end = new Date(realStart.getTime() + explicitMinutes * 60000);
+  return end.getTime() <= nowInstant.getTime() ? end : null;
+}
+
+// Validation/shape plan for the after-the-fact edit (PATCH /:serviceId/
+// time-on-site): the forgotten-closeout fix's second leg, correcting a row
+// that already completed with an inflated duration. Only completed rows
+// qualify — open rows get their correction at close-out (live override or
+// backfill). newEnd reuses adjustedCompletionEndInstant: end stamps are
+// rewritten only when a real row-backed start exists and start + minutes is
+// not in the future; a backfilled row with stripped stamps (or no start)
+// gets duration columns + structured_notes only — never fabricated
+// timestamps. Pure for testability (_test).
+function timeOnSiteEditPlan({ minutes, service = {}, structuredNotes = {}, now = new Date() } = {}) {
+  const rounded = Math.round(Number(minutes));
+  if (!Number.isFinite(rounded) || rounded < 1 || rounded > BACKFILL_MAX_TIME_ON_SITE_MINUTES) {
+    return {
+      status: 400,
+      error: {
+        error: `Time on site must be between 1 and ${BACKFILL_MAX_TIME_ON_SITE_MINUTES} minutes`,
+        code: 'time_on_site_invalid',
+      },
+    };
+  }
+  if (service.status !== 'completed') {
+    return {
+      status: 409,
+      error: {
+        error: 'Time on site can only be edited on a completed visit — close the visit out first',
+        code: 'service_not_completed',
+      },
+    };
+  }
+  return {
+    minutes: rounded,
+    newEnd: adjustedCompletionEndInstant(service, rounded, now),
+    isBackfillRecord: structuredNotes.backfill === true,
+  };
+}
+
 // Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
 // completion transaction commits, the record's structured_notes freeze IS the
 // completion — and the request hash carries `backfill`/`timeOnSite` in a
@@ -878,18 +1176,9 @@ function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MI
   return err;
 }
 
-function formatRescheduleTemplateVars(svc) {
-  const dateOnly = serviceDateOnly(svc?.scheduled_date);
-  const start = svc?.window_start || '08:00';
-  const apptTime = parseETDateTime(`${dateOnly}T${start}`);
-  return {
-    first_name: svc?.first_name || 'there',
-    service_type: svc?.service_type || 'service',
-    day: formatETDay(apptTime),
-    date: formatETDate(apptTime),
-    time: formatETTime(apptTime),
-  };
-}
+// formatRescheduleTemplateVars was removed with the inline single-reschedule
+// send — that path now routes through admin-schedule's
+// sendRescheduleNoticeForVisit (recipient routing + arrival-window copy).
 
 async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
@@ -1338,6 +1627,27 @@ async function attachLawnAssessmentOutcomePhotoRefs(outcome, assessmentId) {
 
 function serializeJsonb(value) {
   return JSON.stringify(value ?? null);
+}
+
+// ATOMIC post-commit structured_notes key merge (codex P1 #3152 — the same
+// clobber class pdf-queue's clearLawnPdfCorrectionMarker fixed): once the
+// completion transaction has committed, service_records.structured_notes has
+// CONCURRENT writers — the completion side-effect status stamps below and
+// the admin time-on-site correction (PATCH /:serviceId/time-on-site) — and a
+// whole-column snapshot write from either side erases the other's keys.
+// Every post-commit writer therefore merges ONLY the keys it owns; the
+// in-memory record.structured_notes snapshots stay as they were (they feed
+// the response payload and later deltas), but what lands in the column is
+// the delta applied to its CURRENT committed value. Whole-column
+// serializeJsonb writes on structured_notes remain legal only INSIDE the
+// completion transaction, where nothing can race them.
+function mergeRecordNotesKeys(recordId, patch) {
+  return db('service_records').where({ id: recordId }).update({
+    structured_notes: db.raw(
+      "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify(patch)],
+    ),
+  });
 }
 
 function composeCompletionSmsBody({ recapText, body, suffix = '', maxSegments = 2 }) {
@@ -2043,6 +2353,302 @@ router.patch('/:serviceId/note', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PATCH /api/admin/dispatch/:serviceId/time-on-site — after-the-fact
+// correction of a completed visit's recorded duration (forgotten-closeout
+// fix, second leg: the visit already closed out with the inflated timer).
+// ADMIN-ONLY. A pure data correction by design: no status transition, no
+// markComplete, and NO customer communications of any kind — the visit's
+// comms already fired (or were suppressed) at its real completion.
+//
+// What it rewrites (single transaction):
+//  - scheduled_services: both duration families (service_time_minutes +
+//    actual_duration_minutes), and — only when the row carries a real
+//    start AND start + minutes is not in the future — every kept end stamp
+//    (actual_end_time/check_out_time/completed_at) to start + minutes, so
+//    timestamp-pair readers agree with the corrected duration. Rows without
+//    a usable start (incl. backfilled closeouts with stripped stamps) get
+//    duration columns only — never fabricated timestamps.
+//  - service_records (latest row, when present): structured_notes.timeOnSite
+//    (what the report's on-site metric reads), a durable timeOnSiteAdjusted
+//    marker with the first pre-edit value in timeOnSitePrior, the same end
+//    stamps, and pdf_storage_key → NULL so the cached report PDF re-renders
+//    with the corrected figure (its cache signature does not vary on
+//    duration).
+// Post-commit: job costing recalc (labor books from the corrected value —
+// the durable structured_notes.timeOnSiteAdjusted marker re-derives an
+// overrideLaborMinutes that outranks even a job-tied time entry, here and
+// on every later no-opts recalculation; see calculateJobCost) and an
+// activity_log audit entry — both best-effort, never failing the edit.
+// Known scope-out: estimate-actuals only re-reconciles rows inside its
+// 7-day nightly rescan window.
+router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Canonical record resolution (codex P2 #3152 round 2): visits completed
+    // before migration 20260427000007 have service_records rows with a NULL
+    // scheduled_service_id, so an FK-only lookup would miss a record that
+    // exists and leave the customer report (and job costing's marker read)
+    // uncorrected. resolveServiceRecord is job-costing's own resolver — FK
+    // first, then the legacy (customer, date, type) soft-join with ambiguity
+    // detection — so the record this edit stamps is the SAME record
+    // calculateJobCost reads the marker from. An AMBIGUOUS legacy match is
+    // left untouched (job-costing skips those too: correcting the newest of
+    // several colliding records would stamp the wrong visit); the
+    // scheduled_services columns still correct, and the response says the
+    // record leg was skipped. Lookup failures PROPAGATE (codex P2 #3152):
+    // a thrown error here is a real DB failure — a 500 the admin retries,
+    // never a 200 that silently skipped the report-side correction.
+    // Schema lookup failures PROPAGATE too (codex P2 #3152 round 4): a
+    // degraded {} would make resolveServiceRecord skip the authoritative FK
+    // lookup AND strip the pdf-invalidation / timing / FK-heal legs off the
+    // record update — a partial correction behind a 200. A transient
+    // metadata failure must 500 so the admin retries whole.
+    const serviceRecordCols = await db('service_records').columnInfo();
+
+    const plan = timeOnSiteEditPlan({ minutes: req.body?.minutes, service: svc });
+    if (plan.error) return res.status(plan.status).json(plan.error);
+
+    let previousMinutes = null;
+    let recordUpdated = false;
+    let recordAmbiguous = false;
+    let newEnd = null;
+    let committedCorrectionSeq = null;
+    let timerEntriesSnapshot = null;
+    await db.transaction(async (trx) => {
+      // Prior minutes come from the LOCKED row (codex P2 #3152 round 10):
+      // two concurrent corrections serialize on this lock, and each audit
+      // entry must record the value it actually superseded — the first
+      // correction's committed minutes, not a shared pre-lock snapshot.
+      const lockedSvc = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+      // The revision this save commits — the raw COALESCE(seq,0)+1 bump
+      // writes the same value; safe to compute here under the row lock.
+      committedCorrectionSeq = (Number(lockedSvc?.time_on_site_correction_seq) || 0) + 1;
+      // Linked-timer snapshot INSIDE the correction transaction (codex P2
+      // #3152 round 23): this is the sync's version boundary — a payroll
+      // edit after this commit outdates the snapshot and rejects the sync.
+      // (No try/catch: a failed statement would poison the transaction
+      // anyway, and time_entries is a core table like the others read here.)
+      timerEntriesSnapshot = await trx('time_entries')
+        .where({ job_id: svc.id, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+      previousMinutes = positiveNumber(lockedSvc?.service_time_minutes)
+        || positiveNumber(lockedSvc?.actual_duration_minutes)
+        || null;
+      // Record resolution runs UNDER the same row lock (codex P2 #3152
+      // round 13): the status-route-first flow leaves the visit completed
+      // while a later /complete finalization creates its service_records
+      // row inside a transaction that updates this same scheduled_services
+      // row. Resolving before the lock could permanently miss that fresh
+      // record; blocking here until the finalization commits, then
+      // resolving through the trx, sees whatever record exists once it
+      // settled. Runs BEFORE any write so a resolution failure aborts the
+      // whole correction.
+      const { record: resolvedRecord, viaFk: recordViaFk, ambiguous } = await require('../services/job-costing')
+        .resolveServiceRecord(trx, lockedSvc || svc, serviceRecordCols);
+      recordAmbiguous = ambiguous;
+      const record = ambiguous ? null : resolvedRecord;
+      if (ambiguous) {
+        logger.warn(`[time-on-site] ambiguous legacy service_record match for service ${svc.id} — correcting scheduled_services only`);
+      }
+      // End instant from the LOCKED row too — its start fields are the
+      // settled truth after any in-flight finalization.
+      newEnd = adjustedCompletionEndInstant(lockedSvc || svc, plan.minutes);
+      const serviceUpdate = {
+        service_time_minutes: plan.minutes,
+        actual_duration_minutes: plan.minutes,
+        // Durable stamp on the visit ROW (codex P2 #3152 round 5): the
+        // structured_notes marker can't exist when the record leg is skipped
+        // (no/ambiguous legacy record), and without a durable signal every
+        // later no-opts job-cost recalculation re-books labor from the
+        // inflated job-linked time entry. calculateJobCost reads this column
+        // off the row it already holds.
+        time_on_site_adjusted_minutes: plan.minutes,
+        // Monotonic revision (codex P2 #3152 round 17): the fences compare
+        // THIS, not the minutes value — a same-minutes re-save (repairing
+        // previously clamped end fields) must still read as a new
+        // correction to any in-flight finalization or tracker write.
+        time_on_site_correction_seq: trx.raw('COALESCE(time_on_site_correction_seq, 0) + 1'),
+        updated_at: new Date(),
+      };
+      let clearedDerivedEnd = false;
+      if (newEnd) {
+        // Both timestamp families together, plus completed_at — same-day
+        // stamps stay on the visit's day, so billing recovery's aging and
+        // pricing-reality-check's month bucketing never shift buckets.
+        serviceUpdate.actual_end_time = newEnd;
+        serviceUpdate.check_out_time = newEnd;
+        serviceUpdate.completed_at = newEnd;
+      } else {
+        // Clamped re-correction (codex P2 #3152 round 25): this save cannot
+        // derive a nonfuture end (start + minutes is still ahead of the
+        // wall clock). If the CURRENT end stamps are the DERIVED shape a
+        // prior correction wrote (start + previously stamped minutes),
+        // leaving them would pair the old derived completion instant with
+        // the new larger duration — the customer timeline prefers the
+        // timestamp pair and would show an inconsistent span. Derived
+        // stamps are cleared to the unknown-end posture (explicit duration
+        // columns win at read time, as in backfill); completed_at is KEPT —
+        // it drives day-window attribution (billing aging, pricing month
+        // buckets) and both instants sit on the same service day, while a
+        // NULL there has previously hidden visits from Billing Recovery. A
+        // genuine wall-clock closeout end never matches the derived shape
+        // and is preserved untouched.
+        const priorStampedMinutes = Number(lockedSvc?.time_on_site_adjusted_minutes);
+        const shapeStart = [lockedSvc?.actual_start_time, lockedSvc?.check_in_time, lockedSvc?.arrived_at]
+          .map((v) => finiteDate(v))
+          .find(Boolean);
+        const currentEnd = finiteDate(lockedSvc?.actual_end_time) || finiteDate(lockedSvc?.check_out_time);
+        if (Number.isFinite(priorStampedMinutes) && priorStampedMinutes > 0 && shapeStart && currentEnd
+          && Math.abs(currentEnd.getTime() - (shapeStart.getTime() + priorStampedMinutes * 60000)) < 1000) {
+          serviceUpdate.actual_end_time = null;
+          serviceUpdate.check_out_time = null;
+          clearedDerivedEnd = true;
+        }
+      }
+      await trx('scheduled_services').where({ id: svc.id }).update(serviceUpdate);
+
+      if (record) {
+        const recordCols = serviceRecordCols;
+        const recordUpdate = {
+          // ATOMIC key merge (codex P1 #3152, same clobber class as
+          // pdf-queue.js clearLawnPdfCorrectionMarker): a whole-column
+          // read-modify-write races the completion flow's post-commit
+          // structured_notes writers (SMS status, photo notes) — either side
+          // could erase the other's keys. This single statement merges ONLY
+          // the correction keys against the column's CURRENT value, and
+          // captures timeOnSitePrior from that same value — first edit only
+          // (`-> 'timeOnSitePrior' IS NOT NULL` detects the key even when it
+          // holds JSON null, which is exactly what a no-prior first edit
+          // writes).
+          structured_notes: trx.raw(
+            `(COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb)
+             || jsonb_build_object('timeOnSiteRev',
+                  COALESCE(NULLIF(COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'timeOnSiteRev', ''), '0')::int + 1)
+             || (CASE WHEN COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'timeOnSitePrior' IS NOT NULL
+                  THEN '{}'::jsonb
+                  ELSE jsonb_build_object('timeOnSitePrior', COALESCE(structured_notes::jsonb -> 'timeOnSite', 'null'::jsonb))
+                END)`,
+            [JSON.stringify({ timeOnSite: plan.minutes, timeOnSiteAdjusted: true })],
+          ),
+        };
+        if (newEnd) {
+          for (const field of BACKFILL_RECORD_END_FIELDS) {
+            if (recordCols[field]) recordUpdate[field] = newEnd;
+          }
+        } else if (clearedDerivedEnd) {
+          // Mirror the row-side clearing (codex P2 #3152 round 25): the
+          // record's end fields carry the same prior-derived instant and
+          // feed the customer timeline directly. completed_at is EXEMPT on
+          // the record too (codex P2 round 26) — it is the durable
+          // completion stamp report logic keys off (mowing-history cap
+          // falls back to updated_at without it), same reasoning that
+          // keeps the scheduled_services stamp; only the duration-pair
+          // end fields clear.
+          for (const field of BACKFILL_RECORD_END_FIELDS) {
+            if (field !== 'completed_at' && recordCols[field]) recordUpdate[field] = null;
+          }
+        }
+        if (recordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;
+        // FK-heal (codex P2 #3152 round 3): a pre-FK record found through the
+        // legacy soft-join gets its scheduled_service_id stamped in the same
+        // update, so every later lookup — this endpoint, job costing's marker
+        // read — is tuple-independent and a subsequent date/service-type edit
+        // can no longer orphan the corrected record.
+        if (!recordViaFk && recordCols.scheduled_service_id) {
+          recordUpdate.scheduled_service_id = svc.id;
+        }
+        await trx('service_records').where({ id: record.id }).update(recordUpdate);
+        recordUpdated = true;
+      }
+
+      // The audit rides the correction transaction (codex P2 #3152 round
+      // 19): concurrent corrections serialize on the row lock, so in-trx
+      // inserts land in COMMIT order — outside the transaction, whichever
+      // request finished its independent costing run first wrote its audit
+      // first, and activity_log.created_at could present "45 → 60" before
+      // "original → 45". The committed revision is frozen in metadata too,
+      // so readers can order by it even across clock skew. Atomic with the
+      // correction on purpose: an audit that can't be written rolls the
+      // correction back rather than leaving an unaudited financial-adjacent
+      // change (previousMinutes accuracy is already load-bearing per round
+      // 10 — this is the same posture).
+      await trx('activity_log').insert({
+        admin_user_id: req.technicianId,
+        customer_id: svc.customer_id,
+        action: 'time_on_site_adjusted',
+        description: `Time on site corrected to ${plan.minutes} min (was ${previousMinutes != null ? `${previousMinutes} min` : 'unrecorded'}) for ${svc.service_type || 'service'}`,
+        metadata: JSON.stringify({
+          scheduled_service_id: svc.id,
+          previous_minutes: previousMinutes,
+          new_minutes: plan.minutes,
+          end_stamps_rewritten: !!newEnd,
+          // Same value the raw COALESCE(seq,0)+1 bump commits — safe to
+          // compute in JS because this transaction holds the row lock.
+          correction_seq: committedCorrectionSeq,
+        }),
+      });
+    });
+
+    // Linked job timer (codex P1, pre-push audit round 20): the forgotten
+    // closeout that inflated the visit timer usually inflated the linked
+    // time_entries row too — job costing overrides it via the durable
+    // stamp, but timesheet detail, utilization, and actual-duration
+    // analytics read time_entries directly, so the visit would still look
+    // uncorrected there. Route the fix through the audited admin-edit
+    // workflow WHEN SAFE: exactly one non-voided closed job entry whose
+    // recorded span exceeds the corrected minutes. adminEditEntry preserves
+    // originals, recomputes the paid duration, and returns the day to
+    // pending for re-approval; an approved/immutable week or an ambiguous
+    // shape is SURFACED in the response instead of forced — the client
+    // warns that the timer needs a separate Timesheets correction.
+    const { corrected: timeEntryCorrected, blocked: timeEntryCorrectionBlocked } = await syncLinkedJobTimer({
+      serviceId: svc.id,
+      minutes: plan.minutes,
+      committedSeq: committedCorrectionSeq,
+      editedBy: req.technicianId,
+      entriesSnapshot: timerEntriesSnapshot,
+    });
+
+    // A failed recalc is SURFACED, not swallowed (codex P2 #3152 round 9):
+    // the correction itself stands (costing is derived state any later
+    // recalc heals from the durable stamp), but the response says so and
+    // the client warns instead of promising updated job costing.
+    let costingUpdated = false;
+    try {
+      const JobCosting = require('../services/job-costing');
+      // NO request-local minutes here (codex P2 #3152 round 7): concurrent
+      // corrections of the same visit serialize their transactions on the
+      // scheduled_services row lock, but their post-commit recalcs can
+      // interleave — an older request's recalc finishing last would bake ITS
+      // stale minutes into job_costs while the row carries the newer value.
+      // calculateJobCost re-reads the row and derives the override from the
+      // durable time_on_site_adjusted_minutes stamp committed above (round
+      // 5), so whichever recalc runs last converges on the newest committed
+      // correction, and any interleaving self-heals on the next recalc —
+      // no request-local state involved. A staleSkipped result still counts
+      // as updated: it means a NEWER correction owns the costing and its
+      // own recalculation lands (or landed) the truth.
+      await JobCosting.calculateJobCost(svc.id);
+      costingUpdated = true;
+    } catch (err) {
+      logger.warn(`[time-on-site] job costing recalc failed for service ${svc.id}: ${err.message}`);
+    }
+    res.json({
+      success: true,
+      timeOnSiteMinutes: plan.minutes,
+      endStampsRewritten: !!newEnd,
+      recordUpdated,
+      costingUpdated,
+      ...(recordAmbiguous ? { recordAmbiguous: true } : {}),
+      ...(timeEntryCorrected != null ? { timeEntryCorrected } : {}),
+      ...(timeEntryCorrectionBlocked ? { timeEntryCorrectionBlocked } : {}),
+    });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/dispatch/:serviceId/status
 //
 // First call site to migrate to services/job-status.js#transitionJobStatus
@@ -2087,6 +2693,9 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
+    // Populated by the single-cancel branch when a cancellation text was
+    // requested — surfaces send failures in the response.
+    let cancelNoticeOutcome = null;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -2136,6 +2745,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // no_show and transitionJobStatus's atomic guard would accept it.
     if (svc.status === 'no_show') {
       if (toStatus === 'no_show') {
+        // Only same-status retry path that SKIPS transitionJobStatus — so
+        // its post-commit follow-up re-park hook can't re-fire here. If the
+        // original no_show's re-park failed transiently, this retry is the
+        // recovery vehicle: re-attempt it directly (dedup-guarded,
+        // fire-and-forget; Codex r4).
+        {
+          const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
+          void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
+        }
         return res.json({ success: true, alreadyNoShow: true });
       }
       return res.status(409).json({
@@ -2281,11 +2899,30 @@ router.put('/:serviceId/status', async (req, res, next) => {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
         const targetIds = targets.map((target) => target.id);
+        cancelNoticeOutcome = notifyCustomer !== false ? {} : null;
         await AppointmentReminders.handleSeriesCancellation(targetIds, svc.id, {
           sendNotification: notifyCustomer !== false,
           scope,
+          ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
+
+      // One-time card-on-file holds: this branch returns before the
+      // single-cancel hold block below, so settle every cancelled target's
+      // hold here — an in-window cancel charges the disclosed late-cancel
+      // fee unless waiveCardHoldFee (admin-only, same gate as the single
+      // path) releases it free; no-op for visits without a hold. Dark until
+      // ONE_TIME_CARD_HOLD; best-effort — never blocks the committed cancels.
+      try {
+        const CardHolds = require('../services/estimate-card-holds');
+        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
+        for (const target of targets) {
+          await CardHolds.handleCardHoldCancellation({
+            scheduledServiceId: target.id,
+            waiveFee,
+          });
+        }
+      } catch (e) { logger.error(`[admin-dispatch] series cancellation card-hold handling failed: ${e.message}`); }
 
       // Void any still-open invoices pre-minted for the cancelled visits so
       // dunning doesn't chase cancelled jobs. The helper enforces the
@@ -2329,7 +2966,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
           + (ongoingStopped > 0 ? ' and stopped the ongoing recurring plan' : ''),
       });
 
-      return res.json({ success: true, cancelledCount: targets.length, scope });
+      return res.json({
+        success: true,
+        cancelledCount: targets.length,
+        scope,
+        ...(cancelNoticeOutcome && cancelNoticeOutcome.notificationSent !== undefined
+          ? {
+              notificationSent: cancelNoticeOutcome.notificationSent,
+              notificationError: cancelNoticeOutcome.notificationError || null,
+            }
+          : {}),
+      });
     }
 
     const fromStatus = svc.status;
@@ -2505,8 +3152,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
     } else if (toStatus === 'cancelled') {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
+        // Out-param so the response can tell the operator the cancel
+        // committed but the requested text didn't go out (missing reminder
+        // row/phone, consent block, provider failure).
+        cancelNoticeOutcome = notifyCustomer !== false ? {} : null;
         await AppointmentReminders.handleCancellation(svc.id, {
           sendNotification: notifyCustomer !== false,
+          ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
 
@@ -2617,8 +3269,30 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // alreadyFlagged guard so a visit the nightly job already logged
       // (while it was still pending) isn't double-counted. Best-effort.
       try {
+        // Occurrence-aware dedup: a soft Quick Move no-show logs
+        // customer_noshow for an EARLIER slot of this same row
+        // (original_date + original_window = the slot that was missed), and
+        // that earlier miss must not suppress counting THIS one — including
+        // a rebook LATER THE SAME DAY, which only the window distinguishes
+        // (codex r2). Match only rows recorded for the current slot; NULL
+        // slot fields match legacy rows to preserve their old per-row dedup.
+        const missedDateStr = svc.scheduled_date
+          ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+          : null;
+        const missedWindowStr = svc.window_start ? `${svc.window_start}-${svc.window_end}` : null;
         const alreadyFlagged = await db('reschedule_log')
           .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
+          .where(function occurrenceMatch() {
+            if (!missedDateStr) return; // no slot info — legacy per-row dedup
+            this.whereNull('original_date').orWhere(function currentSlot() {
+              this.where('original_date', missedDateStr);
+              if (missedWindowStr) {
+                this.andWhere(function sameWindow() {
+                  this.where('original_window', missedWindowStr).orWhereNull('original_window');
+                });
+              }
+            });
+          })
           .first('id');
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
@@ -2633,7 +3307,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
       description: `${svc.tech_name} marked ${svc.service_type} as ${toStatus} for ${svc.first_name}`,
     });
 
-    res.json({ success: true });
+    res.json({
+      success: true,
+      ...(cancelNoticeOutcome && cancelNoticeOutcome.notificationSent !== undefined
+        ? {
+            notificationSent: cancelNoticeOutcome.notificationSent,
+            notificationError: cancelNoticeOutcome.notificationError || null,
+          }
+        : {}),
+    });
   } catch (err) { next(err); }
 });
 
@@ -2974,9 +3656,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // structured_notes stamp wins (frozenResumeCompletionState below; the
     // hash excludes timeOnSite, so a retry can legally carry the panel's
     // auto-elapsed instead of the committed typed duration).
+    // Live override leg (forgotten-closeout fix): a NUMERIC timeOnSite on a
+    // non-backfill completion is an admin-typed correction of the running
+    // timer — validated fail-closed (403 non-admin, 400 out-of-range) before
+    // anything commits. Strings (the panel's auto-elapsed) pass through
+    // untouched. Runs AFTER backfillPlan so a technician's backfill body
+    // still fails as backfill_admin_only, not time_on_site_admin_only.
+    const livePlan = liveTimeOnSitePlan({ timeOnSite, role: req.techRole, backfill: isBackfillCompletion, service: svc });
+    if (livePlan.error) {
+      return res.status(livePlan.status).json(livePlan.error);
+    }
+    const liveAdjustedTimeOnSite = livePlan.adjusted;
     let effectiveTimeOnSite = isBackfillCompletion
       ? backfillTimeOnSiteMinutes(timeOnSite)
-      : timeOnSite;
+      : livePlan.effectiveTimeOnSite;
     if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
       logger.warn(`[completion] backfill timeOnSite ${JSON.stringify(timeOnSite)} rejected for service ${svc.id} (not a positive duration ≤ ${BACKFILL_MAX_TIME_ON_SITE_MINUTES}min) — recorded as unknown`);
     }
@@ -3130,6 +3823,68 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Returns {status, body} on rejection, null when valid; mutates the
     // typed* locals on success.
     const runTypedValidation = () => {
+      // Untyped completions render the same tech-entered copy on customer
+      // reports (observations feed the pest-pressure main-driver line,
+      // recommendations feed the recap, captions sit under photos) — the
+      // free-text fields must pass the same banned-copy policy as typed
+      // forms, or the untyped path becomes a compliance side door (codex
+      // pre-push P1 2026-07-30). Internal-only consultations are exempt
+      // (codex r7): they mint no customer report, so blocking a staff-only
+      // assessment on customer-copy rules would strand valid internal
+      // notes — same reasoning as the caption gate's fresh-consultation
+      // skip below.
+      if (!typedFindingsType && !isIncompleteVisit && !isInternalOnlyCompletion) {
+        const untypedCopySources = [
+          ...(Array.isArray(observations) ? observations : []),
+          ...(Array.isArray(recommendations) ? recommendations : []),
+          ...(customerRecap ? [customerRecap] : []),
+          ...taggedCompletionNoteLines(technicianNotes, ['next']),
+          ...taggedCompletionNoteLines(technicianNotes, ['found']),
+          ...(Array.isArray(completionPhotos)
+            ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+        ];
+        const untypedViolations = [...new Set(
+          untypedCopySources.flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry)),
+        )];
+        if (untypedViolations.length) {
+          return {
+            status: 422,
+            body: {
+              error: `This completion contains wording we can't put on a customer report (${untypedViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
+              code: 'completion_banned_copy',
+              violations: untypedViolations,
+            },
+          };
+        }
+        // Report/track egress (AGENTS.md): access/gate/lockbox codes never
+        // reach customer-facing reports. These free-text fields render
+        // verbatim (pressure driver line, photo captions), so a line that
+        // reads like an entry code fails closed instead of persisting.
+        if (untypedCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+          return {
+            status: 422,
+            body: {
+              error: 'This completion looks like it contains an access, gate, or lockbox code. Keep entry codes out of customer-visible fields — use the internal property notes instead.',
+              code: 'completion_access_code',
+            },
+          };
+        }
+        // A pre-untype client (panel opened before the deploy, or a restored
+        // typed draft) still submits structuredFindings for a now-untyped
+        // profile. Accepting it would silently DISCARD the typed data the
+        // tech entered (target pest, activity level, treatment...) — make
+        // the transition loud instead (codex P2).
+        if (structuredFindings != null) {
+          return {
+            status: 409,
+            body: {
+              error: 'This service now completes with the standard form. Refresh the page and complete the visit again.',
+              code: 'untyped_refresh_required',
+            },
+          };
+        }
+      }
       // Recap-only mode (the lightweight pest recap) has no findings, no
       // billing gate, and no snapshot — it must not be a side door around
       // the typed flow. Typed services complete through the full form only.
@@ -3140,6 +3895,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             error: 'This service completes through its service-specific findings form, not the quick recap. Refresh and complete the visit from the completion form.',
             code: 'typed_recap_not_allowed',
             findingsType: typedFindingsType,
+          },
+        };
+      }
+      // Untyped ALERT-policy lanes (bed_bug post-20260731400000) keep their
+      // typed-era billing parity: a performed infestation treatment must
+      // mint its invoice, so the no-invoice recap bypass stays closed —
+      // keyed on the profile's follow-up semantics, not findings type
+      // (codex P1 r7). The untyped pest one-time family (followup 'none')
+      // keeps its recap-only option unchanged.
+      if (!typedFindingsType && oneTimeRecapOnly && !isIncompleteVisit
+        && completionProfile?.followupPolicy === 'alert') {
+        return {
+          status: 409,
+          body: {
+            error: 'This service bills per treatment — the no-invoice recap is not available for it.',
+            code: 'recap_only_not_allowed',
           },
         };
       }
@@ -3235,6 +4006,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               error: `This completion contains wording we can't put on a customer report (${copyViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
               code: 'typed_recommendations_banned_copy',
               violations: copyViolations,
+            },
+          };
+        }
+        // Same access-code egress gate the untyped branch enforces (codex
+        // r4): typed completions carry the identical customer-visible
+        // free-text surfaces, and an entry code in any of them would
+        // persist into the report the same way.
+        if (customerCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+          return {
+            status: 422,
+            body: {
+              error: 'This completion looks like it contains an access, gate, or lockbox code. Keep entry codes out of customer-visible fields — use the internal property notes instead.',
+              code: 'completion_access_code',
             },
           };
         }
@@ -3350,6 +4134,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionMode: completionProfile?.completionMode,
       profileDeliveryMode: completionProfile?.deliveryMode,
       specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+      profileCategory: completionProfile?.category,
     });
     let typedDeliveryMode = deliveryPosture.typedDeliveryMode;
     let suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
@@ -3536,13 +4321,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    // Typed one-time billing profile — the exact population the billing
-    // pre-gate below governs. Hoisted to a named flag because a backfill
-    // completion skips the gate and must reach the same billing outcome
-    // through the in-transaction invoice decision instead
-    // (shouldAutoInvoiceCompletion's typedOneTimeBilling input).
-    const typedOneTimeBillingProfile = !!typedFindingsType
-      && !isIncompleteVisit
+    // One-time billing profile — the population whose completion mints the
+    // visit invoice through the in-transaction invoice decision
+    // (shouldAutoInvoiceCompletion's typedOneTimeBilling input). Keyed to
+    // the PROFILE's billing_type, not to whether the completion form is
+    // typed: untyping a one-time service's form (the 2026-07-30 pest
+    // untype migration) must not silently turn off its billing (codex P1).
+    const typedOneTimeBillingProfile = !isIncompleteVisit
       && !recapReviewOnly
       && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
       && svc.followup_included !== true;
@@ -4112,9 +4897,63 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // completion. Race rejection → no completion → no MOA alert.
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
+    // Final follow-up verdict for typed completions (profiles
+    // followup_policy / default_followup_days, adjusted by the shared
+    // override chain). Computed BEFORE the durable transaction so the
+    // follow_up_needed alert parks ATOMICALLY with the completion below —
+    // a post-commit best-effort write that failed was unrecoverable once
+    // the attempt finalized (Codex r2), and the pre-cutover project flow
+    // parked inside its transaction too (createProjectFollowupAlert). The
+    // resume path re-derives from the committed snapshot instead (its
+    // original transaction already parked or skipped the alert).
+    let followupSuggestion = null;
+    if (typedFindingsType && typedFindings && !isIncompleteVisit && claim.action === 'proceed') {
+      followupSuggestion = typedFollowupVerdict({
+        scheduledService: svc,
+        profile: completionProfile,
+        findingsType: typedFindingsType,
+        values: typedFindings.values || {},
+      });
+    } else if (
+      // UNTYPED completions on an alert-policy profile (bed_bug_treatment
+      // after the 20260731400000 untype) owe the same profile-declared
+      // follow-up — deriving only for typed forms silently dropped the
+      // obligation, the exact bug the typed lane fixed. The verdict chain
+      // reduces to the pure profile suggestion (no typed values to apply
+      // overrides against), and the alert keeps source 'typed_completion'
+      // so the (type, job_id) dedupe index still covers it.
+      !typedFindingsType
+      && completionProfile?.followupPolicy === 'alert'
+      && !isIncompleteVisit
+      // No treatment happened on declined/inspection-only visits — the
+      // profile promise anchors to a PERFORMED first treatment, so a false
+      // obligation must not park or mint the included $0 CTA (codex P2 r3;
+      // same performed-visit definition the billing path uses).
+      && visitPerformed
+      && claim.action === 'proceed'
+    ) {
+      followupSuggestion = typedFollowupVerdict({
+        scheduledService: svc,
+        profile: completionProfile,
+        findingsType: null,
+        values: {},
+      });
+    }
+
     let record;
     let turfOcrReadingId = null; // set when a gauge photo was captured → async OCR post-commit
     let linkedLawnAssessmentId = null;
+    // The completion transaction's wall clock, hoisted to handler scope so
+    // the post-commit tracker instant reuses the SAME clamp decision the
+    // lifecycle stamps were computed against (codex P2 #3152 round 14).
+    // Stays null on a crash-resumed retry (no transaction runs) — the
+    // tracker recompute falls back to the current clock there.
+    let completionWallClockAt = null;
+    // Linked-timer snapshot captured inside the completion transaction —
+    // the post-commit sync's version boundary (codex P2 #3152 round 23).
+    // Stays null on the crash-resume path (no transaction runs here), and
+    // the sync then falls back to a fresh read.
+    let completionTimerEntriesSnapshot = null;
     if (resumingCommittedCompletion) {
       record = await db('service_records').where({ id: claim.serviceRecordId }).first();
       if (!record) {
@@ -4187,6 +5026,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             serviceType: svc.service_type,
             areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
             products: recapProducts,
+            // Merged observations/recommendations (chip labels + free text +
+            // tagged note lines) and the tech's activity rating ground the
+            // production recap the same way the preview path does (owner
+            // 2026-07-30).
+            observations: reportObservations,
+            recommendations: reportRecommendations,
+            pestActivityRating: Number.isInteger(clientPestRating) ? clientPestRating : null,
             visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {
@@ -4236,8 +5082,76 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           technicianReportBody = technicianReport?.body || null;
         }
 
+        completionTimerEntriesSnapshot = null;
         await db.transaction(async (trx) => {
+          // The finalization takes the scheduled_services row lock FIRST
+          // (codex P2 #3152 round 14): the time-on-site PATCH serializes on
+          // this lock, and without it the finalizer's service_records
+          // INSERT lands before its scheduled_services UPDATE would block —
+          // a correction slipping between the two missed the fresh record
+          // and was then overwritten. Locking up front makes finalization
+          // and correction strictly ordered whichever starts first.
+          const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+          // Linked-timer snapshot under the same lock (codex P2 #3152
+          // round 23): the post-commit sync's version boundary is THIS
+          // transaction — a payroll edit landing after the commit outdates
+          // the snapshot's updated_at and the audited edit rejects it.
+          if (!isBackfillCompletion) {
+            completionTimerEntriesSnapshot = await trx('time_entries')
+              .where({ job_id: svc.id, entry_type: 'job' })
+              .whereNot('status', 'voided')
+              .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+          }
+          // Reconcile with anything that committed between the handler's svc
+          // load and this lock (codex P2 #3152 round 15): a time-on-site
+          // correction in that window already moved the duration columns,
+          // end stamps, and the durable stamp — building the finalization
+          // from the stale snapshot would silently overwrite it. Lifecycle
+          // state adopts the locked row (start fields are write-once and
+          // cannot have moved), and a correction stamped mid-flight outranks
+          // a plain stale-timer elapsed in THIS request — the timer being
+          // wrong is the exact failure the correction fixed. An explicit
+          // adjusted or backfill value in this request is the newer operator
+          // statement and keeps its authority ONLY while the durable stamp
+          // still reads what it read when this request loaded the row (codex
+          // P2 #3152 round 16): the request's values were typed before a
+          // stamp that moved in that window committed, so the moved stamp is
+          // the newer statement regardless of the request's mode — the
+          // request's live/backfill override joins the preserved lane below
+          // and its end-instant forcing is suppressed.
+          let correctionPreservedMidFlight = false;
+          if (lockedSvcRow) {
+            const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
+            const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
+            const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);
+            for (const field of [
+              'actual_end_time', 'check_out_time', 'completed_at',
+              'service_time_minutes', 'actual_duration_minutes',
+              'time_on_site_adjusted_minutes', 'time_on_site_correction_seq',
+            ]) {
+              if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];
+            }
+            const stampedMinutes = Number(lockedSvcRow.time_on_site_adjusted_minutes);
+            // Moved = the monotonic correction seq changed, NOT the minutes
+            // value (codex P2 #3152 round 17): a correction that re-saves
+            // the same minutes to repair previously clamped end fields bumps
+            // the seq while the value comparison stays blind. Rows without
+            // the seq column (pre-migration environments) fall back to the
+            // round-16 value comparison so the fence never weakens.
+            const stampMovedMidFlight = Object.prototype.hasOwnProperty.call(lockedSvcRow, 'time_on_site_correction_seq')
+              ? normStampVal(lockedSvcRow.time_on_site_correction_seq) !== preLockSeq
+              : (Object.prototype.hasOwnProperty.call(lockedSvcRow, 'time_on_site_adjusted_minutes')
+                && normStampVal(lockedSvcRow.time_on_site_adjusted_minutes) !== preLockStamp);
+            if (Number.isFinite(stampedMinutes) && stampedMinutes > 0
+              && (stampMovedMidFlight
+                || (!isBackfillCompletion && !liveAdjustedTimeOnSite
+                  && typeof effectiveTimeOnSite !== 'number'))) {
+              effectiveTimeOnSite = stampedMinutes;
+              correctionPreservedMidFlight = true;
+            }
+          }
           const completionEndedAt = new Date();
+          completionWallClockAt = completionEndedAt;
           // Backfill: the service happened on its scheduled day — stamp the
           // record (and everything keyed off it: activity-score dates, the
           // completion invoice's service linkage) with that date, not today.
@@ -4259,7 +5173,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const backfillEndedAt = isBackfillCompletion
             ? backfillCompletionEndInstant(completionServiceDate, effectiveTimeOnSite, svc)
             : null;
-          const completionLifecycleAt = backfillEndedAt || completionEndedAt;
+          // Live admin override: with a real row-backed start, the honest end
+          // is start + typed minutes — stamping it keeps every timestamp-pair
+          // reader in agreement with the typed duration. Null (no start, or
+          // typed minutes exceed the actual elapsed) falls through to the
+          // wall clock and the explicit duration columns win at read time.
+          // Suppressed when a mid-flight correction outranked this request
+          // (round 16): the request's typed minutes lost authority, so its
+          // derived end must not be stamped either — the preserved lane's
+          // posture (row-backed end or wall clock + correction's duration
+          // columns) applies instead.
+          const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite
+            && !correctionPreservedMidFlight
+            ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionEndedAt)
+            : null;
+          const completionLifecycleAt = backfillEndedAt || adjustedEndedAt || completionEndedAt;
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, { elapsed: effectiveTimeOnSite });
           // Backfill: never derive a duration from the stale on-row
           // timestamps (a weeks-old check-in against today's checkout), and
@@ -4268,6 +5196,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // unknown; row-backed start timestamps or none. See
           // applyBackfillDurationPolicy.
           if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, effectiveTimeOnSite, svc);
+          // Live admin override (codex P2 #3152 round 3): the shared helper
+          // prefers a ROW-BACKED end stamp over its `at` argument, so a row
+          // that already carries one (a legacy operational completion being
+          // finalized later) would keep the stale end while the duration
+          // columns took the typed minutes — and every start→end pair reader
+          // would still derive the inflated span. Force the kept end fields
+          // onto the adjusted instant; the pair must equal the operator's
+          // statement exactly (same posture as backfillCompletionEndInstant's
+          // real-start branch).
+          if (!isBackfillCompletion && liveAdjustedTimeOnSite && !correctionPreservedMidFlight) {
+            if (adjustedEndedAt) {
+              lifecycleUpdates.actual_end_time = adjustedEndedAt;
+              lifecycleUpdates.check_out_time = adjustedEndedAt;
+            }
+            // Durable row stamp for live overrides too (codex P2 #3152
+            // round 11): the costing fence and the no-opts labor override
+            // both read scheduled_services.time_on_site_adjusted_minutes —
+            // without it a straddling recalculation sees null → null and
+            // can overwrite the corrected financials. Same stamp the
+            // after-the-fact endpoint writes; stamped even when the end
+            // instant was clamped (the MINUTES are the operator statement).
+            lifecycleUpdates.time_on_site_adjusted_minutes = effectiveTimeOnSite;
+            // …and the monotonic revision advances with it (codex P2 #3152
+            // round 19): a live override IS a correction — without a bump,
+            // an ordinary status-route markComplete that loaded before this
+            // commit still matches the old revision under the default-on
+            // fence and overwrites the override's duration/end fields. A
+            // plain value is safe here: this transaction holds the row lock,
+            // so the locked row's seq cannot move underneath it. The
+            // in-memory svc adopts it so the post-commit markComplete
+            // callers fence on the revision this finalization created.
+            if (Object.prototype.hasOwnProperty.call(lockedSvcRow || svc, 'time_on_site_correction_seq')) {
+              const bumpedSeq = (Number((lockedSvcRow || svc).time_on_site_correction_seq) || 0) + 1;
+              lifecycleUpdates.time_on_site_correction_seq = bumpedSeq;
+              svc.time_on_site_correction_seq = bumpedSeq;
+            }
+          }
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
@@ -4291,6 +5256,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // Backfill frozen on the record: a crash-resumed retry may lack
             // the body flag, and the quiet/backdate posture must survive it.
             ...(isBackfillCompletion ? { backfill: true } : {}),
+            // Durable audit marker: this duration is an admin-typed override
+            // of the running timer, not the timer itself (or a mid-flight
+            // correction this finalization preserved — codex round 15). No
+            // reader keys off it — the corrected end stamps/duration columns
+            // already agree.
+            ...(liveAdjustedTimeOnSite || correctionPreservedMidFlight ? { timeOnSiteAdjusted: true } : {}),
             // REQUIRED-mint posture frozen at commit (Codex P0, fix round
             // 8): derived from the LIVE billing profile above — the profile
             // the operator saw — and stamped in the SAME transaction as the
@@ -4343,13 +5314,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // retroactively expose reports that were never sent. Frozen for
             // typed completions AND internal-only consultations (typedDeliveryMode
             // 'disabled') so the no-customer-artifact posture survives resume.
-            ...((typedFindingsType || isInternalOnlyCompletion) ? { typedReportDelivery: typedDeliveryMode } : {}),
+            // Every non-auto_send posture FREEZES, regardless of findings
+            // type — an untyped specialty profile under a delivery kill
+            // switch (bed_bug post-untype) must persist its suppression or
+            // downstream gates (report metadata, resolution sync, pressure
+            // history, crash-resume re-derivation) read the absent field as
+            // auto_send and can mint/send anyway (codex P1 r4).
+            ...((typedFindingsType || isInternalOnlyCompletion || typedDeliveryMode !== 'auto_send') ? { typedReportDelivery: typedDeliveryMode } : {}),
             // Companion delivery postures frozen alongside (same rule):
             // graduation flips on the profile never retro-publish stored
             // companion sections.
             ...(validatedCompanions.length
               ? { companionReportDelivery: Object.fromEntries(companionDeliveryByType) }
               : {}),
+            // The completion-time follow-up verdict is FROZEN here (both
+            // directions — required and withdrawn) so later re-parks (child
+            // cancellation, deploy-boundary resume) replay the promise that
+            // was actually made, never a re-derivation from the live profile
+            // — a repointed/deactivated profile or changed interval must not
+            // silently drop (or invent) an owed included treatment
+            // (Codex r4).
+            ...(followupSuggestion ? { typedFollowupVerdict: followupSuggestion } : {}),
           };
           const serviceData = {
             protocol: {
@@ -4548,8 +5533,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // transaction rolls back only the savepoint and the completion
             // proceeds with chip/action scope.
             let tracedExteriorZone = false;
+            // Interior-only treatments (bed bug, post-20260731400000): a
+            // trace saved before the tracer was hidden for this lane is
+            // stale EXTERIOR evidence — it must not resurrect the exterior
+            // dry-down timer on an interior visit (codex P2 r6). The stable
+            // profile key is authoritative; the label regex is the fallback
+            // for unresolved profiles (codex P2 r8).
+            const interiorOnlyVisit = completionProfile?.serviceKey === 'bed_bug_treatment'
+              || /\bbed\s*bugs?\b/i.test(String(svc.service_type || ''));
             try {
-              tracedExteriorZone = await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
+              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
                 .where({ scheduled_service_id: svc.id })
                 .first()));
             } catch (traceErr) {
@@ -4628,6 +5621,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+
+        // Park the owed follow-up's dispatch alert ATOMICALLY with the
+        // completion (same trx — a completion that commits can never lack
+        // its durable follow-up trace, and an alert-write failure rolls the
+        // whole completion back into a retryable state; Codex r2). The
+        // helper skips when a live linked child already covers the
+        // obligation (the call pipeline pre-books visit 2 — alerting on a
+        // booked follow-up parks a false exception; Codex r2) or an
+        // unresolved alert already exists. The visit-outcome
+        // follow_up_needed writer runs LATER in this trx and defers to
+        // this park when the verdict is required (Codex r3). Emit
+        // defers to commit via createAlertOnce's trx handling.
+        if (followupSuggestion?.required) {
+          await parkFollowupAlert({
+            scheduledService: svc,
+            suggestion: followupSuggestion,
+            serviceRecordId: record.id,
+            serviceName: completionProfile?.serviceName || null,
+            customerName: [svc.first_name, svc.last_name].filter(Boolean).join(' ').trim() || null,
+            source: 'typed_completion',
+            trx,
+          });
+        }
 
         // Before/progress photos captured from Tech Home predate the immutable
         // service_record. Attach them inside this transaction so a failed
@@ -4749,6 +5765,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           && serviceFindingsAvailable
           && !typedFindingsType
           && !isInternalOnlyCompletion
+          // Infestation-class untyped closeouts (alert-policy profiles —
+          // bed_bug post-20260731400000) never INFER "no activity" from
+          // blank optional fields: the visit exists because activity was
+          // found, and a contradictory zero would print on the customer
+          // report. Only an explicit 0 rating states it (codex P2 r1).
+          && !(completionProfile?.followupPolicy === 'alert'
+            && (activityScore ?? clientPestRating) == null)
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
@@ -4772,7 +5795,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // history. The activity score above is their indicator instead.
         // Internal-only consultations are excluded for the same reason: an
         // advisory walkthrough must not write Pest Pressure history.
-        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType && !isInternalOnlyCompletion) {
+        // One-time treatments are excluded FORM-INDEPENDENTLY (codex r5):
+        // the untyped pest family (tick control, fire ant, nest removals…)
+        // slips both the typed guard and review-window's one-time-label
+        // heuristic, and an isolated treatment must not seed recurring
+        // pressure history. Re-service/callback visits are the deliberate
+        // exception — extra visits on an active plan still score (see
+        // review-window.js isOneTimeServiceLabel).
+        const oneTimePressureExcluded = String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
+          && completionProfile?.serviceKey !== 'pest_re_service'
+          && !svc.is_callback;
+        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType && !isInternalOnlyCompletion && !oneTimePressureExcluded) {
           const pestPressure = await runPestPressureForServiceRecord(record.id, trx);
           if (pestPressure && pestPressure.result.displayedScore != null) {
             record.pressure_index = pestPressure.result.displayedScore;
@@ -5112,7 +6145,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (visitOutcome === 'customer_concern') {
           await createAlert({ ...alertBase, type: 'customer_concern', severity: 'warn' });
         }
-        if (visitOutcome === 'follow_up_needed') {
+        if (visitOutcome === 'follow_up_needed' && !followupSuggestion?.required) {
+          // When the typed verdict owns the obligation, parkFollowupAlert
+          // already inserted the follow_up_needed card earlier in THIS
+          // transaction — an unconditional second insert here deterministically
+          // double-carded one visit (Codex r3). Untyped completions and typed
+          // ones whose verdict withdrew (e.g. German "No") keep the
+          // outcome-driven alert exactly as before.
           await createAlert({ ...alertBase, type: 'follow_up_needed', severity: 'info' });
         }
         if (visitOutcome === 'incomplete') {
@@ -5250,7 +6289,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         effectiveTimeOnSite,
         svc,
       )
-      : null;
+      // Live admin override (codex P2 #3152 round 10): the tracker's
+      // completed_at must carry the corrected end too — date-window readers
+      // (pricing-reality-check's lookback COALESCE, billing recovery aging)
+      // prefer completed_at over the corrected end columns, so a correction
+      // crossing an ET day boundary would otherwise stay attributed to the
+      // late-closeout day. A NUMERIC effectiveTimeOnSite is the durable mode
+      // signal (validated at intake on first run, restored from the frozen
+      // structured_notes on a crash-resumed retry); the same pure helper
+      // yields the same start + minutes instant the lifecycle columns carry,
+      // and null (no real start / clamped) falls through to the tracker's
+      // wall clock exactly like a plain live completion.
+      // Anchored to the transaction's own wall clock so the clamp decision
+      // here matches the committed lifecycle stamps exactly (codex P2
+      // round 14). On a crash-resumed retry no transaction ran in THIS
+      // process and the clamp anchor exists only in memory — recomputing
+      // against the current clock flips a committed clamp once
+      // start + minutes has passed (codex P2 round 20), splitting the
+      // tracker's completed_at from the committed end fields. The committed
+      // lifecycle end IS the clamp outcome, so the resume path carries the
+      // persisted stamp instead of recomputing.
+      : (typeof effectiveTimeOnSite === 'number'
+        ? (completionWallClockAt
+          ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionWallClockAt)
+          : (finiteDate(svc.actual_end_time) || finiteDate(svc.check_out_time) || null))
+        : null);
 
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
     // durably committed. Runs on BOTH first-run and durable-resume paths. On
@@ -5305,25 +6368,93 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
       const latestNotes = parseJsonObject(record.structured_notes);
-      const photoNotes = {
-        ...latestNotes,
+      const completionPhotosDelta = {
         completionPhotos: {
           uploaded: completionPhotoUploadResult.uploaded,
           failed: completionPhotoUploadResult.failed,
           uploadedAt: new Date().toISOString(),
         },
       };
-      await db('service_records').where({ id: record.id }).update({
-        structured_notes: serializeJsonb(photoNotes),
-      }).catch((updateErr) => {
+      const photoNotes = { ...latestNotes, ...completionPhotosDelta };
+      await mergeRecordNotesKeys(record.id, completionPhotosDelta).catch((updateErr) => {
         logger.warn(`[dispatch] completion photo status update failed: ${updateErr.message}`);
       });
       record.structured_notes = photoNotes;
     }
 
+    // Grounded-recommendation regen state — the artifact/SMS blocks below
+    // key on these. `Grounded` is true ONLY on a settled run with a truthy
+    // result: a quick provider/parse failure must not be mistaken for a
+    // grounded success (codex P1 r12).
+    let lawnRecRegenPromise = null;
+    let lawnRecRegenAttempted = false;
+    let lawnRecRegenGrounded = false;
+    let lawnRecRegenTimedOut = false;
+    // Resolves true once customer-safe copy is durable: grounded write OR
+    // deterministic sanitize after failure. Gates unrecallable artifacts
+    // (report email) queued later in this handler.
+    let lawnRecFinalCopyPromise = null;
+    // True once the durable lawn-PDF correction marker is persisted; when a
+    // correction is needed but the marker cannot be written, the PDF render
+    // queue is suppressed (codex P1 r31).
+    let lawnPdfCorrectionNeeded = false;
+    let lawnPdfCorrectionMarked = false;
+    // DURABLE correction marker (codex P1 r30/r31/r34): the in-process
+    // recovery callback dies with the process, and customers without report
+    // email have no worker path that forces a fresh render, so
+    // structured_notes.lawnPdfCorrectionPending makes EVERY render path
+    // render fresh until a post-settlement render clears it. It must be
+    // durable before any artifact is produced — retry, and if it still
+    // fails the PDF enqueue is suppressed. Atomic jsonb_set so a concurrent
+    // structured_notes write is never clobbered. Called from the regen path
+    // AND from the setup-failure catch (r34).
+    const markLawnPdfCorrectionNeeded = async () => {
+      lawnPdfCorrectionNeeded = true;
+      for (let attempt = 0; attempt < 3 && !lawnPdfCorrectionMarked; attempt += 1) {
+        try {
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: db.raw(
+              "jsonb_set(COALESCE(structured_notes::jsonb, '{}'::jsonb), '{lawnPdfCorrectionPending}', 'true'::jsonb, true)",
+            ),
+          });
+          lawnPdfCorrectionMarked = true;
+          record.structured_notes = { ...parseJsonObject(record.structured_notes), lawnPdfCorrectionPending: true };
+        } catch (markErr) {
+          logger.warn(`[dispatch] lawn PDF correction marker write failed for ${record.id} (attempt ${attempt + 1}): ${markErr.message}`);
+          await new Promise((resolve) => { setTimeout(resolve, 2000 * (attempt + 1)).unref?.(); });
+        }
+      }
+      if (!lawnPdfCorrectionMarked) {
+        logger.error(`[dispatch] lawn PDF correction marker UNWRITABLE for ${record.id} — suppressing the PDF render queue so no stale artifact is stored`);
+      }
+    };
     const completedLawnAssessmentId =
       linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
     if (!isIncompleteVisit && completedLawnAssessmentId) {
+      // FAIL CLOSED (codex P1 r21): the safety gate arms BEFORE any fallible
+      // setup — a transient failure in the assessment lookup/relink below
+      // must leave the MMS/SMS-tip/email gates CLOSED (not-grounded), not
+      // silently open because `attempted` was never set. The catch installs
+      // a sanitize-based finalCopy chain so held artifacts still settle.
+      const KnowledgeBridgeGate = require('../services/knowledge-bridge');
+      const lawnRecSanitizeWithRetry = async (tries = 4) => {
+        for (let attempt = 0; attempt < tries; attempt += 1) {
+          // A setup failure BEFORE the backlink write leaves the assessment
+          // unlinked and sanitation rejects it forever (codex P1 r40) —
+          // restore the known link first (idempotent, only-if-null).
+          await db('lawn_assessments')
+            .where({ id: completedLawnAssessmentId })
+            .whereNull('service_record_id')
+            .update({ service_record_id: record.id })
+            .catch((linkErr) => logger.warn(`[dispatch] assessment backlink recovery failed for ${completedLawnAssessmentId}: ${linkErr.message}`));
+          const res = await KnowledgeBridgeGate.sanitizeStoredRecommendations(completedLawnAssessmentId)
+            .catch((e) => ({ changed: false, error: e.message }));
+          if (!res.error) return res;
+          await new Promise((resolve) => { setTimeout(resolve, 15000 * (attempt + 1)).unref?.(); });
+        }
+        return { changed: false, error: 'sanitize retries exhausted' };
+      };
+      lawnRecRegenAttempted = true;
       try {
         const completedAssessment = await db('lawn_assessments')
           .where({
@@ -5348,8 +6479,110 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const wiki = require('../services/agronomic-wiki');
         const outcome = await wiki.linkTreatmentOutcome(record.id);
         await attachLawnAssessmentOutcomePhotoRefs(outcome, completedLawnAssessmentId);
+        // Recommendations were generated at confirm time, BEFORE the
+        // service_records/service_products rows existed, so the applied-today
+        // grounding in generateAssessmentRecommendations never fired (codex
+        // P1 #3093). Now that the visit's applications are persisted and the
+        // assessment is back-linked, regenerate and wait — the PDF job and
+        // MMS preview later in this handler read ai_summary/recommendations
+        // and must not bake the stale confirm-time output (r3/r5). The wait
+        // is BOUNDED so a stalled provider can't hang the tech's completion
+        // response (r6), and the run always completes + writes: on a timeout
+        // the grounded correction still becomes durable and the PDF-queue
+        // block re-renders the artifact when it lands (r8) — no permanent
+        // stale copy on either path.
+        const KnowledgeBridge = KnowledgeBridgeGate;
+        // RESUME SAFETY (codex P1 r32): a crashed-then-resumed completion can
+        // find grounded copy already stored — and its PDF/email may already
+        // have reached the customer. A second LLM run would produce
+        // different recommendations and overwrite the permanent report while
+        // the sent delivery is deduped, so treat existing grounded copy as
+        // final and skip regeneration entirely.
+        let alreadyGrounded = false;
+        try {
+          const priorRow = await db('lawn_assessments').where({ id: completedAssessment.id }).first('recommendations');
+          const prior = typeof priorRow?.recommendations === 'string'
+            ? JSON.parse(priorRow.recommendations) : (priorRow?.recommendations || null);
+          // Sanitation-final copy counts as final too (codex P1 r35): the
+          // deterministic pass ran against an authoritative application
+          // read, and its result may already be in a customer's hands.
+          // But a LIVE generation lease in _generationRuns means another
+          // run (e.g. admin regeneration) can still overwrite the stored
+          // copy — the shortcut must not release the artifact gates while
+          // that is possible (codex P1 r38).
+          const priorRuns = (prior && typeof prior === 'object' && !Array.isArray(prior)
+            && prior._generationRuns && typeof prior._generationRuns === 'object') ? prior._generationRuns : {};
+          const liveLease = Object.values(priorRuns).some((exp) => {
+            const t = Date.parse(exp);
+            return Number.isFinite(t) && t > Date.now();
+          });
+          alreadyGrounded = !!(prior && typeof prior === 'object' && !Array.isArray(prior)
+            && (prior._groundedInApplications || prior._sanitizationFinal)
+            && !liveLease);
+        } catch { alreadyGrounded = false; }
+        if (alreadyGrounded) {
+          lawnRecRegenGrounded = true;
+          lawnRecFinalCopyPromise = Promise.resolve({ verified: true, changed: false });
+          logger.info(`[dispatch] grounded recommendations already stored for assessment ${completedAssessment.id} — skipping regeneration (resume-safe)`);
+          throw { __skipLawnRegen: true };
+        }
+        lawnRecRegenPromise = KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
+          .catch((recErr) => { logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`); return null; });
+        // LIVE grounded flag (codex P2 r15): the promise updates it whenever
+        // it settles — a run that lands grounded just after the race must
+        // not stay suppressed at the later MMS/SMS checks. Attached before
+        // the race so a fast settle updates the flag before the await
+        // returns.
+        void lawnRecRegenPromise.then((result) => { lawnRecRegenGrounded = !!result; })
+          .catch((flagErr) => logger.error(`[dispatch] regen grounded-flag updater failed: ${flagErr.message}`));
+        // Final-copy settlement with VERIFIED semantics (codex P1 r18): the
+        // sanitizer reports transient DB errors as { error } without
+        // rejecting, so the chain retries with backoff and resolves
+        // { verified, changed } — consumers must not treat an errored
+        // sanitize as a clean no-op.
+        lawnRecFinalCopyPromise = lawnRecRegenPromise.then(async (result) => {
+          if (result) return { verified: true, changed: true };
+          const sanitized = await lawnRecSanitizeWithRetry();
+          if (sanitized.error) {
+            logger.error(`[dispatch] stored-copy sanitize UNVERIFIED for assessment ${completedAssessment.id}: ${sanitized.error} — held email stays gated by the worker`);
+          }
+          return { verified: !sanitized.error, changed: !!sanitized.changed };
+        });
+        const regenOutcome = await Promise.race([
+          lawnRecRegenPromise.then(() => ({ settled: true })),
+          new Promise((resolve) => { setTimeout(() => resolve({ settled: false }), 60000).unref?.(); }),
+        ]);
+        lawnRecRegenTimedOut = !regenOutcome.settled;
+        if (lawnRecRegenTimedOut || !lawnRecRegenGrounded) {
+          await markLawnPdfCorrectionNeeded();
+        }
+        if (lawnRecRegenTimedOut) {
+          logger.warn('[dispatch] lawn recommendation regen still running after 60s — completion continues; PDF re-queues when the grounded write lands');
+        } else if (!lawnRecRegenGrounded) {
+          // A fast failure leaves the confirm-time copy stored and customer-
+          // visible — the finalCopy chain above is already running the
+          // retrying deterministic sanitize (codex P1 r13+r18); recommendation-
+          // derived customer output stays suppressed meanwhile.
+          logger.warn('[dispatch] lawn recommendation regen failed — retrying sanitize runs in the finalCopy chain; recommendation-derived customer output suppressed');
+        }
       } catch (err) {
+        if (err && err.__skipLawnRegen) {
+          // Not an error: grounded copy already stored (resume-safe skip).
+        } else {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
+        // Setup failed before (or during) regen creation: keep the gates
+        // closed and install a sanitize-based settlement chain so the held
+        // email / recovery render still converge on safe copy (codex P1 r21).
+        if (!lawnRecFinalCopyPromise) {
+          lawnRecFinalCopyPromise = lawnRecSanitizeWithRetry().then((res) => ({ verified: !res.error, changed: !!res.changed }));
+          void lawnRecFinalCopyPromise.catch((chainErr) => logger.error(`[dispatch] fallback sanitize chain failed: ${chainErr.message}`));
+        }
+        // Setup failure leaves confirm-time copy live while sanitation
+        // retries — the same durable-marker-or-suppress path must run here
+        // before the PDF block, or a restart strands a stale PDF for
+        // customers with no email fallback (codex P1 r34).
+        await markLawnPdfCorrectionNeeded();
+        }
       }
     }
 
@@ -5454,6 +6687,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // survive.
         untrustedLifecycleSpan: isBackfillCompletion,
         completedAt: backfillTrackerCompletedAt,
+        // Fences the tracker writes (codex P2 #3152 rounds 13/17): this
+        // instant belongs to the correction revision this request observed
+        // on the (lock-reconciled) row — null when it has never been
+        // corrected. If a newer time-on-site PATCH landed since, the row's
+        // monotonic seq differs (even for a same-minutes re-save) and the
+        // tracker must not restore ours.
+        expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -5658,6 +6898,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Live-override completions correct the linked technician timer too
+    // (codex P1, pre-push audit round 20c): the correction is authoritative
+    // for costing via the durable stamp, but without this sync timesheets
+    // and utilization kept the inflated span — and the corrected value
+    // becomes the edit modal's seed, so no later save would re-invoke the
+    // after-the-fact PATCH. Same revision-fenced audited sync the PATCH
+    // uses; committedSeq is the revision this finalization created (or
+    // adopted). Runs on crash-resumed retries too — idempotent, the
+    // divergence check no-ops once the entry agrees. Backfills are
+    // excluded: their entries are historic and the quiet-closeout posture
+    // owns them.
+    let completionTimerSync = { corrected: null, blocked: null };
+    if (!isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
+      completionTimerSync = await syncLinkedJobTimer({
+        serviceId: svc.id,
+        minutes: effectiveTimeOnSite,
+        committedSeq: svc.time_on_site_correction_seq ?? null,
+        editedBy: req.technicianId,
+        entriesSnapshot: completionTimerEntriesSnapshot,
+      });
+    }
+
     if (isIncompleteVisit) {
       // Recurring plan refill / end-of-plan flag — an incomplete-outcome
       // completion still flips the scheduled_services row to 'completed'
@@ -5684,6 +6946,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
         }),
+        ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
+        ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
       };
       await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice: null, response: responsePayload });
       markedSucceeded = true;
@@ -5932,7 +7196,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             'billing',
             'Visit covered by membership dues — stamped price not billed',
             `A completed recurring visit for a monthly-membership customer carried a $${Number(svc.estimated_price).toFixed(2)} per-visit price${svc.create_invoice_on_complete ? " and the series' create-invoice default" : ''}. Membership dues cover plan visits, so NO invoice was cut. If this series is actually a separately billable add-on, bill this visit manually and KEEP its per-visit price — every visit in the series will complete uninvoiced the same way, so bill each manually or roll the add-on into the customer's monthly rate.`,
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
+            // bell: false — billing FYI, not a money failure; silenced under
+            // GATE_ADMIN_BELL_POLICY even though category 'billing' rings.
+            { link: `/admin/customers/${svc.customer_id}`, bell: false, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
         });
       } catch (e) { logger.warn(`[dispatch] dues-covered review alert failed: ${e.message}`); }
@@ -5996,7 +7262,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // JWT, and the public report routes 404 suppressed reports for
     // non-staff. Staff review the shadow via the HTML report; the PDF only
     // feeds customer sends, which are suppressed anyway.
-    if (serviceReportV1Delivery && reportToken && typedDeliveryMode === 'auto_send') {
+    if (serviceReportV1Delivery && reportToken && typedDeliveryMode === 'auto_send'
+      && !(lawnPdfCorrectionNeeded && !lawnPdfCorrectionMarked)) {
       await enqueuePdfRenderJob({
         serviceRecordId: record.id,
         payload: {
@@ -6006,6 +7273,56 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }).catch((err) => {
         logger.warn(`[dispatch] service report PDF render queue failed for ${record.id}: ${err.message}`);
       });
+      // A grounded-recommendation regen that outlived its bounded wait still
+      // writes when it lands — re-render the PDF then, so the queued artifact
+      // doesn't permanently carry the stale confirm-time copy (codex P1 r8).
+      if (lawnRecRegenAttempted && !lawnRecRegenGrounded && lawnRecFinalCopyPromise) {
+        // Deliberately detached recovery chain — explicit void + logged
+        // catch per repo detachment style (codex P1 r19).
+        void lawnRecFinalCopyPromise.then(async (finalCopy) => {
+          // Recovery render for EVERY not-grounded-at-wait outcome (fast
+          // fail, late grounded, late fail — codex P1 r14+r18): the
+          // finalCopy chain has already run the grounded write or the
+          // retrying sanitize. Unverified (sanitize kept erroring) → no
+          // re-render; render-time guards protect the web report and the
+          // held email stays gated by the worker. Verified with no change →
+          // nothing to correct.
+          if (!finalCopy?.verified || !finalCopy?.changed) {
+            if (finalCopy && !finalCopy.verified) {
+              logger.warn(`[dispatch] recovery render skipped for ${record.id} — final copy unverified`);
+            }
+            return;
+          }
+          try {
+            // Copy changed after the first render may have stored a stale
+            // PDF — clear the storage key so the next render is forced
+            // fresh instead of served from the object match (codex P1 r18).
+            await db('service_records').where({ id: record.id })
+              .update({ pdf_storage_key: null })
+              .catch((invErr) => logger.warn(`[dispatch] pdf key invalidation failed for ${record.id}: ${invErr.message}`));
+            // enqueuePdfRenderJob dedupes against an ACTIVE job — a render
+            // already in flight may have loaded pre-write data, so a deduped
+            // 'rendering' result is NOT the correction; retry until the
+            // active job settles and a fresh render actually queues (codex
+            // P1 r11). A deduped 'queued' job hasn't started yet and will
+            // read post-write data — that IS the correction.
+            for (let attempt = 0; attempt < 12; attempt += 1) {
+              const res = await enqueuePdfRenderJob({
+                serviceRecordId: record.id,
+                payload: { source: 'grounded_regen_late', token: reportToken },
+              });
+              if (res.queued || res.job?.status === 'queued') {
+                logger.info(`[dispatch] PDF re-queued for ${record.id} after late grounded recommendation write (attempt ${attempt + 1})`);
+                return;
+              }
+              await new Promise((resolve) => { setTimeout(resolve, 15000).unref?.(); });
+            }
+            logger.warn(`[dispatch] late PDF re-queue gave up for ${record.id} — active render never settled`);
+          } catch (requeueErr) {
+            logger.warn(`[dispatch] late PDF re-queue failed for ${record.id}: ${requeueErr.message}`);
+          }
+        }).catch((recoveryErr) => logger.error(`[dispatch] PDF recovery chain failed for ${record.id}: ${recoveryErr.message}`));
+      }
     }
     // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
     // (flag-gated via PEST_RECAP). The pipeline self-skips non-eligible visits and a
@@ -6056,7 +7373,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'SERVICE_REPORT_MMS_PREVIEW_ENABLED',
         false,
       );
-      if (mmsPreviewEnabled && reportToken) {
+      // A grounded-recommendation regen still pending past its bounded wait
+      // means this preview could bake the stale confirm-time copy into an
+      // image TEXTED to the customer — unrecallable, unlike the PDF (which
+      // re-queues) and the web report (which heals). Omit the image on that
+      // rare path; the SMS still links to the live report (codex P1 r10).
+      if (mmsPreviewEnabled && reportToken && lawnRecRegenAttempted && !lawnRecRegenGrounded) {
+        logger.warn(`[dispatch] MMS preview omitted for ${record.id} — grounded recommendation regen ${lawnRecRegenTimedOut ? 'still pending' : 'failed'}; SMS sends without an image`);
+      } else if (mmsPreviewEnabled && reportToken) {
         serviceReportPreviewAsset = await buildAndStoreSmsPreviewImage({
           recordId: record.id,
           token: reportToken,
@@ -7081,6 +8405,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    const reviewCadenceEnabled = require('../config/feature-gates').isEnabled('reviewSequences');
     const shouldBundleReview =
       effectiveSendCompletionSms &&
       !completionSmsAlreadyHandled &&
@@ -7088,7 +8413,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
-      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0);
+      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0) &&
+      // Cadence mode owns the ask: the review link is its own Day-0 message at
+      // the smart send window, never bundled into the completion/receipt SMS
+      // (bundling would also dodge the sequence's cap/cooldown bookkeeping).
+      !reviewCadenceEnabled;
 
     let bundledReviewUrl = null;
     let bundledReviewRequestId = null;
@@ -7247,8 +8576,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // carry the marker forward instead of clobbering it.
           recordStructuredNotes.paymentFailedNoticeStatus = 'sending';
           recordStructuredNotes.paymentFailedNoticeAttemptedAt = new Date().toISOString();
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(recordStructuredNotes),
+          await mergeRecordNotesKeys(record.id, {
+            paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+            paymentFailedNoticeAttemptedAt: recordStructuredNotes.paymentFailedNoticeAttemptedAt,
           });
           const failResult = await sendCustomerMessage({
             to: svc.cust_phone,
@@ -7266,8 +8596,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : 'failed';
           if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
           else recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(recordStructuredNotes),
+          await mergeRecordNotesKeys(record.id, {
+            paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+            ...(failResult.sent
+              ? { paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt }
+              : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError }),
           }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
           record.structured_notes = recordStructuredNotes;
           if (!failResult.sent) {
@@ -7361,7 +8694,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // (codex P1 #3007 r13).
               applications: (typeof products !== 'undefined' && Array.isArray(products)) ? products : [],
               tracedExteriorZone: await require('../services/service-report/reentry')
-                .resolveTracedExteriorZone({ scheduled_service_id: record.scheduled_service_id || svc.id }),
+                .resolveTracedExteriorZone({
+                  scheduled_service_id: record.scheduled_service_id || svc.id,
+                  service_type: svc.service_type,
+                  interior_only_lane: completionProfile?.serviceKey === 'bed_bug_treatment',
+                }),
             },
             service: svc,
             reportUrl,
@@ -7515,6 +8852,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           try {
             const LawnIntel = require('../services/lawn-intelligence');
             const scoreParts = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
+            // The tip is recommendation-derived: unless the grounded regen
+            // SUCCEEDED, it may be the stale confirm-time text that
+            // contradicts today's applications — an SMS is unrecallable, so
+            // suppress the tip and send the score alone (codex P1 r12). The
+            // score line is tech-confirmed assessment data, not
+            // recommendation output.
+            if (scoreParts && lawnRecRegenAttempted && !lawnRecRegenGrounded) {
+              scoreParts.tipLine = '';
+            }
             if (scoreParts?.scoreLine) {
               const folded = foldLawnScoreIntoCompletionSms(sentSmsBody, scoreParts, { maxSegments: 2 });
               if (folded.folded) {
@@ -7529,8 +8875,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
         if (sentSmsBody) {
-          const sendingNotes = {
-            ...recordStructuredNotes,
+          // smsNotesDelta accumulates every key this SMS leg owns — each
+          // persisted write below merges the delta only (mergeRecordNotesKeys),
+          // never the whole snapshot.
+          const smsNotesDelta = {
             completionSmsStatus: 'sending',
             completionSmsType: sentSmsType,
             completionSmsBody: sentSmsBody,
@@ -7541,9 +8889,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               completionSmsBundledReviewUrl: bundledReviewUrl,
             } : {}),
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(sendingNotes),
-          });
+          const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
+          await mergeRecordNotesKeys(record.id, smsNotesDelta);
           const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id };
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
@@ -7587,35 +8934,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             });
             sentSmsChannel = 'sms';
             mmsFallbackToSms = true;
-            sendingNotes.completionSmsMmsFallbackAt = new Date().toISOString();
-            sendingNotes.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+            smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
+            smsNotesDelta.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+            sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
+            sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
           if (!smsResult.sent) {
-            const failedNotes = {
-              ...sendingNotes,
+            Object.assign(smsNotesDelta, {
               completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
               completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
               completionSmsFailedAt: new Date().toISOString(),
-            };
-            await db('service_records').where({ id: record.id }).update({
-              structured_notes: serializeJsonb(failedNotes),
             });
+            const failedNotes = { ...sendingNotes, ...smsNotesDelta };
+            await mergeRecordNotesKeys(record.id, smsNotesDelta);
             record.structured_notes = failedNotes;
             await markBundledReviewFailed(smsResult);
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           } else {
-            const sentNotes = {
-              ...sendingNotes,
+            Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
               sentSmsBody,
               sentSmsAt: new Date().toISOString(),
               sentSmsType,
               sentSmsChannel,
               serviceReportPreviewAssetId: serviceReportPreviewAsset?.id || null,
-            };
-            await db('service_records').where({ id: record.id }).update({
-              structured_notes: serializeJsonb(sentNotes),
             });
+            const sentNotes = { ...sendingNotes, ...smsNotesDelta };
+            await mergeRecordNotesKeys(record.id, smsNotesDelta);
             await db('service_report_events').insert({
               service_record_id: record.id,
               customer_id: svc.customer_id,
@@ -7668,15 +9013,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
       } catch (e) {
-        const failedNotes = {
-          ...parseJsonObject(record.structured_notes),
+        const failedDelta = {
           completionSmsStatus: 'failed',
           completionSmsError: e.message || 'SMS send failed',
           completionSmsFailedAt: new Date().toISOString(),
         };
-        await db('service_records').where({ id: record.id }).update({
-          structured_notes: serializeJsonb(failedNotes),
-        }).catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
+        const failedNotes = { ...parseJsonObject(record.structured_notes), ...failedDelta };
+        await mergeRecordNotesKeys(record.id, failedDelta)
+          .catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
         record.structured_notes = failedNotes;
         await markBundledReviewFailed();
         logger.error(`Completion SMS failed: ${e.message}`);
@@ -7685,14 +9029,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // Record the skip in structured_notes so the audit trail (and the
       // completionSmsStatus surfaced in the response) shows WHY no
       // completion SMS went out for a visit that asked for one.
-      const skippedNotes = {
-        ...recordStructuredNotes,
+      const skippedDelta = {
         completionSmsStatus: 'skipped_recap_sms_already_sent',
         completionSmsSkippedAt: new Date().toISOString(),
       };
-      await db('service_records').where({ id: record.id }).update({
-        structured_notes: serializeJsonb(skippedNotes),
-      }).catch((updateErr) => logger.warn(`[dispatch] completion SMS skip status update failed: ${updateErr.message}`));
+      const skippedNotes = { ...recordStructuredNotes, ...skippedDelta };
+      await mergeRecordNotesKeys(record.id, skippedDelta)
+        .catch((updateErr) => logger.warn(`[dispatch] completion SMS skip status update failed: ${updateErr.message}`));
       record.structured_notes = skippedNotes;
       logger.info(`[dispatch] Recap SMS already texted for service ${svc.id}; skipping completion SMS to avoid double-texting`);
     } else if (effectiveSendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
@@ -7728,14 +9071,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && !serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
       if (!latestNotes.serviceReportV1EmailStatus) {
-        const disabledNotes = {
-          ...latestNotes,
+        const disabledDelta = {
           serviceReportV1EmailStatus: 'disabled',
           serviceReportV1EmailDisabledAt: new Date().toISOString(),
         };
-        await db('service_records').where({ id: record.id }).update({
-          structured_notes: serializeJsonb(disabledNotes),
-        }).catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
+        const disabledNotes = { ...latestNotes, ...disabledDelta };
+        await mergeRecordNotesKeys(record.id, disabledDelta)
+          .catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
         record.structured_notes = disabledNotes;
       }
     }
@@ -7745,38 +9087,77 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
       if (!emailAlreadyHandled) {
         try {
+          // The email worker rebuilds and ATTACHES the current PDF at send
+          // time — an emailed attachment is unrecallable. While grounded
+          // copy is still pending, the job is enqueued DURABLY with a
+          // 20-minute hold (survives a process restart, unlike a promise
+          // callback — codex P1 r15+r16); the settlement callback below
+          // pulls next_attempt_at forward the moment copy settles, so the
+          // hold only fully elapses if the process died — and by then the
+          // locked late write/sanitize has landed anyway.
+          // Hold on timeout even if the regen landed grounded MEANWHILE
+          // (codex P1 r22): the initial PDF may have started rendering the
+          // stale copy during the timed-out window, and only the held path's
+          // worker fence + key invalidation guarantees the email attaches a
+          // post-settlement render.
+          const emailHoldMs = lawnRecRegenAttempted && (lawnRecRegenTimedOut || !lawnRecRegenGrounded)
+            ? 20 * 60 * 1000 : 0;
           const queued = await enqueueServiceReportV1EmailDelivery({
             serviceRecordId: record.id,
             customerId: svc.customer_id,
             token: reportToken,
             reportUrl,
             pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
+            delayMs: emailHoldMs,
             payload: {
               scheduled_service_id: svc.id,
-              source: 'dispatch_complete',
+              source: emailHoldMs ? 'dispatch_complete_held_for_grounding' : 'dispatch_complete',
+              // The delivery worker enforces grounding readiness itself for
+              // held jobs (elapsed time is not proof the settlement ran —
+              // codex P1 r17).
+              // The assessment identity rides on EVERY lawn-report delivery,
+              // not just held ones (issue #3135). When regeneration settles
+              // inside the hold window the job is enqueued normally, and
+              // without this the worker had no assessment to fence — that
+              // delivery dispatched with no version check and no send seal.
+              // awaiting_grounding stays hold-only: it means "sanitize before
+              // sending", which is a held-path obligation.
+              ...(completedLawnAssessmentId ? { lawn_assessment_id: completedLawnAssessmentId } : {}),
+              ...(emailHoldMs ? { awaiting_grounding: true } : {}),
             },
           });
-          const queuedNotes = {
-            ...latestNotes,
+          if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {
+            const heldDeliveryId = queued.delivery.id;
+            logger.info(`[dispatch] report email held ${Math.round(emailHoldMs / 60000)}m for ${record.id} pending grounded copy`);
+            void lawnRecFinalCopyPromise.then(async (finalCopy) => {
+              // Pull forward only on VERIFIED settlement (codex P1 r18) —
+              // unverified keeps the full hold, and the worker's own
+              // sanitize gate still protects the send.
+              if (!finalCopy?.verified) return;
+              await db('service_report_deliveries')
+                .where({ id: heldDeliveryId, status: 'queued' })
+                .update({ next_attempt_at: new Date(), updated_at: new Date() })
+                .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
+            }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
+          }
+          const queuedDelta = {
             serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
             serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
             serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
             serviceReportV1EmailError: queued.ok ? null : queued.error || null,
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(queuedNotes),
-          });
+          const queuedNotes = { ...latestNotes, ...queuedDelta };
+          await mergeRecordNotesKeys(record.id, queuedDelta);
           record.structured_notes = queuedNotes;
         } catch (err) {
-          const failedNotes = {
-            ...latestNotes,
+          const failedDelta = {
             serviceReportV1EmailStatus: 'failed',
             serviceReportV1EmailError: err.message || 'Email queue failed',
             serviceReportV1EmailFailedAt: new Date().toISOString(),
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(failedNotes),
-          }).catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
+          const failedNotes = { ...latestNotes, ...failedDelta };
+          await mergeRecordNotesKeys(record.id, failedDelta)
+            .catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
           record.structured_notes = failedNotes;
           logger.error(`[dispatch] v1 report email queue failed: ${err.message}`);
         }
@@ -7785,16 +9166,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
-    if (effectiveRequestReview && svc.cust_phone && !bundledReviewUrl) {
+    // Legacy mode is SMS-only, so no phone = no ask. Cadence mode has its own
+    // channel resolver with an SMS→email fallback (sendOutreachTouch), so an
+    // email-only customer must still reach enrollment (Codex P2, r1) — the
+    // resolver stops the sequence with no_contact/opted_out when neither
+    // channel is available.
+    if (effectiveRequestReview && (svc.cust_phone || reviewCadenceEnabled) && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
-        await ReviewService.create({
+        await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
+          serviceType: svc.service_type || null,
+          techName: svc.tech_name || null,
+          completedAt: new Date(),
           triggeredBy: 'auto',
-          delayMinutes: completionReviewDelayMinutes === undefined
-            ? 120
-            : completionReviewDelayMinutes,
+          // Only an operator-SELECTED timing travels as an explicit delay —
+          // it wins in both modes (Codex P2, r2). Untouched selector =
+          // undefined = legacy 120-min default / cadence smart window.
+          delayMinutes: completionReviewDelayMinutes,
+          legacyDelayMinutes: 120,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
@@ -7813,6 +9204,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // completed_at stamp too.
         untrustedLifecycleSpan: isBackfillCompletion,
         completedAt: backfillTrackerCompletedAt,
+        // Same fence as the first markComplete above (codex rounds 13/17).
+        expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -7903,70 +9296,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
-    // Follow-up suggestion for typed completions (profiles followup_policy /
-    // default_followup_days). Cockroach only suggests for German — matched on
-    // the canonical registry option value, never display-label text.
-    let followupSuggestion = null;
-    if (typedFindingsType && typedFindings && !isIncompleteVisit) {
-      followupSuggestion = projectFollowupSuggestion({
-        scheduledService: svc,
-        project: {},
-        profile: completionProfile,
-      });
-      // cockroach_control is exempt from the German-only rule: it is sold
-      // as a two-treatment package (profile alert/14d,
-      // services.requires_follow_up) — the included second visit applies
-      // regardless of species, matching its pre-cutover project-flow
-      // behavior (20260712300000).
-      if (followupSuggestion?.required && typedFindingsType === 'cockroach'
-        && completionProfile?.serviceKey !== 'cockroach_control'
-        && String(typedFindings.values?.species || '') !== 'German') {
-        followupSuggestion = { ...followupSuggestion, required: false, reason: 'species_not_german' };
-      }
-      // Two-treatment packages stop at visit 2: the included follow-up
-      // (followup_included, minted by /schedule-followup) resolves the same
-      // ALERT profile on ITS completion, which would suggest — and let the
-      // CTA mint — a third $0 visit, then a fourth (Codex r3). Trapping
-      // programs deliberately chain and are not in this set.
-      if (followupSuggestion?.required
-        && TWO_TREATMENT_PACKAGE_KEYS.has(completionProfile?.serviceKey)
-        && svc.followup_included === true) {
-        followupSuggestion = { ...followupSuggestion, required: false, reason: 'included_followup_visit' };
-      }
-      // German knockdown: the tech's explicit follow-up selection wins over
-      // the profile's standing ALERT policy — a "No" must not leave the
-      // success overlay demanding a follow-up the customer report says is
-      // not needed, and the selected window drives the suggested date so
-      // the CTA can never book a date the report copy contradicts (Codex
-      // P2 rounds 3–4).
-      if (followupSuggestion?.required && typedFindingsType === 'german_roach_knockdown') {
-        if (String(typedFindings.values?.followup_required || '') === 'No') {
-          followupSuggestion = { ...followupSuggestion, required: false, reason: 'tech_marked_not_required' };
-        } else {
-          const windowDays = KNOCKDOWN_FOLLOWUP_WINDOW_DAYS[String(typedFindings.values?.followup_window || '')];
-          if (windowDays && windowDays !== followupSuggestion.days) {
-            followupSuggestion = projectFollowupSuggestion({
+    // Follow-up suggestion for the RESPONSE (success-overlay CTA). On the
+    // normal path this is the pre-transaction verdict whose alert already
+    // parked atomically inside the completion trx above. On crash-resume,
+    // runTypedValidation was bypassed (typedFindings stays null) and the
+    // original transaction already parked-or-skipped the alert — so
+    // re-derive the verdict from the committed snapshot purely so the
+    // resumed response still carries the CTA, and best-effort re-park to
+    // cover completions committed before the in-trx park deployed (the
+    // dedup + live-child guards make this a no-op everywhere else).
+    // Untyped alert-policy profiles (bed_bug_treatment post-untype) resume
+    // through the same lane: their completion froze typedFollowupVerdict
+    // into structured_notes, and the frozen-verdict read below is
+    // form-independent. NO profile condition here — a profile deactivated,
+    // repointed, or policy-cleared between the commit and a crash retry
+    // must not hide the persisted promise from the resumed response; the
+    // obligation helper reads the frozen verdict first and returns null
+    // cheaply for lanes that never froze one (codex P2 r6).
+    if (resumingCommittedCompletion && !isIncompleteVisit && !followupSuggestion) {
+      try {
+        const obligation = await typedFollowupObligationForCompletedSource({
+          scheduledService: { ...svc, status: 'completed' },
+        });
+        if (obligation?.suggestion) {
+          followupSuggestion = obligation.suggestion;
+          if (followupSuggestion.required) {
+            await parkFollowupAlert({
               scheduledService: svc,
-              project: {},
-              profile: { ...completionProfile, followupPolicy: 'alert', defaultFollowupDays: windowDays },
+              suggestion: followupSuggestion,
+              serviceRecordId: obligation.serviceRecordId || record?.id || null,
+              serviceName: completionProfile?.serviceName || null,
+              customerName: [svc.first_name, svc.last_name].filter(Boolean).join(' ').trim() || null,
+              source: 'typed_completion',
             });
           }
         }
-      }
-      // Palmetto knockdown: the profile policy is 'none', but when the
-      // checklist says a follow-up IS needed the overlay must offer the
-      // scheduling CTA — same 14-day default interval as German.
-      if (typedFindingsType === 'palmetto_roach_knockdown'
-        && String(typedFindings.values?.followup_needed || '') === 'Yes'
-        && !followupSuggestion?.required) {
-        followupSuggestion = {
-          ...projectFollowupSuggestion({
-            scheduledService: svc,
-            project: {},
-            profile: { ...completionProfile, followupPolicy: 'alert', defaultFollowupDays: completionProfile?.defaultFollowupDays ?? 14 },
-          }),
-          reason: 'tech_marked_needed',
-        };
+      } catch (e) {
+        logger.warn(`[dispatch] resumed follow-up derivation failed for ${svc.id}: ${e.message}`);
       }
     }
 
@@ -8123,11 +9489,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
       }),
+      ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
+      ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
       ...(typedFindingsType ? {
         typedFindingsType,
         typedDeliveryMode,
         followupSuggestion,
-      } : {}),
+      } : {
+        // Untyped alert-policy completions (bed_bug post-20260731400000)
+        // parked the same obligation — the panel needs the suggestion to
+        // render its Book-follow-up CTA (codex P1 r1).
+        ...(followupSuggestion ? { followupSuggestion } : {}),
+        // A suppressed untyped delivery posture must reach the panel too:
+        // the success overlays disclose internal-only/disabled delivery
+        // from typedDeliveryMode, else they claim "SMS + Report sent" on a
+        // completion the server suppressed (codex P2 r8).
+        ...(typedDeliveryMode !== 'auto_send' ? { typedDeliveryMode } : {}),
+      }),
     };
     // Refresh the stored response with the final invoice info — this is an
     // UPDATE of an already-succeeded row (set above immediately after the
@@ -8360,12 +9738,6 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     const profile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-    if (!profile?.findingsType) {
-      return res.status(409).json({
-        error: 'Follow-up booking from completion is only available for typed specialty services.',
-        code: 'followup_not_typed',
-      });
-    }
 
     // This is the server-side gate for the completion CTA, not a generic
     // booking API — the source visit must be completed and its persisted
@@ -8389,58 +9761,68 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       .first()
       .catch(() => null);
     const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
-    if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) {
+    const preAuthFrozenVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;
+    const frozenVerdictPresent = !!(preAuthFrozenVerdict && typeof preAuthFrozenVerdict.required === 'boolean');
+    // Untyped alert-policy profiles (bed_bug post-20260731400000) book from
+    // the FROZEN verdict their completion persisted; the typed-snapshot
+    // gates below stay authoritative for typed profiles (codex P1 r1).
+    // A frozen verdict ALSO authorizes the lane by itself: ops deactivating,
+    // repointing, or clearing the alert policy after the completion must not
+    // reject the promise the completion already made — the frozen-promise
+    // contract below applies to this gate too (codex P2 r4).
+    const untypedAlertProfile = !profile?.findingsType
+      && (profile?.followupPolicy === 'alert' || frozenVerdictPresent);
+    if (!profile?.findingsType && !untypedAlertProfile) {
+      return res.status(409).json({
+        error: 'Follow-up booking from completion is only available for typed specialty services.',
+        code: 'followup_not_typed',
+      });
+    }
+    if (untypedAlertProfile) {
+      // Untyped completions always freeze their verdict; a legacy TYPED
+      // completion on the now-untyped profile still carries its snapshot.
+      // Neither present → the visit never earned the CTA — same "can't mint
+      // an included $0 follow-up" guarantee as the typed gate.
+      if (!frozenVerdictPresent && !snapshot) {
+        return res.status(409).json({
+          error: 'This visit was not completed through the follow-up flow.',
+          code: 'followup_no_typed_completion',
+        });
+      }
+    } else if (!frozenVerdictPresent && (!snapshot || String(snapshot.type || '') !== String(profile.findingsType))) {
+      // A frozen verdict bypasses the snapshot gate in BOTH directions: an
+      // untyped completion followed by a rollback/repoint that restores the
+      // typed pointer has a frozen promise but no snapshot — the mutable
+      // profile must not reject it (codex P2 r5). Without a frozen verdict
+      // the typed gate stays exactly as before.
       return res.status(409).json({
         error: 'This visit was not completed through the typed report flow.',
         code: 'followup_no_typed_completion',
       });
     }
-    let suggestion = projectFollowupSuggestion({ scheduledService: svc, project: {}, profile });
-    let followupRequired = !!suggestion?.required;
-    // Mirrors /complete: cockroach_control's two-treatment package is exempt
-    // from the German-only rule (20260712300000).
-    if (followupRequired && profile.findingsType === 'cockroach'
-      && profile.serviceKey !== 'cockroach_control') {
-      if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
-    }
-    // Mirrors /complete: two-treatment packages stop at visit 2 — an
-    // included follow-up visit never mints another included follow-up
-    // (Codex r3).
-    if (followupRequired
-      && TWO_TREATMENT_PACKAGE_KEYS.has(profile.serviceKey)
-      && svc.followup_included === true) {
-      followupRequired = false;
-    }
-    // Knockdown typed-value overrides mirror /complete (Codex P2 rounds
-    // 3–4): the stored snapshot's explicit German "No" wins over the
-    // profile's ALERT policy, the selected window drives the bookable date,
-    // and a palmetto "Yes" earns the CTA the none-policy profile would
-    // withhold (same 14-day default interval as German).
-    if (followupRequired && profile.findingsType === 'german_roach_knockdown') {
-      if (String(snapshot?.values?.followup_required || '') === 'No') {
-        followupRequired = false;
-      } else {
-        const windowDays = KNOCKDOWN_FOLLOWUP_WINDOW_DAYS[String(snapshot?.values?.followup_window || '')];
-        if (windowDays && windowDays !== suggestion?.days) {
-          suggestion = projectFollowupSuggestion({
-            scheduledService: svc,
-            project: {},
-            profile: { ...profile, followupPolicy: 'alert', defaultFollowupDays: windowDays },
-          });
-          followupRequired = !!suggestion?.required;
-        }
-      }
-    }
-    if (!followupRequired && profile.findingsType === 'palmetto_roach_knockdown'
-      && String(snapshot?.values?.followup_needed || '') === 'Yes') {
-      suggestion = projectFollowupSuggestion({
+    // The completion FROZE its final verdict into structured_notes — the
+    // CTA must book exactly the promise that was made, so a later profile
+    // change (interval, policy, deactivation) can neither reject the
+    // original CTA nor authorize a follow-up the completion withheld.
+    // Legacy records without a frozen verdict re-derive through the SAME
+    // shared override chain the completion ran (species rule incl. the
+    // cockroach_control exemption, two-treatment visit-2 stop, German
+    // "No"/window selection, palmetto "Yes" upgrade) — a stale or crafted
+    // POST still can't mint an included $0 follow-up the verdict withheld.
+    const frozenCtaVerdict = preAuthFrozenVerdict;
+    const suggestion = (frozenCtaVerdict && typeof frozenCtaVerdict.required === 'boolean')
+      ? frozenCtaVerdict
+      : typedFollowupVerdict({
         scheduledService: svc,
-        project: {},
-        profile: { ...profile, followupPolicy: 'alert', defaultFollowupDays: profile.defaultFollowupDays ?? 14 },
+        profile: profile || {},
+        // Pre-freeze legacy records on a now-untyped profile re-derive
+        // through their own snapshot's type — the pointer was cleared, not
+        // the record (codex P1 r1). The snapshot-presence gate above makes
+        // this reachable only with a snapshot in the untyped case.
+        findingsType: profile?.findingsType || snapshot?.type || null,
+        values: snapshot?.values || {},
       });
-      followupRequired = !!suggestion?.required;
-    }
-    if (!followupRequired) {
+    if (!suggestion?.required) {
       return res.status(409).json({
         error: 'This completed visit does not call for a follow-up appointment.',
         code: 'followup_not_required',
@@ -8462,12 +9844,35 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       return res.status(503).json({ error: 'Follow-up booking is not available yet (pending migration).', code: 'followup_columns_missing' });
     }
 
+    // A booked follow-up clears the parked exception — resolve the
+    // completion-minted follow_up_needed alert(s) so they don't linger as
+    // stale bells for a visit that is now on the schedule. Called on EVERY
+    // path that answers "the follow-up exists" (fresh insert, idempotent
+    // retry, 23505 race winner): a crash or failed resolve after the insert
+    // must not strand the alert open forever (Codex r1 P2). Best-effort —
+    // the booking is the durable outcome and never fails on this.
+    const resolveOpenFollowupAlerts = async () => {
+      try {
+        const { resolveAlert } = require('../services/dispatch-alerts');
+        const openFollowupAlerts = await db('dispatch_alerts')
+          .where({ type: 'follow_up_needed', job_id: svc.id })
+          .whereNull('resolved_at')
+          .select('id');
+        for (const alert of openFollowupAlerts) {
+          await resolveAlert({ id: alert.id, resolvedBy: req.technicianId || null });
+        }
+      } catch (e) {
+        logger.warn(`[dispatch] follow-up alert resolve failed for ${svc.id}: ${e.message}`);
+      }
+    };
+
     const existing = await db('scheduled_services')
       .where({ followup_source_service_id: svc.id })
-      .whereNotIn('status', ['cancelled', 'skipped'])
+      .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
+      await resolveOpenFollowupAlerts();
       return res.json({ success: true, alreadyScheduled: true, appointment: { id: existing.id, scheduledDate: serviceDateOnly(existing.scheduled_date), status: existing.status } });
     }
 
@@ -8504,10 +9909,11 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       if (err && err.code === '23505') {
         const winner = await db('scheduled_services')
           .where({ followup_source_service_id: svc.id })
-          .whereNotIn('status', ['cancelled', 'skipped'])
+          .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
           .orderBy('created_at', 'desc')
           .first();
         if (winner) {
+          await resolveOpenFollowupAlerts();
           return res.json({
             success: true,
             alreadyScheduled: true,
@@ -8517,7 +9923,12 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       }
       throw err;
     }
-    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile.findingsType}) for ${date}`);
+    // profile can be null on the frozen-verdict lane (transient resolver
+    // failure) — a post-insert throw here would 500 AFTER the booking
+    // committed and permanently skip reminder registration on the retry
+    // (codex P2 r6).
+    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile?.findingsType || 'untyped'}) for ${date}`);
+    await resolveOpenFollowupAlerts();
     // Without this the visit never enters appointment_reminders, so the
     // 72h/24h reminder cron can't see it (the cron reads only that table).
     // sendConfirmation:false — no immediate SMS; the customer was told about
@@ -8674,28 +10085,56 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
 router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    const { photos, structuredFindings } = req.body || {};
+    const { photos, structuredFindings, context } = req.body || {};
     if (!Array.isArray(photos) || !photos.length) {
       return res.status(400).json({ error: 'photos array is required', code: 'photos_required' });
     }
     if (photos.length > 5) {
       return res.status(400).json({ error: 'At most 5 photos can be analyzed', code: 'too_many_photos' });
     }
-    const findingsType = structuredFindings?.type;
-    if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
-      return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
-    }
-    const schema = ActivityIndicators.findingsSchemaForType(findingsType);
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
       .first('id', 'customer_id', 'service_type', 'service_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     const photoProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-    if (photoProfile?.findingsType !== findingsType) {
-      return res.status(409).json({
-        error: 'This service does not use that findings form.',
-        code: 'findings_type_mismatch',
-      });
+    const findingsType = structuredFindings?.type;
+    let schema = null;
+    const contextLines = [];
+    if (findingsType) {
+      if (!ActivityIndicators.isTypedFindingsType(findingsType)) {
+        return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
+      }
+      schema = ActivityIndicators.findingsSchemaForType(findingsType);
+      if (photoProfile?.findingsType !== findingsType) {
+        return res.status(409).json({
+          error: 'This service does not use that findings form.',
+          code: 'findings_type_mismatch',
+        });
+      }
+    } else {
+      // Basic (untyped) completions analyze photos too (owner 2026-07-30) —
+      // grounded in the tech's structured observations instead of a findings
+      // form. A typed service must send its typed findings so the summary
+      // stays grounded in the form the tech actually fills.
+      if (photoProfile?.findingsType) {
+        return res.status(409).json({
+          error: 'This service uses a findings form — send structuredFindings.',
+          code: 'findings_type_mismatch',
+        });
+      }
+      // Report/track egress (AGENTS.md): raw technician notes never reach a
+      // customer-facing LLM — the prompt context is the structured
+      // observations field only, with entry-code-shaped lines dropped.
+      const observations = Array.isArray(context?.observations)
+        ? context.observations
+          .map((o) => String(o).trim())
+          .filter(Boolean)
+          .filter((o) => !COMPLETION_ACCESS_CODE_RE.test(o))
+          .slice(0, 10)
+        : [];
+      if (observations.length) {
+        contextLines.push(`Observations: ${observations.join('; ').slice(0, 600)}`);
+      }
     }
     // Decode with the same size cap the completion upload enforces — a
     // photo too big to persist is too big to analyze (the helper default
@@ -8712,6 +10151,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       values: structuredFindings?.values || {},
       photoCount: photos.length,
       serviceType: svc.service_type,
+      contextLines,
     });
     const generated = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.visionAnalysis,
@@ -9073,7 +10513,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404
-        : (result.reason === 'bad_reason' || result.reason === 'bad_target') ? 400
+        : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }
@@ -9289,63 +10729,62 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       }
       rescheduleOptions.technicianId = newTechId;
     }
-    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
-    await syncRescheduleReminder(req.params.serviceId, newDate, newWindow, { willNotify: notifyCustomer !== false });
-    // Snapshot the just-synced reminder state BEFORE the SMS, so the no-send
-    // re-arm below can't stomp a newer reschedule that lands during the send.
-    const reminderGuards = await captureReminderGuards(req.params.serviceId);
+    // Callers with a possibly-stale board snapshot (the RescheduleModal)
+    // opt in to server-side block derivation: window_end is rebuilt from
+    // the CURRENT row's own span/duration at the submitted start, so a
+    // concurrent duration edit can't be overwritten with a stale block.
+    let effectiveWindow = newWindow;
+    if (req.body.deriveWindowFromCurrentVisit === true && newWindow?.start) {
+      const row = await db('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .first('window_start', 'window_end', 'estimated_duration_minutes');
+      if (row) {
+        const dur = (() => {
+          if (row.window_start && row.window_end) {
+            const [h1, m1] = String(row.window_start).split(':').map(Number);
+            const [h2, m2] = String(row.window_end).split(':').map(Number);
+            const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
+            if (span > 0) return span;
+          }
+          const d = parseInt(row.estimated_duration_minutes, 10);
+          if (Number.isInteger(d) && d > 0) return d;
+          return 60;
+        })();
+        const [sh, sm] = String(effectiveWindow.start).split(':').map(Number);
+        const endTotal = sh * 60 + (sm || 0) + dur;
+        if (endTotal > 23 * 60 + 59) {
+          return res.status(409).json({
+            error: "That start time would run past midnight for this visit's duration — pick an earlier hour",
+            code: 'WINDOW_CROSSES_MIDNIGHT',
+          });
+        }
+        const end = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
+        effectiveWindow = { ...effectiveWindow, end };
+      }
+    }
+    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
+    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {
       logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
     }
     if (notifyCustomer !== false) {
-      const svc = await db('scheduled_services')
-        .where('scheduled_services.id', req.params.serviceId)
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
-        .first();
-      let notificationSent = false;
-      let notificationError = null;
-      if (!svc?.phone) {
-        notificationError = 'Customer phone unavailable';
-      } else {
-        try {
-          const vars = formatRescheduleTemplateVars(svc);
-          const body = await renderRequiredTemplate('appointment_rescheduled', vars, {
-            workflow: 'dispatch_reschedule',
-            entity_type: 'scheduled_service',
-            entity_id: req.params.serviceId,
-          });
-          const msg = await sendCustomerMessage({
-            to: svc.phone,
-            body,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'appointment',
-            customerId: svc.customer_id,
-            identityTrustLevel: 'phone_matches_customer',
-            metadata: { original_message_type: 'reschedule_confirmation', reasonText },
-          });
-          notificationSent = !(msg?.blocked || msg?.sent === false);
-          if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
-          if (notificationSent) {
-            await markRescheduleReminderNotified(req.params.serviceId);
-          }
-        } catch (err) {
-          notificationError = err.message;
-          logger.warn(`[dispatch] Reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
-        }
-      }
-      if (!notificationSent) {
-        // Fallback scope for a failed guard snapshot: the visit's NEW time,
-        // recomputed exactly as syncRescheduleReminder stamped it above.
-        await rearmRescheduleReminderWindows(reminderGuards, [{
-          scheduledServiceId: req.params.serviceId,
-          appointmentTime: parseETDateTime(rescheduleReminderTime(newDate, newWindow)),
-        }]);
-      }
-      return res.json({ ...result, notificationSent, notificationError });
+      // Shared notice path (recipient routing incl. appointment_notify_primary
+      // and service contacts, arrival-window copy, terminal/slot recheck at
+      // the provider handoff, guarded reminder close/re-arm) — replaces this
+      // route's former inline send, which texted customers.phone directly and
+      // closed reminder windows unguarded. syncRescheduleReminder(willNotify)
+      // above satisfies the helper's cover contract. Lazy require both ways —
+      // admin-schedule lazily requires this module too; neither runs at load.
+      const { sendRescheduleNoticeForVisit } = require('./admin-schedule');
+      const win = parseRescheduleWindow(effectiveWindow);
+      const notice = await sendRescheduleNoticeForVisit(
+        req.params.serviceId,
+        String(newDate).split('T')[0],
+        win.start,
+      );
+      return res.json({ ...result, notificationSent: notice.sent, notificationError: notice.error });
     }
     res.json(result);
   } catch (err) {
@@ -10479,6 +11918,11 @@ router.delete('/:serviceId/recap-media/:mediaId', async (req, res, next) => {
 });
 
 module.exports = router;
+// Shared with admin-schedule's update-details opt-in reschedule notice, so
+// its failed-send compensation is the same guarded re-arm this route uses
+// (never a diverging local copy).
+module.exports.captureReminderGuards = captureReminderGuards;
+module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
@@ -10500,6 +11944,9 @@ module.exports._test = {
   applyBackfillRecordTimingPolicy,
   backfillCompletionEndInstant,
   backfillTimeOnSiteMinutes,
+  liveTimeOnSitePlan,
+  adjustedCompletionEndInstant,
+  timeOnSiteEditPlan,
   frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,

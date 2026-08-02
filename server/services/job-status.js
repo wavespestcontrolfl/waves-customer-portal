@@ -377,6 +377,38 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     emitToAdmins(adminPayload);
   }
 
+  function maybeReparkFollowupObligation() {
+    // Cancelling/skipping/no-showing a completion-linked follow-up child
+    // resurfaces the source visit's owed follow-up as a fresh dispatch
+    // alert — the booking resolved it, and without this an ordinary
+    // cancellation left the obligation with neither an appointment nor an
+    // open alert (a no_show child likewise no longer covers it; Codex r3).
+    // Runs POST-COMMIT, fire-and-forget: it must never block or poison the
+    // cancellation transaction (an error inside a Postgres trx aborts every
+    // later statement), and the park is dedup-guarded so a same-status
+    // cancel re-send safely re-attempts it. Guarded here (the shared
+    // status writer) so every transitionJobStatus caller is covered; the
+    // one direct-update cancellation writer (Intelligence Bar
+    // cancel_appointment) now routes through this writer too. Lazy
+    // require: the module's dependency chain reaches back into job-status.
+    const { handleFollowupChildCancellation, handleFollowupChildRevival } = require('./typed-followup-obligation');
+    if (['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) {
+      void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
+        logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
+      });
+    } else {
+      // Reverse direction: a compensated cancellation (offboarding /
+      // cancellation-processor revert a cancel when tracker state raced) or
+      // any other transition back to a covering status re-covers the source
+      // obligation — resolve the typed cards the re-park minted, or they
+      // linger as false exceptions the reverse transition never cleans
+      // (local Codex audit P1).
+      void handleFollowupChildRevival({ jobId, toStatus }).catch((e) => {
+        logger.warn(`[job-status] follow-up revival hook failed for ${jobId}: ${e.message}`);
+      });
+    }
+  }
+
   if (trx) {
     // Caller-owned trx. Do the writes; defer both emits until the
     // caller's outer transaction resolves. trx.executionPromise is
@@ -385,7 +417,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     const { customerId, customerPayload, adminPayload } = await doWrites(trx);
     if (trx.executionPromise) {
       trx.executionPromise
-        .then(() => emitBoth(customerId, customerPayload, adminPayload))
+        .then(() => {
+          emitBoth(customerId, customerPayload, adminPayload);
+          maybeReparkFollowupObligation();
+        })
         .catch(() => {
           // Rollback path. Caller will see the rejection on their
           // db.transaction() promise; we just suppress both emits.
@@ -407,6 +442,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   });
   // trx committed by here.
   emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
+  maybeReparkFollowupObligation();
   return {
     customerPayload: captured.customerPayload,
     adminPayload: captured.adminPayload,

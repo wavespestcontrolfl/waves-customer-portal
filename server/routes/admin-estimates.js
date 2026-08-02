@@ -785,7 +785,11 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
             channels.sms = { ok: false, error: result.reason || result.code || 'SMS send blocked/failed' };
             logger.error(`Estimate SMS failed: ${result.reason || result.code || 'unknown'}`);
           } else {
-            channels.sms = { ok: true };
+            // real: suppression paths (gate off, template disabled, owner
+            // kill) return sent:true with a sentinel provider id — delivered
+            // for the send result, but never a first response to the lead.
+            const { isRealProviderSend } = require('../services/sms-auto-send');
+            channels.sms = { ok: true, real: isRealProviderSend(result) };
           }
         } catch (e) {
           logger.error(`Estimate SMS failed: ${e.message}`);
@@ -878,6 +882,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
 
   const sentChannels = requestedChannels.filter((ch) => channels[ch]?.ok);
   const failedChannels = requestedChannels.filter((ch) => !channels[ch]?.ok);
+  // Channels whose delivery counts as a first response: sms only when the
+  // provider send was REAL (not a suppression sentinel); email's ok already
+  // implies a real handoff.
+  const stampChannels = sentChannels.filter((ch) => (ch === 'sms' ? channels.sms?.real === true : true));
   const sent = sentChannels.length > 0;
 
   if (!sent) {
@@ -972,6 +980,21 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
     } catch (e) {
       logger.warn(`[admin-estimates] learning event failed for estimate ${estimate.id}: ${e.message}`);
     }
+    // The channels DID reach the customer even though the row moved on —
+    // other same-contact open leads were still answered by this send. Loose
+    // SLA stamp only (never status/linkage — the accepted/declined state is
+    // exactly what must not be regressed here). Fail-soft.
+    if (stampChannels.length) {
+      try {
+        const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+        await stampFirstResponseByContact({
+          phone: stampChannels.includes('sms') ? estimate.customer_phone : null,
+          email: stampChannels.includes('email') ? estimate.customer_email : null,
+        });
+      } catch (e) {
+        logger.warn(`[admin-estimates] superseded-send first-response stamp failed: ${e.message}`);
+      }
+    }
     return {
       sent: true,
       superseded: true,
@@ -983,7 +1006,10 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   }
 
   try {
-    await markLinkedLeadEstimateSent({ estimateId: estimate.id, sendMethod });
+    // stampChannels: only channels that actually delivered a REAL send gate
+    // the loose first-response stamp (partial 'both' sends are permitted
+    // above; sentinel-suppressed sms legs are excluded).
+    await markLinkedLeadEstimateSent({ estimateId: estimate.id, sendMethod, sentChannels: stampChannels });
   } catch (e) {
     logger.warn(`[admin-estimates] linked lead status update failed for estimate ${estimate.id}: ${e.message}`);
   }
@@ -1560,6 +1586,18 @@ router.put('/:id/proposal', async (req, res, next) => {
       return res.status(400).json({ error: 'Proposal line items cannot have negative quantities or unit prices.' });
     }
 
+    // per_application is a RENDERING-only cadence (the estimate PDF's
+    // synthesized lines). It must never be persisted here: the editor payload
+    // carries no visitsPerYear, so such a line annualizes to $0 and the UPDATE
+    // below would write that into the estimate's authoritative annual_total
+    // (codex #3120 r1, re-flagged pre-push r5 at the normalizer level).
+    const hasRenderingOnlyCadence = incoming.buildings.some((b) => Array.isArray(b?.lineItems || b?.line_items)
+      && (b.lineItems || b.line_items).some((i) => String(i?.frequency || '')
+        .trim().toLowerCase().replace(/[\s-]+/g, '_') === 'per_application'));
+    if (hasRenderingOnlyCadence) {
+      return res.status(400).json({ error: 'Proposal line items cannot use the per-application cadence. Pick a billing cadence for each line.' });
+    }
+
     // Normalize through the shared model so what we store matches what the
     // PDF and totals read. Force enabled:true — an explicit PUT means the
     // operator is authoring a real proposal (not the synthesized fallback).
@@ -1622,7 +1660,10 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
-    generateEstimateProposalPDF(estimate, res);
+    // Same live billing lane the customer-facing download resolves, so the
+    // operator's copy and the customer's copy stay byte-identical.
+    const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    generateEstimateProposalPDF(estimate, res, await resolveProposalBillingContext(estimate));
   } catch (err) { next(err); }
 });
 

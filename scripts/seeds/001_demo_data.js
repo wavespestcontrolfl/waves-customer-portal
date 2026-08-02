@@ -303,7 +303,6 @@ exports.seed = async function (knex) {
     service_reminder_24h: true,
     tech_en_route: true,
     service_completed: true,
-    billing_reminder: false,
     seasonal_tips: true,
     sms_enabled: true,
     email_enabled: true,

@@ -39,7 +39,13 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   // area" — legacy rows predate capture_mode and may be building-perimeter
   // traces, so they keep a neutral caption and skip the interior wash while
   // still getting the calmer outline presentation (codex P1 #3038).
-  const lawnCapture = traced.captureMode === 'lawn';
+  // 'lawn_highlight' = the snapshot carries the baked grass highlight —
+  // suppress the polygon overlay and say "highlighted". Plain 'lawn' rows
+  // (legacy saves + highlight-fallback saves) contain the baked OUTLINE, so
+  // they keep the outline overlay and outline language — the caption must
+  // never claim a highlight the snapshot doesn't contain (codex P1 #3075).
+  const highlightCapture = traced.captureMode === 'lawn_highlight';
+  const lawnCapture = traced.captureMode === 'lawn' || highlightCapture;
   // Interior-spray captures (owner 2026-07-29) flood the traced footprint
   // with the brand-blue wash — only rows captured that way, and only closed
   // loops, get the fill (same area-claim rule as lawn).
@@ -48,9 +54,11 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   // server label speaks perimeter language — the outline variant tells the
   // area story instead.
   const caption = outline
-    ? (lawnCapture
-      ? 'Treated lawn area outlined on-site by your technician.'
-      : 'Service area traced on-site by your technician.')
+    ? (highlightCapture
+      ? 'Treated lawn areas highlighted on-site by your technician.'
+      : (lawnCapture
+        ? 'Treated lawn area outlined on-site by your technician.'
+        : 'Service area traced on-site by your technician.'))
     : (traced.label || 'Treated perimeter traced on-site by your technician.');
   const pathD = canReplay
     ? `M ${points.map((p) => `${Math.round(p.x)} ${Math.round(p.y)}`).join(' L ')}${traced.closedLoop ? ' Z' : ''}`
@@ -66,14 +74,46 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
           className="traced-zone-image"
           src={traced.snapshotUrl}
           alt={outline
-            ? (lawnCapture
-              ? 'Satellite photo of the property with the treated lawn area outlined'
-              : 'Satellite photo of the property with the technician-traced service area outlined')
+            ? (highlightCapture
+              ? 'Satellite photo of the property with the treated lawn areas highlighted'
+              : (lawnCapture
+                ? 'Satellite photo of the property with the treated lawn area outlined'
+                : 'Satellite photo of the property with the technician-traced service area outlined'))
             : (interiorCapture
               ? 'Satellite photo of the property with the treated home and perimeter highlighted'
               : 'Satellite photo of the property with the treated perimeter highlighted')}
         />
-        {sprayLive && pathD && outline && (
+        {/* Highlight-captured rows: the snapshot carries the baked highlight
+            baseline (PDF/static-safe); live viewers get the transparent
+            highlight layer PULSING on top — the treated turf breathes
+            (owner 2026-07-30 "the goal is to show where we sprayed").
+            sprayLive already gates on scroll-into-view + motion tolerance,
+            so PDFs and reduced-motion visitors keep the still image. */}
+        {sprayLive && highlightCapture && traced.maskUrl && (
+          <>
+            <style>{`
+              @keyframes lawnHighlightPulse {
+                0%, 100% { opacity: 0; }
+                50% { opacity: 0.9; }
+              }
+              .lawn-highlight-pulse {
+                animation: lawnHighlightPulse 3.6s ease-in-out infinite;
+              }
+            `}</style>
+            <img
+              className="lawn-highlight-pulse"
+              src={traced.maskUrl}
+              alt=""
+              aria-hidden="true"
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+            />
+          </>
+        )}
+        {/* Highlight-captured rows never draw the polygon overlay — the
+            highlight IS the render. Legacy 'lawn' rows and highlight-
+            fallback rows carry the baked OUTLINE and keep the animated
+            line. */}
+        {sprayLive && pathD && outline && !highlightCapture && (
           <svg
             viewBox="0 0 1280 960"
             preserveAspectRatio="xMidYMid slice"
@@ -91,7 +131,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                  emitter. Draw-in plays once, then the pulse takes over. */
               @keyframes outlinePulse {
                 0%, 100% { opacity: 1; }
-                50% { opacity: 0.45; }
+                50% { opacity: 0.35; }
               }
               .treated-outline-line { animation: outlineDraw 2.4s ease-in-out both; }
               .treated-outline-pulse { animation: outlinePulse 3.6s ease-in-out 2.4s infinite; }
@@ -159,6 +199,12 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
               <filter id="tracedMistBlurSoft" x="-80%" y="-80%" width="260%" height="260%">
                 <feGaussianBlur stdDeviation="16" />
               </filter>
+              {/* soft white halo under the mascot emitter — mirrors the
+                  tech-engine's drawHead readability halo */}
+              <radialGradient id="tracedEmitterHalo">
+                <stop offset="0%" stopColor="#FFFFFF" stopOpacity="0.6" />
+                <stop offset="100%" stopColor="#FFFFFF" stopOpacity="0" />
+              </radialGradient>
             </defs>
             <style>{`
               @keyframes tracedSprayDraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
@@ -236,11 +282,27 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 <circle cx={Math.round(p.x) - 13} cy={Math.round(p.y) + 6} r="17" fill="#0A7EC2" fillOpacity="0.4" />
               </g>
             ))}
-            {/* mist emitter — a glowing spray blob riding the band, no hard marker */}
-            <g className="traced-spray-emitter" filter="url(#tracedMistBlur)">
-              <circle r="26" fill="#7CC7F0" fillOpacity="0.8">
-                <animateMotion dur="7s" repeatCount="indefinite" path={pathD} calcMode="linear" />
-              </circle>
+            {/* Emitter: the Waves mascot rides the spray line — same treatment
+                the tech-side engine gives it (owner 2026-07-29 / report parity
+                owner 2026-07-30): upright, white halo for readability over
+                dark imagery, mist glow trailing underneath. Until the logo
+                paints (loading/404) the blurred glow blob still reads as the
+                emitter, matching the engine's fallback. Spray variant only —
+                lawn never gets the mascot (owner ruling #3075). */}
+            <g>
+              <animateMotion dur="7s" repeatCount="indefinite" path={pathD} calcMode="linear" />
+              {/* the mist glow breathes; the mascot itself stays solid, like
+                  the tech-engine render */}
+              <circle className="traced-spray-emitter" r="26" fill="#7CC7F0" fillOpacity="0.8" filter="url(#tracedMistBlur)" />
+              <circle r="52" fill="url(#tracedEmitterHalo)" />
+              <image
+                href="/waves-logo.png"
+                x="-38"
+                y="-38"
+                width="76"
+                height="76"
+                preserveAspectRatio="xMidYMid meet"
+              />
             </g>
           </svg>
         )}

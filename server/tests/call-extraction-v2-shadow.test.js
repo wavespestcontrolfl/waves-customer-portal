@@ -184,7 +184,12 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.7.0');
+    expect(SCHEMA_VERSION).toBe('1.8.0');
+  });
+
+  test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
+    const persistedSchema = require('../schemas/call-extraction.persisted.schema.json');
+    expect(persistedSchema.properties.meta.properties.schema_version.enum).toContain(SCHEMA_VERSION);
   });
 
   test('prompt hash is deterministic', () => {

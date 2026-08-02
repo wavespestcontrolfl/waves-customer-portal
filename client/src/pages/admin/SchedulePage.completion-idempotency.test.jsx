@@ -70,6 +70,61 @@ describe("backfill timeOnSite submission (Codex P1, PR #2897)", () => {
   });
 });
 
+describe("live admin time-on-site override (forgotten-closeout fix)", () => {
+  // On a live completion the wire contract is TYPE-based: a NUMBER is
+  // admin-typed minutes overriding the running timer; a string stays the
+  // auto-elapsed. The backfill branch keeps its own input and semantics.
+  it("typed minutes on a live completion submit as a NUMBER, not the elapsed", () => {
+    expect(
+      completionTimeOnSiteBody({ backfill: false, elapsed: "2:19:05", adjustedMinutes: "45" }),
+    ).toEqual({ timeOnSite: 45 });
+    expect(
+      completionTimeOnSiteBody({ backfill: false, elapsed: "2:19:05", adjustedMinutes: " 45 " }),
+    ).toEqual({ timeOnSite: 45 });
+  });
+
+  it("blank falls back to the timer — today's behavior exactly", () => {
+    for (const blank of ["", "   ", null, undefined]) {
+      expect(
+        completionTimeOnSiteBody({ backfill: false, elapsed: "2:19:05", adjustedMinutes: blank }),
+      ).toEqual({ timeOnSite: "2:19:05" });
+    }
+  });
+
+  it("out-of-range/junk falls back to the timer (handleSubmit alerts first; this is the stale-draft belt-and-suspenders)", () => {
+    for (const bad of ["0", "-5", "721", "abc"]) {
+      expect(
+        completionTimeOnSiteBody({ backfill: false, elapsed: "2:19:05", adjustedMinutes: bad }),
+      ).toEqual({ timeOnSite: "2:19:05" });
+    }
+  });
+
+  it("the backfill branch ignores adjustedMinutes entirely — its own input owns that mode", () => {
+    expect(
+      completionTimeOnSiteBody({
+        backfill: true,
+        typedMinutes: "30",
+        elapsed: "412:07:33",
+        adjustedMinutes: "45",
+      }),
+    ).toEqual({ timeOnSite: 30 });
+    expect(
+      completionTimeOnSiteBody({
+        backfill: true,
+        typedMinutes: "",
+        elapsed: "412:07:33",
+        adjustedMinutes: "45",
+      }),
+    ).toEqual({});
+  });
+
+  it("typed override minutes are draft content; whitespace is not", () => {
+    expect(completionPreferencesNeedDraft({ adjustedTimeOnSite: "45" })).toBe(true);
+    expect(completionPreferencesNeedDraft({ adjustedTimeOnSite: "  " })).toBe(false);
+    expect(completionPreferencesNeedDraft({ adjustedTimeOnSite: "" })).toBe(false);
+  });
+});
+
 describe("completion draft state", () => {
   it("treats outbound-message and pest-rating changes as draft content", () => {
     expect(completionPreferencesNeedDraft()).toBe(false);
@@ -108,26 +163,35 @@ describe("backfill choices survive the completion draft (Codex P2, PR #2897 fix 
 
   it("restore round-trips the saved choices — the quiet choice never degrades to LOUD", () => {
     expect(
-      restoredBackfillChoices({ backfillCloseout: true, backfillTimeOnSite: "45" }, false),
-    ).toEqual({ backfillCloseout: true, backfillTimeOnSite: "45" });
+      restoredBackfillChoices(
+        { backfillCloseout: true, backfillTimeOnSite: "45", adjustedTimeOnSite: "50" },
+        false,
+      ),
+    ).toEqual({ backfillCloseout: true, backfillTimeOnSite: "45", adjustedTimeOnSite: "50" });
     // The ≥7-day inverse: an explicit LOUD choice survives a CHECKED default.
     expect(
       restoredBackfillChoices({ backfillCloseout: false, backfillTimeOnSite: "" }, true),
-    ).toEqual({ backfillCloseout: false, backfillTimeOnSite: "" });
+    ).toEqual({ backfillCloseout: false, backfillTimeOnSite: "", adjustedTimeOnSite: "" });
   });
 
   it("a legacy draft without the fields restores the panel default, not false", () => {
     expect(restoredBackfillChoices({}, true)).toEqual({
       backfillCloseout: true,
       backfillTimeOnSite: "",
+      adjustedTimeOnSite: "",
     });
     expect(restoredBackfillChoices({}, false)).toEqual({
       backfillCloseout: false,
       backfillTimeOnSite: "",
+      adjustedTimeOnSite: "",
     });
     // Junk shapes fall back the same way instead of leaking through.
-    expect(restoredBackfillChoices({ backfillCloseout: "true", backfillTimeOnSite: 45 }, false))
-      .toEqual({ backfillCloseout: false, backfillTimeOnSite: "" });
+    expect(
+      restoredBackfillChoices(
+        { backfillCloseout: "true", backfillTimeOnSite: 45, adjustedTimeOnSite: 50 },
+        false,
+      ),
+    ).toEqual({ backfillCloseout: false, backfillTimeOnSite: "", adjustedTimeOnSite: "" });
   });
 });
 
@@ -157,10 +221,13 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     expect(
       completionReviewSuppressionReason({ customerConcernInteraction: true }),
     ).toBe("customer_concern");
-    expect(completionReviewSuppressionReason({ willInvoice: true })).toBe("invoice_created");
+    // Coverage fix (2026-07-30): an invoiced completion is no longer a
+    // client-side suppression — the server owns the invoice rule (unpaid
+    // blocks at completion, the paid-invoice webhook queues the ask).
+    expect(completionReviewSuppressionReason({ willInvoice: true })).toBe(null);
     expect(completionWillReview({ requestReview: true })).toBe(true);
     expect(completionWillReview({ requestReview: false })).toBe(false);
-    expect(completionWillReview({ requestReview: true, willInvoice: true })).toBe(false);
+    expect(completionWillReview({ requestReview: true, willInvoice: true })).toBe(true);
     expect(completionWillReview({ oneTimeRecapOnly: true, requestReview: false })).toBe(true);
   });
 

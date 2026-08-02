@@ -53,6 +53,36 @@ const SYSTEM_LABELS = {
 const GENERIC_SYSTEM_LABEL = 'in-ground termite bait stations';
 const START_DATE_FALLBACK = 'To be confirmed at installation';
 
+// Recent-bell existence check — the single source of exactly-once bell
+// semantics: every path (accept-time, superseded pass, main sweep) rings
+// IFF no matching bell landed within the window. A lost bell self-heals on
+// the next pass; a bell that landed while the durable marker write failed
+// is never duplicated; a genuinely new park months later (window elapsed)
+// re-rings.
+// 30 days: strictly longer than the 21-day standard-sweep window, so a
+// parked estimate cannot outlive its bell's dedupe record while still being
+// selected daily (a re-park after the window legitimately re-rings).
+const BELL_DEDUPE_DAYS = 30;
+// Tri-state: true (bell exists), false (proven absent), 'error' (lookup
+// failed — the caller must neither ring nor mark handled; the retry path
+// re-evaluates when the database recovers).
+async function adminBellExists(titleLike, metaKey, metaValue, conn = db) {
+  if (!metaValue) return false;
+  try {
+    const cutoff = new Date(Date.now() - BELL_DEDUPE_DAYS * 24 * 60 * 60 * 1000);
+    const row = await conn('notifications')
+      .where('recipient_type', 'admin')
+      .where('title', 'like', titleLike)
+      .whereRaw(`metadata->>'${metaKey}' = ?`, [String(metaValue)])
+      .where('created_at', '>=', cutoff)
+      .first('id');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[termite-agreement] bell-history lookup failed (${titleLike}): ${err.message}`);
+    return 'error';
+  }
+}
+
 function autosendGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND || '').toLowerCase());
 }
@@ -126,6 +156,28 @@ function collectTermiteFacts(estData) {
     const key = String(node.service || node.key || '').toLowerCase();
     const name = String(node.name || '').toLowerCase();
 
+    // Commercial-proposal lineItems keep only description/quantity/unitPrice
+    // (the normalizer drops service/key/name) — a termite line authored in
+    // the proposal editor must still mark the program so the commercial
+    // park runs instead of a silent no_termite_program return.
+    if (!key && !name
+      && typeof node.description === 'string'
+      && /termite/i.test(node.description)
+      // The BAIT PROGRAM specifically — 'termite trenching' and other
+      // one-time termite work must not trigger the program agreement flow
+      // (which would retire an existing bait agreement and ring a false
+      // manual-prep bell).
+      && /bait|station|monitor/i.test(node.description)
+      && ('unitPrice' in node || 'unit_price' in node || 'quantity' in node)) {
+      facts.hasProgram = true;
+    }
+
+    // Commercial termite lines use their own key — they mark the PROGRAM
+    // present (so the commercial park runs instead of a silent
+    // no_termite_program return) but contribute no residential figures.
+    if (key === 'commercial_termite_bait' || key.startsWith('commercial_termite')) {
+      facts.hasProgram = true;
+    }
     if (key === 'termite_bait' || (!key && /termite bait/.test(name))) {
       facts.hasProgram = true;
       // Raw engine lines carry the FINAL discounted annual in
@@ -134,7 +186,20 @@ function collectTermiteFacts(estData) {
       // discount fields are absent exactly when no discount landed OR on
       // legacy lines that never carried them), so it must not bypass the
       // fail-closed discount check.
-      const visits = Number(node.visitsPerYear ?? node.visits) || 4;
+      const rawVisits = node.visitsPerYear ?? node.visits;
+      const visits = Number(rawVisits) || 4;
+      // The seeded agreements promise a QUARTERLY cadence ("4 applications
+      // per year") verbatim. Any EXPLICIT count that isn't a finite 4 —
+      // including 0, empty, or nonnumeric values that Number()||4 would
+      // silently coerce to quarterly — must be remembered so the builder
+      // parks instead of papering a fabricated 4x cadence over the
+      // accepted annual.
+      if (rawVisits != null) {
+        const parsedVisits = Number(rawVisits);
+        if (!Number.isFinite(parsedVisits) || parsedVisits !== 4) {
+          facts.nonQuarterlyVisits = Number.isFinite(parsedVisits) && parsedVisits > 0 ? parsedVisits : 'invalid';
+        }
+      }
       const netAnnual = Number(node.manualFinalAnnual ?? node.annualAfterDiscount);
       if (Number.isFinite(netAnnual) && netAnnual > 0) {
         takePerApp(Math.round((netAnnual / visits) * 100) / 100, { net: true });
@@ -216,6 +281,12 @@ function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { sta
   const facts = collectTermiteFacts(data);
   if (!facts.hasProgram) return null;
 
+  // Owner-approved wording states "4 applications per year" verbatim — an
+  // accepted line with an explicit non-quarterly visit count parks for a
+  // manually tailored agreement rather than signing a 4x promise that
+  // contradicts the accepted annual total.
+  if (facts.nonQuarterlyVisits) return null;
+
   // Pre-discount figure + a discount in play = the agreement could state a
   // higher price than the accepted invoice. Fail closed to manual prep.
   if (!facts.perAppIsNet && estimateMayDiscount(estimate, data)) return null;
@@ -288,7 +359,7 @@ function normalizeAddress(value) {
 //                fresh agreement drafted (pre-push P0: a revised accept must
 //                never leave the old-priced legal draft as the live one).
 //  'ignore'    — terminal/expired, or a different property.
-function classifyExistingAgreement(row, estimate, now = new Date()) {
+function classifyExistingAgreement(row, estimate, now = new Date(), { activeVersionIds = null } = {}) {
   if (!row) return 'ignore';
   const status = String(row.status || '').toLowerCase();
   if (!OPEN_STATUSES.includes(status)) return 'ignore';
@@ -299,12 +370,36 @@ function classifyExistingAgreement(row, estimate, now = new Date()) {
     try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
   }
   const snapEstimateId = snapshot?.estimate?.id || null;
-  if (snapEstimateId && estimate?.id && String(snapEstimateId) === String(estimate.id)) return 'blocks';
-
+  const sameEstimate = !!(snapEstimateId && estimate?.id && String(snapEstimateId) === String(estimate.id));
   const snapAddress = normalizeAddress(snapshot?.estimate?.address || snapshot?.customer?.address);
   const acceptedAddress = normalizeAddress(estimate?.address);
-  if (!snapAddress || !acceptedAddress) return 'supersede'; // same customer, unprovable property — one open draft max
-  return snapAddress === acceptedAddress ? 'supersede' : 'ignore';
+  // Property scoping comes FIRST: another property's request is never this
+  // accept's business — even when its template version is stale, it is
+  // reconciled independently by the daily superseded pass, so it keeps its
+  // signing flow instead of being cancelled without a replacement here.
+  const provablyDifferentProperty = !sameEstimate
+    && snapAddress && acceptedAddress && snapAddress !== acceptedAddress;
+  if (provablyDifferentProperty) return 'ignore';
+
+  // An open request rendered from a SUPERSEDED template version never
+  // blocks — it must be cancelled and re-prepped from the active body,
+  // even for the same estimate (this is what makes v1 retirement a durable
+  // invariant rather than a one-shot migration snapshot: a request that
+  // races past the migration is superseded on the next accept-time or
+  // daily-sweep touch).
+  // A NULL version (FK ON DELETE SET NULL — the rendering version was
+  // deleted) can never be the active version: with active versions known,
+  // it is stale wording and must supersede, not block. An EMPTY active set
+  // means the templates themselves are unknown — treat staleness as
+  // unprovable rather than cancelling everything without replacements.
+  const staleVersion = activeVersionIds
+    && activeVersionIds.size > 0
+    && !(row.document_template_version_id && activeVersionIds.has(row.document_template_version_id));
+  if (staleVersion) return 'supersede';
+  if (sameEstimate) return 'blocks';
+  // Same or unprovable property, different estimate, current version: the
+  // newer accept's figures supersede — one open draft max per property.
+  return 'supersede';
 }
 
 async function openProgramAgreements(customerId, conn = db, { forUpdate = false } = {}) {
@@ -312,14 +407,42 @@ async function openProgramAgreements(customerId, conn = db, { forUpdate = false 
     .where({ customer_id: customerId, contract_type: 'document_template' })
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .whereIn('status', OPEN_STATUSES)
-    .select('id', 'customer_id', 'status', 'share_token_expires_at', 'document_variables_snapshot');
+    .select('id', 'customer_id', 'status', 'share_token_expires_at', 'document_variables_snapshot', 'document_template_version_id', 'created_at');
   return forUpdate ? query.forUpdate() : query;
 }
 
-async function existingBlockingProgramAgreement(customerId, estimate, conn = db) {
+// Active version ids for the two program templates — rows rendered from any
+// other version are stale and get superseded on sight.
+async function activeProgramVersionIds(conn = db) {
+  const rows = await conn('document_templates')
+    .whereIn('template_key', PROGRAM_TEMPLATE_KEYS)
+    .whereNotNull('active_version_id')
+    .select('active_version_id');
+  return new Set(rows.map((r) => r.active_version_id));
+}
+
+// Per-template rollout moments: template_key → its ACTIVE version's
+// published_at. Requests that expired before THEIR OWN template's rollout
+// are ordinary historical expiries (deliberately blockers in the main
+// sweep), not rollout casualties — a single global minimum would let an
+// agreement that deliberately expired between two templates' staggered
+// upgrades slip back in.
+async function activeVersionRolloutStarts(conn = db) {
+  const rows = await conn('document_templates as dt')
+    .join('document_template_versions as dtv', 'dtv.id', 'dt.active_version_id')
+    .whereIn('dt.template_key', PROGRAM_TEMPLATE_KEYS)
+    .select('dt.template_key', 'dtv.published_at');
+  const map = new Map();
+  for (const row of rows) {
+    if (row.published_at) map.set(row.template_key, new Date(row.published_at));
+  }
+  return map;
+}
+
+async function existingBlockingProgramAgreement(customerId, estimate, conn = db, activeVersionIds = null) {
   const rows = await openProgramAgreements(customerId, conn);
   const now = new Date();
-  return rows.find((row) => classifyExistingAgreement(row, estimate, now) === 'blocks') || null;
+  return rows.find((row) => classifyExistingAgreement(row, estimate, now, { activeVersionIds }) === 'blocks') || null;
 }
 
 // First upcoming non-cancelled visit booked from this estimate — the honest
@@ -365,6 +488,159 @@ async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
   }
 }
 
+// Commercial / multi-unit accepts never auto-draft: Florida gives them
+// different retreat windows (180 vs 90 days, Rule 5E-14.105), tenants add
+// business-interruption exposure, and the seeded residential wording
+// doesn't fit — they park for a manually tailored agreement, same posture
+// as annual prepay. Detection is deliberately broad (park = safe).
+function isCommercialEstimate(estimate = {}, estData = null) {
+  const data = estData || parseEstimateData(estimate.estimate_data) || {};
+  // Canonical commercial-proposal marker (estimate-proposal.js): an
+  // authored or scaffolded proposal is commercial by definition.
+  if (data?.proposal?.enabled === true || data?.proposal?.scaffold === true) return true;
+  // The estimator forms persist isCommercial as the strings "YES"/"NO",
+  // not booleans — normalize the same affirmative values the estimator
+  // uses so an explicitly commercial accept always parks.
+  const commercialFlag = (value) => value === true
+    || ['true', 'yes', 'y', '1', 'commercial'].includes(String(value ?? '').trim().toLowerCase());
+  // Estimates persist their inputs under several generations of shapes:
+  // estimator-form `inputs`, v1/engine-draft `engineInputs`, the admin
+  // save's `engineRequest.profile`, and the quote-wizard's `enriched`
+  // profile. Detection must read ALL of them — an engineInputs-only
+  // Duplex/Condo/Townhome must park exactly like a form-entered one.
+  const profile = (data?.engineRequest && typeof data.engineRequest === 'object'
+    && data.engineRequest.profile && typeof data.engineRequest.profile === 'object')
+    ? data.engineRequest.profile : null;
+  const enriched = (data?.enriched && typeof data.enriched === 'object') ? data.enriched : null;
+  if (commercialFlag(data?.isCommercial) || commercialFlag(data?.inputs?.isCommercial)
+    || commercialFlag(data?.engineInputs?.isCommercial)
+    || commercialFlag(profile?.isCommercial) || commercialFlag(enriched?.isCommercial)) return true;
+  // Engine-shaped inputs carry explicit commercial markers beyond the
+  // flag: category COMMERCIAL and the commercial subtype/risk fields are
+  // only ever set for commercial intents (estimator-engine draft-builder).
+  const commercialMarkers = (src) => !!src && (
+    String(src.category || '').trim().toUpperCase() === 'COMMERCIAL'
+    || !!src.commercialSubtype || !!src.commercialRiskType
+  );
+  // Top-level `data` included: legacy estimate_data shapes persist
+  // isCommercial / category / commercialSubtype at the root, not under an
+  // inputs container — the same shapes the property-type list below
+  // already honors at the top level.
+  if ([data, data?.inputs, data?.engineInputs, profile, enriched].some(commercialMarkers)) return true;
+  // Canonical commercial property-type classification, mirroring the
+  // estimate engine's alias/token rules (client/src/lib/estimateEngine.js
+  // classifyPropertyType): a persisted 'Office' / 'Restaurant' / 'School'
+  // / 'HOA Common Area' / 'Government Municipal' must park here exactly
+  // as the engine prices it commercial. Multi-unit residential structures
+  // (duplex/condo/townhome) park too.
+  const COMMERCIAL_TYPE_TOKENS = new Set([
+    'commercial', 'business', 'office', 'retail', 'shop', 'storefront', 'plaza',
+    'warehouse', 'apartment', 'apartments', 'multifamily', 'hoa', 'restaurant',
+    'medical', 'clinic', 'industrial', 'school', 'daycare', 'government', 'municipal',
+  ]);
+  const isCommercialPropertyType = (value) => {
+    const normalized = String(value || '').trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!normalized) return false;
+    if (normalized.includes('multi_family') || normalized.includes('common_area') || normalized.includes('food_service')) return true;
+    if (/duplex|triplex|quadplex|condo|town_?home|townhouse/.test(normalized)) return true;
+    return normalized.split('_').some((token) => COMMERCIAL_TYPE_TOKENS.has(token));
+  };
+  if ([
+    data?.inputs?.propertyType,
+    data?.propertyType,
+    data?.engineInputs?.propertyType,
+    profile?.propertyType,
+    enriched?.propertyType,
+  ].some(isCommercialPropertyType)) return true;
+  if (String(estimate.waveguard_tier || '').toLowerCase() === 'commercial') return true;
+  try {
+    const txt = typeof estimate.estimate_data === 'string' ? estimate.estimate_data : JSON.stringify(data);
+    if (/"commercial_/.test(txt) || /commercial proposal/i.test(txt)) return true;
+  } catch { /* fall through */ }
+  return false;
+}
+
+// A PARKED accept (commercial/multi-unit, annual prepay, unresolved
+// figures) creates no replacement draft — the operator does — but any open
+// agreement for the same property now carries obsolete figures/terms and
+// must not stay signable. Retires them under the same advisory lock +
+// FOR UPDATE + conditional-cancel discipline as the creation path. Uses
+// the ordinary supersession reason (NOT the compliance reason) so the
+// sweeps don't try to auto-replace what the operator now owns.
+async function retireSamePropertyOpenAgreements(customerId, estimate) {
+  const lockKey = `termite-agreement:${customerId}`;
+  let keptReplacement = false;
+  await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+    // Active-version truth is read UNDER the lock (both template rows
+    // FOR UPDATE) — a v3 published after the caller's snapshot can't get a
+    // freshly issued current request branded stale and cancelled here.
+    const lockedTemplates = await trx('document_templates')
+      .whereIn('template_key', PROGRAM_TEMPLATE_KEYS)
+      .forUpdate()
+      .select('active_version_id');
+    const lockedActiveIds = new Set(lockedTemplates.map((t) => t.active_version_id).filter(Boolean));
+    const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
+    const nowTs = new Date();
+    const acceptedAt = estimate.accepted_at ? new Date(estimate.accepted_at) : null;
+    for (const row of openRows) {
+      // Everything that isn't provably another property's request retires —
+      // including same-estimate current-version rows (their figures predate
+      // this revised accept).
+      if (classifyExistingAgreement(row, estimate, nowTs, { activeVersionIds: lockedActiveIds }) === 'ignore') continue;
+      // A CURRENT-version request created AFTER this acceptance — and not
+      // service-generated for a DIFFERENT estimate (a racing older-estimate
+      // reconciliation also lands after this accepted_at) — is staff's
+      // tailored response to it; keep it, the handoff is complete.
+      const isCurrentVersion = row.document_template_version_id
+        && lockedActiveIds.has(row.document_template_version_id);
+      const createdAt = row.created_at ? new Date(row.created_at) : null;
+      let rowSnap = row.document_variables_snapshot;
+      if (typeof rowSnap === 'string') { try { rowSnap = JSON.parse(rowSnap); } catch { rowSnap = null; } }
+      const rowEstimateId = rowSnap?.estimate?.id || null;
+      const forDifferentEstimate = rowEstimateId && estimate?.id && String(rowEstimateId) !== String(estimate.id);
+      if (isCurrentVersion && acceptedAt && createdAt && createdAt >= acceptedAt && !forDifferentEstimate) {
+        // Only a STAFF-issued row is a tailored replacement. A row this
+        // service auto-drafted for the SAME estimate after accepted_at is
+        // the rolling-deploy misissue itself (an old instance without the
+        // park minted residential wording for this accept) — it must
+        // retire, or the incompatible request stays signable forever.
+        // Service preps stamp their 'created' event with
+        // source=estimate_accept; the document-library route writes
+        // 'created_from_document_template' as an admin actor.
+        const serviceCreated = await trx('customer_contract_events')
+          .where({ contract_id: row.id, event_type: 'created', actor_type: 'system' })
+          .whereRaw("metadata->>'source' = 'estimate_accept'")
+          .first('id');
+        if (!serviceCreated) {
+          keptReplacement = true;
+          continue;
+        }
+      }
+      const cancelled = await trx('customer_contracts')
+        .where({ id: row.id })
+        .whereIn('status', OPEN_STATUSES)
+        .update({
+          status: 'cancelled',
+          cancelled_at: nowTs,
+          cancelled_reason: 'Superseded by a newer accepted termite estimate',
+          updated_at: nowTs,
+        });
+      if (!cancelled) continue;
+      await trx('customer_contract_events').insert({
+        contract_id: row.id,
+        customer_id: customerId,
+        event_type: 'cancelled',
+        actor_type: 'system',
+        actor_id: null,
+        metadata: JSON.stringify({ reason: 'superseded', supersededByEstimateId: estimate.id, parkedAccept: true }),
+      });
+    }
+  });
+  return { keptReplacement };
+}
+
 // Create the draft agreement for an accepted termite estimate. Never throws
 // into the caller (acceptance must not fail because agreement prep did);
 // failures are retryable via reconcileTermiteProgramAgreements. Returns a
@@ -373,13 +649,55 @@ async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
 // in this flow is a required handoff, so ring twice before conceding and
 // leave an error-level trail when both attempts miss.
 async function ringAdminBell(NotificationService, args, context) {
-  let bell = await NotificationService.notifyAdmin(...args);
-  if (!bell) bell = await NotificationService.notifyAdmin(...args);
+  // bell: true — every bell in this flow is a required handoff on an
+  // accepted termite estimate (sign-and-return, unresolved billing, parked
+  // accept). Under GATE_ADMIN_BELL_POLICY a suppression returns a truthy
+  // sentinel this wrapper would count as delivered, so tag the emission
+  // instead of letting the category default decide.
+  const [category, title, body, opts = {}] = args;
+  const ring = () => NotificationService.notifyAdmin(category, title, body, { ...opts, bell: true });
+  let bell = await ring();
+  if (!bell) bell = await ring();
   if (!bell) logger.error(`[termite-agreement] admin bell failed twice — ${context}`);
   return !!bell;
 }
 
-async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null }) {
+// Exactly-once bells under concurrency: the history lookup and the insert
+// run in ONE transaction holding the per-customer advisory lock, so an
+// accept-time caller overlapping the reconciliation cron cannot both
+// observe "no bell" and both insert. Each attempt is a fresh transaction
+// (an insert failure aborts the tx, so an in-tx retry would be dead on
+// arrival); two attempts preserve ringAdminBell's ring-twice posture.
+// Returns true when a bell exists or landed, false otherwise (lookup
+// error, insert failure) — callers treat false as retry-later.
+async function ringAdminBellDeduped(NotificationService, { lockKey, titleLike, metaKey, metaValue }, args, context) {
+  const attempt = async () => {
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+        const exists = await adminBellExists(titleLike, metaKey, metaValue, trx);
+        if (exists === true) return true;
+        if (exists === 'error') return 'error';
+        const [category, title, body, opts = {}] = args;
+        // bell: true — same required-handoff posture as ringAdminBell above.
+        const bell = await NotificationService.notifyAdmin(category, title, body, { ...opts, connection: trx, bell: true });
+        return bell ? true : 'insert_failed';
+      });
+    } catch (err) {
+      logger.warn(`[termite-agreement] deduped bell attempt failed (${context}): ${err.message}`);
+      return 'error';
+    }
+  };
+  let outcome = await attempt();
+  if (outcome !== true) outcome = await attempt();
+  if (outcome !== true) {
+    logger.error(`[termite-agreement] admin bell failed twice — ${context}`);
+    return false;
+  }
+  return true;
+}
+
+async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null, signedBlockScope = 'estimate', reissueSourceContractId = null, signedAfter = null }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
     // One-time acceptances keep their termite snapshots but did NOT accept
@@ -394,21 +712,76 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
 
     const NotificationService = require('./notification-service');
 
+    // Manual-prep handoffs must carry the ACCEPTED property: the generic
+    // document flow rebuilds customer.address from the customer row, so
+    // without this the operator would issue a rental/second-property
+    // agreement naming the wrong property. The issuance API accepts a
+    // propertyAddress override for exactly this.
+    const propertyClause = estimate.address
+      ? ` The accepted property is ${estimate.address} — issue the agreement with that property address, not the account's primary address.`
+      : '';
+    const propertyMeta = estimate.address ? { propertyAddress: estimate.address } : {};
+
+    if (isCommercialEstimate(estimate, estData)) {
+      // Retirement failures must not swallow the operator handoff — the
+      // bell still rings and the retirement retries on the next sweep. The
+      // failure is surfaced as retireFailed so reconciliation callers keep
+      // the row retryable instead of marking it handled on a bell alone.
+      let commercialReplacementKept = false;
+      let commercialRetireFailed = false;
+      try {
+        ({ keptReplacement: commercialReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+      } catch (err) {
+        commercialRetireFailed = true;
+        logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+      }
+      if (commercialReplacementKept) return { ok: false, skipped: 'commercial', belled: true };
+      // Compliance reissues dedupe on the SUPERSEDED CONTRACT, not the
+      // acceptance — the original accept-time bell may already be resolved,
+      // so a rollout-driven re-park must ring its own handoff once.
+      const belled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${customerId}`,
+        titleLike: 'Termite agreement needs manual prep%',
+        ...(reissueSourceContractId
+          ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+          : { metaKey: 'estimateId', metaValue: estimate.id }),
+      }, [
+        'estimate',
+        'Termite agreement needs manual prep (commercial)',
+        `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.${propertyClause}`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+      ], `manual-prep (commercial) for estimate ${estimate.id}`);
+      return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
+    }
+
     const prepay = await isAnnualPrepayAccept(estimate, billingTerm);
     if (prepay === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
     if (prepay) {
       // Fail closed: the seeded wording states per-application billing,
       // which would contradict the annual-prepay invoice. Park it for
       // manual preparation with accurate terms.
-      if (notifyOnUnresolved) {
-        await ringAdminBell(NotificationService, [
-          'estimate',
-          'Termite agreement needs manual prep (annual prepay)',
-          `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
-        ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
+      let prepayReplacementKept = false;
+      let prepayRetireFailed = false;
+      try {
+        ({ keptReplacement: prepayReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+      } catch (err) {
+        prepayRetireFailed = true;
+        logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
-      return { ok: false, skipped: 'annual_prepay' };
+      if (prepayReplacementKept) return { ok: false, skipped: 'annual_prepay', belled: true };
+      const prepayBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${customerId}`,
+        titleLike: 'Termite agreement needs manual prep%',
+        ...(reissueSourceContractId
+          ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+          : { metaKey: 'estimateId', metaValue: estimate.id }),
+      }, [
+        'estimate',
+        'Termite agreement needs manual prep (annual prepay)',
+        `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.${propertyClause}`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+      ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
+      return { ok: false, skipped: 'annual_prepay', belled: prepayBelled, retireFailed: prepayRetireFailed };
     }
 
     // The admin scheduling flow books the visit BEFORE the rows are linked
@@ -424,20 +797,38 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // exception with the owner instead of drafting a wrong document.
       // (The reconciliation sweep passes notifyOnUnresolved=false so the
       // original accept-time bell isn't re-rung daily.)
-      if (notifyOnUnresolved) {
-        await ringAdminBell(NotificationService, [
-          'estimate',
-          'Termite agreement needs manual prep',
-          `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
-        ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
+      let figuresReplacementKept = false;
+      let figuresRetireFailed = false;
+      try {
+        ({ keptReplacement: figuresReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
+      } catch (err) {
+        figuresRetireFailed = true;
+        logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
-      return { ok: false, skipped: 'figures_unresolved' };
+      if (figuresReplacementKept) return { ok: false, skipped: 'figures_unresolved', belled: true };
+      const figuresBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${customerId}`,
+        titleLike: 'Termite agreement needs manual prep%',
+        ...(reissueSourceContractId
+          ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+          : { metaKey: 'estimateId', metaValue: estimate.id }),
+      }, [
+        'estimate',
+        'Termite agreement needs manual prep',
+        `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.${propertyClause}`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+      ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
+      return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
     }
 
-    const existing = await existingBlockingProgramAgreement(customerId, estimate);
-    if (existing) return { ok: true, skipped: 'already_exists', contractId: existing.id };
-
+    // Deliberately NO pre-transaction "already exists" fast path: a blocker
+    // verdict depends on the ACTIVE version set, and a version published
+    // between an unlocked read and the return would leave a superseded
+    // request classified as blocking — signable until the next sweep. The
+    // in-transaction check below re-reads the active set under the locked
+    // template rows and is the only place that decision is safe; an
+    // existing draft costs one redundant render before returning
+    // 'already_exists' from there.
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return { ok: false, skipped: 'customer_not_found' };
 
@@ -481,18 +872,38 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // duplicate drafts — the advisory xact lock + in-transaction re-check
       // make the dedupe atomic (pre-push P1).
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeLockKey]);
+      // Revalidate the template's active version under the lock: an admin
+      // publish/reactivation between the pre-transaction reads and here
+      // must not let us insert (and autosend) an agreement rendered from a
+      // no-longer-active version.
+      // Lock BOTH program templates and rebuild the active-id set from the
+      // locked truth: the pre-transaction snapshot could brand a freshly
+      // published-and-issued v3 request 'stale' and cancel a delivered link.
+      const lockedTemplates = await trx('document_templates')
+        .whereIn('template_key', PROGRAM_TEMPLATE_KEYS)
+        .forUpdate()
+        .select('template_key', 'active_version_id', 'status');
+      const lockedActiveIds = new Set(lockedTemplates.map((t) => t.active_version_id).filter(Boolean));
+      const liveTemplate = lockedTemplates.find((t) => t.template_key === prepared.templateKey);
+      // Status re-check alongside the version re-check: an admin pausing or
+      // archiving the template between the unlocked read and this lock must
+      // not have us insert (and autosend) from a just-disabled template —
+      // the version pointer alone doesn't move on pause/archive.
+      if (!liveTemplate || liveTemplate.status !== 'active' || liveTemplate.active_version_id !== version.id) return 'version_changed';
       // FOR UPDATE: the status re-read must be current when we cancel — a
       // customer signing the older agreement concurrently would otherwise
       // commit 'signed' between our unlocked read and an unconditional
       // update, and the completed signature would be clobbered 'cancelled'.
       const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
       const nowTs = new Date();
-      if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs) === 'blocks')) return null;
-      // A revised estimate accepted for the same property supersedes the
-      // older open draft — cancel it so exactly one live agreement exists
-      // and it carries the ACCEPTED figures. The cancel stays conditional
-      // on the row still being open (belt + braces with the row lock).
-      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs) === 'supersede');
+      // Supersede-cancels run BEFORE the early returns: a same-estimate
+      // current-version blocker (or an executed signature) must not shield
+      // an OLDER same-property open agreement from retirement — rolling
+      // deploys and legacy/manual issuance can leave both, and the stale
+      // one would stay publicly signable at superseded figures. The
+      // cancel stays conditional on the row still being open (belt +
+      // braces with the row lock).
+      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds: lockedActiveIds }) === 'supersede');
       for (const staleRow of stale) {
         const cancelled = await trx('customer_contracts')
           .where({ id: staleRow.id })
@@ -512,6 +923,46 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           actor_id: null,
           metadata: JSON.stringify({ reason: 'superseded', supersededByEstimateId: estimate.id }),
         });
+      }
+      if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds: lockedActiveIds }) === 'blocks')) return null;
+      // Signed re-check INSIDE the lock: a customer signing a (stale) request
+      // for THIS estimate between an unlocked pre-check and this transaction
+      // commits 'signed' — the row drops out of the open set above, and
+      // without this check a second agreement would be created (and
+      // autosent) on top of the executed one. Same-estimate only: a fresh
+      // accept at the same property after an older signed agreement
+      // legitimately gets a new document at the new figures.
+      if (estimate.id) {
+        const signedRows = await trx('customer_contracts')
+          .where({ customer_id: customerId, contract_type: 'document_template' })
+          .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+          .where('status', 'signed')
+          .select('document_variables_snapshot', 'created_at', 'signed_at');
+        const acceptedAddress = normalizeAddress(estimate.address);
+        const signedAfterTs = signedAfter ? new Date(signedAfter) : null;
+        const signedBlocks = signedRows.some((sr) => {
+          let ss = sr.document_variables_snapshot;
+          if (typeof ss === 'string') { try { ss = JSON.parse(ss); } catch { ss = null; } }
+          if (ss?.estimate?.id && String(ss.estimate.id) === String(estimate.id)) return true;
+          // Reconciliation callers block on same-PROPERTY signatures too (a
+          // manually issued or different-estimate replacement signed mid-
+          // sweep must not be stacked) — but only signatures from THIS
+          // cycle (at/after the superseded source's creation); historical
+          // signatures never deny a re-accept its fresh paperwork.
+          // Accept-time callers keep the same-estimate scope.
+          if (signedBlockScope !== 'property') return false;
+          const signedAddress = normalizeAddress(ss?.estimate?.address || ss?.customer?.address);
+          const sameProperty = (!signedAddress || !acceptedAddress) ? true : signedAddress === acceptedAddress;
+          if (!sameProperty) return false;
+          if (!signedAfterTs) return true; // no boundary supplied — conservative
+          // Compare when the signature HAPPENED, not when its request was
+          // created — an older request signed after the boundary is this
+          // cycle's executed replacement and must block.
+          const signedTs = sr.signed_at ? new Date(sr.signed_at)
+            : (sr.created_at ? new Date(sr.created_at) : null);
+          return !signedTs || signedTs >= signedAfterTs;
+        });
+        if (signedBlocks) return 'signed_exists';
       }
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
@@ -544,6 +995,13 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       });
       return row;
     });
+    if (contract === 'signed_exists') {
+      return { ok: true, skipped: 'signed_exists' };
+    }
+    if (contract === 'version_changed') {
+      // Retryable: the next sweep re-reads the fresh active version.
+      return { ok: false, skipped: 'version_changed' };
+    }
     if (!contract) {
       const winner = await existingBlockingProgramAgreement(customerId, estimate);
       return { ok: true, skipped: 'already_exists', contractId: winner?.id || null };
@@ -582,6 +1040,511 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
   }
 }
 
+// Superseded-request reconciliation: replaces requests retired by a
+// template-version upgrade regardless of estimate age. Covers (a) rows the
+// compliance migration cancelled — including estimates older than the main
+// sweep's window — and (b) open rows still carrying a stale version (e.g. a
+// request that raced past the migration during deploy; superseded in-txn by
+// maybeCreate's version-aware classify). Runs with bells ON so re-preps
+// that park (commercial/multi-unit, annual prepay, unresolved figures)
+// hand off to the operator instead of vanishing silently. A SIGNED program
+// row for the customer always blocks re-papering — executed contracts are
+// historical records.
+const REPROCESSED_EVENT = 'superseded_reprocessed';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Conditionally retire a stale-open source row (no-op for rows already
+// cancelled, e.g. by the compliance migration): the superseded wording's
+// public signing link must die whenever the row is deemed handled.
+async function cancelStaleSource(row, conn = db) {
+  // Serialized against admin publication: the template row is locked
+  // FOR UPDATE in the same transaction as the cancel, so a reactivation
+  // either commits BEFORE the lock (we observe it and skip) or waits until
+  // our transaction commits (the cancel already applied to a genuinely
+  // stale request). No MVCC-snapshot window remains.
+  return conn.transaction(async (trx) => {
+    if (row.document_template_version_id && row.document_template_key) {
+      const template = await trx('document_templates')
+        .where({ template_key: row.document_template_key })
+        .forUpdate()
+        .first('active_version_id');
+      if (template?.active_version_id === row.document_template_version_id) return 'reactivated';
+    }
+    // Row lock + fresh status read: the recorded prior_status must be the
+    // status the cancel actually replaced (the caller's selected row can be
+    // minutes stale) — the v2 migration's down() restores service-driven
+    // compliance cancels from this event exactly like its own.
+    const current = await trx('customer_contracts')
+      .where({ id: row.id })
+      .forUpdate()
+      .first('status');
+    if (!current || !OPEN_STATUSES.includes(String(current.status || '').toLowerCase())) return false;
+    const cancelled = await trx('customer_contracts')
+      .where({ id: row.id })
+      .whereIn('status', OPEN_STATUSES)
+      .update({
+        status: 'cancelled',
+        cancelled_at: new Date(),
+        cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
+        updated_at: new Date(),
+      });
+    if (!cancelled) return false;
+    await trx('customer_contract_events').insert({
+      contract_id: row.id,
+      customer_id: row.customer_id,
+      event_type: 'cancelled',
+      actor_type: 'system',
+      actor_id: null,
+      metadata: JSON.stringify({ reason: 'superseded_stale_version', prior_status: current.status }),
+    });
+    return true;
+  });
+}
+
+async function markSupersededHandled(row, outcome, conn = db, extraMetadata = null) {
+  await conn('customer_contract_events').insert({
+    contract_id: row.id,
+    customer_id: row.customer_id,
+    event_type: REPROCESSED_EVENT,
+    actor_type: 'system',
+    actor_id: null,
+    metadata: JSON.stringify({ outcome, ...(extraMetadata || {}) }),
+  });
+}
+
+async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
+  const activeVersionIds = await activeProgramVersionIds();
+  const results = { checked: 0, created: 0, skipped: 0, failed: 0 };
+  if (!activeVersionIds.size) return results;
+
+  // Handled rows carry a durable REPROCESSED_EVENT marker so the daily pass
+  // ADVANCES: every terminal outcome (replaced, parked-with-bell, signed
+  // elsewhere, estimate gone) is marked and excluded next run — the same 50
+  // rows can't be re-selected forever and parked rows can't re-ring their
+  // manual-prep bells every day. Only transient errors stay unmarked for a
+  // retry.
+  // Rollout-window markers carry the template version they validated
+  // (versionId). Their verdict is only good for THAT version: a request
+  // marked 'rollout_window_ok' under v2 still needs reconciliation when v3
+  // publishes, so a marker whose version is no longer active does not
+  // block. Markers without a versionId are terminal outcomes recorded on
+  // already-stale rows and block permanently, as before.
+  const notReprocessed = (query) => query.whereNotExists(function handled() {
+    this.select(db.raw('1'))
+      .from('customer_contract_events as cce')
+      .whereRaw('cce.contract_id = customer_contracts.id')
+      .where('cce.event_type', REPROCESSED_EVENT)
+      .where(function versionScoped() {
+        this.whereRaw("(cce.metadata->>'versionId') IS NULL")
+          .orWhereIn(db.raw("cce.metadata->>'versionId'"), [...activeVersionIds]);
+      });
+  });
+
+  const staleOpen = await notReprocessed(db('customer_contracts')
+    .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+    .whereIn('status', OPEN_STATUSES)
+    // NOT IN never matches NULL — a row whose rendering version was
+    // deleted (FK SET NULL) is stale wording and must be selected too.
+    .where((q) => q.whereNull('document_template_version_id')
+      .orWhereNotIn('document_template_version_id', [...activeVersionIds]))
+    // A dead token is not recoverable paperwork: its link already 410s,
+    // and when expireDocumentRequests' capped batch hasn't stamped the
+    // status yet, cancelling + re-prepping here would revive what the
+    // expired-recovery rule treats as a deliberate blocker. The lifecycle
+    // pass stamps it 'expired' and the expiredStale leg applies the
+    // per-template rollout cutoff.
+    .where((q) => q.whereNull('share_token_expires_at')
+      .orWhere('share_token_expires_at', '>', new Date())))
+    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'created_at')
+    .limit(limit);
+  const migrationCancelled = await notReprocessed(db('customer_contracts')
+    .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+    .where('status', 'cancelled')
+    .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%'))
+    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'created_at')
+    .limit(limit);
+  // A stale-version request whose token expired (processDocumentWorkflow
+  // runs earlier in this same cron and stamps 'expired') is out of
+  // OPEN_STATUSES and blocked by the ordinary sweep's anti-join — without
+  // this leg it would never receive its compliant replacement. Its token is
+  // already dead, so it only needs the re-prep, not a cancel.
+  // Bounded to expiries at-or-after the OWN template's rollout: a request
+  // that expired historically (or deliberately between two templates'
+  // staggered upgrades) was already a deliberate blocker in the ordinary
+  // sweep and must not be revived and autosent just because a newer
+  // template version exists. The cutoff is applied IN SQL per template so
+  // ineligible rows never occupy the limit window (limit-before-filter
+  // would let a staggered-upgrade band starve genuine rollout casualties).
+  const rolloutStarts = await activeVersionRolloutStarts();
+  const expiredStale = [];
+  for (const [templateKey, cutoff] of rolloutStarts) {
+    const rows = await notReprocessed(db('customer_contracts')
+      .where('document_template_key', templateKey)
+      .where('status', 'expired')
+      .where((q) => q.whereNull('document_template_version_id')
+        .orWhereNotIn('document_template_version_id', [...activeVersionIds]))
+      .where('share_token_expires_at', '>=', cutoff))
+      .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'created_at')
+      .limit(limit);
+    expiredStale.push(...rows);
+  }
+
+  // Rolling-deploy window: an OLD application instance (without the
+  // commercial/multi-unit park) can keep accepting for a short time AFTER
+  // the migration commits the v2 pointer, minting CURRENT-version
+  // residential agreements for estimates that must park. Those rows pass
+  // every stale filter and block the ordinary sweep, so a bounded
+  // window after each rollout is re-validated against today's predicates.
+  const ROLLOUT_MISISSUE_WINDOW_MS = 48 * 60 * 60 * 1000;
+  const rolloutWindowRows = [];
+  for (const [templateKey, cutoff] of rolloutStarts) {
+    const rows = await notReprocessed(db('customer_contracts')
+      .where('document_template_key', templateKey)
+      .whereIn('status', OPEN_STATUSES)
+      .whereIn('document_template_version_id', [...activeVersionIds])
+      .where('created_at', '>=', cutoff)
+      .where('created_at', '<=', new Date(cutoff.getTime() + ROLLOUT_MISISSUE_WINDOW_MS)))
+      .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'created_at')
+      .limit(limit);
+    rolloutWindowRows.push(...rows);
+  }
+
+  const NotificationService = require('./notification-service');
+  const seenEstimates = new Set();
+  for (const row of rolloutWindowRows) {
+    if (results.checked >= limit) break;
+    // Every rollout-window marker is stamped with the version it validated
+    // so the verdict expires with that version (see notReprocessed).
+    const rolloutMeta = { versionId: row.document_template_version_id };
+    let snap = row.document_variables_snapshot;
+    if (typeof snap === 'string') { try { snap = JSON.parse(snap); } catch { snap = null; } }
+    const rawId = snap?.estimate?.id;
+    const linkedEstimateId = UUID_RE.test(String(rawId || '')) ? String(rawId) : null;
+    if (!linkedEstimateId) { await markSupersededHandled(row, 'rollout_window_manual', db, rolloutMeta); continue; }
+    results.checked += 1;
+    const linkedEstimate = await db('estimates').where({ id: linkedEstimateId }).first();
+    if (!linkedEstimate || !linkedEstimate.customer_id
+      || String(linkedEstimate.customer_id) !== String(row.customer_id)) {
+      await markSupersededHandled(row, 'rollout_window_ownership', db, rolloutMeta);
+      continue;
+    }
+    // Re-run TODAY'S FULL preparation predicates, not just the commercial
+    // park — an old dyno lacking any of the newer guards (non-quarterly
+    // cadence, annual prepay, discount fail-closed, ownership/template
+    // choice) can have minted this current-version agreement. 'ok' means
+    // today's flow would have produced this exact paperwork.
+    const linkedEstData = parseEstimateData(linkedEstimate.estimate_data);
+    let misissue = null; // 'park_expected' | 'template_mismatch'
+    if (isCommercialEstimate(linkedEstimate, linkedEstData)) {
+      misissue = 'park_expected';
+    } else {
+      const prepayState = await isAnnualPrepayAccept(linkedEstimate, null);
+      if (prepayState === 'error') { results.failed += 1; continue; } // retry tomorrow
+      if (prepayState) {
+        misissue = 'park_expected';
+      } else {
+        const preparedNow = buildTermiteProgramAgreementValues(linkedEstimate, linkedEstData, { startDateLabel: null });
+        if (!preparedNow) misissue = 'park_expected';
+        else if (preparedNow.templateKey !== row.document_template_key) misissue = 'template_mismatch';
+      }
+    }
+    if (!misissue) {
+      // Correctly issued under today's rules — nothing to do until a later
+      // template version voids this verdict.
+      await markSupersededHandled(row, 'rollout_window_ok', db, rolloutMeta);
+      continue;
+    }
+    if (misissue === 'template_mismatch') {
+      // The one misissue maybeCreate can't self-heal: the existing
+      // same-estimate current-version row would classify 'blocks' inside
+      // its transaction. Retire the misissued paperwork first — the
+      // service-generated guard makes retireSamePropertyOpenAgreements
+      // cancel it rather than keep it as a staff replacement.
+      try {
+        await retireSamePropertyOpenAgreements(row.customer_id, linkedEstimate);
+      } catch (err) {
+        logger.warn(`[termite-agreement] rollout mismatch retirement failed for contract ${row.id}: ${err.message}`);
+        results.failed += 1;
+        continue;
+      }
+    }
+    // Run the misissue through today's flow — parked categories retire the
+    // same-property open rows (including this one) and ring the
+    // reissue-scoped bell; a template mismatch re-preps the correct
+    // agreement.
+    const misissueResult = await maybeCreateTermiteProgramAgreement({
+      estimate: linkedEstimate,
+      customerId: row.customer_id,
+      notifyOnUnresolved: true,
+      signedBlockScope: 'property',
+      signedAfter: row.created_at || null,
+      reissueSourceContractId: row.id,
+    });
+    if (misissueResult.retireFailed || misissueResult.belled === false) {
+      // Retirement or bell missing — the residential link may still be
+      // live, so the row stays unmarked for tomorrow's retry (the
+      // reissue-scoped bell dedupes; the retirement is idempotent).
+      results.failed += 1;
+    } else if (misissueResult.skipped === 'commercial') {
+      await markSupersededHandled(row, 'rollout_window_commercial_reissued', db, rolloutMeta);
+      results.skipped += 1;
+    } else {
+      await markSupersededHandled(row, misissueResult.skipped || 'rollout_window_processed', db, rolloutMeta);
+      results.skipped += 1;
+    }
+  }
+  // Signed-during-rollout audit: an old dyno can autosend superseded
+  // wording after the migration snapshot and the customer can sign it
+  // before the next sweep. Executed contracts are HISTORICAL RECORDS —
+  // never modified — but a signature on a non-active version made
+  // at/after that template's rollout needs the operator's eyes exactly
+  // once. (Legacy signatures without signed_at predate rollouts by
+  // construction and are excluded by the cutoff comparison.)
+  for (const [templateKey, cutoff] of rolloutStarts) {
+    const signedStale = await notReprocessed(db('customer_contracts')
+      .where('document_template_key', templateKey)
+      .where('status', 'signed')
+      .where((q) => q.whereNull('document_template_version_id')
+        .orWhereNotIn('document_template_version_id', [...activeVersionIds]))
+      .where('signed_at', '>=', cutoff))
+      .select('id', 'customer_id', 'recipient_name')
+      .limit(limit);
+    for (const row of signedStale) {
+      if (results.checked >= limit) break;
+      results.checked += 1;
+      const auditBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${row.customer_id}`,
+        titleLike: 'Termite agreement signed on superseded wording%',
+        metaKey: 'contractId',
+        metaValue: row.id,
+      }, [
+        'estimate',
+        'Termite agreement signed on superseded wording',
+        `${row.recipient_name || 'A customer'} signed a termite program agreement rendered from a superseded template version during a rollout window. The executed contract stays signed as-is — review it and issue corrected paperwork if the wording differences matter.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+      ], `signed-on-superseded audit for contract ${row.id}`);
+      if (auditBelled) {
+        await markSupersededHandled(row, 'signed_superseded_belled');
+        results.skipped += 1;
+      } else {
+        results.failed += 1;
+      }
+    }
+  }
+  for (const row of [...staleOpen, ...migrationCancelled, ...expiredStale]) {
+    if (results.checked >= limit) break;
+    results.checked += 1;
+    let snapshot = row.document_variables_snapshot;
+    if (typeof snapshot === 'string') {
+      try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+    }
+    // The generic document route accepts arbitrary snapshot values, so a
+    // manually issued request can carry an untrusted estimate.id — a
+    // malformed one must not throw the whole pass, and any value that
+    // doesn't survive validation routes to the manual-handoff branch.
+    const estimateIdRaw = snapshot?.estimate?.id;
+    const estimateId = UUID_RE.test(String(estimateIdRaw || '')) ? String(estimateIdRaw) : null;
+
+    if (!estimateId) {
+      // MANUALLY issued stale row (no estimate linkage — e.g. one that raced
+      // past the migration): it is still openly signable on superseded
+      // wording. Cancel it (conditional on still being open) and hand the
+      // re-issue to the operator — never assume the migration covered it.
+      // A version reactivated mid-sweep makes this row current again —
+      // skip entirely with no marker (and no misleading cancelled bell).
+      const manualCancelOutcome = await cancelStaleSource(row);
+      if (manualCancelOutcome === 'reactivated') continue;
+      // Selected OPEN but the conditional cancel didn't land: another actor
+      // changed the row in between (admin cancel/void, a signature, an
+      // expiry). Their action is authoritative — no re-issue bell over it.
+      // No marker: a future pass re-evaluates the row's new state.
+      if (manualCancelOutcome === false && OPEN_STATUSES.includes(String(row.status || '').toLowerCase())) continue;
+      // The bell IS the handoff — the row is only marked handled when it
+      // actually landed; a double notify failure leaves the row eligible
+      // for tomorrow's retry (the cancel above is conditional, so the
+      // retry just re-rings the bell). A bell that already landed (e.g. the
+      // durable marker write failed after a successful insert) counts as
+      // landed — never duplicated.
+      const belled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${row.customer_id}`,
+        titleLike: 'Re-issue termite agreement%',
+        metaKey: 'contractId',
+        metaValue: row.id,
+      }, [
+        'estimate',
+        'Re-issue termite agreement (wording updated)',
+        `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+      ], `manual stale-version re-issue for contract ${row.id}`);
+      if (belled) await markSupersededHandled(row, 'manual_reissue_belled');
+      else results.failed += 1;
+      if (belled) results.skipped += 1;
+      continue;
+    }
+
+    // Dedupe by customer+estimate: a manually issued row carrying ANOTHER
+    // customer's (valid) estimate UUID must not poison the batch and route
+    // the legitimate row into the duplicate branch.
+    const dedupeKey = `${row.customer_id}:${estimateId}`;
+    if (seenEstimates.has(dedupeKey)) {
+      if ((await cancelStaleSource(row)) === 'reactivated') continue;
+      await markSupersededHandled(row, 'duplicate_estimate');
+      continue;
+    }
+    seenEstimates.add(dedupeKey);
+    // Retire the stale source UP FRONT — every downstream outcome (signed
+    // skip, replacement exists, estimate unavailable, parked, replaced, or
+    // a concurrent reissue racing maybeCreate's already_exists) must leave
+    // the superseded public signing link dead. Conditional + idempotent:
+    // migration-cancelled and expired rows are no-ops, and the bell-retry
+    // path stays bell-only. A version REACTIVATED mid-sweep makes the row
+    // current again: skip it entirely with NO marker, so a later rollout
+    // can reconsider it.
+    const cancelOutcome = await cancelStaleSource(row);
+    if (cancelOutcome === 'reactivated') continue;
+    // A stale-OPEN row whose conditional cancel didn't land was changed by
+    // another actor between selection and here (admin cancel/void, a
+    // signature, an expiry). That intentional change is authoritative — do
+    // not create (and potentially autosend) a replacement over it. No
+    // marker: the row re-evaluates under its new state on a future pass.
+    // (false is EXPECTED for migration-cancelled and expired selections —
+    // those proceed as before.)
+    if (cancelOutcome === false && OPEN_STATUSES.includes(String(row.status || '').toLowerCase())) continue;
+
+    // Executed agreements stay executed — but only within THIS superseded
+    // cycle: a signature belonging to the same estimate, or any same-
+    // property signature made AT/AFTER this source request was created (a
+    // replacement that got signed). A HISTORICAL signature from before this
+    // request existed never blocks — classifyExistingAgreement deliberately
+    // lets a re-accept receive fresh paperwork, and this check must not
+    // undo that.
+    const rowAddress = normalizeAddress(snapshot?.estimate?.address || snapshot?.customer?.address);
+    const sourceCreatedAt = row.created_at ? new Date(row.created_at) : null;
+    const signedRows = await db('customer_contracts')
+      .where({ customer_id: row.customer_id })
+      .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+      .where('status', 'signed')
+      .select('document_variables_snapshot', 'created_at', 'signed_at');
+    const signedThisCycle = signedRows.some((sr) => {
+      let ss = sr.document_variables_snapshot;
+      if (typeof ss === 'string') { try { ss = JSON.parse(ss); } catch { ss = null; } }
+      if (ss?.estimate?.id && String(ss.estimate.id) === String(estimateId)) return true;
+      const signedAddress = normalizeAddress(ss?.estimate?.address || ss?.customer?.address);
+      const sameProperty = (!signedAddress || !rowAddress) ? true : signedAddress === rowAddress;
+      if (!sameProperty) return false;
+      // Signature time, not request-creation time: an older request signed
+      // after this source was created is this cycle's executed replacement.
+      const signedTs = sr.signed_at ? new Date(sr.signed_at)
+        : (sr.created_at ? new Date(sr.created_at) : null);
+      if (!sourceCreatedAt || !signedTs) return true; // unprovable — conservative
+      return signedTs >= sourceCreatedAt;
+    });
+    if (signedThisCycle) { await markSupersededHandled(row, 'signed_same_property'); results.skipped += 1; continue; }
+
+    // Staff may have re-issued a replacement before this sweep (manually or
+    // via a fresh accept): an OPEN request on the CURRENT template version
+    // for the same estimate/property means the source row is fully handled —
+    // processing it anyway would ring false manual-prep bells for parked
+    // categories before maybeCreate's own dedupe runs.
+    const openNow = await openProgramAgreements(row.customer_id);
+    const nowForReplacement = new Date();
+    const replacementExists = openNow.some((openRow) => {
+      if (openRow.id === row.id) return false;
+      if (!openRow.document_template_version_id || !activeVersionIds.has(openRow.document_template_version_id)) return false;
+      // An expired-token row is no coverage: the customer's link 410s and
+      // the row leaves OPEN_STATUSES on the next lifecycle pass.
+      if (openRow.share_token_expires_at && new Date(openRow.share_token_expires_at) < nowForReplacement) return false;
+      let os = openRow.document_variables_snapshot;
+      if (typeof os === 'string') { try { os = JSON.parse(os); } catch { os = null; } }
+      if (os?.estimate?.id && String(os.estimate.id) === String(estimateId)) return true;
+      // Cycle boundary, mirroring the signed check above: an open request
+      // CREATED BEFORE this source is an older estimate's paperwork, not
+      // this supersession's replacement (deploy overlap can leave a
+      // current-version request for older estimate A open while revised
+      // estimate B's v1 gets cancelled — treating A as coverage would
+      // strand B's figures behind A's obsolete ones forever). Unprovable
+      // timestamps stay conservative (treat as covering).
+      const openCreatedAt = openRow.created_at ? new Date(openRow.created_at) : null;
+      if (sourceCreatedAt && openCreatedAt && openCreatedAt < sourceCreatedAt) return false;
+      const openAddress = normalizeAddress(os?.estimate?.address || os?.customer?.address);
+      if (!openAddress || !rowAddress) return true; // unprovable — treat as covering
+      return openAddress === rowAddress;
+    });
+    if (replacementExists) {
+      await markSupersededHandled(row, 'replacement_exists');
+      results.skipped += 1;
+      continue;
+    }
+
+    const estimate = await db('estimates').where({ id: estimateId }).first();
+    if (!estimate || estimate.status !== 'accepted') {
+      await markSupersededHandled(row, 'estimate_unavailable');
+      results.skipped += 1;
+      continue;
+    }
+    // The snapshot's estimate must belong to THIS contract's customer — an
+    // untrusted id pointing at another customer's estimate must never feed
+    // figures into (or autosend) an agreement. Park it with the operator.
+    if (!estimate.customer_id || String(estimate.customer_id) !== String(row.customer_id)) {
+      const mismatchBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${row.customer_id}`,
+        titleLike: 'Re-issue termite agreement%',
+        metaKey: 'contractId',
+        metaValue: row.id,
+      }, [
+        'estimate',
+        'Re-issue termite agreement (wording updated)',
+        `The cancelled termite program agreement for ${row.recipient_name || 'a customer'} referenced an estimate that does not belong to that customer, so it could not be replaced automatically. Re-issue it from the document library.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+      ], `estimate-customer mismatch for contract ${row.id}`);
+      if (mismatchBelled) {
+        await markSupersededHandled(row, 'estimate_customer_mismatch');
+        results.skipped += 1;
+      } else {
+        results.failed += 1;
+      }
+      continue;
+    }
+
+    const result = await maybeCreateTermiteProgramAgreement({
+      estimate,
+      customerId: row.customer_id,
+      notifyOnUnresolved: true,
+      signedBlockScope: 'property',
+      signedAfter: row.created_at || null,
+      reissueSourceContractId: row.id,
+    });
+    const parked = ['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped);
+    if (result.ok && result.contractId && !result.skipped) {
+      await markSupersededHandled(row, 'replaced');
+      results.created += 1;
+    } else if (result.ok) {
+      await markSupersededHandled(row, result.skipped || 'skipped');
+      results.skipped += 1;
+    } else if (parked) {
+      // Parked — but the bell IS the handoff: only terminal when it landed.
+      // A failed bell OR a failed same-property retirement leaves the
+      // source unmarked (cancelled above, so the retry is cheap) and
+      // counts as failed for tomorrow's run.
+      if (result.belled === false || result.retireFailed) {
+        results.failed += 1;
+      } else {
+        await markSupersededHandled(row, result.skipped);
+        results.skipped += 1;
+      }
+    } else if (result.skipped === 'customer_not_found') {
+      // Soft-deleted customer — deterministic, not transient: mark handled
+      // so archived-customer rows stop consuming the bounded daily window.
+      // A restored customer gets fresh paperwork through a new accept.
+      await markSupersededHandled(row, 'customer_archived');
+      results.skipped += 1;
+    } else {
+      results.failed += 1; // transient — stays unmarked for tomorrow's retry
+    }
+  }
+  return results;
+}
+
 // Daily reconciliation (scheduler, document-lifecycle cron): re-prep any
 // recently accepted termite estimate that has no program agreement —
 // acceptance already committed, so a transient prep failure must not
@@ -609,6 +1572,15 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
       .where((builder) => {
         builder.whereNull('accepted_service_mode').orWhereNot('accepted_service_mode', 'one_time');
       })
+      // Soft-deleted customers can't receive paperwork — their estimates
+      // would fail customer_not_found deterministically every day and
+      // churn the bounded scan window until the 21-day cutoff.
+      .whereExists(function activeCustomer() {
+        this.select(db.raw('1'))
+          .from('customers as cust')
+          .whereRaw('cust.id = estimates.customer_id')
+          .whereNull('cust.deleted_at');
+      })
       .whereRaw("estimate_data::text ILIKE '%termite%'")
       // Estimates whose agreement already exists never occupy the window.
       // Snapshot estimate.id is stamped by every prep this service performs.
@@ -617,7 +1589,34 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
           .from('customer_contracts as cc')
           .whereRaw('cc.customer_id = estimates.customer_id')
           .whereIn('cc.document_template_key', PROGRAM_TEMPLATE_KEYS)
-          .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text");
+          .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text")
+          // ONLY compliance-superseded cancels that the superseded pass has
+          // NOT yet handled bypass the exists-check (the estimate still
+          // needs a live agreement after a template-version retirement).
+          // Once handled (superseded_reprocessed stamped — replaced or
+          // parked with its bell), the row blocks again: without this, a
+          // permanently parked commercial/prepay estimate would be retried
+          // and counted failed by this sweep every day and eat the scan
+          // window. Every other row blocks — a customer-declined or
+          // admin-cancelled request reflects an intentional decision, and
+          // COALESCE keeps NULL cancelled_reason rows as blockers.
+          .whereRaw("NOT (cc.status = 'cancelled' AND COALESCE(cc.cancelled_reason, '') LIKE 'Superseded by updated compliance wording%' AND NOT EXISTS (SELECT 1 FROM customer_contract_events cce2 WHERE cce2.contract_id = cc.id AND cce2.event_type = 'superseded_reprocessed'))");
+      })
+      // Parked accepts (commercial/multi-unit, annual prepay, unresolved
+      // figures) create NO contract, so the anti-join above can't exclude
+      // them — without this they re-enter the scan daily for the full
+      // 21-day window and can crowd out genuine transient failures. Their
+      // manual-prep bell IS the durable handled marker: once it landed the
+      // operator owns the estimate (BELL_DEDUPE_DAYS=30 outlives the
+      // 21-day window, so a parked estimate never re-enters while
+      // eligible). Bell-less parks (notify failure) stay selected — that
+      // is the retry path.
+      .whereNotExists(function manualPrepBelled() {
+        this.select(db.raw('1'))
+          .from('notifications as n')
+          .where('n.recipient_type', 'admin')
+          .where('n.title', 'like', 'Termite agreement needs manual prep%')
+          .whereRaw("n.metadata->>'estimateId' = estimates.id::text");
       })
       .orderBy('accepted_at', 'desc')
       .limit(PAGE_SIZE)
@@ -642,6 +1641,8 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
 }
 
 module.exports = {
+  isCommercialEstimate,
+  reconcileSupersededProgramAgreements,
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   PROGRAM_TEMPLATE_KEYS,
@@ -651,6 +1652,7 @@ module.exports = {
   collectTermiteFacts,
   estimateMayDiscount,
   maybeCreateTermiteProgramAgreement,
+  normalizeAddress,
   reconcileTermiteProgramAgreements,
   systemLabelFor,
 };

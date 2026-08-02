@@ -415,7 +415,9 @@ function significanceChip(sig) {
   return <Chip tone={{ bg: D.bg, fg: D.muted }}>no significant change (p={sig.pValue})</Chip>;
 }
 
-const LEG_LABELS = { anthropic: "Claude leg", openai: "GPT leg" };
+// Live legs first, then the measurement-only candidates (owner 07-30 six-
+// model ranking). The backend accepts exactly these keys (EXAM_LEG_ROUTES).
+const LEG_LABELS = { anthropic: "Claude leg", openai: "GPT Sol leg", gemini: "Gemini (measure)", luna: "GPT Luna (measure)", opus: "Opus (measure)", fable: "Fable (measure)" };
 
 function SealedRunRow({ run, runsById }) {
   const pct = run.unsafeRate == null ? "-" : `${Math.round(run.unsafeRate * 100)}%`;

@@ -134,6 +134,14 @@ const INTENT_SCHEMA = {
   properties: {
     decision: { enum: ['draft', 'skip'] },
     skip_reason: { type: ['string', 'null'] },
+    // Machine-readable skip class (GATE_ESTIMATOR_SCOPE_GUARDS prompt
+    // addendum): lets the red lane distinguish "ask the customer to
+    // clarify" skips from "there is nothing to clarify" skips (out-of-scope
+    // work, non-quotes, existing-job coordination). Optional — the ungated
+    // prompt never emits it.
+    skip_category: {
+      enum: ['out_of_scope', 'not_a_quote', 'existing_job', 'ambiguous', 'needs_human_scoping', null],
+    },
     customer_name: { type: ['string', 'null'] },
     customer_phone: { type: ['string', 'null'] },
     customer_email: { type: ['string', 'null'] },

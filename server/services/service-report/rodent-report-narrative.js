@@ -29,6 +29,7 @@
  * posture as the pest narrative.
  */
 
+const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
@@ -46,7 +47,7 @@ const {
 // project-report surface and is out of scope) — the prompt generalized from rodent-
 // only wording (owner ask 2026-07-27, second lane). File name kept (no
 // renames); rodent remains a thin alias over the same engine.
-const PROMPT_VERSION = 'typed_report_narrative_v2';
+const PROMPT_VERSION = 'typed_report_narrative_v3'; // v3: + HUMAN_PROSE_RULES (owner style block 07-30)
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -318,6 +319,9 @@ function deterministicSummary(facts) {
 }
 
 const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control & Lawn Care service report.
+
+${HUMAN_PROSE_RULES}
+
 
 You are given grounding facts: the technician's recap message, the report type, the report's ratified result copy, customer-labeled findings (target pest, areas noted, work completed), the property's activity reading (a WORDING-based level — never express activity as a number, score, or ratio), trap/bait-station check counts when the program uses them, the devices and products in service, photo evidence the technician documented (captions and, when present, a reviewed photo summary), and the next scheduled visit.
 

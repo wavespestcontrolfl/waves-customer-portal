@@ -12,6 +12,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { lockTriageCall } = require('../utils/triage-locks');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -22,7 +23,9 @@ const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
 // auto-routed review list; nothing here changes routing automatically.
 const VERDICTS = ['accept', 'deny'];
 const WRONG_FIELDS = ['name', 'address', 'service', 'scheduling', 'consent', 'spam_status', 'routing'];
-const V2_DECISION_VERSION = 'v2-1.0.0';
+// History-spanning review queue: rows from BOTH decision versions must stay
+// visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
+const { V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
 
 function sanitizeWrongFields(input) {
   if (!Array.isArray(input)) return [];
@@ -120,6 +123,12 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
 
+  // Per-call advisory lock + transaction: the shared lockTriageCall contract
+  // with the nightly auto-resolve sweep. Serializing per call removes both
+  // the row-lock ordering deadlock against the sweep's bulk pre-lock and the
+  // interleaved-count race that could strand call_log.review_status 'open'
+  // on a fully-terminal call.
+  //
   // Atomic compare-and-swap: only transition if the row is STILL open. Two staff
   // actioning the same item concurrently can both pass the read above; the
   // conditional update + affected-row count makes the loser a no-op so only the
@@ -132,26 +141,26 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
   // the card still open, and a retry works.
   const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
   const emailReviewCard = !!item.call_log_id && EMAIL_REVIEW_REASON_CODES.includes(item.reason_code);
-  let updated = 0;
   // null = not checked (not resolving an email card); the release below runs
   // only when the check ran inside the transaction and found none live.
   let siblingLive = null;
   const holdsTable = emailReviewCard && await db.schema.hasTable('first_touch_holds');
-  await db.transaction(async (trx) => {
-    // Lock-order discipline (Codex #3084 r33): the email-correction fanout
-    // locks first_touch_holds FOR UPDATE and then settles triage_items in
-    // ONE transaction; this transaction wrote the triage row first and
-    // then updated the hold — the opposite order, a deadlock Postgres
-    // breaks by aborting one side (a 500 on whichever loses). Take the
-    // call's hold-row locks FIRST so every path acquires
-    // first_touch_holds → triage_items.
+  const result = await db.transaction(async (trx) => {
+    // GLOBAL LOCK ORDER (owner ruling 2026-08-02, reconciling #3119's
+    // advisory contract with this lane's r33 row-lock discipline):
+    // advisory call lock → first_touch_holds rows → triage_items.
+    // Every writer that touches a call's cards or holds acquires in this
+    // order; taking the hold-row locks AFTER the advisory lock keeps the
+    // r33 guarantee against the email-correction fanout, which pre-locks
+    // the same way.
+    await lockTriageCall(trx, item.call_log_id);
     if (holdsTable) {
       await trx('first_touch_holds')
         .where({ call_log_id: item.call_log_id })
         .forUpdate()
         .select('id');
     }
-    updated = await trx('triage_items')
+    const updated = await trx('triage_items')
       .where({ id })
       .whereIn('status', OPEN_STATES)
       .update({
@@ -161,7 +170,8 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
         resolved_at: new Date(),
         updated_at: new Date(),
       });
-    if (updated > 0 && nextStatus === 'resolved' && emailReviewCard) {
+    if (updated === 0) return { outcome: 'conflict' };
+    if (nextStatus === 'resolved' && emailReviewCard) {
       // A force-reprocess can leave BOTH an email_invalid and an
       // email_unverified card on the call (the partial unique index is
       // per reason_code) — resolving one while the sibling is still live
@@ -196,18 +206,38 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
           });
       }
     }
+
+    // Keep call_log.review_status in sync with the call's remaining open
+    // items — inside the same locked transaction (the interleaved-count
+    // race is what the advisory lock exists to remove).
+    if (item.call_log_id) {
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id })
+        .whereIn('status', OPEN_STATES)
+        .count('* as n')
+        .first();
+      const remaining = parseInt(stillOpen?.n || 0, 10);
+      await trx('call_log')
+        .where({ id: item.call_log_id })
+        .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
+    }
+
+    return { outcome: 'ok', item };
   });
-  if (updated === 0) return { outcome: 'conflict' };
+  if (result.outcome !== 'ok') return result;
 
   // Resolving an email read-back card AS-IS ("the spelling was right") is a
   // release point for the held first-touch sends — the email-correction
   // fanout only runs when the address actually changes, so without this the
   // held drip/newsletter would never start (2026-07-30 lane). Resolve only:
   // a DISMISSED card is "not actionable", not a confirmation. Best-effort —
-  // never affects the transition result. Runs IMMEDIATELY after winning the
-  // compare-and-swap (Codex #3084 r9): if it ran after the review-status
-  // bookkeeping and that write failed, the card would already be closed, a
-  // retry would 409, and the hold would have no release trigger left.
+  // never affects the transition result. Runs AFTER the commit: with the
+  // review-status bookkeeping now INSIDE the same transaction as the resolve
+  // (#3119 model), a bookkeeping failure rolls the resolve back and a retry
+  // works — the r9 "closed card with no release trigger" window is gone; the
+  // only residue is a crash between commit and this call, which the
+  // reconciliation sweep covers. (The engine runs its own transactions, so
+  // it must not run under the advisory lock above.)
   if (nextStatus === 'resolved' && emailReviewCard && siblingLive === false) {
     try {
       const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
@@ -219,20 +249,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
     }
   }
 
-  // Keep call_log.review_status in sync with the call's remaining open items.
-  if (item.call_log_id) {
-    const stillOpen = await db('triage_items')
-      .where({ call_log_id: item.call_log_id })
-      .whereIn('status', OPEN_STATES)
-      .count('* as n')
-      .first();
-    const remaining = parseInt(stillOpen?.n || 0, 10);
-    await db('call_log')
-      .where({ id: item.call_log_id })
-      .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
-  }
-
-  return { outcome: 'ok', item };
+  return result;
 }
 
 function sendTransitionResult(res, result, id, nextStatus) {
@@ -334,11 +351,14 @@ router.post('/:id/verdict', async (req, res) => {
     let resolved = 0;
     let emailCardResolved = false;
     await db.transaction(async (trx) => {
-      // Lock-order discipline (Codex #3084 r33): the email-correction
-      // fanout locks first_touch_holds FOR UPDATE and then settles
-      // triage_items in ONE transaction — writing the triage rows first
-      // here and then touching the hold is the opposite order, a deadlock
-      // Postgres breaks by aborting one side. Hold-row locks FIRST.
+      // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
+      // first_touch_holds rows → triage_items. The advisory lock is the
+      // shared lockTriageCall contract with the nightly auto-resolve sweep
+      // (the bulk update's planner-order row locks could otherwise deadlock
+      // against the sweep's ordered pre-lock); the hold-row locks keep the
+      // r33 discipline against the email-correction fanout, which settles
+      // holds and cards in one transaction using the same order.
+      await lockTriageCall(trx, item.call_log_id);
       if (holdsTable) {
         await trx('first_touch_holds')
           .where({ call_log_id: item.call_log_id })
@@ -359,7 +379,8 @@ router.post('/:id/verdict', async (req, res) => {
       resolved = resolvedRows.length;
       emailCardResolved = resolvedRows
         .some((r) => ['email_unverified', 'email_invalid'].includes(r?.reason_code));
-      if (resolved > 0 && emailCardResolved && holdsTable) {
+      if (resolved === 0) return;
+      if (emailCardResolved && holdsTable) {
         const now = new Date();
         if (verdict === 'deny' && !denyClearsEmailEarly) {
           // UPSERT, not update (r14): a deny can land BEFORE the processor's
@@ -406,6 +427,18 @@ router.post('/:id/verdict', async (req, res) => {
             });
         }
       }
+
+      // A surviving bounce card keeps the call visible in review — synced
+      // inside the same locked transaction (the interleaved-count race is
+      // what the advisory lock exists to remove).
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id })
+        .whereIn('status', OPEN_STATES)
+        .count('* as n')
+        .first();
+      await trx('call_log')
+        .where({ id: item.call_log_id })
+        .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: new Date() });
     });
     if (resolved === 0) {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
@@ -419,10 +452,13 @@ router.post('/:id/verdict', async (req, res) => {
     // email-correction fanout resumes then. Without this, a deny about an
     // unrelated field (service/scheduling/routing) would resolve the email
     // card with no release path left (Codex #3084 r3). Best-effort. Runs
-    // IMMEDIATELY after winning the bulk compare-and-swap (Codex #3084 r9):
-    // if the later feedback/review-status bookkeeping fails, the handler
-    // 500s with the cards already closed and a retried verdict 409s — this
-    // block must already have run by then or the hold loses its trigger.
+    // AFTER the commit and BEFORE the feedback write (Codex #3084 r9): the
+    // review-status sync now rides inside the resolve transaction (#3119
+    // model), so the remaining bookkeeping that can fail after the cards
+    // close is upsertFeedback — a failure there 500s the handler and a
+    // retried verdict 409s, so this block must already have run by then or
+    // the hold loses its trigger. (The engine runs its own transactions, so
+    // it must not run under the advisory lock above.)
     // A deny with NO fields selected says "something is wrong" without
     // saying what — it must not read as confirming the email (Codex #3084
     // r10). The hold stays pending; the correction fanout (ungated on card
@@ -441,16 +477,6 @@ router.post('/:id/verdict', async (req, res) => {
         logger.warn(`[admin-triage] first-touch resume failed for call ${item.call_log_id}: ${resumeErr.message}`);
       }
     }
-
-    // A surviving bounce card keeps the call visible in review.
-    const stillOpen = await db('triage_items')
-      .where({ call_log_id: item.call_log_id })
-      .whereIn('status', OPEN_STATES)
-      .count('* as n')
-      .first();
-    await db('call_log')
-      .where({ id: item.call_log_id })
-      .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: new Date() });
 
     await upsertFeedback({
       callLogId: item.call_log_id,
@@ -479,8 +505,16 @@ router.get('/auto-routed', async (req, res) => {
       .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .leftJoin('route_feedback', 'route_decisions.call_log_id', 'route_feedback.call_log_id')
-      .where('route_decisions.decision_version', V2_DECISION_VERSION)
-      .where('route_decisions.mode', 'enforce')
+      // One row per call: a reprocessed call carries BOTH decision versions;
+      // only its NEWEST supported enforce decision represents current state.
+      // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the
+      // DISTINCT ON subquery spans both versions), but a superseded stale
+      // decision never duplicates or shadows the fresh one.
+      .whereIn('route_decisions.id', db('route_decisions')
+        .select(db.raw('DISTINCT ON (call_log_id) id'))
+        .whereIn('decision_version', V2_DECISION_VERSIONS)
+        .where('mode', 'enforce')
+        .orderByRaw('call_log_id, created_at DESC'))
       .where('route_decisions.final_action_taken', 'auto_route')
       .orderBy('route_decisions.created_at', 'desc')
       .limit(limit)

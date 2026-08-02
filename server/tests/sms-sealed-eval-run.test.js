@@ -9,6 +9,8 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ mocke
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v9_test',
   generateGroundedDraft: jest.fn(),
+  // effective profile = none unless a test overrides — keeps the pin inert
+  resolveEffectiveVoiceProfile: jest.fn(async () => null),
 }));
 jest.mock('../services/sms-shadow-judge', () => ({
   judgeOne: jest.fn(),
@@ -18,11 +20,12 @@ const drafter = require('../services/sms-shadow-drafter');
 const judge = require('../services/sms-shadow-judge');
 const sealedEval = require('../services/sms-sealed-eval');
 
-function makeRunnerDb({ runs = [], items = [], results = [], insertErrorCode = null } = {}) {
+function makeRunnerDb({ runs = [], items = [], results = [], voiceProfiles = [], insertErrorCode = null } = {}) {
   const state = {
     runsById: new Map(runs.map((r) => [r.id, { ...r }])),
     items: items.map((i) => ({ ...i })),
     results: results.map((r) => ({ ...r })),
+    voiceProfiles: voiceProfiles.map((v) => ({ ...v })),
     runPatches: [],
     calls: [],
     lastLoadedRunId: null,
@@ -107,6 +110,9 @@ function makeRunnerDb({ runs = [], items = [], results = [], insertErrorCode = n
         } else {
           out = b._count ? [{ count: String(active.length) }] : active;
         }
+      } else if (tableKey === 'voice_profiles') {
+        const all = state.voiceProfiles.filter(matches);
+        out = b._first ? all[0] : all;
       } else {
         out = [];
       }
@@ -151,6 +157,7 @@ const judgment = (verdict, scores) => ({
 beforeEach(() => {
   drafter.generateGroundedDraft.mockReset();
   judge.judgeOne.mockReset();
+  drafter.resolveEffectiveVoiceProfile.mockClear(); // keep the default null impl, drop call history
 });
 
 describe('createExamRun — guards and stamps', () => {
@@ -171,24 +178,122 @@ describe('createExamRun — guards and stamps', () => {
 
   test('unknown leg is rejected before any DB work', async () => {
     const dbi = makeRunnerDb({});
-    await expect(sealedEval.createExamRun({ providerLeg: 'gemini', dbi }))
+    await expect(sealedEval.createExamRun({ providerLeg: 'mistral', dbi }))
       .rejects.toThrow(/unknown sealed-eval provider leg/);
+  });
+
+  test('measurement legs (gemini/sol/opus/fable) are valid, but autonomy rides only on the live legs', async () => {
+    // the exam accepts every candidate…
+    for (const leg of ['gemini', 'luna', 'opus', 'fable']) expect(sealedEval.EXAM_LEGS).toContain(leg);
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
+    const run = await sealedEval.createExamRun({ providerLeg: 'gemini', dbi });
+    expect(run.provider_leg).toBe('gemini');
+    // …while the graduation gate and the nightly auto-sweep are pinned to
+    // the two LIVE SMS providers — an experimental leg must neither block
+    // autonomy nor auto-spend.
+    expect(sealedEval.LIVE_EXAM_LEGS).toEqual(['anthropic', 'openai']);
   });
 
   test('stamps the RUNNING drafter version and defaults the baseline to the latest complete different-version same-leg run', async () => {
     const dbi = makeRunnerDb({
       runs: [
-        { id: 'r-old', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v8' },
-        { id: 'r-other-leg', status: 'complete', provider_leg: 'openai', prompt_version: 'house_voice_v8' },
-        { id: 'r-same-version', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test' },
+        // model must MATCH the leg's current model (codex r12) — a
+        // different-model prior is not a valid baseline
+        { id: 'r-old-other-model', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v8', model: 'claude-old-model' },
+        { id: 'r-old', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v8', model: 'claude-sonnet-5' },
+        { id: 'r-other-leg', status: 'complete', provider_leg: 'openai', prompt_version: 'house_voice_v8', model: 'gpt-5.6-sol' },
+        { id: 'r-same-version', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', model: 'claude-sonnet-5' },
       ],
       items: [item('i1'), item('i2')],
     });
     const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
     expect(run.prompt_version).toBe('house_voice_v9_test'); // from the drafter, never a caller param
     expect(run.items_total).toBe(2);
-    expect(run.baseline_run_id).toBe('r-old'); // same leg, different version
+    expect(run.baseline_run_id).toBe('r-old'); // same leg, different version, SAME model
+    expect(run.model).toBe('claude-sonnet-5'); // runs stamp their drafting model (codex r12)
     expect(run.status).toBe('running');
+    expect(run.voice_profile_version).toBeNull(); // effective profile = none in the default mock
+  });
+
+  test('stamps the EFFECTIVE voice-profile version at creation (Codex r2 pin)', async () => {
+    drafter.resolveEffectiveVoiceProfile.mockResolvedValueOnce({ version: 4, profile_text: 'Warm.' });
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
+    const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
+    expect(run.voice_profile_version).toBe(4);
+  });
+});
+
+describe('runSealedExam — voice-profile pin (Codex r2)', () => {
+  test('a pinned run drafts every item under the FROZEN profile text, not the current effective one', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', voice_profile_version: 4 }],
+      items: [item('i1')],
+      voiceProfiles: [{ version: 4, profile_text: 'Warm and brief.' }],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), voiceProfileVersion: 4 });
+    judge.judgeOne.mockResolvedValue(judgment());
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('complete');
+    expect(drafter.generateGroundedDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceProfile: expect.objectContaining({ version: 4, profile_text: 'Warm and brief.' }) })
+    );
+    // and the run never consulted the CURRENT effective profile — the run row is the pin
+    expect(drafter.resolveEffectiveVoiceProfile).not.toHaveBeenCalled();
+  });
+
+  test('an unpinned run drafts explicitly profile-free (voiceProfile null, never undefined)', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', voice_profile_version: null }],
+      items: [item('i1')],
+    });
+    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    judge.judgeOne.mockResolvedValue(judgment());
+    await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(drafter.generateGroundedDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceProfile: null })
+    );
+  });
+
+  test('a pinned run whose drafts fell back to the BASE prompt fails instead of reporting a phantom-profile exam (codex r4)', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', voice_profile_version: 4 }],
+      items: [item('i1')],
+      voiceProfiles: [{ version: 4, profile_text: 'Warm and brief.' }],
+    });
+    // the drafter reports the profile never reached the prompt (stamp null)
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), voiceProfileVersion: null });
+    judge.judgeOne.mockResolvedValue(judgment());
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('failed');
+    // no result row was recorded under the phantom profile
+    expect(dbi.state.results.filter((r) => r.run_id === 'r1')).toHaveLength(0);
+  });
+
+  test('createExamRun refuses when the effective profile moved past the caller\'s expected pin (codex r4 sweep freeze)', async () => {
+    drafter.resolveEffectiveVoiceProfile.mockResolvedValueOnce({ version: 5, profile_text: 'x' });
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', expectedVoiceProfileVersion: 4, dbi }))
+      .rejects.toMatchObject({ code: 'PROFILE_CHANGED' });
+    // matching pin creates normally
+    drafter.resolveEffectiveVoiceProfile.mockResolvedValueOnce({ version: 4, profile_text: 'x' });
+    const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', expectedVoiceProfileVersion: 4, dbi });
+    expect(run.voice_profile_version).toBe(4);
+  });
+
+  test('a pinned run whose profile row vanished is FINALIZED failed — never drafts unpinned, never wedges the one-running index (codex r3)', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', voice_profile_version: 9 }],
+      items: [item('i1')],
+      voiceProfiles: [],
+    });
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('failed');
+    expect(out.error).toMatch(/voice profile v9, which no longer exists/);
+    // the row must leave 'running' (the partial unique index keys on it) —
+    // a pre-try throw would have stranded it and blocked every future exam
+    const failedPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'failed');
+    expect(failedPatch).toBeTruthy();
+    expect(drafter.generateGroundedDraft).not.toHaveBeenCalled();
   });
 });
 

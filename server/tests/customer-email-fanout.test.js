@@ -139,11 +139,17 @@ function makeConn(cfg = {}) {
     };
     return qb;
   };
-  conn.raw = (sql) => ({ __raw: sql });
+  // Raw calls are RECORDED (main's shape) so lock-contract tests can pin
+  // pg_advisory_xact_lock acquisitions; the return value keeps this lane's
+  // `{ __raw }` marker (used by CASE-expression update patches) plus the
+  // bindings for the lock assertions.
+  conn.raw = (sql, bindings) => { calls.push({ table: '__raw', op: 'raw', arg: { sql, bindings } }); return { __raw: sql, __bindings: bindings }; };
   conn.schema = { hasTable: async () => true };
   // Savepoint-style passthrough (the r33 all-or-nothing marker consume);
   // the counter lets tests pin that grouped clears share ONE transaction,
-  // and the begin/end markers let them pin what ran INSIDE it (r37).
+  // and the begin/end markers let them pin what ran INSIDE it (r37). Also
+  // serves the review-card block, which wraps its writes in
+  // conn.transaction (shared per-call lock contract).
   let trxCount = 0;
   conn.transaction = async (fn) => {
     trxCount += 1;
@@ -583,7 +589,11 @@ describe('propagateCustomerEmailChange', () => {
     });
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     const reasonFilter = conn.__calls.find((c) => c.table === 'triage_items' && c.op === 'whereIn' && c.arg.col === 'reason_code');
-    expect(reasonFilter.arg.vals).toEqual(['email_unverified', 'email_invalid']);
+    // customer_email_missing joined 2026-08-01: a call that booked WITHOUT an
+    // email files it, and a valid email landing on the profile is exactly the
+    // event that completes it — same lifecycle and validity gate as the two
+    // read-back codes.
+    expect(reasonFilter.arg.vals).toEqual(['email_unverified', 'email_invalid', 'customer_email_missing']);
   });
 
   test('the held-first-touch release runs even when NO review card is still open', async () => {

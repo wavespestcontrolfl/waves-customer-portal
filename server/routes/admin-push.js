@@ -17,6 +17,10 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { listTriggers } = require('../services/notification-triggers');
+const {
+  OVERRIDABLE_CATEGORY_SET,
+  clearOverrideCache,
+} = require('../services/notification-bell-policy');
 const PushService = require('../services/push-notifications');
 const {
   adminAuthenticate,
@@ -205,7 +209,23 @@ router.get('/preferences', async (req, res, next) => {
         sound_enabled: r ? r.sound_enabled !== false : true,
       };
     });
-    res.json({ preferences: merged });
+    // Bell-category overrides ('category:<cat>' pseudo-keys) for the admin
+    // bell policy (GATE_ADMIN_BELL_POLICY). Default OFF — no row means the
+    // category stays silenced while the gate is on. ADMIN-ONLY on read as
+    // well as write: the PUT 403s category keys from techs, so returning
+    // them here would make the settings page unsavable for technicians
+    // (the client round-trips whatever it received).
+    const bellCategories = req.techRole === 'admin'
+      ? [...OVERRIDABLE_CATEGORY_SET].map((cat) => {
+        const r = byKey.get(`category:${cat}`);
+        return {
+          key: `category:${cat}`,
+          category: cat,
+          bell_enabled: r ? r.bell_enabled === true : false,
+        };
+      })
+      : [];
+    res.json({ preferences: merged, bellCategories });
   } catch (err) { next(err); }
 });
 
@@ -218,24 +238,50 @@ router.put('/preferences', async (req, res, next) => {
     // shape — two tabs saving the same trigger key simultaneously can't
     // race past each other now (the unique constraint on
     // (admin_user_id, trigger_key) is enforced atomically by Postgres).
+    // 'category:<cat>' pseudo-keys are the bell-policy category overrides —
+    // validate against the fixed list BEFORE writing anything so a typo'd
+    // key can't take a notification_preferences slot the policy then reads.
+    for (const u of updates) {
+      if (typeof u.key === 'string' && u.key.startsWith('category:')) {
+        const cat = u.key.slice('category:'.length);
+        if (!OVERRIDABLE_CATEGORY_SET.has(cat)) {
+          return res.status(400).json({ error: `Unknown bell category: ${cat}` });
+        }
+        // Category overrides re-open the SHARED admin bell — owner
+        // controls, admin role only. Techs keep their per-user push/sound
+        // preferences; they don't get to widen the global bell.
+        if (req.techRole !== 'admin') {
+          return res.status(403).json({ error: 'Bell category overrides require the admin role' });
+        }
+      }
+    }
+    let touchedCategoryKey = false;
     for (const u of updates) {
       if (!u.key) continue;
+      const isCategoryKey = typeof u.key === 'string' && u.key.startsWith('category:');
+      // Category rows only carry bell_enabled (push/sound are meaningless
+      // for the bell policy) — store the other flags as true so the
+      // /diagnose "disabled prefs" check doesn't flag them as muted pushes.
+      const row = isCategoryKey
+        ? { push_enabled: true, bell_enabled: !!u.bell_enabled, sound_enabled: true }
+        : {
+          push_enabled: !!u.push_enabled,
+          bell_enabled: !!u.bell_enabled,
+          sound_enabled: !!u.sound_enabled,
+        };
       await db('notification_preferences')
         .insert({
           admin_user_id: adminUserId,
           trigger_key: u.key,
-          push_enabled: !!u.push_enabled,
-          bell_enabled: !!u.bell_enabled,
-          sound_enabled: !!u.sound_enabled,
+          ...row,
         })
         .onConflict(['admin_user_id', 'trigger_key'])
-        .merge({
-          push_enabled: !!u.push_enabled,
-          bell_enabled: !!u.bell_enabled,
-          sound_enabled: !!u.sound_enabled,
-          updated_at: new Date(),
-        });
+        .merge({ ...row, updated_at: new Date() });
+      if (isCategoryKey) touchedCategoryKey = true;
     }
+    // Apply an override toggle immediately instead of after the policy's
+    // ~60s cache window.
+    if (touchedCategoryKey) clearOverrideCache();
     res.json({ ok: true });
   } catch (err) { next(err); }
 });

@@ -131,10 +131,16 @@ function modeAwareProfilesChain({ flipped = [], backed = [], first = null } = {}
     first: jest.fn().mockResolvedValue(first),
   });
   c.where = jest.fn((args) => {
-    if (args && args.completion_mode) mode = args.completion_mode;
+    if (args && typeof args === 'object' && args.completion_mode) mode = args.completion_mode;
     return c;
   });
-  c.distinct = jest.fn(async () => (mode === 'project_required' ? backed : flipped));
+  // The still-backed query now uses whereIn('completion_mode', [...])
+  // (project_required + special_project both override the code retirement).
+  c.whereIn = jest.fn((col) => {
+    if (col === 'completion_mode') mode = 'project_backed';
+    return c;
+  });
+  c.distinct = jest.fn(async () => (mode === 'project_backed' ? backed : flipped));
   return c;
 }
 
