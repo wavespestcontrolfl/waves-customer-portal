@@ -170,6 +170,25 @@ const FACTS_GATED_ACTIONS = new Set([
   'new_supporting_blog',
 ]);
 
+// A brief may forbid dollar amounts even though it IS a competitor intercept.
+// Scans every string in the brief payload for that instruction; anything
+// unreadable is treated as forbidding (fail closed).
+// Tight on purpose: "no" must directly negate the noun. A looser window
+// matched "no-cost retreatments; large price" in an unrelated brief, which
+// would have silently withheld a permission that brief never forbade.
+const BRIEF_PRICE_PROHIBITION_RE = /\bno\s+(?:[\w-]+\s+){0,3}(?:dollar amounts?|prices|pricing)\b/i;
+function briefForbidsCompetitorPrices(...sources) {
+  let forbids = false;
+  const walk = (v) => {
+    if (forbids) return;
+    if (typeof v === 'string') { if (BRIEF_PRICE_PROHIBITION_RE.test(v)) forbids = true; return; }
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  try { sources.forEach(walk); } catch { return true; }
+  return forbids;
+}
+
 class AutonomousRunner {
   /**
    * runNext({ minScore, dryRun })
@@ -3029,7 +3048,12 @@ class AutonomousRunner {
       // auto-publish informational posts — only a true competitor-intercept
       // brief (signal_metadata.intercept_brief) may cite competitor prices
       // (Codex P0, 2026-08-01).
-      competitorPriceCitations: Boolean(opp?.signal_metadata?.intercept_brief),
+      // …and the brief must not FORBID them. B2/B4 carry "GATE RULE … NO
+      // TruGreen dollar amounts anywhere in the post", so treating every
+      // intercept as price-authorized overrode the brief's own instruction
+      // (Codex). Fail closed: an unreadable brief keeps the full guard.
+      competitorPriceCitations: Boolean(opp?.signal_metadata?.intercept_brief)
+        && !briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
       allowedInternalLinks,
       isRefresh,
       priorBody,

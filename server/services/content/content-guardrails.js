@@ -129,7 +129,7 @@ const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript', 'datalis
 function opensDefinitelyHidden(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
-  if (tag.name === 'dialog' && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if ((tag.name === 'dialog' || tag.name === 'details') && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
   if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
   if (ariaM) {
@@ -142,7 +142,7 @@ function opensDefinitelyHidden(tag) {
 function opensHiddenContent(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
-  if (tag.name === 'dialog' && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if ((tag.name === 'dialog' || tag.name === 'details') && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
   if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
   // aria-hidden in ANY form except a literal false.
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
@@ -304,6 +304,9 @@ function paragraphHasMarkup(text, index) {
   const start = (() => { const i = s.lastIndexOf('\n\n', index); return i === -1 ? 0 : i + 2; })();
   const rawEnd = s.indexOf('\n\n', index);
   const paragraph = s.slice(start, rawEnd === -1 ? s.length : rawEnd);
+  // Deletion markup is not an affirmative statement: "~~Other companies
+  // charge~~ $89 per visit" leaves the price as the operative claim (Codex).
+  if (/~~/.test(paragraph)) return true;
   if (/\{|&[#A-Za-z]|<!/.test(paragraph)) return true; // expression, entity, comment
   // A tag with NO attributes cannot hide anything — it carries no hidden,
   // style, class or aria-hidden — so plain wrappers like <p> and <strong>
@@ -1141,6 +1144,10 @@ const DEST_CONTROL_RE = new RegExp([
   // must hit every arm above — the sibling scheme regexes already carry it.
 ].join('|'), 'i');
 
+// Elements whose BODY is code/data rather than prose — a URL in there is
+// never a citation.
+const RAW_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'template', 'iframe', 'object']);
+
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
@@ -1186,6 +1193,52 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     }
   }
   const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
+  // The broad .gov/.edu allowance is for CITATIONS — passive hyperlink
+  // destinations. It must not extend to ACTIVE resource positions: posts are
+  // published as executable .mdx, so a "<script src=…edu/payload.js>" would
+  // turn control of any delegated subdomain into live third-party code on the
+  // customer site (Codex). Those spans lose the TLD leniency and fall back to
+  // the explicit host allowlist.
+  // ALLOWLIST, not blocklist. Enumerating active positions missed script
+  // BODIES, form action= and a ping= (Codex), so the rule is inverted: the
+  // TLD leniency applies ONLY to a URL sitting in plain document text —
+  // outside every tag and outside every raw-text element body. That covers
+  // Markdown link destinations, reference definitions and bare prose URLs,
+  // which is what a citation actually looks like. A URL inside ANY tag
+  // (including <a href>) or inside a script/style body falls back to the
+  // explicit host allowlist.
+  const markupRanges = [];
+  {
+    const tags = [...eachTag(body)];
+    for (let i = 0; i < tags.length; i += 1) {
+      const tag = tags[i];
+      markupRanges.push([tag.start, tag.end]);
+      if (tag.isClose || tag.selfClosing || !RAW_TEXT_TAGS.has(tag.name)) continue;
+      const close = tags.slice(i + 1).find((t) => t.name === tag.name && t.isClose);
+      markupRanges.push([tag.end, close ? close.end : body.length - 1]);
+    }
+  }
+  // MDX EXPRESSION containers are executable too — a URL inside one is not a
+  // citation (Codex). Balanced and quote-aware.
+  for (let i = 0; i < body.length; i += 1) {
+    if (body[i] !== '{') continue;
+    let depth = 0;
+    let j = i;
+    for (; j < body.length; j += 1) {
+      const ch = body[j];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        const q = ch; j += 1;
+        while (j < body.length && body[j] !== q) j += body[j] === '\\' ? 2 : 1;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') { depth -= 1; if (depth === 0) break; }
+    }
+    if (j >= body.length) break;
+    markupRanges.push([i, j]);
+    i = j;
+  }
+  const inActiveResource = (idx) => markupRanges.some(([a, b]) => idx >= a && idx <= b);
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
   let m;
   while ((m = urlRe.exec(body)) !== null) {
@@ -1200,7 +1253,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     let host = null;
     try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
-    if (!hostAllowed(norm, allowed, { citationGradeTlds: operatorCitations })) {
+    if (!hostAllowed(norm, allowed, { citationGradeTlds: operatorCitations && !inActiveResource(m.index) })) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
   }

