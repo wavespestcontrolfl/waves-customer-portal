@@ -974,6 +974,46 @@ describe('settleAppointmentNoShowFee — paid refundable fee invoice', () => {
     expect(res.settled).toBe(true);
   });
 
+  test('adopted marker replayed after a crash (invoice_id bound) → replay, never a second invoice (r27)', async () => {
+    mockTableHandlers.trx = {
+      payments: {
+        first: () => ({
+          id: 'pay-1',
+          status: 'paid',
+          refund_status: 'partial',
+          refund_amount: '20.00',
+          metadata: JSON.stringify({ purpose: 'appointment_card_no_show_fee', pre_settlement_refund: true, invoice_id: 'inv-old', stamped_refund_ids: ['re_1'] }),
+        }),
+      },
+    };
+    mockTableHandlers.invoices = { first: () => ({ id: 'inv-old', token: 't', receipt_sent_at: '2026-08-01' }) };
+    const res = await settleAppointmentNoShowFee(PI());
+    expect(res).toEqual({ settled: false, replay: true });
+    expect(mockInvoiceCreate).not.toHaveBeenCalled();
+  });
+
+  test('failed refunds in the live collection are NOT stamped — only money counted in amount_refunded (r27)', async () => {
+    mockRetrievePaymentIntent.mockResolvedValue({
+      latest_charge: {
+        id: 'ch_1',
+        amount: 4900,
+        amount_refunded: 2000,
+        refunded: false,
+        disputed: false,
+        refunds: { data: [{ id: 're_ok', status: 'succeeded' }, { id: 're_bad', status: 'failed' }] },
+      },
+    });
+    const res = await settleAppointmentNoShowFee(PI());
+    expect(res.settled).toBe(true);
+    const paymentInserts = mockTrxTouches.filter((t) => t.table === 'payments')
+      .flatMap((t) => t.chain.calls.filter((c) => c[0] === 'insert').map((c) => c[1]));
+    const meta = JSON.parse(paymentInserts[0].metadata);
+    expect(meta.stamped_refund_ids).toEqual(['re_ok']);
+    expect(paymentInserts[0].stripe_refund_id).toBe('re_ok');
+    expect(meta.pre_settlement_refund).toBeUndefined();
+    expect(meta.pre_settlement_dispute).toBeUndefined();
+  });
+
   test('settlement heals a stuck charging OR parked charge_review claim to charged (r21 + r25)', async () => {
     const res = await settleAppointmentNoShowFee(PI());
     expect(res.settled).toBe(true);

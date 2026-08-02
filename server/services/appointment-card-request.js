@@ -2336,6 +2336,12 @@ async function settleAppointmentNoShowFee(paymentIntent) {
         || String(existing.refund_status || '').toLowerCase() === 'full';
       const isMarker = meta.pre_settlement_refund === true || meta.pre_settlement_dispute === true;
       if (!isMarker || fullyRefunded) return { replay: true };
+      // An invoice-bound row is SETTLED regardless of any residual marker
+      // flag (Codex #3153 r27 P1): a worker crash after the adoption
+      // commit but before the webhook-processed stamp replays this event —
+      // re-adopting would mint a second paid invoice + receipt and rebind
+      // the row away from the first.
+      if (meta.invoice_id) return { replay: true };
       // A still-contested dispute marker stays untouched — the dispute-won
       // handler flips it and re-triggers settlement (Codex #3153 r18 P1).
       if (String(existing.status || '').toLowerCase() === 'disputed') return { replay: true };
@@ -2406,8 +2412,16 @@ async function settleAppointmentNoShowFee(paymentIntent) {
         }
         const chargedCents = Math.round(Number(ch.amount || 0));
         preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
+        // Only refunds whose money is counted in amount_refunded (Codex
+        // #3153 r27 P1): a failed/canceled refund can sit in the same
+        // collection — stamping its id would let its refund.failed event
+        // subtract an amount that was never included, erasing a legitimate
+        // successful refund from refund_amount.
         liveRefundIds = Array.isArray(ch.refunds?.data)
-          ? ch.refunds.data.map((r) => r?.id).filter(Boolean)
+          ? ch.refunds.data
+            .filter((r) => ['succeeded', 'pending'].includes(String(r?.status || '')))
+            .map((r) => r?.id)
+            .filter(Boolean)
           : [];
         if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
           // Durable FULL-refund marker with canonical attribution (Codex
@@ -2489,9 +2503,14 @@ async function settleAppointmentNoShowFee(paymentIntent) {
       status: 'paid',
       description,
       metadata: JSON.stringify({
-        // Marker metadata (stamped_refund_ids, pre_settlement_refund) rides
-        // forward so a later refund bounce can still unwind it (r17).
+        // Marker metadata (stamped_refund_ids) rides forward so a later
+        // refund bounce can still unwind it (r17) — but the marker FLAGS
+        // are cleared (r27 P1): a settled row must never look adoptable
+        // again on a crash replay, and invoice_id (below) is the settled
+        // fence the replay guard keys on.
         ...(markerMeta || {}),
+        pre_settlement_refund: undefined,
+        pre_settlement_dispute: undefined,
         ...(preRefundedCents > 0 && liveRefundIds.length ? { stamped_refund_ids: liveRefundIds } : {}),
         purpose: 'appointment_card_no_show_fee',
         invoice_id: inv.id,
