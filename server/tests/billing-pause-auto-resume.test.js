@@ -333,6 +333,21 @@ describe('stripe-webhook wiring', () => {
     expect(helper).not.toContain('catch');
   });
 
+  test('no qualifying LEDGER row, no clear — Stripe success alone is not settled customer money', () => {
+    // Quarantined mismatches and orphaned duplicates never write a customer
+    // payments row; a disputed payment's row is no longer status='paid'.
+    // The gate reads the same exclusions as billing-cron's pause veto, so
+    // the two sides of the race share one source of truth.
+    const helperStart = src.indexOf('async function maybeAutoClearBillingPauseForIntent');
+    const helperEnd = src.indexOf('async function', helperStart + 10);
+    const helper = src.slice(helperStart, helperEnd);
+    expect(helper).toMatch(/stripe_payment_intent_id: paymentIntent\.id, status: 'paid'/);
+    expect(helper).toContain("whereNull('statement_id')");
+    expect(helper).toContain("IS DISTINCT FROM 'card_hold_no_show_fee'");
+    expect(helper).toMatch(/payer_id'\) IS NULL/);
+    expect(helper).toContain('if (!ledgerRow) return;');
+  });
+
   test('the dispatch helper skips non-arrears money and resolves invoice-first', () => {
     const helperStart = src.indexOf('async function maybeAutoClearBillingPauseForIntent');
     expect(helperStart).toBeGreaterThan(-1);

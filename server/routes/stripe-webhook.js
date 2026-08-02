@@ -308,6 +308,22 @@ async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) 
     ? (invoice.payer_id ? null : invoice.customer_id)
     : (paymentIntent?.metadata?.waves_customer_id || null);
   if (!pausedCustomerId) return;
+  // Require a QUALIFYING LEDGER ROW before clearing — "Stripe says the PI
+  // succeeded" is not the same as "we accepted it as settled customer
+  // money". Quarantined tender mismatches and orphaned late duplicates
+  // never write a customer payments row (they land in their own review
+  // tables), and a disputed payment's row has left status='paid' — none of
+  // them should re-enable billing. The exclusions mirror billing-cron's
+  // pause veto exactly, so both sides of the race read one source of
+  // truth. If a quarantine later resolves into a real settlement, THAT
+  // write's own processing re-runs this dispatch and clears then.
+  const ledgerRow = await db('payments')
+    .where({ stripe_payment_intent_id: paymentIntent.id, status: 'paid' })
+    .whereNull('statement_id')
+    .whereRaw("(payments.metadata->>'purpose') IS DISTINCT FROM 'card_hold_no_show_fee'")
+    .whereRaw("(payments.metadata->>'payer_id') IS NULL")
+    .first('id');
+  if (!ledgerRow) return;
   const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
   const result = await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
     paymentIntentId: paymentIntent.id,
