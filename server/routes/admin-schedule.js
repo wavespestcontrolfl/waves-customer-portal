@@ -5057,9 +5057,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // matches stay untouched — stamping one of several same-day rows
         // could bind the wrong visit; FK-carrying records need no heal.
         if (updates.scheduled_date !== undefined || updates.service_type !== undefined) {
-          const preTupleRow = await trx('scheduled_services').where({ id: req.params.id }).first();
+          // FOR UPDATE first (codex P2 #3152 round 20): the correction and
+          // costing paths lock scheduled_services and then touch
+          // service_records — healing in the opposite order (record update,
+          // then the tuple update below) deadlocks against them. Taking the
+          // scheduled-service lock up front puts all three paths in one
+          // lock order.
+          const preTupleRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
           const srCols = await trx('service_records').columnInfo();
-          if (preTupleRow && srCols.scheduled_service_id) {
+          // Completed visits only (codex P2 #3152 round 20): the soft-join
+          // resolves records by (customer, date, type) — an OPEN visit
+          // sharing its tuple with a completed pre-FK visit would otherwise
+          // steal that visit's record and permanently redirect report and
+          // costing lookups. Only the completed visit can own the record.
+          if (preTupleRow && preTupleRow.status === 'completed' && srCols.scheduled_service_id) {
             const { record: legacyRecord, viaFk: legacyViaFk, ambiguous: legacyAmbiguous } = await require('../services/job-costing')
               .resolveServiceRecord(trx, preTupleRow, srCols);
             if (legacyRecord && !legacyViaFk && !legacyAmbiguous) {

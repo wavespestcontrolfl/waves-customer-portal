@@ -735,8 +735,19 @@ async function markComplete(serviceId, opts = {}) {
   const fenceSeq = opts.expectedCorrectionSeq !== undefined
     ? opts.expectedCorrectionSeq
     : (svc.time_on_site_correction_seq ?? null);
-  let completedAtStamp = !transitionStampMatches
-    ? null // a newer correction owns completed_at — the row's value stands
+  // A correction that committed BEFORE this load owns the row exactly as
+  // much as one that commits after it — and the seq predicate only detects
+  // post-load movement (codex P2 #3152 round 20). When the caller states no
+  // revision (an ordinary status-route completion) and the loaded row
+  // already carries a correction revision WITH a completed_at (the
+  // unclosed-timer correction stamps its derived end proactively), the flip
+  // degrades to transition-only: stamping `now` over the corrected instant
+  // is the exact overwrite the fences exist to prevent.
+  const priorCorrectionOwnsRow = opts.expectedCorrectionSeq === undefined
+    && normStamp(svc.time_on_site_correction_seq) != null
+    && !!finiteDate(svc.completed_at);
+  let completedAtStamp = (!transitionStampMatches || priorCorrectionOwnsRow)
+    ? null // the correction owns completed_at — the row's value stands
     : (opts.untrustedLifecycleSpan
       ? finiteDate(opts.completedAt)
       : (finiteDate(opts.completedAt) || now));
@@ -750,7 +761,7 @@ async function markComplete(serviceId, opts = {}) {
     .whereIn('track_state', transitionableStates)
     .update({ track_state: 'complete', updated_at: now });
   let updated;
-  if (!transitionStampMatches) {
+  if (!transitionStampMatches || priorCorrectionOwnsRow) {
     updated = await transitionOnlyFlip();
   } else {
     updated = await db('scheduled_services')

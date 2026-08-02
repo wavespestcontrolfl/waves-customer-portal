@@ -351,7 +351,7 @@ describe('live override composed with buildCompletionLifecycleUpdates', () => {
     // fallback — so the live override's adjusted instant is not discarded.
     // Both branches sit behind the round-15 transition stamp fence: when a
     // newer correction owns completed_at, neither stamps anything.
-    expect(trackerSource).toMatch(/let completedAtStamp = !transitionStampMatches\s*\n\s*\? null[\s\S]{0,120}: \(opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\)\);/);
+    expect(trackerSource).toMatch(/let completedAtStamp = \(!transitionStampMatches \|\| priorCorrectionOwnsRow\)\s*\n\s*\? null[\s\S]{0,120}: \(opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\)\);/);
   });
 
   test('the live sanitizer and the backfill sanitizer are the same 1..720 rule', () => {
@@ -611,7 +611,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // holds on crash-resumed retries too. Anchored to the transaction's own
     // wall clock so the clamp decision matches the committed stamps (codex
     // P2 round 14).
-    expect(source).toMatch(/: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt \|\| new Date\(\)\)\s*\n\s*: null\);/);
+    expect(source).toMatch(/: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
   });
 
   test('the finalization takes the row lock at transaction start — corrections and finalizations are strictly ordered (codex P2 round 14)', () => {
@@ -1147,6 +1147,13 @@ describe('job costing durable re-derivation from the timeOnSiteAdjusted marker',
     expect(healAt).toBeGreaterThan(-1);
     expect(tupleUpdateAt).toBeGreaterThan(healAt);
     expect(adminScheduleSource).toMatch(/if \(legacyRecord && !legacyViaFk && !legacyAmbiguous\) \{\s*\n\s*await trx\('service_records'\)\s*\n\s*\.where\(\{ id: legacyRecord\.id \}\)\s*\n\s*\.update\(\{ scheduled_service_id: req\.params\.id \}\);/);
+    // Round-20 guards: the heal takes the scheduled-service lock FIRST
+    // (same lock order as the correction and costing paths — opposite
+    // order deadlocks), and only a COMPLETED visit can own the record (an
+    // open visit sharing the tuple must not steal a completed visit's
+    // report).
+    expect(adminScheduleSource).toMatch(/const preTupleRow = await trx\('scheduled_services'\)\.where\(\{ id: req\.params\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    expect(adminScheduleSource).toMatch(/if \(preTupleRow && preTupleRow\.status === 'completed' && srCols\.scheduled_service_id\) \{/);
   });
 
   test('an ambiguous legacy match contributes NOTHING to costing — nulled at resolution, not just at the write-through (codex P2 round 6)', () => {

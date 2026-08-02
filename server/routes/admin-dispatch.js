@@ -6079,11 +6079,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // wall clock exactly like a plain live completion.
       // Anchored to the transaction's own wall clock so the clamp decision
       // here matches the committed lifecycle stamps exactly (codex P2
-      // round 14); a crash-resumed retry (no transaction ran) falls back to
-      // the current clock — the recompute is deterministic from the frozen
-      // minutes and the row's start either way.
+      // round 14). On a crash-resumed retry no transaction ran in THIS
+      // process and the clamp anchor exists only in memory — recomputing
+      // against the current clock flips a committed clamp once
+      // start + minutes has passed (codex P2 round 20), splitting the
+      // tracker's completed_at from the committed end fields. The committed
+      // lifecycle end IS the clamp outcome, so the resume path carries the
+      // persisted stamp instead of recomputing.
       : (typeof effectiveTimeOnSite === 'number'
-        ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionWallClockAt || new Date())
+        ? (completionWallClockAt
+          ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionWallClockAt)
+          : (finiteDate(svc.actual_end_time) || finiteDate(svc.check_out_time) || null))
         : null);
 
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is

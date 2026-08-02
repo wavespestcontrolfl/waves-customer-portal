@@ -818,6 +818,36 @@ describe('track-transitions lifecycle side effects', () => {
     expect(update2.update.mock.calls[0][0].completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
   });
 
+  test('a correction that committed BEFORE the load owns completed_at — the flip is transition-only (codex P2 #3152 round 20)', async () => {
+    // Unclosed-timer flow: the admin corrected the running timer (the PATCH
+    // stamped seq 1 and the derived completed_at), then the tech completes
+    // through the status route with no stated revision. The seq predicate
+    // only sees post-load movement, so this pre-load correction must be
+    // preserved by inspection: no `now` over the corrected instant, no
+    // lifecycle rebuild over the corrected columns.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f20',
+      technician_id: 'tech-f20',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      actual_end_time: new Date('2026-07-19T12:45:00.000Z'),
+      completed_at: new Date('2026-07-19T12:45:00.000Z'),
+      time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 1,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-f20', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    expect(Object.keys(update.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+  });
+
   test('a fenced 0-row write whose retry also matches 0 rows reloads instead of guessing (codex P2 #3152 round 16)', async () => {
     // Both writes miss → the state (not the stamp) moved: another writer
     // completed the visit. Report the fresh row, write nothing.
