@@ -196,9 +196,10 @@ async function releasePhoneClaim(phone) {
 
 // Success-path variant: transitions ONLY from the in-flight 'claimed' state
 // so a bounce verdict that raced in first is never overwritten.
-async function stampPhoneClaimIfClaimed(phone, outcome) {
+async function stampPhoneClaimIfClaimed(phone, outcome, providerSid = null) {
   try {
-    await db('dropped_call_sms_claims').where({ phone, outcome: 'claimed' }).update({ outcome });
+    await db('dropped_call_sms_claims').where({ phone, outcome: 'claimed' })
+      .update({ outcome, ...(providerSid ? { provider_sid: providerSid } : {}) });
   } catch (e) {
     logger.warn(`[dropped-call-sms] conditional phone claim stamp failed for ${maskPhone(phone)}: ${e.code || e.name || 'db_error'}`);
   }
@@ -389,7 +390,7 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     // these run and stamp 'undelivered'/'opted_out' from the in-flight
     // 'claimed' state — the sender must never overwrite that verdict.
     await stampStatusIfClaimed(leadId, 'sent');
-    await stampPhoneClaimIfClaimed(phone, 'sent');
+    await stampPhoneClaimIfClaimed(phone, 'sent', result.providerMessageId || null);
     await logActivity(leadId, 'sms_sent', `Auto-texted address request after dropped call to ${maskPhone(phone)}`, {
       message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,
@@ -492,18 +493,17 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
     if (!phone) return { handled: false, reason: 'no_phone' };
 
     return await db.transaction(async (trx) => {
-      const claim = await trx('dropped_call_sms_claims').where({ phone }).first('lead_id', 'outcome', 'created_at');
+      const claim = await trx('dropped_call_sms_claims').where({ phone }).first('lead_id', 'outcome', 'provider_sid');
       if (!claim || !claim.lead_id) return { handled: false, reason: 'no_claim_lead' };
-      // Without a SID-bound sms_log row, phone-alone correlation could
-      // misattribute an UNRELATED SMS's bounce to this claim (codex P1).
-      // The send-then-log race window is seconds — accept the log-less path
-      // only while the claim is fresh; a stale claim without a matching log
-      // row is somebody else's bounce.
-      if (!row) {
-        const ageMs = Date.now() - new Date(claim.created_at || 0).getTime();
-        if (!Number.isFinite(ageMs) || ageMs > 15 * 60 * 1000) {
-          return { handled: false, reason: 'no_log_row_and_claim_stale' };
-        }
+      // Without a SID-bound sms_log row, the ONLY safe correlation is the
+      // provider SID stamped on the claim at send time — /status dispatches
+      // this handler for EVERY failed outbound SMS, and phone-plus-recency
+      // would let another message's bounce (whose own sms_log insert also
+      // raced) mutate this claim's lead and card (codex P1). No stored SID
+      // (the callback beat the sent-stamp too) → refuse; the row-present
+      // path and the processor's post-insert reconcile cover that window.
+      if (!row && claim.provider_sid !== sid) {
+        return { handled: false, reason: 'no_log_row_and_sid_mismatch' };
       }
       // Atomic idempotency gate: exactly one callback (Twilio retries them)
       // flips 'sent' -> 'undelivered'; every later one sees 0 rows.

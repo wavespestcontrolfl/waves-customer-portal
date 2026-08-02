@@ -15,6 +15,11 @@ exports.up = async function (knex) {
     t.string('phone', 20).primary();
     t.uuid('lead_id');
     t.string('outcome', 30);
+    // Provider SID stamped on the successful send — the delivery-status
+    // callback's ONLY safe correlation key when the sms_log insert lost the
+    // send-then-log race (phone alone would let another message's bounce
+    // mutate this claim's lead and card).
+    t.string('provider_sid', 64);
     t.timestamp('created_at').defaultTo(knex.fn.now());
   });
 };

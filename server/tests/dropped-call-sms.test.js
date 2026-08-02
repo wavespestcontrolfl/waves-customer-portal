@@ -388,20 +388,20 @@ describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
     expect(note.payload.description).toMatch(/30006/);
   });
 
-  it('sms_log row missing (send-then-log race) — still remediates via a FRESH claim row', async () => {
+  it('sms_log row missing (send-then-log race) — remediates only on an exact provider-SID match', async () => {
     state.firstResults.sms_log = [null];
-    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent', created_at: new Date(Date.now() - 60 * 1000) }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent', provider_sid: 'SM1' }];
     state.firstResults.leads = [{ id: LEAD_ID }];
     const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'failed', to: PHONE });
     expect(res).toEqual({ handled: true, leadId: LEAD_ID });
     expect(state.updates.some((u) => u.table === 'triage_items')).toBe(true);
   });
 
-  it('sms_log row missing AND claim stale — refuses (phone alone is not authoritative)', async () => {
+  it("sms_log row missing AND sid doesn't match the claim — refuses (another message's bounce)", async () => {
     state.firstResults.sms_log = [null];
-    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent', created_at: new Date(Date.now() - 2 * 60 * 60 * 1000) }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent', provider_sid: 'SM_other' }];
     const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'failed', to: PHONE });
-    expect(res).toEqual({ handled: false, reason: 'no_log_row_and_claim_stale' });
+    expect(res).toEqual({ handled: false, reason: 'no_log_row_and_sid_mismatch' });
     expect(state.updates.filter((u) => u.table === 'dropped_call_sms_claims')).toHaveLength(0);
   });
 
