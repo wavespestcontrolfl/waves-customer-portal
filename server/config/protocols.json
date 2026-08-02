@@ -8,7 +8,7 @@
         "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
         "★ NEW v4: N RATE CONTROL — Explicit lb N/1,000 per visit in Notes. Annual target: Basic/Std 1.5 lb N, Enh/Prem 3.0 lb N.",
         "★ NEW v4: Soil-test branching — P index >80 skip 24-2-11, K >80 ppm skip K-Flow. Chinch IPM ≥20/sq ft threshold + MOA ro",
-        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. SpeedZone Apr weather-gated at 90°F.",
+        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. SpeedZone Apr weather-gated at 85°F.",
         "★ NEW v4: Aug drive-by scout + Dec wellness touchpoint for Basic/Std. Thatch measurement V3+V10. Irrigation VWC audit V2",
         "★ ST. AUGUSTINE IS ONE TRACK: Do not split the protocol into full-sun vs shade programs. Use site observations only as condition checks for stress, disease, irrigation, and herbicide safety."
       ],
@@ -65,7 +65,7 @@
           "visit": 4,
           "month": "Apr",
           "primary": "Acelepryn Xtra liquid preventive ($6.78)\n★ SpeedZone Southern + NIS WEATHER-GATED ($5.95)\nK-Flow 0-0-25 liquid K ($2.18)",
-          "secondary": "Primo Maxx PGR Premium only ($1.91)\nDismiss if sedge ($4.36)\n★ IF forecast >90°F → Celsius WG instead of SpeedZone",
+          "secondary": "Primo Maxx PGR Premium only ($1.91)\nDismiss if sedge ($4.36)\n★ IF forecast >85°F → Celsius WG instead of SpeedZone",
           "material_cost": "36.13",
           "labor_cost": "26.96",
           "tiers": {
@@ -74,7 +74,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "CRITICAL: Acelepryn before chinch season. N rate: 0 lb N. ★ SpeedZone NOW WEATHER-GATED at 90°F — Celsius WG fallback.",
+          "notes": "CRITICAL: Acelepryn before chinch season. N rate: 0 lb N. ★ SpeedZone NOW WEATHER-GATED at 85°F — Celsius WG fallback.",
           "conditional_cost": "0.55"
         },
         {
@@ -154,7 +154,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "K-Flow returns (soil-test gated). SpeedZone safe — temps <90°F. N rate: 0 lb.",
+          "notes": "K-Flow returns (soil-test gated). SpeedZone safe — temps <85°F. N rate: 0 lb.",
           "conditional_cost": "0.55"
         },
         {
@@ -209,7 +209,7 @@
       "site_condition_rules": {
         "default": "standard_st_augustine",
         "stress_check": "If turf is heat, drought, scalp, or disease stressed, hold PGR and hot herbicide until manager review.",
-        "herbicide_heat_gate": "SpeedZone Southern is weather-gated at 90°F; use Celsius WG fallback when heat risk is high.",
+        "herbicide_heat_gate": "SpeedZone Southern is weather-gated at 85°F; use Celsius WG fallback when heat risk is high.",
         "disease_check": "Pull-test and inspect roots when thinning or patch symptoms are present; choose fungicide by diagnosis, not by sun/shade label.",
         "irrigation_vwc_threshold": "Use VWC/audit notes to adjust irrigation recommendations; do not create a separate St. Augustine shade program."
       }
@@ -217,14 +217,14 @@
     "bermuda": {
       "name": "Bermuda Lawn Care Protocol",
       "notes": [
-        "⚠ SpeedZone Southern: NEVER apply above 90°F. In SWFL summer, use Celsius WG for Jul/Aug/Sep broadleaf instead.",
+        "⚠ SpeedZone Southern: NEVER apply above 85°F. In SWFL summer, use Celsius WG for Jul/Aug/Sep broadleaf instead.",
         "⚠ NO Atrazine on Bermuda — Atrazine is ST. AUGUSTINE ONLY.",
         "⚠ PGR: Primo Maxx every 3-4 weeks Mar-Oct. Document growth response each visit. Bermuda grows aggressively.",
         "⚠ N budget: 3.0-4.0 lb N/K/yr. Explicit rates per visit below. Bermuda = high-input track.",
         "★ NEW v4: SDS preventive fungicide calendar — Armada/Velista (FRAC 7) in Oct+Nov BEFORE soil temps <70°F. T-Storm replac",
         "★ NEW v4: Armyworm IPM — soap flush threshold ≥3/sq ft. Curative rotation: Bifen (3A) → chlorantraniliprole (28) → spino",
         "★ NEW v4: Mole cricket curative defined — Dylox 420 SL for adult activity beyond Acelepryn residual.",
-        "★ NEW v4: SpeedZone April weather-gated at 90°F. Soil-test branching. Thatch measurement V3+V10. Irrigation VWC audit.",
+        "★ NEW v4: SpeedZone April weather-gated at 85°F. Soil-test branching. Thatch measurement V3+V10. Irrigation VWC audit.",
         "★ NEW v4: PGR response documentation at each PGR visit — calibrate rate per property. Aug/Dec all-tier touchpoints.",
         "★ NEW v4: FRAC rotation fixed — Armada (7) Oct → Armada (7) Nov → Torque (3) spring SDS followup. No FRAC 11 stacking."
       ],
@@ -281,7 +281,7 @@
           "visit": 4,
           "month": "Apr",
           "primary": "Acelepryn Xtra preventive ($6.78)\n★ SpeedZone Southern WEATHER-GATED ($5.95)\nPrimo Maxx PGR ($1.91)\nK-Flow 0-0-25 ($2.18)",
-          "secondary": "★ Mole cricket tunnel scout\n★ Armyworm soap flush baseline\nAnuew EZ Premium ($21.79)\n★ IF forecast >90°F → Celsius WG instead",
+          "secondary": "★ Mole cricket tunnel scout\n★ Armyworm soap flush baseline\nAnuew EZ Premium ($21.79)\n★ IF forecast >85°F → Celsius WG instead",
           "material_cost": "50.38",
           "labor_cost": "26.96",
           "tiers": {
@@ -290,7 +290,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Acelepryn covers armyworm+mole cricket nymphs. PGR cycle 2. ★ SpeedZone WEATHER-GATED at 90°F. ★ Mole cricket + armyworm scout protocols defined.",
+          "notes": "Acelepryn covers armyworm+mole cricket nymphs. PGR cycle 2. ★ SpeedZone WEATHER-GATED at 85°F. ★ Mole cricket + armyworm scout protocols defined.",
           "conditional_cost": "0.00"
         },
         {
@@ -338,7 +338,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Celsius replaces SpeedZone (>90°F). PGR cycle 5. ★ Armyworm MOA rotation: Bifen (3A) → chlorantraniliprole (28).",
+          "notes": "Celsius replaces SpeedZone (>85°F). PGR cycle 5. ★ Armyworm MOA rotation: Bifen (3A) → chlorantraniliprole (28).",
           "conditional_cost": "1.12"
         },
         {
@@ -377,7 +377,7 @@
           "visit": 10,
           "month": "Oct",
           "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\nSpeedZone Southern + NIS ($5.95)\n★ Armada 50 WDG SDS preventive ($12.41)\nPrimo Maxx PGR LAST ($1.91)",
-          "secondary": "★ SDS PREVENTION #1 — apply BEFORE soil temps <70°F\n★ THATCH MEASUREMENT #2: compare to Mar\n★ SpeedZone returns — temps <90°F",
+          "secondary": "★ SDS PREVENTION #1 — apply BEFORE soil temps <70°F\n★ THATCH MEASUREMENT #2: compare to Mar\n★ SpeedZone returns — temps <85°F",
           "material_cost": "44.17",
           "labor_cost": "26.96",
           "tiers": {
@@ -429,12 +429,12 @@
         "⚠ N budget: 2.0-3.0 lb N/K/yr MAX (UF/IFAS). Excess N = explosive thatch → severe Large Patch in fall.",
         "⚠ PGR: Primo Maxx at CONSERVATIVE rates only. Document response. Over-regulation = months of thin turf.",
         "⚠ Large Patch (Rhizoctonia): Zoysia is HIGHLY susceptible. Preventive fungicide Oct-Mar with FRAC rotation.",
-        "⚠ SpeedZone Southern: NEVER apply above 90°F. Use Celsius WG for Jul/Aug/Sep broadleaf.",
+        "⚠ SpeedZone Southern: NEVER apply above 85°F. Use Celsius WG for Jul/Aug/Sep broadleaf.",
         "⚠ NO Atrazine on Zoysia. NO Anuew EZ on Zoysia.",
         "★ NEW v4: Large Patch FRAC — preventive Headway (11+3) Oct → Medallion (12) Nov (base); Velista (FRAC 7) as the Dec rescue when large patch is active. Rotate MOA each app, no consecutive repeat. No more tri",
         "★ NEW v4: Large patch diagnostic criteria for techs — orange-brown rings with dark \"smoke ring\" advancing border.",
         "★ NEW v4: Thatch measurement V3+V10. Zoysia trigger: >0.5\" (lower than Bermuda 0.75\" — denser thatch per inch).",
-        "★ NEW v4: SpeedZone April weather-gated at 90°F. Soil-test branching. PGR response documentation.",
+        "★ NEW v4: SpeedZone April weather-gated at 85°F. Soil-test branching. PGR response documentation.",
         "★ NEW v4: Irrigation VWC audit V2+V6. Aug all-tier scout. Dec all-tier touchpoint. Conditional ceiling $60."
       ],
       "visits": [
@@ -490,7 +490,7 @@
           "visit": 4,
           "month": "Apr",
           "primary": "Acelepryn Xtra preventive ($6.78)\n★ SpeedZone Southern WEATHER-GATED ($5.95)\nK-Flow 0-0-25 ($2.18)",
-          "secondary": "Primo Maxx PGR CONSERVATIVE ($1.91)\nWebworm scout — Zoysia primary insect\n★ IF forecast >90°F → Celsius WG instead",
+          "secondary": "Primo Maxx PGR CONSERVATIVE ($1.91)\nWebworm scout — Zoysia primary insect\n★ IF forecast >85°F → Celsius WG instead",
           "material_cost": "27.38",
           "labor_cost": "26.96",
           "tiers": {
@@ -499,7 +499,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "Acelepryn covers webworm. N rate: 0 lb. ★ SpeedZone WEATHER-GATED at 90°F with Celsius fallback. PGR conservative — document response.",
+          "notes": "Acelepryn covers webworm. N rate: 0 lb. ★ SpeedZone WEATHER-GATED at 85°F with Celsius fallback. PGR conservative — document response.",
           "conditional_cost": "0.00"
         },
         {
@@ -538,7 +538,7 @@
           "visit": 7,
           "month": "Jul",
           "primary": "BLACKOUT — Celsius WG + NIS broadleaf ($3.84)\nPrimo Maxx PGR ($1.91)",
-          "secondary": "Celsius replaces SpeedZone — too hot (>90°F)\nMoisture Manager if needed ($7.45)\n★ Document PGR response — critical on Zoysia",
+          "secondary": "Celsius replaces SpeedZone — too hot (>85°F)\nMoisture Manager if needed ($7.45)\n★ Document PGR response — critical on Zoysia",
           "material_cost": "12.43",
           "labor_cost": "26.96",
           "tiers": {
@@ -586,7 +586,7 @@
           "visit": 10,
           "month": "Oct",
           "primary": "LESCO 24-0-11 PolyPlus fert ($8.68)\n★ Headway G SC PREVENTIVE (FRAC 11+3) ($17.16)\nChelated Iron Plus ($1.52)",
-          "secondary": "SpeedZone + NIS ($5.95) — safe again <90°F\n★ LARGE PATCH PREVENTION #1 — NON-NEGOTIABLE\n★ THATCH MEASUREMENT #2: compare to Mar, >0.5\" = dethatch",
+          "secondary": "SpeedZone + NIS ($5.95) — safe again <85°F\n★ LARGE PATCH PREVENTION #1 — NON-NEGOTIABLE\n★ THATCH MEASUREMENT #2: compare to Mar, >0.5\" = dethatch",
           "material_cost": "91.25",
           "labor_cost": "26.96",
           "tiers": {
@@ -644,7 +644,7 @@
         "★ NEW v4: T-Storm removed from Oct default — fungicide now conditional on active dollar spot only. Low-input = no \"just ",
         "★ NEW v4: Fire ant protocol — Topchoice broadcast ONCE/yr at V4 for documented history. 12-month control. Prevents callb",
         "★ NEW v4: Crabgrass — NO bahia-safe post-emergent curative (Drive/quinclorac NOT labeled for bahia); rely on pre-emergent timing + scout/manual, nonselective spot only where turf loss is acceptable.",
-        "★ NEW v4: SpeedZone Sep weather-gated at 90°F. Soil-test branching. Explicit N rates (0.75 lb N/1K per app).",
+        "★ NEW v4: SpeedZone Sep weather-gated at 85°F. Soil-test branching. Explicit N rates (0.75 lb N/1K per app).",
         "★ NEW v4: Seed head customer communication at V1+V7. Aug all-tier scout. Dec all-tier touchpoint. $60 conditional ceilin",
         "★ NEW v4: Customer expectation framework structured at V1, V7 (seed heads), V12 (dormancy). Reduces cancellations."
       ],
@@ -685,7 +685,7 @@
           "visit": 3,
           "month": "Mar",
           "primary": "Prodiamine 65 WDG split 2 ($3.51)\nLESCO 24-0-11 PolyPlus fert ($8.68)",
-          "secondary": "SpeedZone Southern if broadleaf heavy — established turf, <90°F ($5.95)\n★ Soil sample OPTIONAL if requested — $15\n★ Mole cricket adult flight season — re-flush if Feb was borderline",
+          "secondary": "SpeedZone Southern if broadleaf heavy — established turf, <85°F ($5.95)\n★ Soil sample OPTIONAL if requested — $15\n★ Mole cricket adult flight season — re-flush if Feb was borderline",
           "material_cost": "24.28",
           "labor_cost": "26.96",
           "tiers": {
@@ -701,7 +701,7 @@
           "visit": 4,
           "month": "Apr",
           "primary": "Acelepryn Xtra preventive ($6.78)\n★ SpeedZone Southern WEATHER-GATED ($5.95)\nK-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow (needs water to activate)",
-          "secondary": "★ Topchoice BROADCAST if fire ant history ($8.22)\n— provides 12-month control, prevents callbacks\n★ IF forecast >90°F → DEFER broadleaf (no bahia-safe herbicide when hot)\nMole cricket: Acelepryn covers nymphs",
+          "secondary": "★ Topchoice BROADCAST if fire ant history ($8.22)\n— provides 12-month control, prevents callbacks\n★ IF forecast >85°F → DEFER broadleaf (no bahia-safe herbicide when hot)\nMole cricket: Acelepryn covers nymphs",
           "material_cost": "27.38",
           "labor_cost": "26.96",
           "tiers": {
@@ -748,7 +748,7 @@
         {
           "visit": 7,
           "month": "Jul",
-          "primary": "BLACKOUT — broadleaf: SpeedZone Southern only if <90°F on established turf ($5.95); DEFER when hot (no bahia-safe hot-weather fallback)",
+          "primary": "BLACKOUT — broadleaf: SpeedZone Southern only if <85°F on established turf ($5.95); DEFER when hot (no bahia-safe hot-weather fallback)",
           "secondary": "★ OPTIONAL CUSTOMER EXPECTATION TALK #2 — SEED HEADS:\n\"Bahia produces seed heads Jun-Aug. This is normal,\nhealthy biology — not a problem. Mowing frequency\ncontrols the l",
           "material_cost": "0.00",
           "labor_cost": "26.96",
@@ -780,7 +780,7 @@
         {
           "visit": 9,
           "month": "Sep",
-          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow\n★ SpeedZone Southern WEATHER-GATED ($5.95)\n★ IF >90°F → DEFER broadleaf (no bahia-safe herbicide when hot)",
+          "primary": "BLACKOUT — K-Flow 0-0-25 ($2.18)\n★ NON-IRRIGATED: skip K-Flow\n★ SpeedZone Southern WEATHER-GATED ($5.95)\n★ IF >85°F → DEFER broadleaf (no bahia-safe herbicide when hot)",
           "secondary": "Dismiss for sedge ($4.36)\n★ Crabgrass breakthrough: NO bahia-safe curative — pre-em reliance + manual/nonselective spot\n★ Early Sep SWFL can still hit 90°F+",
           "material_cost": "5.21",
           "labor_cost": "26.96",

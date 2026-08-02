@@ -621,7 +621,7 @@ const PROJECT_TYPES = {
       { key: 'disease_pressure', label: 'Disease pressure', type: 'select', section: 'Pressure observed', options: ['None observed', 'Suspected', 'Confirmed'] },
       { key: 'turf_issues', label: 'Issues observed', type: 'chips', section: 'Pressure observed', options: [
         'Chinch bug damage', 'Sod webworm signs', 'Armyworm signs', 'Grub activity',
-        'Brown patch / large patch', 'Gray leaf spot', 'Dollarweed', 'Sedge', 'Crabgrass',
+        'Large patch', 'Gray leaf spot', 'Dollarweed', 'Sedge', 'Crabgrass',
         'Broadleaf weeds', 'Drought stress', 'Scalping', 'Excess shade', 'Compaction', 'Pet damage',
       ] },
       { key: 'irrigation_mowing', label: 'Irrigation & mowing notes', type: 'chips', section: 'Irrigation & mowing', options: [

@@ -79,9 +79,15 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('products_catalog'))) return;
 
+  // All three values must still be exactly what up() wrote. Matching only the
+  // restriction text would destroy a hand-edited bound that someone set after
+  // up() ran while leaving the text alone — the same admin-edit-preserving
+  // contract the forward direction honours.
   await knex('products_catalog')
     .whereRaw('LOWER(name) = LOWER(?)', [NAME])
     .where('heat_restrictions', HEAT_RESTRICTIONS)
+    .where('max_temp_f', 85)
+    .where('min_temp_f', 50)
     .update({
       max_temp_f: null,
       min_temp_f: null,

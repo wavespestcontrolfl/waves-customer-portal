@@ -16184,7 +16184,7 @@ const LAWN_TARGET_SUGGESTIONS = [
   "Tawny mole crickets",
   "Fire ants",
   "Nematodes",
-  "Brown patch / large patch",
+  "Large patch",
   "Dollar spot",
   "Gray leaf spot",
   "Take-all root rot",
