@@ -16,9 +16,10 @@
  *   - Compare-and-swap on the exact pause that was read, so a NEWER pause
  *     applied between the read and the write is never wiped.
  *   - The clear, the customer-timeline note and the critical audit event
- *     share one transaction. On failure the pause stays (the manual button
- *     still exists) and the error is logged loudly — a caller in a webhook
- *     must never throw over this.
+ *     share one transaction. The function itself never throws; an
+ *     infrastructure failure comes back as { reason: 'error', error } and
+ *     the caller chooses — the webhook dispatch rethrows it so Stripe
+ *     redelivers the event and the clear is retried.
  *   - Clearing the pause claims nothing about future collection (the
  *     #3148 lesson): dues resume on the next billing day at most, other
  *     billing guards still apply, and the paused months are never
@@ -129,10 +130,12 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
     logger.info(`[billing-pause] auto-cleared for customer ${customerId} on payment ${context.paymentIntentId || '(unknown PI)'} (was paused ${pausedSince})`);
     return { resumed: true, pausedSince };
   } catch (err) {
-    // The payment already settled — a bookkeeping failure here must never
-    // bubble into the webhook. The pause stays; the manual button covers it.
+    // Infrastructure failure, not a business outcome. The pause stays for
+    // now; the CALLER decides whether to surface it — the stripe-webhook
+    // dispatch throws on this reason so the event 500s and Stripe
+    // redelivers, retrying the clear (handlers are idempotent by contract).
     logger.error(`[billing-pause] auto-clear failed for customer ${customerId}: ${err.message}`);
-    return { resumed: false, reason: 'error' };
+    return { resumed: false, reason: 'error', error: err };
   }
 }
 

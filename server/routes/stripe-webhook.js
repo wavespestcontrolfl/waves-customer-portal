@@ -300,25 +300,27 @@ async function recordCardHoldNoShowFeePayment(paymentIntent) {
 // candidate at all, without metadata fallthrough: the payer's tender proves
 // nothing about the homeowner's dead card, which is why they are paused.
 async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) {
-  try {
-    if (paymentIntent?.metadata?.waves_statement_id) return;
-    if (paymentIntent?.metadata?.purpose === 'estimate_deposit') return;
-    if (paymentIntent?.metadata?.purpose === 'card_hold_no_show_fee') return;
-    const invoice = await findInvoiceForPaymentIntent(paymentIntent);
-    const pausedCustomerId = invoice
-      ? (invoice.payer_id ? null : invoice.customer_id)
-      : (paymentIntent?.metadata?.waves_customer_id || null);
-    if (!pausedCustomerId) return;
-    const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
-    await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
-      paymentIntentId: paymentIntent.id,
-      source: 'stripe_webhook',
-      settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
-    });
-  } catch (err) {
-    // Belt over the helper's own never-throw: a pause staying set must
-    // never fail the webhook.
-    logger.error(`[stripe-webhook] billing-pause auto-clear crashed for PI ${paymentIntent?.id}: ${err.message}`);
+  if (paymentIntent?.metadata?.waves_statement_id) return;
+  if (paymentIntent?.metadata?.purpose === 'estimate_deposit') return;
+  if (paymentIntent?.metadata?.purpose === 'card_hold_no_show_fee') return;
+  const invoice = await findInvoiceForPaymentIntent(paymentIntent);
+  const pausedCustomerId = invoice
+    ? (invoice.payer_id ? null : invoice.customer_id)
+    : (paymentIntent?.metadata?.waves_customer_id || null);
+  if (!pausedCustomerId) return;
+  const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+  const result = await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
+    paymentIntentId: paymentIntent.id,
+    source: 'stripe_webhook',
+    settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
+  });
+  // Business no-ops (not paused, manual pause, ordering refusal) end here.
+  // An INFRASTRUCTURE failure must not be swallowed: the handler's durable
+  // writes are already committed and idempotent, so throwing lets the event
+  // 500 and Stripe redeliver — the retry re-runs the clear instead of the
+  // pause silently surviving a transient DB error forever.
+  if (result?.reason === 'error') {
+    throw new Error(`billing-pause auto-clear failed for customer ${pausedCustomerId} (PI ${paymentIntent.id}): ${result.error?.message || 'unknown'}`);
   }
 }
 

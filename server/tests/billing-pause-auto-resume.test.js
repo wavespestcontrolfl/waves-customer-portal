@@ -236,19 +236,21 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     const pauseIdx = cronSrc.indexOf("service_pause_reason: 'autopay_final_failure'");
     expect(pauseIdx).toBeGreaterThan(-1);
     const before = cronSrc.slice(Math.max(0, pauseIdx - 1600), pauseIdx);
+    // ONE atomic statement: the veto lives in the UPDATE's own predicate
+    // (whereNotExists), so no settled-and-committed payment can slip
+    // between a separate check and the write.
+    expect(before).toContain('whereNotExists');
     expect(before).toContain('attemptStartedAt');
     // 'paid' ONLY — a 'processing' ACH row is accepted, not settled, and can
     // still bounce; and settlement can be an in-place status flip, so BOTH
     // timestamps count.
-    expect(before).toMatch(/status: 'paid'/);
-    // The comment may SAY 'processing'; the QUERY must not accept it.
+    expect(before).toMatch(/'payments\.status', 'paid'/);
     expect(before).not.toMatch(/whereIn\('status'/);
-    expect(before).toContain("orWhere('updated_at'");
-    expect(before).toContain('racedSettlement');
-    // Pause write and paused-email live in the ELSE of the veto.
-    const after = cronSrc.slice(pauseIdx, pauseIdx + 800);
+    expect(before).toContain("orWhere('payments.updated_at'");
+    // The paused-email fires only when the UPDATE actually matched.
+    const after = cronSrc.slice(pauseIdx, pauseIdx + 900);
+    expect(after).toContain('if (!pausedRows)');
     expect(after).toContain('sendMembershipPaused');
-    expect(before).toContain('} else {');
   });
 
   test('every downstream message tells the truth about whether the pause applied', () => {
@@ -285,6 +287,18 @@ describe('stripe-webhook wiring', () => {
     const fnStart = src.indexOf('async function handlePaymentIntentSucceeded');
     const fnEnd = src.indexOf('async function handlePaymentIntentFailed');
     expect(src.slice(fnStart, fnEnd)).not.toContain('maybeResumeBillingPauseOnPayment');
+  });
+
+  test('an infrastructure failure PROPAGATES so Stripe redelivers — business no-ops stay silent', () => {
+    // The webhook's idempotency lane records the error and 500s, Stripe
+    // retries, the reclaim path re-runs the clear. Swallowing the error
+    // would strand the pause behind a processed event forever.
+    const helperStart = src.indexOf('async function maybeAutoClearBillingPauseForIntent');
+    const helperEnd = src.indexOf('async function', helperStart + 10);
+    const helper = src.slice(helperStart, helperEnd);
+    expect(helper).toMatch(/if \(result\?\.reason === 'error'\) \{\s*\n\s*throw new Error/);
+    // And no catch-all swallowing it before the dispatcher sees it.
+    expect(helper).not.toContain('catch');
   });
 
   test('the dispatch helper skips non-arrears money and resolves invoice-first', () => {

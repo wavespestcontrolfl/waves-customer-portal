@@ -1189,38 +1189,43 @@ const BillingCron = {
           // claim a pause that does not exist.
           let pauseApplied = false;
           try {
-            // Concurrent-settlement guard: if ANY payment of this customer's
-            // settled while this attempt was in flight (a portal payment
-            // racing the exhaustion), pausing now would strand them — the
-            // auto-clear in billing-pause.js only fires on settlements that
-            // ARRIVE after a pause exists, and this settlement's webhook may
-            // already have run and seen nothing to clear. A sub-query-window
-            // sliver remains (settlement between this check and the UPDATE);
-            // the next settled payment or the manual button covers it.
-            // status='paid' ONLY — an ACH 'processing' row is accepted, not
-            // settled, and can still bounce; if it does settle later, its
-            // succeeded webhook finds the pause and auto-clears it. Both
-            // timestamps, because settlement takes two shapes: a NEW row
-            // (card, created_at) or an EXISTING processing row flipped to
-            // paid in place (ACH — the webhook's paid-marking updates stamp
-            // updated_at, not created_at).
-            const racedSettlement = await db('payments')
-              .where({ customer_id: payment.customer_id, status: 'paid' })
-              .where(function settledSinceAttempt() {
-                this.where('created_at', '>=', attemptStartedAt)
-                  .orWhere('updated_at', '>=', attemptStartedAt);
-              })
-              .first('id');
-            if (racedSettlement) {
-              // No pause AND no "membership paused" email — the customer
-              // just paid; telling them they're paused would be false.
-              logger.warn(`[billing-cron] NOT pausing customer ${payment.customer_id} — payment ${racedSettlement.id} settled during the final retry attempt`);
-            } else {
-              const pausedAt = new Date();
-              await db('customers').where({ id: payment.customer_id }).update({
+            // Concurrent-settlement guard, IN the UPDATE's predicate: if
+            // any payment of this customer's settled since this attempt
+            // began (a portal payment racing the exhaustion), pausing would
+            // strand them — the auto-clear in billing-pause.js only fires on
+            // settlements whose webhook ARRIVES after a pause exists.
+            // status='paid' ONLY (an ACH 'processing' row is accepted, not
+            // settled, and can still bounce; when it does settle, its
+            // succeeded webhook finds the pause and auto-clears it), and
+            // BOTH timestamps, because settlement takes two shapes: a NEW
+            // row (card — created_at) or an EXISTING processing row flipped
+            // paid in place (ACH — the webhook stamps updated_at). One
+            // atomic statement, so no settled-and-committed payment can
+            // slip between a check and the write; a webhook transaction
+            // still uncommitted at the UPDATE's snapshot is caught by its
+            // own post-commit clear instead.
+            const pausedAt = new Date();
+            const pausedRows = await db('customers')
+              .where({ id: payment.customer_id })
+              .whereNotExists(
+                db('payments')
+                  .select(db.raw('1'))
+                  .whereRaw('payments.customer_id = customers.id')
+                  .where('payments.status', 'paid')
+                  .where(function settledSinceAttempt() {
+                    this.where('payments.created_at', '>=', attemptStartedAt)
+                      .orWhere('payments.updated_at', '>=', attemptStartedAt);
+                  }),
+              )
+              .update({
                 service_paused_at: pausedAt,
                 service_pause_reason: 'autopay_final_failure',
               });
+            if (!pausedRows) {
+              // No pause AND no "membership paused" email — the customer
+              // just paid; telling them they're paused would be false.
+              logger.warn(`[billing-cron] NOT pausing customer ${payment.customer_id} — a payment settled during the final retry attempt`);
+            } else {
               pauseApplied = true;
               void AccountMembershipEmail.sendMembershipPaused({
                 customerId: payment.customer_id,
