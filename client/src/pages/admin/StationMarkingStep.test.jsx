@@ -341,11 +341,37 @@ describe('StationMarkingStep', () => {
       fireEvent.click(screen.getByText('Add stations'));
 
       firePointer(svg, 'pointerdown', 320, 170);
-      firePointer(svg, 'pointermove', 322, 170); // ~1 frame unit — under the slop
-      firePointer(svg, 'pointerup', 322, 170);
+      firePointer(svg, 'pointermove', 324, 170); // 4 client px — under the slop
+      firePointer(svg, 'pointerup', 324, 170);
 
       expect(svg).toHaveAttribute('viewBox', '160 85 320 170');
       expect(onAddStation).toHaveBeenCalledTimes(1);
+    });
+
+    // codex P2 on #3159: measuring the slop in FRAME units made it scale
+    // with the rendered width, so on a real phone (~340px for a 640-unit
+    // frame) the advertised 6px was ~3.2px and an ordinary shake swallowed
+    // the tap. Every earlier zoom test stubs a 640px rect, where the two
+    // units coincide — which is exactly why this one does not.
+    it('the slop is real client pixels, even on a phone-width frame', () => {
+      const onAddStation = vi.fn();
+      const { container } = render(
+        <StationMarkingStep {...baseProps} stations={[]} onAddStation={onAddStation} />,
+      );
+      const svg = container.querySelector('svg');
+      // 390px viewport: the card renders the frame at ~340 CSS px.
+      svg.getBoundingClientRect = () => ({
+        left: 0, top: 0, width: 340, height: 181, right: 340, bottom: 181, x: 0, y: 0,
+      });
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }));
+      fireEvent.click(screen.getByText('Add stations'));
+
+      firePointer(svg, 'pointerdown', 170, 90);
+      firePointer(svg, 'pointermove', 174, 90); // 4 real px of thumb shake
+      firePointer(svg, 'pointerup', 174, 90);
+
+      expect(svg).toHaveAttribute('viewBox', '160 85 320 170'); // did not pan
+      expect(onAddStation).toHaveBeenCalledTimes(1); // the tap survived
     });
 
     it('zooming frees ground the pin used to swallow — the tap radius is fixed in SCREEN px', () => {

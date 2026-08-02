@@ -81,8 +81,14 @@ function stationSummaryLine(summary, programMeta, initialSetup = false) {
   if (!summary || !summary.total) return null;
   const parts = [];
   // Same rule as the pin label: traps placed today were SET, not inspected.
+  // Counts the ACCESSIBLE pins, not every pin — `checked` excludes
+  // inaccessible ones, which is the same exclusion the closeout's
+  // traps_checked autofill applies. Using `total` here made the map say
+  // "8 traps set this visit · 1 not accessible" beside a typed
+  // "Traps set: 7" (codex P2 on #3159).
   if (initialSetup) {
-    parts.push(`${summary.total} trap${summary.total === 1 ? '' : 's'} set this visit`);
+    const set = summary.checked;
+    parts.push(`${set} trap${set === 1 ? '' : 's'} set this visit`);
   } else if (summary.checked > 0) {
     parts.push(`${summary.checked} of ${summary.total} station${summary.total === 1 ? '' : 's'} inspected`);
   } else {

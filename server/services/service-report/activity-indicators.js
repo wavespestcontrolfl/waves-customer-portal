@@ -1865,7 +1865,10 @@ const SETUP_RECHECK_RES = [
   // `inspect` was missing on the first pass, so the single most natural
   // re-check sentence walked through both screens (codex P1 on #3159).
   new RegExp(`\\b(?:re-?)?(?:check|inspect)(?:ed|ing)?\\b[^.!?]{0,40}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
-  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,40}?\\bwere\\s+(?:re-?)?(?:check|inspect)(?:ed)?\\b`, 'i'),
+  // Passive forms take BOTH numbers — "one trap was reset" is as much a
+  // re-check claim as "the traps were reset", and hard-coding `were` let the
+  // singular through (codex P1 round 5).
+  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,40}?\\b(?:were|was)\\s+(?:re-?)?(?:check|inspect)(?:ed)?\\b`, 'i'),
   // Follow-up-only ACTIONS. Every verb the structured validator rejects on a
   // setup (reset / moved / replaced / rebaited / refreshed) has to reject in
   // prose too, or the draft publishes what the checklist just refused. The
@@ -1873,8 +1876,9 @@ const SETUP_RECHECK_RES = [
   // traps" — not the literal words "the traps", which was the earlier gap
   // (codex P1 round 4).
   new RegExp(`\\b(?:re-?set|re-?bait(?:ed|ing)?|rebait(?:ed|ing)?|re-?fresh(?:ed|ing)?|refresh(?:ed|ing)?|re-?position(?:ed|ing)?|replac(?:ed|ing)|swapped(?:\\s+out)?|moved)\\b[^.!?]{0,30}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
-  // …and their passive forms: "the traps were replaced", "all 8 traps were rebaited".
-  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,30}?\\bwere\\s+(?:re-?set|re-?baited|rebaited|re-?freshed|refreshed|re-?positioned|replaced|swapped(?:\\s+out)?|moved)\\b`, 'i'),
+  // …and their passive forms, singular and plural: "the traps were
+  // replaced", "all 8 traps were rebaited", "one trap was reset".
+  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,30}?\\b(?:were|was)\\s+(?:re-?set|re-?baited|rebaited|re-?freshed|refreshed|re-?positioned|replaced|swapped(?:\\s+out)?|moved)\\b`, 'i'),
   new RegExp(`\\b(?:existing|previous(?:ly)?\\s+(?:set|placed)|damaged|missing|old)\\s+${TRAP_NOUN_RE}\\b`, 'i'),
 ];
 // trap_actions values that presuppose traps were ALREADY on the property,

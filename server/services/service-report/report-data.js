@@ -2784,14 +2784,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
     serviceDate: service.service_date || null,
-    // Read off the FROZEN snapshot, so the map's wording and the typed
-    // findings' "Traps set" label can never disagree (codex P1 on #3159).
-    // Scoped require matches this file's pattern for report-time helpers.
-    initialSetup: require('./activity-indicators').isInitialRodentTrapSetup(
-      typedSnapshot?.type,
-      typedSnapshot?.visitSequence,
-      typedSnapshot?.values,
-    ),
+    // Read off the FROZEN snapshot that actually OWNS the trapping program —
+    // which may be a COMPANION, since typedTypes deliberately lets a
+    // non-station primary carry a rodent_trapping companion and that
+    // companion selects the map. Deriving this from the primary alone left
+    // the companion's "Traps set" finding beside a map still saying
+    // "inspected" (codex P2 on #3159). Scoped require matches this file's
+    // pattern for report-time helpers.
+    initialSetup: [typedSnapshot, ...companionReports].some((snap) => require('./activity-indicators')
+      .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)),
   });
 
   const onSiteMin = computeOnSiteMin({

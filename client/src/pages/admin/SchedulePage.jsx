@@ -7959,9 +7959,11 @@ const STATION_FRAME_H = 340;
 // itself runs out of detail — past that the tech is magnifying blur.
 const STATION_MAX_ZOOM = 4;
 const STATION_ZOOM_STEP = 2;
-// Pointer travel (in frame units at the current zoom) that turns a tap into a
-// pan. Below it the gesture still places/selects a pin, so the one-tap flow
-// survives the shaky thumb a phone in the field always has.
+// Pointer travel in CLIENT PIXELS that turns a tap into a pan. Below it the
+// gesture still places/selects a pin, so the one-tap flow survives the shaky
+// thumb a phone in the field always has. Deliberately NOT frame units: those
+// scale with the rendered width and the zoom, which would shrink a thumb
+// tolerance on exactly the small screens that need it most.
 const STATION_DRAG_SLOP = 6;
 const STATION_FULL_VIEW = { x: 0, y: 0, w: STATION_FRAME_W, h: STATION_FRAME_H };
 // Keep the window inside the basemap so zooming can never reveal blank space.
@@ -8135,9 +8137,18 @@ export function StationMarkingStep({
   const handlePointerMove = (evt) => {
     const gesture = gestureRef.current;
     if (!gesture) return;
-    const dx = ((evt.clientX - gesture.clientX) / gesture.rect.width) * gesture.view.w;
-    const dy = ((evt.clientY - gesture.clientY) / gesture.rect.height) * gesture.view.h;
-    if (!gesture.moved && Math.abs(dx) + Math.abs(dy) <= STATION_DRAG_SLOP * viewScale) return;
+    // The slop is a THUMB tolerance, so it is measured in the client pixels
+    // the thumb actually moved — never in frame units (codex P2 on #3159).
+    // Converting first made the advertised 6px scale with the rendered
+    // width: on a 390px phone the frame renders ~340px, so 6 frame units was
+    // ~3.2 real pixels and an ordinary shake latched `moved`, silently
+    // swallowing the pin placement. The earlier test hid this by stubbing a
+    // 640px-wide SVG, where the two units happen to coincide.
+    const dxPx = evt.clientX - gesture.clientX;
+    const dyPx = evt.clientY - gesture.clientY;
+    if (!gesture.moved && Math.abs(dxPx) + Math.abs(dyPx) <= STATION_DRAG_SLOP) return;
+    const dx = (dxPx / gesture.rect.width) * gesture.view.w;
+    const dy = (dyPx / gesture.rect.height) * gesture.view.h;
     gesture.moved = true;
     // Drag the MAP, not the window: content follows the thumb.
     setView(clampStationView({ ...gesture.view, x: gesture.view.x - dx, y: gesture.view.y - dy }));

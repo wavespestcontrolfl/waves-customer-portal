@@ -881,3 +881,27 @@ describe('setup guards — round 4 gaps', () => {
     expect(submit('Follow-up check', '0').ok).toBe(true);
   });
 });
+
+// codex P1 round 5: the passive matcher hard-coded `were`, so the singular
+// forms a tech would naturally write walked through both screens.
+describe('setup guards — singular passive (round 5)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('singular passive re-check claims reject like their plural forms', () => {
+    for (const text of [
+      'One trap was replaced today.',
+      'A trap was reset.',
+      'One device was moved.',
+      'A trap was rebaited.',
+      'One trap was inspected.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('the plural forms still reject and placement wording still passes', () => {
+    expect(setupContradictions('The traps were replaced.').length).toBeGreaterThan(0);
+    expect(setupContradictions('We set 8 traps today.')).toEqual([]);
+    expect(setupContradictions('A trap was set at the plenum.')).toEqual([]);
+  });
+});
