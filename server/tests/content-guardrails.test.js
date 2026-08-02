@@ -2453,6 +2453,14 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     // An executable expression needs no literal URL to reach the network.
     expect(guardrails._internals.externalLinkFinding('{fetch(atob("aHR0cHM6"))}', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     expect(guardrails._internals.externalLinkFinding('{() => 1}', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    // Decided by TOKENIZING, so other executable shapes are caught too.
+    for (const body of ['<Comp x={globalThis.foo} />', '<Comp x={a.b} />', '<Comp x={someVar} />', '{tag`x`}', '<a href={`/x/${y}`}>x</a>']) {
+      expect(guardrails._internals.externalLinkFinding(body, N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    }
+    // Literal props of every shape still work, including a plain template path.
+    for (const body of ['<ComparisonTable highlight={1} />', '<Comp a={true} b={null} />', '<a href={`/services/pest-control`}>x</a>']) {
+      expect(guardrails._internals.externalLinkFinding(body, N)).toBeNull();
+    }
     // Component props and comments are unaffected.
     expect(guardrails._internals.externalLinkFinding('<ComparisonTable columns={["Fee","Aptive"]} />', N)).toBeNull();
     expect(guardrails._internals.externalLinkFinding('{/* a note */} Orkin charges a fee.', N)).toBeNull();

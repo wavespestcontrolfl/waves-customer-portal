@@ -1303,6 +1303,53 @@ const PASSIVE_HTML_TAGS = new Set([
   'a', 'img', 'figure', 'figcaption', 'picture', 'details', 'summary',
 ]);
 
+// Is this MDX expression a pure DATA LITERAL? Decided by tokenizing rather
+// than sniffing for "(" or "=>": character heuristics kept admitting other
+// executable shapes ("{globalThis.x}", "{a.b}", tagged templates). The only
+// tokens allowed are string / number / boolean / null literals, the array and
+// object punctuation, and identifiers in KEY position. Anything else — an
+// identifier that is not a key, an operator, a call — makes it executable.
+function isLiteralExpression(expr) {
+  const body = String(expr || '').replace(/^\{/, '').replace(/\}$/, '');
+  let i = 0;
+  const n = body.length;
+  while (i < n) {
+    const ch = body[i];
+    if (/\s/.test(ch)) { i += 1; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      i += 1;
+      let interpolated = false;
+      while (i < n && body[i] !== quote) {
+        if (quote === '`' && body[i] === '$' && body[i + 1] === '{') interpolated = true;
+        i += body[i] === '\\' ? 2 : 1;
+      }
+      if (i >= n) return false;
+      // A backtick string is a plain literal only WITHOUT interpolation —
+      // "${…}" executes.
+      if (interpolated) return false;
+      i += 1;
+      continue;
+    }
+    if ('[]{},:'.includes(ch)) { i += 1; continue; }
+    if (/[-+]/.test(ch) && /\d/.test(body[i + 1] || '')) { i += 1; continue; }
+    if (/\d/.test(ch)) { while (i < n && /[\d._eE+-]/.test(body[i])) i += 1; continue; }
+    if (/[A-Za-z_$]/.test(ch)) {
+      let j = i;
+      while (j < n && /[\w$]/.test(body[j])) j += 1;
+      const word = body.slice(i, j);
+      let k = j;
+      while (k < n && /\s/.test(body[k])) k += 1;
+      // A bare identifier is only data when it is an object KEY.
+      if (!['true', 'false', 'null', 'undefined'].includes(word) && body[k] !== ':') return false;
+      i = j;
+      continue;
+    }
+    return false; // operators, calls, backticks, anything else
+  }
+  return true;
+}
+
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
@@ -1332,7 +1379,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
       // execute, and an executable expression needs no literal URL to reach
       // the network — "{fetch(atob('…'))}" has none (Codex).
       const isComment = /^\{\s*\/\*[\s\S]*\*\/\s*\}$/.test(expr);
-      const isLiteral = !/\(|=>|\$\{|:\/\//.test(expr);
+      const isLiteral = isLiteralExpression(expr);
       if (!isComment && !isLiteral) {
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains an executable MDX expression — generated posts may carry only literal component props and comments. Write content as Markdown.');
       }
