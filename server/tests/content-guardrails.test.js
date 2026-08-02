@@ -2450,6 +2450,9 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     // A component PROP expression is just as live as a top-level one.
     expect(guardrails._internals.externalLinkFinding('<Comp onClick={fetch("https://legalclarity.org/a")} />', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     expect(guardrails._internals.externalLinkFinding('<Comp src={"https://legalclarity.org/a"} />', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    // An executable expression needs no literal URL to reach the network.
+    expect(guardrails._internals.externalLinkFinding('{fetch(atob("aHR0cHM6"))}', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    expect(guardrails._internals.externalLinkFinding('{() => 1}', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     // Component props and comments are unaffected.
     expect(guardrails._internals.externalLinkFinding('<ComparisonTable columns={["Fee","Aptive"]} />', N)).toBeNull();
     expect(guardrails._internals.externalLinkFinding('{/* a note */} Orkin charges a fee.', N)).toBeNull();

@@ -1327,6 +1327,15 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
       }
       if (j >= body.length) break;
       const expr = body.slice(i, j + 1);
+      // A closed rule, not a URL sniff: an expression may only be a COMMENT
+      // or a LITERAL prop value. Calls, arrows and template interpolation
+      // execute, and an executable expression needs no literal URL to reach
+      // the network — "{fetch(atob('…'))}" has none (Codex).
+      const isComment = /^\{\s*\/\*[\s\S]*\*\/\s*\}$/.test(expr);
+      const isLiteral = !/\(|=>|\$\{|:\/\//.test(expr);
+      if (!isComment && !isLiteral) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains an executable MDX expression — generated posts may carry only literal component props and comments. Write content as Markdown.');
+      }
       if (/:\/\//.test(expr)) {
         return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a URL inside an MDX expression — expressions execute at render and are never citations. Write the link as Markdown.');
       }
