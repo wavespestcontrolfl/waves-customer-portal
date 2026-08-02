@@ -257,11 +257,16 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     expect(before).toContain('whereNotExists');
     expect(before).toContain('attemptStartedAt');
     // 'paid' ONLY — a 'processing' ACH row is accepted, not settled, and can
-    // still bounce; and settlement can be an in-place status flip, so BOTH
-    // timestamps count.
+    // still bounce.
     expect(before).toMatch(/'payments\.status', 'paid'/);
     expect(before).not.toMatch(/whereIn\('status'/);
-    expect(before).toContain("orWhere('payments.updated_at'");
+    // WHEN it settled must be Stripe's clock for webhook-recorded rows: a
+    // delayed redelivery of a days-old success touches its row NOW, so
+    // local write times lie. Stamped rows compare metadata.settled_event_at;
+    // only unstamped (synchronous local) recordings fall back to created_at.
+    expect(before).toContain("settled_event_at')::timestamptz >= ?");
+    expect(before).toMatch(/settled_event_at'\) IS NULL/);
+    expect(before).not.toContain("orWhere('payments.updated_at'");
     // The paused-email fires only when the UPDATE actually matched.
     const after = cronSrc.slice(pauseIdx, pauseIdx + 900);
     expect(after).toContain('if (!pausedRows)');
@@ -336,13 +341,20 @@ describe('stripe-webhook wiring', () => {
     expect(helper).toContain('eventCreated');
   });
 
-  test('the ACH processing->paid flip stamps updated_at for the cron race guard', () => {
-    // knex never auto-touches updated_at; without this stamp the cron's veto
-    // guard is blind to an in-place ACH settlement.
-    const idx = src.indexOf('const paymentUpdates = {');
-    expect(idx).toBeGreaterThan(-1);
-    const block = src.slice(idx, idx + 700);
-    expect(block).toContain("status: 'paid'");
-    expect(block).toContain('updated_at: new Date()');
+  test('both webhook paid-writes stamp Stripe\'s settlement moment into metadata', () => {
+    // The cron's veto compares metadata.settled_event_at — Stripe's clock —
+    // because the row's own write times lie under delayed redelivery.
+    const flipIdx = src.indexOf('const paymentUpdates = {');
+    expect(flipIdx).toBeGreaterThan(-1);
+    const flip = src.slice(flipIdx, flipIdx + 1400);
+    expect(flip).toContain("status: 'paid'");
+    expect(flip).toContain('updated_at: new Date()');
+    expect(flip).toContain("'{settled_event_at}'");
+    // Parameterized, never interpolated.
+    expect(flip).toContain('to_jsonb(?::text)');
+
+    const insertIdx = src.indexOf("payment_state: 'paid',");
+    const insert = src.slice(insertIdx, insertIdx + 600);
+    expect(insert).toContain('settled_event_at: eventCreated');
   });
 });

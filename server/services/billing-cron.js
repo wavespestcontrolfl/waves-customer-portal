@@ -1198,14 +1198,18 @@ const BillingCron = {
             // settlements whose webhook ARRIVES after a pause exists.
             // status='paid' ONLY (an ACH 'processing' row is accepted, not
             // settled, and can still bounce; when it does settle, its
-            // succeeded webhook finds the pause and auto-clears it), and
-            // BOTH timestamps, because settlement takes two shapes: a NEW
-            // row (card — created_at) or an EXISTING processing row flipped
-            // paid in place (ACH — the webhook stamps updated_at). One
-            // atomic statement, so no settled-and-committed payment can
-            // slip between a check and the write; a webhook transaction
-            // still uncommitted at the UPDATE's snapshot is caught by its
-            // own post-commit clear instead.
+            // succeeded webhook finds the pause and auto-clears it).
+            //
+            // WHEN it settled: webhook-recorded rows carry Stripe's own
+            // settlement moment in metadata.settled_event_at — local write
+            // times lie for those (a delayed redelivery of a days-old
+            // success creates/touches its row NOW and must not pose as
+            // fresh money). Rows WITHOUT the stamp are synchronous local
+            // recordings (stripe.js charge()), where created_at IS the
+            // settlement moment. One atomic statement, so no
+            // settled-and-committed payment slips between a check and the
+            // write; a webhook transaction still uncommitted at the
+            // UPDATE's snapshot is caught by its own post-commit clear.
             const pausedAt = new Date();
             const pausedRows = await db('customers')
               .where({ id: payment.customer_id })
@@ -1215,8 +1219,11 @@ const BillingCron = {
                   .whereRaw('payments.customer_id = customers.id')
                   .where('payments.status', 'paid')
                   .where(function settledSinceAttempt() {
-                    this.where('payments.created_at', '>=', attemptStartedAt)
-                      .orWhere('payments.updated_at', '>=', attemptStartedAt);
+                    this.whereRaw("(payments.metadata->>'settled_event_at')::timestamptz >= ?", [attemptStartedAt])
+                      .orWhere(function unstampedLocalRecording() {
+                        this.whereRaw("(payments.metadata->>'settled_event_at') IS NULL")
+                          .andWhere('payments.created_at', '>=', attemptStartedAt);
+                      });
                   }),
               )
               .update({

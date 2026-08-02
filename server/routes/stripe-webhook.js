@@ -1148,7 +1148,14 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     // forever on settled bank payments. REPLACE is a no-op for rows without
     // the marker. Constant strings only — no request-derived input.
     description: db.raw("REPLACE(description, ' (bank payment pending)', '')"),
-    metadata: db.raw(`jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"')`),
+    // payment_state flip + the Stripe settlement moment in one expression —
+    // the billing-cron pause veto reads settled_event_at, so a delayed
+    // redelivery (updated_at = now, settlement = days ago) cannot pose as
+    // fresh money. Parameterized: the timestamp is bound, never interpolated.
+    metadata: db.raw(
+      `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text))`,
+      [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString()],
+    ),
     // Cash basis: the row was stamped with the INITIATION day when
     // payment_intent.processing arrived; restamp to the SETTLEMENT day so
     // revenue lands in the period the money actually cleared (an ACH
@@ -1328,6 +1335,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           charged_amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
           payment_method: details.paymentMethod || paymentIntent.payment_method_types?.[0] || null,
           payment_state: 'paid',
+          // Stripe's settlement moment, NOT this handler's run time — the
+          // billing-cron pause veto compares this, so a delayed redelivery
+          // of an old success (row created now) cannot pose as fresh money.
+          settled_event_at: eventCreated ? new Date(eventCreated * 1000).toISOString() : null,
         }),
       });
       if (matchingAmbiguousAttempt) {
