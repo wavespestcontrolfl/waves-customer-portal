@@ -328,6 +328,38 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
   });
 });
 
+describe('off-Stripe payment paths honor the same contract', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('record-payment and reconcile both dispatch the clear — never for payer-funded invoices', () => {
+    for (const [file, marker] of [
+      ['admin-invoices.js', "source: 'admin_record_payment'"],
+      ['admin-payments-reconcile.js', "source: 'admin_payment_reconcile'"],
+    ]) {
+      const rs = fs.readFileSync(path.join(__dirname, '..', 'routes', file), 'utf8');
+      const idx = rs.indexOf('maybeResumeBillingPauseOnPayment');
+      expect(idx).toBeGreaterThan(-1);
+      const around = rs.slice(Math.max(0, idx - 1400), idx + 700);
+      expect(around).toContain(marker);
+      // The payer's tender proves nothing about the homeowner's card.
+      expect(around).toMatch(/if \(!(updatedInvoice|invoice)\.payer_id\)/);
+      expect(around).toContain('settledAt');
+    }
+  });
+
+  test('reconcile passes the Stripe charge\'s own settlement time when it has one', () => {
+    const rs = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-payments-reconcile.js'), 'utf8');
+    expect(rs).toContain('settledAt: chargeDetails?.created ? new Date(chargeDetails.created * 1000) : new Date()');
+  });
+
+  test('both webhook ledger paths stamp payer ownership', () => {
+    const ws = fs.readFileSync(path.join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
+    expect(ws).toContain('...(lockedInvoice.payer_id ? { payer_id: lockedInvoice.payer_id } : {})');
+    expect(ws).toContain('...(invoice?.payer_id ? { payer_id: invoice.payer_id } : {})');
+  });
+});
+
 describe('stripe-webhook wiring', () => {
   const fs = require('fs');
   const path = require('path');

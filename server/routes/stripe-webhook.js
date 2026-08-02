@@ -1355,6 +1355,11 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           // billing-cron pause veto compares this, so a delayed redelivery
           // of an old success (row created now) cannot pose as fresh money.
           settled_event_at: eventCreated ? new Date(eventCreated * 1000).toISOString() : null,
+          // Payer ownership rides the ledger row: the pause veto and the
+          // auto-clear both exclude payer-funded money by this marker — a
+          // payer-billed invoice settling during a homeowner's failed retry
+          // must not read as the homeowner's own tender.
+          ...(lockedInvoice.payer_id ? { payer_id: lockedInvoice.payer_id } : {}),
         }),
       });
       if (matchingAmbiguousAttempt) {
@@ -3564,6 +3569,10 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
     charged_amount: amount,
     payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
     payment_state: 'processing',
+    // Payer ownership survives the processing->paid flip (the flip only
+    // jsonb_sets payment_state and settled_event_at), so the pause veto and
+    // the auto-clear can exclude payer-funded ACH money too.
+    ...(invoice?.payer_id ? { payer_id: invoice.payer_id } : {}),
   });
 
   if (!invoice?.id) {

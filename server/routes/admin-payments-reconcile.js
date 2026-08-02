@@ -354,6 +354,25 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
       logger.warn(`[reconcile] annual prepay activation skipped: ${e.message}`);
     }
 
+    // Same automatic-clear contract as the webhook and record-payment: a
+    // reconciled payment is the customer paying. Settlement moment = the
+    // Stripe charge's own timestamp when we have one (the ordering guard
+    // then correctly refuses charges that predate the failure cycle), or
+    // NOW for check/cash. Skipped for payer-billed invoices — the payer's
+    // tender proves nothing about the homeowner's card.
+    if (!invoice.payer_id) {
+      try {
+        const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+        await maybeResumeBillingPauseOnPayment(invoice.customer_id, {
+          paymentIntentId: chargeDetails?.payment_intent || null,
+          source: 'admin_payment_reconcile',
+          settledAt: chargeDetails?.created ? new Date(chargeDetails.created * 1000) : new Date(),
+        });
+      } catch (pauseErr) {
+        logger.warn(`[reconcile] billing-pause auto-clear failed: ${pauseErr.message}`);
+      }
+    }
+
     logger.info(`[reconcile] invoice ${invoice.invoice_number} marked paid via ${collectedVia}${stripeChargeId ? ` (${stripeChargeId})` : ''}`);
 
     const refreshed = await db('invoices').where({ id: invoiceId }).first();

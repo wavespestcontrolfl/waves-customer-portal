@@ -1574,6 +1574,27 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       logger.warn(`[admin-invoices:record-payment] stopOnPayment failed: ${err.message}`);
     }
 
+    // The automatic-clear contract does not stop at Stripe: a check/cash/
+    // Zelle payment recorded here is the customer paying, and the Customer
+    // 360 banner promises the pause clears when a payment succeeds. NOT for
+    // payer-funded rows — the payer's tender proves nothing about the
+    // homeowner's card. The settlement moment is NOW (a human recorded
+    // money they are holding). The helper owns every other rule (reason
+    // gate, causality, locking); a failure logs — the operator who just
+    // recorded the payment sees the banner still up and has the button.
+    if (!updatedInvoice.payer_id) {
+      try {
+        const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+        await maybeResumeBillingPauseOnPayment(updatedInvoice.customer_id, {
+          paymentIntentId: null,
+          source: 'admin_record_payment',
+          settledAt: new Date(),
+        });
+      } catch (pauseErr) {
+        logger.warn(`[admin-invoices:record-payment] billing-pause auto-clear failed: ${pauseErr.message}`);
+      }
+    }
+
     // A completion invoice delivered unpaid deferred its review ask to
     // payment — an off-Stripe settlement (cash/check/Zelle) never reaches the
     // Stripe webhook, so trigger the same shared enrollment here (Codex P2,
