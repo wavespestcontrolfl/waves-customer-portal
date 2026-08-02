@@ -9943,11 +9943,24 @@ const CallRecordingProcessor = {
           // Resolved DURING this run (Codex #3084 r6): a force-reprocess of
           // a call whose card resolved in an EARLIER cycle must not read
           // that historical row as a fresh operator confirmation.
+          // Created BY this run too (Codex #3084 r49): when a force-reprocess
+          // overlaps an OPEN card from an earlier cycle, this run's card
+          // insert is absorbed by the partial unique index — the operator
+          // who resolves that surviving card mid-run reviewed the OLD
+          // cycle's payload, not this run's extraction, so a wall-clock
+          // resolved_at test alone would release a newly extracted,
+          // unverified address. Requiring the resolved card to have been
+          // created after processingStartedAt binds the release to a card
+          // whose payload THIS run wrote. The overlap case falls through to
+          // the recovery-marker branch below: a fresh card describing the
+          // current extraction is filed, the hold stays pending, and the
+          // operator's resolve of THAT card releases it.
           const resolvedCard = await db('triage_items')
             .where({ call_log_id: call.id })
             .whereIn('reason_code', ['email_unverified', 'email_invalid'])
             .whereIn('status', ['resolved'])
             .where('resolved_at', '>=', processingStartedAt)
+            .where('created_at', '>=', processingStartedAt)
             .first('id');
           if (resolvedCard) {
             // Scoped to THIS call (Codex #3084 r8): releasing by customerId

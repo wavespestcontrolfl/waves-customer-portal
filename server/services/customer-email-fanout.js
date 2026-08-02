@@ -111,16 +111,24 @@ function emailKey(value) {
  * email (the fanout) settles all three.
  * Returns the number of cards resolved; never throws on a no-op.
  */
-async function resolveOpenEmailReviewCards({ customerId, email, source = 'customer edit', reasonCodes = EMAIL_REVIEW_REASON_CODES }, conn = db) {
+async function resolveOpenEmailReviewCards({ customerId, email, source = 'customer edit', reasonCodes = EMAIL_REVIEW_REASON_CODES, restrictToCallLogIds = null }, conn = db) {
   if (!customerId || !cleanValidEmailOrNull(email)) return 0;
   const codes = reasonCodes.filter((c) => EMAIL_REVIEW_REASON_CODES.includes(c));
   if (!codes.length) return 0;
   const now = new Date();
-  const openItems = await conn('triage_items')
+  // restrictToCallLogIds (Codex #3084 r49): a transactional caller that
+  // already holds row locks (the fanout's hold FOR UPDATE) passes the call
+  // set whose advisory locks it pre-acquired — settling a card on a call
+  // OUTSIDE that set would acquire its advisory lock AFTER those row locks,
+  // the inversion the global order forbids. Standalone callers (own
+  // transaction, advisory-first inside resolveCards) pass nothing.
+  const openItemsQuery = conn('triage_items')
     .whereIn('reason_code', codes)
     .whereIn('status', OPEN_REVIEW_STATES)
     .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
     .select('id', 'call_log_id');
+  if (restrictToCallLogIds) openItemsQuery.whereIn('call_log_id', restrictToCallLogIds);
+  const openItems = await openItemsQuery;
   if (!openItems.length) return 0;
   // Shared per-call lock contract (utils/triage-locks.js) with the nightly
   // auto-resolve sweep and admin-triage: sorted acquisition BEFORE any card
@@ -188,6 +196,20 @@ async function propagateCustomerEmailChange({
   const newEmail = cleanValidEmailOrNull(after && after.email) || '';
   if (!customerId || !newEmail || oldEmail === newEmail) return counts;
 
+  // The review scope IS the authority signal (Codex #3084 r49): the default
+  // scope (all of EMAIL_REVIEW_REASON_CODES) means an OPERATOR asserted this
+  // address — it settles the read-back cards. The call path narrows to
+  // ['customer_email_missing'] precisely because a call-captured address is
+  // unverified BY DESIGN: it may retarget the plain snapshot copies (an old
+  // address really is out there, possibly hard-bouncing), but it must NEVER
+  // touch the hold ledger or release a held first-touch send — the holds
+  // exist to park sends until a human confirms the address, and the capture's
+  // own read-back card is still open. Everything below that treats newEmail
+  // as approved (hold retargets, deny-stamp lifts, zero-work markers, the
+  // r34 evidence writes, and the resume) is gated on this.
+  const operatorAssertedEmail = ['email_unverified', 'email_invalid']
+    .every((code) => reviewReasonCodes.includes(code));
+
   const now = new Date();
 
   // Lock-order discipline (Codex #3084 r30): the release engine's enroll
@@ -210,28 +232,36 @@ async function propagateCustomerEmailChange({
   // sweeps' match set.
   let priorHoldTargets = [];
   let heldCallIds = [];
-  if (await conn.schema.hasTable('first_touch_holds')) {
-    // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
-    // first_touch_holds rows → triage_items. This fan-out settles review
-    // cards (resolveOpenEmailReviewCards below) and writes review evidence
-    // for the held calls AFTER taking the hold-row locks here — acquiring
-    // the advisory locks at that later point would be the exact AB-BA
-    // inversion against admin-triage (which holds advisory and then waits
-    // on these hold rows). Pre-lock every call of the customer, sorted:
-    // per-call advisory locks are cheap, contention is per-customer, and
-    // re-acquiring one later (the card resolve) is a no-op. A call created
-    // AFTER this snapshot cannot cycle: its hold row is not among the rows
-    // locked below, so a concurrent advisory-holder on it never waits on
-    // this transaction. Outside a transaction the pg_advisory_xact_lock
-    // releases immediately (same non-guarantee as the FOR UPDATE below for
-    // non-transactional callers — unchanged behavior).
-    if (conn.isTransaction) {
-      const callRows = await conn('call_log').where({ customer_id: customerId }).select('id');
-      const callIds = [...new Set(callRows.map((r) => r.id).filter(Boolean))].sort();
-      for (const callId of callIds) await lockTriageCall(conn, callId);
-    }
-    const lockedHolds = await conn('first_touch_holds')
-      .where({ customer_id: customerId })
+  // GLOBAL LOCK ORDER (owner ruling 2026-08-02): advisory call lock →
+  // first_touch_holds rows → triage_items. This fan-out settles review
+  // cards (resolveOpenEmailReviewCards below) and writes review evidence
+  // for the held calls AFTER taking hold-row locks — acquiring advisory
+  // locks at those later points would be the exact AB-BA inversion against
+  // admin-triage (which holds advisory and then waits on hold rows).
+  // Pre-lock every call of the customer, sorted: per-call advisory locks
+  // are cheap, contention is per-customer, and re-acquiring one later is a
+  // no-op. The snapshot is ALSO the fence for every later lock in this
+  // transaction (Codex #3084 r49): the hold-row FOR UPDATE below and the
+  // card settle in resolveOpenEmailReviewCards are both restricted to these
+  // call ids, so this transaction never locks a row belonging to a call
+  // whose advisory lock it does not hold — a call committed after this
+  // snapshot is simply outside this correction's scope (its own release
+  // lane owns it; fail-toward-hold). Outside a transaction the
+  // pg_advisory_xact_lock releases immediately (same non-guarantee as the
+  // FOR UPDATE for non-transactional callers — unchanged behavior), so no
+  // snapshot fence applies there either.
+  let snapshotCallIds = null;
+  if (conn.isTransaction) {
+    const callRows = await conn('call_log').where({ customer_id: customerId }).select('id');
+    snapshotCallIds = [...new Set(callRows.map((r) => r.id).filter(Boolean))].sort();
+    for (const callId of snapshotCallIds) await lockTriageCall(conn, callId);
+  }
+  const holdsTableExists = await conn.schema.hasTable('first_touch_holds');
+  if (operatorAssertedEmail && holdsTableExists) {
+    let holdsLockQuery = conn('first_touch_holds')
+      .where({ customer_id: customerId });
+    if (snapshotCallIds) holdsLockQuery = holdsLockQuery.whereIn('call_log_id', snapshotCallIds);
+    const lockedHolds = await holdsLockQuery
       .forUpdate()
       .select('id', 'held_email', 'call_log_id');
     const newEmailLc = newEmail.toLowerCase();
@@ -604,6 +634,7 @@ async function propagateCustomerEmailChange({
   // booking reviews on the same call are untouched.
   counts.reviewCards += await resolveOpenEmailReviewCards({
     customerId, email: newEmail, source, reasonCodes: reviewReasonCodes,
+    restrictToCallLogIds: snapshotCallIds,
   }, conn);
 
 
@@ -620,7 +651,12 @@ async function propagateCustomerEmailChange({
   // resolved-during-run card as confirmation of the stale address.
   // onConflict-ignore: real hold rows are never clobbered; errors propagate
   // with the rest of the edit transaction.
-  if (await conn.schema.hasTable('first_touch_holds')) {
+  // Gated on operatorAssertedEmail (Codex #3084 r49): every write in this
+  // block treats newEmail as an approved address — retargets, deny-stamp
+  // lifts, zero-work markers, the r34 evidence flips. A narrowed
+  // (call-capture) scope must leave the ledger exactly as the open
+  // read-back card demands: held.
+  if (operatorAssertedEmail && holdsTableExists) {
     // A claim already in flight ('releasing') can't be re-claimed by this
     // correction — supersede its TARGET so any retry of that claim (every
     // failure path re-pends, and the ledger sweep re-triggers) resumes to
@@ -824,16 +860,22 @@ async function propagateCustomerEmailChange({
   // carries the pending state (Codex #3084 r8). The shared helper re-checks
   // consent (do-not-contact, suppressions), dedupes via enrollCustomer, and
   // no-ops for customers with no pending hold.
-  try {
-    const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
-    // deferNewsletter: this runs inside the caller's edit transaction — the
-    // DOI (an unrollbackable send) executes post-commit via
-    // resumeHeldNewsletterPostCommit, same contract as pendingConfirmation.
-    const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected', deferNewsletter: true });
-    if (resume?.enrolled) counts.heldDripResumed = 1;
-    if (resume?.newsletterResume) heldNewsletterResume = resume.newsletterResume;
-  } catch (resumeErr) {
-    logger.warn(`[email-fanout] held-drip resume failed for customer ${customerId}: ${resumeErr.message}`);
+  // Operator-asserted scopes ONLY (Codex #3084 r49): a narrowed
+  // (call-capture) scope is not a release point — the captured address is
+  // exactly what the still-open read-back card asks a human to confirm, so
+  // releasing the held drip/DOI to it would send an unapproved address.
+  if (operatorAssertedEmail) {
+    try {
+      const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
+      // deferNewsletter: this runs inside the caller's edit transaction — the
+      // DOI (an unrollbackable send) executes post-commit via
+      // resumeHeldNewsletterPostCommit, same contract as pendingConfirmation.
+      const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected', deferNewsletter: true });
+      if (resume?.enrolled) counts.heldDripResumed = 1;
+      if (resume?.newsletterResume) heldNewsletterResume = resume.newsletterResume;
+    } catch (resumeErr) {
+      logger.warn(`[email-fanout] held-drip resume failed for customer ${customerId}: ${resumeErr.message}`);
+    }
   }
 
   if (Object.values(counts).some(Boolean)) {

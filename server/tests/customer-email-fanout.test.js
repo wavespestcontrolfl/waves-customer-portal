@@ -1394,3 +1394,70 @@ describe('emailKey', () => {
     expect(emailKey(null)).toBe('');
   });
 });
+
+describe('r49 — review scope authority and lock-set symmetry', () => {
+  test('a narrowed (call-capture) scope never touches the hold ledger or resumes held sends', async () => {
+    // The call path passes ['customer_email_missing'] because the captured
+    // address is unverified BY DESIGN (its own read-back card is open) —
+    // the snapshot-copy retargets run, but the hold retarget/evidence/
+    // release lane must not treat the capture as an operator approval.
+    const conn = makeConn({
+      first_touch_holds: { rows: [{ id: 'hold-1', held_email: 'extracted.x@example.com', call_log_id: 'call-9' }] },
+      triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-9' }] },
+    });
+    const counts = await propagateCustomerEmailChange({
+      before: HOLD_BEFORE, after: HOLD_AFTER, reviewReasonCodes: ['customer_email_missing'],
+    }, conn);
+    expect(conn.__updates('first_touch_holds')).toHaveLength(0);
+    expect(conn.__calls.filter((c) => c.table === 'first_touch_holds' && c.op === 'insert')).toHaveLength(0);
+    expect(conn.__calls.filter((c) => c.table === 'first_touch_holds' && c.op === 'forUpdate')).toHaveLength(0);
+    expect(mockResume).not.toHaveBeenCalled();
+    expect(counts.heldDripResumed).toBe(0);
+    // The base enrollment retarget (the pre-hold sweep) still runs — a dead
+    // address really is out there.
+    expect(conn.__updates('automation_enrollments').length).toBeGreaterThan(0);
+  });
+
+  test('the default (operator-asserted) scope keeps the hold lane and the resume', async () => {
+    const conn = makeConn({
+      first_touch_holds: { rows: [{ id: 'hold-1', held_email: 'extracted.x@example.com', call_log_id: 'call-9' }] },
+    });
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    expect(conn.__updates('first_touch_holds').length).toBeGreaterThan(0);
+    expect(mockResume).toHaveBeenCalled();
+  });
+
+  test('transactional callers advisory-lock the call snapshot BEFORE any hold-row lock, and every later lock stays inside it', async () => {
+    // Global order (owner ruling 2026-08-02): advisory → holds → cards. The
+    // pre-lock snapshot must also FENCE the hold FOR UPDATE and the card
+    // settle — locking a row of a call whose advisory lock was never taken
+    // recreates the AB-BA inversion against admin-triage (Codex #3084 r49).
+    const conn = makeConn({
+      call_log: { rows: [{ id: 'call-2' }, { id: 'call-1' }] },
+      first_touch_holds: { rows: [{ id: 'hold-1', held_email: 'extracted.x@example.com', call_log_id: 'call-1' }] },
+    });
+    conn.isTransaction = true;
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    const calls = conn.__calls;
+    const advisoryIdx = calls
+      .map((c, i) => (c.table === '__raw' && String(c.arg.sql).includes('pg_advisory_xact_lock') ? i : -1))
+      .filter((i) => i >= 0);
+    const holdLockIdx = calls.findIndex((c) => c.table === 'first_touch_holds' && c.op === 'forUpdate');
+    expect(advisoryIdx.length).toBe(2);
+    expect(holdLockIdx).toBeGreaterThan(-1);
+    // Sorted acquisition, all before the first hold-row lock.
+    const lockedCallIds = advisoryIdx.map((i) => calls[i].arg.bindings[1]);
+    expect(lockedCallIds).toEqual(['call-1', 'call-2']);
+    expect(Math.max(...advisoryIdx)).toBeLessThan(holdLockIdx);
+    // The hold FOR UPDATE is restricted to the snapshotted calls.
+    const holdRestrict = calls.find((c) => c.table === 'first_touch_holds' && c.op === 'whereIn'
+      && c.arg.col === 'call_log_id' && Array.isArray(c.arg.vals));
+    expect(holdRestrict).toBeDefined();
+    expect(holdRestrict.arg.vals).toEqual(['call-1', 'call-2']);
+    // The card settle is restricted to the same set.
+    const cardRestrict = calls.find((c) => c.table === 'triage_items' && c.op === 'whereIn'
+      && c.arg.col === 'call_log_id' && Array.isArray(c.arg.vals) && c.arg.vals.length === 2);
+    expect(cardRestrict).toBeDefined();
+    expect(cardRestrict.arg.vals).toEqual(['call-1', 'call-2']);
+  });
+});
