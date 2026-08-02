@@ -2428,6 +2428,10 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     ]) {
       expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     }
+    // A passive ELEMENT can still carry an active ATTRIBUTE.
+    for (const body of ['<p onclick="fetch(1)">x</p>', '<img src="/images/a.webp" onerror="x()">', '<div onload="x()">y</div>']) {
+      expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    }
     // Passive formatting and MDX components are unaffected.
     for (const body of ['<p>Orkin charges a fee.</p>', '<table><tr><td>x</td></tr></table>', '<ComparisonTable columns={["a"]} />']) {
       expect(guardrails._internals.externalLinkFinding(body, OPC)).toBeNull();

@@ -1391,7 +1391,16 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   }
   for (const tag of eachTag(body)) {
     if (/^[A-Z]/.test(tag.name.charAt(0)) || /^[A-Z]/.test((/^<\/?([A-Za-z][\w-]*)/.exec(body.slice(tag.start, tag.end + 1)) || [])[1] || '')) continue;
-    if (PASSIVE_HTML_TAGS.has(tag.name)) continue;
+    if (PASSIVE_HTML_TAGS.has(tag.name)) {
+      // A passive ELEMENT can still carry an active ATTRIBUTE: any "on*"
+      // handler is inline JavaScript regardless of which tag holds it
+      // (Codex). Allowlisting the tag is not allowlisting its attributes.
+      const handler = /(?:^|\s)(on[a-z]+)\s*=/i.exec(tag.attrs || '');
+      if (handler) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains the inline event handler "${handler[1]}" — generated posts must never ship JavaScript. Remove it.`);
+      }
+      continue;
+    }
     return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains the raw HTML tag "<${tag.name}", which is not on the passive-content allowlist — generated posts publish as .mdx and must never ship code, redirects, rebased URLs or injected styles. Use Markdown or an approved component.`);
   }
   if (DEST_CONTROL_RE.test(body)) {
