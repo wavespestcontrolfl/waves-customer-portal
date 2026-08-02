@@ -1218,6 +1218,16 @@ const BillingCron = {
                   .select(db.raw('1'))
                   .whereRaw('payments.customer_id = customers.id')
                   .where('payments.status', 'paid')
+                  // MIRRORS the auto-clear's eligibility (stripe-webhook
+                  // maybeAutoClearBillingPauseForIntent): money the clear
+                  // would never fire on must not veto the pause either, or
+                  // the two sides disagree about the same dollar. A no-show
+                  // fee is not a balance payment, and statement/payer rows
+                  // are the PAYER's tender — neither says anything about
+                  // the homeowner's dead card.
+                  .whereRaw("(payments.metadata->>'purpose') IS DISTINCT FROM 'card_hold_no_show_fee'")
+                  .whereNull('payments.statement_id')
+                  .whereRaw("(payments.metadata->>'payer_id') IS NULL")
                   .where(function settledSinceAttempt() {
                     this.whereRaw("(payments.metadata->>'settled_event_at')::timestamptz >= ?", [attemptStartedAt])
                       .orWhere(function unstampedLocalRecording() {

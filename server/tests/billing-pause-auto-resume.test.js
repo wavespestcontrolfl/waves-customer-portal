@@ -267,6 +267,11 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     expect(before).toContain("settled_event_at')::timestamptz >= ?");
     expect(before).toMatch(/settled_event_at'\) IS NULL/);
     expect(before).not.toContain("orWhere('payments.updated_at'");
+    // The veto mirrors the auto-clear's eligibility: a no-show fee and
+    // payer/statement money never clear a pause, so they must not veto one.
+    expect(before).toContain("IS DISTINCT FROM 'card_hold_no_show_fee'");
+    expect(before).toContain("whereNull('payments.statement_id')");
+    expect(before).toMatch(/payer_id'\) IS NULL/);
     // The paused-email fires only when the UPDATE actually matched.
     const after = cronSrc.slice(pauseIdx, pauseIdx + 900);
     expect(after).toContain('if (!pausedRows)');
@@ -279,7 +284,7 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     // reassuring message. Three distinct states, defaulting to 'error' so a
     // throw cannot masquerade as a veto.
     const pauseIdx = cronSrc.indexOf("service_pause_reason: 'autopay_final_failure'");
-    const block = cronSrc.slice(Math.max(0, pauseIdx - 2600), pauseIdx + 4200);
+    const block = cronSrc.slice(Math.max(0, pauseIdx - 4200), pauseIdx + 4200);
     expect(block).toContain("let pauseOutcome = 'error';");
     expect(block).toContain("pauseOutcome = 'settlement_veto';");
     expect(block).toContain("pauseOutcome = 'applied';");
