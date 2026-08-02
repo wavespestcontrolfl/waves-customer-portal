@@ -870,6 +870,82 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(timeTrackingSource).toMatch(/if \(derivedOut\.getTime\(\) > Date\.now\(\)\) \{\s*\n\s*throw staffTimeHttpError\(400, 'Target duration extends the entry into the future/);
   });
 
+  test('a clamped re-correction clears PRIOR-DERIVED end stamps; genuine closeout ends survive (codex P2 round 25)', async () => {
+    // First correction derived end = start + 45. Re-correcting to 720 while
+    // start + 720min is still ahead of the clock derives no end — leaving
+    // the old 45-minute pair beside the new duration would render an
+    // inconsistent timeline span. Derived stamps clear (unknown-end
+    // posture); completed_at stays for day-window attribution.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:30:00.000Z'));
+    try {
+      const corrected45 = {
+        ...COMPLETED_SVC,
+        actual_end_time: new Date('2026-07-19T16:45:00.000Z'),
+        check_out_time: new Date('2026-07-19T16:45:00.000Z'),
+        completed_at: new Date('2026-07-19T16:45:00.000Z'),
+        service_time_minutes: 45,
+        actual_duration_minutes: 45,
+        time_on_site_adjusted_minutes: 45,
+        time_on_site_correction_seq: 1,
+      };
+      let dbMock = makeRecordingDb({ svc: corrected45, record: RECORD, recordCols: RECORD_COLS });
+      mockDbCurrent = dbMock;
+      let res = makeRes();
+      await patchHandler()(
+        { params: { serviceId: 'svc-1' }, body: { minutes: 720 }, technicianId: 'admin-1', techRole: 'admin' },
+        res,
+        (err) => { throw err; },
+      );
+      expect(res.statusCode).toBe(200);
+      const svcUpdate = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload);
+      expect(svcUpdate.updatePayload.actual_end_time).toBeNull();
+      expect(svcUpdate.updatePayload.check_out_time).toBeNull();
+      expect(svcUpdate.updatePayload).not.toHaveProperty('completed_at');
+      const recUpdate = dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload);
+      expect(recUpdate.updatePayload.ended_at).toBeNull();
+      expect(recUpdate.updatePayload.actual_end_time).toBeNull();
+
+      // A GENUINE closeout end (not start + prior stamped minutes) is
+      // preserved untouched even when this save derives no end.
+      const genuineEnd = {
+        ...corrected45,
+        actual_end_time: new Date('2026-07-19T18:19:05.000Z'),
+        check_out_time: new Date('2026-07-19T18:19:05.000Z'),
+        time_on_site_adjusted_minutes: null,
+        time_on_site_correction_seq: null,
+      };
+      dbMock = makeRecordingDb({ svc: genuineEnd, record: RECORD, recordCols: RECORD_COLS });
+      mockDbCurrent = dbMock;
+      res = makeRes();
+      await patchHandler()(
+        { params: { serviceId: 'svc-1' }, body: { minutes: 720 }, technicianId: 'admin-1', techRole: 'admin' },
+        res,
+        (err) => { throw err; },
+      );
+      const svcUpdate2 = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload);
+      expect(svcUpdate2.updatePayload).not.toHaveProperty('actual_end_time');
+      expect(svcUpdate2.updatePayload).not.toHaveProperty('check_out_time');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('startJob serializes timer creation with the sync via the visit row lock (codex P2 round 25)', () => {
+    // Without a shared lock, startJob could insert a new job timer between
+    // the sync's membership check and its audited edit. The job lookup is
+    // now FOR UPDATE and ordered before startJob's time_entries writes, so
+    // every path locks scheduled_services before touching time_entries.
+    const timeTrackingSource = fs.readFileSync(
+      path.join(__dirname, '../services/time-tracking.js'),
+      'utf8',
+    );
+    expect(timeTrackingSource).toMatch(/const job = await trx\('scheduled_services'\)\.where\(\{ id: jobId \}\)\.forUpdate\(\)\.first\(\);/);
+    const lockAt = timeTrackingSource.indexOf("const job = await trx('scheduled_services').where({ id: jobId }).forUpdate().first();");
+    const closeAt = timeTrackingSource.indexOf(".where({ technician_id: technicianId, entry_type: 'job', status: 'active' })");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(closeAt).toBeGreaterThan(lockAt);
+  });
+
   test('duplicate entries matching the corrected minutes are DIVERGENT in aggregate — surfaced, not silently fine (codex P1, audit round 21)', async () => {
     // Two duplicate 45-minute entries against a 45-minute correction total
     // 90 timesheet minutes: each entry individually "matches", but the

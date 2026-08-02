@@ -232,6 +232,27 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
       throw new Error('Must be clocked in to start a job.');
     }
 
+    // Job lookup FIRST, and LOCKED (codex P2 #3152 round 25): the
+    // time-on-site correction's linked-timer sync holds this visit's
+    // scheduled_services row lock across its membership check and audited
+    // edit — an unlocked insert here could land a new job timer between
+    // that check and the edit, making the sync report success against a
+    // set that just changed. Taking the same row lock serializes timer
+    // creation with the sync (either the insert commits first and the
+    // membership check sees it, or it waits until the sync's report is
+    // already honest at its commit point). Ordered before the
+    // time_entries writes below so every path locks scheduled_services
+    // before touching time_entries.
+    let customerId = null;
+    let serviceType = null;
+    if (jobId) {
+      const job = await trx('scheduled_services').where({ id: jobId }).forUpdate().first();
+      if (job) {
+        customerId = job.customer_id;
+        serviceType = job.service_type;
+      }
+    }
+
     // Close any other active job entry.
     const now = new Date();
     await trx('time_entries')
@@ -242,17 +263,6 @@ async function startJob(technicianId, jobId, { lat, lng } = {}) {
         duration_minutes: completedDurationSql(trx, now),
         updated_at: now,
       });
-
-    // Lookup job details.
-    let customerId = null;
-    let serviceType = null;
-    if (jobId) {
-      const job = await trx('scheduled_services').where({ id: jobId }).first();
-      if (job) {
-        customerId = job.customer_id;
-        serviceType = job.service_type;
-      }
-    }
 
     const [created] = await trx('time_entries')
       .insert({

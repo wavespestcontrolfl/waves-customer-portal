@@ -2464,6 +2464,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
         time_on_site_correction_seq: trx.raw('COALESCE(time_on_site_correction_seq, 0) + 1'),
         updated_at: new Date(),
       };
+      let clearedDerivedEnd = false;
       if (newEnd) {
         // Both timestamp families together, plus completed_at — same-day
         // stamps stay on the visit's day, so billing recovery's aging and
@@ -2471,6 +2472,32 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
         serviceUpdate.actual_end_time = newEnd;
         serviceUpdate.check_out_time = newEnd;
         serviceUpdate.completed_at = newEnd;
+      } else {
+        // Clamped re-correction (codex P2 #3152 round 25): this save cannot
+        // derive a nonfuture end (start + minutes is still ahead of the
+        // wall clock). If the CURRENT end stamps are the DERIVED shape a
+        // prior correction wrote (start + previously stamped minutes),
+        // leaving them would pair the old derived completion instant with
+        // the new larger duration — the customer timeline prefers the
+        // timestamp pair and would show an inconsistent span. Derived
+        // stamps are cleared to the unknown-end posture (explicit duration
+        // columns win at read time, as in backfill); completed_at is KEPT —
+        // it drives day-window attribution (billing aging, pricing month
+        // buckets) and both instants sit on the same service day, while a
+        // NULL there has previously hidden visits from Billing Recovery. A
+        // genuine wall-clock closeout end never matches the derived shape
+        // and is preserved untouched.
+        const priorStampedMinutes = Number(lockedSvc?.time_on_site_adjusted_minutes);
+        const shapeStart = [lockedSvc?.actual_start_time, lockedSvc?.check_in_time, lockedSvc?.arrived_at]
+          .map((v) => finiteDate(v))
+          .find(Boolean);
+        const currentEnd = finiteDate(lockedSvc?.actual_end_time) || finiteDate(lockedSvc?.check_out_time);
+        if (Number.isFinite(priorStampedMinutes) && priorStampedMinutes > 0 && shapeStart && currentEnd
+          && Math.abs(currentEnd.getTime() - (shapeStart.getTime() + priorStampedMinutes * 60000)) < 1000) {
+          serviceUpdate.actual_end_time = null;
+          serviceUpdate.check_out_time = null;
+          clearedDerivedEnd = true;
+        }
       }
       await trx('scheduled_services').where({ id: svc.id }).update(serviceUpdate);
 
@@ -2501,6 +2528,13 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
         if (newEnd) {
           for (const field of BACKFILL_RECORD_END_FIELDS) {
             if (recordCols[field]) recordUpdate[field] = newEnd;
+          }
+        } else if (clearedDerivedEnd) {
+          // Mirror the row-side clearing (codex P2 #3152 round 25): the
+          // record's end fields carry the same prior-derived instant and
+          // feed the customer timeline directly.
+          for (const field of BACKFILL_RECORD_END_FIELDS) {
+            if (recordCols[field]) recordUpdate[field] = null;
           }
         }
         if (recordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;
