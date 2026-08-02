@@ -7152,8 +7152,16 @@ const CallRecordingProcessor = {
             // path returns already_sent_to_phone) — a 21610 that landed
             // while the first card insert was lost must reach the rebuilt
             // card too (codex P1).
-            const bounceOutcome = (smsOutcome.sent || smsOutcome.skipped === 'already_sent_to_phone')
+            const bounceVerdict = (smsOutcome.sent || smsOutcome.skipped === 'already_sent_to_phone')
               ? await DroppedCallSms.terminalBounceOutcome(smsAni || phone) : null;
+            // An opt-out is PHONE-level truth and applies to any card for
+            // this number; 'undelivered' is call-specific — an old call's
+            // bounce must not stamp a NEW call's card (codex P2).
+            const bounceOutcome = bounceVerdict
+              && (bounceVerdict.outcome === 'opted_out'
+                || !bounceVerdict.callLogId
+                || String(bounceVerdict.callLogId) === String(call.id))
+              ? bounceVerdict.outcome : null;
             if (bounceOutcome) {
               await db('triage_items')
                 .where({ call_log_id: call.id, reason_code: 'call_dropped_mid_intake' })

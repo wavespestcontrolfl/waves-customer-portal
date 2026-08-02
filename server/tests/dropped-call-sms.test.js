@@ -591,13 +591,13 @@ describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
     expect(state.inserts).toHaveLength(0);
   });
 
-  it('terminal bounce outcome exposed for the processor post-insert reconcile (both kinds)', async () => {
+  it('terminal bounce outcome carries provenance for call-scoped reconciliation', async () => {
     const { terminalBounceOutcome } = require('../services/dropped-call-sms');
-    state.firstResults.dropped_call_sms_claims = [{ outcome: 'undelivered' }];
-    await expect(terminalBounceOutcome(PHONE)).resolves.toBe('undelivered');
-    state.firstResults.dropped_call_sms_claims = [{ outcome: 'opted_out' }];
-    await expect(terminalBounceOutcome(PHONE)).resolves.toBe('opted_out');
-    state.firstResults.dropped_call_sms_claims = [{ outcome: 'sent' }];
+    state.firstResults.dropped_call_sms_claims = [{ outcome: 'undelivered', call_log_id: 'call-1' }];
+    await expect(terminalBounceOutcome(PHONE)).resolves.toEqual({ outcome: 'undelivered', callLogId: 'call-1' });
+    state.firstResults.dropped_call_sms_claims = [{ outcome: 'opted_out', call_log_id: null }];
+    await expect(terminalBounceOutcome(PHONE)).resolves.toEqual({ outcome: 'opted_out', callLogId: null });
+    state.firstResults.dropped_call_sms_claims = [{ outcome: 'sent', call_log_id: 'call-1' }];
     await expect(terminalBounceOutcome(PHONE)).resolves.toBe(null);
   });
 

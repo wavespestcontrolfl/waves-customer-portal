@@ -800,8 +800,10 @@ async function terminalBounceOutcome(rawPhone) {
   try {
     const phone = normalizePhoneE164(rawPhone);
     if (!phone) return null;
-    const claim = await db('dropped_call_sms_claims').where({ phone }).first('outcome');
-    if (claim?.outcome === 'undelivered' || claim?.outcome === 'opted_out') return claim.outcome;
+    const claim = await db('dropped_call_sms_claims').where({ phone }).first('outcome', 'call_log_id');
+    if (claim?.outcome === 'undelivered' || claim?.outcome === 'opted_out') {
+      return { outcome: claim.outcome, callLogId: claim.call_log_id || null };
+    }
     return null;
   } catch (e) {
     logger.warn(`[dropped-call-sms] post-insert outcome check failed: ${e.code || e.name || 'db_error'}`);
