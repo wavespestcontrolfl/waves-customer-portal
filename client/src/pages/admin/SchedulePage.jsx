@@ -1682,11 +1682,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           // inflated span survives there until corrected by hand.
           if (patchResult?.timeEntryCorrected === false) {
             const timerReason =
-              patchResult?.timeEntryCorrectionBlocked === "approved_week"
-                ? "its week is already approved"
-                : patchResult?.timeEntryCorrectionBlocked === "multiple_job_entries"
-                  ? "several timer entries are linked to this visit"
-                  : "it could not be edited automatically";
+              patchResult?.timeEntryCorrectionBlocked === "entry_open"
+                ? "its timer is still running"
+                : patchResult?.timeEntryCorrectionBlocked === "approved_week"
+                  ? "its week is already approved"
+                  : patchResult?.timeEntryCorrectionBlocked === "multiple_job_entries"
+                    ? "several timer entries are linked to this visit"
+                    : "it could not be edited automatically";
             alert(
               `Duration corrected, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
             );
@@ -11595,6 +11597,23 @@ export function CompletionPanel({
       if (photoResult?.failed > 0) {
         alert(
           `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
+        );
+      }
+      // A live time-on-site override syncs the technician's linked job
+      // timer server-side; when that sync is blocked the inflated span
+      // survives in Timesheets/utilization — say so, since the corrected
+      // value seeds the edit modal and no later save will retry it.
+      if (result?.timeEntryCorrected === false) {
+        const timerReason =
+          result?.timeEntryCorrectionBlocked === "entry_open"
+            ? "its timer is still running"
+            : result?.timeEntryCorrectionBlocked === "approved_week"
+              ? "its week is already approved"
+              : result?.timeEntryCorrectionBlocked === "multiple_job_entries"
+                ? "several timer entries are linked to this visit"
+                : "it could not be edited automatically";
+        alert(
+          `Service completed with the corrected duration, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
         );
       }
       localStorage.removeItem(completionDraftKey(service.id));

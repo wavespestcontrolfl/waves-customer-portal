@@ -696,6 +696,36 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(res.body.timeEntryCorrectionBlocked).toBe('approved_week');
   });
 
+  test('a still-running linked timer is surfaced as entry_open, never silently fine (codex P1 round 20)', async () => {
+    // clock_out == null: the span keeps growing past the corrected minutes
+    // and the audited edit workflow is for completed intervals — the
+    // response must say the timer needs a Timesheets fix, not read as a
+    // full success.
+    const TimeTracking = require('../services/time-tracking');
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [{
+        id: 'te-open',
+        clock_in: new Date('2026-07-19T16:00:00.000Z'),
+        clock_out: null,
+        duration_minutes: null,
+        status: 'active',
+      }],
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(TimeTracking.adminEditEntry).not.toHaveBeenCalled();
+    expect(res.body.timeEntryCorrected).toBe(false);
+    expect(res.body.timeEntryCorrectionBlocked).toBe('entry_open');
+  });
+
   test('an increased re-correction moves the linked timer too, fenced on the committed revision (codex P1 round 20)', async () => {
     // 45 → 60: the entry diverges in the OTHER direction — sync is on any
     // divergence, not only inflated-timer decreases.
@@ -728,8 +758,13 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // through the edit) and skips when the row already carries a NEWER
     // revision than this request committed — an older request can never
     // land its stale timer last.
-    expect(source).toMatch(/if \(rowSeqNow != null && committedCorrectionSeq != null && rowSeqNow > committedCorrectionSeq\) return;/);
-    const timerLockAt = source.indexOf("await timerTrx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    expect(source).toMatch(/if \(rowSeqNow != null && committedSeq != null && rowSeqNow > committedSeq\) return;/);
+    // The live-override completion reuses the SAME fenced sync (audit
+    // round 20c) — gated off backfills, on for numeric corrected minutes,
+    // idempotent on crash-resumed retries.
+    expect(source).toMatch(/if \(!isBackfillCompletion && typeof effectiveTimeOnSite === 'number'\) \{\s*\n\s*completionTimerSync = await syncLinkedJobTimer\(\{/);
+    expect((source.match(/\.\.\.\(completionTimerSync\.corrected != null \? \{ timeEntryCorrected: completionTimerSync\.corrected \} : \{\}\),/g) || []).length).toBe(2);
+    const timerLockAt = source.indexOf("await timerTrx('scheduled_services').where({ id: serviceId }).forUpdate().first();");
     const timerEditAt = source.indexOf("await require('../services/time-tracking').adminEditEntry(");
     expect(timerLockAt).toBeGreaterThan(-1);
     expect(timerEditAt).toBeGreaterThan(timerLockAt);

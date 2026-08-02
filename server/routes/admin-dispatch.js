@@ -834,6 +834,69 @@ function minutesAsElapsedString(minutes) {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}:00`;
 }
 
+// Linked job timer sync — shared by the after-the-fact PATCH and the live
+// completion override (codex P1, pre-push audit round 20): job costing
+// overrides the inflated entry via the durable stamp, but timesheet detail,
+// utilization, and actual-duration analytics read time_entries directly.
+// Revision-fenced under the scheduled_services row lock, which is HELD
+// through the audited edit so concurrent corrections' syncs serialize in
+// commit order; a request that finds a NEWER revision than the one it
+// committed skips — the newest correction's own pass lands the truth. The
+// safe shape is exactly one non-voided, CLOSED job entry diverging from the
+// corrected minutes in either direction; everything else is surfaced as a
+// blocked reason (entry_open / multiple_job_entries / entry_shape /
+// approved_week / edit_failed) rather than forced.
+async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy }) {
+  let corrected = null; // null = no divergent linked entry to correct
+  let blocked = null;
+  try {
+    await db.transaction(async (timerTrx) => {
+      const rowNow = await timerTrx('scheduled_services').where({ id: serviceId }).forUpdate().first();
+      const rowSeqNow = rowNow?.time_on_site_correction_seq == null
+        ? null
+        : Number(rowNow.time_on_site_correction_seq);
+      if (rowSeqNow != null && committedSeq != null && rowSeqNow > committedSeq) return;
+      const jobEntries = await timerTrx('time_entries')
+        .where({ job_id: serviceId, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status');
+      if (jobEntries.length === 0) return;
+      // A still-running linked timer cannot be silently "fine" — the span
+      // keeps growing past the corrected minutes and the audited edit
+      // workflow is for completed intervals. Surface it (codex P1, audit
+      // round 20c) so the admin closes/fixes it in Timesheets.
+      const open = jobEntries.filter((e) => e.clock_out == null);
+      if (open.length > 0) {
+        corrected = false;
+        blocked = 'entry_open';
+        return;
+      }
+      // ANY divergence syncs — an increased re-correction (45 → 60) must
+      // move the entry too, not only an inflated-timer decrease.
+      const divergent = jobEntries.filter((e) => Math.abs(Number(e.duration_minutes) - minutes) > 1);
+      if (divergent.length === 0) return;
+      if (jobEntries.length === 1 && divergent.length === 1 && divergent[0].clock_in) {
+        const entry = divergent[0];
+        const newClockOut = new Date(new Date(entry.clock_in).getTime() + minutes * 60000);
+        await require('../services/time-tracking').adminEditEntry(entry.id, {
+          clock_out: newClockOut.toISOString(),
+          edit_reason: `Time-on-site correction: ${minutes} min (visit ${serviceId})`,
+          edited_by: editedBy,
+        });
+        corrected = true;
+      } else {
+        corrected = false;
+        blocked = jobEntries.length > 1 ? 'multiple_job_entries' : 'entry_shape';
+      }
+    });
+  } catch (err) {
+    corrected = false;
+    blocked = /approved/i.test(String(err.message)) ? 'approved_week' : 'edit_failed';
+    logger.warn(`[time-on-site] linked job timer sync blocked for service ${serviceId}: ${err.message}`);
+  }
+  return { corrected, blocked };
+}
+
 function liveTimeOnSitePlan({ timeOnSite, role, backfill = false, service = {}, now = new Date() } = {}) {
   const isEmpty = timeOnSite == null || timeOnSite === '';
   if (backfill === true || isEmpty) {
@@ -2423,50 +2486,12 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     // pending for re-approval; an approved/immutable week or an ambiguous
     // shape is SURFACED in the response instead of forced — the client
     // warns that the timer needs a separate Timesheets correction.
-    let timeEntryCorrected = null; // null = no divergent linked entry to correct
-    let timeEntryCorrectionBlocked = null;
-    try {
-      await db.transaction(async (timerTrx) => {
-        // Revision-fenced under the row lock (pre-push audit, both legs):
-        // concurrent corrections' post-commit syncs would otherwise finish
-        // out of order. The lock is HELD through the edit, so syncs
-        // serialize in commit order; a request that sees a NEWER revision
-        // than the one it committed skips — the newest correction's own
-        // pass lands the truth. (Null/absent seq — pre-migration — leaves
-        // the fence inactive, same posture as every other seq consumer.)
-        const rowNow = await timerTrx('scheduled_services').where({ id: svc.id }).forUpdate().first();
-        const rowSeqNow = rowNow?.time_on_site_correction_seq == null
-          ? null
-          : Number(rowNow.time_on_site_correction_seq);
-        if (rowSeqNow != null && committedCorrectionSeq != null && rowSeqNow > committedCorrectionSeq) return;
-        const jobEntries = await timerTrx('time_entries')
-          .where({ job_id: svc.id, entry_type: 'job' })
-          .whereNot('status', 'voided')
-          .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status');
-        const closed = jobEntries.filter((e) => e.clock_out != null);
-        // ANY divergence syncs — an increased re-correction (45 → 60) must
-        // move the entry too, not only an inflated-timer decrease.
-        const divergent = closed.filter((e) => Math.abs(Number(e.duration_minutes) - plan.minutes) > 1);
-        if (divergent.length === 0) return;
-        if (jobEntries.length === 1 && divergent.length === 1 && divergent[0].clock_in) {
-          const entry = divergent[0];
-          const newClockOut = new Date(new Date(entry.clock_in).getTime() + plan.minutes * 60000);
-          await require('../services/time-tracking').adminEditEntry(entry.id, {
-            clock_out: newClockOut.toISOString(),
-            edit_reason: `Time-on-site correction: ${plan.minutes} min (visit ${svc.id})`,
-            edited_by: req.technicianId,
-          });
-          timeEntryCorrected = true;
-        } else {
-          timeEntryCorrected = false;
-          timeEntryCorrectionBlocked = jobEntries.length > 1 ? 'multiple_job_entries' : 'entry_shape';
-        }
-      });
-    } catch (err) {
-      timeEntryCorrected = false;
-      timeEntryCorrectionBlocked = /approved/i.test(String(err.message)) ? 'approved_week' : 'edit_failed';
-      logger.warn(`[time-on-site] linked job timer correction blocked for service ${svc.id}: ${err.message}`);
-    }
+    const { corrected: timeEntryCorrected, blocked: timeEntryCorrectionBlocked } = await syncLinkedJobTimer({
+      serviceId: svc.id,
+      minutes: plan.minutes,
+      committedSeq: committedCorrectionSeq,
+      editedBy: req.technicianId,
+    });
 
     // A failed recalc is SURFACED, not swallowed (codex P2 #3152 round 9):
     // the correction itself stands (costing is derived state any later
@@ -6738,6 +6763,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Live-override completions correct the linked technician timer too
+    // (codex P1, pre-push audit round 20c): the correction is authoritative
+    // for costing via the durable stamp, but without this sync timesheets
+    // and utilization kept the inflated span — and the corrected value
+    // becomes the edit modal's seed, so no later save would re-invoke the
+    // after-the-fact PATCH. Same revision-fenced audited sync the PATCH
+    // uses; committedSeq is the revision this finalization created (or
+    // adopted). Runs on crash-resumed retries too — idempotent, the
+    // divergence check no-ops once the entry agrees. Backfills are
+    // excluded: their entries are historic and the quiet-closeout posture
+    // owns them.
+    let completionTimerSync = { corrected: null, blocked: null };
+    if (!isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
+      completionTimerSync = await syncLinkedJobTimer({
+        serviceId: svc.id,
+        minutes: effectiveTimeOnSite,
+        committedSeq: svc.time_on_site_correction_seq ?? null,
+        editedBy: req.technicianId,
+      });
+    }
+
     if (isIncompleteVisit) {
       // Recurring plan refill / end-of-plan flag — an incomplete-outcome
       // completion still flips the scheduled_services row to 'completed'
@@ -6764,6 +6810,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
         }),
+        ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
+        ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
       };
       await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice: null, response: responsePayload });
       markedSucceeded = true;
@@ -9305,6 +9353,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
       }),
+      ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
+      ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
       ...(typedFindingsType ? {
         typedFindingsType,
         typedDeliveryMode,
