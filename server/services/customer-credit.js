@@ -193,14 +193,26 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null }, trx = null) {
   const run = async (t) => {
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // Frozen-consent cap, enforced against the LOCKED invoice (Codex #3153
+    // r16 P1): the appointment-card completion lane's preflight compares an
+    // unlocked snapshot — an invoice edit racing this credit apply could
+    // otherwise consume customer credit (or flip the bill prepaid) above
+    // the amount the customer accepted. Opt-in; null = unchanged behavior.
+    if (maxAuthorizedSubtotal != null) {
+      const lockedSubtotalCents = Math.round(Number(invoice.subtotal != null ? invoice.subtotal : invoice.total || 0) * 100);
+      const lockedDiscountCents = Math.max(0, Math.round(Number(invoice.discount_amount || 0) * 100));
+      if (lockedSubtotalCents - lockedDiscountCents > Math.round(Number(maxAuthorizedSubtotal) * 100)) {
+        return { applied: 0, skipped: 'above_authorized_cap' };
+      }
+    }
     // Homeowner credit must never touch a third-party (payer-billed) invoice.
     if (invoice.payer_id) return { applied: 0, skipped: 'payer_billed' };
     try {
-      // eslint-disable-next-line global-require
+       
       require('./invoice-helpers').assertInvoiceCollectible(invoice.status);
     } catch {
       return { applied: 0, skipped: 'uncollectible' };
@@ -356,7 +368,7 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
     // Transition winner: give back the deposit dollars this invoice consumed
     // (credited → received, roll-forward-eligible). Restore-based-on-line-items
     // must run at most once per invoice, which the terminal gate guarantees.
-    // eslint-disable-next-line global-require
+     
     const { restoreDepositCreditForVoidedInvoice } = require('./estimate-deposits');
     await restoreDepositCreditForVoidedInvoice({ invoice: inv, trx });
   }
@@ -382,14 +394,14 @@ async function returnAppliedCreditOnRefund({ invoiceId, createdBy = 'system' }, 
  */
 async function runPostFullCoverageSideEffects(invoiceId) {
   try {
-    // eslint-disable-next-line global-require
+     
     await require('./invoice-followups').stopOnPayment(invoiceId);
   } catch (e) {
     logger.warn(`[account-credit] stopOnPayment after full coverage failed for ${invoiceId}: ${e.message}`);
   }
   try {
     const inv = await db('invoices').where({ id: invoiceId }).first();
-    // eslint-disable-next-line global-require
+     
     if (inv) await require('./annual-prepay-renewals').syncTermForInvoicePayment(inv);
   } catch (e) {
     logger.warn(`[account-credit] annual-prepay term sync after full coverage failed for ${invoiceId}: ${e.message}`);
@@ -412,7 +424,7 @@ async function runPostFullCoverageSideEffects(invoiceId) {
  */
 async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system', trx = null, deferFullCoverageSideEffects = false } = {}) {
   try {
-    // eslint-disable-next-line global-require
+     
     if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return null;
     const result = await applyAccountCreditToInvoice({ invoiceId, createdBy }, trx);
     // When a seam-time apply FULLY covers the invoice (now prepaid / paid_at), run

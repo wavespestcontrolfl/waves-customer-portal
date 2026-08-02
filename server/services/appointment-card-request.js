@@ -1455,8 +1455,13 @@ function isWithinApptCancelWindow({ request, serviceStart, now = new Date() }) {
 
 async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date() }) {
   if (!isApptCardFeeRailEnabled()) return { charged: false, reason: 'feature_disabled' };
-  const { request, reason: skipReason } = await feeEligibleRequestForVisit(scheduledServiceId);
-  if (!request) return { charged: false, reason: skipReason };
+  const { request, reason: skipReason, unresolved } = await feeEligibleRequestForVisit(scheduledServiceId);
+  // Unresolved eligibility (failed payer/hold lookup) surfaces as the
+  // canonical review reason (Codex #3153 r16 P2): the dispatch no-show
+  // path maps ONLY charge_review to its cautious customer copy — a raw
+  // lookup-failure reason would send "there's no charge" while the agreed
+  // fee sits retryable.
+  if (!request) return { charged: false, reason: unresolved ? 'charge_review' : skipReason };
   const feeAmount = Number(request.no_show_fee_amount);
 
   // Staleness guard — identical posture to the card-hold rail: the fee is
@@ -1760,13 +1765,27 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
         .where({ scheduled_service_id: scheduledServiceId })
         .first('id', 'fee_status');
       if (row && !row.fee_status) {
-        await db('appointment_card_requests')
+        // The flip-protection stamp is REQUIRED, not best-effort (Codex
+        // #3153 r16 P1): during a rolling gate enable a gate-on worker can
+        // already be charging, and an unstamped row could be fee'd by a
+        // cancellation retry after the flip. Exactly one row or the
+        // canonical non-released review outcome.
+        const stamped = await db('appointment_card_requests')
           .where({ id: row.id })
           .whereNull('fee_status')
           .update({ fee_status: waiveFee ? 'waived' : 'released', updated_at: new Date() });
+        if (stamped !== 1) {
+          logger.warn(`[appt-card-request] dark-gate release stamp lost a race for visit ${scheduledServiceId} — reporting charge_review`);
+          return { handled: false, released: false, reason: 'charge_review' };
+        }
+      } else if (row && (row.fee_status === 'charging' || row.fee_status === 'charge_review')) {
+        // A gate-on worker's fee is in flight (rolling enable) — never a
+        // clean release while it may land.
+        return { handled: false, released: false, reason: 'charge_review' };
       }
     } catch (err) {
-      logger.warn(`[appt-card-request] dark-gate release stamp failed for visit ${scheduledServiceId}: ${err.message}`);
+      logger.error(`[appt-card-request] dark-gate release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${err.message}`);
+      return { handled: false, released: false, reason: 'charge_review' };
     }
     return { handled: false, released: true, reason: 'feature_disabled' };
   }
@@ -1912,7 +1931,10 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
   let start = null;
   try {
     const { scheduledServiceApptTime } = require('./appointment-reminders');
-    start = await scheduledServiceApptTime(scheduledServiceId);
+    // throwOnError distinguishes a FAILED lookup from a genuinely timeless
+    // visit (Codex #3153 r16 P1 — the helper's default fail-soft null made
+    // this catch unreachable and the preview lied fee-free).
+    start = await scheduledServiceApptTime(scheduledServiceId, { throwOnError: true });
   } catch (err) {
     // A THROWN time resolution is unresolved, not fee-free (Codex #3153
     // r13 P1): the cancellation path re-resolves independently, and a
@@ -2174,26 +2196,7 @@ async function settleAppointmentNoShowFee(paymentIntent) {
   const customerId = paymentIntent?.metadata?.waves_customer_id || null;
   if (!piId || !customerId) return { settled: false, reason: 'missing_pi_or_customer' };
 
-  // Pre-settlement refund guard — FAIL CLOSED on a retrieve error (throw so
-  // Stripe retries): settling gross would book already-refunded money.
   const StripeService = require('./stripe');
-  let preRefundedCents = 0;
-  try {
-    const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
-    const ch = live?.latest_charge;
-    if (ch && typeof ch === 'object') {
-      const chargedCents = Math.round(Number(ch.amount || 0));
-      preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
-      if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
-        logger.warn(`[appt-card-request] no-show fee fully refunded before settlement — skipping (${piId})`);
-        return { settled: false, reason: 'refunded_pre_settlement' };
-      }
-    }
-  } catch (err) {
-    logger.error(`[appt-card-request] pre-settlement refund check failed — deferring to Stripe retry (${piId}): ${err.message}`);
-    throw err;
-  }
-
   const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
   const reason = paymentIntent.metadata?.reason || 'no_show';
   const requestId = paymentIntent.metadata?.request_id || null;
@@ -2209,6 +2212,27 @@ async function settleAppointmentNoShowFee(paymentIntent) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${piId}`]);
     const existing = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
     if (existing) return { replay: true };
+
+    // Refund guard INSIDE the PI lock (Codex #3153 r16 P1): a dashboard
+    // refund landing after an earlier unlocked check but before the paid
+    // rows insert would be acknowledged by the refund webhook with no row
+    // to mark — and this settlement would then book fully-paid revenue for
+    // a refunded charge. The live retrieve runs under the lock, right
+    // before the insert; FAIL CLOSED on a retrieve error (throw → rollback
+    // → Stripe redelivers).
+    let preRefundedCents = 0;
+    {
+      const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
+      const ch = live?.latest_charge;
+      if (ch && typeof ch === 'object') {
+        const chargedCents = Math.round(Number(ch.amount || 0));
+        preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
+        if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
+          logger.warn(`[appt-card-request] no-show fee fully refunded before settlement — skipping (${piId})`);
+          return { refundedPreSettlement: true };
+        }
+      }
+    }
 
     // Face value, NO tax: the fee must equal the amount disclosed + charged.
     const inv = await InvoiceService.create({
@@ -2253,6 +2277,7 @@ async function settleAppointmentNoShowFee(paymentIntent) {
     return { invoice: inv };
   });
   const { sendNoShowFeeReceipt } = require('./estimate-card-holds');
+  if (result.refundedPreSettlement) return { settled: false, reason: 'refunded_pre_settlement' };
   if (result.replay) {
     try {
       const inv = await db('invoices').where({ stripe_payment_intent_id: piId })

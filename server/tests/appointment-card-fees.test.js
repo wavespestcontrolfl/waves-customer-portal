@@ -331,11 +331,14 @@ describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
     expect(reverted).toBeTruthy();
   });
 
-  test('hold lookup FAILURE fails closed — never read as absence (Codex #3153 r1)', async () => {
+  test('hold lookup FAILURE fails closed — canonical charge_review, never read as absence (Codex #3153 r1+r16)', async () => {
     mockTableHandlers = handlersWith();
     mockTableHandlers.estimate_card_holds.first = () => { throw new Error('db blip'); };
     const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
-    expect(res).toEqual({ charged: false, reason: 'hold_lookup_failed' });
+    // Canonical review reason (r16 P2): dispatch maps ONLY charge_review to
+    // its cautious no-show copy — a raw lookup reason would tell the
+    // customer "no charge" while the fee sits retryable.
+    expect(res).toEqual({ charged: false, reason: 'charge_review' });
     expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 

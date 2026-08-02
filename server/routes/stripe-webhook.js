@@ -2224,6 +2224,47 @@ async function handleChargeRefunded(charge) {
     }
   }
 
+  // Appointment-card fee PI refunded BEFORE settlement (Codex #3153 r16
+  // P0): the fee's paid rows are written by settleAppointmentNoShowFee
+  // under the appointment_card_no_show_fee:<pi> advisory lock. A refund
+  // landing first would find nothing to mark and be acknowledged, and the
+  // later settlement would book fully-paid revenue for refunded money.
+  // Under the SAME lock: re-check for the settlement row (it may have
+  // landed in the window — the generic path below then stamps it) and
+  // otherwise persist a durable refunded payments row that settlement's
+  // in-lock replay check consumes.
+  if (charge.payment_intent && charge.metadata?.purpose === 'appointment_card_no_show_fee') {
+    const feePreRow = await db('payments').where({ stripe_payment_intent_id: charge.payment_intent }).first('id');
+    if (!feePreRow) {
+      const markerWritten = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${charge.payment_intent}`]);
+        const rowInLock = await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).first('id');
+        if (rowInLock) return false;
+        await trx('payments').insert({
+          customer_id: charge.metadata?.waves_customer_id || null,
+          processor: 'stripe',
+          payment_date: etDateString(),
+          amount: (Number(charge.amount) || 0) / 100,
+          refund_amount: cumulativeRefundAmountDollars,
+          refund_status: isFullRefund ? 'refunded' : 'partial',
+          status: isFullRefund ? 'refunded' : 'paid',
+          stripe_payment_intent_id: charge.payment_intent,
+          stripe_charge_id: chargeId,
+          metadata: JSON.stringify({
+            purpose: 'appointment_card_no_show_fee',
+            pre_settlement_refund: true,
+            refund_ids: refundId ? [refundId] : [],
+          }),
+        });
+        return true;
+      });
+      if (markerWritten) {
+        logger.warn(`[stripe-webhook] appointment fee PI ${charge.payment_intent} refunded before settlement — durable refund marker written`);
+        return;
+      }
+    }
+  }
+
   // Statement refund REORDERED ahead of settlement: if a FULL refund arrives
   // before payment_intent.succeeded wrote the statement payments row, resolve the
   // statement by PI and clear/reset its active PI (so the later succeeded fails

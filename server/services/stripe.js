@@ -2367,6 +2367,13 @@ const StripeService = {
             .forUpdate()
             .first('id', 'customer_id');
           if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
+          // The locked visit must still belong to the invoice's customer
+          // (Codex #3153 r16 P0): a reassignment racing the caller's
+          // preflight could otherwise verify the NEW customer's self-pay
+          // state and then charge the OLD customer's invoice and card.
+          if (String(lockedSvc.customer_id) !== String(lockedInvoice.customer_id)) {
+            throw new Error('The appointment was reassigned to a different customer. Review before charging.');
+          }
           const resolvedPayer = await require('./payer').resolveForInvoice({
             database: trx,
             customerId: String(lockedSvc.customer_id),

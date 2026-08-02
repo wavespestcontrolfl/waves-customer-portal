@@ -7286,7 +7286,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');
-        const creditResult = await applyAccountCreditToInvoice({ invoiceId: invoice.id });
+        // The appointment lane's frozen cap rides INTO the credit apply
+        // (Codex #3153 r16 P1) and is re-checked against the LOCKED
+        // invoice — the preflight fence above is an unlocked snapshot an
+        // invoice edit can outrun. NULL accepted amount = cap 0 (the lane
+        // is unchargeable, so credit must not touch its bill either).
+        const creditResult = await applyAccountCreditToInvoice({
+          invoiceId: invoice.id,
+          ...(apptCardOneTimeCharge ? { maxAuthorizedSubtotal: apptCardAcceptedAmount != null ? apptCardAcceptedAmount : 0 } : {}),
+        });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })
             .first('status', 'credit_applied', 'prepaid_at', 'prepaid_by', 'prepaid_prev_status', 'paid_at');
