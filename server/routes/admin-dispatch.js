@@ -40,7 +40,6 @@ const TurfHeightOcr = require('../services/turf-height-ocr');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   buildServiceReportV1DeliveryContext,
-  foldLawnScoreIntoCompletionSms,
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
@@ -9087,37 +9086,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
           }
         }
-        // Lawn health score consolidation: fold the confirmed assessment's
-        // score (and tip) into the SAME completion report text instead of
-        // sending a separate "lawn health report ready" SMS at confirm time.
-        // Branch-agnostic — applies to whichever completion template was
-        // chosen above. Best-effort; a failure here must never block the send.
-        if (sentSmsBody && !isIncompleteVisit && completedLawnAssessmentId) {
-          try {
-            const LawnIntel = require('../services/lawn-intelligence');
-            const scoreParts = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
-            // The tip is recommendation-derived: unless the grounded regen
-            // SUCCEEDED, it may be the stale confirm-time text that
-            // contradicts today's applications — an SMS is unrecallable, so
-            // suppress the tip and send the score alone (codex P1 r12). The
-            // score line is tech-confirmed assessment data, not
-            // recommendation output.
-            if (scoreParts && lawnRecRegenAttempted && !lawnRecRegenGrounded) {
-              scoreParts.tipLine = '';
-            }
-            if (scoreParts?.scoreLine) {
-              const folded = foldLawnScoreIntoCompletionSms(sentSmsBody, scoreParts, { maxSegments: 2 });
-              if (folded.folded) {
-                sentSmsBody = folded.body;
-                if (folded.truncated) completionSmsWasTruncated = true;
-              } else {
-                logger.info(`[dispatch] lawn score fold-in skipped for ${record.id} (segment budget)`);
-              }
-            }
-          } catch (scoreErr) {
-            logger.warn(`[dispatch] lawn score fold-in failed for ${record.id}: ${scoreErr.message}`);
-          }
-        }
+        // The lawn score/tip fold-in was REMOVED 2026-08-01 (owner ruling).
+        // It appended the confirmed assessment's score line and a
+        // recommendation-derived tip — watering advice among it — to lawn
+        // completion texts, and budgeted two segments to fit them. That is the
+        // same content the synthesis lead-in carried, arriving by a second
+        // route: lawn texts still read nothing like pest, and still ran long.
+        // The score and the tip belong on the report, which the text links to.
+        // buildCompletionScoreBlock is untouched and still feeds the report.
         if (sentSmsBody) {
           // smsNotesDelta accumulates every key this SMS leg owns — each
           // persisted write below merges the delta only (mergeRecordNotesKeys),

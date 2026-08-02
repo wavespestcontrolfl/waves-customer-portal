@@ -75,13 +75,18 @@ function buildServiceReportV1SmsVars({
   return {
     first_name: normalizeName(customerFirstName) || 'there',
     report_url: url,
+    // EXPAND half of an expand/contract rollout. `service_type` is supplied
+    // here BEFORE any template references it, and `reentry_line` keeps being
+    // supplied as an empty string AFTER the line was retired. Railway runs
+    // migrations before the new instance takes traffic, so for a window the
+    // OLD code serves the NEW template and vice versa — and an unresolved
+    // placeholder does not render blank, it suppresses the entire send
+    // (#3121). Supplying both keys means neither ordering can silence a
+    // completion text. Emptying reentry_line is also what drops the re-entry
+    // line from the live copy today, without touching the template at all.
+    // The contract half — rewriting the bodies to use {service_type} and drop
+    // {reentry_line} — ships as a SEPARATE PR once this is deployed.
     service_type: serviceTypeLabel(serviceType),
-    // Retired with the re-entry line, but STILL SUPPLIED as empty string. The
-    // migration in this change strips {reentry_line} from both bodies, and an
-    // unresolved placeholder does not render blank — it suppresses the entire
-    // send (#3121). Keeping the key costs nothing and means a stale row, a
-    // half-applied migration, or an operator re-adding the token by hand can
-    // never silence a completion text.
     reentry_line: '',
     pay_url: String(payUrl || '').trim(),
   };
@@ -134,53 +139,10 @@ function buildServiceReportV1DeliveryContext({
   };
 }
 
-// Fold a lawn assessment score (and optional tip) into an already-composed
-// completion SMS body, right below the "report is ready: <link>" lead line so
-// the customer's score rides in the SAME text as the report — instead of a
-// separate "lawn health report ready" message.
-//
-// The body handed in was already selected/truncated to a segment target, so
-// the fold must not blow past it: prefer score + tip, else drop the (longer)
-// tip for score-only, else skip the fold entirely (the full recommendations
-// still live in the linked report, so the inline tip is not material).
-//
-// Returns { body, folded, truncated }:
-//   folded=false, body=original  → nothing changed (no score, or no room)
-//   truncated=true               → a tip existed but was dropped for budget
-function foldLawnScoreIntoCompletionSms(body, scoreParts = {}, { maxSegments = 2 } = {}) {
-  const { countSegments } = require('../messaging/segment-counter');
-  const base = String(body || '');
-  const scoreLine = String(scoreParts?.scoreLine || '').trim();
-  const tipLine = String(scoreParts?.tipLine || '').trim();
-  if (!base || !scoreLine) return { body: base, folded: false, truncated: false };
-
-  // DB templates separate paragraphs with a blank line; the prebuilt V1 body
-  // uses single newlines — split on whichever this body uses so the score
-  // lands under the lead line either way.
-  const sep = base.includes('\n\n') ? '\n\n' : '\n';
-  const foldIn = (block) => {
-    const parts = base.split(sep);
-    parts.splice(1, 0, block);
-    return parts.join(sep);
-  };
-  const segs = (text) => countSegments(text).segmentCount;
-
-  if (tipLine) {
-    const withTip = foldIn(`${scoreLine}\n${tipLine}`);
-    if (segs(withTip) <= maxSegments) return { body: withTip, folded: true, truncated: false };
-  }
-  const scoreOnly = foldIn(scoreLine);
-  if (segs(scoreOnly) <= maxSegments) {
-    return { body: scoreOnly, folded: true, truncated: !!tipLine };
-  }
-  return { body: base, folded: false, truncated: false };
-}
-
 module.exports = {
   buildServiceReportV1DeliveryContext,
   buildServiceReportV1Sms,
   buildServiceReportV1SmsVars,
-  foldLawnScoreIntoCompletionSms,
   serviceReportV1SmsType,
   shouldSendServiceReportV1Delivery,
 };
