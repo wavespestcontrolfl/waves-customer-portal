@@ -1124,11 +1124,17 @@ violations at the severity noted.
   CLOSED: a lookup error or an in-flight `charging`/`charge_review`
   fee_status returns a NON-released canonical `charge_review` from the
   cancellation handler (never "released", never treated as absence). The
-  rail also RE-RESOLVES the payer immediately before claiming (r6): a
-  third-party payer assigned after the card was secured exempts the
-  homeowner (`payer_billed` skip), and a payer lookup error is unresolved
-  (fail closed), mirroring the capture flow's own payer fail-closed
-  posture. Every satisfied heal (auto-secure update, autopay heal, prepay
+  rail also RE-RESOLVES the payer both in eligibility AND at the claim
+  boundary (r6+r8): a third-party payer assigned after the card was
+  secured exempts the homeowner (`payer_billed` — a post-claim payer hit
+  closes the fee event terminally as 'released'), a payer lookup error is
+  unresolved / reverts the claim (fail closed), and unresolved fee states
+  are checked BEFORE the payer exemption so an in-flight charge can never
+  be reported as a clean payer release. The completion charge's frozen
+  cap (`maxAuthorizedSubtotal`) is enforced inside
+  `chargeInvoiceWithSavedCard` against the LOCKED invoice and BEFORE any
+  account-credit application — the fully-covered-by-credit early return
+  must never consume credit above consent. Every satisfied heal (auto-secure update, autopay heal, prepay
   heal) applies the SAME monotonic-down accepted_amount stamp as the
   render — a heal can never overwrite the sticky 0 sentinel or widen a
   lower disclosed cap. The

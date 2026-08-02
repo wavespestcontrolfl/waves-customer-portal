@@ -245,6 +245,47 @@ describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
     expect(res).toEqual({ handled: false, released: false, reason: 'charge_review' });
   });
 
+  test('in-flight fee + payer assigned → STILL charge_review, never a clean payer release (Codex #3153 r8 — check order)', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'charging' } });
+    const payerMock = require('../services/payer').resolveForInvoice;
+    payerMock.mockClear();
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1', waiveFee: true });
+    expect(res).toEqual({ handled: false, released: false, reason: 'charge_review' });
+    // The unresolved-state check runs FIRST — the payer exemption is never
+    // even consulted, so it can't convert an in-flight fee into a release.
+    expect(payerMock).not.toHaveBeenCalled();
+  });
+
+  test('payer assigned in the eligibility→claim gap → claim closes released, homeowner never charged (Codex #3153 r8)', async () => {
+    const payerMock = require('../services/payer').resolveForInvoice;
+    payerMock.mockResolvedValueOnce(null); // eligibility pass
+    payerMock.mockResolvedValueOnce({ payerId: 'payer-9' }); // claim boundary
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ charged: false, reason: 'payer_billed' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    const released = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.fee_status === 'released');
+    expect(released).toBeTruthy();
+  });
+
+  test('claim-boundary payer lookup FAILURE reverts the claim and parks review (Codex #3153 r8)', async () => {
+    const payerMock = require('../services/payer').resolveForInvoice;
+    payerMock.mockResolvedValueOnce(null);
+    payerMock.mockRejectedValueOnce(new Error('payer db down'));
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ charged: false, reason: 'charge_review' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    const reverted = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.fee_status === null);
+    expect(reverted).toBeTruthy();
+  });
+
   test('hold lookup FAILURE fails closed — never read as absence (Codex #3153 r1)', async () => {
     mockTableHandlers = handlersWith();
     mockTableHandlers.estimate_card_holds.first = () => { throw new Error('db blip'); };

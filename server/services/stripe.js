@@ -2311,6 +2311,24 @@ const StripeService = {
           .first();
         if (!lockedInvoice) throw new Error('Invoice not found');
         assertInvoiceCollectible(lockedInvoice.status);
+        // Frozen-consent hard cap, enforced against the LOCKED invoice
+        // (Codex #3153 r7 P0) and BEFORE any account-credit application
+        // (r8 P1: the fully-covered-by-credit early return would otherwise
+        // consume customer credit for an amount the completion rail was
+        // never authorized to collect). The completion rails' preflight
+        // compares an UNLOCKED snapshot — a concurrent invoice edit
+        // between that check and this lock must refuse, and a throw here
+        // rolls the whole transaction back with nothing consumed. Opt-in
+        // (null = unchanged behavior); comparator is byte-identical to the
+        // preflight: pre-tax subtotal net of recorded discounts,
+        // cents-authoritative.
+        if (maxAuthorizedSubtotal != null) {
+          const lockedSubtotalCents = Math.round(Number(lockedInvoice.subtotal != null ? lockedInvoice.subtotal : lockedInvoice.total || 0) * 100);
+          const lockedDiscountCents = Math.max(0, Math.round(Number(lockedInvoice.discount_amount || 0) * 100));
+          if (lockedSubtotalCents - lockedDiscountCents > Math.round(Number(maxAuthorizedSubtotal) * 100)) {
+            throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
+          }
+        }
         // The pre-lock invoice read is only an early eligibility snapshot. Use
         // this locked baseline for reservation ownership so credit applied by a
         // concurrent request before our lock is never attributed to this attempt.
@@ -2406,20 +2424,6 @@ const StripeService = {
         total = invTotalCents / 100;
         if (expectedTotal != null && Math.round(Number(expectedTotal) * 100) !== invTotalCents) {
           throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
-        }
-        // Frozen-consent hard cap, enforced against the LOCKED invoice
-        // (Codex #3153 r7 P0): the completion rails' preflight compares an
-        // UNLOCKED snapshot — a concurrent invoice edit between that check
-        // and this lock could otherwise raise an off-session charge above
-        // what the customer accepted. Opt-in (null = unchanged behavior);
-        // comparator is byte-identical to the preflight: pre-tax subtotal
-        // net of recorded discounts, cents-authoritative.
-        if (maxAuthorizedSubtotal != null) {
-          const lockedSubtotalCents = Math.round(Number(lockedInvoice.subtotal != null ? lockedInvoice.subtotal : lockedInvoice.total || 0) * 100);
-          const lockedDiscountCents = Math.max(0, Math.round(Number(lockedInvoice.discount_amount || 0) * 100));
-          if (lockedSubtotalCents - lockedDiscountCents > Math.round(Number(maxAuthorizedSubtotal) * 100)) {
-            throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
-          }
         }
         if (stalePaymentIntentToCancel) {
           await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);

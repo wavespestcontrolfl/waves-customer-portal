@@ -1364,12 +1364,25 @@ async function feeEligibleRequestForVisit(scheduledServiceId) {
   const feeAgreedAt = request.fee_agreed_at ? new Date(request.fee_agreed_at) : null;
   if (!feeAgreedAt || Number.isNaN(feeAgreedAt.getTime())) return { request: null, reason: 'no_fee_consent' };
   if (!request.stripe_payment_method_id || !request.customer_id) return { request: null, reason: 'no_charge_target' };
+  // charging/charge_review are IN-FLIGHT fee events, not benign absence
+  // (Codex #3153 r1 P1): a caller treating them as "nothing here" would
+  // release/refund while a charge may still land. `unresolved` makes the
+  // cancellation handler report a non-released review outcome. Checked
+  // BEFORE the payer exemption (r8 P1): a payer assigned while another
+  // worker's claim is in flight must never convert that unresolved state
+  // into a clean payer_billed release.
+  if (request.fee_status === 'charging' || request.fee_status === 'charge_review') {
+    return { request: null, reason: 'charge_review', unresolved: true };
+  }
+  if (request.fee_status) return { request: null, reason: `fee_${request.fee_status}` };
   // A third-party payer assigned AFTER the card was secured exempts the
   // homeowner from this lane (Codex #3153 r6 P1): the capture flow fails
   // closed on payer changes at render and completion, and the completion
   // rail refuses payer-linked invoices — the penalty charge must honor the
   // same exemption. Fail CLOSED on lookup errors (unresolved, never a
-  // charge against a card the appointment may no longer bill).
+  // charge against a card the appointment may no longer bill). Re-checked
+  // again AT the claim boundary in chargeAppointmentNoShowFee (r8 P1) —
+  // this early resolve also keeps the cancel preview honest.
   try {
     const PayerService = require('./payer');
     const resolved = await PayerService.resolveForInvoice({
@@ -1382,14 +1395,6 @@ async function feeEligibleRequestForVisit(scheduledServiceId) {
     logger.error(`[appt-card-request] payer re-check failed for visit ${scheduledServiceId} — fee rail fails closed: ${err.message}`);
     return { request: null, reason: 'payer_check_failed', unresolved: true };
   }
-  // charging/charge_review are IN-FLIGHT fee events, not benign absence
-  // (Codex #3153 r1 P1): a caller treating them as "nothing here" would
-  // release/refund while a charge may still land. `unresolved` makes the
-  // cancellation handler report a non-released review outcome.
-  if (request.fee_status === 'charging' || request.fee_status === 'charge_review') {
-    return { request: null, reason: 'charge_review', unresolved: true };
-  }
-  if (request.fee_status) return { request: null, reason: `fee_${request.fee_status}` };
   // Lane exclusivity — fail CLOSED on a lookup error (Codex #3153 r1 P1): a
   // hold row in ANY status may already own this visit's one fee event, so a
   // transient failure must never read as absence and mint a second fee.
@@ -1476,6 +1481,32 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
     // the canonical unresolved outcome so no caller sends a no-charge
     // notice or reports a clean cancellation while the fee may land.
     logger.warn(`[appt-card-request] fee claim lost for visit ${scheduledServiceId} — reporting charge_review`);
+    return { charged: false, reason: 'charge_review' };
+  }
+
+  // Payer ownership re-checked AT the claim boundary (Codex #3153 r8 P1):
+  // eligibility's resolve ran before the staleness guard's own awaits — a
+  // payer assigned in that gap must still exempt the homeowner. The claim
+  // is ours, so a payer hit closes the fee event terminally ('released' —
+  // the appointment is payer-billed and this lane can never own its fee);
+  // a lookup error reverts the claim (nothing charged) and parks review.
+  try {
+    const PayerService = require('./payer');
+    const resolvedPayer = await PayerService.resolveForInvoice({
+      customerId: String(request.customer_id),
+      scheduledServiceId: String(scheduledServiceId),
+      throwOnError: true,
+    });
+    if (resolvedPayer?.payerId) {
+      await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+        .update({ fee_status: 'released', updated_at: new Date() }).catch(() => {});
+      logger.info(`[appt-card-request] fee released (payer assigned) for visit ${scheduledServiceId}`);
+      return { charged: false, reason: 'payer_billed' };
+    }
+  } catch (err) {
+    logger.error(`[appt-card-request] claim-boundary payer re-check failed for visit ${scheduledServiceId} — reverting claim, parking review: ${err.message}`);
+    await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+      .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
     return { charged: false, reason: 'charge_review' };
   }
 

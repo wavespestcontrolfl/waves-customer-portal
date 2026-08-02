@@ -179,4 +179,18 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
       .rejects.toThrow('Invoice exceeds the customer-accepted amount');
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
+
+  test('the consent cap runs BEFORE account-credit application (Codex #3153 r8 — source contract)', () => {
+    // The fully-covered-by-credit early return commits a credit draw-down;
+    // an over-cap invoice must refuse before any credit is consumed.
+    const src = require('fs').readFileSync(require.resolve('../services/stripe.js'), 'utf8');
+    const fn = src.slice(src.indexOf('async chargeInvoiceWithSavedCard('));
+    const capIdx = fn.indexOf('maxAuthorizedSubtotal != null');
+    const creditIdx = fn.indexOf('applyAccountCreditToInvoice');
+    const coveredIdx = fn.indexOf('coveredByCredit = true');
+    expect(capIdx).toBeGreaterThan(-1);
+    expect(creditIdx).toBeGreaterThan(-1);
+    expect(capIdx).toBeLessThan(creditIdx);
+    expect(capIdx).toBeLessThan(coveredIdx);
+  });
 });
