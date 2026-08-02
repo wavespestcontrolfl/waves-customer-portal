@@ -1478,6 +1478,27 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
   }
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
   const startMs = startDate && !Number.isNaN(startDate.getTime()) ? startDate.getTime() : null;
+  if (reason === 'no_show' && startMs != null && startMs > now.getTime()) {
+    // Marked no-show BEFORE the visit's scheduled start (Codex #3153 r19
+    // P1 — the dispatch day-guard rejects only future DATES, not
+    // later-today times): the customer cannot have missed it yet. Never
+    // charge — and never stamp terminal either, so a genuine no-show
+    // re-marked AFTER the start can still collect its fee. (late_cancel is
+    // exempt BY DEFINITION: an in-window cancel happens before the start.)
+    logger.warn(`[appt-card-request] no-show fee refused (before scheduled start) for visit ${scheduledServiceId}`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'No-show fee not charged — marked before start',
+        'A visit was marked no-show before its scheduled start time — the saved-card fee was NOT charged. Re-mark the visit after its start if the customer no-shows.',
+        {
+          link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+          metadata: { scheduledServiceId, reason: 'no_show_before_start' },
+        },
+      );
+    } catch (e) { logger.warn(`[appt-card-request] pre-start no-show alert failed: ${e.message}`); }
+    return { charged: false, reason: 'no_show_before_start' };
+  }
   if (startMs == null || now.getTime() - startMs > NO_SHOW_FEE_MAX_AGE_MS) {
     const staleReason = startMs == null ? 'no_show_start_unresolved' : 'no_show_stale_start';
     logger.warn(`[appt-card-request] no-show fee refused (${staleReason}) for visit ${scheduledServiceId}`);
@@ -2266,21 +2287,49 @@ async function settleAppointmentNoShowFee(paymentIntent) {
     // → Stripe redelivers).
     let preRefundedCents = 0;
     {
-      const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge.dispute'] });
+      const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
       const ch = live?.latest_charge;
       if (ch && typeof ch === 'object') {
         // Disputed BEFORE settlement (Codex #3153 r17 P1): Stripe permits
         // charge.dispute.created to arrive before the succeeded event, and
         // that handler finds nothing to mark — booking a paid fee invoice
         // for money already clawed back would overstate revenue. Refuse
-        // UNLESS the dispute already closed in our favor (r18: disputed
+        // UNLESS every dispute already closed in our favor (r18: disputed
         // stays true forever on the charge — a WON dispute means the money
-        // is retained and the fee must settle).
+        // is retained and the fee must settle). Status resolved through
+        // the Disputes API (r19 — `dispute` is not an expandable charge
+        // property); a list failure throws → rollback → Stripe retries.
         if (ch.disputed === true) {
-          const disputeObj = ch.dispute && typeof ch.dispute === 'object' ? ch.dispute : null;
-          const disputeWon = !!disputeObj && ['won', 'warning_closed'].includes(String(disputeObj.status || ''));
-          if (!disputeWon) {
-            logger.warn(`[appt-card-request] no-show fee disputed before settlement — skipping (${piId})`);
+          const disputes = await StripeService.listDisputesForCharge(ch.id);
+          const activeDispute = disputes.find((d) => !['won', 'warning_closed'].includes(String(d?.status || ''))) || null;
+          if (activeDispute || disputes.length === 0) {
+            // Persist the SAME marker the created-event handler writes
+            // (r19 P1) BEFORE refusing: a won closure delivered before the
+            // created event must find something to resettle. Adopts an
+            // existing refund marker instead of inserting a second row.
+            const disputeMeta = {
+              purpose: 'appointment_card_no_show_fee',
+              pre_settlement_dispute: true,
+              ...(activeDispute?.id ? { dispute_id: activeDispute.id } : {}),
+            };
+            if (adoptMarkerRowId) {
+              await trx('payments').where({ id: adoptMarkerRowId }).update({
+                status: 'disputed',
+                metadata: JSON.stringify({ ...(markerMeta || {}), ...disputeMeta }),
+              });
+            } else {
+              await trx('payments').insert({
+                customer_id: customerId,
+                processor: 'stripe',
+                payment_date: etDateString(),
+                amount,
+                status: 'disputed',
+                stripe_payment_intent_id: piId,
+                stripe_charge_id: ch.id,
+                metadata: JSON.stringify(disputeMeta),
+              });
+            }
+            logger.warn(`[appt-card-request] no-show fee disputed before settlement — durable marker written, skipping (${piId})`);
             return { refundedPreSettlement: true };
           }
         }

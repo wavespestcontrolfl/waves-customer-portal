@@ -83,10 +83,12 @@ jest.mock('../services/appointment-reminders', () => ({
 const mockChargeOffSession = jest.fn();
 const mockRetrievePaymentIntent = jest.fn();
 const mockChargeSavedCard = jest.fn(async () => ({ id: 'pi_recap_1' }));
+const mockListDisputes = jest.fn(async () => []);
 jest.mock('../services/stripe', () => ({
   chargeSavedPaymentMethodOffSession: (...a) => mockChargeOffSession(...a),
   retrievePaymentIntent: (...a) => mockRetrievePaymentIntent(...a),
   chargeInvoiceWithSavedCard: (...a) => mockChargeSavedCard(...a),
+  listDisputesForCharge: (...a) => mockListDisputes(...a),
   savePaymentMethod: jest.fn(async () => ({ id: 'pm-row-9', method_type: 'card' })),
   retrieveSetupIntent: jest.fn(),
   createAppointmentCardSetupIntent: jest.fn(),
@@ -643,6 +645,21 @@ describe('chargeAppointmentNoShowFee — staleness guard', () => {
     expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 
+  test('marked no-show BEFORE the scheduled start → refused, NO terminal stamp, office alerted (Codex #3153 r19)', async () => {
+    mockTableHandlers = handlersWith();
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1', serviceStart: new Date(Date.now() + 5 * HOUR) });
+    expect(res).toEqual({ charged: false, reason: 'no_show_before_start' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    // No stamp: a genuine no-show re-marked AFTER the start must still fee.
+    const stamped = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => 'fee_status' in p);
+    expect(stamped).toBeUndefined();
+  });
+
   test('caller-supplied fresh start skips re-resolution and charges', async () => {
     mockApptTime = null; // resolver would fail — the supplied start must win
     const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1', serviceStart: FRESH_START() });
@@ -887,6 +904,28 @@ describe('settleAppointmentNoShowFee — paid refundable fee invoice', () => {
   test('refund-state lookup failure → throws (fail closed, Stripe retries)', async () => {
     mockRetrievePaymentIntent.mockRejectedValue(new Error('stripe down'));
     await expect(settleAppointmentNoShowFee(PI())).rejects.toThrow('stripe down');
+  });
+
+  test('ACTIVE dispute before settlement → durable marker written, no paid rows (Codex #3153 r19)', async () => {
+    mockRetrievePaymentIntent.mockResolvedValue({ latest_charge: { id: 'ch_1', amount: 4900, amount_refunded: 0, refunded: false, disputed: true } });
+    mockListDisputes.mockResolvedValueOnce([{ id: 'dp_1', status: 'needs_response' }]);
+    expect(await settleAppointmentNoShowFee(PI())).toEqual({ settled: false, reason: 'refunded_pre_settlement' });
+    expect(mockInvoiceCreate).not.toHaveBeenCalled();
+    const markerInsert = mockTrxTouches
+      .filter((t) => t.table === 'payments')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'insert'))
+      .map(([, row]) => row)
+      .find((r) => r.status === 'disputed');
+    expect(markerInsert).toBeTruthy();
+    expect(JSON.parse(markerInsert.metadata).pre_settlement_dispute).toBe(true);
+  });
+
+  test('dispute closed WON → settlement proceeds (disputed stays true forever on the charge — Codex #3153 r19)', async () => {
+    mockRetrievePaymentIntent.mockResolvedValue({ latest_charge: { id: 'ch_1', amount: 4900, amount_refunded: 0, refunded: false, disputed: true } });
+    mockListDisputes.mockResolvedValueOnce([{ id: 'dp_1', status: 'won' }]);
+    const res = await settleAppointmentNoShowFee(PI());
+    expect(res.settled).toBe(true);
+    expect(mockInvoiceCreate).toHaveBeenCalled();
   });
 
   test('replay (payments row exists) → no second invoice; receipt recovery attempted', async () => {

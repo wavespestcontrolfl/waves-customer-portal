@@ -4120,6 +4120,17 @@ async function handleDisputeCreated(dispute) {
         });
         if (marked) {
           logger.warn(`[stripe-webhook] appointment fee PI ${dispute.payment_intent} disputed before settlement — durable dispute marker written`);
+          // The standard dispute notification still fires (Codex #3153 r19
+          // P1): the early return must not reduce a live dispute to a log
+          // line — the office needs to submit evidence in time.
+          try {
+            await NotificationService.notifyAdmin(
+              'dispute',
+              `Dispute created: $${amount}`,
+              `Dispute ${dispute.id} on charge ${chargeId} (${reason}) — a no-show fee was disputed before settlement. Respond with evidence in the Stripe dashboard.`,
+              { icon: '⚠️', link: '/admin/invoices' },
+            );
+          } catch { /* non-critical */ }
           return;
         }
       }

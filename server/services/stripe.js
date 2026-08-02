@@ -1030,6 +1030,18 @@ const StripeService = {
    * consent snapshotting on the public /pay endpoint) where trusting
    * client-supplied fields would defeat the audit trail.
    */
+  // Charge objects expose only the `disputed` boolean — the dispute itself
+  // is NOT an expandable charge property (Codex #3153 r19 P1); resolve
+  // status through the Disputes API. Throws on API failure (callers fail
+  // closed / retry).
+  async listDisputesForCharge(chargeId, options = {}) {
+    if (!chargeId) return [];
+    const stripe = getStripe();
+    if (!stripe) return [];
+    const res = await stripe.disputes.list({ charge: chargeId, limit: 10, ...options });
+    return res?.data || [];
+  },
+
   async retrievePaymentIntent(paymentIntentId, options = {}) {
     if (!paymentIntentId) return null;
     const stripe = getStripe();
