@@ -1230,7 +1230,10 @@ async function loadSecureCardPageData(token) {
         savedMethod,
         trigger: 'secure_page_coverage',
       });
-      if (secured.action === 'auto_secured') return { state: 'secured', ...base };
+      // Satisfied via saved-card coverage — no page disclosure, no fee
+      // terms to repeat (Codex #3153 r9 P2: base.cancelFeeNote is the LIVE
+      // disclosure and would claim a fee this row can never be charged).
+      if (secured.action === 'auto_secured') return { state: 'secured', ...base, cancelFeeNote: null };
     }
   } catch (err) {
     logger.warn(`[appt-card-request] page coverage re-check failed — rendering the form: ${err.message}`);
@@ -1563,15 +1566,15 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
   }
 
   // Charge FIRST (separately from the row write) so a post-charge DB failure
-  // is never confused with a pre-charge failure. Attach self-heal is
-  // idempotent — the completion tail normally attached the PM already
-  // (and the revocation check above guarantees it only re-links a method
-  // whose local consent row still stands).
+  // is never confused with a pre-charge failure. Deliberately NO attach
+  // self-heal on this path (Codex #3153 r9 P1): a removal racing the
+  // revocation check above would be resurrected by an attach — a detached
+  // method must simply fail the charge (definite error → claim reverts →
+  // office bills manually). The completion tail attached the PM at consent;
+  // a method that is detached NOW is detached because someone detached it.
   const StripeService = require('./stripe');
   let paymentIntent;
   try {
-    const { attachCardHoldPaymentMethod } = require('./estimate-card-holds');
-    await attachCardHoldPaymentMethod({ customerId: request.customer_id, paymentMethodId: request.stripe_payment_method_id });
     paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
       customerId: request.customer_id,
       paymentMethodId: request.stripe_payment_method_id,

@@ -1135,15 +1135,19 @@ violations at the severity noted.
   `chargeInvoiceWithSavedCard` against the LOCKED invoice and BEFORE any
   account-credit application — the fully-covered-by-credit early return
   must never consume credit above consent — and the dispatch route's OWN
-  credit auto-apply is fenced off over-cap appointment-lane invoices (r9:
-  review must see the bill exactly as minted, and full coverage must not
-  flip it prepaid past the never-evaluated cap). The cancel preview
-  surfaces an unverifiable lane as fee-may-apply (`unresolved: true`,
-  never a silent "no fee"); the secured page repeats the FROZEN row terms
-  (satisfied rows carry none); and a card the customer removed is honored
-  as revoked — the fee closes 'released' with an office alert, and the
-  attach self-heal never resurrects a detached PM (the local
-  payment_methods row must still exist before any fee charge). Every satisfied heal (auto-secure update, autopay heal, prepay
+  credit auto-apply is fenced off over-cap appointment-lane invoices AND
+  off UNVERIFIABLE lanes (lookup error — r9/r10: review must see the bill
+  exactly as minted, full coverage must not flip it prepaid past a
+  never-evaluated cap, and an error must not bypass the fence). The
+  cancel preview surfaces an unverifiable lane as fee-may-apply
+  (`unresolved: true`, never a silent "no fee"); the secured page repeats
+  the FROZEN row terms (EVERY satisfied transition carries none —
+  including the page's own auto-secure branch); and a card the customer
+  removed is honored as revoked — the fee closes 'released' with an
+  office alert, the local payment_methods row must still exist before any
+  fee charge, and the fee path performs NO attach self-heal at all (a
+  method detached by a racing removal fails the charge instead of being
+  resurrected). Every satisfied heal (auto-secure update, autopay heal, prepay
   heal) applies the SAME monotonic-down accepted_amount stamp as the
   render — a heal can never overwrite the sticky 0 sentinel or widen a
   lower disclosed cap. The

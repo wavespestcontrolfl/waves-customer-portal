@@ -7224,6 +7224,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let apptCardOneTimeCharge = false;
     let apptCardAcceptedAmount = null;
     let apptCardOverCap = false;
+    let apptCardLaneUnresolved = false;
     if (!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane
       && svc.is_recurring !== true
       && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
@@ -7252,7 +7253,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
       } catch (e) {
-        logger.warn(`[dispatch] appointment-card completion-lane check failed for visit ${svc.id} — no auto-charge: ${e.message}`);
+        // Lane state UNVERIFIABLE (Codex #3153 r10 P1): fail closed for
+        // credit too — an over-cap lane invoice we couldn't detect must
+        // not consume credit or flip prepaid past a never-evaluated cap.
+        // The charge lane already fails toward the pay link.
+        apptCardLaneUnresolved = true;
+        logger.warn(`[dispatch] appointment-card completion-lane check failed for visit ${svc.id} — no auto-charge, credit auto-apply suppressed: ${e.message}`);
       }
     }
     if (!isBackfillCompletion
@@ -7260,8 +7266,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
       // Over-cap appointment-lane invoices keep their credit untouched
       // (Codex #3153 r9 P1) — the lane routes them to office review, and
-      // review must see the bill exactly as minted.
-      && !apptCardOverCap
+      // review must see the bill exactly as minted. An UNVERIFIABLE lane
+      // (lookup error) is treated the same (r10).
+      && !apptCardOverCap && !apptCardLaneUnresolved
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');

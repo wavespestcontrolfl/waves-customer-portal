@@ -1033,6 +1033,9 @@ describe('loadSecureCardPageData — page state machine', () => {
     mockTableHandlers.appointment_card_requests.returning = () => [];
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('secured');
+    // Auto-secured = no page disclosure = no fee — the live fee note must
+    // NOT ride this payload (Codex #3153 r9 P2).
+    expect(res.cancelFeeNote).toBeNull();
     // Enrollment is the coverage, not the row (completion auto-charge reads
     // active Auto Pay) — it MUST run before the heal.
     expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ paymentMethodId: 'pm-row-7' }));

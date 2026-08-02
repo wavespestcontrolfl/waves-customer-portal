@@ -560,7 +560,10 @@ describe('chargeAppointmentNoShowFee — charge outcomes', () => {
   test('success: frozen $49 charged face value with lane metadata, row → charged with PI pointer', async () => {
     const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1', reason: 'no_show' });
     expect(res).toEqual({ charged: true, amount: 49 });
-    expect(mockAttach).toHaveBeenCalledWith({ customerId: 'cust-1', paymentMethodId: 'pm_live_1' });
+    // NO attach self-heal on the fee path (Codex #3153 r9 P1): re-attaching
+    // would resurrect a method a racing removal just revoked — a detached
+    // method must fail the charge instead.
+    expect(mockAttach).not.toHaveBeenCalled();
     const chargeArgs = mockChargeOffSession.mock.calls[0][0];
     expect(chargeArgs.amountDollars).toBe(49);
     expect(chargeArgs.metadata.purpose).toBe('appointment_card_no_show_fee');
