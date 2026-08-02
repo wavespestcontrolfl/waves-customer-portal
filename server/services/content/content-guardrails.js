@@ -2587,10 +2587,18 @@ function piiFindings(text) {
   try {
     if (piiRedactor === undefined) piiRedactor = require('./pii-redactor');
     const out = piiRedactor.redact(text);
+    if (!out) return true;
     // PERSON-identifying types only. The redactor also reports "url", which
-    // every internal link trips — counting that would refuse every repair.
-    return Boolean(out && Array.isArray(out.findings)
-      && out.findings.some((f) => PERSONAL_PII_TYPES.has(String(f && f.type || '').toLowerCase())));
+    // every absolute link trips — counting that would refuse every repair.
+    const personal = Array.isArray(out.findings)
+      && out.findings.some((f) => PERSONAL_PII_TYPES.has(String(f && f.type || '').toLowerCase()));
+    if (personal) return true;
+    // "no findings" is not the same as "proven clean": the redactor reports
+    // LOW confidence when it cannot vouch for the text, and undetected PII
+    // is exactly what that means. Only a high-confidence clean read permits
+    // a repair (Codex). Ordinary prose reads high; the low cases are short
+    // link-only fragments, which simply keep their route finding.
+    return String(out.confidence || '').toLowerCase() !== 'high';
   } catch (_) {
     // Detector unavailable → nothing is proven clean → no repair. This module
     // has no logger, and the fail-closed return is the whole signal.

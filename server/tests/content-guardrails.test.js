@@ -2265,7 +2265,16 @@ describe('angle-bracket link destinations vs raw tags (merge of #3125)', () => {
 });
 
 describe('deterministic repair of invented internal routes (owner ruling 2026-08-01)', () => {
-  const { repairInventedInternalRoutes } = guardrails;
+  const { repairInventedInternalRoutes: rawRepair } = guardrails;
+  // The repair only runs on a body the PII redactor reads as HIGH-confidence
+  // clean, and a bare link fragment does not qualify. Fixtures are wrapped in
+  // a sentence of ordinary prose so they exercise realistic content; the
+  // PROSE prefix is stripped back off the result for exact comparisons.
+  const PROSE = 'Chinch bugs peak in July across Bradenton lawns.\n\n';
+  const repairInventedInternalRoutes = (body, ...rest) => {
+    const out = rawRepair(PROSE + body, ...rest);
+    return { ...out, body: out.body.startsWith(PROSE) ? out.body.slice(PROSE.length) : out.body };
+  };
 
   test('near-miss routes alias to the real allowlisted page', () => {
     const r = repairInventedInternalRoutes('Start with [our services](/pest-control/) today.');
@@ -2658,16 +2667,14 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
   });
 
   test('every alias target is a real allowlisted route (module-load contract)', () => {
-    // Drive EVERY alias in the map, so a bad target can't hide behind a
-    // hand-picked sample. (/get-a-quote/ etc. are deliberately no longer
-    // aliased — see the generic-source rule above.)
-    const sources = Object.keys(guardrails._internals.INVENTED_ROUTE_ALIASES);
-    expect(sources.length).toBeGreaterThan(5);
-    const r = repairInventedInternalRoutes(sources.map((s, i) => `[x${i}](${s})`).join(' '));
-    expect(r.repairs.length).toBe(sources.length);
-    for (const rep of r.repairs) {
-      expect(rep.to).not.toBeNull();
-      expect(guardrails.evaluate({ body: `[a](${rep.to})` }, {}).findings
+    // Asserted against the MAP directly: the repair now requires a
+    // high-confidence clean body, and a synthetic soup of a dozen links is
+    // not that. The contract under test is the targets, not the plumbing.
+    const aliases = guardrails._internals.INVENTED_ROUTE_ALIASES;
+    const targets = Object.values(aliases);
+    expect(targets.length).toBeGreaterThan(5);
+    for (const target of targets) {
+      expect(guardrails.evaluate({ body: `Chinch bugs peak in July.\n\nSee [a](${target}) today.` }, {}).findings
         .some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
     }
   });
