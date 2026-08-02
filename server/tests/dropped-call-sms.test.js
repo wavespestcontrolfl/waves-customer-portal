@@ -231,6 +231,15 @@ describe('endedAbruptly', () => {
     ]))).toBe(true);
   });
 
+  it("'take care of the ants' mid-question is not a farewell", () => {
+    expect(endedAbruptly(mk([
+      'Caller: I keep seeing ants by the sink.',
+      'Agent: We can take care of the ants — what is your service address?',
+      'Caller: It is one eight',
+      'Caller: one one zero,',
+    ]))).toBe(true);
+  });
+
   it('false for transcripts too short to judge', () => {
     expect(endedAbruptly(mk(['Agent: Hello?', 'Caller: Hi —']))).toBe(false);
     expect(endedAbruptly('')).toBe(false);
@@ -519,6 +528,14 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_FAILURE', reason: 'sms-guard blocked' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'pre_dispatch_block', code: 'PROVIDER_FAILURE' });
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
+  });
+
+  it('Twilio 20429 rate limit — pre-accept rejection releases the one-shot', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'PROVIDER_FAILURE', providerErrorCode: '20429' });
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'provider_rate_limited' });
     expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 

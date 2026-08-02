@@ -104,7 +104,7 @@ const STRONG_FAREWELL_RE = new RegExp(
     // OPEN question mid-intake, not a farewell (codex P2).
     "(?<!(?:do|ca)n'?t )see (you|ya)\\b(?! in\\b)", 'talk (to you|soon|later)',
     'have a (good|great|nice|wonderful)',
-    'take care',
+    'take care(?! of\\b)',
   ].join('|'),
   'i'
 );
@@ -609,6 +609,15 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
       skipped: optedOut ? 'policy_block' : 'provider_terminal',
       code: optedOut ? 'SUPPRESSED_PROVIDER_OPT_OUT_21610' : providerCode,
     };
+  }
+  // Twilio 20429 (rate limit) rejects messages.create outright — no SID was
+  // minted, nothing was accepted, nothing ambiguous (codex P2): release for
+  // a later drop.
+  if (String(result.providerErrorCode || '') === '20429') {
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.warn(`[dropped-call-sms] Rate-limited pre-accept for ${maskPhone(phone)} (released)`);
+    return { sent: false, skipped: 'provider_rate_limited' };
   }
   // Provider failure with AMBIGUOUS acceptance (a timeout/network error can
   // fire after Twilio accepted the message but before the SID response

@@ -6752,6 +6752,15 @@ const CallRecordingProcessor = {
               extracted,
               v2Extraction: v2Result?.status === 'valid' ? v2Result.extraction : null,
             });
+            // A PRE-EXISTING linked customer whose record already carries the
+            // service address is not missing anything — the card would
+            // falsely claim so (codex P2). One read, only when detection
+            // otherwise fired.
+            if (droppedMidIntake && customerId && !createdCustomerFromCall) {
+              const custAddr = await db('customers').where({ id: customerId })
+                .first('address_line1').catch(() => null);
+              if (String(custAddr?.address_line1 || '').trim()) droppedMidIntake = false;
+            }
             if (droppedMidIntake && !bridgeNeedsConfirmation.includes('call_dropped_mid_intake')) {
               bridgeNeedsConfirmation.push('call_dropped_mid_intake');
             }
@@ -7157,10 +7166,20 @@ const CallRecordingProcessor = {
             // An opt-out is PHONE-level truth and applies to any card for
             // this number; 'undelivered' is call-specific — an old call's
             // bounce must not stamp a NEW call's card (codex P2).
+            // A START reply clears the canonical suppression and re-enables
+            // SMS — an opted_out claim is then STALE and must not stamp DNC
+            // onto new cards (codex P2). Verify against the live store.
+            let optOutStillActive = false;
+            if (bounceVerdict?.outcome === 'opted_out') {
+              optOutStillActive = !!(await db('messaging_suppression')
+                .where({ phone: smsAni || phone, active: true })
+                .first('id')
+                .catch(() => null));
+            }
             const bounceOutcome = bounceVerdict
-              && (bounceVerdict.outcome === 'opted_out'
-                || !bounceVerdict.callLogId
-                || String(bounceVerdict.callLogId) === String(call.id))
+              && ((bounceVerdict.outcome === 'opted_out' && optOutStillActive)
+                || (bounceVerdict.outcome === 'undelivered'
+                  && (!bounceVerdict.callLogId || String(bounceVerdict.callLogId) === String(call.id))))
               ? bounceVerdict.outcome : null;
             if (bounceOutcome) {
               await db('triage_items')
