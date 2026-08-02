@@ -357,6 +357,9 @@ describe('off-Stripe payment paths honor the same contract', () => {
     const ws = fs.readFileSync(path.join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
     expect(ws).toContain('...(lockedInvoice.payer_id ? { payer_id: lockedInvoice.payer_id } : {})');
     expect(ws).toContain('...(invoice?.payer_id ? { payer_id: invoice.payer_id } : {})');
+    // And the flip BACKFILLS payer_id for processing rows that predate the
+    // stamp, so pre-deploy in-flight ACH cannot veto as homeowner money.
+    expect(ws).toContain("'{payer_id}', to_jsonb(?::text)");
   });
 });
 
@@ -403,6 +406,9 @@ describe('stripe-webhook wiring', () => {
     const helperEnd = src.indexOf('async function', helperStart + 10);
     const helper = src.slice(helperStart, helperEnd);
     expect(helper).toMatch(/stripe_payment_intent_id: paymentIntent\.id, status: 'paid'/);
+    // Merge-safe ownership: the ledger row's customer_id outranks frozen PI
+    // metadata for invoice-less money.
+    expect(helper).toContain("ledgerRow.customer_id || paymentIntent?.metadata?.waves_customer_id");
     expect(helper).toContain("whereNull('statement_id')");
     expect(helper).toContain("IS DISTINCT FROM 'card_hold_no_show_fee'");
     expect(helper).toMatch(/payer_id'\) IS NULL/);

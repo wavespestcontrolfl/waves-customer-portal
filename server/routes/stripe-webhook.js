@@ -304,10 +304,6 @@ async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) 
   if (paymentIntent?.metadata?.purpose === 'estimate_deposit') return;
   if (paymentIntent?.metadata?.purpose === 'card_hold_no_show_fee') return;
   const invoice = await findInvoiceForPaymentIntent(paymentIntent);
-  const pausedCustomerId = invoice
-    ? (invoice.payer_id ? null : invoice.customer_id)
-    : (paymentIntent?.metadata?.waves_customer_id || null);
-  if (!pausedCustomerId) return;
   // Require a QUALIFYING LEDGER ROW before clearing — "Stripe says the PI
   // succeeded" is not the same as "we accepted it as settled customer
   // money". Quarantined tender mismatches and orphaned late duplicates
@@ -322,8 +318,18 @@ async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) 
     .whereNull('statement_id')
     .whereRaw("(payments.metadata->>'purpose') IS DISTINCT FROM 'card_hold_no_show_fee'")
     .whereRaw("(payments.metadata->>'payer_id') IS NULL")
-    .first('id');
+    .first('id', 'customer_id');
   if (!ledgerRow) return;
+  // OWNERSHIP, in authority order: the matched invoice (payer-billed yields
+  // NOTHING — the payer's tender proves nothing about the homeowner's dead
+  // card, and no fallthrough: the invoice answers the question); else the
+  // LEDGER row's customer_id — customer merges repoint payments rows while
+  // PI metadata stays frozen on the merged-away id; immutable metadata only
+  // as the last resort.
+  const pausedCustomerId = invoice
+    ? (invoice.payer_id ? null : invoice.customer_id)
+    : (ledgerRow.customer_id || paymentIntent?.metadata?.waves_customer_id || null);
+  if (!pausedCustomerId) return;
   const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
   const result = await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
     paymentIntentId: paymentIntent.id,
@@ -1168,10 +1174,18 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     // the billing-cron pause veto reads settled_event_at, so a delayed
     // redelivery (updated_at = now, settlement = days ago) cannot pose as
     // fresh money. Parameterized: the timestamp is bound, never interpolated.
-    metadata: db.raw(
-      `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text))`,
-      [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString()],
-    ),
+    metadata: invoiceForTenderGuard?.payer_id
+      // Payer-funded ACH rows already 'processing' at deploy time predate
+      // the payer_id stamp on the processing insert — backfill it at the
+      // flip so the pause veto and the auto-clear can exclude them.
+      ? db.raw(
+        `jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text)), '{payer_id}', to_jsonb(?::text))`,
+        [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString(), String(invoiceForTenderGuard.payer_id)],
+      )
+      : db.raw(
+        `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text))`,
+        [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString()],
+      ),
     // Cash basis: the row was stamped with the INITIATION day when
     // payment_intent.processing arrived; restamp to the SETTLEMENT day so
     // revenue lands in the period the money actually cleared (an ACH
