@@ -1134,7 +1134,16 @@ violations at the severity noted.
   cap (`maxAuthorizedSubtotal`) is enforced inside
   `chargeInvoiceWithSavedCard` against the LOCKED invoice and BEFORE any
   account-credit application — the fully-covered-by-credit early return
-  must never consume credit above consent. Every satisfied heal (auto-secure update, autopay heal, prepay
+  must never consume credit above consent — and the dispatch route's OWN
+  credit auto-apply is fenced off over-cap appointment-lane invoices (r9:
+  review must see the bill exactly as minted, and full coverage must not
+  flip it prepaid past the never-evaluated cap). The cancel preview
+  surfaces an unverifiable lane as fee-may-apply (`unresolved: true`,
+  never a silent "no fee"); the secured page repeats the FROZEN row terms
+  (satisfied rows carry none); and a card the customer removed is honored
+  as revoked — the fee closes 'released' with an office alert, and the
+  attach self-heal never resurrects a detached PM (the local
+  payment_methods row must still exist before any fee charge). Every satisfied heal (auto-secure update, autopay heal, prepay
   heal) applies the SAME monotonic-down accepted_amount stamp as the
   render — a heal can never overwrite the sticky 0 sentinel or widen a
   lower disclosed cap. The

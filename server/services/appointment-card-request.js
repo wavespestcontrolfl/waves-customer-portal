@@ -177,6 +177,20 @@ function cancelFeeNote() {
   return disclosure ? disclosure.note : '';
 }
 
+// Post-consent (secured) renders repeat the terms the ROW actually carries
+// (Codex #3153 r9 P1): the secured page's "only charged after your service
+// is completed" would otherwise contradict an enforceable no-show fee the
+// customer agreed to. Frozen row values only — never live config — and
+// never a fee for `satisfied` rows (auto-secured, no disclosure = no fee).
+function frozenFeeNoteForRow(request) {
+  if (request?.status !== 'completed' && request?.status !== 'completing') return null;
+  const fee = Number(request?.no_show_fee_amount);
+  const windowHours = Number(request?.cancel_window_hours);
+  if (!(fee > 0) || !(windowHours > 0)) return null;
+  const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
+  return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
+}
+
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
   try {
     const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -1112,7 +1126,7 @@ async function loadSecureCardPageData(token) {
   // If the in-flight attempt fails and reverts, the durable webhook retry
   // converges the row to completed.
   if (request.status === 'completed' || request.status === 'satisfied' || request.status === 'completing') {
-    return { state: 'secured', ...base };
+    return { state: 'secured', ...base, cancelFeeNote: frozenFeeNoteForRow(request) };
   }
 
   // Plan-choice lane (GATE_SECURE_PLAN_CHOICE; both helpers return null
@@ -1141,7 +1155,8 @@ async function loadSecureCardPageData(token) {
         completed_at: new Date(),
         updated_at: new Date(),
       });
-    return { state: 'secured', ...base };
+    // Satisfied via coverage (no page disclosure) → no fee terms to repeat.
+    return { state: 'secured', ...base, cancelFeeNote: null };
   }
   const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
   if (!visit
@@ -1194,7 +1209,8 @@ async function loadSecureCardPageData(token) {
           completed_at: new Date(),
           updated_at: new Date(),
         });
-      return { state: 'secured', ...base };
+      // Satisfied via coverage (no page disclosure) → no fee terms to repeat.
+    return { state: 'secured', ...base, cancelFeeNote: null };
     }
     const { findConsentedChargeableCard } = require('./payment-method-consents');
     const savedMethod = await findConsentedChargeableCard(request.customer_id);
@@ -1510,9 +1526,47 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
     return { charged: false, reason: 'charge_review' };
   }
 
+  // Revocation check (Codex #3153 r8 P1): removing a card in the portal
+  // detaches the Stripe PM AND deletes the local payment_methods row — the
+  // promised revocation mechanism. The attach self-heal below would happily
+  // RE-ATTACH a detached PM, resurrecting authorization the customer
+  // explicitly withdrew — so require the local row to still exist before
+  // any charge. Revoked → close the fee event terminally + tell the office
+  // (bill manually if the fee is owed); lookup error → revert the claim
+  // (nothing charged) and park review.
+  try {
+    const pmRow = await db('payment_methods')
+      .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
+      .first('id');
+    if (!pmRow) {
+      await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+        .update({ fee_status: 'released', updated_at: new Date() }).catch(() => {});
+      logger.warn(`[appt-card-request] no-show fee not charged — saved card was removed (visit ${scheduledServiceId})`);
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'No-show fee not charged — card removed',
+          'The customer removed the saved card before the no-show/late-cancel fee could be charged. Bill manually if the fee applies.',
+          {
+            link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+            metadata: { scheduledServiceId, reason: 'payment_method_revoked' },
+          },
+        );
+      } catch (e) { logger.warn(`[appt-card-request] revoked-card alert failed: ${e.message}`); }
+      return { charged: false, reason: 'payment_method_revoked' };
+    }
+  } catch (err) {
+    logger.error(`[appt-card-request] payment-method revocation check failed for visit ${scheduledServiceId} — reverting claim, parking review: ${err.message}`);
+    await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+      .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
+    return { charged: false, reason: 'charge_review' };
+  }
+
   // Charge FIRST (separately from the row write) so a post-charge DB failure
   // is never confused with a pre-charge failure. Attach self-heal is
-  // idempotent — the completion tail normally attached the PM already.
+  // idempotent — the completion tail normally attached the PM already
+  // (and the revocation check above guarantees it only re-links a method
+  // whose local consent row still stands).
   const StripeService = require('./stripe');
   let paymentIntent;
   try {
@@ -1642,8 +1696,25 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
 // GET /admin/dispatch/:serviceId/card-hold response so the client confirm
 // prompts cover both lanes unchanged.
 async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()) {
-  const { request } = await feeEligibleRequestForVisit(scheduledServiceId);
-  if (!request) return { secured: false, feeApplies: false };
+  const { request, unresolved } = await feeEligibleRequestForVisit(scheduledServiceId);
+  if (!request) {
+    if (unresolved) {
+      // Lane state unverifiable (Codex #3153 r9 P1): reporting "no fee"
+      // while a recovered lookup could charge one on the very next request
+      // makes the operator's confirm prompt lie — surface a fee-may-apply
+      // preview so the cancel path shows the waiver choice. Fee amount is
+      // best-effort from the row (the prompt copy degrades gracefully).
+      let feeAmount = null;
+      try {
+        const row = await db('appointment_card_requests')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .first('no_show_fee_amount');
+        feeAmount = Number(row?.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
+      } catch (err) { /* best-effort */ }
+      return { secured: true, feeApplies: true, feeAmount, unresolved: true };
+    }
+    return { secured: false, feeApplies: false };
+  }
   let start = null;
   try {
     const { scheduledServiceApptTime } = require('./appointment-reminders');

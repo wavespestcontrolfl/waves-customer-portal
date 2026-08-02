@@ -150,10 +150,13 @@ const REQUEST = () => ({
   fee_status: null,
 });
 
-function handlersWith({ request = REQUEST(), hold = null, trx = {} } = {}) {
+function handlersWith({ request = REQUEST(), hold = null, pmRow = { id: 'pm-row-1' }, trx = {} } = {}) {
   return {
     appointment_card_requests: { first: () => request },
     estimate_card_holds: { first: () => hold },
+    // The fee rail's revocation check (Codex #3153 r8): the local
+    // payment_methods row must still exist or the charge refuses.
+    payment_methods: { first: () => pmRow },
     trx,
   };
 }
@@ -269,6 +272,37 @@ describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
       .map(([, patch]) => patch)
       .find((p) => p.fee_status === 'released');
     expect(released).toBeTruthy();
+  });
+
+  test('customer removed the saved card → payment_method_revoked, fee closes released + office alert, NEVER a resurrection charge (Codex #3153 r8)', async () => {
+    mockTableHandlers = handlersWith({ pmRow: null });
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ charged: false, reason: 'payment_method_revoked' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+    expect(mockAttach).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    const released = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.fee_status === 'released');
+    expect(released).toBeTruthy();
+  });
+
+  test('revocation lookup FAILURE reverts the claim and parks review (Codex #3153 r8)', async () => {
+    mockTableHandlers = handlersWith();
+    mockTableHandlers.payment_methods.first = () => { throw new Error('db blip'); };
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ charged: false, reason: 'charge_review' });
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  test('unverifiable lane on the cancel PREVIEW surfaces fee-may-apply, never a silent no-fee (Codex #3153 r8)', async () => {
+    mockTableHandlers = handlersWith();
+    mockTableHandlers.estimate_card_holds.first = () => { throw new Error('db blip'); };
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true });
+    expect(Number(res.feeAmount)).toBe(49);
   });
 
   test('claim-boundary payer lookup FAILURE reverts the claim and parks review (Codex #3153 r8)', async () => {

@@ -969,6 +969,23 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
   });
 
+  test('secured render repeats the FROZEN fee terms for a page-consented row (Codex #3153 r8)', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', no_show_fee_amount: '75.00', cancel_window_hours: 24,
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    // Row values, never live config — and the exact enforced window stated.
+    expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free.');
+  });
+
+  test('secured render for a satisfied (auto-secured) row carries NO fee note — no disclosure means no fee', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'satisfied' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    expect(res.cancelFeeNote).toBeNull();
+  });
+
   test('a mid-completion row renders secured, never the card form again', async () => {
     mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completing', updated_at: new Date() });
     const res = await loadSecureCardPageData(REQUEST.token);

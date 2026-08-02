@@ -7204,9 +7204,64 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // bill (possibly flipping it prepaid) is a money movement the quiet path
     // promises not to make. The operator applies credit deliberately if it
     // belongs on the bill.
+    // Appointment-card one-time completion lane (owner-approved 2026-08-01,
+    // GATE_APPT_CARD_COMPLETION_CHARGE): the /secure lane's invite promises
+    // "your card is only charged after service is completed" — for a
+    // ONE-TIME visit whose card came through that lane (a completed or
+    // satisfied appointment_card_requests row: page consent or auto-secure
+    // under the same v10 enrollment consent), the completion invoice
+    // auto-charges through the SAME rail as per-application billing, capped
+    // at the visit's stamped estimated_price. Explicit membership /
+    // annual-prepay / per-application lanes are excluded (they have their
+    // own billing), as is any visit with an estimate_card_holds row (the
+    // hold rail owns estimate-flow one-time bookings). Every failure mode
+    // fails toward NOT auto-charging — the pay-link flow is the unchanged
+    // fallback. Detected BEFORE the account-credit auto-apply below (Codex
+    // #3153 r9 P1): an over-cap invoice on this lane must not consume
+    // credit either — partial credit would be drained on a bill the lane
+    // routes to review, and full coverage would flip it prepaid without
+    // the cap ever being evaluated.
+    let apptCardOneTimeCharge = false;
+    let apptCardAcceptedAmount = null;
+    let apptCardOverCap = false;
+    if (!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane
+      && svc.is_recurring !== true
+      && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && customerAutopayActive) {
+      try {
+        if (require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
+          const laneRow = await db('appointment_card_requests')
+            .where({ scheduled_service_id: svc.id })
+            .whereIn('status', ['completed', 'satisfied'])
+            .first('id', 'accepted_amount');
+          const holdRow = laneRow ? await db('estimate_card_holds')
+            .where({ scheduled_service_id: svc.id })
+            .first('id') : null;
+          apptCardOneTimeCharge = !!laneRow && !holdRow;
+          // The lane's cap is the amount FROZEN at consent (Codex #3153 r1
+          // P1) — appointment editors rewrite estimated_price, so the live
+          // value is not what the customer accepted. NULL (pre-migration
+          // row, unstamped render) → acceptedPerVisit stays null → the
+          // no-accepted-amount skip below routes to office review.
+          if (apptCardOneTimeCharge) {
+            apptCardAcceptedAmount = laneRow.accepted_amount != null && Number(laneRow.accepted_amount) > 0
+              ? Number(laneRow.accepted_amount) : null;
+            const preCreditSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
+            const preCreditNet = Math.round((preCreditSubtotal - Math.max(0, Number(invoice.discount_amount) || 0)) * 100) / 100;
+            apptCardOverCap = apptCardAcceptedAmount == null || preCreditNet > apptCardAcceptedAmount + 0.005;
+          }
+        }
+      } catch (e) {
+        logger.warn(`[dispatch] appointment-card completion-lane check failed for visit ${svc.id} — no auto-charge: ${e.message}`);
+      }
+    }
     if (!isBackfillCompletion
       && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
+      // Over-cap appointment-lane invoices keep their credit untouched
+      // (Codex #3153 r9 P1) — the lane routes them to office review, and
+      // review must see the bill exactly as minted.
+      && !apptCardOverCap
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');
@@ -7252,49 +7307,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // actually delivers, the completion SMS goes report-only.
     let autoChargedReceiptPending = false;
     let paymentFailedSmsContext = null;
-    // Appointment-card one-time completion lane (owner-approved 2026-08-01,
-    // GATE_APPT_CARD_COMPLETION_CHARGE): the /secure lane's invite promises
-    // "your card is only charged after service is completed" — for a
-    // ONE-TIME visit whose card came through that lane (a completed or
-    // satisfied appointment_card_requests row: page consent or auto-secure
-    // under the same v10 enrollment consent), the completion invoice
-    // auto-charges through the SAME rail as per-application billing, capped
-    // at the visit's stamped estimated_price. Explicit membership /
-    // annual-prepay / per-application lanes are excluded (they have their
-    // own billing), as is any visit with an estimate_card_holds row (the
-    // hold rail owns estimate-flow one-time bookings). Every failure mode
-    // fails toward NOT auto-charging — the pay-link flow is the unchanged
-    // fallback.
-    let apptCardOneTimeCharge = false;
-    let apptCardAcceptedAmount = null;
-    if (!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane
-      && svc.is_recurring !== true
-      && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
-      && customerAutopayActive) {
-      try {
-        if (require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
-          const laneRow = await db('appointment_card_requests')
-            .where({ scheduled_service_id: svc.id })
-            .whereIn('status', ['completed', 'satisfied'])
-            .first('id', 'accepted_amount');
-          const holdRow = laneRow ? await db('estimate_card_holds')
-            .where({ scheduled_service_id: svc.id })
-            .first('id') : null;
-          apptCardOneTimeCharge = !!laneRow && !holdRow;
-          // The lane's cap is the amount FROZEN at consent (Codex #3153 r1
-          // P1) — appointment editors rewrite estimated_price, so the live
-          // value is not what the customer accepted. NULL (pre-migration
-          // row, unstamped render) → acceptedPerVisit stays null → the
-          // no-accepted-amount skip below routes to office review.
-          if (apptCardOneTimeCharge) {
-            apptCardAcceptedAmount = laneRow.accepted_amount != null && Number(laneRow.accepted_amount) > 0
-              ? Number(laneRow.accepted_amount) : null;
-          }
-        }
-      } catch (e) {
-        logger.warn(`[dispatch] appointment-card completion-lane check failed for visit ${svc.id} — no auto-charge: ${e.message}`);
-      }
-    }
     // Backfill closeouts never move money automatically: the visit is days
     // old and an off-session charge (plus the receipt/decline texts it can
     // spawn) would hit the customer with zero fresh context. Skipping the

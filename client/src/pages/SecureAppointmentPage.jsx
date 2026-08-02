@@ -320,6 +320,15 @@ export default function SecureAppointmentPage() {
             charged today — your card is only charged after your service is
             completed.
           </p>
+          {/* Frozen fee terms ride the secured payload for page-consented
+              rows (Codex #3153 r9): the confirmation must not read as an
+              unqualified "only after completion" when a no-show/late-cancel
+              fee was agreed to. Absent for auto-secured visits (no fee). */}
+          {data?.cancelFeeNote ? (
+            <p style={{ fontSize: 14, color: S.muted, lineHeight: 1.5, marginTop: 6 }}>
+              {data.cancelFeeNote}
+            </p>
+          ) : null}
           {data ? <VisitSummary data={data} /> : null}
           <ContactRow />
         </Card>
