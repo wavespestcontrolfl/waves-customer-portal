@@ -46,6 +46,11 @@ const router = require('../routes/admin-schedule');
 // change behind it.
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const FUTURE_DATE = etDateString(addETDays(new Date(), 120));
+// Term-end fixtures are derived from the SAME anchor, never calendar
+// literals (Codex #3161 r4 P1): a fixed date silently changes meaning
+// relative to FUTURE_DATE as real time passes.
+const TERM_END_BEFORE_VISIT = etDateString(addETDays(new Date(), 30));
+const TERM_END_AFTER_VISIT = etDateString(addETDays(new Date(), 200));
 
 function stubTables({
   customer = { id: 'cust-1', property_type: 'residential' },
@@ -135,7 +140,9 @@ describe('annual-prepay preview — pricing', () => {
     // The waiver IS the pest/mosquito incentive — the two never stack.
     expect(body.discountAmount).toBe(0);
     expect(body.discountLabel).toBe('');
-    expect(body.setupFee).toEqual({ amount: 99, waivedWithPrepay: true });
+    // No setup-fee claim in THIS lane: nothing here stamps pending_setup_fee,
+    // so a per-visit booking never owes it and there is nothing to waive.
+    expect(body.setupFee).toBeNull();
   });
 
   test('the mint payload carries server-derived money + the booked visit as the coverage anchor', async () => {
@@ -230,6 +237,29 @@ describe('annual-prepay preview — refusals (fail closed)', () => {
     expect(body.blockReason).toMatch(/commercial properties/);
   });
 
+  test('refuses a monthly member — dues cover the visits, so there is no per-visit price to sell', async () => {
+    stubTables({ customer: { id: 'cust-1', property_type: 'residential', billing_mode: 'monthly_membership', monthly_rate: 89 } });
+    const { body } = await preview({});
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/monthly members/);
+  });
+
+  // The lane can also be INFERRED (membership tier + a positive rate), which
+  // is how legacy members without an explicit mode resolve.
+  test('refuses an inferred monthly member too', async () => {
+    stubTables({ customer: { id: 'cust-1', property_type: 'residential', waveguard_tier: 'Gold', monthly_rate: 89 } });
+    const { body } = await preview({});
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/monthly members/);
+  });
+
+  test('refuses a customer already on the annual-prepay lane', async () => {
+    stubTables({ customer: { id: 'cust-1', property_type: 'residential', billing_mode: 'annual_prepay' } });
+    const { body } = await preview({});
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/already on an annual prepay plan/);
+  });
+
   test('refuses a third-party-billed customer', async () => {
     mockResolveForInvoice.mockResolvedValue({ payerId: 'payer-9' });
     const { body } = await preview({});
@@ -253,14 +283,14 @@ describe('annual-prepay preview — refusals (fail closed)', () => {
   // Surfaced here rather than letting the mint 409 AFTER the appointment is
   // already booked.
   test('refuses when a coverage-holding term still runs, naming the end date', async () => {
-    stubTables({ term: { id: 'term-1', term_end: '2031-01-15' } });
+    stubTables({ term: { id: 'term-1', term_end: TERM_END_AFTER_VISIT } });
     const { body } = await preview({});
     expect(body.eligible).toBe(false);
-    expect(body.blockReason).toContain('2031-01-15');
+    expect(body.blockReason).toContain(TERM_END_AFTER_VISIT);
   });
 
   test('an EXPIRED term does not block a fresh year', async () => {
-    stubTables({ term: { id: 'term-old', term_end: '2020-01-15' } });
+    stubTables({ term: { id: 'term-old', term_end: etDateString(addETDays(new Date(), -400)) } });
     const { body } = await preview({});
     expect(body.eligible).toBe(true);
   });
@@ -401,13 +431,13 @@ describe('annual-prepay preview — visit cap and renewal window', () => {
   // The mint's own guard allows termStart > activeTermEnd, so a renewal
   // booked to start after the current term ends is a legitimate sale.
   test('a term ending BEFORE the booked first visit does not block the renewal', async () => {
-    stubTables({ term: { id: 'term-1', term_end: etDateString(addETDays(new Date(), 30)) } });
+    stubTables({ term: { id: 'term-1', term_end: TERM_END_BEFORE_VISIT } });
     const { body } = await preview({});
     expect(body.eligible).toBe(true);
   });
 
   test('a term still running AT the booked first visit blocks it', async () => {
-    stubTables({ term: { id: 'term-1', term_end: etDateString(addETDays(new Date(), 200)) } });
+    stubTables({ term: { id: 'term-1', term_end: TERM_END_AFTER_VISIT } });
     const { body } = await preview({});
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/already has an annual prepay term/);

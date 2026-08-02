@@ -2632,9 +2632,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   {manualPrepay.discountAmount > 0
                     ? ` · less ${manualPrepay.discountLabel} prepay discount (${formatMoney(manualPrepay.discountAmount)})`
                     : ''}
-                  {manualPrepay.setupFee?.waivedWithPrepay
-                    ? ` · ${formatMoney(manualPrepay.setupFee.amount)} setup fee waived`
-                    : ''}
                   <br />
                   On save this invoices <strong>{formatMoney(manualPrepay.prepayTotal)}</strong> for the year and
                   texts/emails the pay link. Visits bill per application until it&rsquo;s paid; on payment the

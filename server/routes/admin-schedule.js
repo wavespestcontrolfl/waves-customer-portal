@@ -7965,8 +7965,21 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     const customer = await db('customers')
       .where({ id: customerId })
       .whereNull('deleted_at')
-      .first('id', 'property_type');
+      .first('id', 'property_type', 'billing_mode', 'waveguard_tier', 'monthly_rate');
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Monthly members' visits are covered by dues — the booking POST strips
+    // estimated_price for them (memberSeriesCovered), so an armed prepay
+    // would book fine and then find an unpriced series with nothing to
+    // invoice. An existing annual-prepay lane is already covered. Refuse both
+    // up front (Codex #3161 r4 P2) — same exclusions the /secure picker takes.
+    const lane = resolveBillingLane(customer);
+    if (lane.mode === 'monthly_membership') {
+      return blocked('isn’t available for monthly members — their visits are covered by dues, so this booking carries no per-visit price to sell');
+    }
+    if (lane.mode === 'annual_prepay') {
+      return blocked('isn’t available — this customer is already on an annual prepay plan');
+    }
 
     // Commercial/business invoices carry county tax (InvoiceService.create
     // computes it), which would split the total quoted here from the total
@@ -8040,7 +8053,13 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       prepayTotal: pricing.prepay.total,
       discountAmount: pricing.prepay.discount,
       discountLabel: pricing.prepay.ratePctLabel,
-      setupFee: pricing.setupFee,
+      // Deliberately NOT pricing.setupFee (Codex #3161 r4 P2): the $99 waiver
+      // is a real incentive on the /secure picker, where choosing per
+      // application STAMPS pending_setup_fee. Nothing in this manual lane
+      // writes that fee, so a per-visit booking here never owes it and there
+      // is nothing to waive — claiming otherwise sells a discount that does
+      // not exist. (The class still drives the no-percentage rule above.)
+      setupFee: null,
       termStart,
       // Ready-to-post body for the Customer 360 mint
       // (POST /api/admin/customers/:id/annual-prepay-invoice), so the modal
