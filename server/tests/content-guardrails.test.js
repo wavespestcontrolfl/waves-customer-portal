@@ -2434,6 +2434,13 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     }
   });
 
+  test('the citation must be in the amount\'s OWN SENTENCE (r14 P0)', () => {
+    // An unrelated citation elsewhere in the paragraph is not evidence for
+    // this price; the briefs' mandated shape puts the source in-sentence.
+    expect(findHardcodedPrice('Per [UF](https://ufl.edu/chinch), chinch bugs peak in July. Orkin charges a $199 fee as of June 2026.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 ([source](https://www.consumeraffairs.com/x)).', OP)).toBeNull();
+  });
+
   test('the date must be GOVERNED by "as of" (r14)', () => {
     expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), Orkin charges a $199 fee. June 2026 was rainy.', OP)).not.toBeNull();
     expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
@@ -2540,7 +2547,9 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('<span class="other companies charge"> $89 per visit for local quarterly service</span>', OP)).not.toBeNull();
     expect(findHardcodedPrice('<div data-note="Orkin charges"> $89 per visit locally.</div>', OP)).not.toBeNull();
     // Visible prose inside a tag still attributes normally.
-    expect(findHardcodedPrice(SRC + '<p>Orkin charges a $199 cancellation fee.</p>', OP)).toBeNull();
+    // The citation must sit in the SAME sentence, and a block tag is a
+    // sentence boundary — so it goes inside the <p>, not before it.
+    expect(findHardcodedPrice(`<p>${SRC}Orkin charges a $199 cancellation fee.</p>`, OP)).toBeNull();
   });
 
   test('a > inside an attribute does not end the tag (pre-push P0, r7)', () => {

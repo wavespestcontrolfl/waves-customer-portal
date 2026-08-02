@@ -370,12 +370,12 @@ function visibleCitationUrls(citationPara, renderedPara, citationDoc) {
 // definition is invisible to the customer and cannot satisfy a sourcing
 // rule that exists for their benefit (Codex).
 function priceParagraphIsSourced(citationText, renderedText, index, opts = {}) {
-  const para = (text) => {
-    const t = String(text || '');
-    const start = (() => { const i = t.lastIndexOf('\n\n', index); return i === -1 ? 0 : i + 2; })();
-    const rawEnd = t.indexOf('\n\n', index);
-    return t.slice(start, rawEnd === -1 ? t.length : rawEnd);
-  };
+  // SENTENCE scope, not paragraph. A citation anywhere in the paragraph let
+  // an unrelated link — a chinch-bug study next to a competitor fee —
+  // authorize the price (Codex). The briefs' own mandated shape puts the
+  // source in the sentence: "Aptive charges a $199 fee as of July 2026
+  // ([source](…))." Reference DEFINITIONS are still resolved doc-wide.
+  const para = (text) => sentenceAround(String(text || ''), index).text;
   // The URL comes from text with link DESTINATIONS intact — rendered text
   // blanks them, so an ordinary "[ConsumerAffairs](https://…)" citation
   // could never qualify (Codex). Hidden content is still blanked there, so
