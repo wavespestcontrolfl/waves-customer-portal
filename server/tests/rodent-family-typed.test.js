@@ -333,15 +333,38 @@ describe('trap setup vs. re-check — the tech declares it', () => {
     }).ok).toBe(false);
   });
 
-  test('it is optional — a completion without it falls back to the visit number', () => {
-    expect(validateTypedFindings({
+  // codex P2 on #3159: left optional, a blank selector rendered the static
+  // "Traps checked" label on the form while the server's visitSequence
+  // fallback froze "Traps set" into the report — the tech entering a count
+  // under one meaning and the customer reading the other.
+  test('a closeout cannot be submitted without declaring the visit', () => {
+    const result = validateTypedFindings({
       type: 'rodent_trapping',
       values: SETUP_VALUES,
       expectedType: 'rodent_trapping',
       enforceRequired: true,
-    }).ok).toBe(true);
+    });
+    expect(result.ok).toBe(false);
+    expect(result.missing).toContain('trap_visit_type');
+  });
+
+  test('the visitSequence fallback still resolves snapshots that carry no value', () => {
+    // Completions frozen before the field existed replay through the same
+    // copy path — they must still render, on the old inference.
     expect(todaysResult(SETUP_VALUES, 1).body).toContain('We set 8 traps today.');
     expect(todaysResult(SETUP_VALUES, 2).body).toContain('We checked 8 traps');
+  });
+
+  // codex P2 on #3159: "we removed 1 capture" beside "we check them and
+  // record what they catch" reads as a contradiction.
+  test('a capture on a setup visit drops the nothing-caught-yet line, keeps the capture', () => {
+    const result = todaysResult(
+      { ...SETUP_VALUES, captures: '1', trap_visit_type: 'Initial setup' },
+      1,
+    );
+    expect(result.body).toContain('We set 8 traps and removed 1 capture today.');
+    expect(result.body).not.toContain('The traps go out on this first visit');
+    expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
   test('visit 1 reads as a setup — traps SET, no re-check or empty-check wording', () => {
@@ -464,6 +487,28 @@ describe('tech-reviewed AI report copy on rodent trapping', () => {
     });
     expect(result.body).not.toContain(AI_BODY);
     expect(result).not.toHaveProperty('bodySource');
+  });
+
+  // codex P1 on #3159. A repeat visit with a prior score ALWAYS carries a
+  // trendWord (admin-dispatch resolves one), so a gauge the tech flipped to
+  // zero reaches the trend branch before the zero-state guard below it — and
+  // published a draft written while activity still looked heavy. The first
+  // zero-state test missed this purely because it supplied no trendWord.
+  test('a zero score on a TREND visit also refuses the draft', () => {
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: { species: 'Roof rat', traps_checked: '8', captures: '0', trap_visit_type: 'Follow-up check' },
+      chips: ['Monitor after no activity'],
+      activity: { score: 0, trend: 'improving', trendWord: 'decreased' },
+      visitSequence: 3,
+      technicianReportBody: AI_BODY,
+    });
+    expect(result.body).not.toContain(AI_BODY);
+    expect(result.body).not.toMatch(/heavy/i);
+    expect(result).not.toHaveProperty('bodySource');
+    // The gauge headline is untouched — only the body refuses the draft.
+    expect(result.headline).toBe('Rodent activity has decreased since our last visit.');
   });
 
   test('bait-station siblings are unchanged — the gauge body stays deterministic', () => {

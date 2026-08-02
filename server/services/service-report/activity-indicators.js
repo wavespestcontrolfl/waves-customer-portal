@@ -27,12 +27,18 @@ const {
 // owner spec 2026-06-12). Snapshots are immutable — v1 snapshots keep
 // rendering with their persisted labels.
 const SCHEMA_VERSION = 2;
-const COPY_MAP_VERSION = 2;
-// Summary template v3: the generic non-gauge default composition of
-// buildTodaysResult accepts the tech-reviewed AI report copy as the body
-// (bodySource 'technician_report'); zero states and every owner story keep
-// template copy, and template-only output is unchanged from v2.
-const SUMMARY_TEMPLATE_VERSION = 3;
+// Copy map v3: rodent trapping's count label is no longer a constant — on a
+// declared trap-SETUP visit `traps_checked` persists as "Traps set" (owner
+// 2026-08-02). A v2 snapshot can never carry that label, so the version is
+// what tells fixtures and audits which generator produced a given row
+// (codex P2 on #3159).
+const COPY_MAP_VERSION = 3;
+// Summary template v4: rodent trapping joins the lanes that accept the
+// tech-reviewed AI report copy as the body (bodySource 'technician_report'),
+// and a declared setup visit composes setup wording instead of the re-check
+// story. v3 added the generic non-gauge default composition. Zero states and
+// every owner story still keep template copy in both.
+const SUMMARY_TEMPLATE_VERSION = 4;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -679,7 +685,15 @@ const REQUIRED_FINDINGS_FIELDS = {
   // required in validateTypedFindings (any evidence level except 'None
   // observed') — a truthful cleared visit has no activity area to name.
   flea: ['evidence_level', 'treatment_completed', 'customer_prep'],
-  rodent_trapping: ['species'],
+  // trap_visit_type is REQUIRED (codex P2 on #3159): left optional, a blank
+  // selector showed the static "Traps checked" label on the form while the
+  // server's visitSequence fallback froze "Traps set" into the report — the
+  // tech entering a count under one meaning and the customer reading the
+  // other. The closeout pre-selects it from the property's trap registry, so
+  // requiring it costs a tap only when we genuinely cannot tell — which is
+  // exactly the case that must not be guessed. The fallback survives for
+  // snapshots that legitimately carry no value (pre-field completions).
+  rodent_trapping: ['species', 'trap_visit_type'],
   // Owner spec §1/§2/§4 marked the full checklists required; the 2026-07-23
   // simplification (same lane as the T&S closeout) retired the duplicate /
   // label-only fields, so each list is back inside the ≤4 budget. Inspection
@@ -2165,14 +2179,30 @@ function buildTodaysResult({
     // deterministic and gauge-driven; only the body swaps, and only when a
     // parsed, banned-copy-screened body exists. bodySource is stamped so the
     // report's summary slot follows the same precedence every other typed
-    // report already uses (report-data.js). Zero states are excluded below,
-    // same rule as the default composition: a draft written before a late
-    // flip to "None observed" must not contradict the typed zero.
-    const trappingReportBody = projectType === 'rodent_trapping' ? technicianReportBody : null;
-    // One line of expectation-setting on the first trapping visit: nothing
-    // has been checked yet, so the customer is told what happens next
-    // instead of reading a re-check story.
-    const setupLine = initialTrapSetup
+    // report already uses (report-data.js).
+    //
+    // The zero score is excluded HERE, not just in the zero-state branch
+    // below — a repeat visit with a prior score always carries a trendWord,
+    // so a gauge the tech flipped to 0 reaches the trend branch first and
+    // would have published a draft written while activity still looked
+    // heavy (codex P1 on #3159). Same rule as the default composition: a
+    // draft must never outrank the typed zero it predates.
+    const trappingReportBody = projectType === 'rodent_trapping' && activity.score !== 0
+      ? technicianReportBody
+      : null;
+    // One line of expectation-setting on a trap-setup visit: nothing has
+    // been checked yet, so the customer is told what happens next instead of
+    // reading a re-check story.
+    //
+    // Dropped when the tech recorded a capture on the same visit (codex P2
+    // on #3159): "we removed 1 capture" next to "we check them and record
+    // what they catch" reads as a contradiction. The capture is the tech's
+    // observed fact and stays; the forward-looking line is the part that no
+    // longer applies. Deliberately NOT a validation rejection — a completion
+    // is never blocked on copy, and a setup that catches something the same
+    // day is a real (if rare) state.
+    const capturesRecorded = Number(values.captures) > 0;
+    const setupLine = initialTrapSetup && !capturesRecorded
       ? ' The traps go out on this first visit — we check them, record what they catch, and adjust placements from there.'
       : '';
     if (visitSequence > 1 && activity.trendWord) {

@@ -412,3 +412,88 @@ test('a model miss or throw falls back deterministically and never throws', asyn
   });
   expect(threw).toContain('7 of 7 traps were inspected');
 });
+
+// ---------------------------------------------------------------------------
+// Trap-SETUP visits (owner 2026-08-02; codex P2 on #3159). The prompt rule
+// alone was not a guard: on a mapped setup the station facts still ground the
+// checked count and a typed `captures: 0` still grounds negative capture
+// wording, so a re-check story cleared every fail-closed check while flatly
+// contradicting visitStage.
+// ---------------------------------------------------------------------------
+
+function setupInput(overrides = {}) {
+  return input({
+    typedReport: {
+      type: 'rodent_trapping',
+      visitSequence: 1,
+      values: { trap_visit_type: 'Initial setup' },
+      todaysResult: {
+        headline: 'Rodent activity was moderate today.',
+        body: 'We set 7 traps today. We will return for the scheduled trap check.',
+        nextStep: 'We will return for the scheduled trap check.',
+      },
+      findings: [
+        { fieldKey: 'species', customerLabel: 'What we found', customerValueLabel: 'Roof rats', value: 'Roof rat' },
+        { fieldKey: 'traps_checked', customerLabel: 'Traps set', customerValueLabel: '7', value: '7' },
+        { fieldKey: 'captures', customerLabel: 'Captures', customerValueLabel: '0', value: '0' },
+      ],
+    },
+    ...overrides,
+  });
+}
+
+test('a declared setup marks the facts and the deterministic summary says SET', () => {
+  const facts = groundingFacts(setupInput());
+  expect(facts.visitStage).toBe('initial_trap_setup');
+  const summary = deterministicSummary(facts);
+  expect(summary).toContain('7 of 7 traps were set');
+  expect(summary).not.toContain('were inspected');
+  // Traps placed today have had no chance to catch anything.
+  expect(summary).not.toContain('no captures recorded');
+});
+
+test('re-check and empty-check wording is REJECTED on a setup, not merely discouraged', () => {
+  const facts = groundingFacts(setupInput());
+  const rejected = [
+    'We checked 7 traps and found no captures today.',
+    'The traps were inspected and reset during the visit.',
+    'We reset the traps along the roofline.',
+    'No new captures were recorded.',
+    'The traps were empty.',
+  ];
+  for (const text of rejected) {
+    expect(ungroundedClaims(text, facts).filter((p) => p.startsWith('setup_')).length)
+      .toBeGreaterThan(0);
+  }
+});
+
+test('legitimate setup prose survives the guard', () => {
+  const facts = groundingFacts(setupInput());
+  const allowed = [
+    'We set 7 traps in the attic and garage today.',
+    // "checked" against a NON-trap noun is ordinary inspection prose
+    'We checked the roofline for entry points before placing the traps.',
+    'We placed the devices along the runways we documented.',
+  ];
+  for (const text of allowed) {
+    expect(ungroundedClaims(text, facts).filter((p) => p.startsWith('setup_'))).toEqual([]);
+  }
+});
+
+test('the setup guard is inert on a follow-up visit', () => {
+  const facts = groundingFacts(input());
+  expect(facts.visitStage).toBeNull();
+  expect(ungroundedClaims('We checked 7 traps and found no captures today.', facts)
+    .filter((p) => p.startsWith('setup_'))).toEqual([]);
+});
+
+test('a model that ignores the setup rule falls back to the deterministic setup summary', async () => {
+  const out = await applyRodentReportNarrative(setupInput(), {
+    callModel: jest.fn().mockResolvedValue({
+      ok: true,
+      json: { summary: 'We checked 7 traps around the home today and found no captures at any of them, so we will keep monitoring the property between visits this season.' },
+    }),
+  });
+  expect(out).toContain('7 of 7 traps were set');
+  expect(out).not.toContain('checked 7 traps');
+});
