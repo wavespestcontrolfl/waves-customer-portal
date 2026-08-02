@@ -143,10 +143,22 @@ function cancelFeeLine() {
   return feeText ? `\n${feeText} fee only for last-minute cancels or no-shows.` : '';
 }
 
-// Fuller sentence for the /secure page (no SMS segment budget there).
+// Fuller sentence for the /secure page (no SMS segment budget there). The
+// EXACT enforced window is part of the disclosure (Codex #3153 r3 P0): a
+// fee collected under an undisclosed cutoff is not consented — the page
+// states the same derived hours the render stamp freezes. Window source
+// unavailable → no disclosure at all (never enforce a term we can't state).
 function cancelFeeNote() {
   const feeText = cancelFeeText();
-  return feeText ? `A ${feeText} fee applies only for last-minute cancels or no-shows. Rescheduling is always free.` : '';
+  if (!feeText) return '';
+  try {
+    const { cardHoldCancelWindowHours } = require('./estimate-card-holds');
+    const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
+    return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
+  } catch (err) {
+    logger.warn(`[appt-card-request] cancel-window unavailable — omitting fee disclosure: ${err.message}`);
+    return '';
+  }
 }
 
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
@@ -1192,24 +1204,47 @@ async function loadSecureCardPageData(token) {
   // a reload retries, and a row that raced to completed re-renders secured.
   let disclosureStamped = false;
   try {
-    // accepted_amount is stamped ONLY when the page actually DISPLAYS the
-    // price (Codex #3153 r2 P1): the one-time service-total row and the
-    // recurring per-application price both render exclusively from
-    // planContext — with GATE_SECURE_PLAN_CHOICE off (or derivation null)
-    // no number is shown, so nothing is accepted and the row stays
-    // unchargeable by the completion lane (routes to office review).
-    // Auto-secured `satisfied` rows are different: their cap rests on the
-    // saved-method enrollment consent, not this page.
-    const disclosure = { accepted_amount: planContext ? visitPrice : null, updated_at: new Date() };
     const { cardHoldNoShowFee, cardHoldCancelWindowHours } = require('./estimate-card-holds');
     const feeAmount = Number(cardHoldNoShowFee());
+    const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
+    const disclosure = { updated_at: new Date() };
+    // Monotonic-DOWN with sticky "nothing disclosed" sentinels (Codex #3153
+    // r3 P0): completion cannot know WHICH open tab's render the customer
+    // consented from — the /complete POST carries only the (shared)
+    // SetupIntent — so the row may only ever move TOWARD the customer. A
+    // re-render can lower a fee/cap but never raise one (LEAST, atomic in
+    // SQL against concurrent renders), and any render that disclosed NO fee
+    // (window sentinel 0) or NO price (accepted sentinel 0) pins the row
+    // unchargeable for good. Whatever tab they complete from, the enforced
+    // terms are ≤ every disclosure ever shown on this link.
+    //
+    // accepted_amount rides ONLY when the page actually DISPLAYS the price
+    // (Codex #3153 r2 P1): the one-time service total and the recurring
+    // per-application price both render exclusively from planContext —
+    // gate off / derivation null shows no number, so nothing is accepted
+    // and the completion lane routes to office review. Auto-secured
+    // `satisfied` rows are different: their cap rests on the saved-method
+    // enrollment consent, not this page.
     if (base.cancelFeeNote && feeAmount > 0) {
-      disclosure.no_show_fee_amount = feeAmount;
-      disclosure.cancel_window_hours = Number(cardHoldCancelWindowHours()) > 0
-        ? Number(cardHoldCancelWindowHours()) : 24;
+      disclosure.no_show_fee_amount = db.raw(
+        'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
+        [feeAmount, feeAmount],
+      );
+      disclosure.cancel_window_hours = db.raw(
+        'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
+        [windowHours, windowHours],
+      );
     } else {
       disclosure.no_show_fee_amount = null;
-      disclosure.cancel_window_hours = null;
+      disclosure.cancel_window_hours = 0;
+    }
+    if (planContext) {
+      disclosure.accepted_amount = db.raw(
+        'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+        [visitPrice, visitPrice],
+      );
+    } else {
+      disclosure.accepted_amount = 0;
     }
     const stamped = await db('appointment_card_requests')
       .where({ id: request.id, status: 'pending' })

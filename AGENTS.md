@@ -1089,7 +1089,17 @@ violations at the severity noted.
   ONLY when the page DISPLAYED the price (planContext present — r2): with
   `GATE_SECURE_PLAN_CHOICE` off no number renders, so page-secured rows
   stay uncharged (completion routes to review) until that gate is on —
-  flip order matters. Fee-state machine is terminal-everything: a timely
+  flip order matters. The stamp is MONOTONIC-DOWN with sticky sentinels
+  (r3): completion cannot know which open tab's render was consented
+  from, so a re-render may LOWER the frozen fee/cap (SQL LEAST, atomic)
+  but never raise it, and a render that disclosed no fee
+  (`cancel_window_hours = 0` sentinel) or no price (`accepted_amount = 0`
+  sentinel) pins the row unchargeable permanently — enforced terms are ≤
+  every disclosure ever shown on the link. The /secure page and the
+  enrollment email state the EXACT window hours being frozen (a fee under
+  an undisclosed cutoff is not consented); the SMS keeps the short
+  "last-minute" clause (segment budget — the page is the consent
+  surface). Fee-state machine is terminal-everything: a timely
   free cancel persists `fee_status='released'` BEFORE reporting release
   (cancellation retries re-run side effects — an unpersisted free cancel
   must never become chargeable later), and BOTH races (lost charge claim,

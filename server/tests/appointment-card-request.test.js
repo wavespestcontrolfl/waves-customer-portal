@@ -40,11 +40,15 @@ jest.mock('../models/db', () => {
     touch.chain = chain;
     return chain;
   };
-  return jest.fn((table) => {
+  const db = jest.fn((table) => {
     const touch = { table };
     mockDbTouches.push(touch);
     return makeChain(mockTableHandlers[table] || {}, touch);
   });
+  // Raw SQL fragments (the monotonic disclosure stamp) — returned as an
+  // inspectable token so tests can pin the SQL contract and its bindings.
+  db.raw = (sql, bindings = []) => ({ __raw: sql, bindings });
+  return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -904,11 +908,16 @@ describe('loadSecureCardPageData — page state machine', () => {
       .find((p) => 'accepted_amount' in p);
     expect(stamp).toBeTruthy();
     // planContext is null here (gate off) → the page shows NO price, so
-    // nothing is accepted and the completion lane must stay unchargeable
-    // (Codex #3153 r2). The fee disclosure renders regardless and stamps.
-    expect(stamp.accepted_amount).toBeNull();
-    expect(Number(stamp.no_show_fee_amount)).toBeGreaterThan(0);
-    expect(Number(stamp.cancel_window_hours)).toBeGreaterThan(0);
+    // nothing is accepted: the sticky 0 sentinel pins the row unchargeable
+    // by the completion lane (Codex #3153 r2+r3).
+    expect(stamp.accepted_amount).toBe(0);
+    // The fee stamp is monotonic-DOWN and sentinel-aware (r3): LEAST against
+    // any prior render's value, and a prior no-fee render (window 0) wins.
+    expect(String(stamp.no_show_fee_amount.__raw)).toContain('LEAST(COALESCE(no_show_fee_amount');
+    expect(String(stamp.no_show_fee_amount.__raw)).toContain('CASE WHEN cancel_window_hours = 0 THEN NULL');
+    expect(stamp.no_show_fee_amount.bindings).toContain(49);
+    expect(String(stamp.cancel_window_hours.__raw)).toContain('LEAST(COALESCE(cancel_window_hours');
+    expect(stamp.cancel_window_hours.bindings).toContain(24);
     // Consent is NOT recorded at render — only /complete stamps fee_agreed_at.
     expect(stamp.fee_agreed_at).toBeUndefined();
   });
@@ -924,7 +933,10 @@ describe('loadSecureCardPageData — page state machine', () => {
         .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
         .map(([, patch]) => patch)
         .find((p) => 'accepted_amount' in p);
-      expect(Number(stamp.accepted_amount)).toBe(135);
+      // Monotonic-DOWN + sticky no-price sentinel (r3): a display can lower
+      // the frozen cap, never raise it, and a prior no-price render wins.
+      expect(String(stamp.accepted_amount.__raw)).toContain('CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount');
+      expect(stamp.accepted_amount.bindings).toContain(135);
     } finally {
       spy.mockRestore();
     }

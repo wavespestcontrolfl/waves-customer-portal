@@ -280,11 +280,14 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
     // appointment-card-request.
     let cancelFeeSentence = '';
     try {
-      const { cardHoldNoShowFee } = require('./estimate-card-holds');
+      const { cardHoldNoShowFee, cardHoldCancelWindowHours } = require('./estimate-card-holds');
       const fee = Number(cardHoldNoShowFee());
       if (fee > 0) {
         const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-        cancelFeeSentence = `A ${feeText} fee applies only for last-minute cancels or no-shows. Rescheduling is always free.`;
+        // The enforced window is part of the disclosure (Codex #3153 r3 P0)
+        // — same derived hours the /secure page states and stamps.
+        const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
+        cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
       }
     } catch (feeErr) {
       logger.warn(`[card-enrollment-email] cancel-fee line unavailable — omitting: ${feeErr.message}`);
