@@ -1296,11 +1296,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // fills in after the booked ones, so the server refuses those series —
         // send it pre-save too, or the control would price a year it can't sell.
         skipWeekends: String(!!skipWeekends),
+        // A capped series sells fewer visits than a prepaid year covers, so
+        // the server refuses it — send the cap, don't let the control price a
+        // year the booking won't put on the schedule.
+        recurringCount: String(recurringCount || ''),
         firstVisitDate: String(apptDate || '').split('T')[0],
         windowStart,
       },
     };
-  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends]);
+  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount]);
   const manualPrepayQuery = manualPrepayPlan.query;
 
   // Preview fetch. Runs whenever the control is on screen — NOT only once
@@ -1645,13 +1649,24 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           body: JSON.stringify(fresh.mintPayload),
         });
         const num = minted?.invoice?.invoice_number ? ` ${minted.invoice.invoice_number}` : '';
-        prepayNotice = minted?.delivery?.ok === false
-          ? `Annual prepay invoice${num} created for ${formatMoney(fresh.prepayTotal)}, but sending it failed — send it from the customer's invoices.`
-          : `Annual prepay invoice${num} sent for ${formatMoney(fresh.prepayTotal)}.`;
+        if (minted?.delivery?.covered_by_credit) {
+          // Account credit covered it outright, so nothing was sent — saying
+          // "sent" would have the office believe the customer was notified.
+          prepayNotice = `Annual prepay invoice${num} for ${formatMoney(fresh.prepayTotal)} was settled by account credit — nothing was sent to the customer.`;
+        } else if (minted?.delivery?.ok === false) {
+          prepayNotice = `Annual prepay invoice${num} created for ${formatMoney(fresh.prepayTotal)}, but sending it failed — send it from the customer's invoices.`;
+        } else {
+          prepayNotice = `Annual prepay invoice${num} sent for ${formatMoney(fresh.prepayTotal)}.`;
+        }
       } catch (e) {
         // Loud, never silent: the appointment IS booked, so the operator must
         // know the year was not invoiced and where to finish it.
-        alert(`Appointment booked, but the annual prepay invoice was NOT created: ${e.message}\n\nMint it from the customer's profile (Customer 360 → Annual prepay) if they still want to prepay.`);
+        // Deliberately NOT "the invoice was not created": the mint commits the
+        // invoice and term, sends, and only then writes its audit row, so a
+        // 500 (or a lost response) can mean the customer already HAS the
+        // invoice. Telling the operator to mint another would double-bill the
+        // year (Codex #3161 r3 P2).
+        alert(`Appointment booked, but the annual prepay step did not complete cleanly: ${e.message}\n\nCheck the customer's invoices BEFORE minting another — the invoice may already exist and have been sent. If none is there, mint it from Customer 360 → Annual prepay.`);
       } finally {
         setSaving(false);
       }

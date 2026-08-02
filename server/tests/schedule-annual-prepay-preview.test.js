@@ -52,20 +52,25 @@ function stubTables({
   term = undefined,
   visit = undefined,
   addonCount = 0,
+  seriesCount = 4,
 } = {}) {
   db.mockImplementation((table) => {
     const q = {};
+    let isCount = false;
     q.where = jest.fn(() => q);
     q.whereNull = jest.fn(() => q);
+    q.whereNotIn = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
-    q.count = jest.fn(() => q);
+    // count() marks the query so first() can tell the series-count probe
+    // apart from the plain row read on the same table.
+    q.count = jest.fn(() => { isCount = true; return q; });
     q.first = jest.fn(async () => {
       if (table === 'customers') return customer;
-      if (table === 'scheduled_services') return visit;
       if (table === 'scheduled_service_addons') {
         if (addonCount === 'throw') throw new Error('addon read failed');
         return { n: addonCount };
       }
+      if (table === 'scheduled_services') return isCount ? { n: seriesCount } : visit;
       return term;
     });
     return q;
@@ -356,6 +361,56 @@ describe('annual-prepay preview — weekend rule', () => {
     const { body } = await preview({ scheduledServiceId: 'svc-1' });
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/skips weekends/);
+  });
+});
+
+describe('annual-prepay preview — visit cap and renewal window', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
+  // Selling a 4-visit year against a 2-visit capped series would have the
+  // coverage seeder schedule the visits the operator explicitly capped away.
+  test('refuses a finite series shorter than the prepaid year', async () => {
+    stubTables();
+    const { body } = await preview({ recurringCount: '2' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/capped at 2 visits/);
+  });
+
+  test('a finite series covering the whole year is fine', async () => {
+    stubTables();
+    const { body } = await preview({ recurringCount: '4' });
+    expect(body.eligible).toBe(true);
+  });
+
+  test('ongoing (blank Visits) is fine', async () => {
+    stubTables();
+    const { body } = await preview({ recurringCount: '' });
+    expect(body.eligible).toBe(true);
+  });
+
+  test('a committed finite series is measured by its own rows', async () => {
+    stubTables({ visit: { ...COMMITTED_VISIT, recurring_ongoing: false }, seriesCount: 2 });
+    const { body } = await preview({ scheduledServiceId: 'svc-1' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/capped at 2 visits/);
+  });
+
+  // The mint's own guard allows termStart > activeTermEnd, so a renewal
+  // booked to start after the current term ends is a legitimate sale.
+  test('a term ending BEFORE the booked first visit does not block the renewal', async () => {
+    stubTables({ term: { id: 'term-1', term_end: etDateString(addETDays(new Date(), 30)) } });
+    const { body } = await preview({});
+    expect(body.eligible).toBe(true);
+  });
+
+  test('a term still running AT the booked first visit blocks it', async () => {
+    stubTables({ term: { id: 'term-1', term_end: etDateString(addETDays(new Date(), 200)) } });
+    const { body } = await preview({});
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/already has an annual prepay term/);
   });
 });
 

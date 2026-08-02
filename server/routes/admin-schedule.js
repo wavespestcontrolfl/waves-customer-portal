@@ -7759,7 +7759,10 @@ router.get('/card-request-availability', async (req, res, next) => {
 // control only on true: an offered choice that silently no-ops while the
 // lane is dark reads to the office as a sold prepay (same rule as the
 // card-on-file checkbox above).
-router.get('/annual-prepay-availability', async (_req, res, next) => {
+// requireAdmin, NOT the router-level tech gate (Codex #3161 r3 P2): the
+// preview below is admin-only, so a technician answered `true` here would be
+// shown a Billing control whose every price probe 403s.
+router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) => {
   try {
     res.json({ enabled: isEnabled('prepayOnBook') });
   } catch (err) { next(err); }
@@ -7821,13 +7824,14 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         .where({ id: scheduledServiceId })
         .first('id', 'customer_id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
           'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id', 'skip_weekends',
-          'booster_months', 'source_estimate_id');
+          'recurring_ongoing', 'booster_months', 'source_estimate_id');
       if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
       const parent = visit.recurring_parent_id
         ? await db('scheduled_services')
           .where({ id: visit.recurring_parent_id })
           .first('id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
-            'recurring_pattern', 'recurring_interval_days', 'skip_weekends', 'booster_months', 'source_estimate_id')
+            'recurring_pattern', 'recurring_interval_days', 'skip_weekends', 'recurring_ongoing',
+            'booster_months', 'source_estimate_id')
         : visit;
       const anchor = parent || visit;
       // An estimate-origin series already made its billing choice at accept —
@@ -7854,7 +7858,27 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         if (!raw) return [];
         try { return Array.isArray(raw) ? raw : JSON.parse(raw); } catch { return []; }
       })();
+      // A FINITE series caps how many visits the operator sold. Ongoing
+      // series have no cap (the coverage seeder extends them), so only a
+      // non-ongoing one carries a count worth comparing.
+      let bookedVisitCount = null;
+      if (anchor.recurring_ongoing === false) {
+        try {
+          const seriesCount = await db('scheduled_services')
+            .where(function series() {
+              this.where({ id: anchor.id }).orWhere({ recurring_parent_id: anchor.id });
+            })
+            .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+            .count({ n: '*' })
+            .first();
+          bookedVisitCount = Number(seriesCount?.n) || null;
+        } catch (countErr) {
+          logger.warn(`[schedule:prepay-preview] series count failed for ${anchor.id}: ${countErr.message} — refusing`);
+          return blocked('couldn’t confirm how many visits this series carries — refresh and try again');
+        }
+      }
       input = {
+        bookedVisitCount,
         customerId: String(anchor.customer_id || visit.customer_id || ''),
         coverageServiceType: String(anchor.service_type || '').trim(),
         perVisit: anchor.estimated_price != null ? Number(anchor.estimated_price) : null,
@@ -7867,7 +7891,9 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
         windowStartRaw: anchor.window_start || null,
       };
     } else {
+      const draftCount = Number.parseInt(req.query.recurringCount, 10);
       input = {
+        bookedVisitCount: Number.isInteger(draftCount) && draftCount >= 2 ? draftCount : null,
         customerId: String(req.query.customerId || '').trim(),
         coverageServiceType: String(req.query.serviceType || '').trim(),
         perVisit: req.query.price === undefined || req.query.price === null || req.query.price === ''
@@ -7905,6 +7931,14 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     const coverageCadence = prepayCoverageCadenceForPattern(cadence);
     if (!visitsPerYear || !coverageCadence) {
       return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
+    }
+
+    // A capped series sells FEWER visits than the prepaid year covers (Codex
+    // #3161 r3 P2): booking 2 quarterly visits then selling a 4-visit year
+    // would have the coverage seeder schedule the 2 extra visits the operator
+    // explicitly capped away. Leave the series ongoing, or book the full year.
+    if (input.bookedVisitCount != null && input.bookedVisitCount < visitsPerYear) {
+      return blocked(`needs the full year on the schedule — this booking is capped at ${input.bookedVisitCount} visit${input.bookedVisitCount === 1 ? '' : 's'} but a prepaid year covers ${visitsPerYear}. Leave Visits blank (ongoing) or book ${visitsPerYear}`);
     }
 
     // Same two combinations the quote-linked prepay control refuses: the
@@ -7963,22 +7997,10 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     const planClass = PLAN_CLASS_BY_SERVICE_KEY[recurringServiceKey({ name: coverageServiceType })] || null;
     if (!planClass) return blocked('isn’t available for this service');
 
-    // Surface an existing term as a block rather than letting the mint 409
-    // after the appointment is already booked.
-    const overlapping = await db('annual_prepay_terms')
-      .where({ customer_id: customerId })
-      .where(annualPrepayOverlapStatusClause())
-      .orderBy('term_end', 'desc')
-      .first('id', 'term_end');
-    const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
-    const today = etDateString();
-    if (overlapEnd && today <= overlapEnd) {
-      return blocked(`isn’t available — this customer already has an annual prepay term through ${overlapEnd}`);
-    }
-
     // The term is anchored on the visit being booked, so the coverage seeder
     // ADOPTS this series instead of seeding a duplicate one (the mint's
     // firstVisitDate/firstVisitWindowStart contract, PR #3126).
+    const today = etDateString();
     const firstVisitDate = validScheduleDate(input.firstVisitDateRaw)
       ? String(input.firstVisitDateRaw).split('T')[0]
       : null;
@@ -7987,6 +8009,21 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       ? AnnualPrepayTimes.normalizeWindowStart(String(input.windowStartRaw))
       : null;
     const termStart = firstVisitDate || today;
+
+    // Surface an existing term as a block rather than letting the mint 409
+    // after the appointment is already booked. Compared against the PROPOSED
+    // term start, not today (Codex #3161 r3 P2) — the mint's own guard allows
+    // termStart > activeTermEnd, so a renewal booked to begin after the
+    // current term ends is a legitimate sale, not an overlap.
+    const overlapping = await db('annual_prepay_terms')
+      .where({ customer_id: customerId })
+      .where(annualPrepayOverlapStatusClause())
+      .orderBy('term_end', 'desc')
+      .first('id', 'term_end');
+    const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
+    if (overlapEnd && termStart <= overlapEnd) {
+      return blocked(`isn’t available — this customer already has an annual prepay term through ${overlapEnd}. Book the first visit after that date to sell the renewal`);
+    }
 
     const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
     const planLabel = `${coverageServiceType} Annual Prepay`;
