@@ -132,6 +132,9 @@ describe('maybeResumeBillingPauseOnPayment', () => {
     expect(mockState.auditEvents).toHaveLength(1);
     expect(mockState.auditEvents[0]).toMatchObject({
       actor_type: 'system',
+      // UUID column — a string actor here fails the INSERT in prod and the
+      // never-throw catch would hide it forever.
+      actor_id: null,
       action: 'customer.billing_pause_cleared',
       resource_type: 'customer',
       resource_id: 'cust-1',
@@ -139,6 +142,7 @@ describe('maybeResumeBillingPauseOnPayment', () => {
     });
     expect(mockState.auditEvents[0].metadata).toMatchObject({
       trigger: 'payment_succeeded',
+      source: 'stripe_webhook',
       payment_intent_id: 'pi_42',
     });
     expect(mockState.auditEvents[0].trx).toBeTruthy();

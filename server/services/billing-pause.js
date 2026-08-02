@@ -93,7 +93,11 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
 
       await recordAuditEvent({
         actor_type: 'system',
-        actor_id: context.source || 'stripe_webhook',
+        // actor_id is a UUID column — a string here fails the INSERT in
+        // Postgres, rolls back the transaction, and the never-throw catch
+        // would hide it: the feature would silently never fire. System
+        // actors pass null (repo convention); the source lives in metadata.
+        actor_id: null,
         action: 'customer.billing_pause_cleared',
         resource_type: 'customer',
         resource_id: customerId,
@@ -101,6 +105,7 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
           paused_since: pausedSince,
           pause_reason: AUTO_CLEARABLE_REASON,
           trigger: 'payment_succeeded',
+          source: context.source || 'stripe_webhook',
           payment_intent_id: context.paymentIntentId || null,
           settled_at: settledAt.toISOString(),
         },
