@@ -45,7 +45,7 @@ function isCardHoldEnabled() {
 // from the `estimate_card_hold` row), with hard fallbacks if a row is missing.
 function cardHoldNoShowFee() {
   const amount = Number(CARD_HOLD.noShowFeeAmount);
-  return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 49;
+  return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) / 100 : 75;
 }
 function cardHoldCancelWindowHours() {
   const hours = Number(CARD_HOLD.cancelWindowHours);

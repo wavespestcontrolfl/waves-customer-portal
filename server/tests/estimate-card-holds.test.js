@@ -291,19 +291,19 @@ describe('completion charge accepted-amount cap — frozen at booking, never col
 });
 
 describe('cardHoldNoShowFee / cardHoldCancelWindowHours', () => {
-  it('default to $49 / 24h', () => {
-    expect(cardHoldNoShowFee()).toBe(49);
+  it('default to $75 / 24h (owner ruling 2026-08-01)', () => {
+    expect(cardHoldNoShowFee()).toBe(75);
     expect(cardHoldCancelWindowHours()).toBe(24);
   });
   it('read constants.CARD_HOLD (pricing_config-authoritative) and fall back on junk', () => {
     const { CARD_HOLD } = require('../services/pricing-engine/constants');
     const original = { ...CARD_HOLD };
     try {
-      CARD_HOLD.noShowFeeAmount = 75; CARD_HOLD.cancelWindowHours = 48;
-      expect(cardHoldNoShowFee()).toBe(75);
+      CARD_HOLD.noShowFeeAmount = 60; CARD_HOLD.cancelWindowHours = 48;
+      expect(cardHoldNoShowFee()).toBe(60);
       expect(cardHoldCancelWindowHours()).toBe(48);
       CARD_HOLD.noShowFeeAmount = -5; CARD_HOLD.cancelWindowHours = 'junk';
-      expect(cardHoldNoShowFee()).toBe(49);
+      expect(cardHoldNoShowFee()).toBe(75);
       expect(cardHoldCancelWindowHours()).toBe(24);
     } finally {
       Object.assign(CARD_HOLD, original);
@@ -321,7 +321,7 @@ describe('resolveCardHoldPolicy', () => {
   it('REQUIRES a hold for a one-time accept with fee + window', () => {
     const p = resolveCardHoldPolicy({ treatAsOneTime: true });
     expect(p.required).toBe(true);
-    expect(p.noShowFeeAmount).toBe(49);
+    expect(p.noShowFeeAmount).toBe(75);
     expect(p.cancelWindowHours).toBe(24);
   });
   it('never required for recurring', () => {
