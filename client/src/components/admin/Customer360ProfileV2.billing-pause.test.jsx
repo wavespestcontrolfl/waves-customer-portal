@@ -106,10 +106,33 @@ describe('Customer 360 billing-pause banner', () => {
     expect(screen.getByText(/Visits are unaffected/i)).toBeInTheDocument();
     // The automatic path (owner ruling 2026-08-01): paying clears the pause
     // without anyone clicking anything.
-    expect(screen.getByText(/clears on its own\s+when a payment/i)).toBeInTheDocument();
+    expect(screen.getByText(/clears on its own when a payment/i)).toBeInTheDocument();
     expect(screen.getByText(/never back-billed/i)).toBeInTheDocument();
     // Must NOT promise collection resumes — other cron guards still apply.
     expect(screen.getByText(/other billing guards/i)).toBeInTheDocument();
+  });
+
+  it('a MANUAL pause does not promise automatic clearing', async () => {
+    // maybeResumeBillingPauseOnPayment returns manual_pause and leaves it
+    // set — telling an operator "no action needed" here would be false.
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'owner_hold_pending_dispute',
+        }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+
+    expect(screen.queryByText(/clears on its own/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/set manually and only clears manually/i)).toBeInTheDocument();
   });
 
   it('resumes billing and clears the banner', async () => {

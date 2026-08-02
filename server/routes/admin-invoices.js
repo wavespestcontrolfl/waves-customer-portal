@@ -1542,7 +1542,15 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       // invoice.total, so they MUST be linked or the receipt falls back to the
       // pre-credit total instead of the amount actually received.
       if (row.payer_id || Number(row.credit_applied) > 0) {
-        paymentRow.metadata = JSON.stringify({ invoice_id: row.id });
+        paymentRow.metadata = JSON.stringify({
+          invoice_id: row.id,
+          // Payer ownership rides the ledger row itself: billing-cron's
+          // pause veto and the webhook auto-clear both exclude payer-funded
+          // money by metadata.payer_id — without this stamp a manually
+          // recorded third-party payment would read as the homeowner's own
+          // tender and veto a pause their dead card earned.
+          ...(row.payer_id ? { payer_id: row.payer_id } : {}),
+        });
       }
       await trx('payments').insert(paymentRow);
       return row;

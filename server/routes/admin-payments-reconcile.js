@@ -303,6 +303,18 @@ router.post('/reconcile', requireAdmin, async (req, res, next) => {
         metadata: JSON.stringify({
           invoice_id: invoiceId,
           source: 'admin_payment_reconcile',
+          // The CHARGE's settlement moment, not the reconciliation moment:
+          // billing-cron's pause veto reads settled_event_at, and a row
+          // created at reconcile time without it would fall back to
+          // created_at — making a weeks-old charge look like money settled
+          // during the current failed attempt. chargeDetails.created is
+          // Stripe's epoch-seconds charge timestamp (verified above when a
+          // stripeChargeId is supplied). Non-Stripe reconciliations
+          // (check/cash) carry no stamp on purpose: they were recorded by a
+          // human NOW, and created_at is honest for them.
+          ...(stripeChargeId && chargeDetails?.created
+            ? { settled_event_at: new Date(chargeDetails.created * 1000).toISOString() }
+            : {}),
         }),
       });
 

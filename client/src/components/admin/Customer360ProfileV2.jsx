@@ -5871,12 +5871,13 @@ export default function Customer360ProfileV2({
                         {c.servicePauseReason === "autopay_final_failure"
                           ? " — autopay failed three times"
                           : ""}
-                        . Visits are unaffected. The pause clears on its own
-                        when a payment from this customer succeeds; clearing
-                        it (either way) removes this block only — other
-                        billing guards (autopay state, plan type, prepaid
-                        coverage) still apply — and the paused months are
-                        never back-billed.
+                        . Visits are unaffected.{" "}
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? "The pause clears on its own when a payment from this customer succeeds; clearing"
+                          : "This pause was set manually and only clears manually; clearing"}{" "}
+                        it removes this block only — other billing guards
+                        (autopay state, plan type, prepaid coverage) still
+                        apply — and the paused months are never back-billed.
                       </div>
                       {isAdmin && (
                         <Button
