@@ -676,6 +676,15 @@ const gates = {
   // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
   voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
 
+  // Dropped-call address-request text (services/dropped-call-sms.js): a NEW
+  // prospect whose intake call died mid-conversation before the service
+  // address was captured gets ONE text asking for it. Same fail-CLOSED rule
+  // as voicemailLeadSms — customer-facing auto-send, explicit opt-in in
+  // every environment. Owner sets GATE_DROPPED_CALL_SMS=true to go live.
+  // Off → the dropped call still opens its call-back triage card; only the
+  // SMS is skipped.
+  droppedCallSms: process.env.GATE_DROPPED_CALL_SMS === 'true',
+
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
   // eligible requests consult GrowthBook (server SDK; LOCAL eval against a

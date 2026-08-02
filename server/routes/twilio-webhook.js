@@ -920,8 +920,16 @@ router.post('/status', async (req, res) => {
   try {
     const { MessageSid, MessageStatus, ErrorCode, ErrorMessage, From, To } = req.body;
     if (MessageSid && MessageStatus) {
-      await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
-      await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() });
+      // Bookkeeping is isolated: a transient DB error here must not jump to
+      // the outer catch and skip the bounce-remediation handlers below —
+      // the webhook answers 200 regardless, so Twilio would never redeliver
+      // and a bounce would be lost (codex P2).
+      try {
+        await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
+        await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() });
+      } catch (bookkeepingErr) {
+        logger.error(`[twilio-status] status bookkeeping failed (continuing to handlers): ${bookkeepingErr.message}`);
+      }
       if (isFailureStatus(MessageStatus)) {
         notifyTwilioFailure({
           channel: 'sms',
@@ -1059,6 +1067,24 @@ router.post('/status', async (req, res) => {
           }).catch((e) => logger.error(`[twilio-status] voicemail quote-link bounce handling failed: ${e.message}`));
         } catch (e) {
           logger.error(`[twilio-status] voicemail quote-link bounce dispatch failed: ${e.message}`);
+        }
+
+        // Dropped-call address-request bounce: same failure mode as the
+        // voicemail quote link — Twilio accepted at send time, the carrier
+        // bounced later (30006 landline past the fail-open pre-check), and
+        // the lead + review card still say "sent, watch for a reply" that
+        // can never come. The handler stamps the lead, pulls its follow-up
+        // to now, and flips the open card to 'undelivered'.
+        try {
+          const DroppedCallSms = require('../services/dropped-call-sms');
+          void DroppedCallSms.handleUndeliveredAddressRequestWithRetry({
+            sid: MessageSid,
+            status: MessageStatus,
+            errorCode: ErrorCode,
+            to: To,
+          }).catch((e) => logger.error(`[twilio-status] dropped-call address-request bounce handling failed: ${e.message}`));
+        } catch (e) {
+          logger.error(`[twilio-status] dropped-call address-request bounce dispatch failed: ${e.message}`);
         }
       }
     }
