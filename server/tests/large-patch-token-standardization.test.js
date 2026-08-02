@@ -93,6 +93,41 @@ describe('large patch token standardization', () => {
   });
 });
 
+describe('no source still produces the retired disease token', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  // Renaming the catalog is pointless if a producer keeps emitting the old
+  // spelling into NEW records. The recurring lawn template seed is the
+  // dangerous one — it upserts on every re-run.
+  const PRODUCERS = [
+    '../scripts/seed-job-form-templates.js',
+    '../services/project-types.js',
+  ];
+
+  test('lawn disease pickers offer "Large patch", never "Brown patch"', () => {
+    const offenders = [];
+    for (const rel of PRODUCERS) {
+      const src = fs.readFileSync(path.join(__dirname, rel), 'utf8');
+      // Quoted exactly — "Brown patches" (a visual description of
+      // discoloration, not the disease) is legitimate and must not trip this.
+      if (/['"]Brown patch['"]/.test(src)) offenders.push(rel);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  test('the seed still offers the disease at all, under the new name', () => {
+    const src = fs.readFileSync(
+      path.join(__dirname, '../scripts/seed-job-form-templates.js'),
+      'utf8',
+    );
+    expect(src).toMatch(/['"]Large patch['"]/);
+    // The turf-colour option describes what the lawn LOOKS like and is a
+    // separate concept — it stays.
+    expect(src).toMatch(/['"]Brown patches['"]/);
+  });
+});
+
 describe('SpeedZone Southern turf and heat limits', () => {
   test('records the label temperature window', async () => {
     const { knex, calls } = mockKnex();

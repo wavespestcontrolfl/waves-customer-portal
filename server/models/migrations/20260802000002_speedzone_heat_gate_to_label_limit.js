@@ -75,8 +75,17 @@ async function shiftGateThreshold(knex, { from, to }) {
       .whereRaw('goal ILIKE ?', ['%speedzone%'])
       .update({
         goal: knex.raw('REPLACE(goal, ?, ?)', [`${from}°F`, `${to}°F`]),
+        // Build the nested copy from the TOP-LEVEL goal rather than from
+        // itself. Deriving it from service_report_context->>'goal' breaks two
+        // ways: the column defaults to '{}', so a window without a nested goal
+        // yields REPLACE(NULL, ...) = NULL and jsonb_set then returns NULL,
+        // violating the NOT NULL constraint and aborting the whole migration;
+        // and a nested goal that had already drifted would stay drifted while
+        // the top-level moved. Sourcing both from `goal` restores parity in
+        // every case. (Postgres evaluates SET expressions against the row's
+        // pre-update values, so `goal` here is the old string.)
         service_report_context: knex.raw(
-          "jsonb_set(service_report_context, '{goal}', to_jsonb(REPLACE(service_report_context->>'goal', ?, ?)))",
+          "jsonb_set(COALESCE(service_report_context, '{}'::jsonb), '{goal}', to_jsonb(REPLACE(goal, ?, ?)))",
           [`${from}°F`, `${to}°F`],
         ),
       });
