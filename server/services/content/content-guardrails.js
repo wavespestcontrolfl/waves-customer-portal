@@ -299,6 +299,32 @@ function blankToRenderedText(s) {
   return blankExpressions(blankMarkdownLinkDestinations(blankTags(blankHiddenContent(blankComments(s)))));
 }
 
+// A cited competitor price must actually BE cited. The grammar alone —
+// party plus pricing verb — let "Other companies charge a $199 cancellation
+// fee" through with no source and no date, which is an invented figure as
+// far as the reader is concerned (Codex). The manifest's global rule is
+// "all dollar figures re-verified at publish + dated in-post ('as of
+// [date]')", so the amount's paragraph must carry BOTH a citation link and a
+// date. Absent either, the draft parks for review.
+const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,30}\b(?:19|20)\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(?:19|20)\d{2}\b/i;
+// Reads RENDERED text: a date or URL parked in a comment or a reference
+// definition is invisible to the customer and cannot satisfy a sourcing
+// rule that exists for their benefit (Codex).
+function priceParagraphIsSourced(citationText, renderedText, index) {
+  const para = (text) => {
+    const t = String(text || '');
+    const start = (() => { const i = t.lastIndexOf('\n\n', index); return i === -1 ? 0 : i + 2; })();
+    const rawEnd = t.indexOf('\n\n', index);
+    return t.slice(start, rawEnd === -1 ? t.length : rawEnd);
+  };
+  // The URL comes from text with link DESTINATIONS intact — rendered text
+  // blanks them, so an ordinary "[ConsumerAffairs](https://…)" citation
+  // could never qualify (Codex). Hidden content is still blanked there, so
+  // a URL buried in a comment does not count. The DATE must be rendered.
+  if (!/https?:\/\//i.test(para(citationText))) return false;
+  return AS_OF_DATE_RE.test(para(renderedText));
+}
+
 // Any markup in the amount's paragraph disqualifies the prose exemption.
 // Blunt by design: "<" opens a tag or comment, "{" an MDX expression, "&"
 // an entity. Over-matching costs an exemption; under-matching publishes a
@@ -363,7 +389,7 @@ function isInsideTableMarkup(text, index) {
  * ONE price policy. Exported for seo-completion-gate (its previous private
  * copy had drifted: no comma support, no regulatory exemption).
  */
-function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
+function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false } = {}) {
   const s = String(text || '');
   // Attribution is decided against what READERS SEE. Comments and tag
   // attributes are stripped at render, so "{/* other companies charge */} $89
@@ -372,10 +398,21 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
   // exemption (Codex r6/r7). Detection still runs on the original text — a
   // price hidden in markup stays flagged (conservative in both directions).
   const proseText = blankToRenderedText(s);
+  // Link destinations intact, hidden content still gone — used only to look
+  // for the citation URL behind the price.
+  const citationText = blankTags(blankHiddenContent(blankComments(s)));
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
   while ((match = priceRe.exec(s)) !== null) {
     const window = s.slice(Math.max(0, match.index - 80), Math.min(s.length, match.index + 120));
+    // Allowed when the surrounding copy points at the calculator / quote / a
+    // "varies" framing rather than asserting a hard price.
+    // A brief-level BAN outranks every exemption below. B2/D1 say "NO
+    // TruGreen dollar amounts ANYWHERE in the post", and the seeder's own
+    // global instruction tells writers to add "though pricing varies by
+    // contract" — which landed exactly on this generic-framing exemption and
+    // made the ban a no-op (Codex). Nothing is exempt under a ban.
+    if (forbidAllPrices) return match[0].trim();
     // Allowed when the surrounding copy points at the calculator / quote / a
     // "varies" framing rather than asserting a hard price.
     if (/\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
@@ -430,6 +467,7 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
       && !isMarkdownTableRow(s, tokenIndex)
       && !isInsideTableMarkup(s, tokenIndex)
       && !paragraphHasMarkup(s, tokenIndex)
+      && priceParagraphIsSourced(citationText, proseText, tokenIndex)
       && isThirdPartyPriceCitation(proseText, tokenIndex, s)) continue;
     return match[0].trim();
   }
@@ -957,6 +995,32 @@ function curatedCompetitorSourceHosts() {
   return hosts;
 }
 
+// Scheme and host are case-INSENSITIVE; the PATH is not. Lowercasing the
+// whole URL made "/Payload.js" and "/payload.js" the same resource, so a
+// named citation could authorize a different file on the same host
+// (Codex).
+function normalizeSourceUrl(u) {
+  const raw = String(u || '').trim().replace(/[).,;:!?]+$/, '');
+  if (!/^https?:\/\//i.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    const path = `${url.pathname}${url.search}${url.hash}`.replace(/\/+$/, '');
+    return `${url.protocol.toLowerCase()}//${url.hostname.toLowerCase()}${path}`;
+  } catch { return null; }
+}
+
+// The EXACT URLs a brief named. Compared whole, so naming a citation page
+// never widens to its host — an operator asking for one document does not
+// authorize everything that domain can serve.
+function allowedExactSourceUrls(requiredSourceUrls = []) {
+  const urls = new Set();
+  for (const u of Array.isArray(requiredSourceUrls) ? requiredSourceUrls : []) {
+    const norm = normalizeSourceUrl(u);
+    if (norm) urls.add(norm);
+  }
+  return urls;
+}
+
 function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const hosts = new Set();
   for (const d of HUB_DOMAINS) hosts.add(normalizeHost(d));
@@ -965,12 +1029,11 @@ function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] }
     const h = normalizeHost(d);
     if (h) hosts.add(h);
   }
-  // Operator-mandated must-link citations: the brief's own required_sources
-  // URLs are binding writer instructions ("every source below must be linked
-  // in the body"), so their hosts are allowed for that draft.
-  for (const u of Array.isArray(requiredSourceUrls) ? requiredSourceUrls : []) {
-    try { hosts.add(normalizeHost(new URL(String(u)).hostname)); } catch { /* skip non-URLs */ }
-  }
+  // NOTE: brief-named sources are NOT host-allowlisted — see
+  // allowedExactSourceUrls. Allowing the HOST would let a named citation
+  // domain also serve "<script src=…/evil.js>", which is the executable-MDX
+  // hole the TLD rule had (Codex).
+
   if (operatorCitations) {
     for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
     for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
@@ -1183,6 +1246,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     }
   }
   const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
+  const exactUrls = allowedExactSourceUrls(requiredSourceUrls);
   // The broad .gov/.edu allowance is for CITATIONS — passive hyperlink
   // destinations. It must not extend to ACTIVE resource positions: posts are
   // published as executable .mdx, so a "<script src=…edu/payload.js>" would
@@ -1203,6 +1267,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     let host = null;
     try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
+    if (exactUrls.has(normalizeSourceUrl(rawUrl) || '\u0000')) continue;
     if (!hostAllowed(norm, allowed)) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
@@ -2673,7 +2738,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -2721,7 +2786,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // citation hosts, but only true competitor-intercept briefs may cite
     // competitor prices (Codex: seed lanes auto-publish informational posts
     // and must keep the full price guard).
-    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations }),
+    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),

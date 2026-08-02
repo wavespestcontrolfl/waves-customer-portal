@@ -2253,6 +2253,10 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
   // .gov/.edu citation allowance (Codex P1: mined drafts keep the full hard
   // block, or an injected attribution publishes arbitrary prices).
   const OP = { thirdPartyCitations: true };
+  // The exemption now requires the amount's paragraph to carry BOTH a
+  // citation link and an "as of <date>" — the manifest's global sourcing
+  // rule. Fixtures that expect an exemption must therefore be sourced.
+  const SRC = 'Per ConsumerAffairs (https://www.consumeraffairs.com/x), as of June 2026, ';
 
   test('mined drafts get NO third-party exemption — the P0 price guard holds (Codex P1)', () => {
     for (const body of [
@@ -2272,19 +2276,19 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       'Aptive charges from $49 to $99 per month for comparable plans.',
       'Aptive charges between $49 and $99 for the same coverage.',
     ]) {
-      expect(findHardcodedPrice(body, OP)).toBeNull();
+      expect(findHardcodedPrice(SRC + body, OP)).toBeNull();
       expect(findHardcodedPrice(body)).not.toBeNull(); // mined: still blocked
     }
   });
 
   test('case-sensitive aliasesCS attribute; lowercase phrase does not (r2)', () => {
-    expect(findHardcodedPrice('Rodent Solutions charges a $199 fee.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Rodent Solutions charges a $199 fee.', OP)).toBeNull();
     expect(findHardcodedPrice('rodent solutions charges a $199 fee.', OP)).not.toBeNull();
   });
 
   test('"US" the country is not "us" the pronoun (r2)', () => {
-    expect(findHardcodedPrice('In the US, Aptive charges a $199 cancellation fee.', OP)).toBeNull();
-    expect(findHardcodedPrice('Aptive charges a $199 cancellation fee in the US.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'In the US, Aptive charges a $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Aptive charges a $199 cancellation fee in the US.', OP)).toBeNull();
     expect(findHardcodedPrice('The plan costs us $89 per visit here in Bradenton today.', OP)).not.toBeNull();
   });
 
@@ -2320,12 +2324,66 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     }
   });
 
+  test('a brief-level BAN outranks every exemption (r12)', () => {
+    // B2/D1 say "NO TruGreen dollar amounts ANYWHERE in the post", while the
+    // seeder tells writers to add "though pricing varies by contract" — which
+    // landed on the generic framing exemption and made the ban a no-op.
+    const BAN = { thirdPartyCitations: true, forbidAllPrices: true };
+    expect(findHardcodedPrice('TruGreen charges $89 per visit, though pricing varies by contract', BAN)).not.toBeNull();
+    expect(findHardcodedPrice(`${SRC}Orkin charges a $199 cancellation fee.`, BAN)).not.toBeNull();
+    expect(findHardcodedPrice('Use the calculator for a $99 estimate.', BAN)).not.toBeNull();
+    // Without a ban the framing exemption is unchanged.
+    expect(findHardcodedPrice('Use the calculator for a $99 estimate.', {})).toBeNull();
+  });
+
+  test('brief-named sources allow the EXACT URL, not the host (r12 P0)', () => {
+    // Allowing the host would let a named citation domain also serve
+    // "<script src=…/evil.js>" — the executable-MDX hole again.
+    const NAMED = { operatorCitations: true, requiredSourceUrls: ['https://legalclarity.org/how-to-cancel-trugreen/'] };
+    expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/how-to-cancel-trugreen/ for the steps.', NAMED)).toBeNull();
+    for (const body of [
+      'See https://legalclarity.org/evil.js for the steps.',
+      '<script src="https://legalclarity.org/evil.js"></script>',
+    ]) {
+      expect(guardrails._internals.externalLinkFinding(body, NAMED)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    }
+  });
+
+  test('a Markdown citation LINK satisfies the source requirement (r12)', () => {
+    // Rendered text blanks link destinations, so the ordinary citation shape
+    // must be read from text that keeps them.
+    expect(findHardcodedPrice('Per [ConsumerAffairs](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
+  });
+
+  test('exact-source matching respects URL path case (r12 P0)', () => {
+    const N = { operatorCitations: true, requiredSourceUrls: ['https://legalclarity.org/Report'] };
+    expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/Report today.', N)).toBeNull();
+    // A different file on the same host is a different resource.
+    expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/report today.', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+  });
+
+  test('the source and date must be RENDERED, not hidden (r12)', () => {
+    expect(findHardcodedPrice('{/* as of June 2026 https://x.com/y */} Orkin charges a $199 fee.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('<!-- as of June 2026 https://x.com/y --> Orkin charges a $199 fee.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Per (https://x.com/y) {/* as of June 2026 */} Orkin charges a $199 fee.', OP)).not.toBeNull();
+  });
+
+  test('a cited price must actually BE cited — source AND date (r12)', () => {
+    // Grammar alone let an invented figure through: the manifest requires
+    // every dollar figure sourced and dated in-post.
+    expect(findHardcodedPrice('Other companies charge a $199 cancellation fee.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Per ConsumerAffairs (https://www.consumeraffairs.com/x), Orkin charges a $199 fee.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('As of June 2026, Orkin charges a $199 cancellation fee.', OP)).not.toBeNull();
+    // Both present → exempt.
+    expect(findHardcodedPrice(`${SRC}Orkin charges a $199 cancellation fee.`, OP)).toBeNull();
+  });
+
   test('PROSE attribution still works — this is what the exemption is for', () => {
-    expect(findHardcodedPrice('Orkin charges a $199 cancellation fee.', OP)).toBeNull();
-    expect(findHardcodedPrice('Aptive charges from $49 to $99 per month for comparable plans.', OP)).toBeNull();
-    expect(findHardcodedPrice("Orkin's cancellation fee is $199.", OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Orkin charges a $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Aptive charges from $49 to $99 per month for comparable plans.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + "Orkin's cancellation fee is $199.", OP)).toBeNull();
     // Prose AFTER a table has closed is still prose.
-    expect(findHardcodedPrice('<table><tr><td>x</td></tr></table>\n\nOrkin charges a $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice('<table><tr><td>x</td></tr></table>\n\n' + SRC + 'Orkin charges a $199 cancellation fee.', OP)).toBeNull();
     // …and every first-party guard on the prose path is untouched.
     expect(findHardcodedPrice('Our quarterly service is $89 per application.', OP)).not.toBeNull();
     expect(findHardcodedPrice('O**ur** service differs; Orkin charges $89 per visit.', OP)).not.toBeNull();
@@ -2377,8 +2435,8 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('Aptive charges from $49 and $89 is the local quarterly rate.', OP)).not.toBeNull();
     expect(findHardcodedPrice('Aptive charges between $49 and $89 is the local quarterly rate.', OP)).not.toBeNull();
     // The canonical pairings still read as ONE attributed range.
-    expect(findHardcodedPrice('Aptive charges from $49 to $99 per month for comparable plans.', OP)).toBeNull();
-    expect(findHardcodedPrice('Aptive charges between $49 and $99 for the same coverage.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Aptive charges from $49 to $99 per month for comparable plans.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Aptive charges between $49 and $99 for the same coverage.', OP)).toBeNull();
   });
 
 
@@ -2389,7 +2447,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('<span class="other companies charge"> $89 per visit for local quarterly service</span>', OP)).not.toBeNull();
     expect(findHardcodedPrice('<div data-note="Orkin charges"> $89 per visit locally.</div>', OP)).not.toBeNull();
     // Visible prose inside a tag still attributes normally.
-    expect(findHardcodedPrice('<p>Orkin charges a $199 cancellation fee.</p>', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + '<p>Orkin charges a $199 cancellation fee.</p>', OP)).toBeNull();
   });
 
   test('a > inside an attribute does not end the tag (pre-push P0, r7)', () => {
@@ -2417,7 +2475,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('<p>Other companies charge</p><p> $89 per visit for local quarterly service.</p>', OP)).not.toBeNull();
     expect(findHardcodedPrice('<td>Other companies charge</td><td> $89 per visit locally.</td>', OP)).not.toBeNull();
     // An INLINE tag is not a boundary — real attribution still works.
-    expect(findHardcodedPrice('<p>Orkin charges a <strong>$199</strong> cancellation fee.</p>', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + '<p>Orkin charges a <strong>$199</strong> cancellation fee.</p>', OP)).toBeNull();
   });
 
 
@@ -2425,7 +2483,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('O&#117;r service is different; Orkin charges $89 per visit.', OP)).not.toBeNull();
     expect(findHardcodedPrice('&#87;aves charges less than Orkin&rsquo;s $199 fee.', OP)).not.toBeNull();
     // A genuine competitor attribution with no first-party marker still passes.
-    expect(findHardcodedPrice('Orkin charges a $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Orkin charges a $199 cancellation fee.', OP)).toBeNull();
   });
 
 
@@ -2462,7 +2520,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       expect(findHardcodedPrice(body, OP)).not.toBeNull();
     }
     // Visible attribution is untouched, including an explicit aria-hidden=false.
-    expect(findHardcodedPrice('<span>Orkin charges a</span> $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + '<span>Orkin charges a</span> $199 cancellation fee.', OP)).toBeNull();
     // Explicitly-visible markup no longer earns the exemption either: the
     // contract is PLAIN PROSE, and any attribute makes visibility a
     // judgement call. Parking is the safe answer.
@@ -2482,7 +2540,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     // REFERENCE links render only their label — the definition is invisible.
     expect(findHardcodedPrice('[Local plan][1] charges $89 per application.\n\n[1]: https://example.com/Orkin', OP)).not.toBeNull();
     // A visible anchor still attributes normally.
-    expect(findHardcodedPrice('[Orkin](https://orkin.com) charges a $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + '[Orkin](https://orkin.com) charges a $199 cancellation fee.', OP)).toBeNull();
   });
 
 
@@ -2499,7 +2557,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('Our U.S. service differs; Orkin charges $89', OP)).not.toBeNull();
     expect(findHardcodedPrice('Our team (e.g. techs) differs. Orkin charges $89 per visit.', OP)).not.toBeNull();
     // A separate PARAGRAPH is still its own scope.
-    expect(findHardcodedPrice('Our service differs.\n\nOrkin charges a $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice('Our service differs.\n\n' + SRC + 'Orkin charges a $199 cancellation fee.', OP)).toBeNull();
   });
 
 
@@ -2534,7 +2592,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     // A comment ANYWHERE in the paragraph disqualifies it — same rule.
     expect(findHardcodedPrice('{/* sourced 2026 */}\nOrkin charges a $199 cancellation fee.', OP)).not.toBeNull();
     // …but a comment in a DIFFERENT paragraph leaves prose exempt.
-    expect(findHardcodedPrice('{/* sourced 2026 */}\n\nOrkin charges a $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice('{/* sourced 2026 */}\n\n' + SRC + 'Orkin charges a $199 cancellation fee.', OP)).toBeNull();
   });
 
   test('a newline consumed by the price match is still a boundary (r4)', () => {
@@ -2547,7 +2605,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
 
 
   test('citation provenance does NOT unlock prices — only competitorPriceCitations does (pre-push P0: seed lanes)', () => {
-    const body = 'Orkin charges a $199 cancellation fee when you break the agreement early.';
+    const body = `${SRC}Orkin charges a $199 cancellation fee when you break the agreement early.`;
     // operatorCitations alone (category/spoke seeds) keeps the price P0.
     const seedish = guardrails.evaluate({ body }, { operatorCitations: true });
     expect(seedish.findings.some((f) => f.code === 'HARDCODED_PRICE')).toBe(true);
@@ -2564,7 +2622,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       'Aptive charges a $199 early-cancel fee per ConsumerAffairs.',
       'Hawx charges a $149 early-termination fee in most markets.',
     ]) {
-      expect(findHardcodedPrice(body, OP)).toBeNull();
+      expect(findHardcodedPrice(SRC + body, OP)).toBeNull();
     }
   });
 
@@ -2578,7 +2636,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       'Other companies typically charge $25 per month more for the same coverage.',
       'Your previous provider may bill a $99 fee for ending service early.',
     ]) {
-      expect(findHardcodedPrice(body, OP)).toBeNull();
+      expect(findHardcodedPrice(SRC + body, OP)).toBeNull();
     }
   });
 
@@ -2641,7 +2699,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
 
   test('attribution must PRECEDE the amount (subject position)', () => {
     expect(findHardcodedPrice('The fee is $199 according to nothing in particular.')).not.toBeNull();
-    expect(findHardcodedPrice('Orkin lists a $199 fee.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Orkin lists a $199 fee.', OP)).toBeNull();
   });
 
   // Pre-push Codex P0 round 3: naming a party is not owning the price.
@@ -2681,7 +2739,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
   });
 
   test('coordination still allows a genuinely attributed amount', () => {
-    expect(findHardcodedPrice('Orkin and Terminix both charge $199 to cancel early.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'Orkin and Terminix both charge $199 to cancel early.', OP)).toBeNull();
   });
 
   // Pre-push Codex P0 round 5: an intervening predicate must not be crossed.
@@ -2719,8 +2777,8 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
   });
 
   test('possessive price constructions are attributed', () => {
-    expect(findHardcodedPrice("Orkin's cancellation fee is $199 in most contracts.", OP)).toBeNull();
-    expect(findHardcodedPrice('The industry average is $145 per quarterly visit.', OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + "Orkin's cancellation fee is $199 in most contracts.", OP)).toBeNull();
+    expect(findHardcodedPrice(SRC + 'The industry average is $145 per quarterly visit.', OP)).toBeNull();
   });
 
   test('operator citations are the BRIEF\'S NAMED SOURCES, not a TLD class', () => {

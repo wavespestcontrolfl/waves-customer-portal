@@ -3063,6 +3063,11 @@ class AutonomousRunner {
       // (Codex). Fail closed: an unreadable brief keeps the full guard.
       competitorPriceCitations: Boolean(opp?.signal_metadata?.intercept_brief)
         && !briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
+      // A ban is stronger than "no permission": it must also outrank the
+      // generic calculator/quote/"pricing varies" framing exemption, which
+      // the seeder's own writer instruction steers drafts straight into
+      // (Codex).
+      forbidAllPrices: briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
       allowedInternalLinks,
       isRefresh,
       priorBody,
