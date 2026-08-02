@@ -439,11 +439,12 @@ describe('route wiring contracts', () => {
 // Behavioral: the PATCH handler against a scripted knex mock
 // ---------------------------------------------------------------------------
 
-function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, legacyRows = null, columnInfoError = null, timeEntries = null }) {
+function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, legacyRows = null, columnInfoError = null, timeEntries = null, timeEntriesLive = null }) {
   // `record` answers resolveServiceRecord's FK query (.first()); `legacyRows`
   // (when set) answers its awaited (customer, date, type) soft-join, so the
   // pre-FK shapes exercise the REAL legacy resolution path.
   const calls = [];
+  let timeEntryReads = 0;
   const chainFor = (table) => {
     const op = { table };
     calls.push(op);
@@ -470,9 +471,17 @@ function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, le
         return recordCols;
       },
       then(resolve, reject) {
-        const rows = table === 'time_entries'
-          ? (timeEntries || [])
-          : (table === 'service_records' && op.limited ? (legacyRows || []) : []);
+        let rows;
+        if (table === 'time_entries') {
+          // First read = the in-transaction snapshot; later reads = the
+          // sync's live membership recheck (round 24).
+          timeEntryReads += 1;
+          rows = timeEntryReads > 1 && timeEntriesLive !== null
+            ? timeEntriesLive
+            : (timeEntries || []);
+        } else {
+          rows = table === 'service_records' && op.limited ? (legacyRows || []) : [];
+        }
         return Promise.resolve(rows).then(resolve, reject);
       },
     };
@@ -738,7 +747,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       path.join(__dirname, '../services/time-tracking.js'),
       'utf8',
     );
-    expect(timeTrackingSource).toMatch(/if \(!clock_out && Number\.isFinite\(Number\(target_duration_minutes\)\) && Number\(target_duration_minutes\) > 0\) \{\s*\n\s*const baseIn = updates\.clock_in \|\| entry\.clock_in;\s*\n\s*updates\.clock_out = new Date\(new Date\(baseIn\)\.getTime\(\) \+ Number\(target_duration_minutes\) \* 60000\);/);
+    expect(timeTrackingSource).toMatch(/if \(!clock_out && Number\.isFinite\(Number\(target_duration_minutes\)\) && Number\(target_duration_minutes\) > 0\) \{\s*\n\s*const baseIn = updates\.clock_in \|\| entry\.clock_in;\s*\n\s*const derivedOut = new Date\(new Date\(baseIn\)\.getTime\(\) \+ Number\(target_duration_minutes\) \* 60000\);/);
   });
 
   test('a concurrent payroll edit rejects the sync as entry_conflict — never silently replaced (codex P2 round 22)', async () => {
@@ -784,6 +793,81 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       'utf8',
     );
     expect(timeTrackingSource).toMatch(/if \(expected_updated_at !== undefined\) \{\s*\n\s*const observed = expected_updated_at \? new Date\(expected_updated_at\)\.getTime\(\) : null;\s*\n\s*const current = entry\.updated_at \? new Date\(entry\.updated_at\)\.getTime\(\) : null;\s*\n\s*if \(observed !== current\) \{/);
+  });
+
+  test('a timer started after the snapshot rejects the sync — membership recheck (codex P2 round 24)', async () => {
+    // The correction transaction snapshotted one entry; a second job timer
+    // appeared before the post-commit sync. Editing the snapshotted row
+    // would report success while the payroll aggregate is still wrong —
+    // surfaced as a conflict, nothing edited.
+    const TimeTracking = require('../services/time-tracking');
+    const base = {
+      clock_in: new Date('2026-07-19T16:00:00.000Z'),
+      clock_out: new Date('2026-07-19T18:19:05.000Z'),
+      duration_minutes: 139,
+      status: 'active',
+      updated_at: new Date('2026-07-19T18:20:00.000Z'),
+    };
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [{ id: 'te-1', ...base }],
+      timeEntriesLive: [{ id: 'te-1', ...base }, { id: 'te-new', ...base, clock_out: null, duration_minutes: null }],
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(TimeTracking.adminEditEntry).not.toHaveBeenCalled();
+    expect(res.body.timeEntryCorrected).toBe(false);
+    expect(res.body.timeEntryCorrectionBlocked).toBe('entry_conflict');
+    // Resume guard: with NO transaction-time snapshot a divergent timer is
+    // surfaced, never edited (no version predates the correction).
+    expect(source).toMatch(/if \(entriesSnapshot === null\) \{\s*\n\s*corrected = false;\s*\n\s*blocked = 'entry_conflict';\s*\n\s*return;\s*\n\s*\}/);
+  });
+
+  test('a correction exceeding the elapsed span is rejected — no future paid time (codex P1 round 24)', async () => {
+    // adminEditEntry refuses to derive a clock_out ahead of the wall clock
+    // (the visit lifecycle clamps ITS end for the same input; payroll must
+    // not record minutes that have not happened) — surfaced distinctly.
+    const TimeTracking = require('../services/time-tracking');
+    TimeTracking.adminEditEntry.mockRejectedValueOnce(
+      Object.assign(new Error('Target duration extends the entry into the future; correct the timer manually once the interval has elapsed.'), { status: 400 }),
+    );
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [{
+        id: 'te-f',
+        clock_in: new Date('2026-07-19T16:00:00.000Z'),
+        clock_out: new Date('2026-07-19T16:30:00.000Z'),
+        duration_minutes: 30,
+        status: 'active',
+        updated_at: new Date('2026-07-19T16:30:00.000Z'),
+      }],
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 120 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body.timeEntryCorrected).toBe(false);
+    expect(res.body.timeEntryCorrectionBlocked).toBe('exceeds_elapsed');
+    // Service-side: the guard runs on the derived instant from the LOCKED
+    // row, before any write.
+    const timeTrackingSource = fs.readFileSync(
+      path.join(__dirname, '../services/time-tracking.js'),
+      'utf8',
+    );
+    expect(timeTrackingSource).toMatch(/if \(derivedOut\.getTime\(\) > Date\.now\(\)\) \{\s*\n\s*throw staffTimeHttpError\(400, 'Target duration extends the entry into the future/);
   });
 
   test('duplicate entries matching the corrected minutes are DIVERGENT in aggregate — surfaced, not silently fine (codex P1, audit round 21)', async () => {

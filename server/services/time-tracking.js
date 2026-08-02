@@ -606,7 +606,17 @@ async function adminEditEntry(entryId, {
     // Explicit clock_out wins when both are passed.
     if (!clock_out && Number.isFinite(Number(target_duration_minutes)) && Number(target_duration_minutes) > 0) {
       const baseIn = updates.clock_in || entry.clock_in;
-      updates.clock_out = new Date(new Date(baseIn).getTime() + Number(target_duration_minutes) * 60000);
+      const derivedOut = new Date(new Date(baseIn).getTime() + Number(target_duration_minutes) * 60000);
+      // Never fabricate future paid time (codex P1 #3152 round 24): a
+      // corrected duration exceeding the elapsed span since clock_in would
+      // derive a clock_out ahead of the wall clock — the visit lifecycle
+      // clamps ITS end for exactly this input, and payroll must not record
+      // minutes that have not happened. Rejected, not clamped: a clamped
+      // timer would silently disagree with the operator's stated minutes.
+      if (derivedOut.getTime() > Date.now()) {
+        throw staffTimeHttpError(400, 'Target duration extends the entry into the future; correct the timer manually once the interval has elapsed.');
+      }
+      updates.clock_out = derivedOut;
     }
     if (entry_type) updates.entry_type = entry_type;
     if (notes !== undefined) updates.notes = notes;

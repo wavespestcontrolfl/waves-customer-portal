@@ -861,16 +861,31 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy, 
       // inside the correction transaction, so a payroll edit landing
       // between the correction's commit and this sync carries a newer
       // updated_at than the snapshot and the audited edit 409s instead of
-      // silently replacing it. Only the crash-resume path (no transaction
-      // ran in this process, no snapshot to hand over) falls back to a
-      // fresh read — its divergence check still no-ops when a manual edit
-      // already agrees with the corrected minutes.
-      const jobEntries = entriesSnapshot !== null
-        ? entriesSnapshot
-        : await timerTrx('time_entries')
-          .where({ job_id: serviceId, entry_type: 'job' })
-          .whereNot('status', 'voided')
-          .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+      // silently replacing it. The LIVE set is still read for the
+      // membership recheck below; on the crash-resume path (no transaction
+      // ran in this process, no snapshot to hand over) it is also the
+      // divergence input — but never an edit basis, see the resume guard.
+      const liveEntries = await timerTrx('time_entries')
+        .where({ job_id: serviceId, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+      let jobEntries = liveEntries;
+      if (entriesSnapshot !== null) {
+        // Membership recheck (codex P2 #3152 round 24): a job timer
+        // started for this visit after the snapshot means the snapshot's
+        // aggregate no longer describes payroll reality — editing the
+        // snapshotted row could report success while the true total stays
+        // wrong. Versions and values still come from the SNAPSHOT (the
+        // correction's ordering boundary); only the id-set is compared.
+        const snapIds = entriesSnapshot.map((e) => String(e.id)).sort().join(',');
+        const liveIds = liveEntries.map((e) => String(e.id)).sort().join(',');
+        if (snapIds !== liveIds) {
+          corrected = false;
+          blocked = 'entry_conflict';
+          return;
+        }
+        jobEntries = entriesSnapshot;
+      }
       if (jobEntries.length === 0) return;
       // A still-running linked timer cannot be silently "fine" — the span
       // keeps growing past the corrected minutes and the audited edit
@@ -897,6 +912,18 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy, 
       const totalMinutes = jobEntries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
       if (Math.abs(totalMinutes - minutes) <= 0.005) return;
       if (jobEntries.length === 1 && jobEntries[0].clock_in) {
+        // Crash-resume guard (codex P2 #3152 round 24): with no
+        // transaction-time snapshot there is no version that predates the
+        // correction — a fresh updated_at would bless a NEWER payroll edit
+        // for overwrite. A divergent timer on the resume path is surfaced,
+        // never edited. (An already-agreeing timer returned at the
+        // aggregate check above, so resumes stay quiet when the first run
+        // finished its sync.)
+        if (entriesSnapshot === null) {
+          corrected = false;
+          blocked = 'entry_conflict';
+          return;
+        }
         const entry = jobEntries[0];
         // Duration-based edit (codex P1, audit round 21b): adminEditEntry
         // derives the clock_out from ITS locked row's start, so a
@@ -922,7 +949,9 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy, 
     corrected = false;
     blocked = /approved/i.test(String(err.message))
       ? 'approved_week'
-      : (/changed since it was read/i.test(String(err.message)) ? 'entry_conflict' : 'edit_failed');
+      : (/changed since it was read/i.test(String(err.message))
+        ? 'entry_conflict'
+        : (/into the future/i.test(String(err.message)) ? 'exceeds_elapsed' : 'edit_failed'));
     logger.warn(`[time-on-site] linked job timer sync blocked for service ${serviceId}: ${err.message}`);
   }
   return { corrected, blocked };
