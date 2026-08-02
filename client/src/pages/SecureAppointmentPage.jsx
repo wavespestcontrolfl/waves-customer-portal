@@ -135,6 +135,24 @@ export default function SecureAppointmentPage() {
     }
   }, [token]);
 
+  // Post-capture refresh with a SECURED fallback (Codex #3153 r21): once
+  // the server confirmed completion, the save IS done — a transient
+  // refetch failure must render the secured state, never an error message
+  // or the card form again.
+  const refreshOrSecured = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
+      if (res.ok) {
+        const payload = await res.json();
+        setData(payload);
+        setSelectedPlan(payload.planContext?.selected || null);
+        setState(payload.state === 'ready' ? 'ready' : payload.state);
+        return;
+      }
+    } catch { /* fall through to the secured fallback */ }
+    setState('secured');
+  }, [token]);
+
   const complete = useCallback(async (setupIntentId) => {
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
       method: 'POST',
@@ -201,8 +219,9 @@ export default function SecureAppointmentPage() {
       // Re-pull the payload so the secured confirmation renders the FROZEN
       // row terms, never this render's pre-completion disclosure (Codex
       // #3153 r16 — a concurrent tab or a monotonic-down stamp can make
-      // the stale note wrong in either direction).
-      await refresh();
+      // the stale note wrong in either direction). Secured fallback on a
+      // refetch hiccup — the save already succeeded (r21).
+      await refreshOrSecured();
     } catch (err) {
       // The visit was cancelled / became payer-billed since the page
       // loaded — nothing to save; show the "nothing needed" state.
@@ -215,7 +234,7 @@ export default function SecureAppointmentPage() {
       // so the durable webhook path finishes it. Not a failure. Re-pull so
       // the secured render carries the frozen row terms (Codex #3153 r16).
       if (err?.code === 'completion_in_progress') {
-        await refresh();
+        await refreshOrSecured();
         return;
       }
       // The server requires a recorded plan selection before the capture
@@ -230,7 +249,7 @@ export default function SecureAppointmentPage() {
     } finally {
       setBusy(false);
     }
-  }, [busy, complete, refresh]);
+  }, [busy, complete, refresh, refreshOrSecured]);
 
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;
