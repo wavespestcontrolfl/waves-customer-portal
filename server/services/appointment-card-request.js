@@ -1840,9 +1840,14 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
   if (!start) {
     try {
       const { scheduledServiceApptTime } = require('./appointment-reminders');
-      start = await scheduledServiceApptTime(scheduledServiceId);
+      // throwOnError (Codex #3153 r19 P1): a FAILED lookup must not fall
+      // through to the terminal free-release stamp — that would silently
+      // waive a potentially applicable fee. Release is reserved for a
+      // successful null (the visit genuinely has no time).
+      start = await scheduledServiceApptTime(scheduledServiceId, { throwOnError: true });
     } catch (err) {
-      logger.warn(`[appt-card-request] appt-time resolution for cancel failed — no fee: ${err.message}`);
+      logger.error(`[appt-card-request] appt-time resolution for cancel FAILED — unresolved, parking review: ${err.message}`);
+      return { handled: false, released: false, reason: 'charge_review' };
     }
   }
   if (start && isApptCardFeeRailEnabled() && isWithinApptCancelWindow({ request, serviceStart: start, now })) {
@@ -1883,15 +1888,13 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
 // so this is the recovery trigger (Codex #3153 r18 P1). Best-effort;
 // settlement itself is idempotent under the PI advisory lock.
 async function resettleAppointmentFeeFromPi(piId) {
-  try {
-    const StripeService = require('./stripe');
-    const pi = await StripeService.retrievePaymentIntent(piId);
-    if (pi?.metadata?.purpose !== 'appointment_card_no_show_fee') return { settled: false, reason: 'not_fee_pi' };
-    return await settleAppointmentNoShowFee(pi);
-  } catch (err) {
-    logger.error(`[appt-card-request] fee re-settlement failed for PI ${piId}: ${err.message}`);
-    return { settled: false, reason: 'error', error: err.message };
-  }
+  // THROWS on failure (Codex #3153 r19 P1): the webhook callers must not
+  // mark their event processed while retained/reinstated money still lacks
+  // its paid invoice — a throw makes Stripe redeliver and retry this.
+  const StripeService = require('./stripe');
+  const pi = await StripeService.retrievePaymentIntent(piId);
+  if (pi?.metadata?.purpose !== 'appointment_card_no_show_fee') return { settled: false, reason: 'not_fee_pi' };
+  return settleAppointmentNoShowFee(pi);
 }
 
 // Route-side surfacing for unresolved cancellation-fee outcomes (Codex

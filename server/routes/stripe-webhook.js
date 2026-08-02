@@ -2794,18 +2794,17 @@ async function handleRefundFailed(refund) {
   // retained fee gets its paid invoice + receipt (the settle transaction
   // adopts the unwound marker row).
   if (piId) {
+    // NO catch around the re-settlement (Codex #3153 r19 P1): a failure
+    // must propagate so Stripe retries — acknowledging would permanently
+    // strand the retained fee without its paid invoice.
+    const feeRow = await db('payments').where({ stripe_payment_intent_id: piId }).first('metadata');
+    let feeMeta = {};
     try {
-      const feeRow = await db('payments').where({ stripe_payment_intent_id: piId }).first('metadata');
-      let feeMeta = {};
-      try {
-        feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
-      } catch { feeMeta = {}; }
-      if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_refund === true && !feeMeta.invoice_id) {
-        const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
-        await resettleAppointmentFeeFromPi(piId);
-      }
-    } catch (feeErr) {
-      logger.warn(`[stripe-webhook] fee refund-bounce re-settlement failed for PI ${piId}: ${feeErr.message}`);
+      feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
+    } catch { feeMeta = {}; }
+    if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_refund === true && !feeMeta.invoice_id) {
+      const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
+      await resettleAppointmentFeeFromPi(piId);
     }
   }
 }
@@ -4089,11 +4088,14 @@ async function handleDisputeCreated(dispute) {
   // durable 'disputed' marker settlement's in-lock check respects. The fee
   // lane is identified LOCALLY by no_show_payment_intent_id.
   if (dispute.payment_intent) {
-    const feeReq = await db('appointment_card_requests')
-      .where({ no_show_payment_intent_id: dispute.payment_intent })
-      .first('id', 'customer_id')
-      .catch(() => null);
-    if (feeReq) {
+    // Lane identified from TRUSTED Stripe PI metadata (Codex #3153 r19
+    // P1): the local no_show_payment_intent_id pointer is stamped
+    // post-charge and can lag a fast dispute; a lookup failure here must
+    // RETRY the event (throw), never read as "not the fee lane".
+    const StripeService = require('../services/stripe');
+    const disputedPi = await StripeService.retrievePaymentIntent(dispute.payment_intent);
+    if (disputedPi?.metadata?.purpose === 'appointment_card_no_show_fee') {
+      const feeReq = { customer_id: disputedPi.metadata?.waves_customer_id || null };
       const feePreRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id');
       if (!feePreRow) {
         const marked = await db.transaction(async (trx) => {
@@ -4497,21 +4499,20 @@ async function handleDisputeClosed(dispute) {
   // will never retry \u2014 flip the marker settleable and re-run idempotent
   // settlement so the retained fee gets its paid invoice + receipt.
   if (['won', 'warning_closed'].includes(status) && dispute.payment_intent) {
+    // NO catch around the re-settlement itself (Codex #3153 r19 P1): a
+    // failure must propagate so the event is retried — acknowledging it
+    // would permanently strand the reinstated fee without its invoice.
+    const feeRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status', 'metadata');
+    let feeMeta = {};
     try {
-      const feeRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status', 'metadata');
-      let feeMeta = {};
-      try {
-        feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
-      } catch { feeMeta = {}; }
-      if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_dispute === true && !feeMeta.invoice_id) {
-        if (String(feeRow.status || '').toLowerCase() === 'disputed') {
-          await db('payments').where({ id: feeRow.id }).update({ status: 'paid' });
-        }
-        const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
-        await resettleAppointmentFeeFromPi(dispute.payment_intent);
+      feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
+    } catch { feeMeta = {}; }
+    if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_dispute === true && !feeMeta.invoice_id) {
+      if (String(feeRow.status || '').toLowerCase() === 'disputed') {
+        await db('payments').where({ id: feeRow.id }).update({ status: 'paid' });
       }
-    } catch (feeErr) {
-      logger.warn(`[stripe-webhook] fee dispute-won re-settlement failed for PI ${dispute.payment_intent}: ${feeErr.message}`);
+      const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
+      await resettleAppointmentFeeFromPi(dispute.payment_intent);
     }
   }
 
