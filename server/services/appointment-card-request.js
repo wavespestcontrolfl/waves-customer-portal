@@ -2509,11 +2509,18 @@ async function settleAppointmentNoShowFee(paymentIntent) {
     // died after Stripe accepted the PaymentIntent but before its row
     // update, the request sits 'charging' forever and every cancellation/
     // offboarding parks review despite the fee being durably settled here.
-    // Monotonic: only a 'charging' row advances; the trusted request_id
-    // comes from the PI metadata this settlement already keys on.
+    // charge_review advances too (r25 P1): a post-Stripe park (ambiguous
+    // submit outcome, commit failure after the PI went out) is resolved by
+    // this settlement — the claim is one-shot (NULL→charging), so a PI
+    // carrying this request_id can only belong to this row's single fee
+    // event; leaving the park would strand a durably-paid fee in review
+    // forever. Monotonic: terminal charged/released/waived never regress;
+    // the trusted request_id comes from the PI metadata this settlement
+    // already keys on.
     if (requestId) {
       await trx('appointment_card_requests')
-        .where({ id: requestId, fee_status: 'charging' })
+        .where({ id: requestId })
+        .whereIn('fee_status', ['charging', 'charge_review'])
         .update({
           fee_status: 'charged',
           no_show_payment_intent_id: piId,

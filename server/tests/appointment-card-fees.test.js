@@ -973,4 +973,17 @@ describe('settleAppointmentNoShowFee — paid refundable fee invoice', () => {
     const res = await settleAppointmentNoShowFee(PI());
     expect(res.settled).toBe(true);
   });
+
+  test('settlement heals a stuck charging OR parked charge_review claim to charged (r21 + r25)', async () => {
+    const res = await settleAppointmentNoShowFee(PI());
+    expect(res.settled).toBe(true);
+    const reqTouch = mockTrxTouches.filter((t) => t.table === 'appointment_card_requests')
+      .find((t) => t.chain.calls.some(([op]) => op === 'update'));
+    expect(reqTouch).toBeTruthy();
+    expect(reqTouch.chain.calls.find(([op]) => op === 'whereIn')).toEqual(['whereIn', 'fee_status', ['charging', 'charge_review']]);
+    expect(reqTouch.chain.calls.find(([op]) => op === 'update')[1]).toMatchObject({
+      fee_status: 'charged',
+      no_show_payment_intent_id: 'pi_fee_1',
+    });
+  });
 });
