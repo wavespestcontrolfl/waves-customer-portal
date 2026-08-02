@@ -2755,6 +2755,11 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       '<a ping="https://student.example.edu/track">x</a>',
       '{fetch("https://student.example.edu/payload.js")}',
       '<Comp src={"https://student.example.edu/x"} />',
+      // Markdown images render as remote <img> resources.
+      '![x](https://student.example.edu/payload.svg)',
+      '![x][p]\n\n[p]: https://student.example.edu/payload.svg',
+      '![p][]\n\n[p]: https://student.example.edu/payload.svg',
+      '![p]\n\n[p]: https://student.example.edu/payload.svg',
     ]) {
       expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     }
@@ -2762,6 +2767,10 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(guardrails._internals.externalLinkFinding('Per [the study](https://research.example.edu/paper), chinch bugs peak in July.', OPC)).toBeNull();
     expect(guardrails._internals.externalLinkFinding('See https://www.epa.gov/pesticides for details.', OPC)).toBeNull();
     expect(guardrails._internals.externalLinkFinding('See the study.\n\n[1]: https://research.example.edu/paper', OPC)).toBeNull();
+    // Reference-style LINKS stay citations (only image refs are active).
+    expect(guardrails._internals.externalLinkFinding('See [the study][1].\n\n[1]: https://research.example.edu/paper', OPC)).toBeNull();
+    // A Markdown AUTOLINK is a citation, not a tag named "https".
+    expect(guardrails._internals.externalLinkFinding('See <https://research.example.edu/paper> for the study.', OPC)).toBeNull();
   });
 
   test('only the exact .gov/.edu suffix qualifies — lookalikes still block', () => {

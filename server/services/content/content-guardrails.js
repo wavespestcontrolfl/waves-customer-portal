@@ -82,6 +82,10 @@ function* eachTag(text) {
     if (text[i] !== '<') continue;
     const m = /^<(\/?)([a-zA-Z][\w-]*)/.exec(text.slice(i, i + 64));
     if (!m) continue;
+    // "<https://…>" is a Markdown AUTOLINK, not a tag named "https" —-
+    // treating it as markup cost a legitimate citation its allowance
+    // (Codex).
+    if (text[i + m[0].length] === ':') continue;
     let j = i + m[0].length;
     let braceDepth = 0;
     for (; j < text.length; j += 1) {
@@ -1237,6 +1241,32 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     if (j >= body.length) break;
     markupRanges.push([i, j]);
     i = j;
+  }
+  // Markdown IMAGES render as remote <img> resources, so their destinations
+  // are active even though no tag is written (Codex). Inline form, plus any
+  // reference definition an image points at.
+  {
+    const imgRe = /!\[[^\]\n]*\]\(([^)\s]+)[^)]*\)/g;
+    let im;
+    while ((im = imgRe.exec(body)) !== null) markupRanges.push([im.index, im.index + im[0].length]);
+    const imgRefs = new Set();
+    // Full "![alt][ref]", COLLAPSED "![ref][]" and SHORTCUT "![ref]" all
+    // resolve to a definition; the last two use the label itself (Codex).
+    const refUseRe = /!\[([^\]\n]*)\](?:\[([^\]\n]*)\])?/g;
+    let rm;
+    while ((rm = refUseRe.exec(body)) !== null) {
+      const after = body[rm.index + rm[0].length];
+      if (after === '(') continue; // inline form, already ranged above
+      const explicit = (rm[2] || '').trim();
+      imgRefs.add((explicit || (rm[1] || '')).trim().toLowerCase());
+    }
+    if (imgRefs.size) {
+      const defRe = /^[ \t]*\[([^\]\n]+)\]:[^\n]*/gm;
+      let dm;
+      while ((dm = defRe.exec(body)) !== null) {
+        if (imgRefs.has(dm[1].trim().toLowerCase())) markupRanges.push([dm.index, dm.index + dm[0].length]);
+      }
+    }
   }
   const inActiveResource = (idx) => markupRanges.some(([a, b]) => idx >= a && idx <= b);
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
