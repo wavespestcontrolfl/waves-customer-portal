@@ -307,6 +307,40 @@ function blankToRenderedText(s) {
 // [date]')", so the amount's paragraph must carry BOTH a citation link and a
 // date. Absent either, the draft parks for review.
 const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,30}\b(?:19|20)\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(?:19|20)\d{2}\b/i;
+// URLs a READER can actually follow from this paragraph. An image
+// destination and an UNUSED reference definition are both stripped from the
+// rendered page, so neither is a citation — accepting them let an unrelated
+// "![image](…)" or a dangling "[unused]: …" stand in for the source (Codex).
+function visibleCitationUrls(citationPara, renderedPara, citationDoc) {
+  const out = [];
+  const push = (u) => { if (u) out.push(String(u).replace(/[).,;:!?]+$/, '')); };
+  // Inline links — NOT images.
+  const inline = /(!)?\[[^\]\n]*\]\(\s*<?\s*(https?:\/\/[^)\s>]+)/g;
+  let m;
+  while ((m = inline.exec(citationPara)) !== null) { if (!m[1]) push(m[2]); }
+  // Autolinks and bare URLs the reader sees in the rendered text.
+  const bare = /https?:\/\/[^\s<>()"'\]]+/gi;
+  while ((m = bare.exec(renderedPara)) !== null) push(m[0]);
+  // Reference LINKS resolve to their definition; reference IMAGES do not.
+  const refUse = /(!)?\[[^\]\n]*\](?:\[([^\]\n]*)\])?/g;
+  const usedRefs = new Set();
+  while ((m = refUse.exec(citationPara)) !== null) {
+    if (m[1]) continue; // image
+    const label = (m[2] || '').trim();
+    if (label) usedRefs.add(label.toLowerCase());
+  }
+  if (usedRefs.size) {
+    // Definitions are conventionally collected at the END of the document,
+    // so they are looked up DOC-WIDE — only the reference USE has to sit in
+    // the price's paragraph (Codex).
+    const defs = /^[ \t]*\[([^\]\n]+)\]:[ \t]*(https?:\/\/\S+)/gm;
+    while ((m = defs.exec(citationDoc)) !== null) {
+      if (usedRefs.has(m[1].trim().toLowerCase())) push(m[2]);
+    }
+  }
+  return out;
+}
+
 // Reads RENDERED text: a date or URL parked in a comment or a reference
 // definition is invisible to the customer and cannot satisfy a sourcing
 // rule that exists for their benefit (Codex).
@@ -326,7 +360,7 @@ function priceParagraphIsSourced(citationText, renderedText, index, opts = {}) {
   // unrelated link stand in for the source (Codex).
   const allowedHosts = allowedLinkHosts(opts);
   const exact = allowedExactSourceUrls(opts.requiredSourceUrls);
-  const urls = para(citationText).match(/https?:\/\/[^\s<>()"'\]]+/gi) || [];
+  const urls = visibleCitationUrls(para(citationText), para(renderedText), String(citationText || ''));
   const cited = urls.some((u) => {
     const raw = u.replace(/[).,;:!?]+$/, '');
     if (exact.has(normalizeSourceUrl(raw) || '\u0000')) return true;
@@ -425,8 +459,12 @@ function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices
     // made the ban a no-op (Codex). Nothing is exempt under a ban.
     if (forbidAllPrices) return match[0].trim();
     // Allowed when the surrounding copy points at the calculator / quote / a
-    // "varies" framing rather than asserting a hard price.
-    if (/\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
+    // "varies" framing rather than asserting a hard price. NOT on an
+    // intercept draft: those are exactly the posts that quote competitor
+    // figures, and the framing words let one through unsourced, straight
+    // past the source-and-date requirement (Codex).
+    if (!thirdPartyCitations
+      && /\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
     // Regulatory fines are not Waves service pricing. Allow ordinance/citation
     // contexts while still blocking customer-facing service price claims.
     if (isRegulatoryPenaltyAmount(match[0].trim(), window)) continue;

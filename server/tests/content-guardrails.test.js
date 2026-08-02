@@ -2400,6 +2400,29 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       { ...OP, requiredSourceUrls: ['https://legalclarity.org/a'] })).toBeNull();
   });
 
+  test('generic framing cannot excuse an unsourced intercept price (r13 P0)', () => {
+    // "though pricing varies by contract" is exactly the phrasing the seeder
+    // tells writers to add, and it walked straight past the source rule.
+    expect(findHardcodedPrice('Aptive charges $199, though pricing varies by contract.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Aptive charges $199 — get a quote for your home.', OP)).not.toBeNull();
+    // Non-intercept drafts keep the long-standing framing exemption.
+    expect(findHardcodedPrice('Use the calculator for a $99 estimate.', {})).toBeNull();
+  });
+
+  test('reference definitions are found DOC-WIDE, not just in the paragraph (r13)', () => {
+    // Definitions are conventionally collected at the end of the document.
+    expect(findHardcodedPrice('Per [CA][1], as of June 2026, Orkin charges a $199 fee.\n\nMore prose.\n\n[1]: https://www.consumeraffairs.com/x', OP)).toBeNull();
+  });
+
+  test('the citation must be reader-VISIBLE, not an image or dangling ref (r13 P0)', () => {
+    // Image destinations and unused reference definitions are stripped from
+    // the rendered page, so neither is a citation a reader can follow.
+    expect(findHardcodedPrice('As of June 2026, Orkin charges a $199 fee.\n[unused]: https://www.consumeraffairs.com/x', OP)).not.toBeNull();
+    expect(findHardcodedPrice('![img](https://www.consumeraffairs.com/x) As of June 2026, Orkin charges a $199 fee.', OP)).not.toBeNull();
+    // A USED reference link resolves and does qualify.
+    expect(findHardcodedPrice('Per [CA][1], as of June 2026, Orkin charges a $199 fee.\n[1]: https://www.consumeraffairs.com/x', OP)).toBeNull();
+  });
+
   test('a cited price must actually BE cited — source AND date (r12)', () => {
     // Grammar alone let an invented figure through: the manifest requires
     // every dollar figure sourced and dated in-post.

@@ -339,6 +339,23 @@ function detectPii(body = '') {
 // Single-sourced from content-guardrails (comma-grouped amounts, single-digit
 // prices, calculator-framing AND regulatory-fine exemptions) — this gate's
 // previous private copy had drifted on all four.
+// Mirrors the runner's briefForbidsCompetitorPrices: a brief may forbid
+// dollar amounts even though it is an intercept ("NO TruGreen dollar amounts
+// anywhere in the post"). Tight on purpose — "no" must directly negate the
+// noun, or unrelated prose like "no-cost retreatments; large price" matches.
+const BRIEF_PRICE_PROHIBITION_RE = /\bno\s+(?:[\w-]+\s+){0,3}(?:dollar amounts?|prices|pricing)\b/i;
+function briefForbidsPrices(...sources) {
+  let forbids = false;
+  const walk = (v) => {
+    if (forbids) return;
+    if (typeof v === 'string') { if (BRIEF_PRICE_PROHIBITION_RE.test(v)) forbids = true; return; }
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  try { sources.forEach(walk); } catch { return true; }
+  return forbids;
+}
+
 function detectHardcodedPrice(body = '', brief = null) {
   // Competitor-price provenance = the persisted TRUE-intercept marker, not
   // the bucket alone: category/spoke seeds share the operator_intercept
@@ -356,10 +373,13 @@ function detectHardcodedPrice(body = '', brief = null) {
     ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
     ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
   ];
+  // A brief-level ban outranks every exemption here too (Codex).
+  const forbidAllPrices = briefForbidsPrices(operatorBrief, brief?.gsc_signal);
   return findHardcodedPrice(body, {
     thirdPartyCitations,
     operatorCitations: isOperatorIntercept,
     requiredSourceUrls,
+    forbidAllPrices,
   }) !== null;
 }
 

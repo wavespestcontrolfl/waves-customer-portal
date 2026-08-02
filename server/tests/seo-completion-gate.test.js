@@ -587,3 +587,23 @@ describe('sourced competitor prices survive the SEO price check (r13)', () => {
     expect(detectHardcodedPrice(sourced, { gsc_signal: { bucket: 'seasonal_rising' } })).toBe(true);
   });
 });
+
+describe('a brief-level price ban reaches this gate too (r13)', () => {
+  const { detectHardcodedPrice } = SeoCompletionGate._internals;
+  const banned = {
+    gsc_signal: { bucket: 'operator_intercept', intercept: true },
+    voice_constraints: { operator_brief: {
+      verify_notes: ['GATE RULE: NO TruGreen dollar amounts anywhere in the post'],
+      sources: ['https://www.consumeraffairs.com/x'],
+    } },
+  };
+  const sourced = 'Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.';
+
+  test('the ban outranks the generic framing exemption here', () => {
+    expect(detectHardcodedPrice('TruGreen charges $89 per visit, though pricing varies by contract', banned)).toBe(true);
+  });
+
+  test('the ban outranks a fully sourced citation too', () => {
+    expect(detectHardcodedPrice(sourced, banned)).toBe(true);
+  });
+});
