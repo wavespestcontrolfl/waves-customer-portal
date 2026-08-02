@@ -408,14 +408,21 @@ describe('pest-recap wiring (source contract)', () => {
     expect(src).toContain('chargeAppointmentCardForRecapCompletion({');
   });
 
-  test('the shared recap mint serializes on the CANONICAL schedule.invoice.mint lock (Codex #3153 r4)', () => {
+  test('the shared recap mint delegates to the CANONICAL scheduled-invoice-mint helper (Codex #3153 r4+r5)', () => {
     const holds = require('fs').readFileSync(require.resolve('../services/estimate-card-holds.js'), 'utf8');
     const fn = holds.slice(
       holds.indexOf('async function resolveOrMintRecapCompletionInvoice'),
       holds.indexOf('async function chargeCardHoldForRecapCompletion'),
     );
-    expect(fn).toContain("'schedule.invoice.mint'");
+    // Canonical lock + create() ON the lock transaction's connection both
+    // live in scheduled-invoice-mint.js — a recap-private lock key or a
+    // second-connection mint here re-opens the double-invoice/pool races.
+    expect(fn).toContain('mintScheduledServiceInvoiceWithDeposit');
     expect(fn).not.toContain('card_hold_recap_invoice');
+    expect(fn).not.toContain('createFromService');
+    const mint = require('fs').readFileSync(require.resolve('../services/scheduled-invoice-mint.js'), 'utf8');
+    expect(mint).toContain("'schedule.invoice.mint'");
+    expect(mint).toContain('database: trx');
   });
 
   test('the fallback runs AFTER the hold rail and forwards the prior-non-performed guard', () => {

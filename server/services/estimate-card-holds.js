@@ -547,48 +547,57 @@ async function alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId, r
 // then charge it via chargeCardHoldOnCompletion (which releases the hold if the
 // invoice is already settled). Normal non-card-hold recaps stay no-bill. No-op
 // when the flag is off or no hold exists. Never throws into the recap flow.
-// Resolve-or-mint the recap-path completion invoice inside a transaction-
-// scoped advisory lock keyed on the visit. createFromService isn't
-// trx-aware, but the lock (held for this block's duration) serializes the
-// find-or-create across connections: a concurrent recap submit blocks here,
-// then finds the just-committed invoice instead of minting a second one.
-// Reuse is by service_record_id OR (pre-completion Charge-now/Tap-to-Pay)
-// scheduled_service_id, back-linking the latter like the /complete path.
-// Shared with the appointment-card recap lane (Codex #3153 r1 P1) — one
-// helper, so the two rails can never mint duplicate invoices for the same
-// visit — and serialized on the CANONICAL ['schedule.invoice.mint', svc.id]
-// two-key lock every other scheduled-service invoice writer takes
-// (scheduled-invoice-mint.js; Codex #3153 r4 P1): a recap overlapping the
-// dispatch /complete mint must contend on the SAME lock or both paths mint
-// separate collectible invoices and both auto-charge.
+// Resolve-or-mint the recap-path completion invoice. Shared with the
+// appointment-card recap lane (Codex #3153 r1 P1) — one helper, so the two
+// rails can never mint duplicate invoices for the same visit — and the
+// mint itself delegates to the CANONICAL mintScheduledServiceInvoiceWithDeposit
+// (Codex #3153 r4 P1 + r5 P2): that helper serializes on the
+// ['schedule.invoice.mint', svc.id] two-key lock every other
+// scheduled-service invoice writer takes, runs create() ON the lock
+// transaction's own connection (database: trx — a mint that borrowed a
+// SECOND pooled connection while N concurrent recaps hold N lock
+// connections can exhaust the pool and time out every mint), replays a
+// concurrent writer's invoice instead of double-minting, and carries the
+// estimate-deposit roll-forward for estimate-origin visits. Line items are
+// built BEFORE the lock (transient reads only). Omitting taxRate lets
+// create() auto-compute county-aware tax from the customer's property_type
+// (commercial AND business taxable; residential 0).
 async function resolveOrMintRecapCompletionInvoice({ scheduledServiceId, serviceRecordId, serviceType = null }) {
-  return db.transaction(async (trx) => {
-    await trx.raw(
-      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-      ['schedule.invoice.mint', String(scheduledServiceId)],
-    );
-    const bySr = await trx('invoices').where({ service_record_id: serviceRecordId })
-      .whereNot('status', 'void').orderBy('created_at', 'desc').first('id');
-    if (bySr?.id) return bySr.id;
-    const bySs = await trx('invoices').where({ scheduled_service_id: scheduledServiceId })
-      .whereNot('status', 'void').orderBy('created_at', 'desc').first('id', 'service_record_id');
-    if (bySs?.id) {
-      if (!bySs.service_record_id) {
-        await trx('invoices').where({ id: bySs.id })
-          .update({ service_record_id: serviceRecordId, updated_at: trx.fn.now() }).catch(() => {});
-      }
-      return bySs.id;
-    }
-    // Mint. Omit taxRate so create() auto-computes county-aware tax from the
-    // customer's property_type (commercial AND business taxable; residential 0).
-    const InvoiceService = require('./invoice');
-    const inv = await InvoiceService.createFromService(serviceRecordId, {
-      description: serviceType || undefined,
-      useScheduledReplay: true,
-      dueDate: etDateString(),
-    });
-    return inv?.id || null;
+  const bySr = await db('invoices').where({ service_record_id: serviceRecordId })
+    .whereNot('status', 'void').orderBy('created_at', 'desc').first('id');
+  if (bySr?.id) return bySr.id;
+  const svc = await db('scheduled_services').where({ id: scheduledServiceId }).first();
+  if (!svc) return null;
+  const sr = await db('service_records').where({ id: serviceRecordId }).first('id', 'customer_id', 'service_type');
+  if (!sr) return null;
+  const InvoiceService = require('./invoice');
+  const scheduledInvoice = await InvoiceService.buildLineItemsForScheduledService(scheduledServiceId, {
+    fallbackDescription: serviceType || sr.service_type || 'Service visit',
   });
+  if (!scheduledInvoice?.lineItems?.length) return null;
+  const { mintScheduledServiceInvoiceWithDeposit } = require('./scheduled-invoice-mint');
+  const minted = await mintScheduledServiceInvoiceWithDeposit({
+    svc,
+    buildCreateParams: () => ({
+      customerId: sr.customer_id,
+      serviceRecordId,
+      scheduledServiceId,
+      lineItems: scheduledInvoice.lineItems,
+      discountIds: scheduledInvoice.discountIds || undefined,
+      dueDate: etDateString(),
+      trustedStoredDiscountSources: ['scheduled_service'],
+    }),
+  });
+  const invoice = minted?.invoice || null;
+  if (!invoice?.id) return null;
+  // An adopted concurrent invoice (pre-completion Charge-now/Tap-to-Pay or
+  // the dispatch mint) may not carry the record link yet — back-link it so
+  // later reuse-by-record finds it. Best-effort, outside the lock.
+  if (minted.reused === true && !invoice.service_record_id) {
+    await db('invoices').where({ id: invoice.id })
+      .update({ service_record_id: serviceRecordId, updated_at: new Date() }).catch(() => {});
+  }
+  return invoice.id;
 }
 
 async function chargeCardHoldForRecapCompletion({ scheduledServiceId, serviceRecordId, priorNonPerformed = false }) {
