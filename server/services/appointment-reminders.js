@@ -298,7 +298,11 @@ async function deliverAppointmentNotice({ channel, kind, customerId, scheduledSe
 // Reconstruct an appointment's ET instant from its scheduled_services row —
 // scheduled_date (DATE) + window_start (TIME) composed into the naive shape
 // parseETDateTime expects. Returns null when the row or fields are missing.
-async function scheduledServiceApptTime(scheduledServiceId) {
+// throwOnError (Codex #3153 r16 P1): fee-rail callers must distinguish "the
+// visit genuinely has no time" (null — fee-free is correct) from "the
+// lookup FAILED" (unresolved — a fee may still apply); the default
+// fail-soft null is unchanged for every existing caller.
+async function scheduledServiceApptTime(scheduledServiceId, { throwOnError = false } = {}) {
   try {
     const svc = await db('scheduled_services')
       .where({ id: scheduledServiceId })
@@ -311,6 +315,7 @@ async function scheduledServiceApptTime(scheduledServiceId) {
     return (datePart && timePart) ? parseETDateTime(`${datePart}T${timePart}`) : null;
   } catch (err) {
     logger.warn(`[appt-remind] appt-time lookup failed for service ${scheduledServiceId}: ${err.message}`);
+    if (throwOnError) throw err;
     return null;
   }
 }

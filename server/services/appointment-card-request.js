@@ -143,10 +143,52 @@ function cancelFeeLine() {
   return feeText ? `\n${feeText} fee only for last-minute cancels or no-shows.` : '';
 }
 
-// Fuller sentence for the /secure page (no SMS segment budget there).
+// ONE coherent read of the fee disclosure (Codex #3153 r4 P1): the note in
+// the page payload and the values the render stamp freezes MUST come from
+// the same snapshot — a config refresh mid-request (while the GET awaits
+// the SetupIntent or plan context) must never let the row authorize terms
+// the response didn't show. The EXACT enforced window is part of the
+// disclosure (r3 P0): a fee collected under an undisclosed cutoff is not
+// consented. null = no disclosure (fee off, or source unavailable — never
+// enforce a term we can't state).
+function readCancelFeeDisclosure() {
+  try {
+    const { cardHoldNoShowFee, cardHoldCancelWindowHours } = require('./estimate-card-holds');
+    const feeAmount = Number(cardHoldNoShowFee());
+    if (!(feeAmount > 0)) return null;
+    const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
+    const feeText = feeAmount % 1 ? `$${feeAmount.toFixed(2)}` : `$${feeAmount}`;
+    return {
+      feeAmount,
+      windowHours,
+      note: `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`,
+    };
+  } catch (err) {
+    logger.warn(`[appt-card-request] fee disclosure unavailable — omitting: ${err.message}`);
+    return null;
+  }
+}
+
+// Fuller sentence for the /secure page (no SMS segment budget there) —
+// kept for non-page callers; the page itself uses readCancelFeeDisclosure
+// so the note and the stamped terms share one snapshot.
 function cancelFeeNote() {
-  const feeText = cancelFeeText();
-  return feeText ? `A ${feeText} fee applies only for last-minute cancels or no-shows. Rescheduling is always free.` : '';
+  const disclosure = readCancelFeeDisclosure();
+  return disclosure ? disclosure.note : '';
+}
+
+// Post-consent (secured) renders repeat the terms the ROW actually carries
+// (Codex #3153 r9 P1): the secured page's "only charged after your service
+// is completed" would otherwise contradict an enforceable no-show fee the
+// customer agreed to. Frozen row values only — never live config — and
+// never a fee for `satisfied` rows (auto-secured, no disclosure = no fee).
+function frozenFeeNoteForRow(request) {
+  if (request?.status !== 'completed' && request?.status !== 'completing') return null;
+  const fee = Number(request?.no_show_fee_amount);
+  const windowHours = Number(request?.cancel_window_hours);
+  if (!(fee > 0) || !(windowHours > 0)) return null;
+  const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
+  return `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
 }
 
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
@@ -258,6 +300,12 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
       trigger,
       payment_method_id: savedMethod.id,
       stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
+      // Completion-charge cap, frozen at the auto-secure moment (Codex
+      // #3153 r1 P1): later price edits must never widen what the saved
+      // consent covers. Fee terms are deliberately NOT stamped — a
+      // satisfied row never saw the fee disclosure.
+      accepted_amount: visit.estimated_price != null && Number(visit.estimated_price) > 0
+        ? Number(visit.estimated_price) : null,
       completed_at: new Date(),
     })
     .onConflict('scheduled_service_id')
@@ -274,6 +322,16 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
         status: 'satisfied',
         payment_method_id: savedMethod.id,
         stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
+        // The heal targets a PENDING page row that may carry a lower cap or
+        // the sticky 0 sentinel from an earlier render — monotonic-down,
+        // never a plain overwrite (Codex #3153 r6 P1). (The fresh-row
+        // INSERT above stamps the value directly: no prior disclosure.)
+        ...(visit.estimated_price != null && Number(visit.estimated_price) > 0 ? {
+          accepted_amount: db.raw(
+            'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+            [Number(visit.estimated_price), Number(visit.estimated_price)],
+          ),
+        } : {}),
         completed_at: new Date(),
         updated_at: new Date(),
       });
@@ -642,12 +700,47 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // email on file, or a SendGrid failure never changes the funnel result.
     try {
       const { sendAutopaySetupInvitation } = require('./card-enrollment-email');
+      // The EMAIL's disclosed fee terms become another monotonic bound on
+      // the row BEFORE the email leaves (Codex #3153 r21 P1): a config
+      // change between this invitation and the customer's later /secure
+      // render must never let the row enforce wider/higher terms than the
+      // invitation stated. If the stamp cannot be persisted, the email
+      // omits the fee sentence entirely — never a term we didn't freeze.
+      let emailFeeDisclosure = readCancelFeeDisclosure();
+      if (emailFeeDisclosure) {
+        try {
+          const stampedRows = await db('appointment_card_requests')
+            .where({ scheduled_service_id: visit.id, status: 'pending' })
+            .update({
+              no_show_fee_amount: db.raw(
+                'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
+                [emailFeeDisclosure.feeAmount, emailFeeDisclosure.feeAmount],
+              ),
+              cancel_window_hours: db.raw(
+                'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
+                [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
+              ),
+              updated_at: new Date(),
+            });
+          if (stampedRows !== 1) {
+            // The row left 'pending' between our read and this stamp
+            // (Codex #3153 r22 P1) — the email must not state terms the
+            // row is not bound by. Omit the sentence entirely.
+            logger.warn(`[appt-card-request] email disclosure stamp hit ${stampedRows} rows for visit ${visit.id} — omitting the fee sentence`);
+            emailFeeDisclosure = null;
+          }
+        } catch (stampErr) {
+          logger.warn(`[appt-card-request] email disclosure stamp failed for visit ${visit.id} — omitting the fee sentence: ${stampErr.message}`);
+          emailFeeDisclosure = null;
+        }
+      }
       sendAutopaySetupInvitation({
         customerId: visit.customer_id,
         scheduledServiceId: visit.id,
         serviceType: visit.service_type || 'service',
         dateLine: dateLineFor(visit.scheduled_date),
         secureUrl,
+        feeDisclosure: emailFeeDisclosure,
         // The email variant follows the copy that ACTUALLY went out on the
         // SMS leg — not the raw probe — so the two legs of one invite can
         // never contradict each other (base SMS's unconditional "only
@@ -991,6 +1084,25 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       }
     }
 
+    // Frozen fee terms (fee rail, owner-approved 2026-08-01): the fee/window
+    // the customer agreed to were stamped onto the row when the /secure page
+    // RENDERED them (Codex #3153 r1 P1 — the disclosure the customer saw is
+    // the only chargeable term; re-reading live config here would let a
+    // config change between render and consent move an agreed fee). This
+    // stamp only records WHEN agreement happened. An unstamped row (fee
+    // configured off at render, or the render pre-dates the stamp) carries
+    // no terms and the rail skips it. Only COMPLETED rows agree to a fee: a
+    // `satisfied` row was auto-secured from a saved card and never saw the
+    // disclosure, so it must never carry (or be charged) one.
+    const frozenFeeTerms = {};
+    try {
+      const disclosed = await db('appointment_card_requests')
+        .where({ id: request.id })
+        .first('no_show_fee_amount');
+      if (Number(disclosed?.no_show_fee_amount) > 0) frozenFeeTerms.fee_agreed_at = new Date();
+    } catch (err) {
+      logger.warn(`[appt-card-request] disclosed-terms read failed for request ${request.id} — completing without fee consent stamp: ${err.message}`);
+    }
     await db('appointment_card_requests')
       .where({ id: request.id, status: 'completing' })
       .update({
@@ -1000,6 +1112,7 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
         payment_method_id: saved?.id || null,
         completed_at: new Date(),
         updated_at: new Date(),
+        ...frozenFeeTerms,
       });
     logger.info(`[appt-card-request] capture completed for visit ${request.scheduled_service_id} (request ${request.id})`);
     return { ok: true };
@@ -1030,12 +1143,15 @@ async function loadSecureCardPageData(token) {
   const customer = request.customer_id
     ? await db('customers').where({ id: request.customer_id }).first('id', 'first_name')
     : null;
+  // Read ONCE, up front: the payload note and the render stamp below both
+  // consume this same snapshot (Codex #3153 r4 P1).
+  const feeDisclosure = visitPriced ? readCancelFeeDisclosure() : null;
   const base = {
     firstName: customer?.first_name || null,
     serviceType: visit?.service_type || null,
     dateDisplay: visit ? dateLineFor(visit.scheduled_date).replace(/^ on /, '') : null,
     windowDisplay: visit?.window_display || null,
-    cancelFeeNote: visitPriced ? (cancelFeeNote() || null) : null,
+    cancelFeeNote: visitPriced ? (feeDisclosure ? feeDisclosure.note : null) : null,
   };
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
@@ -1045,7 +1161,7 @@ async function loadSecureCardPageData(token) {
   // If the in-flight attempt fails and reverts, the durable webhook retry
   // converges the row to completed.
   if (request.status === 'completed' || request.status === 'satisfied' || request.status === 'completing') {
-    return { state: 'secured', ...base };
+    return { state: 'secured', ...base, cancelFeeNote: frozenFeeNoteForRow(request) };
   }
 
   // Plan-choice lane (GATE_SECURE_PLAN_CHOICE; both helpers return null
@@ -1059,8 +1175,23 @@ async function loadSecureCardPageData(token) {
   if (planState?.state === 'secured') {
     await db('appointment_card_requests')
       .where({ id: request.id, status: 'pending' })
-      .update({ status: 'satisfied', completed_at: new Date(), updated_at: new Date() });
-    return { state: 'secured', ...base };
+      .update({
+        status: 'satisfied',
+        // Frozen completion cap rides every satisfied transition (pre-push
+        // r2 P1) — but MONOTONIC-DOWN like the render stamp (Codex #3153
+        // r6 P1): a heal must never overwrite the sticky 0 sentinel or
+        // widen a lower disclosed cap. No price → leave the column alone.
+        ...(visitPriced ? {
+          accepted_amount: db.raw(
+            'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+            [visitPrice, visitPrice],
+          ),
+        } : {}),
+        completed_at: new Date(),
+        updated_at: new Date(),
+      });
+    // Satisfied via coverage (no page disclosure) → no fee terms to repeat.
+    return { state: 'secured', ...base, cancelFeeNote: null };
   }
   const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
   if (!visit
@@ -1096,11 +1227,25 @@ async function loadSecureCardPageData(token) {
     const { customerOnAutopay } = require('./autopay-eligibility');
     const customerRow = await db('customers').where({ id: request.customer_id }).first();
     if (customerRow && await customerOnAutopay(customerRow)) {
-      // Already enrolled with a chargeable method — heal and show secured.
+      // Already enrolled with a chargeable method — heal and show secured,
+      // carrying the frozen completion cap (pre-push r2 P1), MONOTONIC-DOWN
+      // (Codex #3153 r6 P1): never overwrite the sticky 0 sentinel or
+      // widen a lower disclosed cap from an earlier render.
       await db('appointment_card_requests')
         .where({ id: request.id, status: 'pending' })
-        .update({ status: 'satisfied', completed_at: new Date(), updated_at: new Date() });
-      return { state: 'secured', ...base };
+        .update({
+          status: 'satisfied',
+          ...(visitPriced ? {
+            accepted_amount: db.raw(
+              'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+              [visitPrice, visitPrice],
+            ),
+          } : {}),
+          completed_at: new Date(),
+          updated_at: new Date(),
+        });
+      // Satisfied via coverage (no page disclosure) → no fee terms to repeat.
+    return { state: 'secured', ...base, cancelFeeNote: null };
     }
     const { findConsentedChargeableCard } = require('./payment-method-consents');
     const savedMethod = await findConsentedChargeableCard(request.customer_id);
@@ -1113,11 +1258,17 @@ async function loadSecureCardPageData(token) {
       // heals this pending row to satisfied. A refused/failed enrollment
       // falls through and renders the form.
       const secured = await autoSecureFromSavedMethod({
-        visit: { id: request.scheduled_service_id, customer_id: request.customer_id },
+        // estimated_price rides along so the satisfied row freezes its
+        // completion cap (pre-push r2 P1) — id/customer_id alone stamped
+        // accepted_amount NULL and stranded the visit on review.
+        visit: { id: request.scheduled_service_id, customer_id: request.customer_id, estimated_price: visit.estimated_price },
         savedMethod,
         trigger: 'secure_page_coverage',
       });
-      if (secured.action === 'auto_secured') return { state: 'secured', ...base };
+      // Satisfied via saved-card coverage — no page disclosure, no fee
+      // terms to repeat (Codex #3153 r9 P2: base.cancelFeeNote is the LIVE
+      // disclosure and would claim a fee this row can never be charged).
+      if (secured.action === 'auto_secured') return { state: 'secured', ...base, cancelFeeNote: null };
     }
   } catch (err) {
     logger.warn(`[appt-card-request] page coverage re-check failed — rendering the form: ${err.message}`);
@@ -1131,6 +1282,81 @@ async function loadSecureCardPageData(token) {
   // card-only page. prepay_selected keeps the SetupIntent alive so the
   // "save a card and pay per visit instead" fallback works on that state.
   const planContext = await buildSecurePlanContext({ request, visitId: request.scheduled_service_id });
+
+  // Freeze what THIS render discloses (Codex #3153 r1 P1): the fee the page
+  // shows is the fee the rail may later charge, and the price shown is the
+  // completion-charge cap — both must be the values the customer SAW, never
+  // whatever config/price holds at consent or completion time. Re-stamped on
+  // every ready render so the LAST disclosure shown wins; fee configured off
+  // at render explicitly clears any earlier stamp. Pending-only — never
+  // touches a row mid- or post-completion. The stamp is LOAD-BEARING, not
+  // best-effort (pre-push r2 P0): a failed or zero-row stamp means the page
+  // would display terms the row does not carry — an EARLIER render's
+  // higher fee/cap could then be charged against a lower disclosure. In
+  // that case render 'unavailable' (no form, no SetupIntent handed out);
+  // a reload retries, and a row that raced to completed re-renders secured.
+  let disclosureStamped = false;
+  try {
+    const disclosure = { updated_at: new Date() };
+    // Monotonic-DOWN with sticky "nothing disclosed" sentinels (Codex #3153
+    // r3 P0): completion cannot know WHICH open tab's render the customer
+    // consented from — the /complete POST carries only the (shared)
+    // SetupIntent — so the row may only ever move TOWARD the customer. A
+    // re-render can lower a fee/cap but never raise one (LEAST, atomic in
+    // SQL against concurrent renders), and any render that disclosed NO fee
+    // (window sentinel 0) or NO price (accepted sentinel 0) pins the row
+    // unchargeable for good. Whatever tab they complete from, the enforced
+    // terms are ≤ every disclosure ever shown on this link.
+    //
+    // accepted_amount rides ONLY when the page actually DISPLAYS the price
+    // (Codex #3153 r2 P1): the one-time service total and the recurring
+    // per-application price both render exclusively from planContext —
+    // gate off / derivation null shows no number, so nothing is accepted
+    // and the completion lane routes to office review. Auto-secured
+    // `satisfied` rows are different: their cap rests on the saved-method
+    // enrollment consent, not this page.
+    // Fee/window come from the SAME feeDisclosure snapshot the payload's
+    // note was built from (Codex #3153 r4 P1) — never a fresh config read,
+    // which mid-request could diverge from what the response displays.
+    if (feeDisclosure) {
+      disclosure.no_show_fee_amount = db.raw(
+        'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
+        [feeDisclosure.feeAmount, feeDisclosure.feeAmount],
+      );
+      disclosure.cancel_window_hours = db.raw(
+        'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
+        [feeDisclosure.windowHours, feeDisclosure.windowHours],
+      );
+    } else {
+      disclosure.no_show_fee_amount = null;
+      disclosure.cancel_window_hours = 0;
+    }
+    // The stamped cap is the EXACT number in the returned payload —
+    // planContext.perVisit, the value the client renders — not this GET's
+    // earlier visitPrice read (Codex #3153 r4 P1: a concurrent reprice
+    // between the two reads would freeze a cap higher than displayed).
+    const displayedPrice = planContext && Number(planContext.perVisit) > 0
+      ? Number(planContext.perVisit) : null;
+    if (displayedPrice != null) {
+      disclosure.accepted_amount = db.raw(
+        'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+        [displayedPrice, displayedPrice],
+      );
+    } else {
+      disclosure.accepted_amount = 0;
+    }
+    const stamped = await db('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update(disclosure);
+    disclosureStamped = stamped === 1;
+  } catch (err) {
+    logger.warn(`[appt-card-request] disclosure stamp failed for request ${request.id}: ${err.message}`);
+  }
+  if (!disclosureStamped) {
+    logger.warn(`[appt-card-request] disclosure not persisted for request ${request.id} — rendering unavailable instead of the form`);
+    return { state: 'unavailable', ...base };
+  }
+
   if (planState?.state === 'prepay_selected') {
     return {
       state: 'prepay_selected',
@@ -1150,6 +1376,1204 @@ async function loadSecureCardPageData(token) {
   };
 }
 
+// ── No-show / late-cancel fee rail (owner-approved 2026-08-01) ────────────
+// The lane's SMS + /secure page disclose a late-cancel/no-show fee, but until
+// this rail the only charge path lived on estimate_card_holds — office/AI-
+// booked visits secured HERE had a disclosed fee nothing could collect.
+// Mirrors the card-hold rail's postures exactly (staleness guards, claim
+// mechanics, ambiguous-outcome parking, face-value surcharge-exempt charge,
+// paid-refundable-invoice settlement) with the appointment_card_requests row
+// as the anchor. Dark behind GATE_APPT_CARD_NO_SHOW_FEE.
+//
+// Eligibility is deliberately narrow (fail toward not charging):
+//   - status='completed' ONLY — the customer went through the /secure page,
+//     which rendered the fee disclosure; `satisfied` rows never saw it.
+//   - frozen terms present (no_show_fee_amount > 0, stamped at consent) —
+//     rows completed before the fee-terms migration are never charged.
+//   - fee_status IS NULL — one fee event per visit, ever.
+//   - NO estimate_card_holds row for the visit (any status): the hold rail
+//     owns estimate-flow bookings; two rails must never both see one visit.
+
+function isApptCardFeeRailEnabled() {
+  try {
+    return require('../config/feature-gates').isEnabled('apptCardNoShowFee');
+  } catch (err) {
+    logger.warn(`[appt-card-request] fee-rail gate read failed — treating as off: ${err.message}`);
+    return false;
+  }
+}
+
+async function feeEligibleRequestForVisit(scheduledServiceId) {
+  const request = await db('appointment_card_requests')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .first();
+  if (!request) return { request: null, reason: 'no_card_request' };
+  if (request.status !== 'completed') {
+    // inFlight distinguishes a capture mid-completion ('completing') from
+    // rows that never gained consent (pending/declined) — the no-show
+    // path parks the former for review instead of declaring "no charge"
+    // (Codex #3153 r24 P2): the capture can finish with valid fee consent
+    // right after, and the no-show route's idempotent retry would never
+    // re-evaluate the agreed fee.
+    return { request: null, reason: 'not_completed', inFlight: request.status === 'completing' };
+  }
+  if (!(Number(request.no_show_fee_amount) > 0)) return { request: null, reason: 'no_agreed_fee' };
+  if (!(Number(request.cancel_window_hours) > 0)) return { request: null, reason: 'no_agreed_fee' };
+  // Consent must be RECORDED, not implied (pre-push r2 P0): the completion
+  // tail stamps fee_agreed_at only after re-reading the disclosed terms —
+  // a row that completed without that stamp (terms read failed) has no
+  // durable consent marker and must never be charged.
+  const feeAgreedAt = request.fee_agreed_at ? new Date(request.fee_agreed_at) : null;
+  if (!feeAgreedAt || Number.isNaN(feeAgreedAt.getTime())) return { request: null, reason: 'no_fee_consent' };
+  if (!request.stripe_payment_method_id || !request.customer_id) return { request: null, reason: 'no_charge_target' };
+  // charging/charge_review are IN-FLIGHT fee events, not benign absence
+  // (Codex #3153 r1 P1): a caller treating them as "nothing here" would
+  // release/refund while a charge may still land. `unresolved` makes the
+  // cancellation handler report a non-released review outcome. Checked
+  // BEFORE the payer exemption (r8 P1): a payer assigned while another
+  // worker's claim is in flight must never convert that unresolved state
+  // into a clean payer_billed release.
+  if (request.fee_status === 'charging' || request.fee_status === 'charge_review') {
+    return { request: null, reason: 'charge_review', unresolved: true };
+  }
+  if (request.fee_status) return { request: null, reason: `fee_${request.fee_status}` };
+  // A third-party payer assigned AFTER the card was secured exempts the
+  // homeowner from this lane (Codex #3153 r6 P1): the capture flow fails
+  // closed on payer changes at render and completion, and the completion
+  // rail refuses payer-linked invoices — the penalty charge must honor the
+  // same exemption. Fail CLOSED on lookup errors (unresolved, never a
+  // charge against a card the appointment may no longer bill). Re-checked
+  // again AT the claim boundary in chargeAppointmentNoShowFee (r8 P1) —
+  // this early resolve also keeps the cancel preview honest.
+  try {
+    const PayerService = require('./payer');
+    const resolved = await PayerService.resolveForInvoice({
+      customerId: String(request.customer_id),
+      scheduledServiceId: String(scheduledServiceId),
+      throwOnError: true,
+    });
+    if (resolved?.payerId) return { request: null, reason: 'payer_billed' };
+  } catch (err) {
+    logger.error(`[appt-card-request] payer re-check failed for visit ${scheduledServiceId} — fee rail fails closed: ${err.message}`);
+    return { request: null, reason: 'payer_check_failed', unresolved: true };
+  }
+  // Lane exclusivity — fail CLOSED on a lookup error (Codex #3153 r1 P1): a
+  // hold row in ANY status may already own this visit's one fee event, so a
+  // transient failure must never read as absence and mint a second fee.
+  let hold;
+  try {
+    hold = await db('estimate_card_holds')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id');
+  } catch (err) {
+    logger.error(`[appt-card-request] card-hold lookup failed for visit ${scheduledServiceId} — fee rail fails closed: ${err.message}`);
+    return { request: null, reason: 'hold_lookup_failed', unresolved: true };
+  }
+  if (hold) return { request: null, reason: 'card_hold_lane' };
+  return { request };
+}
+
+// Same window formula as the card-hold rail, with fee_agreed_at (the consent
+// moment) as the booking-age anchor: the free-cancel period a late securer
+// gets is exactly the time they've had the agreement. Missing/skewed
+// fee_agreed_at keeps the full frozen window (never wider than disclosed
+// except through the booking-age rule itself).
+function isWithinApptCancelWindow({ request, serviceStart, now = new Date() }) {
+  const windowHours = Number(request?.cancel_window_hours) > 0 ? Number(request.cancel_window_hours) : 24;
+  const start = serviceStart instanceof Date ? serviceStart : new Date(serviceStart);
+  if (Number.isNaN(start.getTime())) return false;
+  let windowMs = windowHours * 3600000;
+  const agreedAt = request?.fee_agreed_at ? new Date(request.fee_agreed_at) : null;
+  if (agreedAt && !Number.isNaN(agreedAt.getTime())) {
+    const msSinceAgreed = now.getTime() - agreedAt.getTime();
+    if (msSinceAgreed >= 0) windowMs = Math.min(windowMs, msSinceAgreed);
+  }
+  const { CARD_HOLD_POST_START_GRACE_MS } = require('./estimate-card-holds');
+  const msUntilStart = start.getTime() - now.getTime();
+  // STRICT upper bound (Codex #3153 r10 P2): the disclosure says the fee
+  // applies to cancellations "less than N hours before" — a cancel at
+  // exactly the boundary is free, matching the stated terms.
+  return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart < windowMs;
+}
+
+async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date() }) {
+  if (!isApptCardFeeRailEnabled()) return { charged: false, reason: 'feature_disabled' };
+  const { request, reason: skipReason, unresolved, inFlight } = await feeEligibleRequestForVisit(scheduledServiceId);
+  // Unresolved eligibility (failed payer/hold lookup) surfaces as the
+  // canonical review reason (Codex #3153 r16 P2): the dispatch no-show
+  // path maps ONLY charge_review to its cautious customer copy — a raw
+  // lookup-failure reason would send "there's no charge" while the agreed
+  // fee sits retryable.
+  if (!request) {
+    // Capture in flight at no-show time (Codex #3153 r24 P2): the /secure
+    // completion can commit 'completed' with valid fee consent moments
+    // after this read, and the no-show route's same-status retry never
+    // re-evaluates — a "no charge" here would silently drop an agreed
+    // fee. Park review DURABLY (whereNull-guarded, same stamp discipline
+    // as the cancel path) so the office decides; a lost stamp still
+    // reports review.
+    if (!unresolved && skipReason === 'not_completed' && inFlight) {
+      try {
+        await db('appointment_card_requests')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .whereNull('fee_status')
+          .update({ fee_status: 'charge_review', updated_at: new Date() });
+      } catch (err) {
+        logger.error(`[appt-card-request] in-flight-capture review stamp failed for visit ${scheduledServiceId}: ${err.message}`);
+      }
+      return { charged: false, reason: 'charge_review' };
+    }
+    return { charged: false, reason: unresolved ? 'charge_review' : skipReason };
+  }
+  const feeAmount = Number(request.no_show_fee_amount);
+
+  // Staleness guard — identical posture to the card-hold rail: the fee is
+  // for a FRESH missed visit; cleanup of ancient rows must never bill.
+  const { NO_SHOW_FEE_MAX_AGE_MS } = require('./estimate-card-holds');
+  let start = serviceStart;
+  if (!start) {
+    try {
+      const { scheduledServiceApptTime } = require('./appointment-reminders');
+      // throwOnError (Codex #3153 r20 P1): a FAILED lookup must not fall
+      // into the terminal released stamp below — that would permanently
+      // waive the fee over a transient DB blip. charge_review keeps it
+      // reviewable; terminal release is reserved for a SUCCESSFUL lookup
+      // that genuinely finds no appointment time.
+      start = await scheduledServiceApptTime(scheduledServiceId, { throwOnError: true });
+    } catch (err) {
+      logger.error(`[appt-card-request] appt-time resolution for no-show fee FAILED — parking review: ${err.message}`);
+      return { charged: false, reason: 'charge_review' };
+    }
+  }
+  const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  const startMs = startDate && !Number.isNaN(startDate.getTime()) ? startDate.getTime() : null;
+  if (reason === 'no_show' && startMs != null && startMs > now.getTime()) {
+    // Marked no-show BEFORE the visit's scheduled start (Codex #3153 r19
+    // P1 — the dispatch day-guard rejects only future DATES, not
+    // later-today times): the customer cannot have missed it yet. Never
+    // charge — and never stamp terminal either, so a genuine no-show
+    // re-marked AFTER the start can still collect its fee. (late_cancel is
+    // exempt BY DEFINITION: an in-window cancel happens before the start.)
+    logger.warn(`[appt-card-request] no-show fee refused (before scheduled start) for visit ${scheduledServiceId}`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'No-show fee not charged — marked before start',
+        'A visit was marked no-show before its scheduled start time — the saved-card fee was NOT charged. Re-mark the visit after its start if the customer no-shows.',
+        {
+          link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+          metadata: { scheduledServiceId, reason: 'no_show_before_start' },
+        },
+      );
+    } catch (e) { logger.warn(`[appt-card-request] pre-start no-show alert failed: ${e.message}`); }
+    return { charged: false, reason: 'no_show_before_start' };
+  }
+  if (startMs == null || now.getTime() - startMs > NO_SHOW_FEE_MAX_AGE_MS) {
+    const staleReason = startMs == null ? 'no_show_start_unresolved' : 'no_show_stale_start';
+    logger.warn(`[appt-card-request] no-show fee refused (${staleReason}) for visit ${scheduledServiceId}`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'No-show fee not charged',
+        startMs == null
+          ? 'A visit was marked no-show but its scheduled time could not be resolved — the saved-card fee was NOT charged. Bill manually if the fee applies.'
+          : `A visit was marked no-show more than ${Math.round(NO_SHOW_FEE_MAX_AGE_MS / 3600000)} hours after its scheduled time — the saved-card fee was NOT charged. Bill manually if the fee applies.`,
+        {
+          link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+          metadata: { scheduledServiceId, reason: staleReason },
+        },
+      );
+    } catch (e) { logger.warn(`[appt-card-request] stale no-show alert failed: ${e.message}`); }
+    // Terminal stamp REQUIRED (Codex #3153 r15 P1): the office was just
+    // told to bill manually — a side-effect retry after time resolution
+    // recovers must not machine-charge on top of that. A lost stamp means
+    // a concurrent claim → canonical review, never a benign refusal.
+    try {
+      const stamped = await db('appointment_card_requests')
+        .where({ id: request.id })
+        .whereNull('fee_status')
+        .update({ fee_status: 'released', updated_at: new Date() });
+      if (stamped !== 1) {
+        logger.warn(`[appt-card-request] stale-refusal stamp lost a race for visit ${scheduledServiceId} — reporting charge_review`);
+        return { charged: false, reason: 'charge_review' };
+      }
+    } catch (err) {
+      logger.error(`[appt-card-request] stale-refusal stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${err.message}`);
+      return { charged: false, reason: 'charge_review' };
+    }
+    return { charged: false, reason: staleReason };
+  }
+
+  // Atomic charge claim: NULL -> 'charging'. One fee event per visit, ever.
+  const claimed = await db('appointment_card_requests')
+    .where({ id: request.id })
+    .whereNull('fee_status')
+    .update({ fee_status: 'charging', updated_at: new Date() });
+  if (claimed !== 1) {
+    // Lost the claim race — a concurrent worker is charging (or already
+    // resolved) this visit's one fee RIGHT NOW (Codex #3153 r2 P1): report
+    // the canonical unresolved outcome so no caller sends a no-charge
+    // notice or reports a clean cancellation while the fee may land.
+    logger.warn(`[appt-card-request] fee claim lost for visit ${scheduledServiceId} — reporting charge_review`);
+    return { charged: false, reason: 'charge_review' };
+  }
+
+  // Revocation check (Codex #3153 r8 P1): removing a card in the portal
+  // detaches the Stripe PM AND deletes the local payment_methods row — the
+  // promised revocation mechanism. The attach self-heal below would happily
+  // RE-ATTACH a detached PM, resurrecting authorization the customer
+  // explicitly withdrew — so require the local row to still exist before
+  // any charge. Revoked → close the fee event terminally + tell the office
+  // (bill manually if the fee is owed); lookup error → revert the claim
+  // (nothing charged) and park review.
+  try {
+    const pmRow = await db('payment_methods')
+      .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
+      .first('id');
+    if (!pmRow) {
+      // Exactly-one-row terminal stamp (Codex #3153 r18 P1): a swallowed
+      // failure would leave the row 'charging' forever while callers treat
+      // payment_method_revoked as a clean terminal outcome.
+      try {
+        const stamped = await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+          .update({ fee_status: 'released', updated_at: new Date() });
+        if (stamped !== 1) {
+          logger.error(`[appt-card-request] revoked-card release stamp lost for visit ${scheduledServiceId} — reporting charge_review`);
+          return { charged: false, reason: 'charge_review' };
+        }
+      } catch (stampErr) {
+        logger.error(`[appt-card-request] revoked-card release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${stampErr.message}`);
+        return { charged: false, reason: 'charge_review' };
+      }
+      logger.warn(`[appt-card-request] no-show fee not charged — saved card was removed (visit ${scheduledServiceId})`);
+      try {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'No-show fee not charged — card removed',
+          'The customer removed the saved card before the no-show/late-cancel fee could be charged. Bill manually if the fee applies.',
+          {
+            link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+            metadata: { scheduledServiceId, reason: 'payment_method_revoked' },
+          },
+        );
+      } catch (e) { logger.warn(`[appt-card-request] revoked-card alert failed: ${e.message}`); }
+      return { charged: false, reason: 'payment_method_revoked' };
+    }
+  } catch (err) {
+    logger.error(`[appt-card-request] payment-method revocation check failed for visit ${scheduledServiceId} — reverting claim, parking review: ${err.message}`);
+    await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+      .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
+    return { charged: false, reason: 'charge_review' };
+  }
+
+  // Charge FIRST (separately from the row write) so a post-charge DB failure
+  // is never confused with a pre-charge failure. Deliberately NO attach
+  // self-heal on this path (Codex #3153 r9 P1): a removal racing the
+  // revocation check above would be resurrected by an attach — a detached
+  // method must simply fail the charge (definite error → claim reverts →
+  // office bills manually). The completion tail attached the PM at consent;
+  // a method that is detached NOW is detached because someone detached it.
+  const StripeService = require('./stripe');
+  let paymentIntent;
+  let submittedFeePi = null;
+  try {
+    // Payer ownership SERIALIZED through charge submission (Codex #3153 r15
+    // P1, superseding the r8 snapshot check): payer assignment updates
+    // scheduled_services — FOR UPDATE on that row holds a concurrent
+    // assignment out until the PaymentIntent is submitted (the edit blocks,
+    // or committed first and is seen by the re-resolve on the lock
+    // connection). The transaction writes nothing itself — a payer hit or
+    // lookup failure throws a typed skip and rolls back with the row lock
+    // released and no charge made.
+    paymentIntent = await db.transaction(async (trx) => {
+      // Customer row FIRST, then the visit — the same customer→service
+      // lock order as chargeInvoiceWithSavedCard (Codex #3153 r18 P0):
+      // payer assignment can live on customers.payer_id too, and the admin
+      // customer update locks that row — without it a customer-level payer
+      // edit could commit between the check and the Stripe submission.
+      const lockedCustomer = await trx('customers')
+        .where({ id: request.customer_id })
+        .forUpdate()
+        .first('id');
+      if (!lockedCustomer) {
+        const e = new Error('customer missing at fee charge');
+        e.apptFeeSkip = 'charge_review';
+        throw e;
+      }
+      const lockedSvc = await trx('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .forUpdate()
+        .first('id', 'customer_id');
+      if (!lockedSvc) {
+        const e = new Error('scheduled service missing at fee charge');
+        e.apptFeeSkip = 'charge_review';
+        throw e;
+      }
+      // The consent must belong to the visit's CURRENT customer (Codex
+      // #3153 r19 P0): a reassigned visit must never charge the prior
+      // customer's saved card — park for office review, charge nothing.
+      if (String(lockedSvc.customer_id) !== String(request.customer_id)) {
+        const e = new Error('visit customer changed since consent');
+        e.apptFeeSkip = 'charge_review';
+        throw e;
+      }
+      let resolvedPayer;
+      try {
+        resolvedPayer = await require('./payer').resolveForInvoice({
+          database: trx,
+          customerId: String(request.customer_id),
+          scheduledServiceId: String(scheduledServiceId),
+          throwOnError: true,
+        });
+      } catch (payerErr) {
+        const e = new Error(`payer re-check failed: ${payerErr.message}`);
+        e.apptFeeSkip = 'charge_review';
+        throw e;
+      }
+      if (resolvedPayer?.payerId) {
+        const e = new Error('payer assigned');
+        e.apptFeeSkip = 'payer_billed';
+        throw e;
+      }
+      const pi = await StripeService.chargeSavedPaymentMethodOffSession({
+        customerId: request.customer_id,
+        paymentMethodId: request.stripe_payment_method_id,
+        amountDollars: feeAmount,
+        description: 'Waves appointment — no-show / late-cancellation fee',
+        metadata: {
+          purpose: 'appointment_card_no_show_fee',
+          request_id: String(request.id),
+          scheduled_service_id: String(scheduledServiceId),
+          reason,
+        },
+        idempotencyKey: `appt_card_no_show_${request.id}`,
+      });
+      // Captured OUTSIDE the transaction result (Codex #3153 r19 P0): if
+      // the lock transaction fails to COMMIT after Stripe succeeded, the
+      // catch must see the submitted PI and park review — never classify a
+      // post-submission failure as a definite pre-charge one.
+      submittedFeePi = pi;
+      return pi;
+    });
+  } catch (err) {
+    if (!err.apptFeeSkip && submittedFeePi) {
+      // Stripe charged; only the lock transaction's commit failed. The
+      // claim must NOT revert (a retry past the idempotency window would
+      // double-charge) — proceed to the durable success write below, whose
+      // own failure path parks charge_review keeping the PI pointer.
+      logger.error(`[appt-card-request] fee charged but lock txn commit failed for visit ${scheduledServiceId} — proceeding as charged: ${err.message}`);
+      paymentIntent = submittedFeePi;
+    } else {
+    if (err.apptFeeSkip === 'payer_billed') {
+      // The appointment became payer-billed — close the fee event
+      // terminally. Exactly one row or canonical review (Codex #3153 r15
+      // P1): a swallowed stamp would report a benign outcome while the row
+      // stays 'charging' with no review signal.
+      try {
+        const stamped = await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+          .update({ fee_status: 'released', updated_at: new Date() });
+        if (stamped !== 1) {
+          logger.error(`[appt-card-request] post-claim payer release stamp lost for visit ${scheduledServiceId} — reporting charge_review`);
+          return { charged: false, reason: 'charge_review' };
+        }
+      } catch (stampErr) {
+        logger.error(`[appt-card-request] post-claim payer release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${stampErr.message}`);
+        return { charged: false, reason: 'charge_review' };
+      }
+      logger.info(`[appt-card-request] fee released (payer assigned) for visit ${scheduledServiceId}`);
+      return { charged: false, reason: 'payer_billed' };
+    }
+    if (err.apptFeeSkip === 'charge_review') {
+      logger.error(`[appt-card-request] fee payer serialization failed for visit ${scheduledServiceId} — reverting claim, parking review: ${err.message}`);
+      await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+        .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
+      return { charged: false, reason: 'charge_review' };
+    }
+    // Same triage as the card-hold rail: a DEFINITE pre-charge failure
+    // reopens the claim (safe to retry); an AMBIGUOUS connection/API error
+    // may have charged — park charge_review so a >24h retry can never mint
+    // a SECOND fee once Stripe's idempotency cache expires.
+    const errType = err.type || err.raw?.type || null;
+    const piIdFromErr = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
+    const ambiguous = !piIdFromErr && ['StripeConnectionError', 'StripeAPIError'].includes(errType);
+    if (ambiguous) {
+      await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+        .update({ fee_status: 'charge_review', updated_at: new Date() }).catch(() => {});
+      logger.error(`[appt-card-request] no-show fee charge AMBIGUOUS (possible charge) — parked charge_review for visit ${scheduledServiceId}: ${err.message}`);
+      return { charged: false, reason: 'charge_review', error: err.message };
+    }
+    await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+      .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
+    logger.error(`[appt-card-request] no-show fee charge FAILED (no charge) for visit ${scheduledServiceId}: ${err.message}`);
+    return { charged: false, reason: 'charge_failed', error: err.message };
+    }
+  }
+
+  // PI succeeded. A DB-write failure must NOT reopen the claim (Stripe's
+  // idempotency cache expires ~24h — a retry would double-charge): park
+  // charge_review keeping the PI pointer.
+  try {
+    await db('appointment_card_requests').where({ id: request.id }).update({
+      fee_status: 'charged',
+      no_show_payment_intent_id: paymentIntent?.id || null,
+      fee_charged_amount: feeAmount,
+      fee_charged_at: new Date(),
+      updated_at: new Date(),
+    });
+  } catch (writeErr) {
+    await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+      .update({
+        fee_status: 'charge_review',
+        no_show_payment_intent_id: paymentIntent?.id || null,
+        fee_charged_amount: feeAmount,
+        fee_charged_at: new Date(),
+        updated_at: new Date(),
+      }).catch(() => {});
+    logger.error(`[appt-card-request] no-show fee CHARGED but DB write failed — parked charge_review (NOT retryable) for visit ${scheduledServiceId} (PI ${paymentIntent?.id})`);
+    return { charged: true, amount: feeAmount, reason: 'charge_review_write_failed' };
+  }
+  logger.info(`[appt-card-request] no-show fee charged for visit ${scheduledServiceId} ($${feeAmount}, ${reason})`);
+  return { charged: true, amount: feeAmount };
+}
+
+// Cancel-path entry, run by the same call sites as the card-hold handler
+// (which supersedes — callers try the hold rail first, and this rail's own
+// eligibility skips any visit with a hold row). waiveFee is the business-
+// initiated escape hatch: WE cancelled, so the fee event closes 'waived'
+// and can never fire later.
+async function handleAppointmentCardCancellation({ scheduledServiceId, serviceStart = null, now = new Date(), waiveFee = false }) {
+  // Dark rail (Codex #3153 r11 P1): with the kill switch off, every cancel
+  // path must stay byte-identical to pre-rail behavior — the fail-closed
+  // payer/hold lookups must not run, because their error outcomes would
+  // block an offboarding refund or park review for a fee that CANNOT
+  // charge. The one internal write kept (r2, invisible while dark): a
+  // best-effort terminal stamp on the row so a later gate flip can never
+  // retro-charge a cancellation that happened while the rail was dark.
+  if (!isApptCardFeeRailEnabled()) {
+    try {
+      const row = await db('appointment_card_requests')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('id', 'fee_status');
+      if (row && !row.fee_status) {
+        // The flip-protection stamp is REQUIRED, not best-effort (Codex
+        // #3153 r16 P1): during a rolling gate enable a gate-on worker can
+        // already be charging, and an unstamped row could be fee'd by a
+        // cancellation retry after the flip. Exactly one row or the
+        // canonical non-released review outcome.
+        const stamped = await db('appointment_card_requests')
+          .where({ id: row.id })
+          .whereNull('fee_status')
+          .update({ fee_status: waiveFee ? 'waived' : 'released', updated_at: new Date() });
+        if (stamped !== 1) {
+          logger.warn(`[appt-card-request] dark-gate release stamp lost a race for visit ${scheduledServiceId} — reporting charge_review`);
+          return { handled: false, released: false, reason: 'charge_review' };
+        }
+      } else if (row && (row.fee_status === 'charging' || row.fee_status === 'charge_review')) {
+        // A gate-on worker's fee is in flight (rolling enable) — never a
+        // clean release while it may land.
+        return { handled: false, released: false, reason: 'charge_review' };
+      }
+    } catch (err) {
+      logger.error(`[appt-card-request] dark-gate release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${err.message}`);
+      return { handled: false, released: false, reason: 'charge_review' };
+    }
+    return { handled: false, released: true, reason: 'feature_disabled' };
+  }
+  const { request, reason: skipReason, unresolved } = await feeEligibleRequestForVisit(scheduledServiceId);
+  if (!request) {
+    // An in-flight/parked fee (charging, charge_review) or an unverifiable
+    // hold lookup is NOT a clean release (Codex #3153 r1 P1): offboarding
+    // gates its deposit refund on released=true and the processors park
+    // canonical 'charge_review' for office review — a fee may still land.
+    if (unresolved) return { handled: false, released: false, reason: 'charge_review' };
+    if (skipReason === 'payer_billed' || skipReason === 'not_completed') {
+      // Terminal stamp for a payer-exempt cancellation (Codex #3153 r13
+      // P1), REQUIRED not best-effort (r14): a lost stamp means either a
+      // concurrent worker claimed the fee after our eligibility read or
+      // the write failed — in both cases reporting a clean release could
+      // let a fee land after offboarding refunded. Exactly-one row or the
+      // canonical non-released review outcome. not_completed rows
+      // (pending/completing/satisfied — a row EXISTS) get the same stamp
+      // (r20 P0): a capture mid-flight at cancel time can finish as
+      // 'completed' afterwards, and a cancellation retry would then find
+      // an eligible row and charge a fee for this already-free cancel.
+      try {
+        const stamped = await db('appointment_card_requests')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .whereNull('fee_status')
+          .update({ fee_status: waiveFee ? 'waived' : 'released', updated_at: new Date() });
+        if (stamped !== 1) {
+          logger.warn(`[appt-card-request] payer-exempt release stamp lost a race for visit ${scheduledServiceId} — reporting charge_review`);
+          return { handled: false, released: false, reason: 'charge_review' };
+        }
+      } catch (err) {
+        logger.error(`[appt-card-request] payer-exempt release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${err.message}`);
+        return { handled: false, released: false, reason: 'charge_review' };
+      }
+    }
+    return { handled: false, released: true, reason: skipReason };
+  }
+  if (waiveFee) {
+    const waived = await db('appointment_card_requests').where({ id: request.id }).whereNull('fee_status')
+      .update({ fee_status: 'waived', updated_at: new Date() });
+    if (waived !== 1) {
+      // A concurrent charge claimed the row between the eligibility read and
+      // this waive — fail closed (offboarding gates its deposit refund on a
+      // clean release, mirroring the card-hold lost-race posture).
+      logger.warn(`[appt-card-request] fee waive lost a race for visit ${scheduledServiceId} — review before proceeding`);
+      return { handled: false, released: false, reason: 'waive_race_lost' };
+    }
+    logger.info(`[appt-card-request] fee waived (business-initiated cancel) for visit ${scheduledServiceId}`);
+    return { handled: true, released: true, reason: 'admin_waive' };
+  }
+  let start = serviceStart;
+  if (!start) {
+    try {
+      const { scheduledServiceApptTime } = require('./appointment-reminders');
+      // throwOnError (Codex #3153 r19 P1): a FAILED lookup must not fall
+      // through to the terminal free-release stamp — that would silently
+      // waive a potentially applicable fee. Release is reserved for a
+      // successful null (the visit genuinely has no time).
+      start = await scheduledServiceApptTime(scheduledServiceId, { throwOnError: true });
+    } catch (err) {
+      logger.error(`[appt-card-request] appt-time resolution for cancel FAILED — unresolved, parking review: ${err.message}`);
+      return { handled: false, released: false, reason: 'charge_review' };
+    }
+  }
+  if (start && isApptCardFeeRailEnabled() && isWithinApptCancelWindow({ request, serviceStart: start, now })) {
+    const chargeResult = await chargeAppointmentNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
+    // Normalized for cancellation callers (Codex #3153 r17 P1): unresolved
+    // charge outcomes (parked review, or a definite decline whose reverted
+    // claim a retry may still convert) carry released:false so the
+    // route-level alert and offboarding gates see them; every terminal
+    // outcome (charged, payer_billed, revoked, stale refusals — all of
+    // which stamped the fee event closed) releases cleanly.
+    const unresolvedCharge = chargeResult?.charged !== true
+      && ['charge_review', 'charge_failed'].includes(chargeResult?.reason);
+    return { ...chargeResult, handled: true, released: !unresolvedCharge };
+  }
+  const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  const startPassed = startDate && !Number.isNaN(startDate.getTime()) && startDate.getTime() <= now.getTime();
+  // Persist the free cancel as a TERMINAL fee state before reporting it
+  // (Codex #3153 r2 P1): processCancellationRequest deliberately re-runs
+  // side effects on retry, so an unpersisted timely cancel could re-enter
+  // the window (or the gate could flip on) and charge a fee for a
+  // cancellation that was free when it happened. Atomic on NULL — losing
+  // this write to a concurrent charge claim is the same unresolved race
+  // as losing the claim itself.
+  const releasedStamp = await db('appointment_card_requests')
+    .where({ id: request.id })
+    .whereNull('fee_status')
+    .update({ fee_status: 'released', updated_at: new Date() });
+  if (releasedStamp !== 1) {
+    logger.warn(`[appt-card-request] free-cancel release lost a race for visit ${scheduledServiceId} — reporting charge_review`);
+    return { handled: false, released: false, reason: 'charge_review' };
+  }
+  return { handled: true, released: true, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' };
+}
+
+// Re-run settlement for a fee PI whose pre-settlement marker just became
+// settleable — a bounced refund (Stripe kept the fee) or a WON dispute
+// (funds reinstated). The acknowledged succeeded event will never retry,
+// so this is the recovery trigger (Codex #3153 r18 P1). Best-effort;
+// settlement itself is idempotent under the PI advisory lock.
+async function resettleAppointmentFeeFromPi(piId) {
+  // THROWS on failure (Codex #3153 r19 P1): the webhook callers must not
+  // mark their event processed while retained/reinstated money still lacks
+  // its paid invoice — a throw makes Stripe redeliver and retry this.
+  const StripeService = require('./stripe');
+  const pi = await StripeService.retrievePaymentIntent(piId);
+  if (pi?.metadata?.purpose !== 'appointment_card_no_show_fee') return { settled: false, reason: 'not_fee_pi' };
+  return settleAppointmentNoShowFee(pi);
+}
+
+// Route-side surfacing for unresolved cancellation-fee outcomes (Codex
+// #3153 r16 P1): the admin cancel routes proceed with the cancellation
+// regardless (the visit is already being cancelled), but a NON-released
+// outcome means a fee may still land after an attempted waiver — the
+// operator must hear about it, never read a silent success. Never throws.
+async function alertUnresolvedCancellationFee({ scheduledServiceId, outcome }) {
+  if (!outcome || outcome.released !== false) return;
+  try {
+    const row = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('customer_id');
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Cancellation fee needs review',
+      `A cancelled visit's saved-card fee state is unresolved (${outcome.reason}) — review the customer's billing before assuming no fee was (or will be) charged.`,
+      {
+        link: row?.customer_id ? `/admin/customers/${row.customer_id}` : '/admin/dispatch',
+        metadata: { scheduledServiceId, reason: outcome.reason },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[appt-card-request] unresolved-fee alert failed for visit ${scheduledServiceId}: ${err.message}`);
+  }
+}
+
+// Read-only preview for the admin cancel UIs — merged into the existing
+// GET /admin/dispatch/:serviceId/card-hold response so the client confirm
+// prompts cover both lanes unchanged.
+async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()) {
+  // Dark rail: no lookups, no fee-may-apply previews (Codex #3153 r11 P1)
+  // — the disabled rail cannot charge, so the lane presents as absent.
+  if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false };
+  const { request, unresolved } = await feeEligibleRequestForVisit(scheduledServiceId);
+  if (!request) {
+    if (unresolved) {
+      // Lane state unverifiable (Codex #3153 r9 P1): reporting "no fee"
+      // while a recovered lookup could charge one on the very next request
+      // makes the operator's confirm prompt lie — surface a fee-may-apply
+      // preview so the cancel path shows the waiver choice. Fee amount is
+      // best-effort from the row (the prompt copy degrades gracefully).
+      let feeAmount = null;
+      try {
+        const row = await db('appointment_card_requests')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .first('no_show_fee_amount');
+        feeAmount = Number(row?.no_show_fee_amount) > 0 ? Number(row.no_show_fee_amount) : null;
+      } catch (err) { /* best-effort */ }
+      return { secured: true, feeApplies: true, feeAmount, unresolved: true };
+    }
+    return { secured: false, feeApplies: false };
+  }
+  let start = null;
+  try {
+    const { scheduledServiceApptTime } = require('./appointment-reminders');
+    // throwOnError distinguishes a FAILED lookup from a genuinely timeless
+    // visit (Codex #3153 r16 P1 — the helper's default fail-soft null made
+    // this catch unreachable and the preview lied fee-free).
+    start = await scheduledServiceApptTime(scheduledServiceId, { throwOnError: true });
+  } catch (err) {
+    // A THROWN time resolution is unresolved, not fee-free (Codex #3153
+    // r13 P1): the cancellation path re-resolves independently, and a
+    // recovered lookup could charge an in-window cancel the preview called
+    // free. (A cleanly-null time stays fee-free — the charge path refuses
+    // unresolvable starts the same way.)
+    logger.warn(`[appt-card-request] appt-time resolution for cancel preview failed — reporting fee-may-apply: ${err.message}`);
+    return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };
+  }
+  const feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  return { secured: true, feeApplies, feeAmount: Number(request.no_show_fee_amount) };
+}
+
+// Office heads-up for recap completions the lane could not auto-charge —
+// the recap flow has no pay-link state to fall back on, so silence here
+// strands an unbilled visit (mirror of alertRecapCardHoldNeedsReview).
+async function alertRecapApptCardNeedsReview({ scheduledServiceId, customerId, reason }) {
+  try {
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Recap completion needs billing review (saved card)',
+      `A recap-completed visit whose card was saved through the appointment link was not auto-charged (${reason}). Review the visit's billing and collect manually if appropriate.`,
+      {
+        link: customerId ? `/admin/customers/${customerId}` : '/admin/dispatch',
+        metadata: { scheduledServiceId, reason, lane: 'appointment_card' },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[appt-card-request] recap review alert failed: ${err.message}`);
+  }
+}
+
+// Recap-path completion charge (Codex #3153 r1 P1): POST /:serviceId/pest-recap
+// completes WITHOUT invoicing, so the /complete flow's appointment-card
+// completion lane never runs there — without this fallback a lane-secured
+// one-time visit closes out uncharged despite the "charged after your
+// service is completed" promise. Mirrors chargeCardHoldForRecapCompletion's
+// postures (prior-non-performed → review, prepaid → review, fail-closed
+// lookups, shared invoice mint lock) and the dispatch lane's guardrails
+// (billing-lane exclusions, autopay eligibility, hard cap at the FROZEN
+// accepted_amount). Dark behind GATE_APPT_CARD_COMPLETION_CHARGE; every
+// failure mode alerts the office instead of charging. Never throws.
+async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, serviceRecordId, priorNonPerformed = false }) {
+  // Captured as soon as a lane row is known so the outer catch can still
+  // point the office at the right customer (Codex #3153 r2 P1).
+  let alertCustomerId = null;
+  try {
+    if (!require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
+      return { charged: false, reason: 'feature_disabled' };
+    }
+    if (!serviceRecordId) return { charged: false, reason: 'no_service_record' };
+    const laneRow = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .whereIn('status', ['completed', 'satisfied'])
+      .first('id', 'customer_id', 'accepted_amount');
+    if (!laneRow) return { charged: false, reason: 'no_lane_row' };
+    alertCustomerId = laneRow.customer_id || null;
+    // Lane exclusivity — fail CLOSED on a lookup error: the hold rail owns
+    // any visit with a hold row, and its own recap fallback already ran.
+    let holdRow;
+    try {
+      holdRow = await db('estimate_card_holds')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('id');
+    } catch (err) {
+      logger.error(`[appt-card-request] recap hold lookup failed for visit ${scheduledServiceId} — no auto-charge: ${err.message}`);
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: laneRow.customer_id, reason: 'hold_lookup_failed' });
+      return { charged: false, reason: 'hold_lookup_failed' };
+    }
+    if (holdRow) return { charged: false, reason: 'card_hold_lane' };
+    // A re-completed NOT-performed visit (incomplete / inspection-only /
+    // declined) must not auto-charge a full completion amount — office call.
+    if (priorNonPerformed) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: laneRow.customer_id, reason: 'prior_non_performed' });
+      return { charged: false, reason: 'prior_non_performed' };
+    }
+    let svc;
+    try {
+      svc = await db('scheduled_services').where({ id: scheduledServiceId })
+        .first('id', 'customer_id', 'service_type', 'is_recurring', 'prepaid_amount');
+    } catch (err) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: laneRow.customer_id, reason: 'visit_lookup_failed' });
+      return { charged: false, reason: 'visit_lookup_failed' };
+    }
+    if (!svc || svc.is_recurring === true) return { charged: false, reason: 'not_one_time' };
+    // The consent row must belong to the visit's CURRENT customer (Codex
+    // #3153 r19 P0): a reassigned visit must never ride a prior customer's
+    // accepted_amount into automatic collection.
+    if (String(laneRow.customer_id) !== String(svc.customer_id)) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'customer_mismatch' });
+      return { charged: false, reason: 'customer_mismatch' };
+    }
+    // A field prepayment settles the visit outside this lane — charging on
+    // top of one would double-bill (same posture as the hold recap rail).
+    if (Number(svc.prepaid_amount) > 0) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'prepaid_visit' });
+      return { charged: false, reason: 'prepaid_visit_manual' };
+    }
+    const customer = await db('customers').where({ id: svc.customer_id })
+      .first('id', 'billing_mode', 'monthly_rate', 'waveguard_tier', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+    if (!customer) return { charged: false, reason: 'no_customer' };
+    // Explicit billing lanes have their own rails — same exclusions as the
+    // dispatch completion lane.
+    const { resolveBillingLane } = require('./billing-lane');
+    const lane = resolveBillingLane(customer);
+    if (customer.billing_mode === 'per_application' || lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay') {
+      return { charged: false, reason: 'other_billing_lane' };
+    }
+    const { customerOnAutopay, getChargeableAutopayMethod, isChargeableAutopayMethod } = require('./autopay-eligibility');
+    const onAutopay = await customerOnAutopay(customer);
+    const autopayPm = onAutopay ? await getChargeableAutopayMethod({ id: svc.customer_id }, db) : null;
+    if (!onAutopay || !isChargeableAutopayMethod(autopayPm)) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'no_chargeable_method' });
+      return { charged: false, reason: 'no_chargeable_method' };
+    }
+    // Hard cap at the FROZEN accepted amount (Codex #3153 r1 P1) — never
+    // the live visit price, which appointment editors rewrite.
+    const acceptedAmount = laneRow.accepted_amount != null && Number(laneRow.accepted_amount) > 0
+      ? Number(laneRow.accepted_amount) : null;
+    if (acceptedAmount == null) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'no_accepted_amount' });
+      return { charged: false, reason: 'no_accepted_amount' };
+    }
+    let invoiceId;
+    try {
+      const { resolveOrMintRecapCompletionInvoice } = require('./estimate-card-holds');
+      invoiceId = await resolveOrMintRecapCompletionInvoice({
+        scheduledServiceId,
+        serviceRecordId,
+        serviceType: svc.service_type || null,
+      });
+    } catch (err) {
+      logger.error(`[appt-card-request] recap completion invoice resolve/create failed for visit ${scheduledServiceId}: ${err.message}`);
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'invoice_create_failed' });
+      return { charged: false, reason: 'invoice_create_failed', error: err.message };
+    }
+    if (!invoiceId) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'no_invoice' });
+      return { charged: false, reason: 'no_invoice' };
+    }
+    const invoice = await db('invoices').where({ id: invoiceId })
+      .first('id', 'status', 'payer_id', 'subtotal', 'total', 'discount_amount');
+    if (!invoice) return { charged: false, reason: 'invoice_missing' };
+    if (invoice.payer_id) {
+      // A payer assigned after the card was secured owns this bill — but
+      // submitRecap has NO later delivery path (unlike /complete), so a
+      // silent return strands the payer invoice in draft forever (Codex
+      // #3153 r6 P1): route it to office review for delivery.
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'payer_billed' });
+      return { charged: false, reason: 'payer_billed' };
+    }
+    // A VOIDED invoice on a completed recap visit is an UNBILLED service
+    // with no pay-link fallback (Codex #3153 r10 P1) — unlike paid/
+    // prepaid/processing (money handled elsewhere), it needs the office.
+    if (String(invoice.status || '').toLowerCase() === 'void') {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'invoice_void' });
+      return { charged: false, reason: 'invoice_void' };
+    }
+    if (['paid', 'prepaid', 'processing'].includes(String(invoice.status || '').toLowerCase())) {
+      return { charged: false, reason: `invoice_${String(invoice.status).toLowerCase()}` };
+    }
+    const subtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
+    const netSubtotal = Math.round((subtotal - Math.max(0, Number(invoice.discount_amount) || 0)) * 100) / 100;
+    if (netSubtotal > acceptedAmount + 0.005) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'above_accepted_amount' });
+      return { charged: false, reason: 'above_accepted_amount' };
+    }
+    // Auto Pay re-resolved at the CHARGE boundary (Codex #3153 r12 P1):
+    // the mint/lock awaits above leave a gap an opt-out or pause can
+    // commit inside — and a pause touches only the CUSTOMER row, which a
+    // method re-read alone cannot see. Lookup failure charges nothing.
+    let freshPm = null;
+    try {
+      const freshCustomer = await db('customers').where({ id: svc.customer_id })
+        .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+      freshPm = freshCustomer && await customerOnAutopay(freshCustomer)
+        ? await getChargeableAutopayMethod({ id: svc.customer_id }, db)
+        : null;
+    } catch (recheckErr) {
+      logger.warn(`[appt-card-request] charge-boundary Auto Pay re-check failed for visit ${scheduledServiceId} — not charging: ${recheckErr.message}`);
+      freshPm = null;
+    }
+    if (!isChargeableAutopayMethod(freshPm)) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'no_chargeable_method' });
+      return { charged: false, reason: 'no_chargeable_method' };
+    }
+    // Live payer re-resolve at the charge boundary (Codex #3153 r13 P1): a
+    // payer assigned after the invoice was pre-minted lives only on
+    // scheduled_services — the reused invoice's payer_id stays null. Payer
+    // present → the payer flows own the bill (office alert, no delivery
+    // path here); lookup failure → fail closed, alert.
+    try {
+      const boundaryPayer = await require('./payer').resolveForInvoice({
+        customerId: String(svc.customer_id),
+        scheduledServiceId: String(scheduledServiceId),
+        throwOnError: true,
+      });
+      if (boundaryPayer?.payerId) {
+        await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'payer_billed' });
+        return { charged: false, reason: 'payer_billed' };
+      }
+    } catch (payerRecheckErr) {
+      logger.warn(`[appt-card-request] charge-boundary payer re-check failed for visit ${scheduledServiceId} — not charging: ${payerRecheckErr.message}`);
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'payer_check_failed' });
+      return { charged: false, reason: 'payer_check_failed' };
+    }
+    const StripeService = require('./stripe');
+    try {
+      // maxAuthorizedSubtotal: the frozen cap is re-enforced against the
+      // LOCKED invoice inside the charge service (Codex #3153 r7 P0) — the
+      // preflight above compared an unlocked snapshot a concurrent edit
+      // could outrun. requireAutopayForCustomerId serializes the charge
+      // against a concurrently-committing pause/opt-out (r13).
+      await StripeService.chargeInvoiceWithSavedCard(invoice.id, freshPm.id, {
+        maxAuthorizedSubtotal: acceptedAmount,
+        requireAutopayForCustomerId: svc.customer_id,
+        requireSelfPayScheduledServiceId: scheduledServiceId,
+        requireOneTimeLane: true,
+      });
+    } catch (err) {
+      logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'charge_failed' });
+      // Awaited so a rejected audit write is caught here, never an
+      // unhandled rejection (pre-push r2 P1 — floating-promise rule).
+      try {
+        await require('./autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
+          details: { source: 'appointment_card_recap_completion', invoice_id: invoice.id, scheduled_service_id: scheduledServiceId, error: err.message },
+        });
+      } catch (e) { logger.warn(`[appt-card-request] autopay audit write failed: ${e.message}`); }
+      return { charged: false, reason: 'charge_failed', error: err.message };
+    }
+    try {
+      await require('./autopay-log').logAutopay(svc.customer_id, 'charge_success', {
+        details: { source: 'appointment_card_recap_completion', invoice_id: invoice.id, scheduled_service_id: scheduledServiceId },
+      });
+    } catch (e) { logger.warn(`[appt-card-request] autopay audit write failed: ${e.message}`); }
+    logger.info(`[appt-card-request] recap completion charged invoice ${invoice.id} for visit ${scheduledServiceId}`);
+    return { charged: true, invoiceId: invoice.id };
+  } catch (err) {
+    // An unexpected dependency failure past the lane check leaves a
+    // completed visit unbilled with NO pay-link fallback — the office must
+    // hear about it (Codex #3153 r2 P1). Before the lane check
+    // (alertCustomerId null) a silent return is correct: the visit isn't
+    // this lane's to bill.
+    logger.error(`[appt-card-request] recap completion charge errored for visit ${scheduledServiceId}: ${err.message}`);
+    if (alertCustomerId !== null) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: alertCustomerId, reason: 'error' });
+    }
+    return { charged: false, reason: 'error', error: err.message };
+  }
+}
+
+// Settlement: turn the bare off-session fee charge into a paid, refundable
+// fee invoice + payments row + canonical receipt — contract-for-contract
+// with the card-hold settleNoShowFee (advisory-lock serialized, in-lock
+// replay check, face value, taxRate 0, self-pay). Driven from the
+// appointment_card_no_show_fee webhook; idempotent on the PI.
+async function settleAppointmentNoShowFee(paymentIntent) {
+  const piId = paymentIntent?.id;
+  const customerId = paymentIntent?.metadata?.waves_customer_id || null;
+  if (!piId || !customerId) return { settled: false, reason: 'missing_pi_or_customer' };
+
+  const StripeService = require('./stripe');
+  const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
+  const reason = paymentIntent.metadata?.reason || 'no_show';
+  const requestId = paymentIntent.metadata?.request_id || null;
+  const scheduledServiceId = paymentIntent.metadata?.scheduled_service_id || null;
+  const feeLabel = reason === 'late_cancel' ? 'Late-cancellation fee' : 'No-show fee';
+
+  const InvoiceService = require('./invoice');
+  // Neutral "appointment" wording (Codex #3153 r4 P2): the fee rail also
+  // covers recurring plan-choice visits — "one-time visit" on their
+  // invoice/receipt would be inaccurate billing copy.
+  const description = `Appointment — ${feeLabel.toLowerCase()}`;
+  const result = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${piId}`]);
+    const existing = await trx('payments').where({ stripe_payment_intent_id: piId })
+      .first('id', 'status', 'refund_status', 'refund_amount', 'metadata');
+    let adoptMarkerRowId = null;
+    let liveRefundIds = [];
+    let markerMeta = null;
+    let markerRefundedCents = 0;
+    if (existing) {
+      let meta = {};
+      try {
+        meta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
+      } catch { meta = {}; }
+      const fullyRefunded = String(existing.status || '').toLowerCase() === 'refunded'
+        || String(existing.refund_status || '').toLowerCase() === 'full';
+      const isMarker = meta.pre_settlement_refund === true || meta.pre_settlement_dispute === true;
+      if (!isMarker || fullyRefunded) return { replay: true };
+      // An invoice-bound row is SETTLED regardless of any residual marker
+      // flag (Codex #3153 r27 P1): a worker crash after the adoption
+      // commit but before the webhook-processed stamp replays this event —
+      // re-adopting would mint a second paid invoice + receipt and rebind
+      // the row away from the first.
+      if (meta.invoice_id) return { replay: true };
+      // A still-contested dispute marker stays untouched — the dispute-won
+      // handler flips it and re-triggers settlement (Codex #3153 r18 P1).
+      if (String(existing.status || '').toLowerCase() === 'disputed') return { replay: true };
+      // PARTIAL pre-settlement refund marker (Codex #3153 r17 P1): the fee
+      // was partially refunded before settlement — the business keeps the
+      // remainder, so the paid fee invoice must still be minted. Adopt the
+      // marker row (update, never a second insert) and carry its refund
+      // amount and canonical stamped_refund_ids forward.
+      adoptMarkerRowId = existing.id;
+      markerMeta = meta;
+      markerRefundedCents = Math.max(0, Math.round(Number(existing.refund_amount || 0) * 100));
+    }
+
+    // Refund guard INSIDE the PI lock (Codex #3153 r16 P1): a dashboard
+    // refund landing after an earlier unlocked check but before the paid
+    // rows insert would be acknowledged by the refund webhook with no row
+    // to mark — and this settlement would then book fully-paid revenue for
+    // a refunded charge. The live retrieve runs under the lock, right
+    // before the insert; FAIL CLOSED on a retrieve error (throw → rollback
+    // → Stripe redelivers).
+    let preRefundedCents = 0;
+    {
+      const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
+      const ch = live?.latest_charge;
+      if (ch && typeof ch === 'object') {
+        // Disputed BEFORE settlement (Codex #3153 r17 P1): Stripe permits
+        // charge.dispute.created to arrive before the succeeded event, and
+        // that handler finds nothing to mark — booking a paid fee invoice
+        // for money already clawed back would overstate revenue. Refuse
+        // UNLESS every dispute already closed in our favor (r18: disputed
+        // stays true forever on the charge — a WON dispute means the money
+        // is retained and the fee must settle). Status resolved through
+        // the Disputes API (r19 — `dispute` is not an expandable charge
+        // property); a list failure throws → rollback → Stripe retries.
+        if (ch.disputed === true) {
+          const disputes = await StripeService.listDisputesForCharge(ch.id);
+          const activeDispute = disputes.find((d) => !['won', 'warning_closed'].includes(String(d?.status || ''))) || null;
+          if (activeDispute || disputes.length === 0) {
+            // Persist the SAME marker the created-event handler writes
+            // (r19 P1) BEFORE refusing: a won closure delivered before the
+            // created event must find something to resettle. Adopts an
+            // existing refund marker instead of inserting a second row.
+            const disputeMeta = {
+              purpose: 'appointment_card_no_show_fee',
+              pre_settlement_dispute: true,
+              ...(activeDispute?.id ? { dispute_id: activeDispute.id } : {}),
+            };
+            if (adoptMarkerRowId) {
+              await trx('payments').where({ id: adoptMarkerRowId }).update({
+                status: 'disputed',
+                metadata: JSON.stringify({ ...(markerMeta || {}), ...disputeMeta }),
+              });
+            } else {
+              await trx('payments').insert({
+                customer_id: customerId,
+                processor: 'stripe',
+                payment_date: etDateString(),
+                amount,
+                status: 'disputed',
+                stripe_payment_intent_id: piId,
+                stripe_charge_id: ch.id,
+                metadata: JSON.stringify(disputeMeta),
+              });
+            }
+            logger.warn(`[appt-card-request] no-show fee disputed before settlement — durable marker written, skipping (${piId})`);
+            return { refundedPreSettlement: true };
+          }
+        }
+        const chargedCents = Math.round(Number(ch.amount || 0));
+        preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
+        // Only refunds whose money is counted in amount_refunded (Codex
+        // #3153 r27 P1): a failed/canceled refund can sit in the same
+        // collection — stamping its id would let its refund.failed event
+        // subtract an amount that was never included, erasing a legitimate
+        // successful refund from refund_amount.
+        liveRefundIds = Array.isArray(ch.refunds?.data)
+          ? ch.refunds.data
+            .filter((r) => ['succeeded', 'pending'].includes(String(r?.status || '')))
+            .map((r) => r?.id)
+            .filter(Boolean)
+          : [];
+        if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
+          // Durable FULL-refund marker with canonical attribution (Codex
+          // #3153 r21 P1): the delayed charge.refunded may BOUNCE via
+          // refund.failed first — an unmarked return would leave retained
+          // money with nothing for the bounce handler to unwind, and the
+          // late charge.refunded would be skipped.
+          const fullMeta = {
+            purpose: 'appointment_card_no_show_fee',
+            pre_settlement_refund: true,
+            ...(liveRefundIds.length ? { stamped_refund_ids: liveRefundIds } : {}),
+          };
+          const fullFields = {
+            refund_amount: preRefundedCents / 100,
+            refund_status: 'full',
+            status: 'refunded',
+            stripe_refund_id: liveRefundIds[liveRefundIds.length - 1] || null,
+          };
+          if (adoptMarkerRowId) {
+            await trx('payments').where({ id: adoptMarkerRowId }).update({
+              ...fullFields,
+              metadata: JSON.stringify({ ...(markerMeta || {}), ...fullMeta }),
+            });
+          } else {
+            await trx('payments').insert({
+              customer_id: customerId,
+              processor: 'stripe',
+              payment_date: etDateString(),
+              amount,
+              stripe_payment_intent_id: piId,
+              stripe_charge_id: ch.id,
+              ...fullFields,
+              metadata: JSON.stringify(fullMeta),
+            });
+          }
+          logger.warn(`[appt-card-request] no-show fee fully refunded before settlement — durable marker written, skipping (${piId})`);
+          return { refundedPreSettlement: true };
+        }
+      }
+    }
+    preRefundedCents = Math.max(preRefundedCents, markerRefundedCents);
+
+    // Face value, NO tax: the fee must equal the amount disclosed + charged.
+    const inv = await InvoiceService.create({
+      database: trx,
+      customerId,
+      title: description,
+      lineItems: [{ description: `${feeLabel} — appointment`, quantity: 1, unit_price: amount, amount }],
+      taxRate: 0,
+      dueDate: etDateString(),
+      skipAccrual: true,
+    });
+    // SELF-PAY: charged to the homeowner's saved card — never route the fee
+    // invoice/receipt to a third-party payer.
+    await trx('invoices').where({ id: inv.id }).update({
+      status: 'paid',
+      paid_at: trx.fn.now(),
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payer_id: null,
+      payer_snapshot: null,
+      updated_at: trx.fn.now(),
+    });
+    const settledPaymentFields = {
+      customer_id: customerId,
+      processor: 'stripe',
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payment_date: etDateString(),
+      amount,
+      refund_amount: preRefundedCents > 0 ? preRefundedCents / 100 : 0,
+      refund_status: preRefundedCents > 0 ? 'partial' : null,
+      // Canonical attribution for refunds discovered by the live retrieve
+      // (Codex #3153 r21 P1) — a later refund.failed bounce must find the
+      // ids it unwinds by.
+      ...(preRefundedCents > 0 && liveRefundIds.length
+        ? { stripe_refund_id: liveRefundIds[liveRefundIds.length - 1] }
+        : {}),
+      status: 'paid',
+      description,
+      metadata: JSON.stringify({
+        // Marker metadata (stamped_refund_ids) rides forward so a later
+        // refund bounce can still unwind it (r17) — but the marker FLAGS
+        // are cleared (r27 P1): a settled row must never look adoptable
+        // again on a crash replay, and invoice_id (below) is the settled
+        // fence the replay guard keys on.
+        ...(markerMeta || {}),
+        pre_settlement_refund: undefined,
+        pre_settlement_dispute: undefined,
+        ...(preRefundedCents > 0 && liveRefundIds.length ? { stamped_refund_ids: liveRefundIds } : {}),
+        purpose: 'appointment_card_no_show_fee',
+        invoice_id: inv.id,
+        request_id: requestId,
+        scheduled_service_id: scheduledServiceId,
+        reason,
+      }),
+    };
+    if (adoptMarkerRowId) {
+      await trx('payments').where({ id: adoptMarkerRowId }).update(settledPaymentFields);
+    } else {
+      await trx('payments').insert(settledPaymentFields);
+    }
+    // Heal a stuck fee claim (Codex #3153 r21 P1): if the charging worker
+    // died after Stripe accepted the PaymentIntent but before its row
+    // update, the request sits 'charging' forever and every cancellation/
+    // offboarding parks review despite the fee being durably settled here.
+    // charge_review advances too (r25 P1): a post-Stripe park (ambiguous
+    // submit outcome, commit failure after the PI went out) is resolved by
+    // this settlement — the claim is one-shot (NULL→charging), so a PI
+    // carrying this request_id can only belong to this row's single fee
+    // event; leaving the park would strand a durably-paid fee in review
+    // forever. Monotonic: terminal charged/released/waived never regress;
+    // the trusted request_id comes from the PI metadata this settlement
+    // already keys on.
+    if (requestId) {
+      await trx('appointment_card_requests')
+        .where({ id: requestId })
+        .whereIn('fee_status', ['charging', 'charge_review'])
+        .update({
+          fee_status: 'charged',
+          no_show_payment_intent_id: piId,
+          fee_charged_amount: amount,
+          fee_charged_at: new Date(),
+          updated_at: new Date(),
+        });
+    }
+    return { invoice: inv };
+  });
+  const { sendNoShowFeeReceipt } = require('./estimate-card-holds');
+  if (result.refundedPreSettlement) return { settled: false, reason: 'refunded_pre_settlement' };
+  if (result.replay) {
+    try {
+      const inv = await db('invoices').where({ stripe_payment_intent_id: piId })
+        .whereNot('status', 'void').orderBy('created_at', 'desc').first('id', 'token', 'receipt_sent_at');
+      if (inv?.id && !inv.receipt_sent_at) {
+        await sendNoShowFeeReceipt({ invoice: inv, customerId, amount, feeLabel, reason });
+      }
+    } catch (err) {
+      logger.warn(`[appt-card-request] replay receipt recovery failed (non-fatal): ${err.message}`);
+    }
+    return { settled: false, replay: true };
+  }
+  const invoice = result.invoice;
+  logger.info(`[appt-card-request] no-show fee settled as paid invoice ${invoice.id} (customer ${customerId}, ${reason})`);
+  try {
+    await sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason });
+  } catch (err) {
+    logger.warn(`[appt-card-request] no-show fee receipt/notify failed (non-fatal): ${err.message}`);
+  }
+  return { settled: true, invoiceId: invoice.id };
+}
+
 module.exports = {
   requestCardForAppointment,
   isAppointmentCardRequestEnabled,
@@ -1157,6 +2581,14 @@ module.exports = {
   loadSecureCardPageData,
   completeSecureCardCapture,
   completeSecureCardCaptureFromWebhook,
+  chargeAppointmentNoShowFee,
+  handleAppointmentCardCancellation,
+  alertUnresolvedCancellationFee,
+  appointmentCardCancelPreview,
+  chargeAppointmentCardForRecapCompletion,
+  settleAppointmentNoShowFee,
+  resettleAppointmentFeeFromPi,
+  isWithinApptCancelWindow,
   _test: {
     dateLineFor,
     resolveExemption,

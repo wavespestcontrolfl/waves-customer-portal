@@ -1072,7 +1072,111 @@ violations at the severity noted.
   plan-value-guarded so a selection switch cannot cross a capture
   mid-flight. Treat the token, the verification
   gates, the selection/mint transaction, and the claim mechanics as
-  security-critical).
+  security-critical.
+  **Appointment-card enforcement rails (2026-08-01, both dark, fail-closed
+  `feature-gates.js` money gates):** the /secure page RENDER stamps the
+  disclosed terms onto the pending request row (`no_show_fee_amount` /
+  `cancel_window_hours` + `accepted_amount`, the completion-charge cap —
+  last disclosure shown wins, fee-off renders clear the stamp), and the
+  completion tail only records consent (`fee_agreed_at`) against those
+  stamped values — it NEVER re-reads live config, so a config/price change
+  between render and consent cannot move an agreed fee or widen the cap
+  (Codex #3153 r1). The stamp is LOAD-BEARING: a failed/zero-row stamp
+  renders `unavailable` instead of the card form (an earlier render's
+  higher terms must never sit chargeable behind a lower disclosure), and
+  the fee rail refuses any row without a recorded `fee_agreed_at` +
+  positive frozen window (`no_fee_consent`). `accepted_amount` stamps
+  ONLY when the page DISPLAYED the price (planContext present — r2): with
+  `GATE_SECURE_PLAN_CHOICE` off no number renders, so page-secured rows
+  stay uncharged (completion routes to review) until that gate is on —
+  flip order matters. The stamp is MONOTONIC-DOWN with sticky sentinels
+  (r3): completion cannot know which open tab's render was consented
+  from, so a re-render may LOWER the frozen fee/cap (SQL LEAST, atomic)
+  but never raise it, and a render that disclosed no fee
+  (`cancel_window_hours = 0` sentinel) or no price (`accepted_amount = 0`
+  sentinel) pins the row unchargeable permanently — enforced terms are ≤
+  every disclosure ever shown on the link. The /secure page and the
+  enrollment email state the EXACT window hours being frozen (a fee under
+  an undisclosed cutoff is not consented); the SMS keeps the short
+  "last-minute" clause (segment budget — the page is the consent
+  surface). Fee-state machine is terminal-everything: a timely
+  free cancel persists `fee_status='released'` BEFORE reporting release
+  (cancellation retries re-run side effects — an unpersisted free cancel
+  must never become chargeable later), and BOTH races (lost charge claim,
+  lost free-release stamp) report the canonical NON-released
+  `charge_review`, never a clean outcome. Fee terms live on COMPLETED rows only; a `satisfied`
+  auto-secured row never saw the disclosure and is NEVER fee-charged (it
+  does get `accepted_amount`, frozen at auto-secure time); rows from
+  before the fee-terms migrations stay unchargeable. (1)
+  `GATE_APPT_CARD_NO_SHOW_FEE` — `chargeAppointmentNoShowFee` /
+  `handleAppointmentCardCancellation` in `appointment-card-request.js`
+  mirror the card-hold fee rail posture-for-posture (staleness guards +
+  shared exported constants, `fee_status` NULL→charging atomic claim,
+  ambiguous-outcome parking to `charge_review`, face-value
+  surcharge-exempt `chargeSavedPaymentMethodOffSession`, PI purpose
+  `appointment_card_no_show_fee`, webhook-settled as a paid refundable
+  taxRate-0 self-pay invoice via `settleAppointmentNoShowFee` + the shared
+  `sendNoShowFeeReceipt`). Runs ONLY as the no-hold fallback at the
+  existing card-hold call sites (dispatch no_show/cancel, schedule bulk/V2
+  cancel, cancellation-processor, offboarding waive — which gates the
+  deposit refund on a clean waive) — an `estimate_card_holds` row of ANY
+  status makes the rail skip (`card_hold_lane`), and that lookup FAILS
+  CLOSED: a lookup error or an in-flight `charging`/`charge_review`
+  fee_status returns a NON-released canonical `charge_review` from the
+  cancellation handler (never "released", never treated as absence). The
+  rail also RE-RESOLVES the payer both in eligibility AND at the claim
+  boundary (r6+r8): a third-party payer assigned after the card was
+  secured exempts the homeowner (`payer_billed` — a post-claim payer hit
+  closes the fee event terminally as 'released'), a payer lookup error is
+  unresolved / reverts the claim (fail closed), and unresolved fee states
+  are checked BEFORE the payer exemption so an in-flight charge can never
+  be reported as a clean payer release. The completion charge's frozen
+  cap (`maxAuthorizedSubtotal`) is enforced inside
+  `chargeInvoiceWithSavedCard` against the LOCKED invoice and BEFORE any
+  account-credit application — the fully-covered-by-credit early return
+  must never consume credit above consent — and the dispatch route's OWN
+  credit auto-apply is fenced off over-cap appointment-lane invoices AND
+  off UNVERIFIABLE lanes (lookup error — r9/r10: review must see the bill
+  exactly as minted, full coverage must not flip it prepaid past a
+  never-evaluated cap, and an error must not bypass the fence). The
+  cancel preview surfaces an unverifiable lane as fee-may-apply
+  (`unresolved: true`, never a silent "no fee"); the secured page repeats
+  the FROZEN row terms (EVERY satisfied transition carries none —
+  including the page's own auto-secure branch); and a card the customer
+  removed is honored as revoked — the fee closes 'released' with an
+  office alert, the local payment_methods row must still exist before any
+  fee charge, and the fee path performs NO attach self-heal at all (a
+  method detached by a racing removal fails the charge instead of being
+  resurrected). Every satisfied heal (auto-secure update, autopay heal, prepay
+  heal) applies the SAME monotonic-down accepted_amount stamp as the
+  render — a heal can never overwrite the sticky 0 sentinel or widen a
+  lower disclosed cap. The
+  `GET /:serviceId/card-hold` cancel preview merges both lanes so the
+  client waive prompts work unchanged. (2)
+  `GATE_APPT_CARD_COMPLETION_CHARGE` — the dispatch completion
+  auto-charge guard widens from `perApplicationBilling` to
+  `(perApplicationBilling || apptCardOneTimeCharge)`: a ONE-TIME visit
+  (`is_recurring !== true`, not per-app/prepay/membership lane, no hold
+  row) with a completed-or-satisfied `appointment_card_requests` row and
+  active Auto Pay auto-charges its completion invoice through the same
+  rail, hard-capped at the lane row's FROZEN `accepted_amount` ONLY —
+  never the live `estimated_price`, no acceptance-fee fallback, no
+  setup-fee allowance (those stay per-application concepts); NULL
+  accepted_amount routes to office review instead of charging. Autopay-log
+  source `appointment_card_completion`. The recap closeout path
+  (`pest-recap.js`, which completes without invoicing) runs
+  `chargeAppointmentCardForRecapCompletion` as the no-hold fallback after
+  the card-hold recap rail — same exclusions and frozen cap, invoice
+  minted through the SHARED `resolveOrMintRecapCompletionInvoice` helper,
+  which serializes on the CANONICAL `['schedule.invoice.mint', svc.id]`
+  advisory lock (the same lock every scheduled-service invoice writer
+  takes — a recap overlapping the dispatch /complete mint must contend on
+  it or both paths mint and auto-charge separate invoices; r4),
+  autopay-log source
+  `appointment_card_recap_completion`, every non-charge outcome alerts the
+  office (recap has no pay-link fallback). Source contracts pin the guard
+  strings — `admin-dispatch-backfill-completion.test.js` and
+  `appointment-card-fees.test.js` must move with any change here.)
   `/api/mcp` (POST; machine-to-machine JSON-RPC — a minimal read-only MCP
   server exposing the knowledge index (hybrid search, catalog service +
   static protocol lookups, corpus stats) to MCP clients such as Claude Code

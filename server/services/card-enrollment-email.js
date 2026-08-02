@@ -230,7 +230,7 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
 // every eligibility rule stays enforced in one place. Idempotent per visit:
 // a stale-claim retry that re-enters the funnel can't double-send the
 // email any more than it can re-text.
-async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serviceType, dateLine = '', secureUrl, planChoice = false } = {}) {
+async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serviceType, dateLine = '', secureUrl, planChoice = false, feeDisclosure = undefined } = {}) {
   try {
     if (!emailsEnabled() || !customerId || !scheduledServiceId || !secureUrl) return null;
     const { customer, email } = await loadCustomerEmail(customerId);
@@ -279,15 +279,31 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
     // composed locally to avoid a circular require back into
     // appointment-card-request.
     let cancelFeeSentence = '';
-    try {
-      const { cardHoldNoShowFee } = require('./estimate-card-holds');
-      const fee = Number(cardHoldNoShowFee());
-      if (fee > 0) {
+    if (feeDisclosure !== undefined) {
+      // Caller-frozen disclosure (Codex #3153 r21 P1): the funnel stamped
+      // these exact values onto the request row before handing them over —
+      // the email may only state terms the row is bound by. null = the
+      // stamp failed or fee is off → no sentence at all.
+      if (feeDisclosure && Number(feeDisclosure.feeAmount) > 0) {
+        const fee = Number(feeDisclosure.feeAmount);
         const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-        cancelFeeSentence = `A ${feeText} fee applies only for last-minute cancels or no-shows. Rescheduling is always free.`;
+        cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${Number(feeDisclosure.windowHours)} hours before your visit. Rescheduling is always free.`;
       }
-    } catch (feeErr) {
-      logger.warn(`[card-enrollment-email] cancel-fee line unavailable — omitting: ${feeErr.message}`);
+    } else {
+      // Legacy derivation for callers without a frozen snapshot.
+      try {
+        const { cardHoldNoShowFee, cardHoldCancelWindowHours } = require('./estimate-card-holds');
+        const fee = Number(cardHoldNoShowFee());
+        if (fee > 0) {
+          const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
+          // The enforced window is part of the disclosure (Codex #3153 r3 P0)
+          // — same derived hours the /secure page states and stamps.
+          const windowHours = Number(cardHoldCancelWindowHours()) > 0 ? Number(cardHoldCancelWindowHours()) : 24;
+          cancelFeeSentence = `A ${feeText} fee applies only to no-shows or cancellations less than ${windowHours} hours before your visit. Rescheduling is always free.`;
+        }
+      } catch (feeErr) {
+        logger.warn(`[card-enrollment-email] cancel-fee line unavailable — omitting: ${feeErr.message}`);
+      }
     }
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
