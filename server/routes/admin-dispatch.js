@@ -7342,6 +7342,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // #3153 r21 P1) — a payer assigned after the invoice was
             // pre-minted must not have the homeowner's credit consumed.
             requireSelfPayScheduledServiceId: svc.id,
+            // One-time lane re-verified INSIDE the credit locks (Codex
+            // #3153 r24 P1): a lane change racing this route must not have
+            // credit consumed (or the invoice marked prepaid) for a visit
+            // that is no longer one-time — mirrors the saved-card guard.
+            requireOneTimeLane: true,
           } : {}),
         });
         if (creditResult?.applied > 0) {

@@ -193,8 +193,14 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false }, trx = null) {
   const run = async (t) => {
+    // The lane check lives inside the visit-lock block — without a visit
+    // to lock it cannot be verified, so fail closed rather than silently
+    // skipping the revalidation.
+    if (requireOneTimeLane && requireSelfPayScheduledServiceId == null) {
+      return { applied: 0, skipped: 'lane_unverifiable' };
+    }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
     // Live payer SERIALIZED with the credit apply (Codex #3153 r21 P1):
@@ -213,15 +219,31 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
         const lockedCustomer = await t('customers')
           .where({ id: invoice.customer_id })
           .forUpdate()
-          .first('id');
+          .first('id', 'billing_mode', 'monthly_rate', 'waveguard_tier');
         if (!lockedCustomer) return { applied: 0, skipped: 'customer_missing' };
         const lockedSvc = await t('scheduled_services')
           .where({ id: requireSelfPayScheduledServiceId })
           .forUpdate()
-          .first('id', 'customer_id');
+          .first('id', 'customer_id', 'is_recurring');
         if (!lockedSvc) return { applied: 0, skipped: 'service_missing' };
         if (String(lockedSvc.customer_id) !== String(invoice.customer_id)) {
           return { applied: 0, skipped: 'customer_mismatch' };
+        }
+        // One-time-lane revalidation UNDER the locks (Codex #3153 r24 P1)
+        // — mirrors chargeInvoiceWithSavedCard's requireOneTimeLane: a
+        // billing-lane change (membership, annual prepay, per-application)
+        // or the visit turning recurring after the route's preflight must
+        // refuse the credit apply, not consume credit (or mark the invoice
+        // prepaid) beside dues or coverage.
+        if (requireOneTimeLane) {
+          const { resolveBillingLane } = require('./billing-lane');
+          const lane = resolveBillingLane(lockedCustomer);
+          if (lockedCustomer.billing_mode === 'per_application'
+            || lane.mode === 'monthly_membership'
+            || lane.mode === 'annual_prepay'
+            || lockedSvc.is_recurring === true) {
+            return { applied: 0, skipped: 'not_one_time_lane' };
+          }
         }
         const resolved = await require('./payer').resolveForInvoice({
           database: t,

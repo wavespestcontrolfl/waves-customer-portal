@@ -1408,7 +1408,15 @@ async function feeEligibleRequestForVisit(scheduledServiceId) {
     .where({ scheduled_service_id: scheduledServiceId })
     .first();
   if (!request) return { request: null, reason: 'no_card_request' };
-  if (request.status !== 'completed') return { request: null, reason: 'not_completed' };
+  if (request.status !== 'completed') {
+    // inFlight distinguishes a capture mid-completion ('completing') from
+    // rows that never gained consent (pending/declined) — the no-show
+    // path parks the former for review instead of declaring "no charge"
+    // (Codex #3153 r24 P2): the capture can finish with valid fee consent
+    // right after, and the no-show route's idempotent retry would never
+    // re-evaluate the agreed fee.
+    return { request: null, reason: 'not_completed', inFlight: request.status === 'completing' };
+  }
   if (!(Number(request.no_show_fee_amount) > 0)) return { request: null, reason: 'no_agreed_fee' };
   if (!(Number(request.cancel_window_hours) > 0)) return { request: null, reason: 'no_agreed_fee' };
   // Consent must be RECORDED, not implied (pre-push r2 P0): the completion
@@ -1490,13 +1498,33 @@ function isWithinApptCancelWindow({ request, serviceStart, now = new Date() }) {
 
 async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date() }) {
   if (!isApptCardFeeRailEnabled()) return { charged: false, reason: 'feature_disabled' };
-  const { request, reason: skipReason, unresolved } = await feeEligibleRequestForVisit(scheduledServiceId);
+  const { request, reason: skipReason, unresolved, inFlight } = await feeEligibleRequestForVisit(scheduledServiceId);
   // Unresolved eligibility (failed payer/hold lookup) surfaces as the
   // canonical review reason (Codex #3153 r16 P2): the dispatch no-show
   // path maps ONLY charge_review to its cautious customer copy — a raw
   // lookup-failure reason would send "there's no charge" while the agreed
   // fee sits retryable.
-  if (!request) return { charged: false, reason: unresolved ? 'charge_review' : skipReason };
+  if (!request) {
+    // Capture in flight at no-show time (Codex #3153 r24 P2): the /secure
+    // completion can commit 'completed' with valid fee consent moments
+    // after this read, and the no-show route's same-status retry never
+    // re-evaluates — a "no charge" here would silently drop an agreed
+    // fee. Park review DURABLY (whereNull-guarded, same stamp discipline
+    // as the cancel path) so the office decides; a lost stamp still
+    // reports review.
+    if (!unresolved && skipReason === 'not_completed' && inFlight) {
+      try {
+        await db('appointment_card_requests')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .whereNull('fee_status')
+          .update({ fee_status: 'charge_review', updated_at: new Date() });
+      } catch (err) {
+        logger.error(`[appt-card-request] in-flight-capture review stamp failed for visit ${scheduledServiceId}: ${err.message}`);
+      }
+      return { charged: false, reason: 'charge_review' };
+    }
+    return { charged: false, reason: unresolved ? 'charge_review' : skipReason };
+  }
   const feeAmount = Number(request.no_show_fee_amount);
 
   // Staleness guard — identical posture to the card-hold rail: the fee is

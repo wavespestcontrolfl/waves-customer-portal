@@ -214,6 +214,16 @@ describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
     expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 
+  test('capture in flight (completing) at no-show time → durable review park, never "no charge"', async () => {
+    const updates = [];
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'completing' } });
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => { updates.push(patch); return 1; };
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ charged: false, reason: 'charge_review' });
+    expect(updates.some((p) => p.fee_status === 'charge_review')).toBe(true);
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
   test('completed row without frozen fee terms (pre-migration) → no_agreed_fee', async () => {
     mockTableHandlers = handlersWith({ request: { ...REQUEST(), no_show_fee_amount: null } });
     const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });

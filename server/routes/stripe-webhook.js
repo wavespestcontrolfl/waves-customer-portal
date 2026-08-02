@@ -2400,6 +2400,15 @@ async function handleChargeRefunded(charge) {
   // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
   const refundedPayment = await db.transaction(async (trx) => {
+    // Fee-lane refunds serialize with settlement's marker adoption (Codex
+    // #3153 r24 P1): an existing fee row (pre-settlement marker or settled
+    // row) updated here unlocked could commit between settlement's plain
+    // read and its adopting write — the newer cumulative refund amount and
+    // id would be overwritten by the stale snapshot and lost. Lane from
+    // trusted charge metadata (mirrors the PI's).
+    if (charge.payment_intent && charge.metadata?.purpose === 'appointment_card_no_show_fee') {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${charge.payment_intent}`]);
+    }
     await trx('payments')
       .where({ stripe_charge_id: chargeId })
       .update({
@@ -4762,8 +4771,27 @@ async function handleDisputeClosed(dispute) {
       if (wonPi?.metadata?.purpose === 'appointment_card_no_show_fee') {
         await db.transaction(async (trx) => {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
-          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id');
-          if (rowInLock) return;
+          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'metadata');
+          if (rowInLock) {
+            // Settlement (or a created-event marker) won the lock race
+            // (Codex #3153 r24 P1): the closure must still leave its
+            // final-state fence — returning unstamped would let a delayed
+            // created event mark the reinstated payment disputed and
+            // reopen its invoice. Stamp under the same lock; the post-txn
+            // re-read below picks up marker rows for the settle flip.
+            let appearedMeta = {};
+            try {
+              appearedMeta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
+            } catch { appearedMeta = {}; }
+            await trx('payments').where({ id: rowInLock.id }).update({
+              metadata: JSON.stringify({
+                ...appearedMeta,
+                dispute_id: dispute.id,
+                dispute_final: status,
+              }),
+            });
+            return;
+          }
           await trx('payments').insert({
             customer_id: wonPi.metadata?.waves_customer_id || null,
             processor: 'stripe',
