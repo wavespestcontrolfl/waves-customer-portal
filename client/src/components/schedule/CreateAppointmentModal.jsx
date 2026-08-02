@@ -552,6 +552,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   useEffect(() => {
     setBillAsAnnualPrepay(false);
   }, [linkedEstimateIdForPrepay]);
+  // Annual prepay on a MANUAL booking — the phone-"yes" case with no quote
+  // behind it, where billAsAnnualPrepay above has nothing to price. Every
+  // number comes from the server preview
+  // (/admin/schedule/annual-prepay-preview); the modal NEVER composes an
+  // amount, and the mint posts the preview's own mintPayload back. Also
+  // mutually exclusive with collectPrepay (that one records cash taken in
+  // person; this one invoices the year).
+  const [billAsManualPrepay, setBillAsManualPrepay] = useState(false);
+  const [manualPrepay, setManualPrepay] = useState(null);
+  const [manualPrepayLoading, setManualPrepayLoading] = useState(false);
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
@@ -1235,6 +1245,69 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Deliberately keyed on the scheduling inputs only.
   }, [services, apptDate, recurringCount, skipWeekends, weekendShift]);
 
+  // The booking shape the annual-prepay preview prices: the FIRST submit
+  // group, which is what a manual (quote-less) booking posts. Add-on lines
+  // and booster months are passed through as flags rather than filtered —
+  // the server owns the "can this be sold as prepay" answer, including the
+  // reason text the operator reads.
+  const manualPrepayQuery = useMemo(() => {
+    const group = groupServicesForAppointmentSubmit(services)[0] || null;
+    if (!selectedCustomer || !group || group.cadence === 'one_time') return null;
+    const price = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
+    return {
+      customerId: String(selectedCustomer.id),
+      serviceType: group.lines[0]?.name || '',
+      price: String(price),
+      cadence: group.cadence,
+      intervalDays: String(group.intervalDays || ''),
+      hasAddons: String(group.lines.length > 1),
+      hasBoosters: String(group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0)),
+      firstVisitDate: String(apptDate || '').split('T')[0],
+      windowStart,
+    };
+  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart]);
+
+  // Preview fetch. Runs whenever the control is on screen — NOT only once
+  // armed — so the operator sees the real price on the button and an
+  // ineligible booking disables it with the reason BEFORE clicking, instead
+  // of arming a choice that can't be sold. Read-only and debounced, so
+  // typing a rate doesn't fire a request per keystroke; the LAST response
+  // wins via the cancelled flag.
+  const manualPrepayQueryKey = manualPrepayQuery ? JSON.stringify(manualPrepayQuery) : '';
+  useEffect(() => {
+    if (linkedEstimate || !manualPrepayQueryKey) {
+      setManualPrepay(null);
+      setManualPrepayLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setManualPrepayLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams(JSON.parse(manualPrepayQueryKey));
+        const r = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
+        if (!cancelled) setManualPrepay(r);
+      } catch (e) {
+        // A failed probe must not read as "eligible" — fail toward the
+        // choice being unavailable, with the reason visible.
+        if (!cancelled) setManualPrepay({ eligible: false, blockReason: `couldn’t be priced: ${e.message}` });
+      } finally {
+        if (!cancelled) setManualPrepayLoading(false);
+      }
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [linkedEstimate, manualPrepayQueryKey]);
+
+  // Clearing the recurring plan, linking a quote, or editing the booking into
+  // an ineligible shape must not leave a stale prepay choice armed — the
+  // submit would then try to mint against a booking that can't carry it.
+  const manualPrepayEligible = manualPrepay?.eligible === true;
+  useEffect(() => {
+    if (!manualPrepayQuery || linkedEstimate || (manualPrepay && !manualPrepayEligible)) {
+      setBillAsManualPrepay(false);
+    }
+  }, [manualPrepayQuery, linkedEstimate, manualPrepay, manualPrepayEligible]);
+
   // Compute window_end given a start time and a duration in minutes.
   const computeWindowEnd = (start, durationMin) => {
     const [h, m] = start.split(':').map(Number);
@@ -1493,13 +1566,53 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       alert(lead + tail);
       return;
     }
+    // Annual prepay on a manual booking: mint AFTER the series is committed,
+    // never before — a prepay invoice for a booking that failed to save would
+    // sell a year of visits that don't exist. The preview is re-fetched here
+    // rather than reusing the displayed one so the amount, coverage and
+    // eligibility are re-derived from what was ACTUALLY booked (the operator
+    // can change the rate or date after the last preview), and the server's
+    // own mintPayload is what gets posted.
+    let prepayNotice = '';
+    if (billAsManualPrepay && !linkedEstimate && manualPrepayQuery) {
+      setSaving(true);
+      try {
+        const params = new URLSearchParams(manualPrepayQuery);
+        const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
+        if (!fresh?.eligible) {
+          throw new Error(`annual prepay ${fresh?.blockReason || 'is no longer available for this booking'}`);
+        }
+        const minted = await adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
+          method: 'POST',
+          body: JSON.stringify(fresh.mintPayload),
+        });
+        const num = minted?.invoice?.invoice_number ? ` ${minted.invoice.invoice_number}` : '';
+        prepayNotice = minted?.delivery?.ok === false
+          ? `Annual prepay invoice${num} created for ${formatMoney(fresh.prepayTotal)}, but sending it failed — send it from the customer's invoices.`
+          : `Annual prepay invoice${num} sent for ${formatMoney(fresh.prepayTotal)}.`;
+      } catch (e) {
+        // Loud, never silent: the appointment IS booked, so the operator must
+        // know the year was not invoiced and where to finish it.
+        alert(`Appointment booked, but the annual prepay invoice was NOT created: ${e.message}\n\nMint it from the customer's profile (Customer 360 → Annual prepay) if they still want to prepay.`);
+      } finally {
+        setSaving(false);
+      }
+    }
     const apptCount = results.length || createdGroupKeysRef.current.size;
     const estimateAccepted = results.some((r) => r?.estimateAccepted);
     const apptWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
-    const baseMessage = apptCount === 1
-      ? 'Appointment created — invoice will send with service report'
-      : `${apptCount} appointment series created — invoices will send with each service report`;
-    setToast(estimateAccepted ? `Estimate marked accepted. ${baseMessage}` : baseMessage);
+    // A prepaid year is NOT billed per service report — say what actually
+    // happens instead of the per-visit copy.
+    const baseMessage = prepayNotice
+      ? (apptCount === 1 ? 'Appointment created' : `${apptCount} appointment series created`)
+      : (apptCount === 1
+        ? 'Appointment created — invoice will send with service report'
+        : `${apptCount} appointment series created — invoices will send with each service report`);
+    setToast([
+      estimateAccepted ? 'Estimate marked accepted.' : '',
+      baseMessage,
+      prepayNotice,
+    ].filter(Boolean).join(' '));
     // A guarded estimate (one-time/recurring choice, invoice-mode, expired,
     // pending manager approval) books fine but couldn't be auto-accepted — tell
     // the operator so they can record the win from the Estimates page.
@@ -2368,6 +2481,91 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
         </div>
 
+        {/* Annual prepay on a MANUAL booking — the phone-"yes" with no quote
+            behind it. A linked quote uses the estimate card's own prepay
+            control instead (it prices the QUOTED plan), so this renders only
+            without one. Amounts, coverage and eligibility all come from the
+            server preview; the button never shows a locally computed total. */}
+        {!linkedEstimate && hasRecurringServices && selectedCustomer && (() => {
+          const eligible = manualPrepay?.eligible === true;
+          // Known-unsellable: a resolved preview that said no. An in-flight
+          // probe is NOT blocked (no reason to show yet) — it just can't be
+          // armed until it answers.
+          const blocked = !!manualPrepay && !eligible && !manualPrepayLoading;
+          // Sized to the sibling "Collect prepayment" block (14px control,
+          // 13px detail), not the estimate card's denser nested control.
+          const segStyle = (active) => ({
+            flex: 1,
+            padding: '8px 10px',
+            borderRadius: 6,
+            fontSize: 14,
+            fontWeight: 500,
+            cursor: 'pointer',
+            border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
+            background: active ? '#DCFCE7' : D.bg,
+            color: active ? '#166534' : D.muted,
+          });
+          const prepayLabel = manualPrepayLoading
+            ? 'Annual prepay — pricing…'
+            : (eligible ? `Annual prepay — invoices ${formatMoney(manualPrepay.prepayTotal)}` : 'Annual prepay');
+          return (
+            <div style={sectionStyle}>
+              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+                Billing
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {/* Per visit reads active whenever prepay isn't armed OR
+                    can't be sold — that IS how the booking will bill. */}
+                <button
+                  type="button"
+                  onClick={() => setBillAsManualPrepay(false)}
+                  style={segStyle(!billAsManualPrepay || !eligible)}
+                >
+                  Per visit
+                </button>
+                <button
+                  type="button"
+                  disabled={blocked}
+                  onClick={() => {
+                    // Turning prepay ON turns OFF the in-person collection
+                    // toggle: one records cash already taken, the other
+                    // invoices the year — both at once double-counts.
+                    setBillAsManualPrepay(true);
+                    setCollectPrepay(false);
+                  }}
+                  style={{
+                    ...segStyle(billAsManualPrepay && eligible),
+                    ...(blocked ? { opacity: 0.5, cursor: 'not-allowed' } : {}),
+                  }}
+                >
+                  {prepayLabel}
+                </button>
+              </div>
+              {blocked && (
+                <div style={{ fontSize: 13, color: D.muted, marginTop: 6 }}>
+                  Annual prepay {manualPrepay.blockReason || 'isn’t available for this booking'}.
+                </div>
+              )}
+              {billAsManualPrepay && eligible && (
+                <div style={{ fontSize: 13, color: D.muted, marginTop: 8, lineHeight: 1.5 }}>
+                  {manualPrepay.visitsPerYear} visits × {formatMoney(manualPrepay.perVisit)} ={' '}
+                  {formatMoney(manualPrepay.annualBase)}
+                  {manualPrepay.discountAmount > 0
+                    ? ` · less ${manualPrepay.discountLabel} prepay discount (${formatMoney(manualPrepay.discountAmount)})`
+                    : ''}
+                  {manualPrepay.setupFee?.waivedWithPrepay
+                    ? ` · ${formatMoney(manualPrepay.setupFee.amount)} setup fee waived`
+                    : ''}
+                  <br />
+                  On save this invoices <strong>{formatMoney(manualPrepay.prepayTotal)}</strong> for the year and
+                  texts/emails the pay link. Visits bill per application until it&rsquo;s paid; on payment the
+                  year&rsquo;s {manualPrepay.visitsPerYear} visits are marked prepaid.
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* Prepaid collection toggle */}
         {hasRecurringServices && (() => {
           const parsedCount = Number.parseInt(recurringCount, 10);
@@ -2378,7 +2576,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           return (
             <div style={{ ...sectionStyle, background: collectPrepay ? '#F0FDF4' : undefined, border: collectPrepay ? '1px solid #BBF7D0' : undefined, borderRadius: 8, padding: collectPrepay ? 14 : undefined }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                <input type="checkbox" checked={collectPrepay} onChange={(e) => { setCollectPrepay(e.target.checked); if (e.target.checked) setBillAsAnnualPrepay(false); }} />
+                <input type="checkbox" checked={collectPrepay} onChange={(e) => { setCollectPrepay(e.target.checked); if (e.target.checked) { setBillAsAnnualPrepay(false); setBillAsManualPrepay(false); } }} />
                 <span style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Collect prepayment{billAsAnnualPrepay ? ' in person (turns off the annual-prepay invoice)' : ''}</span>
               </label>
               {collectPrepay && (

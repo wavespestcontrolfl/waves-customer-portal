@@ -7754,6 +7754,167 @@ router.get('/card-request-availability', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/annual-prepay-preview — can the booking the
+// operator is composing in the New Appointment modal be sold as an annual
+// prepay, and for exactly how much?
+//
+// Read-only. The modal has no linked estimate in this lane (the quote-linked
+// prepay control at CreateAppointmentModal.jsx:1904 covers that case), so
+// there is no quote to price against — coverage and price derive from the
+// BOOKED plan, exactly like the /secure plan picker does for a booked series.
+// Every number the operator sees comes from here, never from client math:
+// the modal posts what this returns (`mintPayload`) to the Customer 360
+// annual-prepay mint, so a client-side total could otherwise invoice an
+// amount nobody quoted.
+//
+// Ineligible combinations return `eligible: false` with an operator-readable
+// `blockReason` (never a 4xx — "you can't sell prepay on this booking" is a
+// normal answer, not an error) so the modal can disable the choice BEFORE
+// save instead of booking and failing the mint afterwards. Fail closed:
+// anything unsound is ineligible, never a guessed price.
+router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
+  try {
+    const {
+      computeSeriesPrepayPricing,
+      PLAN_CLASS_BY_SERVICE_KEY,
+      annualPrepayOverlapStatusClause,
+    } = require('../services/secure-appointment-plans');
+
+    const blocked = (blockReason) => res.json({ eligible: false, blockReason });
+
+    const customerId = String(req.query.customerId || '').trim();
+    const coverageServiceType = String(req.query.serviceType || '').trim();
+    if (!customerId || !coverageServiceType) {
+      return res.status(400).json({ error: 'customerId and serviceType are required' });
+    }
+
+    // A blank / zero rate is "manual quote pending", NEVER $0 (waves-billing
+    // invariant 8) — there is no year to price yet.
+    const perVisit = req.query.price === undefined || req.query.price === null || req.query.price === ''
+      ? null
+      : Number(req.query.price);
+    if (!(perVisit > 0)) {
+      return blocked('needs a per-visit price — a blank rate means the quote is still manual');
+    }
+
+    // The modal encodes every-6-weeks as pattern 'custom' + 42-day interval;
+    // normalize the same way the prepay-on-book preflight does, else a valid
+    // 6-week plan reads as an unsupported custom cadence.
+    const rawCadence = String(req.query.cadence || '').trim();
+    const cadence = (rawCadence === 'custom' && Number(req.query.intervalDays) === 42)
+      ? 'every_6_weeks'
+      : rawCadence;
+    if (!cadence || cadence === 'one_time') return blocked('needs a recurring visit');
+    const visitsPerYear = visitsPerYearForCadence(cadence);
+    const coverageCadence = prepayCoverageCadenceForPattern(cadence);
+    if (!visitsPerYear || !coverageCadence) {
+      return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
+    }
+
+    // Same two combinations the quote-linked prepay control refuses: the
+    // prepay invoice prices ONE recurring plan, so add-on lines and booster
+    // months would bill outside the coverage the customer paid for.
+    if (req.query.hasAddons === 'true') {
+      return blocked('can’t be combined with add-on service lines — book them as a separate appointment');
+    }
+    if (req.query.hasBoosters === 'true') return blocked('can’t be combined with booster months');
+
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'property_type');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Commercial/business invoices carry county tax (InvoiceService.create
+    // computes it), which would split the total quoted here from the total
+    // minted — same v1 exclusion the /secure picker takes. Customer 360's
+    // mint, where the operator sees the taxed total before sending, stays
+    // the path for those.
+    if (['commercial', 'business'].includes(String(customer.property_type || '').toLowerCase())) {
+      return blocked('isn’t available for commercial properties here — mint it from Customer 360 so the taxed total is visible before sending');
+    }
+
+    // Third-party-billed customers never get a homeowner prepay invoice.
+    // Fail toward refusing on a lookup error (same rule as the card-request
+    // funnel and the /secure lane).
+    try {
+      const PayerService = require('../services/payer');
+      const resolved = await PayerService.resolveForInvoice({ customerId, throwOnError: true });
+      if (resolved?.payerId) return blocked('isn’t available — this customer’s invoices bill to a third-party payer');
+    } catch (payerErr) {
+      logger.warn(`[schedule:prepay-preview] payer lookup failed for customer ${customerId}: ${payerErr.message} — refusing`);
+      return blocked('couldn’t confirm who this customer bills to — refresh and try again');
+    }
+
+    // Same service→incentive-class whitelist the /secure page uses: solo
+    // pest/mosquito take the $99 WaveGuard setup waiver, the discountable
+    // residential programs take the percentage. Anything unlisted (commercial
+    // keys, unclassifiable names) has no owner-approved prepay incentive.
+    const { recurringServiceKey } = require('../services/estimate-converter');
+    const planClass = PLAN_CLASS_BY_SERVICE_KEY[recurringServiceKey({ name: coverageServiceType })] || null;
+    if (!planClass) return blocked('isn’t available for this service');
+
+    // Surface an existing term as a block rather than letting the mint 409
+    // after the appointment is already booked.
+    const overlapping = await db('annual_prepay_terms')
+      .where({ customer_id: customerId })
+      .where(annualPrepayOverlapStatusClause())
+      .orderBy('term_end', 'desc')
+      .first('id', 'term_end');
+    // Local-calendar date-only read (NOT toISOString) — a UTC slice on a
+    // timestamptz term_end shifts the boundary a day in ET.
+    const { callBookingDateOnly } = require('../services/call-booking-catalog');
+    const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
+    const today = etDateString();
+    if (overlapEnd && today <= overlapEnd) {
+      return blocked(`isn’t available — this customer already has an annual prepay term through ${overlapEnd}`);
+    }
+
+    // The term is anchored on the visit being booked, so the coverage seeder
+    // ADOPTS this series instead of seeding a duplicate one (the mint's
+    // firstVisitDate/firstVisitWindowStart contract, PR #3126).
+    const firstVisitDate = validScheduleDate(req.query.firstVisitDate) ? String(req.query.firstVisitDate) : null;
+    const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
+    const firstVisitWindowStart = firstVisitDate && req.query.windowStart
+      ? AnnualPrepayTimes.normalizeWindowStart(String(req.query.windowStart))
+      : null;
+    const termStart = firstVisitDate || today;
+
+    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
+    const planLabel = `${coverageServiceType} Annual Prepay`;
+
+    res.json({
+      eligible: true,
+      blockReason: null,
+      perVisit: Math.round(perVisit * 100) / 100,
+      visitsPerYear,
+      coverageCadence,
+      coverageServiceType,
+      planLabel,
+      annualBase: pricing.annualBase,
+      prepayTotal: pricing.prepay.total,
+      discountAmount: pricing.prepay.discount,
+      discountLabel: pricing.prepay.ratePctLabel,
+      setupFee: pricing.setupFee,
+      termStart,
+      // Ready-to-post body for the Customer 360 mint
+      // (POST /api/admin/customers/:id/annual-prepay-invoice), so the modal
+      // relays server-derived values instead of composing an amount itself.
+      mintPayload: {
+        amount: pricing.prepay.total,
+        visitCount: visitsPerYear,
+        coverageCadence,
+        serviceType: coverageServiceType,
+        planLabel,
+        termStart,
+        ...(firstVisitDate ? { firstVisitDate } : {}),
+        ...(firstVisitWindowStart ? { firstVisitWindowStart } : {}),
+        note: 'Annual prepay sold when the visit was booked.',
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/schedule/:id/card-request — card-on-file / Auto Pay
 // secure-link state for one appointment, for the schedule editor's Cards
 // on file panel. Read-only rollup of the three sources of truth: the
