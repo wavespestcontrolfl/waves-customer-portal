@@ -138,6 +138,50 @@ describe('no source still produces the retired disease token', () => {
   });
 });
 
+describe('deployed lawn template rename', () => {
+  const tpl = require('../models/migrations/20260802000003_lawn_visit_template_large_patch');
+
+  const sections = () => ([
+    {
+      id: 'assessment',
+      fields: [
+        // A different field that also mentions brown — must NOT be touched.
+        { key: 'turf_color', options: ['Dark green — healthy', 'Brown patches'] },
+        { key: 'disease_symptoms', options: ['None', 'Brown patch', 'Dollar spot'] },
+      ],
+    },
+    { id: 'other', fields: [{ key: 'notes', type: 'text' }] },
+  ]);
+
+  test('renames only the disease option, in only that field', () => {
+    const { sections: out, changed } = tpl.renameOption(sections(), tpl.OLD, tpl.NEW);
+    expect(changed).toBe(true);
+    expect(out[0].fields[1].options).toEqual(['None', 'Large patch', 'Dollar spot']);
+    // The turf-colour option describes appearance, not diagnosis — untouched.
+    expect(out[0].fields[0].options).toEqual(['Dark green — healthy', 'Brown patches']);
+    // Unrelated sections and fields survive.
+    expect(out[1]).toEqual(sections()[1]);
+  });
+
+  test('reports no change when the template was already renamed', () => {
+    const already = [{ id: 'a', fields: [{ key: 'disease_symptoms', options: ['Large patch'] }] }];
+    expect(tpl.renameOption(already, tpl.OLD, tpl.NEW).changed).toBe(false);
+  });
+
+  test('tolerates templates with no fields or odd shapes', () => {
+    expect(tpl.renameOption(null, tpl.OLD, tpl.NEW).changed).toBe(false);
+    expect(tpl.renameOption([{ id: 'x' }], tpl.OLD, tpl.NEW).changed).toBe(false);
+    expect(tpl.renameOption([{ fields: [{ key: 'disease_symptoms' }] }], tpl.OLD, tpl.NEW).changed)
+      .toBe(false);
+  });
+
+  test('down() touches nothing', async () => {
+    const { knex, calls } = mockKnex();
+    await tpl.down(knex);
+    expect(calls).toEqual([]);
+  });
+});
+
 describe('SpeedZone Southern turf and heat limits', () => {
   test('records the label temperature window', async () => {
     // Written across independent statements so a partially populated row still

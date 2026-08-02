@@ -31,8 +31,14 @@
 const OLD_MAX = 90;
 const NEW_MAX = 85;
 
+// The label's St. Augustine-only seasonal prohibitions, recorded structurally
+// alongside the temperature bounds. Both are defined by turf CONDITION rather
+// than by calendar month, which is why nothing here maps them to dates.
+const SEASONAL_BLOCK = ['spring_green_up', 'fall_to_winter_transition'];
+
 exports.OLD_MAX = OLD_MAX;
 exports.NEW_MAX = NEW_MAX;
+exports.SEASONAL_BLOCK = SEASONAL_BLOCK;
 
 async function shiftGateThreshold(knex, { from, to }) {
   // lawn_protocol_gates.logic is jsonb: {"product":"SpeedZone","maxTempF":90}
@@ -44,19 +50,22 @@ async function shiftGateThreshold(knex, { from, to }) {
         logic: knex.raw("jsonb_set(logic, '{maxTempF}', ?::jsonb)", [String(to)]),
       });
 
-    // Same completeness point as the product gates below — the label's floor
-    // and seasonal windows recorded structurally, not just in prose.
+    // Same completeness point as the product gates below, and the same
+    // per-key independence — an existing value is never overwritten.
     await knex('lawn_protocol_gates')
       .where('gate_key', 'speedzone_heat_gate')
-      .whereRaw("logic->>'maxTempF' = ?", [String(to)])
-      .whereRaw("NOT (logic ? 'minTempF')")
+      .whereRaw("NOT (COALESCE(logic, '{}'::jsonb) ? 'minTempF')")
+      .update({
+        logic: knex.raw("jsonb_set(COALESCE(logic, '{}'::jsonb), '{minTempF}', ?::jsonb)", ['50']),
+      });
+
+    await knex('lawn_protocol_gates')
+      .where('gate_key', 'speedzone_heat_gate')
+      .whereRaw("NOT (COALESCE(logic, '{}'::jsonb) ? 'stAugustineSeasonalBlock')")
       .update({
         logic: knex.raw(
-          "logic || ?::jsonb",
-          [JSON.stringify({
-            minTempF: 50,
-            stAugustineSeasonalBlock: ['spring_green_up', 'fall_to_winter_transition'],
-          })],
+          "jsonb_set(COALESCE(logic, '{}'::jsonb), '{stAugustineSeasonalBlock}', ?::jsonb)",
+          [JSON.stringify(SEASONAL_BLOCK)],
         ),
       });
 
@@ -107,17 +116,28 @@ async function shiftGateThreshold(knex, { from, to }) {
     // the record complete and correct for whenever an evaluator does arrive —
     // they are not, on their own, enforcement. The enforcement that reaches a
     // person is the rule_text and visit copy updated above.
+    // Each key is backfilled INDEPENDENTLY and only where absent.
+    //
+    // Keying this off maxTempF = 85 was wrong three ways: a stricter admin
+    // ceiling (say 80) would skip the backfill entirely; a row that already had
+    // minTempF but no seasonal block stayed incomplete; and `gates || {...}`
+    // would have overwritten an existing seasonal block whenever minTempF
+    // happened to be absent. jsonb_set adds a missing key without disturbing
+    // any other, so an existing value always wins.
     await knex('lawn_protocol_products')
-      .whereRaw("gates->>'maxTempF' = ?", [String(to)])
       .whereRaw('product_name ILIKE ?', ['%speedzone%'])
-      .whereRaw("NOT (gates ? 'minTempF')")
+      .whereRaw("NOT (COALESCE(gates, '{}'::jsonb) ? 'minTempF')")
+      .update({
+        gates: knex.raw("jsonb_set(COALESCE(gates, '{}'::jsonb), '{minTempF}', ?::jsonb)", ['50']),
+      });
+
+    await knex('lawn_protocol_products')
+      .whereRaw('product_name ILIKE ?', ['%speedzone%'])
+      .whereRaw("NOT (COALESCE(gates, '{}'::jsonb) ? 'stAugustineSeasonalBlock')")
       .update({
         gates: knex.raw(
-          "gates || ?::jsonb",
-          [JSON.stringify({
-            minTempF: 50,
-            stAugustineSeasonalBlock: ['spring_green_up', 'fall_to_winter_transition'],
-          })],
+          "jsonb_set(COALESCE(gates, '{}'::jsonb), '{stAugustineSeasonalBlock}', ?::jsonb)",
+          [JSON.stringify(SEASONAL_BLOCK)],
         ),
       });
   }

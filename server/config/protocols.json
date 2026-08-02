@@ -3,6 +3,7 @@
     "st_augustine": {
       "name": "St. Augustine Lawn Care Protocol",
       "notes": [
+        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf. Do not apply to St. Augustinegrass during spring green-up or the fall-to-winter transition.",
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
         "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
@@ -154,7 +155,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "K-Flow returns (soil-test gated). SpeedZone ONLY if forecast <85\u00b0F \u2014 verify, Sep here often exceeds it; Celsius WG fallback. N rate: 0 lb.",
+          "notes": "K-Flow returns (soil-test gated). SpeedZone ONLY if forecast <85°F — verify, Sep here often exceeds it; Celsius WG fallback. N rate: 0 lb.",
           "conditional_cost": "0.55"
         },
         {
@@ -217,7 +218,7 @@
     "bermuda": {
       "name": "Bermuda Lawn Care Protocol",
       "notes": [
-        "⚠ SpeedZone Southern: NEVER apply above 85°F. In SWFL summer, use Celsius WG for Jul/Aug/Sep broadleaf instead.",
+        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf.",
         "⚠ NO Atrazine on Bermuda — Atrazine is ST. AUGUSTINE ONLY.",
         "⚠ PGR: Primo Maxx every 3-4 weeks Mar-Oct. Document growth response each visit. Bermuda grows aggressively.",
         "⚠ N budget: 3.0-4.0 lb N/K/yr. Explicit rates per visit below. Bermuda = high-input track.",
@@ -429,7 +430,7 @@
         "⚠ N budget: 2.0-3.0 lb N/K/yr MAX (UF/IFAS). Excess N = explosive thatch → severe Large Patch in fall.",
         "⚠ PGR: Primo Maxx at CONSERVATIVE rates only. Document response. Over-regulation = months of thin turf.",
         "⚠ Large Patch (Rhizoctonia): Zoysia is HIGHLY susceptible. Preventive fungicide Oct-Mar with FRAC rotation.",
-        "⚠ SpeedZone Southern: NEVER apply above 85°F. Use Celsius WG for Jul/Aug/Sep broadleaf.",
+        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf.",
         "⚠ NO Atrazine on Zoysia. NO Anuew EZ on Zoysia.",
         "★ NEW v4: Large Patch FRAC — preventive Headway (11+3) Oct → Medallion (12) Nov (base); Velista (FRAC 7) as the Dec rescue when large patch is active. Rotate MOA each app, no consecutive repeat. No more tri",
         "★ NEW v4: Large patch diagnostic criteria for techs — orange-brown rings with dark \"smoke ring\" advancing border.",
@@ -635,6 +636,7 @@
     "bahia": {
       "name": "Bahia Protocol",
       "notes": [
+        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf.",
         "⚠ Bahia is LOW-INPUT turf. 2.0 lb N/K/yr MAX. More N = more mowing, NOT better quality.",
         "⚠ Mole cricket is THE primary insect threat — not chinch bugs. Soapy flush scout, not leaf inspection.",
         "⚠ NO PGR. NO Atrazine. Customer expectations: Bahia will NEVER look like irrigated St. Augustine.",
