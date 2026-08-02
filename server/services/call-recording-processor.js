@@ -7116,12 +7116,15 @@ const CallRecordingProcessor = {
             // claim outcome is the bounce handler's authority: reconcile the
             // fresh card so it never permanently says 'sent' for a text that
             // already bounced.
-            if (smsOutcome.sent && await DroppedCallSms.sentOutcomeAlreadyUndelivered(phone)) {
+            const bounceOutcome = smsOutcome.sent ? await DroppedCallSms.terminalBounceOutcome(phone) : null;
+            if (bounceOutcome) {
               await db('triage_items')
                 .where({ call_log_id: call.id, reason_code: 'call_dropped_mid_intake' })
                 .whereIn('status', ['open', 'in_progress'])
                 .update({
-                  payload: db.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered')"),
+                  payload: bounceOutcome === 'opted_out'
+                    ? db.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered', 'address_request_sms_code', 'SUPPRESSED_PROVIDER_OPT_OUT_21610')")
+                    : db.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered')"),
                   updated_at: new Date(),
                 })
                 .catch((e) => logger.warn(`[call-proc] dropped-call card bounce reconcile failed: ${e.code || e.name || 'db_error'}`));

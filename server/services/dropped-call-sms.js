@@ -194,6 +194,32 @@ async function releasePhoneClaim(phone) {
   }
 }
 
+// Success-path variant: transitions ONLY from the in-flight 'claimed' state
+// so a bounce verdict that raced in first is never overwritten.
+async function stampPhoneClaimIfClaimed(phone, outcome) {
+  try {
+    await db('dropped_call_sms_claims').where({ phone, outcome: 'claimed' }).update({ outcome });
+  } catch (e) {
+    logger.warn(`[dropped-call-sms] conditional phone claim stamp failed for ${maskPhone(phone)}: ${e.code || e.name || 'db_error'}`);
+  }
+}
+
+async function stampStatusIfClaimed(leadId, status) {
+  try {
+    await db('leads').where({ id: leadId })
+      .whereRaw("COALESCE(extracted_data->>'dropped_call_sms_status', '') = 'claimed'")
+      .update({
+        extracted_data: db.raw(
+          "jsonb_set(COALESCE(extracted_data, '{}'::jsonb), '{dropped_call_sms_status}', to_jsonb(?::text))",
+          [status]
+        ),
+        updated_at: new Date(),
+      });
+  } catch (e) {
+    logger.warn(`[dropped-call-sms] conditional status stamp failed for lead ${leadId}: ${e.code || e.name || 'db_error'}`);
+  }
+}
+
 async function stampPhoneClaim(phone, outcome) {
   try {
     await db('dropped_call_sms_claims').where({ phone }).update({ outcome });
@@ -359,8 +385,11 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     return { sent: false, skipped: 'send_suppressed', code: result.providerMessageId || null };
   }
   if (result.sent) {
-    await stampStatus(leadId, 'sent');
-    await stampPhoneClaim(phone, 'sent');
+    // Conditional 'sent' stamps: a fast delivery callback can land BEFORE
+    // these run and stamp 'undelivered'/'opted_out' from the in-flight
+    // 'claimed' state — the sender must never overwrite that verdict.
+    await stampStatusIfClaimed(leadId, 'sent');
+    await stampPhoneClaimIfClaimed(phone, 'sent');
     await logActivity(leadId, 'sms_sent', `Auto-texted address request after dropped call to ${maskPhone(phone)}`, {
       message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,
@@ -478,8 +507,13 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
       }
       // Atomic idempotency gate: exactly one callback (Twilio retries them)
       // flips 'sent' -> 'undelivered'; every later one sees 0 rows.
+      // Wins from BOTH states: 'sent' (normal) and 'claimed' (the callback
+      // raced in after Twilio accepted but before the sender's own stamp —
+      // a carrier bounce implies the send happened). The sender's stamp is
+      // conditional on 'claimed', so it can never overwrite this verdict.
       const flipped = await trx('dropped_call_sms_claims')
-        .where({ phone, outcome: 'sent' })
+        .where({ phone })
+        .whereIn('outcome', ['sent', 'claimed'])
         .update({ outcome: String(errorCode || '') === '21610' ? 'opted_out' : 'undelivered' });
       if (!flipped) return { handled: false, reason: 'already_handled_or_not_sent' };
 
@@ -556,23 +590,26 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
 // land BETWEEN the awaited send and the card insert — its card flip updates
 // zero rows, and the fresh card would permanently say 'sent'. After
 // inserting the card, the processor asks the claim row (the bounce
-// handler's authority) whether the outcome already flipped.
-async function sentOutcomeAlreadyUndelivered(rawPhone) {
+// handler's authority) for a terminal bounce verdict: 'undelivered' OR
+// 'opted_out' (a delayed 21610 must carry its do-not-contact code onto the
+// fresh card, never an outreach instruction).
+async function terminalBounceOutcome(rawPhone) {
   try {
     const phone = normalizePhoneE164(rawPhone);
-    if (!phone) return false;
+    if (!phone) return null;
     const claim = await db('dropped_call_sms_claims').where({ phone }).first('outcome');
-    return claim?.outcome === 'undelivered';
+    if (claim?.outcome === 'undelivered' || claim?.outcome === 'opted_out') return claim.outcome;
+    return null;
   } catch (e) {
     logger.warn(`[dropped-call-sms] post-insert outcome check failed: ${e.code || e.name || 'db_error'}`);
-    return false;
+    return null;
   }
 }
 
 module.exports = {
   sendDroppedCallAddressRequest,
   handleUndeliveredAddressRequest,
-  sentOutcomeAlreadyUndelivered,
+  terminalBounceOutcome,
   endedAbruptly,
   detectDroppedMidIntake,
   eligibleNewProspect,

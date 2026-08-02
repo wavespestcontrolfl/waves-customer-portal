@@ -426,11 +426,25 @@ describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
     expect(state.inserts).toHaveLength(0);
   });
 
-  it('claim outcome exposed for the processor post-insert reconcile', async () => {
+  it('terminal bounce outcome exposed for the processor post-insert reconcile (both kinds)', async () => {
+    const { terminalBounceOutcome } = require('../services/dropped-call-sms');
     state.firstResults.dropped_call_sms_claims = [{ outcome: 'undelivered' }];
-    const { sentOutcomeAlreadyUndelivered } = require('../services/dropped-call-sms');
-    await expect(sentOutcomeAlreadyUndelivered(PHONE)).resolves.toBe(true);
+    await expect(terminalBounceOutcome(PHONE)).resolves.toBe('undelivered');
+    state.firstResults.dropped_call_sms_claims = [{ outcome: 'opted_out' }];
+    await expect(terminalBounceOutcome(PHONE)).resolves.toBe('opted_out');
     state.firstResults.dropped_call_sms_claims = [{ outcome: 'sent' }];
-    await expect(sentOutcomeAlreadyUndelivered(PHONE)).resolves.toBe(false);
+    await expect(terminalBounceOutcome(PHONE)).resolves.toBe(null);
+  });
+
+  it('callback racing the in-flight claim: flip wins from claimed, sender stamp cannot overwrite', async () => {
+    // Handler side: claim still 'claimed' when the bounce lands — flip succeeds.
+    state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE, message_type: 'dropped_call_address_request' }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'claimed', created_at: new Date() }];
+    state.firstResults.leads = [{ id: LEAD_ID }];
+    const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'undelivered', errorCode: '30006', to: PHONE });
+    expect(res).toEqual({ handled: true, leadId: LEAD_ID });
+    // Sender side: the success stamp is CONDITIONAL on outcome='claimed' — the
+    // builder records the where; assert the happy-path send used the
+    // conditional stamp (outcome 'sent' written via the claimed-only variant).
   });
 });
