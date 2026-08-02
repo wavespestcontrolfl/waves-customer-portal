@@ -232,6 +232,19 @@ describe('chargeAppointmentNoShowFee — gate and eligibility', () => {
     expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 
+  test('payer assigned after securing → payer_billed skip, the homeowner card is never penalty-charged (Codex #3153 r6)', async () => {
+    require('../services/payer').resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
+    const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('payer_billed');
+    expect(mockChargeOffSession).not.toHaveBeenCalled();
+  });
+
+  test('payer re-check FAILURE fails closed — cancellation reports NON-released charge_review (Codex #3153 r6)', async () => {
+    require('../services/payer').resolveForInvoice.mockRejectedValueOnce(new Error('payer db down'));
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1', waiveFee: true });
+    expect(res).toEqual({ handled: false, released: false, reason: 'charge_review' });
+  });
+
   test('hold lookup FAILURE fails closed — never read as absence (Codex #3153 r1)', async () => {
     mockTableHandlers = handlersWith();
     mockTableHandlers.estimate_card_holds.first = () => { throw new Error('db blip'); };
@@ -307,7 +320,9 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
     expect(res).toEqual({ charged: true, invoiceId: 'inv-r1' });
     expect(mockResolveOrMintInvoice).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' }));
-    expect(mockChargeSavedCard).toHaveBeenCalledWith('inv-r1', 'pm-row-1', {});
+    // The frozen cap rides INTO the charge service (Codex #3153 r7 P0) so
+    // it is re-enforced against the locked invoice, not just the preflight.
+    expect(mockChargeSavedCard).toHaveBeenCalledWith('inv-r1', 'pm-row-1', { maxAuthorizedSubtotal: 250 });
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_success', expect.objectContaining({
       details: expect.objectContaining({ source: 'appointment_card_recap_completion' }),
     }));
@@ -370,6 +385,14 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     recapHandlers({ customers: { first: () => { throw new Error('db down'); } } });
     const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
     expect(res.reason).toBe('error');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('payer-linked invoice → payer_billed WITH office alert (recap has no delivery path — Codex #3153 r6)', async () => {
+    recapHandlers({ invoices: { first: () => ({ ...RECAP_INVOICE(), payer_id: 'payer-9' }) } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('payer_billed');
     expect(mockNotifyAdmin).toHaveBeenCalled();
     expect(mockChargeSavedCard).not.toHaveBeenCalled();
   });

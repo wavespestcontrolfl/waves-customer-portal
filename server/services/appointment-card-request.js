@@ -308,8 +308,16 @@ async function autoSecureFromSavedMethod({ visit, savedMethod, trigger }) {
         status: 'satisfied',
         payment_method_id: savedMethod.id,
         stripe_payment_method_id: savedMethod.stripe_payment_method_id || null,
-        accepted_amount: visit.estimated_price != null && Number(visit.estimated_price) > 0
-          ? Number(visit.estimated_price) : null,
+        // The heal targets a PENDING page row that may carry a lower cap or
+        // the sticky 0 sentinel from an earlier render — monotonic-down,
+        // never a plain overwrite (Codex #3153 r6 P1). (The fresh-row
+        // INSERT above stamps the value directly: no prior disclosure.)
+        ...(visit.estimated_price != null && Number(visit.estimated_price) > 0 ? {
+          accepted_amount: db.raw(
+            'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+            [Number(visit.estimated_price), Number(visit.estimated_price)],
+          ),
+        } : {}),
         completed_at: new Date(),
         updated_at: new Date(),
       });
@@ -1121,10 +1129,15 @@ async function loadSecureCardPageData(token) {
       .update({
         status: 'satisfied',
         // Frozen completion cap rides every satisfied transition (pre-push
-        // r2 P1) — without it the completion lane routes to review instead
-        // of the promised auto-charge. (A settled prepay skips the charge
-        // anyway via its own lane, but the row must stay self-consistent.)
-        accepted_amount: visitPriced ? visitPrice : null,
+        // r2 P1) — but MONOTONIC-DOWN like the render stamp (Codex #3153
+        // r6 P1): a heal must never overwrite the sticky 0 sentinel or
+        // widen a lower disclosed cap. No price → leave the column alone.
+        ...(visitPriced ? {
+          accepted_amount: db.raw(
+            'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+            [visitPrice, visitPrice],
+          ),
+        } : {}),
         completed_at: new Date(),
         updated_at: new Date(),
       });
@@ -1165,12 +1178,19 @@ async function loadSecureCardPageData(token) {
     const customerRow = await db('customers').where({ id: request.customer_id }).first();
     if (customerRow && await customerOnAutopay(customerRow)) {
       // Already enrolled with a chargeable method — heal and show secured,
-      // carrying the frozen completion cap (pre-push r2 P1).
+      // carrying the frozen completion cap (pre-push r2 P1), MONOTONIC-DOWN
+      // (Codex #3153 r6 P1): never overwrite the sticky 0 sentinel or
+      // widen a lower disclosed cap from an earlier render.
       await db('appointment_card_requests')
         .where({ id: request.id, status: 'pending' })
         .update({
           status: 'satisfied',
-          accepted_amount: visitPriced ? visitPrice : null,
+          ...(visitPriced ? {
+            accepted_amount: db.raw(
+              'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
+              [visitPrice, visitPrice],
+            ),
+          } : {}),
           completed_at: new Date(),
           updated_at: new Date(),
         });
@@ -1344,6 +1364,24 @@ async function feeEligibleRequestForVisit(scheduledServiceId) {
   const feeAgreedAt = request.fee_agreed_at ? new Date(request.fee_agreed_at) : null;
   if (!feeAgreedAt || Number.isNaN(feeAgreedAt.getTime())) return { request: null, reason: 'no_fee_consent' };
   if (!request.stripe_payment_method_id || !request.customer_id) return { request: null, reason: 'no_charge_target' };
+  // A third-party payer assigned AFTER the card was secured exempts the
+  // homeowner from this lane (Codex #3153 r6 P1): the capture flow fails
+  // closed on payer changes at render and completion, and the completion
+  // rail refuses payer-linked invoices — the penalty charge must honor the
+  // same exemption. Fail CLOSED on lookup errors (unresolved, never a
+  // charge against a card the appointment may no longer bill).
+  try {
+    const PayerService = require('./payer');
+    const resolved = await PayerService.resolveForInvoice({
+      customerId: String(request.customer_id),
+      scheduledServiceId: String(scheduledServiceId),
+      throwOnError: true,
+    });
+    if (resolved?.payerId) return { request: null, reason: 'payer_billed' };
+  } catch (err) {
+    logger.error(`[appt-card-request] payer re-check failed for visit ${scheduledServiceId} — fee rail fails closed: ${err.message}`);
+    return { request: null, reason: 'payer_check_failed', unresolved: true };
+  }
   // charging/charge_review are IN-FLIGHT fee events, not benign absence
   // (Codex #3153 r1 P1): a caller treating them as "nothing here" would
   // release/refund while a charge may still land. `unresolved` makes the
@@ -1709,7 +1747,14 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
     const invoice = await db('invoices').where({ id: invoiceId })
       .first('id', 'status', 'payer_id', 'subtotal', 'total', 'discount_amount');
     if (!invoice) return { charged: false, reason: 'invoice_missing' };
-    if (invoice.payer_id) return { charged: false, reason: 'payer_billed' };
+    if (invoice.payer_id) {
+      // A payer assigned after the card was secured owns this bill — but
+      // submitRecap has NO later delivery path (unlike /complete), so a
+      // silent return strands the payer invoice in draft forever (Codex
+      // #3153 r6 P1): route it to office review for delivery.
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'payer_billed' });
+      return { charged: false, reason: 'payer_billed' };
+    }
     if (['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())) {
       return { charged: false, reason: `invoice_${String(invoice.status).toLowerCase()}` };
     }
@@ -1721,7 +1766,11 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
     }
     const StripeService = require('./stripe');
     try {
-      await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {});
+      // maxAuthorizedSubtotal: the frozen cap is re-enforced against the
+      // LOCKED invoice inside the charge service (Codex #3153 r7 P0) — the
+      // preflight above compared an unlocked snapshot a concurrent edit
+      // could outrun.
+      await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, { maxAuthorizedSubtotal: acceptedAmount });
     } catch (err) {
       logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'charge_failed' });

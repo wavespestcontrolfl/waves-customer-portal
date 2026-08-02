@@ -2223,7 +2223,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2406,6 +2406,20 @@ const StripeService = {
         total = invTotalCents / 100;
         if (expectedTotal != null && Math.round(Number(expectedTotal) * 100) !== invTotalCents) {
           throw new Error('Invoice amount changed after the payment quote. Review the updated total before charging.');
+        }
+        // Frozen-consent hard cap, enforced against the LOCKED invoice
+        // (Codex #3153 r7 P0): the completion rails' preflight compares an
+        // UNLOCKED snapshot — a concurrent invoice edit between that check
+        // and this lock could otherwise raise an off-session charge above
+        // what the customer accepted. Opt-in (null = unchanged behavior);
+        // comparator is byte-identical to the preflight: pre-tax subtotal
+        // net of recorded discounts, cents-authoritative.
+        if (maxAuthorizedSubtotal != null) {
+          const lockedSubtotalCents = Math.round(Number(lockedInvoice.subtotal != null ? lockedInvoice.subtotal : lockedInvoice.total || 0) * 100);
+          const lockedDiscountCents = Math.max(0, Math.round(Number(lockedInvoice.discount_amount || 0) * 100));
+          if (lockedSubtotalCents - lockedDiscountCents > Math.round(Number(maxAuthorizedSubtotal) * 100)) {
+            throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
+          }
         }
         if (stalePaymentIntentToCancel) {
           await stripe.paymentIntents.cancel(stalePaymentIntentToCancel.id);

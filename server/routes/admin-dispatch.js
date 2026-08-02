@@ -7443,6 +7443,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // crash/block anywhere before the combined text delivers leaves
           // the job to send the classic receipt when it comes due.
           await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {
+            // Atomic re-enforcement of the SAME ceiling the preflight above
+            // validated (Codex #3153 r7 P0): the charge service re-checks it
+            // against the LOCKED invoice, so an invoice edit racing this
+            // window refuses instead of charging above consent — the
+            // pay-link fallback takes over exactly like a decline.
+            maxAuthorizedSubtotal: capCeiling,
             deferReceiptDelivery: combinedReceiptArmed,
           });
           const fresh = await db('invoices').where({ id: invoice.id }).first();

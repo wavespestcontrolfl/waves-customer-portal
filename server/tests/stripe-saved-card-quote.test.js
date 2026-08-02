@@ -112,4 +112,71 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(stripeClient.paymentIntents.cancel).not.toHaveBeenCalled();
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
+
+  test('refuses a locked invoice above the frozen consent cap (maxAuthorizedSubtotal — Codex #3153 r7 P0)', async () => {
+    // The completion rails validate the cap on an UNLOCKED snapshot; this
+    // guard is the atomic re-check against the locked row — a concurrent
+    // invoice edit that raised the amount must refuse, never charge above
+    // what the customer accepted.
+    const invoice = {
+      id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
+      subtotal: '300.00', total: '300.00', discount_amount: '0.00',
+      credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
+    };
+    const card = {
+      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
+    };
+    let chargeAttempt = null;
+    const db = jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+        chain[method] = jest.fn((arg) => {
+          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          return chain;
+        });
+      });
+      chain.first = jest.fn(async () => {
+        if (table === 'invoices') return invoice;
+        if (table === 'payment_methods') return card;
+        if (table === 'customers') return { id: 'cust-1', stripe_customer_id: 'cus-1' };
+        if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
+        return null;
+      });
+      chain.insert = jest.fn((payload) => {
+        if (table === 'stripe_invoice_charge_attempts') {
+          chargeAttempt = { ...payload, created_at: new Date(), resolved_at: null };
+        }
+        return chain;
+      });
+      chain.returning = jest.fn(async () => (chargeAttempt ? [chargeAttempt] : []));
+      chain.update = jest.fn(async (payload) => {
+        if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
+        return 1;
+      });
+      return chain;
+    });
+    db.transaction = jest.fn(async (callback) => callback(db));
+    db.fn = { now: jest.fn(() => 'NOW') };
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+
+    const stripeClient = {
+      paymentIntents: {
+        retrieve: jest.fn(),
+        cancel: jest.fn(),
+        create: jest.fn(),
+      },
+    };
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { maxAuthorizedSubtotal: 250 }))
+      .rejects.toThrow('Invoice exceeds the customer-accepted amount');
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
 });

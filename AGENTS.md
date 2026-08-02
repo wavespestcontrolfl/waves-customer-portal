@@ -1124,6 +1124,14 @@ violations at the severity noted.
   CLOSED: a lookup error or an in-flight `charging`/`charge_review`
   fee_status returns a NON-released canonical `charge_review` from the
   cancellation handler (never "released", never treated as absence). The
+  rail also RE-RESOLVES the payer immediately before claiming (r6): a
+  third-party payer assigned after the card was secured exempts the
+  homeowner (`payer_billed` skip), and a payer lookup error is unresolved
+  (fail closed), mirroring the capture flow's own payer fail-closed
+  posture. Every satisfied heal (auto-secure update, autopay heal, prepay
+  heal) applies the SAME monotonic-down accepted_amount stamp as the
+  render — a heal can never overwrite the sticky 0 sentinel or widen a
+  lower disclosed cap. The
   `GET /:serviceId/card-hold` cancel preview merges both lanes so the
   client waive prompts work unchanged. (2)
   `GATE_APPT_CARD_COMPLETION_CHARGE` — the dispatch completion
