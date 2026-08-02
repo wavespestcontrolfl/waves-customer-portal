@@ -600,7 +600,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // so each audit records the value it actually superseded.
     const lockedRead = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.locked);
     expect(lockedRead).toBeTruthy();
-    expect(source).toMatch(/const lockedSvc = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*committedCorrectionSeq = \(Number\(lockedSvc\?\.time_on_site_correction_seq\) \|\| 0\) \+ 1;\s*\n\s*previousMinutes = positiveNumber\(lockedSvc\?\.service_time_minutes\)/);
+    expect(source).toMatch(/const lockedSvc = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*committedCorrectionSeq = \(Number\(lockedSvc\?\.time_on_site_correction_seq\) \|\| 0\) \+ 1;\s*\n(?:\s*\/\/[^\n]*\n)*\s*timerEntriesSnapshot = await trx\('time_entries'\)[\s\S]{0,300}?\s*previousMinutes = positiveNumber\(lockedSvc\?\.service_time_minutes\)/);
     // The audit INSERT rides the correction transaction (codex P2 round
     // 19): concurrent corrections serialize on the row lock, so in-trx
     // audits land in commit order — outside it, whichever request finished

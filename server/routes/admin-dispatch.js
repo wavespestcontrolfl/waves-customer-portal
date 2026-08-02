@@ -846,7 +846,7 @@ function minutesAsElapsedString(minutes) {
 // corrected minutes in either direction; everything else is surfaced as a
 // blocked reason (entry_open / multiple_job_entries / entry_shape /
 // approved_week / edit_failed) rather than forced.
-async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy }) {
+async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy, entriesSnapshot = null }) {
   let corrected = null; // null = no divergent linked entry to correct
   let blocked = null;
   try {
@@ -856,10 +856,21 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy }
         ? null
         : Number(rowNow.time_on_site_correction_seq);
       if (rowSeqNow != null && committedSeq != null && rowSeqNow > committedSeq) return;
-      const jobEntries = await timerTrx('time_entries')
-        .where({ job_id: serviceId, entry_type: 'job' })
-        .whereNot('status', 'voided')
-        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+      // The version boundary is the CORRECTION, not this post-commit sync
+      // (codex P2 #3152 round 23): callers capture the entry snapshot
+      // inside the correction transaction, so a payroll edit landing
+      // between the correction's commit and this sync carries a newer
+      // updated_at than the snapshot and the audited edit 409s instead of
+      // silently replacing it. Only the crash-resume path (no transaction
+      // ran in this process, no snapshot to hand over) falls back to a
+      // fresh read — its divergence check still no-ops when a manual edit
+      // already agrees with the corrected minutes.
+      const jobEntries = entriesSnapshot !== null
+        ? entriesSnapshot
+        : await timerTrx('time_entries')
+          .where({ job_id: serviceId, entry_type: 'job' })
+          .whereNot('status', 'voided')
+          .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
       if (jobEntries.length === 0) return;
       // A still-running linked timer cannot be silently "fine" — the span
       // keeps growing past the corrected minutes and the audited edit
@@ -2366,6 +2377,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     let recordAmbiguous = false;
     let newEnd = null;
     let committedCorrectionSeq = null;
+    let timerEntriesSnapshot = null;
     await db.transaction(async (trx) => {
       // Prior minutes come from the LOCKED row (codex P2 #3152 round 10):
       // two concurrent corrections serialize on this lock, and each audit
@@ -2375,6 +2387,15 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       // The revision this save commits — the raw COALESCE(seq,0)+1 bump
       // writes the same value; safe to compute here under the row lock.
       committedCorrectionSeq = (Number(lockedSvc?.time_on_site_correction_seq) || 0) + 1;
+      // Linked-timer snapshot INSIDE the correction transaction (codex P2
+      // #3152 round 23): this is the sync's version boundary — a payroll
+      // edit after this commit outdates the snapshot and rejects the sync.
+      // (No try/catch: a failed statement would poison the transaction
+      // anyway, and time_entries is a core table like the others read here.)
+      timerEntriesSnapshot = await trx('time_entries')
+        .where({ job_id: svc.id, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
       previousMinutes = positiveNumber(lockedSvc?.service_time_minutes)
         || positiveNumber(lockedSvc?.actual_duration_minutes)
         || null;
@@ -2511,6 +2532,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       minutes: plan.minutes,
       committedSeq: committedCorrectionSeq,
       editedBy: req.technicianId,
+      entriesSnapshot: timerEntriesSnapshot,
     });
 
     // A failed recalc is SURFACED, not swallowed (codex P2 #3152 round 9):
@@ -4850,6 +4872,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Stays null on a crash-resumed retry (no transaction runs) — the
     // tracker recompute falls back to the current clock there.
     let completionWallClockAt = null;
+    // Linked-timer snapshot captured inside the completion transaction —
+    // the post-commit sync's version boundary (codex P2 #3152 round 23).
+    // Stays null on the crash-resume path (no transaction runs here), and
+    // the sync then falls back to a fresh read.
+    let completionTimerEntriesSnapshot = null;
     if (resumingCommittedCompletion) {
       record = await db('service_records').where({ id: claim.serviceRecordId }).first();
       if (!record) {
@@ -4978,6 +5005,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           technicianReportBody = technicianReport?.body || null;
         }
 
+        completionTimerEntriesSnapshot = null;
         await db.transaction(async (trx) => {
           // The finalization takes the scheduled_services row lock FIRST
           // (codex P2 #3152 round 14): the time-on-site PATCH serializes on
@@ -4987,6 +5015,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // and was then overwritten. Locking up front makes finalization
           // and correction strictly ordered whichever starts first.
           const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+          // Linked-timer snapshot under the same lock (codex P2 #3152
+          // round 23): the post-commit sync's version boundary is THIS
+          // transaction — a payroll edit landing after the commit outdates
+          // the snapshot's updated_at and the audited edit rejects it.
+          if (!isBackfillCompletion) {
+            completionTimerEntriesSnapshot = await trx('time_entries')
+              .where({ job_id: svc.id, entry_type: 'job' })
+              .whereNot('status', 'voided')
+              .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+          }
           // Reconcile with anything that committed between the handler's svc
           // load and this lock (codex P2 #3152 round 15): a time-on-site
           // correction in that window already moved the duration columns,
@@ -6801,6 +6839,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         minutes: effectiveTimeOnSite,
         committedSeq: svc.time_on_site_correction_seq ?? null,
         editedBy: req.technicianId,
+        entriesSnapshot: completionTimerEntriesSnapshot,
       });
     }
 
