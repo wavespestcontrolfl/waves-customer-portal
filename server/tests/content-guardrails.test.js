@@ -2528,6 +2528,29 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(repairInventedInternalRoutes(pii).body).toBe('Alice Smith');
   });
 
+  test('a title-bearing unknown route is never unlinked (r8 P1)', () => {
+    // Unlinking discards the title, and a title can carry blocking content —
+    // this body loses BOTH the price and route findings if repaired.
+    const body = '[plan](/invented/ "$199 per application")';
+    const r = repairInventedInternalRoutes(body);
+    expect(r.body).toBe(body);
+    expect(r.repairs).toEqual([]);
+    // A plain unknown route still unlinks, and aliasing keeps its title.
+    expect(repairInventedInternalRoutes('[plan](/invented/)').body).toBe('plan');
+    expect(repairInventedInternalRoutes('[svc](/pest-control/ "Guide")').body).toContain('"Guide"');
+  });
+
+  test('container-prefixed and longer-closer fences are masked (r8 P2)', () => {
+    for (const body of [
+      '> ~~~md\n> [x](/pest-control/)\n> ~~~',
+      '````\n[x](/pest-control/)\n```\n[y](/pest-control/)\n````',
+    ]) {
+      const r = repairInventedInternalRoutes(body);
+      expect(r.body).toBe(body);
+      expect(r.repairs).toEqual([]);
+    }
+  });
+
   test('literal code is never repaired (r7)', () => {
     for (const body of [
       'Use `[x](/pest-control/)` in MDX.',

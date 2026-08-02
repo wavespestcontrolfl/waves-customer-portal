@@ -95,7 +95,7 @@ function* eachTag(text) {
     if (text[i - 1] === '(' && text[i - 2] === ']') {
       const shut = text.indexOf('>', i);
       const inner = shut === -1 ? null : text.slice(i + 1, shut);
-      const after = shut === -1 ? '' : text.slice(shut + 1).replace(/^\s*(?:"[^"]*"|'[^']*')?\s*/, '');
+      const after = shut === -1 ? '' : text.slice(shut + 1).replace(/^\s*(?:"[^"]*"|'[^']*'|\([^)]*\))?\s*/, '');
       if (inner !== null && /^(?:\/(?!\/)[^>\s]*|https?:\/\/[^>\s]*)$/.test(inner) && after.startsWith(')')) continue;
     }
     let j = i + m[0].length;
@@ -2627,7 +2627,12 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     // The closing fence may be LONGER than the opener, and indented blocks
     // are code too. Masking MORE is always safe here — it only means fewer
     // repairs (Codex r7).
-    const fence = /^[ \t]*((`|~)\2{2,})[^\n]*\n[\s\S]*?^[ \t]*\2{3,}[ \t]*$/gm;
+    // Container prefixes: a fence inside a blockquote has "> " on every line
+    // and the plain pattern never matched it, so literal sample code got
+    // rewritten (Codex). The CLOSER must also be at least as long as the
+    // opener — a shorter run does not close the block, and treating it as a
+    // closer ended the mask early.
+    const fence = /^[ \t>]*((`|~)\2{2,})[^\n]*\n[\s\S]*?^[ \t>]*\2{3,}[ \t]*$/gm;
     let fm;
     while ((fm = fence.exec(text)) !== null) ranges.push([fm.index, fm.index + fm[0].length]);
     const indented = /(?:^(?:[ ]{4}|\t)[^\n]*$\n?)+/gm;
@@ -2755,6 +2760,12 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     // the name as prose. On a refresh we therefore only ALIAS; unknown
     // routes stay linked and the gate parks them (Codex r7).
     if (options.refreshPriorBody || options.assumeSpokeWhenUnknown) return whole;
+    // Unlinking DISCARDS the title, and a title can carry blocking content —
+    // "[plan](/invented/ \"$199 per application\")" loses both the price
+    // finding and the route finding at once. Aliasing keeps the title, so
+    // only the unlink path is affected: leave it whole for the gate
+    // (Codex).
+    if (title) return whole;
     repairs.push({ from: norm, to: null, action: 'unlinked' });
     return anchorText;
   });
