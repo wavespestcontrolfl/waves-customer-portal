@@ -91,11 +91,26 @@ exports.down = async function (knex) {
   if (Number(data.noShowFeeAmount) !== NEW_FEE) return; // admin moved it since — leave alone
   const priorData = ownUp.old_value ? JSON.parse(ownUp.old_value) : null;
   if (priorData == null) {
-    await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).del();
+    // up() created this row. Delete it ONLY while it still exactly matches
+    // what up() wrote — an admin edit since (window change, added keys)
+    // must survive rollback (P0 data-loss rule), so then we revert only
+    // the fee to the pre-migration constant.
+    const untouchedCreate = Object.keys(data).length === 2
+      && Number(data.noShowFeeAmount) === NEW_FEE
+      && Number(data.cancelWindowHours) === 24;
+    if (untouchedCreate) {
+      await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).del();
+    } else {
+      await knex('pricing_config')
+        .where({ config_key: 'estimate_card_hold' })
+        .update({ data: JSON.stringify({ ...data, noShowFeeAmount: OLD_FEE }), updated_at: knex.fn.now() });
+    }
   } else {
-    // Restore the recorded snapshot, keeping only later-added keys that
-    // the snapshot never covered.
-    const reverted = { ...data, ...priorData };
+    // Restore ONLY the fee from the recorded snapshot — every other key
+    // keeps its CURRENT value so admin edits made after deployment are
+    // never overwritten by the old snapshot.
+    const priorFee = Number(priorData.noShowFeeAmount);
+    const reverted = { ...data, noShowFeeAmount: Number.isFinite(priorFee) && priorFee > 0 ? priorFee : OLD_FEE };
     await knex('pricing_config')
       .where({ config_key: 'estimate_card_hold' })
       .update({ data: JSON.stringify(reverted), updated_at: knex.fn.now() });
