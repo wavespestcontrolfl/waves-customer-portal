@@ -2210,8 +2210,28 @@ async function settleAppointmentNoShowFee(paymentIntent) {
   const description = `Appointment — ${feeLabel.toLowerCase()}`;
   const result = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${piId}`]);
-    const existing = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
-    if (existing) return { replay: true };
+    const existing = await trx('payments').where({ stripe_payment_intent_id: piId })
+      .first('id', 'status', 'refund_status', 'refund_amount', 'metadata');
+    let adoptMarkerRowId = null;
+    let markerMeta = null;
+    let markerRefundedCents = 0;
+    if (existing) {
+      let meta = {};
+      try {
+        meta = typeof existing.metadata === 'string' ? JSON.parse(existing.metadata) : (existing.metadata || {});
+      } catch { meta = {}; }
+      const fullyRefunded = String(existing.status || '').toLowerCase() === 'refunded'
+        || String(existing.refund_status || '').toLowerCase() === 'full';
+      if (meta.pre_settlement_refund !== true || fullyRefunded) return { replay: true };
+      // PARTIAL pre-settlement refund marker (Codex #3153 r17 P1): the fee
+      // was partially refunded before settlement — the business keeps the
+      // remainder, so the paid fee invoice must still be minted. Adopt the
+      // marker row (update, never a second insert) and carry its refund
+      // amount and canonical stamped_refund_ids forward.
+      adoptMarkerRowId = existing.id;
+      markerMeta = meta;
+      markerRefundedCents = Math.max(0, Math.round(Number(existing.refund_amount || 0) * 100));
+    }
 
     // Refund guard INSIDE the PI lock (Codex #3153 r16 P1): a dashboard
     // refund landing after an earlier unlocked check but before the paid
@@ -2225,6 +2245,14 @@ async function settleAppointmentNoShowFee(paymentIntent) {
       const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
       const ch = live?.latest_charge;
       if (ch && typeof ch === 'object') {
+        // Disputed BEFORE settlement (Codex #3153 r17 P1): Stripe permits
+        // charge.dispute.created to arrive before the succeeded event, and
+        // that handler finds nothing to mark — booking a paid fee invoice
+        // for money already clawed back would overstate revenue. Refuse.
+        if (ch.disputed === true) {
+          logger.warn(`[appt-card-request] no-show fee disputed before settlement — skipping (${piId})`);
+          return { refundedPreSettlement: true };
+        }
         const chargedCents = Math.round(Number(ch.amount || 0));
         preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
         if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
@@ -2233,6 +2261,7 @@ async function settleAppointmentNoShowFee(paymentIntent) {
         }
       }
     }
+    preRefundedCents = Math.max(preRefundedCents, markerRefundedCents);
 
     // Face value, NO tax: the fee must equal the amount disclosed + charged.
     const inv = await InvoiceService.create({
@@ -2255,7 +2284,7 @@ async function settleAppointmentNoShowFee(paymentIntent) {
       payer_snapshot: null,
       updated_at: trx.fn.now(),
     });
-    await trx('payments').insert({
+    const settledPaymentFields = {
       customer_id: customerId,
       processor: 'stripe',
       stripe_payment_intent_id: piId,
@@ -2267,13 +2296,21 @@ async function settleAppointmentNoShowFee(paymentIntent) {
       status: 'paid',
       description,
       metadata: JSON.stringify({
+        // Marker metadata (stamped_refund_ids, pre_settlement_refund) rides
+        // forward so a later refund bounce can still unwind it (r17).
+        ...(markerMeta || {}),
         purpose: 'appointment_card_no_show_fee',
         invoice_id: inv.id,
         request_id: requestId,
         scheduled_service_id: scheduledServiceId,
         reason,
       }),
-    });
+    };
+    if (adoptMarkerRowId) {
+      await trx('payments').where({ id: adoptMarkerRowId }).update(settledPaymentFields);
+    } else {
+      await trx('payments').insert(settledPaymentFields);
+    }
     return { invoice: inv };
   });
   const { sendNoShowFeeReceipt } = require('./estimate-card-holds');
