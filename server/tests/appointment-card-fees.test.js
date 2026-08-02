@@ -708,12 +708,31 @@ describe('handleAppointmentCardCancellation', () => {
     expect(res.released).toBe(true);
   });
 
-  test('gate off → in-window cancel does NOT charge (dark = byte-identical behavior)', async () => {
+  test('gate off → in-window cancel short-circuits released, NO lookups, NO charge (dark = byte-identical behavior — Codex #3153 r11)', async () => {
     mockGateOn = false;
     mockApptTime = new Date(Date.now() + 3 * HOUR);
+    const payerMock = require('../services/payer').resolveForInvoice;
+    payerMock.mockClear();
     const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
-    expect(res.reason).toBe('cancel_outside_window');
+    expect(res).toEqual({ handled: false, released: true, reason: 'feature_disabled' });
     expect(mockChargeOffSession).not.toHaveBeenCalled();
+    // The fail-closed payer/hold lookups never run while dark — their
+    // error outcomes must not block refunds for a fee that cannot charge.
+    expect(payerMock).not.toHaveBeenCalled();
+    // Flip protection survives: the row is terminally stamped released.
+    const released = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.fee_status === 'released');
+    expect(released).toBeTruthy();
+  });
+
+  test('gate off + FAILING hold lookup → still a clean release (dark rail never parks review — Codex #3153 r11)', async () => {
+    mockGateOn = false;
+    mockTableHandlers.estimate_card_holds.first = () => { throw new Error('db blip'); };
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1', waiveFee: true });
+    expect(res).toEqual({ handled: false, released: true, reason: 'feature_disabled' });
   });
 });
 
@@ -730,8 +749,9 @@ describe('appointmentCardCancelPreview', () => {
     mockGateOn = false;
     mockApptTime = new Date(Date.now() + 3 * HOUR);
     const res = await appointmentCardCancelPreview('svc-1');
-    expect(res.secured).toBe(true);
-    expect(res.feeApplies).toBe(false);
+    // Dark rail presents as ABSENT — no lookups, no fee-may-apply
+    // previews (Codex #3153 r11).
+    expect(res).toEqual({ secured: false, feeApplies: false });
   });
 });
 

@@ -1644,6 +1644,29 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
 // initiated escape hatch: WE cancelled, so the fee event closes 'waived'
 // and can never fire later.
 async function handleAppointmentCardCancellation({ scheduledServiceId, serviceStart = null, now = new Date(), waiveFee = false }) {
+  // Dark rail (Codex #3153 r11 P1): with the kill switch off, every cancel
+  // path must stay byte-identical to pre-rail behavior — the fail-closed
+  // payer/hold lookups must not run, because their error outcomes would
+  // block an offboarding refund or park review for a fee that CANNOT
+  // charge. The one internal write kept (r2, invisible while dark): a
+  // best-effort terminal stamp on the row so a later gate flip can never
+  // retro-charge a cancellation that happened while the rail was dark.
+  if (!isApptCardFeeRailEnabled()) {
+    try {
+      const row = await db('appointment_card_requests')
+        .where({ scheduled_service_id: scheduledServiceId })
+        .first('id', 'fee_status');
+      if (row && !row.fee_status) {
+        await db('appointment_card_requests')
+          .where({ id: row.id })
+          .whereNull('fee_status')
+          .update({ fee_status: waiveFee ? 'waived' : 'released', updated_at: new Date() });
+      }
+    } catch (err) {
+      logger.warn(`[appt-card-request] dark-gate release stamp failed for visit ${scheduledServiceId}: ${err.message}`);
+    }
+    return { handled: false, released: true, reason: 'feature_disabled' };
+  }
   const { request, reason: skipReason, unresolved } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     // An in-flight/parked fee (charging, charge_review) or an unverifiable
@@ -1702,6 +1725,9 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
 // GET /admin/dispatch/:serviceId/card-hold response so the client confirm
 // prompts cover both lanes unchanged.
 async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()) {
+  // Dark rail: no lookups, no fee-may-apply previews (Codex #3153 r11 P1)
+  // — the disabled rail cannot charge, so the lane presents as absent.
+  if (!isApptCardFeeRailEnabled()) return { secured: false, feeApplies: false };
   const { request, unresolved } = await feeEligibleRequestForVisit(scheduledServiceId);
   if (!request) {
     if (unresolved) {
