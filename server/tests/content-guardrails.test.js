@@ -2382,8 +2382,10 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
   test('exact-source matching respects URL path case (r12 P0)', () => {
     const N = { operatorCitations: true, requiredSourceUrls: ['https://legalclarity.org/Report'] };
     expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/Report today.', N)).toBeNull();
-    // A different file on the same host is a different resource.
+    // A different file on the same host is a different resource — including
+    // one that differs only by an extension.
     expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/report today.', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    expect(guardrails._internals.externalLinkFinding('See https://legalclarity.org/Report.js today.', N)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
   });
 
   test('the source and date must be RENDERED, not hidden (r12)', () => {
@@ -2439,6 +2441,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       'import{x}from"https://evil.example/p.js"\n\nprose',
       '   import * as x from "y"\n\nprose',
       '> import x from "y"\n\nprose',
+      '{/* x */}import y from "z"\n\nprose',
     ]) {
       expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
     }

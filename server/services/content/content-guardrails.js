@@ -1087,7 +1087,10 @@ function curatedCompetitorSourceHosts() {
 // named citation could authorize a different file on the same host
 // (Codex).
 function normalizeSourceUrl(u) {
-  const raw = String(u || '').trim().replace(/[).,;:!?]+$/, '');
+  // Only sentence punctuation that CANNOT be part of a URL path is trimmed.
+  // Stripping ")" and "." conflated distinct resources — ".../a." and
+  // ".../a" are different paths (Codex).
+  const raw = String(u || '').trim().replace(/[,;:!?]+$/, '');
   if (!/^https?:\/\//i.test(raw)) return null;
   try {
     const url = new URL(raw);
@@ -1368,7 +1371,9 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   // No whitespace is required after the keyword — "import{x}from'y'" is
   // valid — and the line may be indented with any Unicode space or a
   // blockquote marker (Codex).
-  const esm = /^[\s>]*(import|export)(?=[\s{*'"(])/m.exec(body);
+  // Comment-blanked: "{/* … */}import x from 'y'" kept the line from
+  // starting with the keyword (Codex).
+  const esm = /^[\s>]*(import|export)(?=[\s{*'"(])/m.exec(blankComments(body));
   if (esm) {
     return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains an MDX "${esm[1]}" statement — generated posts publish as .mdx and must never declare modules. Remove it.`);
   }
