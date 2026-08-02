@@ -7147,7 +7147,13 @@ const CallRecordingProcessor = {
             // claim outcome is the bounce handler's authority: reconcile the
             // fresh card so it never permanently says 'sent' for a text that
             // already bounced.
-            const bounceOutcome = smsOutcome.sent ? await DroppedCallSms.terminalBounceOutcome(smsAni || phone) : null;
+            // Reconcile terminal bounce outcomes for a FRESH send AND for a
+            // rebuilt card whose original text already went out (reprocess
+            // path returns already_sent_to_phone) — a 21610 that landed
+            // while the first card insert was lost must reach the rebuilt
+            // card too (codex P1).
+            const bounceOutcome = (smsOutcome.sent || smsOutcome.skipped === 'already_sent_to_phone')
+              ? await DroppedCallSms.terminalBounceOutcome(smsAni || phone) : null;
             if (bounceOutcome) {
               await db('triage_items')
                 .where({ call_log_id: call.id, reason_code: 'call_dropped_mid_intake' })

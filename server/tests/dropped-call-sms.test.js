@@ -202,6 +202,26 @@ describe('endedAbruptly', () => {
     ]))).toBe(true);
   });
 
+  it('folds diarized wrap lines into their turn (wrapped farewell still detected)', () => {
+    expect(endedAbruptly(mk([
+      'Agent: We are all set for Tuesday.',
+      'Caller: Perfect, works for me.',
+      'Agent: Great talking with you.',
+      'Caller: Thanks so',
+      'much, bye now.',
+    ]))).toBe(false);
+  });
+
+  it('wrapped mid-thought continuation still reads as a cutoff', () => {
+    expect(endedAbruptly(mk([
+      'Agent: What can I help with?',
+      'Caller: I have rats in the garage.',
+      'Agent: What is your service address?',
+      'Caller: Sure, it is one',
+      'eight one one zero,',
+    ]))).toBe(true);
+  });
+
   it('false for transcripts too short to judge', () => {
     expect(endedAbruptly(mk(['Agent: Hello?', 'Caller: Hi —']))).toBe(false);
     expect(endedAbruptly('')).toBe(false);
@@ -289,6 +309,16 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(res).toEqual({ sent: false, skipped: 'call_too_old' });
     expect(state.inserts).toHaveLength(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('never sends from the AI toll-free line even though findByNumber matches it', async () => {
+    const TN = require('../config/twilio-numbers');
+    TN.tollFree = { number: '+18559260203' };
+    TN.findByNumber.mockReturnValueOnce({ id: 'bradenton', type: 'location' });
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, to_phone: '+18559260203' } });
+    const sent = sendCustomerMessage.mock.calls.pop()[0];
+    expect(sent.metadata.fromNumber).toBeUndefined();
   });
 
   it('sends from the line the prospect dialed when it is one of ours', async () => {

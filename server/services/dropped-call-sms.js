@@ -170,10 +170,19 @@ function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, 
  * the last three turns. Deterministic — no model call.
  */
 function endedAbruptly(transcription) {
-  const turns = String(transcription || '')
-    .split(/\n+/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  // Fold diarized continuation lines into their turns (mirrors the
+  // processor's speakerTurns contract): a turn starts at a "Speaker:" label
+  // and absorbs unlabelled wrap lines — counting physical lines as turns
+  // both inflates the turn count and mis-identifies the final utterance
+  // (codex P2).
+  const turns = [];
+  for (const line of String(transcription || '').split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    if (/^[A-Za-z][A-Za-z0-9 ]{0,20}:/.test(t)) turns.push(t);
+    else if (turns.length) turns[turns.length - 1] += ` ${t}`;
+    else turns.push(t);
+  }
   if (turns.length < 4) return false; // too short to judge — not "abrupt"
   const tail = turns.slice(-3).join(' ');
   const finalTurn = turns[turns.length - 1];
@@ -489,8 +498,13 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
       call_sid: call.twilio_call_sid || null,
       // Reply from the line the prospect just dialed (matches the
       // {callback_clause} in the body); only when it's one of OUR managed
-      // numbers — otherwise the location-aware default applies (codex P1).
-      ...(call.to_phone && TWILIO_NUMBERS.findByNumber(call.to_phone) ? { fromNumber: call.to_phone } : {}),
+      // numbers AND not the AI-assistant toll-free line — a reply to that
+      // line enters the AI chat flow instead of the human comms inbox
+      // (codex P1). Otherwise the location-aware default applies.
+      ...(call.to_phone
+        && call.to_phone !== TWILIO_NUMBERS.tollFree?.number
+        && TWILIO_NUMBERS.findByNumber(call.to_phone)
+        ? { fromNumber: call.to_phone } : {}),
     },
   });
 
