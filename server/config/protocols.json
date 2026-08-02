@@ -209,7 +209,7 @@
       "site_condition_rules": {
         "default": "standard_st_augustine",
         "stress_check": "If turf is heat, drought, scalp, or disease stressed, hold PGR and hot herbicide until manager review.",
-        "herbicide_heat_gate": "SpeedZone Southern is weather-gated at 85°F; use Celsius WG fallback when heat risk is high.",
+        "herbicide_heat_gate": "SpeedZone Southern is weather-gated to 50-85°F; use Celsius WG fallback when heat risk is high. Do not apply to St. Augustinegrass during spring green-up or the fall-to-winter transition.",
         "disease_check": "Pull-test and inspect roots when thinning or patch symptoms are present; choose fungicide by diagnosis, not by sun/shade label.",
         "irrigation_vwc_threshold": "Use VWC/audit notes to adjust irrigation recommendations; do not create a separate St. Augustine shade program."
       }

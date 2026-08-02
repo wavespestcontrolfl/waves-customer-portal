@@ -105,16 +105,19 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('products_catalog'))) return;
-
-  // Safe to reverse by value here — unlike a fill, every row this migration
-  // touches was NON-empty and is restored to the exact prior list, so a match
-  // on the post-value really does identify a row up() rewrote.
-  for (const [name, before, after] of RENAMES) {
-    await knex('products_catalog')
-      .whereRaw('LOWER(name) = LOWER(?)', [name])
-      .whereRaw('target_pests = ?::jsonb', [JSON.stringify(after)])
-      .update({ target_pests: JSON.stringify(before), updated_at: new Date() });
-  }
-};
+// Deliberately a no-op.
+//
+// An earlier version of this reverted by value, on the reasoning that every
+// row touched here was non-empty so a match on the post-value must identify a
+// row up() rewrote. That reasoning was wrong, and in exactly the way the fill
+// migration (20260801300000) was already corrected for: if an environment
+// ALREADY holds the normalized value — because an admin standardized that
+// product by hand — up() skips it, and a value-matched down() cannot tell that
+// row apart from one it rewrote. It would push someone's correct edit back to
+// the retired spelling.
+//
+// Matching a value never proves authorship. Nothing here is destructive (both
+// spellings name the same disease), so there is no state worth restoring at
+// the cost of overwriting a hand edit. To undo one product, change its Targets
+// in the admin catalog UI.
+exports.down = async function down() {};

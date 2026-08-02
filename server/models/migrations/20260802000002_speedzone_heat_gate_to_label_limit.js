@@ -44,12 +44,30 @@ async function shiftGateThreshold(knex, { from, to }) {
         logic: knex.raw("jsonb_set(logic, '{maxTempF}', ?::jsonb)", [String(to)]),
       });
 
-    // rule_text is what a technician actually reads.
+    // rule_text is what a technician actually reads — the numbers inside
+    // `logic` are advisory metadata that nothing evaluates against live
+    // weather, so this string is the gate in practice.
     await knex('lawn_protocol_gates')
       .where('gate_key', 'speedzone_heat_gate')
       .whereRaw('rule_text LIKE ?', [`%${from}°F%`])
       .update({
         rule_text: knex.raw('REPLACE(rule_text, ?, ?)', [`${from}°F`, `${to}°F`]),
+      });
+
+    // The label prohibits more than the upper bound, and the rest of it was
+    // recorded only in products_catalog.heat_restrictions where the protocol
+    // sources never see it. Append the lower bound and the St. Augustine
+    // seasonal prohibitions so the gate a tech reads carries the whole rule.
+    // Idempotent: skipped once the sentence is present.
+    await knex('lawn_protocol_gates')
+      .where('gate_key', 'speedzone_heat_gate')
+      .whereRaw('rule_text NOT LIKE ?', ['%below 50°F%'])
+      .update({
+        rule_text: knex.raw("rule_text || ?", [
+          ' Also do not broadcast below 50°F, and do not apply to St. Augustinegrass'
+          + ' during spring green-up or the fall-to-winter transition (or when temperatures'
+          + ' are expected below 40°F within 10 days).',
+        ]),
       });
   }
 
@@ -61,6 +79,19 @@ async function shiftGateThreshold(knex, { from, to }) {
       .update({
         gates: knex.raw("jsonb_set(gates, '{maxTempF}', ?::jsonb)", [String(to)]),
       });
+  }
+
+  // service_product_usage carries an operator-facing note that 20260401000091
+  // seeded as "weather gate >90°F". Prod has no SpeedZone row in that table
+  // today (verified read-only: 32 rows, none matching), so this is a no-op
+  // there — but a database replayed from migrations DOES get the row, and it
+  // would then contradict every other source. Guarded on the old value so a
+  // reworded note is never clobbered.
+  if (await knex.schema.hasTable('service_product_usage')) {
+    await knex('service_product_usage')
+      .whereRaw('product ILIKE ?', ['%speedzone%'])
+      .whereRaw('notes LIKE ?', [`%${from}°F%`])
+      .update({ notes: knex.raw('REPLACE(notes, ?, ?)', [`${from}°F`, `${to}°F`]) });
   }
 
   // The window GOAL copy is what a technician actually reads in Command
@@ -96,7 +127,16 @@ exports.up = async function up(knex) {
   await shiftGateThreshold(knex, { from: OLD_MAX, to: NEW_MAX });
 };
 
-exports.down = async function down(knex) {
-  // Symmetric, and equally guarded: only rows still reading 85 move back.
-  await shiftGateThreshold(knex, { from: NEW_MAX, to: OLD_MAX });
-};
+// Deliberately a no-op — and here the reason is stronger than for the sibling
+// migrations. Shifting these gates back to 90°F would re-open the 86-90°F band
+// the label prohibits, so an automatic rollback would restore an off-label
+// authorization across every protocol source at once. A rollback is meant to
+// undo a bad deploy, not to reinstate a compliance gap.
+//
+// It also cannot tell a row it changed from one already reading 85°F because
+// someone corrected it by hand — the same value-is-not-provenance problem as
+// the sibling migrations.
+//
+// To raise the threshold deliberately, change it in the protocol editor, where
+// the decision is visible and attributable.
+exports.down = async function down() {};

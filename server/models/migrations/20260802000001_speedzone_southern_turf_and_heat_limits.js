@@ -76,30 +76,17 @@ exports.up = async function up(knex) {
     });
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('products_catalog'))) return;
+// Deliberately a no-op, for the same reason as the sibling migrations.
+//
+// Reverting by value cannot prove authorship. An environment that already
+// excluded Bitterblue by hand, or already carried these bounds, was SKIPPED by
+// up() — yet a value-matched down() would strip that hand-entered exclusion
+// and null out bounds it never set. Removing a cultivar exclusion is the worst
+// possible rollback failure here: Floratam and Bitterblue are the cultivars
+// this product must never touch.
+//
+// Nothing recorded here is destructive — it is label truth that was simply
+// missing — so there is no state worth restoring at the risk of deleting a
+// safety exclusion. To undo it, edit the product in the admin catalog UI.
+exports.down = async function down() {};
 
-  // All three values must still be exactly what up() wrote. Matching only the
-  // restriction text would destroy a hand-edited bound that someone set after
-  // up() ran while leaving the text alone — the same admin-edit-preserving
-  // contract the forward direction honours.
-  await knex('products_catalog')
-    .whereRaw('LOWER(name) = LOWER(?)', [NAME])
-    .where('heat_restrictions', HEAT_RESTRICTIONS)
-    .where('max_temp_f', 85)
-    .where('min_temp_f', 50)
-    .update({
-      max_temp_f: null,
-      min_temp_f: null,
-      heat_restrictions: null,
-      updated_at: new Date(),
-    });
-
-  await knex('products_catalog')
-    .whereRaw('LOWER(name) = LOWER(?)', [NAME])
-    .whereRaw('excluded_turf_species = ?::jsonb', [JSON.stringify(NEXT_EXCLUDED)])
-    .update({
-      excluded_turf_species: JSON.stringify(PREV_EXCLUDED),
-      updated_at: new Date(),
-    });
-};

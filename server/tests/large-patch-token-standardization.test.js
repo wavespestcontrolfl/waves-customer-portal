@@ -75,16 +75,26 @@ describe('large patch token standardization', () => {
     });
   });
 
-  test('down() restores the exact prior list', async () => {
+  test('down() touches nothing — matching a value is not provenance', async () => {
+    // A value-matched rollback cannot tell a row up() rewrote from one that
+    // already held the normalized value because an admin standardized it by
+    // hand — up() skips the latter, and reverting it would push a correct edit
+    // back to the retired spelling.
     const { knex, calls } = mockKnex();
     await migration.down(knex);
-    expect(calls).toHaveLength(RENAMES.length);
-    calls.forEach((c, i) => {
-      const [name, before, after] = RENAMES[i];
-      expect(c.name).toBe(name);
-      expect(c.match).toBe(JSON.stringify(after));
-      expect(c.row.target_pests).toBe(JSON.stringify(before));
-    });
+    expect(calls).toEqual([]);
+  });
+
+  test('none of these migrations reverts by value', async () => {
+    // Same failure mode across the set: the SpeedZone catalog migration would
+    // strip a hand-entered cultivar exclusion, and the gate migration would
+    // re-open the off-label 86-90°F band. All three are no-ops.
+    const gate = require('../models/migrations/20260802000002_speedzone_heat_gate_to_label_limit');
+    for (const m of [migration, speedzone, gate]) {
+      const { knex, calls } = mockKnex();
+      await m.down(knex);
+      expect(calls).toEqual([]);
+    }
   });
 
   test('no product appears twice', () => {

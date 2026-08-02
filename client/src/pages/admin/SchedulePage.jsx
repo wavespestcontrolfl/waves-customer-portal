@@ -16567,37 +16567,37 @@ const PRODUCT_DESCRIPTIONS = {
 const TRACK_SAFETY_RULES = {
   st_augustine: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar and do NOT apply >85\u00b0F",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   A_St_Aug_Sun: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar and do NOT apply >85\u00b0F",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   B_St_Aug_Shade: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar and do NOT apply >85\u00b0F",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   C1_Bermuda: [
     "Celsius WG: MAX 3 apps/year/property",
     "No Atrazine on Bermuda \u2014 EVER",
-    "SpeedZone: do NOT apply >85\u00b0F",
+    "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   C2_Zoysia: [
     "Celsius WG: MAX 3 apps/year/property",
     "No Atrazine on Zoysia \u2014 EVER",
-    "SpeedZone: do NOT apply >85\u00b0F",
+    "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   D_Bahia: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: do NOT apply >85\u00b0F",
+    "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
 };

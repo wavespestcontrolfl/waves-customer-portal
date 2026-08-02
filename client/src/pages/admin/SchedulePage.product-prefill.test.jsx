@@ -229,6 +229,28 @@ describe("TRACK_SAFETY_RULES — SpeedZone heat limit", () => {
     expect(wrong).toEqual([]);
   });
 
+  it("states the LOWER bound too — the label prohibits both ends", () => {
+    // "Do not broadcast apply this product when ambient temperatures are
+    // below 50°F or above 85°F". Recording only the ceiling left the field
+    // sources authorizing cold-weather applications the label forbids.
+    const missingFloor = rules
+      .flatMap(([track, list]) => list.filter((r) => /speedzone/i.test(r)).map((r) => [track, r]))
+      .filter(([, r]) => !/50/.test(r))
+      .map(([track, r]) => `${track}: ${r}`);
+    expect(missingFloor).toEqual([]);
+  });
+
+  it("carries the St. Augustine seasonal prohibition on St. Augustine tracks", () => {
+    // Spring green-up and the fall transition are St. Augustine-specific on
+    // the label, so they belong on those tracks and not on bermuda/zoysia.
+    const saTracks = rules.filter(([t]) => /st_aug|st_augustine/i.test(t));
+    expect(saTracks.length).toBeGreaterThan(0);
+    const missing = saTracks
+      .filter(([, list]) => !list.some((r) => /green-up/i.test(r)))
+      .map(([t]) => t);
+    expect(missing).toEqual([]);
+  });
+
   it("warns on every turf track, not just St. Augustine", () => {
     // The 85°F broadcast ceiling is product-wide, not a St. Augustine-only
     // rule, so bermuda and zoysia need it too. The cultivar check stays
