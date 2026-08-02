@@ -275,7 +275,7 @@ function monthFromServiceDate(serviceDate) {
   return Number.isInteger(m) && m >= 1 && m <= 12 ? m : null;
 }
 
-function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null } = {}) {
+function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null } = {}) {
   const turfIrrigationInches = numberOrNull(turfProfile?.irrigation_inches_per_week);
   const assessmentIrrigationInches = numberOrNull(assessment.irrigation_inches_per_week);
   const prefsIrrigationInches = numberOrNull(propertyPrefs?.irrigation_inches_per_week);
@@ -315,8 +315,15 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
   // Which provider actually supplied the weekly figure — the customer-facing
   // Source row must credit the real one (codex P2 #3093 r6: a FAWN fallback
   // week was labeled Open-Meteo).
+  //
+  // The completion figure no longer means "Open-Meteo": with GATE_RAIN_MRMS
+  // live it can be MRMS observations, or a per-day mrms+open_meteo blend, and
+  // fetchServiceWeekWeather already reports which via rainSource. Hardcoding
+  // 'open_meteo' here mislabeled every MRMS week the moment the gate flipped.
+  // Fall back to 'open_meteo' only when the weather call gave us no source at
+  // all, which is what the pre-engine path did.
   const rainfall7dProvider = completionRainfall7dInches != null
-    ? 'open_meteo'
+    ? (completionRainSource || 'open_meteo')
     : (rainfallInches7d != null ? 'fawn' : null);
   const dailyInputs = [irrigationInchesPerDay, rainfallInchesToday].filter((value) => value != null);
   const weeklyInputs = [irrigationInchesPerWeek, rainfallInches7d].filter((value) => value != null);
@@ -2024,6 +2031,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
   let completionEt0Inches = null;
   let completionDailyRain = null;
   let completionRainConfidence = null;
+  let completionRainSource = null;
   try {
     const weekWeather = await fetchServiceWeekWeather({
       latitude: service.customer_latitude ?? service.latitude ?? service.lat,
@@ -2036,6 +2044,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     // 'low' when the pinpoint week was a single-cell model spike and we fell back to
     // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
     completionRainConfidence = weekWeather.rainConfidence;
+    // Which provider actually supplied it — drives the customer-facing Source row.
+    completionRainSource = weekWeather.rainSource;
   } catch (e) { /* non-blocking */ }
   const waterContext = buildLawnWaterContext({
     assessment,
@@ -2051,6 +2061,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     completionEt0Inches,
     completionDailyRain,
     completionRainConfidence,
+    completionRainSource,
   });
 
   return {
@@ -3043,6 +3054,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         // 'low' when the series is the city-collective fallback → chart shows "Limited
         // data this week" instead of implying a precise per-address reading we don't have.
         reportV2.rain7dConfidence = lawnAssessment.waterContext?.dailyRain7dConfidence || null;
+        // Which provider measured these days — the chart prints the NOAA
+        // attribution + "local totals may vary" only when the numbers really
+        // are radar/gauge derived, never over a pure model week.
+        reportV2.rain7dSource = lawnAssessment.waterContext?.rainfall7dProvider || null;
       }
 
       // Next scheduled lawn visit. Honest-precision rule: a CONFIDENT date only from
@@ -3667,6 +3682,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
 module.exports = {
   buildReportV1Data,
+  // Pure — exported so the rainfall-provenance contract can be tested against
+  // the real implementation rather than a copy of it.
+  buildLawnWaterContext,
   resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,

@@ -162,6 +162,16 @@ async function fetchUpcomingWeekRainForecast({ latitude, longitude } = {}) {
   }
 }
 
+// Attribution for a radar/gauge-measured week, matching the lawn report's rule
+// (LawnReportV2 measuredSourceNote): shown ONLY when the figure really is
+// MRMS-derived, never over a pure model week. Empty string → the template's
+// paragraph renders nothing, same as forecast_line.
+function rainSourceNote(rainSource) {
+  return String(rainSource || '').startsWith('mrms')
+    ? 'Based on NOAA radar and rain-gauge data — local totals may vary.'
+    : '';
+}
+
 // Deterministic forecast sentence. Null forecast → empty string, and the
 // template's forecast_line paragraph renders nothing.
 function forecastLine({ forecastRainInches, status, targetInches }) {
@@ -196,6 +206,7 @@ function buildWeeklyEmailDecision({
   assessmentIrrigationInchesPerWeek = null,
   turfIrrigationType = null,
   irrigationSystem = null,
+  rainSource = null,
   rainfallInches7d = null,
   et0Inches = null,
   forecastRainInches = null,
@@ -276,7 +287,8 @@ function buildWeeklyEmailDecision({
           targetInches: advice.recommendedInchesPerWeek,
         }),
         customer_portal_url: buildPortalUrl('/?tab=property'),
-        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        rain_source_note: rainSourceNote(rainSource),
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: CONTACT_EMAIL,
       },
     };
@@ -358,7 +370,8 @@ function buildWeeklyEmailDecision({
           targetInches: advice.recommendedInchesPerWeek,
         }),
         customer_portal_url: buildPortalUrl('/?tab=property'),
-        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        rain_source_note: rainSourceNote(rainSource),
+    company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: CONTACT_EMAIL,
       },
     };
@@ -403,6 +416,7 @@ function buildWeeklyEmailDecision({
       targetInches: advice.recommendedInchesPerWeek,
     }),
     customer_portal_url: buildPortalUrl('/?tab=property'),
+    rain_source_note: rainSourceNote(rainSource),
     company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
     company_email: CONTACT_EMAIL,
   };
@@ -694,6 +708,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         irrigationSystem: customer.irrigation_system,
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
+        rainSource: weekWeather.rainSource,
       };
       // Decide from last week's balance FIRST — the forecast only fills an
       // optional copy line and never changes shouldSend, so skipped customers
@@ -806,5 +821,5 @@ module.exports = {
   TEMPLATE_SETUP_SCHEDULE,
   TEMPLATE_SETUP_SYSTEM,
   TEMPLATE_CONFIRM_SCHEDULE,
-  _private: { forecastLine, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason },
+  _private: { forecastLine, rainSourceNote, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason },
 };
