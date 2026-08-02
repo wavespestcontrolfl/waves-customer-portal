@@ -413,6 +413,21 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     return { sent: false, skipped: 'template_disabled' };
   }
 
+  // Final ownership + address recheck IMMEDIATELY before dispatch: the
+  // line-type, template, and policy awaits above leave a window where
+  // another flow can reassign the reusable lead or capture the address
+  // (codex P1). A changed lead releases both claims and skips.
+  const leadNow = await db('leads').where({ id: leadId }).first('customer_id', 'address');
+  const ownershipStillOk = !!leadNow
+    && (expectedCustomerId ? (!leadNow.customer_id || String(leadNow.customer_id) === String(expectedCustomerId)) : !leadNow.customer_id);
+  const addressStillMissing = !!leadNow && !String(leadNow.address || '').trim();
+  if (!ownershipStillOk || !addressStillMissing) {
+    await clearLeadClaim(leadId);
+    await releasePhoneClaim(phone);
+    logger.info(`[dropped-call-sms] Pre-dispatch recheck failed for lead ${leadId} (${!ownershipStillOk ? 'ownership changed' : 'address now on file'}) — released, not sent`);
+    return { sent: false, skipped: !ownershipStillOk ? 'lead_ownership_changed' : 'address_now_on_file' };
+  }
+
   const result = await sendCustomerMessage({
     to: phone,
     body,
@@ -493,6 +508,16 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     // must render as do-not-contact, never "call them back"; 21614/invalid
     // destination = not SMS-capable, still callable.
     const providerCode = String(result.providerErrorCode || result.code || 'terminal');
+    // SENDER-side terminal codes (21606: configured From cannot send;
+    // 21608: trial-account destination restriction) are OUR config problem,
+    // not the recipient's — fixing the sender makes a later send viable, so
+    // the recipient's one-shot must not be consumed (codex P2).
+    if (providerCode === '21606' || providerCode === '21608') {
+      await clearLeadClaim(leadId);
+      await releasePhoneClaim(phone);
+      logger.warn(`[dropped-call-sms] Sender-side terminal rejection for ${maskPhone(phone)} (released): ${providerCode}`);
+      return { sent: false, skipped: 'sender_config_terminal', code: providerCode };
+    }
     const optedOut = providerCode === '21610';
     if (optedOut) await recordProviderOptOutSuppression(phone, 'dropped_call_sms_21610');
     await stampStatus(leadId, 'blocked');

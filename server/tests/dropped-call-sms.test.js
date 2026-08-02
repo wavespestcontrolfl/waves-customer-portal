@@ -64,7 +64,11 @@ function makeBuilder(table) {
   }
   b.first = jest.fn(() => {
     const q = state.firstResults[table] || [];
-    const entry = q.length ? q.shift() : null;
+    // Default for an unseeded leads read: a clean, unowned, address-less
+    // lead — the pre-dispatch recheck runs on every send path and tests
+    // that aren't ABOUT the recheck shouldn't have to seed it.
+    const fallback = table === 'leads' ? { customer_id: null, address: null } : null;
+    const entry = q.length ? q.shift() : fallback;
     if (entry instanceof Error) return Promise.reject(entry);
     return Promise.resolve(entry);
   });
@@ -292,6 +296,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('landline — claim kept and stamped, no send', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     lineType.lookupLineType.mockResolvedValueOnce('landline');
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'landline' });
@@ -302,6 +307,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('template disabled — releases BOTH claims', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     renderSmsTemplate.mockResolvedValueOnce(null);
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'template_disabled' });
@@ -309,6 +315,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('happy path — sends via the policy pipeline with lead-transactional shape', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: true });
     expect(renderSmsTemplate).toHaveBeenCalledWith('dropped_call_address_request', expect.objectContaining({
@@ -330,6 +337,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('policy block — claim kept (never retry a suppressed number)', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'SUPPRESSED_MANUAL_DNC' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'policy_block', code: 'SUPPRESSED_MANUAL_DNC' });
@@ -339,6 +347,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('transient consent-lookup block — releases BOTH claims (never terminal)', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'CONSENT_LOOKUP_FAILED' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'policy_block_transient' });
@@ -346,6 +355,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('ambiguous provider failure — one-shot KEPT (dispatch_unknown), never a second text', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'provider_5xx' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'provider_failed' });
@@ -370,6 +380,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('terminal 21610 opt-out — claim kept, classified as suppression for the card', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: 'PROVIDER_FAILURE', providerErrorCode: '21610' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'policy_block', code: 'SUPPRESSED_PROVIDER_OPT_OUT_21610' });
@@ -381,6 +392,7 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('terminal 21614 not-SMS-capable — claim kept, still renders callable', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: 'PROVIDER_FAILURE', providerErrorCode: '21614' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'provider_terminal', code: '21614' });
@@ -389,9 +401,34 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
   });
 
   it('suppression sentinel sent:true (gate-blocked) — released, reported not sent', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
     sendCustomerMessage.mockResolvedValueOnce({ sent: true, providerMessageId: 'gate-blocked' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'send_suppressed', code: 'gate-blocked' });
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
+  });
+
+  it('pre-dispatch recheck: lead reassigned during the awaits — released, not sent', async () => {
+    // sendClaimed's final lead read returns a foreign owner
+    state.firstResults.leads = [{ customer_id: 'someone-else', address: null }];
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'lead_ownership_changed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
+  });
+
+  it('pre-dispatch recheck: address captured during the awaits — released, not sent', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: '123 Main St' }];
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'address_now_on_file' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('sender-side terminal (21606 From misconfig) — recipient one-shot released', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: 'PROVIDER_FAILURE', providerErrorCode: '21606' });
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'sender_config_terminal', code: '21606' });
     expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 
