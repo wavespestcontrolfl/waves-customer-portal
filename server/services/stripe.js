@@ -2223,7 +2223,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, requireAutopayForCustomerId = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2338,13 +2338,43 @@ const StripeService = {
         // (null = unchanged behavior for every existing caller); a throw
         // rolls the whole transaction back with nothing consumed.
         if (requireAutopayForCustomerId != null) {
-          const { customerOnAutopay } = require('./autopay-eligibility');
+          const { customerOnAutopay, getChargeableAutopayMethod } = require('./autopay-eligibility');
           const lockedCustomer = await trx('customers')
             .where({ id: requireAutopayForCustomerId })
             .forUpdate()
             .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
           if (!lockedCustomer || !(await customerOnAutopay(lockedCustomer, { db: trx }))) {
             throw new Error('Auto Pay is no longer active for this customer.');
+          }
+          // The SUPPLIED method must still be the active default under the
+          // same lock (Codex #3153 r14 P1): a customer who switched their
+          // Auto Pay method after the caller selected this one would
+          // otherwise pass the customer-level check while the OLD method
+          // gets charged.
+          const lockedPm = await getChargeableAutopayMethod(lockedCustomer, trx);
+          if (!lockedPm || String(lockedPm.id) !== String(paymentMethodId)) {
+            throw new Error('The saved Auto Pay method changed before the charge. Review before charging.');
+          }
+        }
+        // Self-pay SERIALIZED with the charge (Codex #3153 r14 P1): payer
+        // assignment updates scheduled_services — FOR UPDATE on that row
+        // orders this charge against a concurrently-committing payer edit,
+        // and the re-resolve runs on the lock transaction's own connection.
+        // Opt-in; a payer hit throws and rolls back with nothing consumed.
+        if (requireSelfPayScheduledServiceId != null) {
+          const lockedSvc = await trx('scheduled_services')
+            .where({ id: requireSelfPayScheduledServiceId })
+            .forUpdate()
+            .first('id', 'customer_id');
+          if (!lockedSvc) throw new Error('Scheduled service not found for payer verification.');
+          const resolvedPayer = await require('./payer').resolveForInvoice({
+            database: trx,
+            customerId: String(lockedSvc.customer_id),
+            scheduledServiceId: String(lockedSvc.id),
+            throwOnError: true,
+          });
+          if (resolvedPayer?.payerId) {
+            throw new Error('This appointment is payer-billed. The saved card must not be charged.');
           }
         }
         // The pre-lock invoice read is only an early eligibility snapshot. Use

@@ -363,6 +363,14 @@ describe('unresolved fee states on the cancellation path (Codex #3153 r1)', () =
     expect(released).toBeTruthy();
   });
 
+  test('payer-exempt stamp lost to a concurrent claim → NON-released charge_review, never a clean release (Codex #3153 r14)', async () => {
+    mockTableHandlers = handlersWith();
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.fee_status === 'released' ? 0 : 1);
+    require('../services/payer').resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ handled: false, released: false, reason: 'charge_review' });
+  });
+
   test('appointment-time resolution FAILURE on the preview → fee-may-apply unresolved, never a silent no-fee (Codex #3153 r13)', async () => {
     mockTableHandlers = handlersWith();
     require('../services/appointment-reminders').scheduledServiceApptTime.mockRejectedValueOnce(new Error('db blip'));
@@ -422,6 +430,7 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(mockChargeSavedCard).toHaveBeenCalledWith('inv-r1', 'pm-row-1', {
       maxAuthorizedSubtotal: 250,
       requireAutopayForCustomerId: 'cust-1',
+      requireSelfPayScheduledServiceId: 'svc-1',
     });
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_success', expect.objectContaining({
       details: expect.objectContaining({ source: 'appointment_card_recap_completion' }),

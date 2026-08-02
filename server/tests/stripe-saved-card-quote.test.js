@@ -242,6 +242,78 @@ describe('StripeService.quoteInvoiceSavedCardCharge', () => {
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
+  test('a switched default Auto Pay method refuses the charge under the lock (Codex #3153 r14)', async () => {
+    const invoice = {
+      id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
+      subtotal: '200.00', total: '200.00', discount_amount: '0.00',
+      credit_applied: '0.00', payer_id: null, stripe_payment_intent_id: null,
+    };
+    const callerCard = {
+      id: 'pm-1', customer_id: 'cust-1', method_type: 'card',
+      stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
+    };
+    // The customer switched defaults after the caller selected pm-1.
+    const switchedPm = {
+      id: 'pm-2', processor: 'stripe', method_type: 'card', is_default: true,
+      autopay_enabled: true, stripe_payment_method_id: 'pm_stripe_2', exp_month: 12, exp_year: 2099,
+    };
+    const activeCustomer = {
+      id: 'cust-1', stripe_customer_id: 'cus-1',
+      autopay_enabled: true, autopay_paused_until: null,
+      autopay_payment_method_id: 'pm-2', ach_status: null,
+    };
+    let chargeAttempt = null;
+    const db = jest.fn((table) => {
+      const chain = {};
+      ['where', 'whereIn', 'whereNotIn', 'whereNull', 'whereRaw', 'orWhereColumn', 'forUpdate'].forEach((method) => {
+        chain[method] = jest.fn((arg) => {
+          if (method === 'where' && typeof arg === 'function') arg.call(chain);
+          return chain;
+        });
+      });
+      chain.first = jest.fn(async () => {
+        if (table === 'invoices') return invoice;
+        if (table === 'payment_methods') {
+          // The caller's by-id load vs the lock-time active-default lookup.
+          const w = chain.where.mock.calls[0]?.[0];
+          if (w && typeof w === 'object' && 'id' in w) return callerCard;
+          return switchedPm;
+        }
+        if (table === 'customers') return activeCustomer;
+        if (table === 'stripe_invoice_charge_attempts') return chargeAttempt;
+        return null;
+      });
+      chain.insert = jest.fn((payload) => {
+        if (table === 'stripe_invoice_charge_attempts') {
+          chargeAttempt = { ...payload, created_at: new Date(), resolved_at: null };
+        }
+        return chain;
+      });
+      chain.returning = jest.fn(async () => (chargeAttempt ? [chargeAttempt] : []));
+      chain.update = jest.fn(async (payload) => {
+        if (table === 'stripe_invoice_charge_attempts' && chargeAttempt) Object.assign(chargeAttempt, payload);
+        return 1;
+      });
+      return chain;
+    });
+    db.transaction = jest.fn(async (callback) => callback(db));
+    db.fn = { now: jest.fn(() => 'NOW') };
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+
+    const stripeClient = { paymentIntents: { retrieve: jest.fn(), cancel: jest.fn(), create: jest.fn() } };
+    jest.doMock('../models/db', () => db);
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { requireAutopayForCustomerId: 'cust-1' }))
+      .rejects.toThrow('The saved Auto Pay method changed');
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
   test('the consent cap runs BEFORE account-credit application (Codex #3153 r8 — source contract)', () => {
     // The fully-covered-by-credit early return commits a credit draw-down;
     // an over-cap invoice must refuse before any credit is consumed.

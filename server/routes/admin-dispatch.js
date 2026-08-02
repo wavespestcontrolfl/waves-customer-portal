@@ -7501,10 +7501,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // window refuses instead of charging above consent — the
             // pay-link fallback takes over exactly like a decline.
             maxAuthorizedSubtotal: capCeiling,
-            // Auto Pay serialized inside the charge transaction (r13):
-            // FOR UPDATE on the customer row orders the charge against a
-            // concurrently-committing pause/opt-out.
+            // Auto Pay + self-pay serialized inside the charge transaction
+            // (r13/r14): FOR UPDATE on the customer and scheduled-service
+            // rows orders the charge against concurrently-committing
+            // pause/opt-out, method-switch, and payer-assignment edits.
             requireAutopayForCustomerId: svc.customer_id,
+            requireSelfPayScheduledServiceId: svc.id,
             deferReceiptDelivery: combinedReceiptArmed,
           });
           const fresh = await db('invoices').where({ id: invoice.id }).first();

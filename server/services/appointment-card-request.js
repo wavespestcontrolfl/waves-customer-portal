@@ -1676,16 +1676,23 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
     if (unresolved) return { handled: false, released: false, reason: 'charge_review' };
     if (skipReason === 'payer_billed') {
       // Terminal stamp for a payer-exempt cancellation (Codex #3153 r13
-      // P1): if the payer is later removed and an idempotent cancellation
-      // retry re-runs side effects, this already-cancelled visit must not
-      // become fee-eligible again. Best-effort, atomic on NULL.
+      // P1), REQUIRED not best-effort (r14): a lost stamp means either a
+      // concurrent worker claimed the fee after our eligibility read or
+      // the write failed — in both cases reporting a clean release could
+      // let a fee land after offboarding refunded. Exactly-one row or the
+      // canonical non-released review outcome.
       try {
-        await db('appointment_card_requests')
+        const stamped = await db('appointment_card_requests')
           .where({ scheduled_service_id: scheduledServiceId })
           .whereNull('fee_status')
           .update({ fee_status: waiveFee ? 'waived' : 'released', updated_at: new Date() });
+        if (stamped !== 1) {
+          logger.warn(`[appt-card-request] payer-exempt release stamp lost a race for visit ${scheduledServiceId} — reporting charge_review`);
+          return { handled: false, released: false, reason: 'charge_review' };
+        }
       } catch (err) {
-        logger.warn(`[appt-card-request] payer-exempt release stamp failed for visit ${scheduledServiceId}: ${err.message}`);
+        logger.error(`[appt-card-request] payer-exempt release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${err.message}`);
+        return { handled: false, released: false, reason: 'charge_review' };
       }
     }
     return { handled: false, released: true, reason: skipReason };
@@ -1974,6 +1981,7 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
       await StripeService.chargeInvoiceWithSavedCard(invoice.id, freshPm.id, {
         maxAuthorizedSubtotal: acceptedAmount,
         requireAutopayForCustomerId: svc.customer_id,
+        requireSelfPayScheduledServiceId: scheduledServiceId,
       });
     } catch (err) {
       logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);
