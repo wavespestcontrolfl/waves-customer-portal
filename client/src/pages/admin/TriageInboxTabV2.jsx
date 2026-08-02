@@ -132,11 +132,13 @@ export function ConfirmEvidence({ payload }) {
         const outcome = String(p.address_request_sms);
         const code = p.address_request_sms_code ? String(p.address_request_sms_code) : "";
         if (outcome === "sent") return "sent — watch for their reply";
-        if (outcome === "undelivered") return "text never arrived — call them back";
         // Every recipient-terminal verdict the service can emit: STOP-list
         // suppressions, per-purpose/SMS opt-outs, explicit no-consent, DNC,
-        // wrong number, provider opt-out (21610).
+        // wrong number, provider opt-out (21610). Checked BEFORE the
+        // undelivered rendering — a delayed 21610 bounce is an opt-out, not
+        // a "call them back".
         const DNC_RE = /SUPPRESS|DNC|WRONG_NUMBER|OPTED_OUT|OPT_OUT|NO_CONSENT|NO_MARKETING/i;
+        if (outcome === "undelivered" && !DNC_RE.test(code)) return "text never arrived — call them back";
         if (DNC_RE.test(code) || DNC_RE.test(outcome)) {
           return `blocked (${(code || outcome).replace(/_/g, " ").toLowerCase()}) — do NOT contact; check the record first`;
         }

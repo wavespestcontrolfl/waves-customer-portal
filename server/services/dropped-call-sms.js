@@ -480,7 +480,7 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
       // flips 'sent' -> 'undelivered'; every later one sees 0 rows.
       const flipped = await trx('dropped_call_sms_claims')
         .where({ phone, outcome: 'sent' })
-        .update({ outcome: 'undelivered' });
+        .update({ outcome: String(errorCode || '') === '21610' ? 'opted_out' : 'undelivered' });
       if (!flipped) return { handled: false, reason: 'already_handled_or_not_sent' };
 
       const lead = await trx('leads')
@@ -490,6 +490,10 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
         .first('id');
 
       const now = new Date();
+      // A DELAYED opt-out (21610 on the delivery callback) is the same
+      // do-not-contact verdict as a synchronous one — the card and note must
+      // never instruct a callback for it (codex P1).
+      const optedOut = String(errorCode || '') === '21610';
       if (lead) {
         await trx('leads')
           .where({ id: lead.id })
@@ -510,7 +514,9 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
         await trx('lead_activities').insert({
           lead_id: lead.id,
           activity_type: 'note',
-          description: `Dropped-call address request never arrived (${codeText}). Call the prospect instead.`,
+          description: optedOut
+            ? `Dropped-call address request rejected (error 21610 — recipient has opted out of SMS). Do NOT text this number; check contact preferences before any outreach.`
+            : `Dropped-call address request never arrived (${codeText}). Call the prospect instead.`,
           performed_by: 'AI Call Processor',
           metadata: JSON.stringify({ message_type: MESSAGE_TYPE, delivery_status: status || null, error_code: errorCode || null }),
         });
@@ -526,7 +532,9 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
         .whereIn('status', ['open', 'in_progress'])
         .whereRaw("payload->>'caller_phone' = ?", [phone])
         .update({
-          payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered')"),
+          payload: optedOut
+            ? trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered', 'address_request_sms_code', 'SUPPRESSED_PROVIDER_OPT_OUT_21610')")
+            : trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered')"),
           updated_at: now,
         });
       if (row) {

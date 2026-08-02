@@ -405,6 +405,18 @@ describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
     expect(state.updates.filter((u) => u.table === 'dropped_call_sms_claims')).toHaveLength(0);
   });
 
+  it('delayed 21610 opt-out bounce — claim stamped opted_out, card carries the suppression code', async () => {
+    state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE, message_type: 'dropped_call_address_request' }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent', created_at: new Date() }];
+    state.firstResults.leads = [{ id: LEAD_ID }];
+    const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'failed', errorCode: '21610', to: PHONE });
+    expect(res).toEqual({ handled: true, leadId: LEAD_ID });
+    const flip = state.updates.find((u) => u.table === 'dropped_call_sms_claims');
+    expect(flip.payload.outcome).toBe('opted_out');
+    const note = state.inserts.find((i) => i.table === 'lead_activities');
+    expect(note.payload.description).toMatch(/Do NOT text/);
+  });
+
   it('idempotent: the claim-outcome flip admits exactly one callback', async () => {
     state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE, message_type: 'dropped_call_address_request' }];
     state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'undelivered' }];

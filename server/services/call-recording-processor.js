@@ -6741,7 +6741,12 @@ const CallRecordingProcessor = {
             // duration_seconds unset while recording_duration_seconds is
             // populated (the race this file already handles elsewhere).
             droppedCallSeconds = recordingDurationSeconds(call);
-            droppedMidIntake = DroppedCallSmsDetect.detectDroppedMidIntake({
+            // A reused open lead can already carry the address from a prior
+            // call — a later abrupt call that doesn't restate it is NOT a
+            // missing-address drop; don't card it or text for information
+            // already on file (codex P1).
+            const leadAddressOnFile = !!String(existingLead?.address || '').trim();
+            droppedMidIntake = !leadAddressOnFile && DroppedCallSmsDetect.detectDroppedMidIntake({
               durationSeconds: droppedCallSeconds,
               transcription,
               extracted,
