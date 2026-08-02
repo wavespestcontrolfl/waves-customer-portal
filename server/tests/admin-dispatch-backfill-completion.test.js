@@ -2468,7 +2468,7 @@ describe('completion route wiring (source contracts)', () => {
     // the first call failed) — must flag the span untrusted AND carry the
     // backdated completed_at stamp (fix round 4).
     const flaggedCalls = source.match(
-      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: req\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*completedAt: backfillTrackerCompletedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*expectedAdjustedMinutes: typeof effectiveTimeOnSite === 'number' && !isBackfillCompletion\s*\n\s*\? effectiveTimeOnSite\s*\n\s*: null,\s*\n\s*\}\)/g,
+      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: req\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*completedAt: backfillTrackerCompletedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*expectedCorrectionSeq: svc\.time_on_site_correction_seq \?\? null,\s*\n\s*\}\)/g,
     ) || [];
     expect(flaggedCalls.length).toBe(2);
     // Exactly these two sites exist on the backfill-capable route; the third

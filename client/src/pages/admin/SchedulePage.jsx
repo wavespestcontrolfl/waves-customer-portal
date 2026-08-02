@@ -1625,13 +1625,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // say exactly that, matching the notification partial-failure above.
       if (timeOnSiteDirty) {
         try {
+          const correctionMinutes = Math.round(
+            Number(String(timeOnSiteMinutes).trim()),
+          );
           const patchResult = await adminFetch(
             `/admin/dispatch/${service.id}/time-on-site`,
             {
               method: "PATCH",
-              body: JSON.stringify({
-                minutes: Math.round(Number(String(timeOnSiteMinutes).trim())),
-              }),
+              body: JSON.stringify({ minutes: correctionMinutes }),
             },
           );
           // The record leg can be skipped server-side (ambiguous legacy
@@ -1646,12 +1647,34 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             );
           }
           // The costing refresh is derived state — a failure there must not
-          // read as full success (codex P2 round 9). Any later recalc heals
-          // from the durable stamp, but the admin should know it's pending.
+          // read as full success (codex P2 round 9). "Re-save this
+          // correction" as advice was a dead end (codex P2 round 17): after
+          // the refresh the corrected value becomes the seed, the dirty flag
+          // clears, and Save never re-invokes this PATCH — so the retry
+          // happens HERE, while the correction is still in hand.
           if (patchResult?.costingUpdated === false) {
-            alert(
-              "Duration corrected, but the job-cost refresh failed — costs may show the old labor until the next recalculation (Job Costs → Recalculate, or re-save this correction).",
+            const retryNow = window.confirm(
+              "Duration corrected, but the job-cost refresh failed — costs may show the old labor until the next recalculation. Retry the refresh now?",
             );
+            let retried = null;
+            if (retryNow) {
+              try {
+                retried = await adminFetch(
+                  `/admin/dispatch/${service.id}/time-on-site`,
+                  {
+                    method: "PATCH",
+                    body: JSON.stringify({ minutes: correctionMinutes }),
+                  },
+                );
+              } catch {
+                retried = null;
+              }
+            }
+            if (retryNow && retried?.costingUpdated !== true) {
+              alert(
+                "The job-cost refresh failed again — the corrected duration itself is saved; use Job Costs → Recalculate to refresh the labor cost.",
+              );
+            }
           }
         } catch (patchErr) {
           alert(

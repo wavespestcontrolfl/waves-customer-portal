@@ -679,13 +679,14 @@ describe('track-transitions lifecycle side effects', () => {
       actual_end_time: new Date('2026-07-19T13:00:00.000Z'),
       completed_at: new Date('2026-07-19T13:00:00.000Z'),
       time_on_site_adjusted_minutes: 60,
+      time_on_site_correction_seq: 1,
     };
     const update = query(1);
     db
       .mockReturnValueOnce(query(svc))
       .mockReturnValueOnce(update);
 
-    const result = await trackTransitions.markComplete('job-f15', { expectedAdjustedMinutes: null });
+    const result = await trackTransitions.markComplete('job-f15', { expectedCorrectionSeq: null });
 
     expect(result.ok).toBe(true);
     const payload = update.update.mock.calls[0][0];
@@ -699,7 +700,7 @@ describe('track-transitions lifecycle side effects', () => {
       .mockReturnValueOnce(query(svcMatch))
       .mockReturnValueOnce(update2);
     const result2 = await trackTransitions.markComplete('job-f15b', {
-      expectedAdjustedMinutes: 60,
+      expectedCorrectionSeq: 1,
       completedAt: new Date('2026-07-19T13:00:00.000Z'),
     });
     expect(result2.ok).toBe(true);
@@ -718,14 +719,17 @@ describe('track-transitions lifecycle side effects', () => {
       actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
       actual_end_time: new Date('2026-07-19T13:00:00.000Z'),
       completed_at: new Date('2026-07-19T13:00:00.000Z'),
-      time_on_site_adjusted_minutes: 60,
+      time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 2,
     };
     const update = query(1);
     db
       .mockReturnValueOnce(query(svc))
       .mockReturnValueOnce(update);
 
-    const result = await trackTransitions.markComplete('job-f16a', { expectedAdjustedMinutes: 45 });
+    // Same minutes value (45) as the caller expects — only the monotonic
+    // seq betrays the newer re-save (codex P2 round 17).
+    const result = await trackTransitions.markComplete('job-f16a', { expectedCorrectionSeq: 1 });
 
     expect(result.ok).toBe(true);
     expect(result.completedAt).toBeNull();
@@ -744,6 +748,7 @@ describe('track-transitions lifecycle side effects', () => {
       track_state: 'on_property',
       actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
       time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 1,
     };
     const fencedUpdate = query(0);
     const retryUpdate = query(1);
@@ -753,15 +758,16 @@ describe('track-transitions lifecycle side effects', () => {
       .mockReturnValueOnce(retryUpdate);
 
     const result = await trackTransitions.markComplete('job-f16b', {
-      expectedAdjustedMinutes: 45,
+      expectedCorrectionSeq: 1,
       completedAt: new Date('2026-07-19T12:45:00.000Z'),
     });
 
     expect(result.ok).toBe(true);
     expect(result.completedAt).toBeNull();
-    // The first write carried the atomic stamp predicate.
+    // The first write carried the atomic revision predicate (seq, not the
+    // minutes value — codex P2 round 17).
     expect(fencedUpdate.whereRaw).toHaveBeenCalledWith(
-      'time_on_site_adjusted_minutes IS NOT DISTINCT FROM ?', [45],
+      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [1],
     );
     // The retry wrote only the flip.
     expect(Object.keys(retryUpdate.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
@@ -776,6 +782,7 @@ describe('track-transitions lifecycle side effects', () => {
       track_state: 'on_property',
       actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
       time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 1,
     };
     const freshCompletedAt = new Date('2026-07-19T13:10:00.000Z');
     db
@@ -784,7 +791,7 @@ describe('track-transitions lifecycle side effects', () => {
       .mockReturnValueOnce(query(0))
       .mockReturnValueOnce(query({ ...svc, track_state: 'complete', completed_at: freshCompletedAt }));
 
-    const result = await trackTransitions.markComplete('job-f16c', { expectedAdjustedMinutes: 45 });
+    const result = await trackTransitions.markComplete('job-f16c', { expectedCorrectionSeq: 1 });
 
     expect(result).toEqual({ ok: true, state: 'complete', completedAt: freshCompletedAt });
     expect(clearTechCurrentJob).not.toHaveBeenCalled();

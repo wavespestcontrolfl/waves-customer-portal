@@ -647,14 +647,17 @@ async function markComplete(serviceId, opts = {}) {
     // finalization's SECOND tracker refresh can run after an admin saved a
     // newer duration through the time-on-site PATCH — restoring the older
     // instant here would split completed_at from the newer end fields. When
-    // the caller states which correction its instant belongs to
-    // (expectedAdjustedMinutes; undefined = legacy caller, no fence), the
-    // rewrite only lands while the row's durable stamp still matches; the
+    // the caller states which correction revision its instant belongs to
+    // (expectedCorrectionSeq; undefined = legacy caller, no fence; null =
+    // never corrected), the rewrite only lands while the row's monotonic
+    // seq still matches — the seq, not the minutes value, because a
+    // same-minutes re-save that repairs clamped end fields is a NEW
+    // correction the value comparison cannot see (codex P2 round 17). The
     // UPDATE is additionally conditional on the completed_at this call
     // observed, so a move between read and write skips instead of clobbers.
-    const normMinutes = (v) => (v == null ? null : Number(v));
-    const stampMatchesCaller = opts.expectedAdjustedMinutes === undefined
-      || normMinutes(svc.time_on_site_adjusted_minutes) === normMinutes(opts.expectedAdjustedMinutes);
+    const normSeq = (v) => (v == null ? null : Number(v));
+    const stampMatchesCaller = opts.expectedCorrectionSeq === undefined
+      || normSeq(svc.time_on_site_correction_seq) === normSeq(opts.expectedCorrectionSeq);
     if (suppliedCompletedAt
       && stampMatchesCaller
       && (!svc.completed_at || new Date(svc.completed_at).getTime() !== suppliedCompletedAt.getTime())) {
@@ -666,14 +669,16 @@ async function markComplete(serviceId, opts = {}) {
           // completed_at alone is not a version token for every correction
           // (codex P2 #3152 round 14): a newer clamped correction moves the
           // durable stamp and duration but deliberately leaves completed_at
-          // untouched, so this write must ALSO be conditional on the stamp
-          // the caller's instant belongs to. Guarded on the column existing
-          // in the loaded row so pre-migration environments skip the
-          // predicate (no stamps can exist there).
-          if (opts.expectedAdjustedMinutes !== undefined
-            && Object.prototype.hasOwnProperty.call(svc, 'time_on_site_adjusted_minutes')) {
-            q.whereRaw('time_on_site_adjusted_minutes IS NOT DISTINCT FROM ?', [
-              opts.expectedAdjustedMinutes == null ? null : Number(opts.expectedAdjustedMinutes),
+          // untouched, so this write must ALSO be conditional on the
+          // correction revision the caller's instant belongs to — the
+          // monotonic seq since round 17 (minutes equality misses a
+          // same-value re-save). Guarded on the column existing in the
+          // loaded row so pre-migration environments skip the predicate
+          // (no corrections can exist there).
+          if (opts.expectedCorrectionSeq !== undefined
+            && Object.prototype.hasOwnProperty.call(svc, 'time_on_site_correction_seq')) {
+            q.whereRaw('time_on_site_correction_seq IS NOT DISTINCT FROM ?', [
+              opts.expectedCorrectionSeq == null ? null : Number(opts.expectedCorrectionSeq),
             ]);
           }
         })
@@ -703,21 +708,23 @@ async function markComplete(serviceId, opts = {}) {
   // commit and this first tracker transition — its completed_at is already
   // on the row, and stamping `now` (or this caller's stale instant) over it
   // would split completed_at from the corrected end fields. When the caller
-  // states which correction its instant belongs to and the row's durable
-  // stamp disagrees, completed_at is left exactly as the row carries it —
-  // and so are the lifecycle end/duration columns the correction owns: the
-  // write degrades to a transition-only flip of track_state.
+  // states which correction revision its instant belongs to and the row's
+  // monotonic seq disagrees, completed_at is left exactly as the row
+  // carries it — and so are the lifecycle end/duration columns the
+  // correction owns: the write degrades to a transition-only flip of
+  // track_state. The seq, not the minutes value, is the fence (codex P2
+  // round 17): a same-minutes re-save is a new correction too.
   //
   // The fence is atomic, not just in-memory (codex P2 #3152 round 16): a
   // correction that commits between loadService and the UPDATE would pass
-  // the in-memory check on the stale stamp, so the full write also carries
-  // the stamp predicate. Zero rows with the predicate on is ambiguous —
-  // state moved or stamp moved — and the transition-only retry resolves it:
+  // the in-memory check on the stale row, so the full write also carries
+  // the seq predicate. Zero rows with the predicate on is ambiguous —
+  // state moved or seq moved — and the transition-only retry resolves it:
   // it matches only while the state is still transitionable, meaning the
-  // stamp (not the state) moved mid-flight.
+  // correction (not the state) moved mid-flight.
   const normStamp = (v) => (v == null ? null : Number(v));
-  const transitionStampMatches = opts.expectedAdjustedMinutes === undefined
-    || normStamp(svc.time_on_site_adjusted_minutes) === normStamp(opts.expectedAdjustedMinutes);
+  const transitionStampMatches = opts.expectedCorrectionSeq === undefined
+    || normStamp(svc.time_on_site_correction_seq) === normStamp(opts.expectedCorrectionSeq);
   let completedAtStamp = !transitionStampMatches
     ? null // a newer correction owns completed_at — the row's value stands
     : (opts.untrustedLifecycleSpan
@@ -727,8 +734,8 @@ async function markComplete(serviceId, opts = {}) {
   // Guarded on the column existing in the loaded row so pre-migration
   // environments skip the predicate (no stamps can exist there) — same
   // contract as the already-complete branch above.
-  const stampFenceActive = opts.expectedAdjustedMinutes !== undefined
-    && Object.prototype.hasOwnProperty.call(svc, 'time_on_site_adjusted_minutes');
+  const stampFenceActive = opts.expectedCorrectionSeq !== undefined
+    && Object.prototype.hasOwnProperty.call(svc, 'time_on_site_correction_seq');
   const transitionOnlyFlip = () => db('scheduled_services')
     .where({ id: serviceId })
     .whereIn('track_state', transitionableStates)
@@ -742,8 +749,8 @@ async function markComplete(serviceId, opts = {}) {
       .whereIn('track_state', transitionableStates)
       .modify((q) => {
         if (stampFenceActive) {
-          q.whereRaw('time_on_site_adjusted_minutes IS NOT DISTINCT FROM ?', [
-            opts.expectedAdjustedMinutes == null ? null : Number(opts.expectedAdjustedMinutes),
+          q.whereRaw('time_on_site_correction_seq IS NOT DISTINCT FROM ?', [
+            opts.expectedCorrectionSeq == null ? null : Number(opts.expectedCorrectionSeq),
           ]);
         }
       })

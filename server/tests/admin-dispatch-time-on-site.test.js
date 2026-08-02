@@ -116,6 +116,25 @@ describe('liveTimeOnSitePlan — the live-override intake gate', () => {
       .toEqual({ adjusted: false, effectiveTimeOnSite: '2:16:30' });
   });
 
+  test('a ZERO-rounded server span is a reference, not a trust path (codex P1 round 17)', () => {
+    // Check in and immediately submit: positiveMinutesBetween rounds the
+    // elapsed span to null, which used to skip the comparison entirely and
+    // accept any timer-shaped claim ("720:00") verbatim. Zero IS the
+    // server's span — a divergent claim is replaced with the zero timer.
+    const justStarted = { actual_start_time: new Date(GATE_NOW.getTime() - 10000) };
+    for (const role of ['technician', 'admin']) {
+      expect(liveTimeOnSitePlan({ timeOnSite: '720:00', role, service: justStarted, now: GATE_NOW }))
+        .toEqual({ adjusted: false, effectiveTimeOnSite: '0:00:00' });
+    }
+    // The genuine just-started panel timer stays within tolerance of zero.
+    expect(liveTimeOnSitePlan({ timeOnSite: '0:00:10', role: 'technician', service: justStarted, now: GATE_NOW }))
+      .toEqual({ adjusted: false, effectiveTimeOnSite: '0:00:10' });
+    // A start ahead of the clock (skew) takes the same zero reference.
+    const futureStart = { actual_start_time: new Date(GATE_NOW.getTime() + 60000) };
+    expect(liveTimeOnSitePlan({ timeOnSite: '45:00', role: 'technician', service: futureStart, now: GATE_NOW }))
+      .toEqual({ adjusted: false, effectiveTimeOnSite: '0:00:00' });
+  });
+
   test('a timer claim with NO row-backed start: admin keeps it, any other role records unknown', () => {
     expect(liveTimeOnSitePlan({ timeOnSite: '45:00', role: 'technician', service: {}, now: GATE_NOW }))
       .toEqual({ adjusted: false, effectiveTimeOnSite: null });
@@ -592,7 +611,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // between the handler's svc load and the lock already moved these
     // fields), and its stamped minutes outrank a plain stale-timer elapsed
     // in this request — explicit adjusted/backfill values keep authority.
-    expect(source).toMatch(/for \(const field of \[\s*\n\s*'actual_end_time', 'check_out_time', 'completed_at',\s*\n\s*'service_time_minutes', 'actual_duration_minutes',\s*\n\s*'time_on_site_adjusted_minutes',\s*\n\s*\]\) \{\s*\n\s*if \(field in lockedSvcRow\) svc\[field\] = lockedSvcRow\[field\];/);
+    expect(source).toMatch(/for \(const field of \[\s*\n\s*'actual_end_time', 'check_out_time', 'completed_at',\s*\n\s*'service_time_minutes', 'actual_duration_minutes',\s*\n\s*'time_on_site_adjusted_minutes', 'time_on_site_correction_seq',\s*\n\s*\]\) \{\s*\n\s*if \(field in lockedSvcRow\) svc\[field\] = lockedSvcRow\[field\];/);
     expect(source).toMatch(/if \(Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\s*\n\s*&& \(stampMovedMidFlight\s*\n\s*\|\| \(!isBackfillCompletion && !liveAdjustedTimeOnSite\s*\n\s*&& typeof effectiveTimeOnSite !== 'number'\)\)\) \{\s*\n\s*effectiveTimeOnSite = stampedMinutes;\s*\n\s*correctionPreservedMidFlight = true;/);
     // The reconcile block sits between the lock and the wall-clock capture.
     const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services')");
@@ -608,11 +627,18 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // moved stamp committed — the correction is the newer operator
     // statement, so the mode exclusion does not apply to it. The pre-lock
     // stamp is captured BEFORE the adoption loop overwrites svc.
-    const preLockAt = source.indexOf('const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);');
+    const preLockAt = source.indexOf('const preLockSeq = normStampVal(svc.time_on_site_correction_seq);');
     const adoptLoopAt = source.indexOf("if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];");
     expect(preLockAt).toBeGreaterThan(-1);
     expect(adoptLoopAt).toBeGreaterThan(preLockAt);
-    expect(source).toMatch(/const stampMovedMidFlight = Object\.prototype\.hasOwnProperty\.call\(lockedSvcRow, 'time_on_site_adjusted_minutes'\)\s*\n\s*&& normStampVal\(lockedSvcRow\.time_on_site_adjusted_minutes\) !== preLockStamp;/);
+    // The fence is the monotonic seq (codex P2 round 17) — a same-minutes
+    // re-save bumps it while the value comparison stays blind; rows without
+    // the column fall back to the round-16 value comparison.
+    expect(source).toMatch(/const stampMovedMidFlight = Object\.prototype\.hasOwnProperty\.call\(lockedSvcRow, 'time_on_site_correction_seq'\)\s*\n\s*\? normStampVal\(lockedSvcRow\.time_on_site_correction_seq\) !== preLockSeq\s*\n\s*: \(Object\.prototype\.hasOwnProperty\.call\(lockedSvcRow, 'time_on_site_adjusted_minutes'\)\s*\n\s*&& normStampVal\(lockedSvcRow\.time_on_site_adjusted_minutes\) !== preLockStamp\);/);
+    // The correction PATCH bumps the seq inside its row-locked transaction.
+    expect(source).toMatch(/time_on_site_correction_seq: trx\.raw\('COALESCE\(time_on_site_correction_seq, 0\) \+ 1'\)/);
+    // Both post-commit markComplete callers pass the observed revision.
+    expect((source.match(/expectedCorrectionSeq: svc\.time_on_site_correction_seq \?\? null,/g) || []).length).toBe(2);
     // And the losing live override must not stamp its derived end or its
     // typed minutes over the correction's columns.
     expect(source).toMatch(/const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite\s*\n\s*&& !correctionPreservedMidFlight\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionEndedAt\)\s*\n\s*: null;/);
@@ -640,7 +666,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // completed_at alone is not a version token — a clamped newer
     // correction moves the stamp without moving completed_at, so the UPDATE
     // itself predicates on the stamp the caller's instant belongs to.
-    expect(trackerSource).toMatch(/whereRaw\('time_on_site_adjusted_minutes IS NOT DISTINCT FROM \?', \[\s*\n\s*opts\.expectedAdjustedMinutes == null \? null : Number\(opts\.expectedAdjustedMinutes\),\s*\n\s*\]\)/);
+    expect(trackerSource).toMatch(/whereRaw\('time_on_site_correction_seq IS NOT DISTINCT FROM \?', \[\s*\n\s*opts\.expectedCorrectionSeq == null \? null : Number\(opts\.expectedCorrectionSeq\),\s*\n\s*\]\)/);
   });
 
   test('a repeat edit sends only the correction keys — prior preservation lives in the SQL CASE, not JS state', async () => {

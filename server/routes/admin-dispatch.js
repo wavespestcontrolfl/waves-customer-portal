@@ -855,9 +855,16 @@ function liveTimeOnSitePlan({ timeOnSite, role, backfill = false, service = {}, 
         ? { adjusted: false, effectiveTimeOnSite: timeOnSite }
         : { adjusted: false, effectiveTimeOnSite: null };
     }
-    const serverMinutes = positiveMinutesBetween(realStart, finiteDate(now) || new Date());
-    if (serverMinutes == null
-      || (claimedMinutes != null && Math.abs(claimedMinutes - serverMinutes) <= LIVE_TIMER_TOLERANCE_MINUTES)) {
+    // With a row-backed start and a valid `now`, a null from
+    // positiveMinutesBetween means the elapsed span rounded to zero (or the
+    // start sits ahead of the clock) — NOT "unknown". Trusting the claim on
+    // that null let a check-in-and-immediately-submit freeze any
+    // timer-shaped value ("720:00") into the report (codex P1 #3152 round
+    // 17). Zero IS the server's reference span: the claim survives only
+    // within tolerance of it, otherwise the server-derived timer is
+    // recorded, exactly like every other divergent claim.
+    const serverMinutes = positiveMinutesBetween(realStart, finiteDate(now) || new Date()) ?? 0;
+    if (claimedMinutes != null && Math.abs(claimedMinutes - serverMinutes) <= LIVE_TIMER_TOLERANCE_MINUTES) {
       return { adjusted: false, effectiveTimeOnSite: timeOnSite };
     }
     return { adjusted: false, effectiveTimeOnSite: minutesAsElapsedString(serverMinutes) };
@@ -2313,6 +2320,11 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
         // inflated job-linked time entry. calculateJobCost reads this column
         // off the row it already holds.
         time_on_site_adjusted_minutes: plan.minutes,
+        // Monotonic revision (codex P2 #3152 round 17): the fences compare
+        // THIS, not the minutes value — a same-minutes re-save (repairing
+        // previously clamped end fields) must still read as a new
+        // correction to any in-flight finalization or tracker write.
+        time_on_site_correction_seq: trx.raw('COALESCE(time_on_site_correction_seq, 0) + 1'),
         updated_at: new Date(),
       };
       if (newEnd) {
@@ -4875,17 +4887,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           let correctionPreservedMidFlight = false;
           if (lockedSvcRow) {
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
+            const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
             const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);
             for (const field of [
               'actual_end_time', 'check_out_time', 'completed_at',
               'service_time_minutes', 'actual_duration_minutes',
-              'time_on_site_adjusted_minutes',
+              'time_on_site_adjusted_minutes', 'time_on_site_correction_seq',
             ]) {
               if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];
             }
             const stampedMinutes = Number(lockedSvcRow.time_on_site_adjusted_minutes);
-            const stampMovedMidFlight = Object.prototype.hasOwnProperty.call(lockedSvcRow, 'time_on_site_adjusted_minutes')
-              && normStampVal(lockedSvcRow.time_on_site_adjusted_minutes) !== preLockStamp;
+            // Moved = the monotonic correction seq changed, NOT the minutes
+            // value (codex P2 #3152 round 17): a correction that re-saves
+            // the same minutes to repair previously clamped end fields bumps
+            // the seq while the value comparison stays blind. Rows without
+            // the seq column (pre-migration environments) fall back to the
+            // round-16 value comparison so the fence never weakens.
+            const stampMovedMidFlight = Object.prototype.hasOwnProperty.call(lockedSvcRow, 'time_on_site_correction_seq')
+              ? normStampVal(lockedSvcRow.time_on_site_correction_seq) !== preLockSeq
+              : (Object.prototype.hasOwnProperty.call(lockedSvcRow, 'time_on_site_adjusted_minutes')
+                && normStampVal(lockedSvcRow.time_on_site_adjusted_minutes) !== preLockStamp);
             if (Number.isFinite(stampedMinutes) && stampedMinutes > 0
               && (stampMovedMidFlight
                 || (!isBackfillCompletion && !liveAdjustedTimeOnSite
@@ -6411,13 +6432,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // survive.
         untrustedLifecycleSpan: isBackfillCompletion,
         completedAt: backfillTrackerCompletedAt,
-        // Fences the already-complete rewrite (codex P2 #3152 round 13):
-        // this instant belongs to THIS request's typed minutes (or to no
-        // correction at all) — if a newer time-on-site PATCH landed since,
-        // the row stamp differs and the tracker must not restore ours.
-        expectedAdjustedMinutes: typeof effectiveTimeOnSite === 'number' && !isBackfillCompletion
-          ? effectiveTimeOnSite
-          : null,
+        // Fences the tracker writes (codex P2 #3152 rounds 13/17): this
+        // instant belongs to the correction revision this request observed
+        // on the (lock-reconciled) row — null when it has never been
+        // corrected. If a newer time-on-site PATCH landed since, the row's
+        // monotonic seq differs (even for a same-minutes re-save) and the
+        // tracker must not restore ours.
+        expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -8904,10 +8925,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // completed_at stamp too.
         untrustedLifecycleSpan: isBackfillCompletion,
         completedAt: backfillTrackerCompletedAt,
-        // Same fence as the first markComplete above (codex round 13).
-        expectedAdjustedMinutes: typeof effectiveTimeOnSite === 'number' && !isBackfillCompletion
-          ? effectiveTimeOnSite
-          : null,
+        // Same fence as the first markComplete above (codex rounds 13/17).
+        expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
