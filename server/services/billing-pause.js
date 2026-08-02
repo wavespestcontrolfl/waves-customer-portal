@@ -66,8 +66,16 @@ async function maybeResumeBillingPauseOnPayment(customerId, context = {}) {
     }
     // A pause applied AFTER this payment settled was caused by failures this
     // payment does not answer for — a delayed webhook for an old success
-    // must not clear it.
-    if (new Date(customer.service_paused_at) > settledAt) {
+    // must not clear it. With one exception: the clear now runs AFTER the
+    // webhook's durable ledger writes, so a pause the cron applied SECONDS
+    // after the settlement (the exhaustion racing the payment) legitimately
+    // postdates settledAt. The retry ladder is DAY-spaced
+    // (RETRY_DELAYS_DAYS), so no genuinely newer failure cycle can produce
+    // a pause within minutes of a settlement — an hour of slack separates
+    // the race (clear it) from a stale redelivery (leave it) with three
+    // orders of magnitude to spare on each side.
+    const RACE_SLACK_MS = 60 * 60 * 1000;
+    if (new Date(customer.service_paused_at).getTime() > settledAt.getTime() + RACE_SLACK_MS) {
       return { resumed: false, reason: 'pause_newer_than_payment' };
     }
 

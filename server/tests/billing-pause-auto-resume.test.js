@@ -194,6 +194,20 @@ describe('maybeResumeBillingPauseOnPayment', () => {
     expect(mockState.updates).toHaveLength(0);
   });
 
+  test('a pause applied SECONDS after the settlement (the race) still clears', async () => {
+    // The clear runs after the webhook's durable writes, so the cron's pause
+    // can legitimately postdate settledAt by seconds. The ladder is
+    // day-spaced, so an hour of slack cannot admit a stale redelivery.
+    mockState.customer = { ...PAUSED, service_paused_at: '2026-05-02T12:00:30Z' };
+
+    const res = await maybeResumeBillingPauseOnPayment('cust-1', {
+      paymentIntentId: 'pi_race',
+      settledAt: new Date('2026-05-02T12:00:00Z'),
+    });
+
+    expect(res).toMatchObject({ resumed: true });
+  });
+
   test('refuses to clear without a settlement time — fail toward the pause staying', async () => {
     mockState.customer = { ...PAUSED };
 
@@ -256,39 +270,47 @@ describe('stripe-webhook wiring', () => {
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '..', 'routes', 'stripe-webhook.js'), 'utf8');
 
-  test('handlePaymentIntentSucceeded calls the auto-clear after the non-arrears early returns', () => {
+  test('the auto-clear runs at the DISPATCH level, AFTER the handler\'s durable writes', () => {
+    // Clearing before the paid row exists loses the race where billing-cron
+    // pauses in between and this event never fires again — so the call sits
+    // after handlePaymentIntentSucceeded completes, not inside it.
+    const caseIdx = src.indexOf("case 'payment_intent.succeeded':");
+    expect(caseIdx).toBeGreaterThan(-1);
+    const caseBlock = src.slice(caseIdx, src.indexOf('break;', caseIdx));
+    const handlerCall = caseBlock.indexOf('handlePaymentIntentSucceeded');
+    const clearCall = caseBlock.indexOf('maybeAutoClearBillingPauseForIntent');
+    expect(handlerCall).toBeGreaterThan(-1);
+    expect(clearCall).toBeGreaterThan(handlerCall);
+    // And NOT inside the handler any more.
     const fnStart = src.indexOf('async function handlePaymentIntentSucceeded');
-    expect(fnStart).toBeGreaterThan(-1);
-    const callIdx = src.indexOf('maybeResumeBillingPauseOnPayment', fnStart);
-    expect(callIdx).toBeGreaterThan(fnStart);
-    // After the statement / deposit / no-show routes (which are not the
-    // customer's arrears money) but before the ledger-routing branches.
-    const between = src.slice(fnStart, callIdx);
-    expect(between).toContain('waves_statement_id');
-    expect(between).toContain('estimate_deposit');
-    expect(between).toContain('card_hold_no_show_fee');
-    expect(between).toContain('findInvoiceForPaymentIntent');
-    const callBlock = src.slice(callIdx - 1200, callIdx + 500);
-    // Invoice owner FIRST — customer merges repoint invoices while stale PI
-    // metadata stays tied to the merged-away row.
-    const invoiceIdx = callBlock.indexOf('invoiceForTenderGuard.customer_id');
-    const metadataIdx = callBlock.indexOf('waves_customer_id');
-    expect(invoiceIdx).toBeGreaterThan(-1);
-    expect(metadataIdx).toBeGreaterThan(invoiceIdx);
-    // The settlement moment rides along for the ordering guard.
-    expect(callBlock).toContain('settledAt');
-    expect(callBlock).toContain('eventCreated');
+    const fnEnd = src.indexOf('async function handlePaymentIntentFailed');
+    expect(src.slice(fnStart, fnEnd)).not.toContain('maybeResumeBillingPauseOnPayment');
   });
 
-  test('a payer-billed invoice never resumes the homeowner — and never falls through to metadata', () => {
-    // The builder/AP payer supplied the tender, not the homeowner whose dead
-    // card caused the pause. When an invoice matched, it answers the
-    // question — stale PI metadata must not sneak the homeowner back in.
-    const fnStart = src.indexOf('async function handlePaymentIntentSucceeded');
-    const callIdx = src.indexOf('maybeResumeBillingPauseOnPayment', fnStart);
-    const callBlock = src.slice(callIdx - 1200, callIdx);
-    expect(callBlock).toMatch(/invoiceForTenderGuard\.payer_id \? null : invoiceForTenderGuard\.customer_id/);
-    // Metadata only when NO invoice matched at all.
-    expect(callBlock).toMatch(/: \(paymentIntent\.metadata\?\.waves_customer_id \|\| null\)/);
+  test('the dispatch helper skips non-arrears money and resolves invoice-first', () => {
+    const helperStart = src.indexOf('async function maybeAutoClearBillingPauseForIntent');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helper = src.slice(helperStart, helperStart + 2200);
+    // Statement = payer money; deposit and no-show fee are not balance payments.
+    expect(helper).toContain('waves_statement_id');
+    expect(helper).toContain('estimate_deposit');
+    expect(helper).toContain('card_hold_no_show_fee');
+    // Invoice authority, payer-billed yields NOTHING (no metadata fallthrough),
+    // metadata only when no invoice matched at all.
+    expect(helper).toMatch(/invoice\.payer_id \? null : invoice\.customer_id/);
+    expect(helper).toMatch(/: \(paymentIntent\?\.metadata\?\.waves_customer_id \|\| null\)/);
+    // The settlement moment rides along for the ordering guard.
+    expect(helper).toContain('settledAt');
+    expect(helper).toContain('eventCreated');
+  });
+
+  test('the ACH processing->paid flip stamps updated_at for the cron race guard', () => {
+    // knex never auto-touches updated_at; without this stamp the cron's veto
+    // guard is blind to an in-place ACH settlement.
+    const idx = src.indexOf('const paymentUpdates = {');
+    expect(idx).toBeGreaterThan(-1);
+    const block = src.slice(idx, idx + 700);
+    expect(block).toContain("status: 'paid'");
+    expect(block).toContain('updated_at: new Date()');
   });
 });

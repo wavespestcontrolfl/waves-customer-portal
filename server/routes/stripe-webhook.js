@@ -291,6 +291,37 @@ async function recordCardHoldNoShowFeePayment(paymentIntent) {
   }
 }
 
+// Resolve the customer whose own money just settled and clear their billing
+// pause if one is waiting on exactly that (billing-pause.js owns the rules).
+// Skips the three non-arrears purposes: a statement is the PAYER's money, an
+// estimate deposit and a no-show fee are not balance payments. A matched
+// invoice is the customer authority (merges repoint invoices while stale PI
+// metadata keeps the merged-away id) — and a PAYER-billed invoice yields no
+// candidate at all, without metadata fallthrough: the payer's tender proves
+// nothing about the homeowner's dead card, which is why they are paused.
+async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) {
+  try {
+    if (paymentIntent?.metadata?.waves_statement_id) return;
+    if (paymentIntent?.metadata?.purpose === 'estimate_deposit') return;
+    if (paymentIntent?.metadata?.purpose === 'card_hold_no_show_fee') return;
+    const invoice = await findInvoiceForPaymentIntent(paymentIntent);
+    const pausedCustomerId = invoice
+      ? (invoice.payer_id ? null : invoice.customer_id)
+      : (paymentIntent?.metadata?.waves_customer_id || null);
+    if (!pausedCustomerId) return;
+    const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+    await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
+      paymentIntentId: paymentIntent.id,
+      source: 'stripe_webhook',
+      settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
+    });
+  } catch (err) {
+    // Belt over the helper's own never-throw: a pause staying set must
+    // never fail the webhook.
+    logger.error(`[stripe-webhook] billing-pause auto-clear crashed for PI ${paymentIntent?.id}: ${err.message}`);
+  }
+}
+
 async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason) {
   const latestCharge = paymentIntent.latest_charge;
   const stripeChargeId = typeof latestCharge === 'string'
@@ -608,6 +639,16 @@ router.post(
       switch (event.type) {
         case 'payment_intent.succeeded':
           await handlePaymentIntentSucceeded(event.data.object, event.created);
+          // Auto-clear a billing pause on the customer's OWN settled money
+          // (owner ruling 2026-08-01: billing goes back to normal once they
+          // pay). AFTER the handler so every durable ledger write of
+          // whichever branch it took (invoice paid, orphan, quarantine) has
+          // landed first — clearing before the paid row exists loses the
+          // race where billing-cron pauses in between and this event never
+          // fires again. The helper never throws, only clears
+          // 'autopay_final_failure' pauses, compare-and-swaps so a newer
+          // pause is never wiped, and requires the settlement moment.
+          await maybeAutoClearBillingPauseForIntent(event.data.object, event.created);
           break;
 
         case 'payment_intent.processing':
@@ -910,40 +951,6 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   const chargedTotal = chargedCents > 0 ? Math.round((chargedCents / 100) * 100) / 100 : null;
   const details = await paymentDetailsFromIntent(paymentIntent);
   const invoiceForTenderGuard = await findInvoiceForPaymentIntent(paymentIntent);
-
-  // Auto-clear a billing pause on the customer's OWN settled money (owner
-  // ruling 2026-08-01: billing goes back to normal once they pay). Placed
-  // after the non-arrears early returns (statement = payer money, estimate
-  // deposit, no-show fee) and BEFORE the ledger-routing branches below: even
-  // a payment that ends up quarantined or orphaned is real settled money
-  // from a working tender, which is exactly what the exhausted-retry pause
-  // was waiting on. The helper never throws, only clears
-  // 'autopay_final_failure' pauses, and compare-and-swaps so a newer pause
-  // is never wiped.
-  {
-    // Invoice owner FIRST: customer merges repoint invoices while old Stripe
-    // metadata stays tied to the merged-away row — the locally bound invoice
-    // is the authority whenever one exists, metadata only for genuinely
-    // invoice-less paths. But a PAYER-billed invoice proves nothing about
-    // the homeowner's tender — the builder/AP payer supplied the money, and
-    // the homeowner's dead card is exactly why they are paused. No metadata
-    // fallthrough either: the invoice exists and answers the question.
-    const pausedCustomerId = invoiceForTenderGuard
-      ? (invoiceForTenderGuard.payer_id ? null : invoiceForTenderGuard.customer_id)
-      : (paymentIntent.metadata?.waves_customer_id || null);
-    if (pausedCustomerId) {
-      const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
-      await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
-        paymentIntentId: piId,
-        source: 'stripe_webhook',
-        // Stripe event.created (epoch seconds) — the settlement moment. The
-        // helper refuses to clear without it: a delayed redelivery of an old
-        // success must not clear a pause caused by newer failures.
-        settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
-      });
-    }
-  }
-
   const savedCardAttemptForTenderGuard = invoiceForTenderGuard
     ? await findMatchingSavedCardAttempt(db, invoiceForTenderGuard, paymentIntent, {
       allowResolvedSucceeded: true,
@@ -1128,6 +1135,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // Update payments table
   const paymentUpdates = {
     status: 'paid',
+    // knex gives updated_at a default but never auto-touches it, and the
+    // billing-cron pause-veto guard reads it to see an in-place ACH
+    // settlement — without this stamp that guard is blind to the flip.
+    updated_at: new Date(),
     stripe_charge_id: paymentIntent.latest_charge || null,
     // An async-settling row (ACH) was inserted with a "(bank payment
     // pending)" description and metadata.payment_state='processing'; the
