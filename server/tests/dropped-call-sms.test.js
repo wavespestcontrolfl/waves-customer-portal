@@ -138,6 +138,24 @@ describe('endedAbruptly', () => {
     ]))).toBe(false);
   });
 
+  it('mid-tail acknowledgements do not mask a drop at the address exchange', () => {
+    expect(endedAbruptly(mk([
+      'Caller: Tomorrow works great.',
+      'Agent: Sounds good — and what is your service address?',
+      'Caller: Sure, it is one eight one —',
+      'Caller: Hello? Can you hear me?',
+    ]))).toBe(true);
+  });
+
+  it('weak farewell IN the final utterance still reads as a normal ending', () => {
+    expect(endedAbruptly(mk([
+      'Agent: We will see you Tuesday at nine.',
+      'Caller: Perfect.',
+      'Agent: Anything else I can help with?',
+      'Caller: No, thanks so much.',
+    ]))).toBe(false);
+  });
+
   it('false for transcripts too short to judge', () => {
     expect(endedAbruptly(mk(['Agent: Hello?', 'Caller: Hi —']))).toBe(false);
     expect(endedAbruptly('')).toBe(false);
@@ -304,6 +322,13 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 
+  it('config/content block (EMOJI_FOR_CUSTOMER) — releases the one-shot for a later drop', async () => {
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, code: 'EMOJI_FOR_CUSTOMER' });
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'policy_block_config', code: 'EMOJI_FOR_CUSTOMER' });
+    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
+  });
+
   it('per-lead claim lost (ownership race / reprocess) — phone one-shot released, no send', async () => {
     state.updateResults.leads = [0]; // the ownership-guarded claim update finds no row
     const res = await sendDroppedCallAddressRequest({ ...sendArgs(), expectedCustomerId: 'cust-9' });
@@ -342,31 +367,50 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
 });
 
 describe('handleUndeliveredAddressRequest (delivery bounce)', () => {
-  it('ignores sids that are not address-request sends', async () => {
-    state.firstResults.sms_log = [null];
+  it('ignores sids that belong to a different message type', async () => {
+    state.firstResults.sms_log = [{ id: 'log-x', to_phone: PHONE, message_type: 'voicemail_quote_link' }];
     const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'undelivered', to: PHONE });
     expect(res).toEqual({ handled: false, reason: 'not_address_request' });
   });
 
-  it('remediates: stamps lead undelivered, pulls follow-up, flips the open card', async () => {
-    state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE }];
-    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID }];
+  it('remediates: flips the claim, stamps the lead, pulls follow-up, flips the open card', async () => {
+    state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE, message_type: 'dropped_call_address_request' }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent' }];
     state.firstResults.leads = [{ id: LEAD_ID }];
     const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'undelivered', errorCode: '30006', to: PHONE });
     expect(res).toEqual({ handled: true, leadId: LEAD_ID });
-    const leadWrites = state.updates.filter((u) => u.table === 'leads');
-    expect(leadWrites.length).toBeGreaterThanOrEqual(2); // follow-up pull + status stamp
+    const flip = state.updates.find((u) => u.table === 'dropped_call_sms_claims');
+    expect(flip.payload.outcome).toBe('undelivered');
+    expect(state.updates.filter((u) => u.table === 'leads').length).toBeGreaterThanOrEqual(2);
     expect(state.updates.some((u) => u.table === 'triage_items')).toBe(true);
     const note = state.inserts.find((i) => i.table === 'lead_activities');
     expect(note.payload.description).toMatch(/never arrived/);
     expect(note.payload.description).toMatch(/30006/);
   });
 
-  it('idempotent: a second callback for the same sid is a no-op', async () => {
-    state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE }];
-    state.updateResults.sms_log = [0]; // claim already burned
+  it('sms_log row missing (send-then-log race) — still remediates via the claim row', async () => {
+    state.firstResults.sms_log = [null];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'sent' }];
+    state.firstResults.leads = [{ id: LEAD_ID }];
     const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'failed', to: PHONE });
-    expect(res).toEqual({ handled: false, reason: 'already_handled' });
+    expect(res).toEqual({ handled: true, leadId: LEAD_ID });
+    expect(state.updates.some((u) => u.table === 'triage_items')).toBe(true);
+  });
+
+  it('idempotent: the claim-outcome flip admits exactly one callback', async () => {
+    state.firstResults.sms_log = [{ id: 'log-1', to_phone: PHONE, message_type: 'dropped_call_address_request' }];
+    state.firstResults.dropped_call_sms_claims = [{ lead_id: LEAD_ID, outcome: 'undelivered' }];
+    state.updateResults.dropped_call_sms_claims = [0]; // 'sent' guard finds no row
+    const res = await handleUndeliveredAddressRequest({ sid: 'SM1', status: 'failed', to: PHONE });
+    expect(res).toEqual({ handled: false, reason: 'already_handled_or_not_sent' });
     expect(state.inserts).toHaveLength(0);
+  });
+
+  it('claim outcome exposed for the processor post-insert reconcile', async () => {
+    state.firstResults.dropped_call_sms_claims = [{ outcome: 'undelivered' }];
+    const { sentOutcomeAlreadyUndelivered } = require('../services/dropped-call-sms');
+    await expect(sentOutcomeAlreadyUndelivered(PHONE)).resolves.toBe(true);
+    state.firstResults.dropped_call_sms_claims = [{ outcome: 'sent' }];
+    await expect(sentOutcomeAlreadyUndelivered(PHONE)).resolves.toBe(false);
   });
 });

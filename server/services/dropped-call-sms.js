@@ -49,17 +49,24 @@ const QUIET_START_HOUR_ET = 8;   // inclusive — sends allowed from 08:00 ET
 const QUIET_END_HOUR_ET = 20;    // exclusive — no sends at/after 20:00 ET
 
 // Farewell detection over the transcript tail. A dropped call ends
-// mid-thought; a normal call ends with some goodbye/thanks exchange in the
-// last few turns. Checked against the LAST THREE turns only — "thanks" said
-// mid-conversation must not read as a farewell.
-const FAREWELL_RE = new RegExp(
+// mid-thought; a normal call ends with a goodbye exchange. Two tiers: STRONG
+// farewells (bye / see you / talk soon / take care) count anywhere in the
+// last three turns; WEAK acknowledgements (sounds good / thanks /
+// appreciate it) are everyday mid-conversation phrases — "Sounds good —
+// what's your service address?" right before the line dies must NOT read as
+// a goodbye — so they count only in the FINAL utterance (codex P2).
+const STRONG_FAREWELL_RE = new RegExp(
   [
     '\\bbye\\b', 'good-?bye', 'bye-?bye',
     'see (you|ya)\\b', 'talk (to you|soon|later)',
     'have a (good|great|nice|wonderful)',
-    'take care', 'sounds good',
-    "you're welcome", 'appreciate (it|you)',
-    'thank(s| you)',
+    'take care',
+  ].join('|'),
+  'i'
+);
+const WEAK_FAREWELL_RE = new RegExp(
+  [
+    'sounds good', "you're welcome", 'appreciate (it|you)', 'thank(s| you)',
   ].join('|'),
   'i'
 );
@@ -106,7 +113,8 @@ function endedAbruptly(transcription) {
     .filter(Boolean);
   if (turns.length < 4) return false; // too short to judge — not "abrupt"
   const tail = turns.slice(-3).join(' ');
-  return !FAREWELL_RE.test(tail);
+  const finalTurn = turns[turns.length - 1];
+  return !STRONG_FAREWELL_RE.test(tail) && !WEAK_FAREWELL_RE.test(finalTurn);
 }
 
 function maskPhone(value) {
@@ -373,6 +381,19 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
       logger.warn(`[dropped-call-sms] Transient policy block for ${maskPhone(phone)} (released): ${result.code || 'blocked'}`);
       return { sent: false, skipped: 'policy_block_transient' };
     }
+    // Only RECIPIENT verdicts (STOP-list suppressions, opt-outs, explicit
+    // no-consent) consume the one-shot — the number itself must never be
+    // retried. Content/config blocks (EMOJI_FOR_CUSTOMER on an admin-edited
+    // template, contract violations) say nothing about the recipient: no
+    // SMS left, release BOTH claims so a later drop can text once the
+    // config is fixed (codex P2).
+    const recipientTerminal = /^SUPPRESSED_|OPTED_OUT|OPT_OUT|NO_CONSENT_RECORD|NO_MARKETING_CONSENT|DNC|WRONG_NUMBER/.test(String(result.code || ''));
+    if (!recipientTerminal) {
+      await clearLeadClaim(leadId);
+      await releasePhoneClaim(phone);
+      logger.warn(`[dropped-call-sms] Config/content block for ${maskPhone(phone)} (released): ${result.code || 'blocked'}`);
+      return { sent: false, skipped: 'policy_block_config', code: result.code || null };
+    }
     await stampStatus(leadId, 'blocked');
     await stampPhoneClaim(phone, 'policy_block');
     logger.info(`[dropped-call-sms] Policy-blocked for ${maskPhone(phone)}: ${result.code || result.reason || 'blocked'}`);
@@ -412,61 +433,83 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
  * (result.sent) is NOT delivery — a later undelivered/failed callback
  * (30006 landline past the fail-open pre-check is the common case) means
  * the prospect never saw the address request while the lead and card say
- * "sent — watch for their reply". Remediation: stamp the lead undelivered,
- * pull its follow-up to NOW (earlier-only), leave a call-instead timeline
- * note, and flip the open dropped-call card's address_request_sms payload
- * to 'undelivered' so the office calls instead of waiting. Idempotent via
- * an atomic sms_log metadata claim (Twilio retries callbacks); best-effort
- * by contract — never throws.
+ * "sent — watch for their reply".
+ *
+ * Correlation and idempotency ride the one-shot claim row, NOT sms_log:
+ * twilio.js dispatches to the provider BEFORE its best-effort sms_log
+ * insert, so a fast callback can arrive with no visible log row (and the
+ * insert can fail outright) — an sms_log-gated handler would return
+ * not-ours forever and the card would stay "sent" (codex P1). The atomic
+ * gate is the claim-outcome flip 'sent' -> 'undelivered' (one row, one
+ * winner across Twilio callback retries); the sms_log row, when present,
+ * is used only to reject callbacks that belong to a DIFFERENT message type
+ * and for a best-effort metadata breadcrumb. Remediation: stamp the lead
+ * undelivered, pull its follow-up to NOW (earlier-only), leave a
+ * call-instead timeline note, and flip the open dropped-call card's
+ * address_request_sms payload to 'undelivered'. Best-effort by contract —
+ * never throws.
  */
 async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = {}) {
   try {
     if (!sid) return { handled: false, reason: 'no_sid' };
+    // sms_log by sid alone: a row of another message_type means this bounce
+    // is not ours. A MISSING row is NOT disqualifying (the send-then-log
+    // race) — the claim row below is the authority.
     const row = await db('sms_log')
-      .where({ twilio_sid: sid, message_type: MESSAGE_TYPE, direction: 'outbound' })
-      .first('id', 'to_phone');
-    if (!row) return { handled: false, reason: 'not_address_request' };
-    const phone = normalizePhoneE164(to || row.to_phone);
+      .where({ twilio_sid: sid, direction: 'outbound' })
+      .first('id', 'to_phone', 'message_type');
+    if (row && row.message_type !== MESSAGE_TYPE) return { handled: false, reason: 'not_address_request' };
+    const phone = normalizePhoneE164(to || row?.to_phone);
     if (!phone) return { handled: false, reason: 'no_phone' };
 
     return await db.transaction(async (trx) => {
-      const claimed = await trx('sms_log')
-        .where({ id: row.id })
-        .whereRaw("NOT jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'address_request_bounce_handled_at')")
-        .update({
-          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('address_request_bounce_handled_at', to_jsonb(now()::text))"),
-          updated_at: new Date(),
-        });
-      if (!claimed) return { handled: false, reason: 'already_handled' };
-
-      // Correlate through the one-shot claim row (phone PK -> the exact lead
-      // this text went to) — duplicate/reopened leads can share a number.
-      const claim = await trx('dropped_call_sms_claims').where({ phone }).first('lead_id');
+      const claim = await trx('dropped_call_sms_claims').where({ phone }).first('lead_id', 'outcome');
       if (!claim || !claim.lead_id) return { handled: false, reason: 'no_claim_lead' };
+      // Atomic idempotency gate: exactly one callback (Twilio retries them)
+      // flips 'sent' -> 'undelivered'; every later one sees 0 rows.
+      const flipped = await trx('dropped_call_sms_claims')
+        .where({ phone, outcome: 'sent' })
+        .update({ outcome: 'undelivered' });
+      if (!flipped) return { handled: false, reason: 'already_handled_or_not_sent' };
+
       const lead = await trx('leads')
         .where('id', claim.lead_id)
         .where('status', 'new')
         .whereNull('deleted_at')
         .first('id');
-      if (!lead) return { handled: false, reason: 'claimed_lead_not_open' };
 
       const now = new Date();
-      await trx('leads')
-        .where({ id: lead.id })
-        .where(function followUpMissingOrLater() {
-          this.whereNull('next_follow_up_at').orWhere('next_follow_up_at', '>', now);
-        })
-        .update({ next_follow_up_at: now, updated_at: now });
-      await trx('leads').where({ id: lead.id }).update({
-        extracted_data: trx.raw(
-          "jsonb_set(COALESCE(extracted_data, '{}'::jsonb), '{dropped_call_sms_status}', to_jsonb(?::text))",
-          ['undelivered']
-        ),
-        updated_at: now,
-      });
-      // Flip the open card so the office calls instead of waiting on a reply
-      // that can never come. Payload key match on the caller phone the card
-      // was built with.
+      if (lead) {
+        await trx('leads')
+          .where({ id: lead.id })
+          .where(function followUpMissingOrLater() {
+            this.whereNull('next_follow_up_at').orWhere('next_follow_up_at', '>', now);
+          })
+          .update({ next_follow_up_at: now, updated_at: now });
+        await trx('leads').where({ id: lead.id }).update({
+          extracted_data: trx.raw(
+            "jsonb_set(COALESCE(extracted_data, '{}'::jsonb), '{dropped_call_sms_status}', to_jsonb(?::text))",
+            ['undelivered']
+          ),
+          updated_at: now,
+        });
+        const codeText = String(errorCode || '') === '30006'
+          ? 'error 30006 — landline, this number cannot receive SMS'
+          : `status ${status}${errorCode ? `, error ${errorCode}` : ''}`;
+        await trx('lead_activities').insert({
+          lead_id: lead.id,
+          activity_type: 'note',
+          description: `Dropped-call address request never arrived (${codeText}). Call the prospect instead.`,
+          performed_by: 'AI Call Processor',
+          metadata: JSON.stringify({ message_type: MESSAGE_TYPE, delivery_status: status || null, error_code: errorCode || null }),
+        });
+      }
+      // Flip the open card even when the lead is no longer open — the card
+      // outlives lead status changes and must stop saying "watch for a
+      // reply". Payload key match on the caller phone the card was built
+      // with; the card may not exist YET (bounce raced the processor's
+      // insert) — the processor reconciles from the claim outcome after its
+      // insert, so a zero-row update here is safe.
       await trx('triage_items')
         .where({ reason_code: 'call_dropped_mid_intake' })
         .whereIn('status', ['open', 'in_progress'])
@@ -475,18 +518,14 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
           payload: trx.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered')"),
           updated_at: now,
         });
-      const codeText = String(errorCode || '') === '30006'
-        ? 'error 30006 — landline, this number cannot receive SMS'
-        : `status ${status}${errorCode ? `, error ${errorCode}` : ''}`;
-      await trx('lead_activities').insert({
-        lead_id: lead.id,
-        activity_type: 'note',
-        description: `Dropped-call address request never arrived (${codeText}). Call the prospect instead.`,
-        performed_by: 'AI Call Processor',
-        metadata: JSON.stringify({ message_type: MESSAGE_TYPE, delivery_status: status || null, error_code: errorCode || null }),
-      });
-      logger.info(`[dropped-call-sms] Undelivered address request for lead ${lead.id} (${maskPhone(phone)}) — follow-up pulled to now`);
-      return { handled: true, leadId: lead.id };
+      if (row) {
+        await trx('sms_log').where({ id: row.id }).update({
+          metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('address_request_bounce_handled_at', to_jsonb(now()::text))"),
+          updated_at: now,
+        }).catch(() => {});
+      }
+      logger.info(`[dropped-call-sms] Undelivered address request for lead ${claim.lead_id} (${maskPhone(phone)}) — remediated`);
+      return { handled: true, leadId: claim.lead_id };
     });
   } catch (e) {
     logger.warn(`[dropped-call-sms] undelivered address-request handling failed: ${e.code || e.name || 'error'}`);
@@ -494,12 +533,30 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to } = 
   }
 }
 
+// Post-insert reconciliation (processor phase 2): a bounce callback can
+// land BETWEEN the awaited send and the card insert — its card flip updates
+// zero rows, and the fresh card would permanently say 'sent'. After
+// inserting the card, the processor asks the claim row (the bounce
+// handler's authority) whether the outcome already flipped.
+async function sentOutcomeAlreadyUndelivered(rawPhone) {
+  try {
+    const phone = normalizePhoneE164(rawPhone);
+    if (!phone) return false;
+    const claim = await db('dropped_call_sms_claims').where({ phone }).first('outcome');
+    return claim?.outcome === 'undelivered';
+  } catch (e) {
+    logger.warn(`[dropped-call-sms] post-insert outcome check failed: ${e.code || e.name || 'db_error'}`);
+    return false;
+  }
+}
+
 module.exports = {
   sendDroppedCallAddressRequest,
   handleUndeliveredAddressRequest,
+  sentOutcomeAlreadyUndelivered,
   endedAbruptly,
   detectDroppedMidIntake,
   eligibleNewProspect,
   MIN_CALL_SECONDS,
-  _private: { callbackClause, withinSendWindowET, normalizePhoneE164, FAREWELL_RE },
+  _private: { callbackClause, withinSendWindowET, normalizePhoneE164, STRONG_FAREWELL_RE, WEAK_FAREWELL_RE },
 };

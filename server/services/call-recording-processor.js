@@ -7106,6 +7106,21 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
+            // A delivery bounce can race this insert (callback lands between
+            // the awaited send and here — its card flip found no row). The
+            // claim outcome is the bounce handler's authority: reconcile the
+            // fresh card so it never permanently says 'sent' for a text that
+            // already bounced.
+            if (smsOutcome.sent && await DroppedCallSms.sentOutcomeAlreadyUndelivered(phone)) {
+              await db('triage_items')
+                .where({ call_log_id: call.id, reason_code: 'call_dropped_mid_intake' })
+                .whereIn('status', ['open', 'in_progress'])
+                .update({
+                  payload: db.raw("COALESCE(payload, '{}'::jsonb) || jsonb_build_object('address_request_sms', 'undelivered')"),
+                  updated_at: new Date(),
+                })
+                .catch((e) => logger.warn(`[call-proc] dropped-call card bounce reconcile failed: ${e.code || e.name || 'db_error'}`));
+            }
             logger.info(`[call-proc] Dropped call mid-intake for ${maskSid(callSid)} — review card opened (sms: ${smsOutcome.sent ? 'sent' : smsOutcome.skipped || 'skipped'})`);
           } catch (dropErr) {
             logger.warn(`[call-proc] dropped-call card/text failed (non-blocking): ${dropErr.message}`);
