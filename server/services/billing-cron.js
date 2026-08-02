@@ -636,6 +636,12 @@ const BillingCron = {
 
     for (const payment of failedPayments) {
       retried++;
+      // Anchor for the concurrent-settlement guard at the final-failure
+      // pause write below: a payment that settles while this attempt is in
+      // flight must veto the pause (owner ruling 2026-08-01 — paying
+      // resumes billing; racing webhook order must not strand a customer
+      // who just paid behind a pause their payment would have cleared).
+      const attemptStartedAt = new Date();
       const customer = await db('customers')
         .where({ id: payment.customer_id })
         .first();
@@ -1179,16 +1185,35 @@ const BillingCron = {
           // customers with service_paused_at set) and so dispatch can see the
           // billing issue before dispatching the next visit.
           try {
-            const pausedAt = new Date();
-            await db('customers').where({ id: payment.customer_id }).update({
-              service_paused_at: pausedAt,
-              service_pause_reason: 'autopay_final_failure',
-            });
-            void AccountMembershipEmail.sendMembershipPaused({
-              customerId: payment.customer_id,
-              effectiveDate: pausedAt,
-              reason: 'Payment retry attempts were exhausted',
-            }).catch((emailErr) => logger.warn(`[billing-cron] service pause email failed for customer ${payment.customer_id}: ${emailErr.message}`));
+            // Concurrent-settlement guard: if ANY payment of this customer's
+            // settled while this attempt was in flight (a portal payment
+            // racing the exhaustion), pausing now would strand them — the
+            // auto-clear in billing-pause.js only fires on settlements that
+            // ARRIVE after a pause exists, and this settlement's webhook may
+            // already have run and seen nothing to clear. A sub-query-window
+            // sliver remains (settlement between this check and the UPDATE);
+            // the next settled payment or the manual button covers it.
+            const racedSettlement = await db('payments')
+              .where({ customer_id: payment.customer_id })
+              .whereIn('status', ['paid', 'processing'])
+              .where('created_at', '>=', attemptStartedAt)
+              .first('id');
+            if (racedSettlement) {
+              // No pause AND no "membership paused" email — the customer
+              // just paid; telling them they're paused would be false.
+              logger.warn(`[billing-cron] NOT pausing customer ${payment.customer_id} — payment ${racedSettlement.id} settled during the final retry attempt`);
+            } else {
+              const pausedAt = new Date();
+              await db('customers').where({ id: payment.customer_id }).update({
+                service_paused_at: pausedAt,
+                service_pause_reason: 'autopay_final_failure',
+              });
+              void AccountMembershipEmail.sendMembershipPaused({
+                customerId: payment.customer_id,
+                effectiveDate: pausedAt,
+                reason: 'Payment retry attempts were exhausted',
+              }).catch((emailErr) => logger.warn(`[billing-cron] service pause email failed for customer ${payment.customer_id}: ${emailErr.message}`));
+            }
           } catch (pauseErr) {
             logger.error(`[billing-cron] Service pause failed: ${pauseErr.message}`);
           }

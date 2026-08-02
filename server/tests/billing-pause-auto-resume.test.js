@@ -207,6 +207,31 @@ describe('maybeResumeBillingPauseOnPayment', () => {
   });
 });
 
+describe('billing-cron pause write — concurrent-settlement guard', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const cronSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'billing-cron.js'), 'utf8');
+
+  test('the final-failure pause is vetoed by a payment that settled during the attempt', () => {
+    // The other half of the race: the success webhook can run BEFORE the
+    // pause exists (nothing to clear), then the pause lands and strands a
+    // customer who just paid. The write site must check for a settlement
+    // since the attempt began, and the veto must ALSO suppress the
+    // "membership paused" email — telling a customer who just paid that
+    // they are paused would be false.
+    const pauseIdx = cronSrc.indexOf("service_pause_reason: 'autopay_final_failure'");
+    expect(pauseIdx).toBeGreaterThan(-1);
+    const before = cronSrc.slice(Math.max(0, pauseIdx - 1600), pauseIdx);
+    expect(before).toContain('attemptStartedAt');
+    expect(before).toMatch(/whereIn\('status', \['paid', 'processing'\]\)/);
+    expect(before).toContain('racedSettlement');
+    // Pause write and paused-email live in the ELSE of the veto.
+    const after = cronSrc.slice(pauseIdx, pauseIdx + 800);
+    expect(after).toContain('sendMembershipPaused');
+    expect(before).toContain('} else {');
+  });
+});
+
 describe('stripe-webhook wiring', () => {
   const fs = require('fs');
   const path = require('path');
