@@ -1877,6 +1877,23 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
   return { handled: true, released: true, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' };
 }
 
+// Re-run settlement for a fee PI whose pre-settlement marker just became
+// settleable — a bounced refund (Stripe kept the fee) or a WON dispute
+// (funds reinstated). The acknowledged succeeded event will never retry,
+// so this is the recovery trigger (Codex #3153 r18 P1). Best-effort;
+// settlement itself is idempotent under the PI advisory lock.
+async function resettleAppointmentFeeFromPi(piId) {
+  try {
+    const StripeService = require('./stripe');
+    const pi = await StripeService.retrievePaymentIntent(piId);
+    if (pi?.metadata?.purpose !== 'appointment_card_no_show_fee') return { settled: false, reason: 'not_fee_pi' };
+    return await settleAppointmentNoShowFee(pi);
+  } catch (err) {
+    logger.error(`[appt-card-request] fee re-settlement failed for PI ${piId}: ${err.message}`);
+    return { settled: false, reason: 'error', error: err.message };
+  }
+}
+
 // Route-side surfacing for unresolved cancellation-fee outcomes (Codex
 // #3153 r16 P1): the admin cancel routes proceed with the cancellation
 // regardless (the visit is already being cancelled), but a NON-released
@@ -2222,7 +2239,11 @@ async function settleAppointmentNoShowFee(paymentIntent) {
       } catch { meta = {}; }
       const fullyRefunded = String(existing.status || '').toLowerCase() === 'refunded'
         || String(existing.refund_status || '').toLowerCase() === 'full';
-      if (meta.pre_settlement_refund !== true || fullyRefunded) return { replay: true };
+      const isMarker = meta.pre_settlement_refund === true || meta.pre_settlement_dispute === true;
+      if (!isMarker || fullyRefunded) return { replay: true };
+      // A still-contested dispute marker stays untouched — the dispute-won
+      // handler flips it and re-triggers settlement (Codex #3153 r18 P1).
+      if (String(existing.status || '').toLowerCase() === 'disputed') return { replay: true };
       // PARTIAL pre-settlement refund marker (Codex #3153 r17 P1): the fee
       // was partially refunded before settlement — the business keeps the
       // remainder, so the paid fee invoice must still be minted. Adopt the
@@ -2242,16 +2263,23 @@ async function settleAppointmentNoShowFee(paymentIntent) {
     // → Stripe redelivers).
     let preRefundedCents = 0;
     {
-      const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
+      const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge.dispute'] });
       const ch = live?.latest_charge;
       if (ch && typeof ch === 'object') {
         // Disputed BEFORE settlement (Codex #3153 r17 P1): Stripe permits
         // charge.dispute.created to arrive before the succeeded event, and
         // that handler finds nothing to mark — booking a paid fee invoice
-        // for money already clawed back would overstate revenue. Refuse.
+        // for money already clawed back would overstate revenue. Refuse
+        // UNLESS the dispute already closed in our favor (r18: disputed
+        // stays true forever on the charge — a WON dispute means the money
+        // is retained and the fee must settle).
         if (ch.disputed === true) {
-          logger.warn(`[appt-card-request] no-show fee disputed before settlement — skipping (${piId})`);
-          return { refundedPreSettlement: true };
+          const disputeObj = ch.dispute && typeof ch.dispute === 'object' ? ch.dispute : null;
+          const disputeWon = !!disputeObj && ['won', 'warning_closed'].includes(String(disputeObj.status || ''));
+          if (!disputeWon) {
+            logger.warn(`[appt-card-request] no-show fee disputed before settlement — skipping (${piId})`);
+            return { refundedPreSettlement: true };
+          }
         }
         const chargedCents = Math.round(Number(ch.amount || 0));
         preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
@@ -2350,6 +2378,7 @@ module.exports = {
   appointmentCardCancelPreview,
   chargeAppointmentCardForRecapCompletion,
   settleAppointmentNoShowFee,
+  resettleAppointmentFeeFromPi,
   isWithinApptCancelWindow,
   _test: {
     dateLineFor,

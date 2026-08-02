@@ -2787,6 +2787,27 @@ async function handleRefundFailed(refund) {
       logger.error(`[stripe-webhook] annual-prepay resync after refund bounce failed for invoice ${restoredInvoiceId}: ${err.message}`);
     }
   }
+
+  // Appointment-fee pre-settlement refund marker whose refund BOUNCED
+  // (Codex #3153 r18 P1): Stripe kept the fee, but the acknowledged
+  // succeeded event will never retry — re-run idempotent settlement so the
+  // retained fee gets its paid invoice + receipt (the settle transaction
+  // adopts the unwound marker row).
+  if (piId) {
+    try {
+      const feeRow = await db('payments').where({ stripe_payment_intent_id: piId }).first('metadata');
+      let feeMeta = {};
+      try {
+        feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
+      } catch { feeMeta = {}; }
+      if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_refund === true && !feeMeta.invoice_id) {
+        const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
+        await resettleAppointmentFeeFromPi(piId);
+      }
+    } catch (feeErr) {
+      logger.warn(`[stripe-webhook] fee refund-bounce re-settlement failed for PI ${piId}: ${feeErr.message}`);
+    }
+  }
 }
 
 /**
@@ -4059,6 +4080,50 @@ async function handleDisputeCreated(dispute) {
   const depositReversal = await handleDepositChargeReversed(dispute.payment_intent, 'dispute.created');
   if (depositReversal.handled) return;
 
+  // Appointment-card fee PI disputed BEFORE settlement (Codex #3153 r18
+  // P1): the succeeded event may still be in flight — with no payments row
+  // this handler would acknowledge into thin air while settlement later
+  // books paid revenue for clawed-back money. Under the SAME advisory lock
+  // settlement uses: re-check for the row (it may have landed in the
+  // window — the normal path below then stamps it) and otherwise persist a
+  // durable 'disputed' marker settlement's in-lock check respects. The fee
+  // lane is identified LOCALLY by no_show_payment_intent_id.
+  if (dispute.payment_intent) {
+    const feeReq = await db('appointment_card_requests')
+      .where({ no_show_payment_intent_id: dispute.payment_intent })
+      .first('id', 'customer_id')
+      .catch(() => null);
+    if (feeReq) {
+      const feePreRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id');
+      if (!feePreRow) {
+        const marked = await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
+          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id');
+          if (rowInLock) return false;
+          await trx('payments').insert({
+            customer_id: feeReq.customer_id || null,
+            processor: 'stripe',
+            payment_date: etDateString(),
+            amount: (Number(dispute.amount) || 0) / 100,
+            status: 'disputed',
+            stripe_payment_intent_id: dispute.payment_intent,
+            stripe_charge_id: chargeId,
+            metadata: JSON.stringify({
+              purpose: 'appointment_card_no_show_fee',
+              pre_settlement_dispute: true,
+              dispute_id: dispute.id,
+            }),
+          });
+          return true;
+        });
+        if (marked) {
+          logger.warn(`[stripe-webhook] appointment fee PI ${dispute.payment_intent} disputed before settlement — durable dispute marker written`);
+          return;
+        }
+      }
+    }
+  }
+
   // Statement disputes key on the PI, NOT the payments row: that row isn't created
   // until payment_intent.succeeded settles, and Stripe does not guarantee webhook
   // ordering. Resolve by PI so a dispute that races/precedes settlement still
@@ -4424,6 +4489,29 @@ async function handleDisputeClosed(dispute) {
         await require('../services/annual-prepay-renewals')
           .syncTermForInvoicePayment({ id: lostInvoice.id, status: 'refunded', paid_at: null });
       }
+    }
+  }
+
+  // Appointment-fee pre-settlement dispute marker closed WON (Codex #3153
+  // r18 P1): the funds are reinstated but the acknowledged succeeded event
+  // will never retry \u2014 flip the marker settleable and re-run idempotent
+  // settlement so the retained fee gets its paid invoice + receipt.
+  if (['won', 'warning_closed'].includes(status) && dispute.payment_intent) {
+    try {
+      const feeRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status', 'metadata');
+      let feeMeta = {};
+      try {
+        feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
+      } catch { feeMeta = {}; }
+      if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_dispute === true && !feeMeta.invoice_id) {
+        if (String(feeRow.status || '').toLowerCase() === 'disputed') {
+          await db('payments').where({ id: feeRow.id }).update({ status: 'paid' });
+        }
+        const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
+        await resettleAppointmentFeeFromPi(dispute.payment_intent);
+      }
+    } catch (feeErr) {
+      logger.warn(`[stripe-webhook] fee dispute-won re-settlement failed for PI ${dispute.payment_intent}: ${feeErr.message}`);
     }
   }
 
