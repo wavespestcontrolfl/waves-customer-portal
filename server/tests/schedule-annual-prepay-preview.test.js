@@ -32,6 +32,10 @@ jest.mock('../services/payer', () => ({
   resolveForInvoice: (...args) => mockResolveForInvoice(...args),
 }));
 
+// The lane ships dark. feature-gates snapshots process.env at require time,
+// so the gate must be set BEFORE the router is loaded.
+process.env.GATE_PREPAY_ON_BOOK = 'true';
+
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
@@ -233,5 +237,58 @@ describe('annual-prepay preview — refusals (fail closed)', () => {
     stubTables({ customer: null });
     const { status } = await preview({});
     expect(status).toBe(404);
+  });
+});
+
+describe('annual-prepay preview — dark by default (GATE_PREPAY_ON_BOOK)', () => {
+  // A separate module registry so feature-gates re-reads the env: the gates
+  // object is built once at require time.
+  function withGate(value, fn) {
+    return jest.isolateModulesAsync(async () => {
+      const prior = process.env.GATE_PREPAY_ON_BOOK;
+      if (value === undefined) delete process.env.GATE_PREPAY_ON_BOOK;
+      else process.env.GATE_PREPAY_ON_BOOK = value;
+      try {
+        const darkRouter = require('../routes/admin-schedule');
+        const app = express();
+        app.use(express.json());
+        app.use('/admin/schedule', darkRouter);
+        const server = app.listen(0);
+        try {
+          await fn(`http://127.0.0.1:${server.address().port}`);
+        } finally {
+          await new Promise((resolve) => server.close(resolve));
+        }
+      } finally {
+        if (prior === undefined) delete process.env.GATE_PREPAY_ON_BOOK;
+        else process.env.GATE_PREPAY_ON_BOOK = prior;
+      }
+    });
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+    stubTables();
+  });
+
+  test('gate off → the preview is unobservable (404), not a priced answer', async () => {
+    await withGate(undefined, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/schedule/annual-prepay-preview?customerId=cust-1&serviceType=Quarterly%20Pest%20Control%20Service&price=428&cadence=quarterly`);
+      expect(res.status).toBe(404);
+    });
+  });
+
+  // The modal hides its Billing control on false — an offered choice whose
+  // preview 404s would read to the office as a prepay they sold.
+  test('availability reports the gate', async () => {
+    await withGate(undefined, async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/schedule/annual-prepay-availability`);
+      await expect(res.json()).resolves.toEqual({ enabled: false });
+    });
+    await withGate('true', async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/schedule/annual-prepay-availability`);
+      await expect(res.json()).resolves.toEqual({ enabled: true });
+    });
   });
 });

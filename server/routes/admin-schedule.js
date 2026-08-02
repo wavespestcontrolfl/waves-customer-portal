@@ -7754,6 +7754,17 @@ router.get('/card-request-availability', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/annual-prepay-availability — is the manual
+// prepay-on-book lane live? The New Appointment modal renders its Billing
+// control only on true: an offered choice that silently no-ops while the
+// lane is dark reads to the office as a sold prepay (same rule as the
+// card-on-file checkbox above).
+router.get('/annual-prepay-availability', async (_req, res, next) => {
+  try {
+    res.json({ enabled: isEnabled('prepayOnBook') });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/schedule/annual-prepay-preview — can the booking the
 // operator is composing in the New Appointment modal be sold as an annual
 // prepay, and for exactly how much?
@@ -7774,6 +7785,10 @@ router.get('/card-request-availability', async (req, res, next) => {
 // anything unsound is ineligible, never a guessed price.
 router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
   try {
+    // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
+    // while the lane is off the endpoint is unobservable, exactly like the
+    // /secure select-plan route.
+    if (!isEnabled('prepayOnBook')) return res.status(404).json({ error: 'Not found' });
     const {
       computeSeriesPrepayPricing,
       PLAN_CLASS_BY_SERVICE_KEY,

@@ -562,6 +562,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [billAsManualPrepay, setBillAsManualPrepay] = useState(false);
   const [manualPrepay, setManualPrepay] = useState(null);
   const [manualPrepayLoading, setManualPrepayLoading] = useState(false);
+  // The lane ships dark (GATE_PREPAY_ON_BOOK). Hidden until the probe says
+  // it's live — and hidden on probe failure — because an offered Billing
+  // control whose preview 404s would read as a prepay the office sold.
+  const [prepayOnBookAvailable, setPrepayOnBookAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch('/admin/schedule/annual-prepay-availability')
+      .then(r => { if (!cancelled) setPrepayOnBookAvailable(!!r?.enabled); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
@@ -1275,7 +1286,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // wins via the cancelled flag.
   const manualPrepayQueryKey = manualPrepayQuery ? JSON.stringify(manualPrepayQuery) : '';
   useEffect(() => {
-    if (linkedEstimate || !manualPrepayQueryKey) {
+    if (!prepayOnBookAvailable || linkedEstimate || !manualPrepayQueryKey) {
       setManualPrepay(null);
       setManualPrepayLoading(false);
       return undefined;
@@ -1296,17 +1307,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
     }, 350);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [linkedEstimate, manualPrepayQueryKey]);
+  }, [prepayOnBookAvailable, linkedEstimate, manualPrepayQueryKey]);
 
   // Clearing the recurring plan, linking a quote, or editing the booking into
   // an ineligible shape must not leave a stale prepay choice armed — the
   // submit would then try to mint against a booking that can't carry it.
   const manualPrepayEligible = manualPrepay?.eligible === true;
   useEffect(() => {
-    if (!manualPrepayQuery || linkedEstimate || (manualPrepay && !manualPrepayEligible)) {
+    if (!prepayOnBookAvailable || !manualPrepayQuery || linkedEstimate || (manualPrepay && !manualPrepayEligible)) {
       setBillAsManualPrepay(false);
     }
-  }, [manualPrepayQuery, linkedEstimate, manualPrepay, manualPrepayEligible]);
+  }, [prepayOnBookAvailable, manualPrepayQuery, linkedEstimate, manualPrepay, manualPrepayEligible]);
 
   // Compute window_end given a start time and a duration in minutes.
   const computeWindowEnd = (start, durationMin) => {
@@ -1574,7 +1585,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // can change the rate or date after the last preview), and the server's
     // own mintPayload is what gets posted.
     let prepayNotice = '';
-    if (billAsManualPrepay && !linkedEstimate && manualPrepayQuery) {
+    if (billAsManualPrepay && prepayOnBookAvailable && !linkedEstimate && manualPrepayQuery) {
       setSaving(true);
       try {
         const params = new URLSearchParams(manualPrepayQuery);
@@ -2486,7 +2497,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             control instead (it prices the QUOTED plan), so this renders only
             without one. Amounts, coverage and eligibility all come from the
             server preview; the button never shows a locally computed total. */}
-        {!linkedEstimate && hasRecurringServices && selectedCustomer && (() => {
+        {prepayOnBookAvailable && !linkedEstimate && hasRecurringServices && selectedCustomer && (() => {
           const eligible = manualPrepay?.eligible === true;
           // Known-unsellable: a resolved preview that said no. An in-flight
           // probe is NOT blocked (no reason to show yet) — it just can't be

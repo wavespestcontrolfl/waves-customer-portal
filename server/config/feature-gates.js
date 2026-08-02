@@ -68,6 +68,16 @@ const gates = {
   // experience; the select-plan endpoint 404s (unobservable while dark).
   securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
 
+  // Annual prepay sold from the New Appointment modal on a booking with NO
+  // linked quote. Operator-initiated, but it invoices a customer for a full
+  // year and sends the pay link, so it ships dark and opt-in in EVERY
+  // environment. Gate off: the availability probe answers false, the modal
+  // renders no Billing control at all (never an offered choice that silently
+  // no-ops — Codex #2921 P2), and the preview endpoint 404s, so the mint can
+  // only be reached from Customer 360 as before. Kill switch: unset or any
+  // non-'true' value; nothing is minted retroactively when it flips.
+  prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
