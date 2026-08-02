@@ -350,6 +350,27 @@ describe('unresolved fee states on the cancellation path (Codex #3153 r1)', () =
     expect(res).toEqual({ handled: false, released: false, reason: 'charge_review' });
   });
 
+  test('payer-exempt cancellation persists a TERMINAL stamp — payer removal + retry can never re-arm the fee (Codex #3153 r13)', async () => {
+    mockTableHandlers = handlersWith();
+    require('../services/payer').resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ handled: false, released: true, reason: 'payer_billed' });
+    const released = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.fee_status === 'released');
+    expect(released).toBeTruthy();
+  });
+
+  test('appointment-time resolution FAILURE on the preview → fee-may-apply unresolved, never a silent no-fee (Codex #3153 r13)', async () => {
+    mockTableHandlers = handlersWith();
+    require('../services/appointment-reminders').scheduledServiceApptTime.mockRejectedValueOnce(new Error('db blip'));
+    const res = await appointmentCardCancelPreview('svc-1');
+    expect(res).toMatchObject({ secured: true, feeApplies: true, unresolved: true });
+    expect(Number(res.feeAmount)).toBe(49);
+  });
+
   test("resolved fee_status 'charged' stays a clean release — the fee event is closed", async () => {
     mockTableHandlers = handlersWith({ request: { ...REQUEST(), fee_status: 'charged' } });
     const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
@@ -396,8 +417,12 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(res).toEqual({ charged: true, invoiceId: 'inv-r1' });
     expect(mockResolveOrMintInvoice).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' }));
     // The frozen cap rides INTO the charge service (Codex #3153 r7 P0) so
-    // it is re-enforced against the locked invoice, not just the preflight.
-    expect(mockChargeSavedCard).toHaveBeenCalledWith('inv-r1', 'pm-row-1', { maxAuthorizedSubtotal: 250 });
+    // it is re-enforced against the locked invoice, and Auto Pay is
+    // serialized inside the charge transaction (r13).
+    expect(mockChargeSavedCard).toHaveBeenCalledWith('inv-r1', 'pm-row-1', {
+      maxAuthorizedSubtotal: 250,
+      requireAutopayForCustomerId: 'cust-1',
+    });
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_success', expect.objectContaining({
       details: expect.objectContaining({ source: 'appointment_card_recap_completion' }),
     }));
@@ -487,6 +512,24 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(res.reason).toBe('charge_failed');
     expect(mockNotifyAdmin).toHaveBeenCalled();
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_failed', expect.anything());
+  });
+
+  test('payer assigned AFTER the invoice was pre-minted → payer_billed at the charge boundary, office alerted (Codex #3153 r13)', async () => {
+    recapHandlers();
+    require('../services/payer').resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('payer_billed');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
+  test('boundary payer lookup FAILURE fails closed with an office alert (Codex #3153 r13)', async () => {
+    recapHandlers();
+    require('../services/payer').resolveForInvoice.mockRejectedValueOnce(new Error('payer db down'));
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('payer_check_failed');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
   });
 
   test('Auto Pay pause landing AFTER eligibility but before the charge → no charge (Codex #3153 r12 — boundary re-check)', async () => {

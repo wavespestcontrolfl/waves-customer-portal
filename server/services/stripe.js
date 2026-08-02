@@ -2223,7 +2223,7 @@ const StripeService = {
   // deactivated), the deferred job sends the classic receipt when it comes
   // due. The email leg rides the same job — a few minutes late, unchanged
   // otherwise.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, requireAutopayForCustomerId = null } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
 
@@ -2327,6 +2327,24 @@ const StripeService = {
           const lockedDiscountCents = Math.max(0, Math.round(Number(lockedInvoice.discount_amount || 0) * 100));
           if (lockedSubtotalCents - lockedDiscountCents > Math.round(Number(maxAuthorizedSubtotal) * 100)) {
             throw new Error('Invoice exceeds the customer-accepted amount. Review before charging.');
+          }
+        }
+        // Auto Pay SERIALIZED with the charge (Codex #3153 r13 P1): the
+        // callers' boundary snapshots leave an interval a pause/opt-out
+        // commit can slip inside, and pausing touches only the customers
+        // row. FOR UPDATE on that row orders this transaction against the
+        // pause route's own UPDATE — the pause either blocks until this
+        // charge commits or commits first and is seen here. Opt-in
+        // (null = unchanged behavior for every existing caller); a throw
+        // rolls the whole transaction back with nothing consumed.
+        if (requireAutopayForCustomerId != null) {
+          const { customerOnAutopay } = require('./autopay-eligibility');
+          const lockedCustomer = await trx('customers')
+            .where({ id: requireAutopayForCustomerId })
+            .forUpdate()
+            .first('id', 'autopay_enabled', 'autopay_paused_until', 'autopay_payment_method_id', 'ach_status');
+          if (!lockedCustomer || !(await customerOnAutopay(lockedCustomer, { db: trx }))) {
+            throw new Error('Auto Pay is no longer active for this customer.');
           }
         }
         // The pre-lock invoice read is only an early eligibility snapshot. Use

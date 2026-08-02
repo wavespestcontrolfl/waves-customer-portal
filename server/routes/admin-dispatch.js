@@ -7473,7 +7473,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         } catch (autopayRecheckErr) {
           logger.warn(`[dispatch] charge-boundary Auto Pay re-check failed for visit ${svc.id} — not charging: ${autopayRecheckErr.message}`);
         }
-        if (autopayStillActive && isChargeableAutopayMethod(autopayPm)) {
+        // Live payer re-resolve at the charge boundary (Codex #3153 r13
+        // P1): a payer assigned after the invoice was pre-minted lives only
+        // on scheduled_services — the reused invoice's payer_id stays null.
+        // Payer present (or lookup failure) → skip the charge exactly like
+        // a missing chargeable method; the payer flows own the bill.
+        let liveSelfPay = false;
+        try {
+          const boundaryPayer = await require('../services/payer').resolveForInvoice({
+            customerId: String(svc.customer_id),
+            scheduledServiceId: String(svc.id),
+            throwOnError: true,
+          });
+          liveSelfPay = !boundaryPayer?.payerId;
+        } catch (payerRecheckErr) {
+          logger.warn(`[dispatch] charge-boundary payer re-check failed for visit ${svc.id} — not charging: ${payerRecheckErr.message}`);
+        }
+        if (liveSelfPay && autopayStillActive && isChargeableAutopayMethod(autopayPm)) {
           // deferReceiptDelivery: with the combined text armed, the receipt
           // job is enqueued a few minutes out — nothing is pre-stamped, so a
           // crash/block anywhere before the combined text delivers leaves
@@ -7485,6 +7501,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // window refuses instead of charging above consent — the
             // pay-link fallback takes over exactly like a decline.
             maxAuthorizedSubtotal: capCeiling,
+            // Auto Pay serialized inside the charge transaction (r13):
+            // FOR UPDATE on the customer row orders the charge against a
+            // concurrently-committing pause/opt-out.
+            requireAutopayForCustomerId: svc.customer_id,
             deferReceiptDelivery: combinedReceiptArmed,
           });
           const fresh = await db('invoices').where({ id: invoice.id }).first();

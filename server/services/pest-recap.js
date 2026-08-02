@@ -486,6 +486,23 @@ async function submitRecap({
     }
   } catch (err) {
     logger.warn(`[pest-recap] card-hold completion charge failed for ${serviceId}: ${err.message}`);
+    // The completed visit may be UNBILLED with no pay-link fallback (Codex
+    // #3153 r13 P1) — e.g. the hold rail threw BEFORE the appointment-card
+    // fallback could run its own alerting. Best-effort office alert from
+    // this outer boundary so a saved-card recap never strands silently.
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'Recap completion needs billing review (saved card)',
+        `A recap-completed visit's saved-card billing step errored before it could resolve (${err.message}). Review the visit's billing and collect manually if appropriate.`,
+        {
+          link: svc?.customer_id ? `/admin/customers/${svc.customer_id}` : '/admin/dispatch',
+          metadata: { scheduledServiceId: serviceId, reason: 'recap_billing_error' },
+        },
+      );
+    } catch (notifyErr) {
+      logger.warn(`[pest-recap] recap billing alert failed: ${notifyErr.message}`);
+    }
   }
 
   // 5. Optional customer recap SMS. Only the submit that won the

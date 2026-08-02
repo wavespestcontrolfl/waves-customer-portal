@@ -1674,6 +1674,20 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
     // gates its deposit refund on released=true and the processors park
     // canonical 'charge_review' for office review — a fee may still land.
     if (unresolved) return { handled: false, released: false, reason: 'charge_review' };
+    if (skipReason === 'payer_billed') {
+      // Terminal stamp for a payer-exempt cancellation (Codex #3153 r13
+      // P1): if the payer is later removed and an idempotent cancellation
+      // retry re-runs side effects, this already-cancelled visit must not
+      // become fee-eligible again. Best-effort, atomic on NULL.
+      try {
+        await db('appointment_card_requests')
+          .where({ scheduled_service_id: scheduledServiceId })
+          .whereNull('fee_status')
+          .update({ fee_status: waiveFee ? 'waived' : 'released', updated_at: new Date() });
+      } catch (err) {
+        logger.warn(`[appt-card-request] payer-exempt release stamp failed for visit ${scheduledServiceId}: ${err.message}`);
+      }
+    }
     return { handled: false, released: true, reason: skipReason };
   }
   if (waiveFee) {
@@ -1752,7 +1766,13 @@ async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()
     const { scheduledServiceApptTime } = require('./appointment-reminders');
     start = await scheduledServiceApptTime(scheduledServiceId);
   } catch (err) {
-    logger.warn(`[appt-card-request] appt-time resolution for cancel preview failed: ${err.message}`);
+    // A THROWN time resolution is unresolved, not fee-free (Codex #3153
+    // r13 P1): the cancellation path re-resolves independently, and a
+    // recovered lookup could charge an in-window cancel the preview called
+    // free. (A cleanly-null time stays fee-free — the charge path refuses
+    // unresolvable starts the same way.)
+    logger.warn(`[appt-card-request] appt-time resolution for cancel preview failed — reporting fee-may-apply: ${err.message}`);
+    return { secured: true, feeApplies: true, feeAmount: Number(request.no_show_fee_amount), unresolved: true };
   }
   const feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
   return { secured: true, feeApplies, feeAmount: Number(request.no_show_fee_amount) };
@@ -1924,13 +1944,37 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'no_chargeable_method' });
       return { charged: false, reason: 'no_chargeable_method' };
     }
+    // Live payer re-resolve at the charge boundary (Codex #3153 r13 P1): a
+    // payer assigned after the invoice was pre-minted lives only on
+    // scheduled_services — the reused invoice's payer_id stays null. Payer
+    // present → the payer flows own the bill (office alert, no delivery
+    // path here); lookup failure → fail closed, alert.
+    try {
+      const boundaryPayer = await require('./payer').resolveForInvoice({
+        customerId: String(svc.customer_id),
+        scheduledServiceId: String(scheduledServiceId),
+        throwOnError: true,
+      });
+      if (boundaryPayer?.payerId) {
+        await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'payer_billed' });
+        return { charged: false, reason: 'payer_billed' };
+      }
+    } catch (payerRecheckErr) {
+      logger.warn(`[appt-card-request] charge-boundary payer re-check failed for visit ${scheduledServiceId} — not charging: ${payerRecheckErr.message}`);
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'payer_check_failed' });
+      return { charged: false, reason: 'payer_check_failed' };
+    }
     const StripeService = require('./stripe');
     try {
       // maxAuthorizedSubtotal: the frozen cap is re-enforced against the
       // LOCKED invoice inside the charge service (Codex #3153 r7 P0) — the
       // preflight above compared an unlocked snapshot a concurrent edit
-      // could outrun.
-      await StripeService.chargeInvoiceWithSavedCard(invoice.id, freshPm.id, { maxAuthorizedSubtotal: acceptedAmount });
+      // could outrun. requireAutopayForCustomerId serializes the charge
+      // against a concurrently-committing pause/opt-out (r13).
+      await StripeService.chargeInvoiceWithSavedCard(invoice.id, freshPm.id, {
+        maxAuthorizedSubtotal: acceptedAmount,
+        requireAutopayForCustomerId: svc.customer_id,
+      });
     } catch (err) {
       logger.error(`[appt-card-request] recap completion charge failed for visit ${scheduledServiceId}: ${err.message}`);
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'charge_failed' });
