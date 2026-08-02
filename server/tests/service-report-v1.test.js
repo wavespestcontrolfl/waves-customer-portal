@@ -2603,26 +2603,41 @@ describe('service report v1', () => {
     })).toBe('status=500 Failed at https://portal.wavespestcontrol.com/report/[redacted]');
   });
 
-  test('v1 SMS delivery copy includes public report link and advisory re-entry', () => {
+  // Owner ruling 2026-08-01: the completion text names the service, carries the
+  // link, and stops there — no re-entry line, no opt-out footer. Re-entry lives
+  // on the linked report; the text exists to get the customer there in one
+  // segment. A transactional notice about work already done is not the place
+  // for opt-out wording (that stays on estimates and the marketing lanes).
+  test('v1 SMS delivery names the service and carries only the report link', () => {
     const body = buildServiceReportV1Sms({
       customerFirstName: 'Van',
       reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
-      advisory: {
-        exterior_reentry_min: 30,
-        interior_reentry_min: 120,
-      },
+      serviceType: 'Pest Control Service',
     });
 
-    expect(body).toContain('Hi Van, your Waves service report is ready: https://portal.wavespestcontrol.com/report/token-1');
-    expect(body).toContain('Re-entry: 30 min outside, 120 min inside.');
-    expect(body).toContain('Reply STOP to opt out.');
+    expect(body).toBe('Hi Van, your Pest Control report is ready: https://portal.wavespestcontrol.com/report/token-1');
+    expect(body).not.toMatch(/Re-entry/i);
+    expect(body).not.toMatch(/STOP/i);
     expect(body).not.toContain('serviceData');
   });
 
-  test('v1.1 SMS delivery keeps the existing body unchanged when dynamic context exists', () => {
+  test('v1 SMS falls back to a bare "service" when the visit has no type', () => {
+    // The template supplies the possessive, so an empty type must not render
+    // "your your service report".
+    const body = buildServiceReportV1Sms({
+      customerFirstName: 'Van',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+    });
+    expect(body).toBe('Hi Van, your service report is ready: https://portal.wavespestcontrol.com/report/token-1');
+  });
+
+  test('v1.1 SMS ignores advisory and dynamic context entirely', () => {
+    // Both used to shape the body. Neither may reach the text now — a rich
+    // dynamic context must not resurrect a re-entry line by another route.
     const body = buildServiceReportV1Sms({
       customerFirstName: 'Ava',
       reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      serviceType: 'Lawn Care',
       advisory: {
         exterior_reentry_min: 30,
         interior_reentry_min: 120,
@@ -2642,10 +2657,20 @@ describe('service report v1', () => {
       },
     });
 
+    expect(body).toBe('Hi Ava, your Lawn Care report is ready: https://portal.wavespestcontrol.com/report/token-1');
+  });
+
+  test('v1 SMS appends the invoice link when the visit bills on completion', () => {
+    const body = buildServiceReportV1Sms({
+      customerFirstName: 'Ava',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      payUrl: 'https://portal.wavespestcontrol.com/pay/inv-9',
+      serviceType: 'Lawn Care',
+    });
+
     expect(body).toBe(
-      'Hi Ava, your Waves service report is ready: https://portal.wavespestcontrol.com/report/token-1\n'
-      + 'Re-entry: 30 min outside, 120 min inside.\n'
-      + 'Reply STOP to opt out.'
+      'Hi Ava, your Lawn Care report is ready: https://portal.wavespestcontrol.com/report/token-1\n'
+      + 'Invoice: https://portal.wavespestcontrol.com/pay/inv-9'
     );
   });
 
@@ -2700,8 +2725,15 @@ describe('service report v1', () => {
     expect(context.enabled).toBe(true);
     expect(context.smsType).toBe(serviceReportV1SmsType({ hasInvoiceLink: true }));
     expect(context.body).toContain('https://portal.wavespestcontrol.com/l/report-abc12');
-    expect(context.body).toContain('Re-entry: 45 min outside, 90 min inside.');
+    // Names the visit's service, and the advisory never reaches the text.
+    expect(context.body).toContain('your Residential Pest Control report is ready');
+    expect(context.body).not.toMatch(/Re-entry/i);
     expect(context.body).toContain('Invoice: https://portal.wavespestcontrol.com/l/invoice-xyz89');
+    // service_type must be SUPPLIED, or the template placeholder goes
+    // unresolved and the send is silently suppressed (#3121). reentry_line is
+    // kept as an empty string for the same reason.
+    expect(context.vars.service_type).toBe('Residential Pest Control');
+    expect(context.vars.reentry_line).toBe('');
     expect(context.metadata).toMatchObject({
       original_message_type: 'service_report_v1_with_invoice',
       service_record_id: 'service-1',

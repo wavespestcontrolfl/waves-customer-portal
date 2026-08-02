@@ -8913,14 +8913,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           || autopayCoversVisit
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase());
         // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
-        // source of truth) and run the consistency check, so the SMS below leads with
-        // the same line as the report. Best-effort; never blocks completion.
-        let lawnReportSmsSummary = null;
+        // source of truth) and run the consistency check. Its smsSummary is no
+        // longer read — the completion text is the plain DB template for every
+        // service line (owner ruling 2026-08-01) — but the freeze and the
+        // consistency check are what the REPORT reads, so the gate stays.
+        // Best-effort; never blocks completion.
         if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
           try {
             const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
             const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
-            lawnReportSmsSummary = gate.smsSummary || null;
             // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
             // fold the frozen synthesis back in so the later sending/sent writes (which
             // spread recordStructuredNotes) don't clobber it.
@@ -8950,25 +8951,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             reportUrl,
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
-            summaryLine: lawnReportSmsSummary,
           })
           : null;
         if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
           sentSmsType = serviceReportV1SmsContext.smsType;
-          // The DB service_report_v1 template carries no {summary_line}; when the
-          // write-gate froze a V2 lead, send the prebuilt body (which leads with that
-          // synthesis) so the customer sees it instead of the generic "report is
-          // ready" line. Otherwise keep the editable DB template.
-          let body;
-          if (lawnReportSmsSummary && serviceReportV1SmsContext.body) {
-            body = serviceReportV1SmsContext.body;
-          } else {
-            body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
-              workflow: 'dispatch_service_complete',
-              entity_type: 'service_record',
-              entity_id: record.id,
-            });
-          }
+          // Always the editable DB template (owner ruling 2026-08-01). The lawn
+          // lane used to swap in a prebuilt body leading with the V2 synthesis —
+          // the score band plus a watering action — which made lawn texts read
+          // nothing like pest and pushed them past one segment. That synthesis
+          // belongs on the report. The write-gate above still runs: it freezes
+          // the synthesis onto the record and runs the consistency check, both
+          // of which the REPORT depends on; only its SMS lead-in is retired.
+          let body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
+            workflow: 'dispatch_service_complete',
+            entity_type: 'service_record',
+            entity_id: record.id,
+          });
           // A toggled-off or removed variant must not cost the customer
           // their completion text — fall back to the base report template
           // before giving up (owner report 2026-07-06: the since-removed

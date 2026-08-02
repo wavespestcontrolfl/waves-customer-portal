@@ -116,15 +116,24 @@ describe('Lawn Report V2 — consistency golden fixtures', () => {
     });
   }
 
-  test('SMS leads with the frozen synthesis line (single source of truth)', () => {
+  // Owner ruling 2026-08-01: lawn reads like pest. The frozen synthesis (score
+  // band + watering action) is still written to the record — the REPORT is its
+  // consumer — but it no longer leads the completion text, which is now the
+  // plain templated line for every service line.
+  test('SMS never carries the frozen synthesis line — lawn reads like pest', () => {
     const summaryLine = 'Your St. Augustine lawn report is ready: stable — watching watering. Check sprinkler coverage there.';
-    const withSummary = buildServiceReportV1Sms({ customerFirstName: 'Tony', reportUrl: 'https://x/r/abc', summaryLine });
-    expect(withSummary).toContain('Hi Tony, your St. Augustine lawn report is ready');
-    expect(withSummary).toContain('https://x/r/abc');
-    expect(withSummary).toContain('Reply STOP');
+    const withSummary = buildServiceReportV1Sms({
+      customerFirstName: 'Tony', reportUrl: 'https://x/r/abc', serviceType: 'Lawn Care', summaryLine,
+    });
+    expect(withSummary).toBe('Hi Tony, your Lawn Care report is ready: https://x/r/abc');
+    expect(withSummary).not.toMatch(/watering|sprinkler|stable/i);
+    expect(withSummary).not.toMatch(/STOP/i);
 
-    const generic = buildServiceReportV1Sms({ customerFirstName: 'Tony', reportUrl: 'https://x/r/abc' });
-    expect(generic).toContain('your Waves service report is ready');
+    // Same shape for a pest visit — the only difference is the service name.
+    const pest = buildServiceReportV1Sms({
+      customerFirstName: 'Tony', reportUrl: 'https://x/r/abc', serviceType: 'Pest Control',
+    });
+    expect(pest).toBe('Hi Tony, your Pest Control report is ready: https://x/r/abc');
   });
 
   test('frozenSmsSummary reads the persisted write-gate line (object or JSON string)', () => {

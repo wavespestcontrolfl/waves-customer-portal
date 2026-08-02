@@ -1,30 +1,22 @@
 const { getServiceLineConfig } = require('./service-line-configs');
-const { frozenSmsSummary } = require('./lawn-report-write-gate');
 
 function normalizeName(value) {
   return String(value || '').trim().split(/\s+/)[0] || '';
 }
 
-function normalizeMinutes(value) {
-  if (value === null || value === undefined || value === '') return null;
-  const n = Number(value);
-  if (!Number.isFinite(n)) return null;
-  const rounded = Math.round(n);
-  return rounded > 0 ? rounded : null;
-}
-
-function normalizeAdvisory(advisory = {}, fallback = {}) {
-  let source = advisory;
-  if (typeof source === 'string') {
-    try {
-      source = JSON.parse(source);
-    } catch {
-      source = {};
-    }
-  }
-  source = source && typeof source === 'object' && !Array.isArray(source) ? source : {};
-  const defaults = fallback && typeof fallback === 'object' && !Array.isArray(fallback) ? fallback : {};
-  return { ...defaults, ...source };
+// The completion text names the service (owner ruling 2026-08-01) rather than
+// saying "your service report". Mirrors normalizeServiceTypeForTemplate in
+// admin-dispatch so this family reads the same as service_complete_with_invoice,
+// but degrades to a bare 'service' instead of that helper's 'your service' —
+// the template already supplies the possessive, and "your your service report"
+// is the render you get otherwise.
+function serviceTypeLabel(raw) {
+  const cleaned = String(raw || '')
+    .trim()
+    .replace(/\s+services?$/i, '')
+    .replace(/^your\s+/i, '')
+    .trim();
+  return cleaned || 'service';
 }
 
 function shouldSendServiceReportV1Delivery(record) {
@@ -41,71 +33,56 @@ function serviceReportV1SmsType({ hasInvoiceLink = false } = {}) {
   return hasInvoiceLink ? 'service_report_v1_with_invoice' : 'service_report_v1';
 }
 
+// Owner ruling 2026-08-01: completion texts stay SHORT so they deliver in one
+// segment, and they name the service.
+//   - No re-entry line. It lives on the linked report
+//     (dynamicContext.reentry + advisory.exterior/interior_reentry_min), which
+//     is where a customer reads the detail anyway.
+//   - No "Reply STOP to opt out." A completed visit is transactional: consent
+//     came with the transaction, and Twilio enforces the STOP keyword at the
+//     account level whether or not the body advertises it. Opt-out wording
+//     belongs on estimates and the marketing-adjacent lanes only.
+//   - No lawn synthesis lead-in. Lawn reads exactly like pest; the score band
+//     and watering advice belong on the report, not in a text.
 function buildServiceReportV1Sms({
   customerFirstName,
   reportUrl,
-  advisory,
-  fallbackAdvisory,
   payUrl,
-  summaryLine,
+  serviceType,
 } = {}) {
   const url = String(reportUrl || '').trim();
   if (!url) return '';
 
   const firstName = normalizeName(customerFirstName);
   const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
-  const mergedAdvisory = normalizeAdvisory(advisory, fallbackAdvisory);
-  const exterior = normalizeMinutes(mergedAdvisory.exterior_reentry_min);
-  const interior = normalizeMinutes(mergedAdvisory.interior_reentry_min);
-
-  // Prefer the frozen V2 synthesis line so the text matches the report's lead;
-  // fall back to the generic line when there's no synthesized summary.
-  const summary = String(summaryLine || '').trim();
-  const lines = summary
-    ? [`${greeting} ${summary.charAt(0).toLowerCase()}${summary.slice(1)}`, url]
-    : [`${greeting} your Waves service report is ready: ${url}`];
-
-  if (exterior !== null && interior !== null) {
-    lines.push(`Re-entry: ${exterior} min outside, ${interior} min inside.`);
-  } else if (exterior !== null) {
-    lines.push(`Re-entry: ${exterior} min outside.`);
-  } else if (interior !== null) {
-    lines.push(`Re-entry: ${interior} min inside.`);
-  }
+  const lines = [`${greeting} your ${serviceTypeLabel(serviceType)} report is ready: ${url}`];
 
   const invoiceUrl = String(payUrl || '').trim();
   if (invoiceUrl) lines.push(`Invoice: ${invoiceUrl}`);
 
-  lines.push('Reply STOP to opt out.');
   return lines.join('\n');
 }
 
 function buildServiceReportV1SmsVars({
   customerFirstName,
   reportUrl,
-  advisory,
-  fallbackAdvisory,
   payUrl,
+  serviceType,
 } = {}) {
   const url = String(reportUrl || '').trim();
   if (!url) return null;
 
-  const mergedAdvisory = normalizeAdvisory(advisory, fallbackAdvisory);
-  const exterior = normalizeMinutes(mergedAdvisory.exterior_reentry_min);
-  const interior = normalizeMinutes(mergedAdvisory.interior_reentry_min);
-  let reentryLine = '';
-  if (exterior !== null && interior !== null) {
-    reentryLine = `\nRe-entry: ${exterior} min outside, ${interior} min inside.`;
-  } else if (exterior !== null) {
-    reentryLine = `\nRe-entry: ${exterior} min outside.`;
-  } else if (interior !== null) {
-    reentryLine = `\nRe-entry: ${interior} min inside.`;
-  }
-
   return {
     first_name: normalizeName(customerFirstName) || 'there',
     report_url: url,
-    reentry_line: reentryLine,
+    service_type: serviceTypeLabel(serviceType),
+    // Retired with the re-entry line, but STILL SUPPLIED as empty string. The
+    // migration in this change strips {reentry_line} from both bodies, and an
+    // unresolved placeholder does not render blank — it suppresses the entire
+    // send (#3121). Keeping the key costs nothing and means a stale row, a
+    // half-applied migration, or an operator re-adding the token by hand can
+    // never silence a completion text.
+    reentry_line: '',
     pay_url: String(payUrl || '').trim(),
   };
 }
@@ -116,7 +93,6 @@ function buildServiceReportV1DeliveryContext({
   reportUrl,
   smsReportUrl,
   payUrl,
-  summaryLine: summaryLineParam,
 } = {}) {
   if (!shouldSendServiceReportV1Delivery(record)) {
     return { enabled: false, body: '', smsType: null, metadata: {} };
@@ -125,35 +101,21 @@ function buildServiceReportV1DeliveryContext({
   const config = getServiceLineConfig(record.service_line || service?.service_type);
   const hasInvoiceLink = !!String(payUrl || '').trim();
   const smsType = serviceReportV1SmsType({ hasInvoiceLink });
-  // Frozen V2 synthesis line (write-gate) — keeps the text on-message with the report.
-  const summaryLine = summaryLineParam || frozenSmsSummary(record);
-  // The STORED advisory defers exterior zeroing on unknown scope (so a
-  // trace saved after completion can restore the timer) — the SMS is a
-  // DISPLAY surface and must apply the same read-time normalization the
-  // report does, or the completion text promises an exterior re-entry
-  // window the report won't show (codex P2 #3007 r12). Trace evidence
-  // rides record.tracedExteriorZone, resolved by the caller.
-  const { normalizeAdvisoryForTreatmentScope } = require('./report-data');
-  const displayAdvisory = normalizeAdvisoryForTreatmentScope(record.advisory, {
-    service: record,
-    applications: Array.isArray(record.applications) ? record.applications : [],
-    zones: record.tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
-  });
+  // Name the visit's actual service. The scheduled service_type is what the
+  // sibling paid templates already render, so both families read alike; the
+  // service-line displayName is the fallback when the record has no type.
+  const serviceType = service?.service_type || record.service_type || config.displayName;
   const vars = buildServiceReportV1SmsVars({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
-    advisory: displayAdvisory,
-    fallbackAdvisory: config.advisoryDefaults,
     payUrl,
+    serviceType,
   });
-  if (summaryLine) vars.summary_line = summaryLine;
   const body = buildServiceReportV1Sms({
     customerFirstName: service?.first_name,
     reportUrl: smsReportUrl || reportUrl,
-    advisory: displayAdvisory,
-    fallbackAdvisory: config.advisoryDefaults,
     payUrl,
-    summaryLine,
+    serviceType,
   });
 
   return {
