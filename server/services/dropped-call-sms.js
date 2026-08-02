@@ -42,6 +42,20 @@ const { readCachedLineType, cacheLineType, lookupLineType } = require('./messagi
 // off, template disabled, owner kill switch) report sent:true with a
 // sentinel providerMessageId and no SMS leaves the system.
 const { isRealProviderSend } = require('./sms-auto-send');
+const { recordSuppression } = require('./messaging/validators/suppression');
+
+// A Twilio 21610 is the RECIPIENT's opt-out verdict, not a feature-local
+// fact — feed the canonical suppression store so EVERY SMS workflow stops
+// texting this number, not just this lane (codex P1). Best-effort: a failed
+// write never breaks the calling path (the claim/card verdict still holds
+// locally).
+async function recordProviderOptOutSuppression(phone, source) {
+  try {
+    await recordSuppression({ phone, reason: 'opt_out', source });
+  } catch (e) {
+    logger.warn(`[dropped-call-sms] global opt-out suppression write failed for ${maskPhone(phone)}: ${e.code || e.name || 'db_error'}`);
+  }
+}
 
 const MESSAGE_TYPE = 'dropped_call_address_request';
 const MIN_CALL_SECONDS = 120;
@@ -466,6 +480,7 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     // destination = not SMS-capable, still callable.
     const providerCode = String(result.providerErrorCode || result.code || 'terminal');
     const optedOut = providerCode === '21610';
+    if (optedOut) await recordProviderOptOutSuppression(phone, 'dropped_call_sms_21610');
     await stampStatus(leadId, 'blocked');
     await stampPhoneClaim(phone, optedOut ? 'opted_out' : 'provider_terminal');
     logger.info(`[dropped-call-sms] Terminal provider rejection for ${maskPhone(phone)}: ${providerCode}`);
@@ -564,6 +579,7 @@ async function handleUndeliveredAddressRequest({ sid, status, errorCode, to, isR
       // never instruct a callback for it, and the follow-up pull below must
       // NOT queue outreach for it (codex P1).
       const optedOut = String(errorCode || '') === '21610';
+      if (optedOut) await recordProviderOptOutSuppression(phone, 'dropped_call_sms_bounce_21610');
       if (lead) {
         if (!optedOut) {
           await trx('leads')

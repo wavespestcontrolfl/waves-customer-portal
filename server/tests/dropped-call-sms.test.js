@@ -23,6 +23,9 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (key, vars) => `Hello ${vars.first_name} — reply with your address${vars.callback_clause}.`),
 }));
+jest.mock('../services/messaging/validators/suppression', () => ({
+  recordSuppression: jest.fn(async () => ({ ok: true })),
+}));
 jest.mock('../services/messaging/validators/line-type', () => ({
   readCachedLineType: jest.fn(async () => ({ state: 'miss' })),
   cacheLineType: jest.fn(async () => {}),
@@ -370,6 +373,8 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, terminal: true, code: 'PROVIDER_FAILURE', providerErrorCode: '21610' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'policy_block', code: 'SUPPRESSED_PROVIDER_OPT_OUT_21610' });
+    const { recordSuppression } = require('../services/messaging/validators/suppression');
+    expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ phone: PHONE, reason: 'opt_out' }));
     expect(state.deletes).toHaveLength(0);
     const claimStamp = state.updates.filter((u) => u.table === 'dropped_call_sms_claims').pop();
     expect(claimStamp.payload.outcome).toBe('opted_out');
