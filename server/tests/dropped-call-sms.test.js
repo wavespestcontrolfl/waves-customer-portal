@@ -23,6 +23,9 @@ jest.mock('../services/messaging/send-customer-message', () => ({
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async (key, vars) => `Hello ${vars.first_name} — reply with your address${vars.callback_clause}.`),
 }));
+jest.mock('../config/twilio-numbers', () => ({
+  findByNumber: jest.fn((n) => (n === '+19412166229' ? { id: 'bradenton' } : null)),
+}));
 jest.mock('../services/messaging/validators/suppression', () => ({
   recordSuppression: jest.fn(async () => ({ ok: true })),
 }));
@@ -108,7 +111,7 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-const CALL = { to_phone: '+19412166229', twilio_call_sid: 'CAtest', duration_seconds: 300 };
+const CALL = { to_phone: '+19412166229', twilio_call_sid: 'CAtest', duration_seconds: 300, created_at: new Date('2026-08-01T14:30:00Z') };
 const EXTRACTED = { first_name: 'sam' };
 
 function sendArgs() {
@@ -124,6 +127,15 @@ describe('endedAbruptly', () => {
       'Caller: Tomorrow works.',
       'Agent: And what is your best email address and then your service address?',
       'Caller: Um, oh, you said — I do have one,',
+    ]))).toBe(true);
+  });
+
+  it("open questions containing 'see you' are not farewells", () => {
+    expect(endedAbruptly(mk([
+      'Caller: I called last year I think.',
+      "Agent: Hmm, I don't see you in our system — what is your service address?",
+      'Caller: Sure, it is one eight —',
+      'Caller: Are you there?',
     ]))).toBe(true);
   });
 
@@ -269,6 +281,22 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(res).toEqual({ sent: false, skipped: 'gate_off' });
     expect(db).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('stale call (reprocess/backfill) — card-only, no text, before any claim', async () => {
+    const staleCall = { ...CALL, created_at: new Date('2026-07-25T12:00:00Z') };
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: staleCall });
+    expect(res).toEqual({ sent: false, skipped: 'call_too_old' });
+    expect(state.inserts).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('sends from the line the prospect dialed when it is one of ours', async () => {
+    state.firstResults.leads = [{ customer_id: null, address: null }];
+    await sendDroppedCallAddressRequest(sendArgs());
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+      metadata: expect.objectContaining({ fromNumber: '+19412166229' }),
+    }));
   });
 
   it('quiet hours — skips BEFORE any claim, one-shot not consumed', async () => {

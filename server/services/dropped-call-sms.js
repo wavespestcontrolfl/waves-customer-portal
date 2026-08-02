@@ -43,6 +43,7 @@ const { readCachedLineType, cacheLineType, lookupLineType } = require('./messagi
 // sentinel providerMessageId and no SMS leaves the system.
 const { isRealProviderSend } = require('./sms-auto-send');
 const { recordSuppression } = require('./messaging/validators/suppression');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 // A Twilio 21610 is the RECIPIENT's opt-out verdict, not a feature-local
 // fact — feed the canonical suppression store so EVERY SMS workflow stops
@@ -82,6 +83,10 @@ async function recordProviderOptOutSuppression(phone, source) {
 
 const MESSAGE_TYPE = 'dropped_call_address_request';
 const MIN_CALL_SECONDS = 120;
+// A drop text is a SPEED play — "our call just dropped". An old call
+// reaching the send path (admin force-reprocess, processAllPending backfill)
+// must never text hours or days later (codex P1).
+const MAX_CALL_AGE_MS = 24 * 60 * 60 * 1000;
 const QUIET_START_HOUR_ET = 8;   // inclusive — sends allowed from 08:00 ET
 const QUIET_END_HOUR_ET = 20;    // exclusive — no sends at/after 20:00 ET
 
@@ -95,7 +100,9 @@ const QUIET_END_HOUR_ET = 20;    // exclusive — no sends at/after 20:00 ET
 const STRONG_FAREWELL_RE = new RegExp(
   [
     '\\bbye\\b', 'good-?bye', 'bye-?bye',
-    'see (you|ya)\\b', 'talk (to you|soon|later)',
+    // "see you" only as a closing — "I don't see you in our system" is an
+    // OPEN question mid-intake, not a farewell (codex P2).
+    "(?<!(?:do|ca)n'?t )see (you|ya)\\b(?! in\\b)", 'talk (to you|soon|later)',
     'have a (good|great|nice|wonderful)',
     'take care',
   ].join('|'),
@@ -308,6 +315,14 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
   const phone = normalizePhoneE164(rawPhone);
   if (!leadId || !phone) return { sent: false, skipped: 'missing_input' };
 
+  // Freshness BEFORE any claim: reprocessed/backfilled old calls are
+  // card-only. No created_at on the row = can't prove freshness = no text.
+  const callAgeMs = call.created_at ? Date.now() - new Date(call.created_at).getTime() : Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(callAgeMs) || callAgeMs > MAX_CALL_AGE_MS) {
+    logger.info(`[dropped-call-sms] Call too old for a drop text (lead ${leadId}) — skipped`);
+    return { sent: false, skipped: 'call_too_old' };
+  }
+
   // Quiet hours BEFORE any claim: an evening drop still gets its triage card
   // ("call them back"); the one-shot stays available in case a later
   // scheduler rail wants to pick it up.
@@ -453,6 +468,10 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
     metadata: {
       original_message_type: MESSAGE_TYPE,
       call_sid: call.twilio_call_sid || null,
+      // Reply from the line the prospect just dialed (matches the
+      // {callback_clause} in the body); only when it's one of OUR managed
+      // numbers — otherwise the location-aware default applies (codex P1).
+      ...(call.to_phone && TWILIO_NUMBERS.findByNumber(call.to_phone) ? { fromNumber: call.to_phone } : {}),
     },
   });
 
