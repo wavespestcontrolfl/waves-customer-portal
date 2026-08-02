@@ -348,6 +348,18 @@ describe('off-Stripe payment paths honor the same contract', () => {
     }
   });
 
+  test('the Customer 360 cash paths (annual prepay, credit prepayment) dispatch the clear too', () => {
+    // Every path money enters the ledger honors the one contract — the
+    // banner's promise must be true from the same screen it renders on.
+    const rs = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-customers.js'), 'utf8');
+    expect(rs).toContain("source: 'customer360_annual_prepay',");
+    expect(rs).toContain("source: 'account_credit_prepayment',");
+    // Adjustments move no cash and must not clear anything.
+    const idx = rs.indexOf("source: 'account_credit_prepayment',");
+    const before = rs.slice(Math.max(0, idx - 900), idx);
+    expect(before).toContain("if (kind === 'prepayment')");
+  });
+
   test('reconcile passes the Stripe charge\'s own settlement time when it has one', () => {
     const rs = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-payments-reconcile.js'), 'utf8');
     expect(rs).toContain('settledAt: chargeDetails?.created ? new Date(chargeDetails.created * 1000) : new Date()');
