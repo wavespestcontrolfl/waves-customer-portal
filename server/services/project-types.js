@@ -450,6 +450,18 @@ const PROJECT_TYPES = {
         'Nesting material', 'Noises reported by customer', 'Odor', 'Burrows / runways',
         'Damaged insulation / wiring / stored items',
       ] },
+      // Is this the visit where the traps GO OUT, or one where they get
+      // re-checked? (owner 2026-08-02: "it could be just the first time
+      // trapping, but it also could be the second time … the traps checked
+      // thing in there could be traps set or traps checked.") It is the
+      // tech's call, not an inference: the activity-score visit counter
+      // covers the whole rodent family, so a first trapping that follows a
+      // rodent INSPECTION would count as visit 2 and read as a re-check.
+      // The closeout pre-selects this from the property's existing trap
+      // pins, so the common path stays zero-tap. `internal` = it drives the
+      // report's wording (and the "Traps set" / "Traps checked" label right
+      // below), but it is not itself a customer-facing finding row.
+      { key: 'trap_visit_type', label: 'This visit', type: 'select', section: 'Trap activity', internal: true, options: ['Initial setup', 'Follow-up check'] },
       { key: 'traps_checked', label: 'Traps checked', type: 'count', section: 'Trap activity' },
       { key: 'captures', label: 'Captures', type: 'count', section: 'Trap activity' },
       { key: 'trap_actions', label: 'Trap actions', type: 'chips', section: 'Trap activity', options: [

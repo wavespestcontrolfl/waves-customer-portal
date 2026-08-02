@@ -246,8 +246,11 @@ describe('combo trapping narrative (owner template §3)', () => {
 
 // Owner 2026-08-02: "the rodent trapping reports don't really account for the
 // fact that it was a first time trapping — it always assumes that it's a
-// secondary trapping. Typically these ARE first time trappings."
-describe('first-time trapping (visit 1 = the traps go out)', () => {
+// secondary trapping"… and then: "it could be just the first time trapping,
+// but it also could be the second time trapping. So the traps checked thing
+// in there could be traps set or traps checked." So the TECH declares it via
+// trap_visit_type; the visit number is only the fallback.
+describe('trap setup vs. re-check — the tech declares it', () => {
   const SETUP_VALUES = {
     species: 'Roof rat',
     evidence_observed: 'Droppings, Rub marks / grease trails',
@@ -255,6 +258,91 @@ describe('first-time trapping (visit 1 = the traps go out)', () => {
     captures: '0',
     trap_actions: 'New traps added',
   };
+  const todaysResult = (values, visitSequence) => buildTodaysResult({
+    projectType: 'rodent_trapping',
+    reportTypeLabel: 'Rodent Trapping Summary',
+    values,
+    chips: ['Continue trapping'],
+    activity: { score: 3 },
+    visitSequence,
+  });
+
+  test('a setup declared on a LATER visit still reads as a setup', () => {
+    // The case the visit counter gets wrong: trapping that starts after a
+    // rodent inspection already scored the property.
+    const result = todaysResult({ ...SETUP_VALUES, trap_visit_type: 'Initial setup' }, 4);
+    expect(result.body).toContain('We set 8 traps today.');
+    expect(result.body).toContain('The traps go out on this first visit');
+    expect(result.body).not.toMatch(/checked \d+ traps/);
+  });
+
+  test('a re-check declared on visit 1 reads as a re-check', () => {
+    // The inverse: traps were already out (set at an earlier untyped stop,
+    // or by the customer), so visit 1 is genuinely a check.
+    const result = todaysResult({ ...SETUP_VALUES, trap_visit_type: 'Follow-up check' }, 1);
+    expect(result.body).toContain('We checked 8 traps, found no new captures and added new traps today.');
+    expect(result.body).not.toContain('The traps go out on this first visit');
+  });
+
+  test('the declared value drives the count label, not the visit number', () => {
+    const snapshot = (values, visitSequence) => buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      serviceKey: 'rodent_trapping_check',
+      serviceLabel: 'Rodent Trapping',
+      values,
+      nextStepChips: ['Continue trapping'],
+      visitSequence,
+      activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
+    });
+    const labelOf = (snap) => snap.findings.find((f) => f.fieldKey === 'traps_checked').customerLabel;
+
+    expect(labelOf(snapshot({ ...SETUP_VALUES, trap_visit_type: 'Initial setup' }, 4))).toBe('Traps set');
+    expect(labelOf(snapshot({ ...SETUP_VALUES, trap_visit_type: 'Follow-up check' }, 1))).toBe('Traps checked');
+  });
+
+  test('the selector itself never becomes a customer-facing finding row', () => {
+    const snapshot = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      serviceKey: 'rodent_trapping_setup',
+      serviceLabel: 'Rodent Trapping',
+      values: { ...SETUP_VALUES, trap_visit_type: 'Initial setup' },
+      nextStepChips: ['Continue trapping'],
+      visitSequence: 1,
+      activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
+    });
+    // internal: it switches the wording, it is not itself a finding.
+    expect(snapshot.findings.some((f) => f.fieldKey === 'trap_visit_type')).toBe(false);
+    // …but it is still stored on the snapshot, so the narrative and any
+    // replay resolve the same stage the report was written with.
+    expect(snapshot.values.trap_visit_type).toBe('Initial setup');
+  });
+
+  test('trap_visit_type validates against its options', () => {
+    expect(validateTypedFindings({
+      type: 'rodent_trapping',
+      values: { ...SETUP_VALUES, trap_visit_type: 'Initial setup' },
+      expectedType: 'rodent_trapping',
+      enforceRequired: true,
+    }).ok).toBe(true);
+
+    expect(validateTypedFindings({
+      type: 'rodent_trapping',
+      values: { ...SETUP_VALUES, trap_visit_type: 'First one ever' },
+      expectedType: 'rodent_trapping',
+      enforceRequired: true,
+    }).ok).toBe(false);
+  });
+
+  test('it is optional — a completion without it falls back to the visit number', () => {
+    expect(validateTypedFindings({
+      type: 'rodent_trapping',
+      values: SETUP_VALUES,
+      expectedType: 'rodent_trapping',
+      enforceRequired: true,
+    }).ok).toBe(true);
+    expect(todaysResult(SETUP_VALUES, 1).body).toContain('We set 8 traps today.');
+    expect(todaysResult(SETUP_VALUES, 2).body).toContain('We checked 8 traps');
+  });
 
   test('visit 1 reads as a setup — traps SET, no re-check or empty-check wording', () => {
     const result = buildTodaysResult({

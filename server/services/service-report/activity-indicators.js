@@ -1770,17 +1770,27 @@ function composedWorkSentence(projectType, values = {}) {
 }
 
 /**
- * First visit of a rodent trapping program — the visit where the traps are
- * PUT OUT rather than re-checked (owner 2026-08-02: the reports "always
- * assume it's a secondary trapping"). visitSequence is the same first-visit
- * notion the report already uses for the activity baseline and the "Progress
- * Visit" label, so the copy, the gauge, and the report title all agree.
+ * Is this the rodent trapping visit where the traps GO OUT, rather than one
+ * where they get re-checked? (owner 2026-08-02: the reports "always assume
+ * it's a secondary trapping", and "it could be just the first time trapping,
+ * but it also could be the second time".)
+ *
+ * The tech's `trap_visit_type` selection is AUTHORITATIVE — a trapping visit
+ * is a setup or a re-check because of what happened on it, not because of
+ * where it falls in a sequence. visitSequence is only the fallback for
+ * completions that carry no selection (pre-field snapshots, API callers, a
+ * closeout whose pre-select had nothing to go on), and it is a weak signal:
+ * it counts the whole rodent family, so a first trapping that follows a
+ * rodent inspection lands on visit 2 and reads as a re-check.
  *
  * Wildlife trapping is deliberately excluded: its checklist carries an
  * explicit 'Trap installed' chip that already reads right on visit 1.
  */
-function isInitialRodentTrapSetup(projectType, visitSequence) {
-  return projectType === 'rodent_trapping' && !(Number(visitSequence) > 1);
+function isInitialRodentTrapSetup(projectType, visitSequence, values = {}) {
+  if (projectType !== 'rodent_trapping') return false;
+  const declared = String(values?.trap_visit_type || '').trim();
+  if (declared) return declared === 'Initial setup';
+  return !(Number(visitSequence) > 1);
 }
 
 /**
@@ -1808,14 +1818,13 @@ function buildTodaysResult({
   // The free-text keys stay in the fallback chain so pre-v2 drafts still
   // produce a sentence.
   const isTrappingType = projectType === 'rodent_trapping' || projectType === 'wildlife_trapping';
-  // First visit of a rodent trapping program: the traps go out TODAY, so
-  // every "checked / reset / no captures yet" phrasing is wrong (owner
-  // 2026-08-02 — the reports "always assume it's a secondary trapping").
-  // visitSequence is the same first-visit notion the report already uses for
-  // the activity baseline and the "Progress Visit" label, so the whole
-  // report agrees with itself. Wildlife is untouched: its checklist carries
-  // an explicit 'Trap installed' chip that already reads right on visit 1.
-  const initialTrapSetup = isInitialRodentTrapSetup(projectType, visitSequence);
+  // The trap-setup visit: the traps go out TODAY, so every "checked /
+  // reset / no captures yet" phrasing is wrong (owner 2026-08-02 — the
+  // reports "always assume it's a secondary trapping"). Driven by the tech's
+  // `trap_visit_type` selection, NOT by the visit number — a setup can land
+  // on any visit. Wildlife is untouched: its checklist carries an explicit
+  // 'Trap installed' chip that already reads right on visit 1.
+  const initialTrapSetup = isInitialRodentTrapSetup(projectType, visitSequence, values);
   const isBaitStationType = projectType === 'termite_bait_station' || projectType === 'rodent_bait_station';
   // Combo trapping visits (owner spec §3) append the exclusion/sanitation
   // module work to the trap sentence so the narrative covers the whole stop.
@@ -2257,11 +2266,11 @@ function buildTypedReportSnapshot({
     ? `${ACTIVITY_INDICATORS[projectType].programNoun || ACTIVITY_INDICATORS[projectType].pestNoun} Program — Progress Visit`
     : reportTypeLabel;
 
-  // On the first trapping visit the traps are being PUT OUT, so the count the
-  // tech entered is the number SET, not the number re-checked — the customer
-  // label follows (owner 2026-08-02). Same first-visit signal the Today's
-  // Result copy uses, so the finding row and the summary agree.
-  const initialTrapSetup = isInitialRodentTrapSetup(projectType, visitSequence);
+  // On a trap-SETUP visit the traps are being put out, so the count the tech
+  // entered is the number set, not the number re-checked — the customer
+  // label follows (owner 2026-08-02). Same signal the Today's Result copy
+  // uses, so the finding row and the summary always agree.
+  const initialTrapSetup = isInitialRodentTrapSetup(projectType, visitSequence, values);
 
   const items = [];
   for (const field of config.findingsFields || []) {

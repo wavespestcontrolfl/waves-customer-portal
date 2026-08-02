@@ -5900,6 +5900,23 @@ const EMPTY_COMPANION_ENTRY = {
   scoreTouched: false,
 };
 
+// Field labels that follow a sibling selection. Registry labels are static,
+// but rodent trapping's count means two different things depending on the
+// visit the tech just declared — and a form reading "Traps checked" under
+// "Initial setup" would contradict the report, which labels the very same
+// number "Traps set" (owner 2026-08-02). Kept to this one pair rather than a
+// general mechanism: it is the only field whose noun flips.
+export function typedFieldLabel(schemaType, field, values = {}) {
+  if (
+    schemaType === "rodent_trapping"
+    && field.key === "traps_checked"
+    && String(values.trap_visit_type || "").trim() === "Initial setup"
+  ) {
+    return "Traps set";
+  }
+  return field.label;
+}
+
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
 // chips + optional AI-drafted recommendations. Shared by the mobile and
@@ -5972,7 +5989,7 @@ export function TypedFindingsSection({
         <div style={sectionHeaderStyle}>{field.section}</div>
       )}
       <div style={fieldLabelStyle}>
-        {field.label}
+        {typedFieldLabel(schema.type, field, values)}
         {/* pesticideOnly compliance fields only render when a pesticide
             product is recorded — and then the server REQUIRES them
             (validateTreeShrubTypedCompliance), so they carry the required
@@ -8898,6 +8915,29 @@ export function CompletionPanel({
   const [stationNumberBase, setStationNumberBase] = useState(1); // server's next number (never reuses retired)
   const stationNewSeqRef = useRef(0);
 
+  // Default the rodent trapping "This visit" select, into whichever slice
+  // owns the rodent_trapping schema for this visit (primary findings vs. a
+  // companion section) — same primary/companion split the station auto-count
+  // effect uses. Only fills a BLANK field: a tech selection, or a restored
+  // draft, always wins.
+  const prefillTrapVisitType = (value) => {
+    const fill = (values) => (
+      String(values?.trap_visit_type || "").trim()
+        ? values
+        : { ...values, trap_visit_type: value }
+    );
+    if (service.completionProfile?.findingsType === "rodent_trapping") {
+      setFindingsValues((prev) => fill(prev));
+      return;
+    }
+    setCompanionState((prev) => {
+      const entry = prev.rodent_trapping || EMPTY_COMPANION_ENTRY;
+      const nextValues = fill(entry.values);
+      if (nextValues === entry.values) return prev;
+      return { ...prev, rodent_trapping: { ...entry, values: nextValues } };
+    });
+  };
+
   // Satellite basemap + the property's existing bait-station pins. The fetch
   // runs only when the station surface is on — the manual zone-mark step that
   // also consumed this payload was retired in favor of the traced Treatment
@@ -8926,6 +8966,19 @@ export function CompletionPanel({
           || Number(res.nextStationNumber)
           || 1,
         );
+        // Pre-select "is this a setup or a re-check?" from the property's
+        // own trap registry: no trap pins on record = the traps go out
+        // today. Done HERE, inside the resolved fetch, because an empty
+        // preload array before it lands is indistinguishable from a
+        // property with no traps. This is only a DEFAULT — the tech owns
+        // the field and an untouched-by-the-map property (traps predating
+        // the trap map) is exactly the case they override. Never
+        // overwrites a value already on the form.
+        if (stationProgram === "trapping") {
+          const existingTraps = (Array.isArray(res.stations) ? res.stations : [])
+            .filter((station) => (station.program || "termite") === "trapping").length;
+          prefillTrapVisitType(existingTraps > 0 ? "Follow-up check" : "Initial setup");
+        }
       })
       .catch(() => { if (!cancelled) setPropertyMap(null); });
     return () => { cancelled = true; };

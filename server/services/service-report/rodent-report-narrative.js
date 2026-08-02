@@ -211,11 +211,17 @@ function groundingFacts({
     recap: cleanText(recap),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
     reportTypeLabel: cleanText(reportTypeLabel || typedReport?.reportTypeLabel || typedReport?.typeLabel) || null,
-    // First visit of a rodent trapping program — the traps went out today and
-    // nothing has been re-checked yet. Without this the model reaches for the
-    // recurring "we checked the traps" story every time (owner 2026-08-02).
-    // Null on every other visit/type so those prompts are unchanged.
-    visitStage: isInitialRodentTrapSetup(typedReport?.type, typedReport?.visitSequence)
+    // The trap-SETUP visit — the traps went out today and nothing has been
+    // re-checked yet. Without this the model reaches for the recurring "we
+    // checked the traps" story every time (owner 2026-08-02). Reads the
+    // tech's own trap_visit_type off the frozen snapshot values, so the
+    // narrative can never disagree with the ratified Today's Result. Null on
+    // every other visit/type, so those prompts are unchanged.
+    visitStage: isInitialRodentTrapSetup(
+      typedReport?.type,
+      typedReport?.visitSequence,
+      typedReport?.values,
+    )
       ? 'initial_trap_setup'
       : null,
     todaysResult: typedReport?.todaysResult
