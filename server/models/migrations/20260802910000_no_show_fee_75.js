@@ -40,9 +40,15 @@ exports.up = async function (knex) {
       .where({ config_key: 'estimate_card_hold' })
       .update({ data: JSON.stringify(newData), updated_at: knex.fn.now() });
   } else {
+    // name/category are NOT NULL; shape mirrors the estimate_deposit seed
+    // (20260612000003) so the Pricing Logic panel can re-tune it.
     await knex('pricing_config').insert({
       config_key: 'estimate_card_hold',
+      name: 'One-Time Card Hold — No-Show Fee',
+      category: 'global',
       data: JSON.stringify(newData),
+      description: 'Flat no-show/late-cancel fee and free-cancel window for the one-time card-on-file rails (estimate card hold + /secure appointment card). Terms shown to a customer are frozen on their row at disclosure — changing this only affects future disclosures.',
+      sort_order: 96,
     });
   }
   if (await knex.schema.hasTable('pricing_config_audit')) {
@@ -70,25 +76,35 @@ exports.up = async function (knex) {
 
 exports.down = async function (knex) {
   // Only revert if this migration's up() made the change — keyed off the
-  // audit row — so an admin's own later edit survives rollback.
+  // audit row — and restore the EXACT recorded old_value: an
+  // admin-configured $60 goes back to $60, and a row up() created
+  // (old_value null) is deleted, never rewritten to a guessed $49.
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
   const ownUp = await knex('pricing_config_audit')
     .where({ config_key: 'estimate_card_hold', changed_by: MIGRATION_TAG, reason: UP_REASON })
-    .first('id');
+    .orderBy('changed_at', 'desc')
+    .first('id', 'old_value');
   if (!ownUp) return;
   const row = await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).first();
   if (!row) return;
   const data = typeof row.data === 'string' ? JSON.parse(row.data) : (row.data || {});
   if (Number(data.noShowFeeAmount) !== NEW_FEE) return; // admin moved it since — leave alone
-  const reverted = { ...data, noShowFeeAmount: OLD_FEE };
-  await knex('pricing_config')
-    .where({ config_key: 'estimate_card_hold' })
-    .update({ data: JSON.stringify(reverted), updated_at: knex.fn.now() });
+  const priorData = ownUp.old_value ? JSON.parse(ownUp.old_value) : null;
+  if (priorData == null) {
+    await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).del();
+  } else {
+    // Restore the recorded snapshot, keeping only later-added keys that
+    // the snapshot never covered.
+    const reverted = { ...data, ...priorData };
+    await knex('pricing_config')
+      .where({ config_key: 'estimate_card_hold' })
+      .update({ data: JSON.stringify(reverted), updated_at: knex.fn.now() });
+  }
   await knex('pricing_config_audit').insert({
     config_key: 'estimate_card_hold',
     old_value: JSON.stringify(data),
-    new_value: JSON.stringify(reverted),
+    new_value: ownUp.old_value || null,
     changed_by: MIGRATION_TAG,
-    reason: 'Rollback: no-show/late-cancel fee $75 -> $49',
+    reason: 'Rollback: no-show/late-cancel fee $75 reverted to the audited prior state',
   });
 };
