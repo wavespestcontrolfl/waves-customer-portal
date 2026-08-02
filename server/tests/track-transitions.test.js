@@ -706,6 +706,90 @@ describe('track-transitions lifecycle side effects', () => {
     expect(update2.update.mock.calls[0][0].completed_at).toEqual(new Date('2026-07-19T13:00:00.000Z'));
   });
 
+  test('a mismatched in-memory stamp degrades to a transition-only flip — no lifecycle rewrite (codex P2 #3152 round 16)', async () => {
+    // Round 15 fenced completed_at; round 16 extends the fence to the
+    // correction-owned lifecycle columns: a stale finalizer must not rebuild
+    // end/duration fields from its snapshot over a newer correction.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f16a',
+      technician_id: 'tech-f16a',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      actual_end_time: new Date('2026-07-19T13:00:00.000Z'),
+      completed_at: new Date('2026-07-19T13:00:00.000Z'),
+      time_on_site_adjusted_minutes: 60,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-f16a', { expectedAdjustedMinutes: 45 });
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    expect(Object.keys(update.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+  });
+
+  test('the first-transition stamp fence is atomic: a fenced 0-row write retries transition-only (codex P2 #3152 round 16)', async () => {
+    // The in-memory stamp matches the caller, but a correction commits
+    // between the load and the UPDATE — the fenced write matches 0 rows.
+    // The retry flips track_state without touching completed_at or the
+    // lifecycle columns the correction now owns.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f16b',
+      technician_id: 'tech-f16b',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      time_on_site_adjusted_minutes: 45,
+    };
+    const fencedUpdate = query(0);
+    const retryUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(fencedUpdate)
+      .mockReturnValueOnce(retryUpdate);
+
+    const result = await trackTransitions.markComplete('job-f16b', {
+      expectedAdjustedMinutes: 45,
+      completedAt: new Date('2026-07-19T12:45:00.000Z'),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    // The first write carried the atomic stamp predicate.
+    expect(fencedUpdate.whereRaw).toHaveBeenCalledWith(
+      'time_on_site_adjusted_minutes IS NOT DISTINCT FROM ?', [45],
+    );
+    // The retry wrote only the flip.
+    expect(Object.keys(retryUpdate.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+  });
+
+  test('a fenced 0-row write whose retry also matches 0 rows reloads instead of guessing (codex P2 #3152 round 16)', async () => {
+    // Both writes miss → the state (not the stamp) moved: another writer
+    // completed the visit. Report the fresh row, write nothing.
+    const svc = {
+      id: 'job-f16c',
+      technician_id: 'tech-f16c',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      time_on_site_adjusted_minutes: 45,
+    };
+    const freshCompletedAt = new Date('2026-07-19T13:10:00.000Z');
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(query(0))
+      .mockReturnValueOnce(query(0))
+      .mockReturnValueOnce(query({ ...svc, track_state: 'complete', completed_at: freshCompletedAt }));
+
+    const result = await trackTransitions.markComplete('job-f16c', { expectedAdjustedMinutes: 45 });
+
+    expect(result).toEqual({ ok: true, state: 'complete', completedAt: freshCompletedAt });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  });
+
   test('already-complete + a supplied finite instant still moves completed_at (codex P2 #3152 round 12)', async () => {
     // The status-route-first shape: the visit was marked completed earlier
     // (tracker stamped the wall clock), then the completion flow finalizes

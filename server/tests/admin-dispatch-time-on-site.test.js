@@ -319,7 +319,7 @@ describe('live override composed with buildCompletionLifecycleUpdates', () => {
     // which ALSO stamps the durable row column the costing fence and the
     // no-opts labor override read, even when the end instant was clamped
     // (codex P2 round 11).
-    expect(source).toMatch(/if \(!isBackfillCompletion && liveAdjustedTimeOnSite\) \{\s*\n\s*if \(adjustedEndedAt\) \{\s*\n\s*lifecycleUpdates\.actual_end_time = adjustedEndedAt;\s*\n\s*lifecycleUpdates\.check_out_time = adjustedEndedAt;\s*\n\s*\}/);
+    expect(source).toMatch(/if \(!isBackfillCompletion && liveAdjustedTimeOnSite && !correctionPreservedMidFlight\) \{\s*\n\s*if \(adjustedEndedAt\) \{\s*\n\s*lifecycleUpdates\.actual_end_time = adjustedEndedAt;\s*\n\s*lifecycleUpdates\.check_out_time = adjustedEndedAt;\s*\n\s*\}/);
     expect(source).toMatch(/lifecycleUpdates\.time_on_site_adjusted_minutes = effectiveTimeOnSite;/);
   });
 
@@ -332,7 +332,7 @@ describe('live override composed with buildCompletionLifecycleUpdates', () => {
     // fallback — so the live override's adjusted instant is not discarded.
     // Both branches sit behind the round-15 transition stamp fence: when a
     // newer correction owns completed_at, neither stamps anything.
-    expect(trackerSource).toMatch(/const completedAtStamp = !transitionStampMatches\s*\n\s*\? null[\s\S]{0,120}: \(opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\)\);/);
+    expect(trackerSource).toMatch(/let completedAtStamp = !transitionStampMatches\s*\n\s*\? null[\s\S]{0,120}: \(opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\)\);/);
   });
 
   test('the live sanitizer and the backfill sanitizer are the same 1..720 rule', () => {
@@ -360,7 +360,7 @@ describe('route wiring contracts', () => {
   });
 
   test('the adjusted end instant sits after backfill in the lifecycle fallback chain', () => {
-    expect(source).toMatch(/const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionEndedAt\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| adjustedEndedAt \|\| completionEndedAt;/);
+    expect(source).toMatch(/const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite\s*\n\s*&& !correctionPreservedMidFlight\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionEndedAt\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| adjustedEndedAt \|\| completionEndedAt;/);
   });
 
   test('the adjusted marker freezes into structured_notes beside the backfill marker', () => {
@@ -593,7 +593,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // fields), and its stamped minutes outrank a plain stale-timer elapsed
     // in this request — explicit adjusted/backfill values keep authority.
     expect(source).toMatch(/for \(const field of \[\s*\n\s*'actual_end_time', 'check_out_time', 'completed_at',\s*\n\s*'service_time_minutes', 'actual_duration_minutes',\s*\n\s*'time_on_site_adjusted_minutes',\s*\n\s*\]\) \{\s*\n\s*if \(field in lockedSvcRow\) svc\[field\] = lockedSvcRow\[field\];/);
-    expect(source).toMatch(/if \(!isBackfillCompletion && !liveAdjustedTimeOnSite\s*\n\s*&& Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\s*\n\s*&& typeof effectiveTimeOnSite !== 'number'\) \{\s*\n\s*effectiveTimeOnSite = stampedMinutes;\s*\n\s*correctionPreservedMidFlight = true;/);
+    expect(source).toMatch(/if \(Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\s*\n\s*&& \(stampMovedMidFlight\s*\n\s*\|\| \(!isBackfillCompletion && !liveAdjustedTimeOnSite\s*\n\s*&& typeof effectiveTimeOnSite !== 'number'\)\)\) \{\s*\n\s*effectiveTimeOnSite = stampedMinutes;\s*\n\s*correctionPreservedMidFlight = true;/);
     // The reconcile block sits between the lock and the wall-clock capture.
     const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services')");
     const preserveAt = source.indexOf('correctionPreservedMidFlight = true;');
@@ -601,6 +601,35 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(lockAt).toBeGreaterThan(-1);
     expect(preserveAt).toBeGreaterThan(lockAt);
     expect(wallClockAt).toBeGreaterThan(preserveAt);
+  });
+
+  test('a stamp that MOVED between the svc load and the lock outranks the request in every mode (codex P2 round 16)', () => {
+    // The request's explicit live/backfill values were typed before the
+    // moved stamp committed — the correction is the newer operator
+    // statement, so the mode exclusion does not apply to it. The pre-lock
+    // stamp is captured BEFORE the adoption loop overwrites svc.
+    const preLockAt = source.indexOf('const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);');
+    const adoptLoopAt = source.indexOf("if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];");
+    expect(preLockAt).toBeGreaterThan(-1);
+    expect(adoptLoopAt).toBeGreaterThan(preLockAt);
+    expect(source).toMatch(/const stampMovedMidFlight = Object\.prototype\.hasOwnProperty\.call\(lockedSvcRow, 'time_on_site_adjusted_minutes'\)\s*\n\s*&& normStampVal\(lockedSvcRow\.time_on_site_adjusted_minutes\) !== preLockStamp;/);
+    // And the losing live override must not stamp its derived end or its
+    // typed minutes over the correction's columns.
+    expect(source).toMatch(/const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite\s*\n\s*&& !correctionPreservedMidFlight\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionEndedAt\)\s*\n\s*: null;/);
+    expect(source).toMatch(/if \(!isBackfillCompletion && liveAdjustedTimeOnSite && !correctionPreservedMidFlight\) \{/);
+  });
+
+  test('the first-transition tracker write carries the atomic stamp fence (codex P2 round 16)', () => {
+    const trackerSource = fs.readFileSync(
+      path.join(__dirname, '../services/track-transitions.js'),
+      'utf8',
+    );
+    // The in-memory transitionStampMatches check races a correction that
+    // commits between loadService and the UPDATE — the full write predicates
+    // on the stamp, and a fenced 0-row result retries as a transition-only
+    // flip so the newer correction's lifecycle columns survive.
+    expect(trackerSource).toMatch(/const transitionOnlyFlip = \(\) => db\('scheduled_services'\)\s*\n\s*\.where\(\{ id: serviceId \}\)\s*\n\s*\.whereIn\('track_state', transitionableStates\)\s*\n\s*\.update\(\{ track_state: 'complete', updated_at: now \}\);/);
+    expect(trackerSource).toMatch(/if \(updated === 0 && stampFenceActive\) \{\s*\n\s*updated = await transitionOnlyFlip\(\);\s*\n\s*if \(updated > 0\) completedAtStamp = null;/);
   });
 
   test('the already-complete rewrite is conditional on the correction stamp too (codex P2 round 14)', () => {

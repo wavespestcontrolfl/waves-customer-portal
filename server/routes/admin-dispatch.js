@@ -4865,9 +4865,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // a plain stale-timer elapsed in THIS request — the timer being
           // wrong is the exact failure the correction fixed. An explicit
           // adjusted or backfill value in this request is the newer operator
-          // statement and keeps its authority.
+          // statement and keeps its authority ONLY while the durable stamp
+          // still reads what it read when this request loaded the row (codex
+          // P2 #3152 round 16): the request's values were typed before a
+          // stamp that moved in that window committed, so the moved stamp is
+          // the newer statement regardless of the request's mode — the
+          // request's live/backfill override joins the preserved lane below
+          // and its end-instant forcing is suppressed.
           let correctionPreservedMidFlight = false;
           if (lockedSvcRow) {
+            const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
+            const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);
             for (const field of [
               'actual_end_time', 'check_out_time', 'completed_at',
               'service_time_minutes', 'actual_duration_minutes',
@@ -4876,9 +4884,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];
             }
             const stampedMinutes = Number(lockedSvcRow.time_on_site_adjusted_minutes);
-            if (!isBackfillCompletion && !liveAdjustedTimeOnSite
-              && Number.isFinite(stampedMinutes) && stampedMinutes > 0
-              && typeof effectiveTimeOnSite !== 'number') {
+            const stampMovedMidFlight = Object.prototype.hasOwnProperty.call(lockedSvcRow, 'time_on_site_adjusted_minutes')
+              && normStampVal(lockedSvcRow.time_on_site_adjusted_minutes) !== preLockStamp;
+            if (Number.isFinite(stampedMinutes) && stampedMinutes > 0
+              && (stampMovedMidFlight
+                || (!isBackfillCompletion && !liveAdjustedTimeOnSite
+                  && typeof effectiveTimeOnSite !== 'number'))) {
               effectiveTimeOnSite = stampedMinutes;
               correctionPreservedMidFlight = true;
             }
@@ -4911,7 +4922,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // reader in agreement with the typed duration. Null (no start, or
           // typed minutes exceed the actual elapsed) falls through to the
           // wall clock and the explicit duration columns win at read time.
+          // Suppressed when a mid-flight correction outranked this request
+          // (round 16): the request's typed minutes lost authority, so its
+          // derived end must not be stamped either — the preserved lane's
+          // posture (row-backed end or wall clock + correction's duration
+          // columns) applies instead.
           const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite
+            && !correctionPreservedMidFlight
             ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionEndedAt)
             : null;
           const completionLifecycleAt = backfillEndedAt || adjustedEndedAt || completionEndedAt;
@@ -4932,7 +4949,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // onto the adjusted instant; the pair must equal the operator's
           // statement exactly (same posture as backfillCompletionEndInstant's
           // real-start branch).
-          if (!isBackfillCompletion && liveAdjustedTimeOnSite) {
+          if (!isBackfillCompletion && liveAdjustedTimeOnSite && !correctionPreservedMidFlight) {
             if (adjustedEndedAt) {
               lifecycleUpdates.actual_end_time = adjustedEndedAt;
               lifecycleUpdates.check_out_time = adjustedEndedAt;

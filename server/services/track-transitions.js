@@ -704,24 +704,60 @@ async function markComplete(serviceId, opts = {}) {
   // on the row, and stamping `now` (or this caller's stale instant) over it
   // would split completed_at from the corrected end fields. When the caller
   // states which correction its instant belongs to and the row's durable
-  // stamp disagrees, completed_at is left exactly as the row carries it.
+  // stamp disagrees, completed_at is left exactly as the row carries it —
+  // and so are the lifecycle end/duration columns the correction owns: the
+  // write degrades to a transition-only flip of track_state.
+  //
+  // The fence is atomic, not just in-memory (codex P2 #3152 round 16): a
+  // correction that commits between loadService and the UPDATE would pass
+  // the in-memory check on the stale stamp, so the full write also carries
+  // the stamp predicate. Zero rows with the predicate on is ambiguous —
+  // state moved or stamp moved — and the transition-only retry resolves it:
+  // it matches only while the state is still transitionable, meaning the
+  // stamp (not the state) moved mid-flight.
   const normStamp = (v) => (v == null ? null : Number(v));
   const transitionStampMatches = opts.expectedAdjustedMinutes === undefined
     || normStamp(svc.time_on_site_adjusted_minutes) === normStamp(opts.expectedAdjustedMinutes);
-  const completedAtStamp = !transitionStampMatches
+  let completedAtStamp = !transitionStampMatches
     ? null // a newer correction owns completed_at — the row's value stands
     : (opts.untrustedLifecycleSpan
       ? finiteDate(opts.completedAt)
       : (finiteDate(opts.completedAt) || now));
-  const updated = await db('scheduled_services')
+  const transitionableStates = ['scheduled', 'en_route', 'on_property'];
+  // Guarded on the column existing in the loaded row so pre-migration
+  // environments skip the predicate (no stamps can exist there) — same
+  // contract as the already-complete branch above.
+  const stampFenceActive = opts.expectedAdjustedMinutes !== undefined
+    && Object.prototype.hasOwnProperty.call(svc, 'time_on_site_adjusted_minutes');
+  const transitionOnlyFlip = () => db('scheduled_services')
     .where({ id: serviceId })
-    .whereIn('track_state', ['scheduled', 'en_route', 'on_property'])
-    .update({
-      track_state: 'complete',
-      ...(completedAtStamp ? { completed_at: completedAtStamp } : {}),
-      ...(opts.untrustedLifecycleSpan ? {} : buildCompletionLifecycleUpdates(svc, now)),
-      updated_at: now,
-    });
+    .whereIn('track_state', transitionableStates)
+    .update({ track_state: 'complete', updated_at: now });
+  let updated;
+  if (!transitionStampMatches) {
+    updated = await transitionOnlyFlip();
+  } else {
+    updated = await db('scheduled_services')
+      .where({ id: serviceId })
+      .whereIn('track_state', transitionableStates)
+      .modify((q) => {
+        if (stampFenceActive) {
+          q.whereRaw('time_on_site_adjusted_minutes IS NOT DISTINCT FROM ?', [
+            opts.expectedAdjustedMinutes == null ? null : Number(opts.expectedAdjustedMinutes),
+          ]);
+        }
+      })
+      .update({
+        track_state: 'complete',
+        ...(completedAtStamp ? { completed_at: completedAtStamp } : {}),
+        ...(opts.untrustedLifecycleSpan ? {} : buildCompletionLifecycleUpdates(svc, now)),
+        updated_at: now,
+      });
+    if (updated === 0 && stampFenceActive) {
+      updated = await transitionOnlyFlip();
+      if (updated > 0) completedAtStamp = null;
+    }
+  }
   if (updated === 0) {
     const fresh = await loadService(serviceId);
     return { ok: true, state: fresh?.track_state || 'complete', completedAt: fresh?.completed_at || null };
