@@ -342,11 +342,13 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
   });
 
-  it('transient provider failure — releases BOTH claims for a later drop', async () => {
+  it('ambiguous provider failure — one-shot KEPT (dispatch_unknown), never a second text', async () => {
     sendCustomerMessage.mockResolvedValueOnce({ sent: false, retryable: true, code: 'provider_5xx' });
     const res = await sendDroppedCallAddressRequest(sendArgs());
     expect(res).toEqual({ sent: false, skipped: 'provider_failed' });
-    expect(state.deletes.some((d) => d.table === 'dropped_call_sms_claims')).toBe(true);
+    expect(state.deletes).toHaveLength(0);
+    const claimStamp = state.updates.filter((u) => u.table === 'dropped_call_sms_claims').pop();
+    expect(claimStamp.payload.outcome).toBe('dispatch_unknown');
   });
 
   it('config/content block (EMOJI_FOR_CUSTOMER) — releases the one-shot for a later drop', async () => {

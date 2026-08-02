@@ -475,10 +475,15 @@ async function sendClaimed({ leadId, extracted, call, phone, expectedCustomerId 
       code: optedOut ? 'SUPPRESSED_PROVIDER_OPT_OUT_21610' : providerCode,
     };
   }
-  // Transient provider failure — never consumed: release for a later drop.
-  await clearLeadClaim(leadId);
-  await releasePhoneClaim(phone);
-  logger.warn(`[dropped-call-sms] Provider send failed for ${maskPhone(phone)} (released): ${result.code || result.reason || 'send_failed'}`);
+  // Provider failure with AMBIGUOUS acceptance (a timeout/network error can
+  // fire after Twilio accepted the message but before the SID response
+  // arrived) — releasing here could let a later drop send a SECOND text,
+  // violating one-text-per-phone-EVER (codex P1). The contract wins over
+  // delivery: keep the one-shot, stamped dispatch_unknown; the card still
+  // tells the office to call.
+  await stampStatus(leadId, 'blocked');
+  await stampPhoneClaim(phone, 'dispatch_unknown');
+  logger.warn(`[dropped-call-sms] Provider send failed for ${maskPhone(phone)} (one-shot kept, dispatch_unknown): ${result.code || result.reason || 'send_failed'}`);
   return { sent: false, skipped: 'provider_failed' };
 }
 

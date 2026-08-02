@@ -137,7 +137,10 @@ export function ConfirmEvidence({ payload }) {
         // wrong number, provider opt-out (21610). Checked BEFORE the
         // undelivered rendering — a delayed 21610 bounce is an opt-out, not
         // a "call them back".
-        const DNC_RE = /SUPPRESS|DNC|WRONG_NUMBER|OPTED_OUT|OPT_OUT|NO_CONSENT|NO_MARKETING/i;
+        // Specific opt-out/DNC codes only — a bare SUPPRESS match would also
+        // catch SUPPRESSED_NON_MOBILE (landline), which means "SMS can't
+        // reach them, CALL them", the opposite instruction.
+        const DNC_RE = /SUPPRESSED_MANUAL|SUPPRESSED_OPT_OUT|SUPPRESSED_PROVIDER|SUPPRESSED_WRONG|OPTED_OUT|OPT_OUT|NO_CONSENT|NO_MARKETING|DNC|WRONG_NUMBER/i;
         if (outcome === "undelivered" && !DNC_RE.test(code)) return "text never arrived — call them back";
         if (DNC_RE.test(code) || DNC_RE.test(outcome)) {
           return `blocked (${(code || outcome).replace(/_/g, " ").toLowerCase()}) — do NOT contact; check the record first`;
