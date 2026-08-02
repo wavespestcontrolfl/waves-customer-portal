@@ -62,6 +62,25 @@ async function shiftGateThreshold(knex, { from, to }) {
         gates: knex.raw("jsonb_set(gates, '{maxTempF}', ?::jsonb)", [String(to)]),
       });
   }
+
+  // The window GOAL copy is what a technician actually reads in Command
+  // Center, completion context, assignments and reports — leaving it at 90°F
+  // would keep telling them SpeedZone is permitted in the band the gate now
+  // blocks. `service_report_context.goal` is a jsonb duplicate of the same
+  // string on the same row and must move with it; a parity test asserts the
+  // two stay identical, so they are updated together in one statement.
+  if (await knex.schema.hasTable('lawn_protocol_windows')) {
+    await knex('lawn_protocol_windows')
+      .whereRaw('goal LIKE ?', [`%${from}°F%`])
+      .whereRaw('goal ILIKE ?', ['%speedzone%'])
+      .update({
+        goal: knex.raw('REPLACE(goal, ?, ?)', [`${from}°F`, `${to}°F`]),
+        service_report_context: knex.raw(
+          "jsonb_set(service_report_context, '{goal}', to_jsonb(REPLACE(service_report_context->>'goal', ?, ?)))",
+          [`${from}°F`, `${to}°F`],
+        ),
+      });
+  }
 }
 
 exports.up = async function up(knex) {

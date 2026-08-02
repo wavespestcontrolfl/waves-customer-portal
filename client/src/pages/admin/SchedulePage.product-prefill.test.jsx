@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  TRACK_SAFETY_RULES,
   allowedTargetLinesForServiceType,
   allowedTargetLinesForVisit,
   ALL_TARGET_LINES,
@@ -207,6 +208,35 @@ describe("allowedTargetLinesForVisit", () => {
     expect(allowedTargetLinesForVisit({})).toEqual(
       allowedTargetLinesForServiceType(undefined),
     );
+  });
+});
+
+describe("TRACK_SAFETY_RULES — SpeedZone heat limit", () => {
+  // The label prohibits broadcast above 85°F ("Do not broadcast apply this
+  // product when ambient temperatures are below 50°F or above 85°F"). These
+  // strings are what a technician reads in the Protocol Reference tab, and
+  // they were left at 90°F when the gates moved — a band the label forbids but
+  // the copy still appeared to allow.
+  const rules = Object.entries(TRACK_SAFETY_RULES);
+
+  it("never shows a SpeedZone limit other than 85°F", () => {
+    const wrong = rules.flatMap(([track, list]) =>
+      list
+        .filter((r) => /speedzone/i.test(r))
+        .filter((r) => !/85\s*°?F/.test(r.replace(/\\u00b0/g, "°")))
+        .map((r) => `${track}: ${r}`),
+    );
+    expect(wrong).toEqual([]);
+  });
+
+  it("warns on every turf track, not just St. Augustine", () => {
+    // The 85°F broadcast ceiling is product-wide, not a St. Augustine-only
+    // rule, so bermuda and zoysia need it too. The cultivar check stays
+    // St. Augustine-specific because that is what the label restricts.
+    const missing = rules
+      .filter(([, list]) => !list.some((r) => /speedzone/i.test(r)))
+      .map(([track]) => track);
+    expect(missing).toEqual([]);
   });
 });
 
