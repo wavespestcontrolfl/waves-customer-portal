@@ -223,12 +223,31 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     expect(pauseIdx).toBeGreaterThan(-1);
     const before = cronSrc.slice(Math.max(0, pauseIdx - 1600), pauseIdx);
     expect(before).toContain('attemptStartedAt');
-    expect(before).toMatch(/whereIn\('status', \['paid', 'processing'\]\)/);
+    // 'paid' ONLY — a 'processing' ACH row is accepted, not settled, and can
+    // still bounce; and settlement can be an in-place status flip, so BOTH
+    // timestamps count.
+    expect(before).toMatch(/status: 'paid'/);
+    // The comment may SAY 'processing'; the QUERY must not accept it.
+    expect(before).not.toMatch(/whereIn\('status'/);
+    expect(before).toContain("orWhere('updated_at'");
     expect(before).toContain('racedSettlement');
     // Pause write and paused-email live in the ELSE of the veto.
     const after = cronSrc.slice(pauseIdx, pauseIdx + 800);
     expect(after).toContain('sendMembershipPaused');
     expect(before).toContain('} else {');
+  });
+
+  test('every downstream message tells the truth about whether the pause applied', () => {
+    // After a veto, the office SMS / health alert / autopay log claiming
+    // "service paused" would send an operator chasing state that does not
+    // exist. All of them key off pauseApplied now.
+    const pauseIdx = cronSrc.indexOf("service_pause_reason: 'autopay_final_failure'");
+    const block = cronSrc.slice(pauseIdx, pauseIdx + 4000);
+    expect(block).toContain("pauseApplied ? 'Service paused until card is updated.'");
+    expect(block).toContain("pauseApplied ? 'Service auto-paused.'");
+    expect(block).toContain('service_paused: pauseApplied');
+    expect(block).not.toContain('service_paused: true');
+    expect(block).toContain("pauseApplied ? ', service paused'");
   });
 });
 

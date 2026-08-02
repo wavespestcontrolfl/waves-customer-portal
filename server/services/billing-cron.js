@@ -1183,7 +1183,11 @@ const BillingCron = {
 
           // Pause service so we stop burning charges (next month's cron skips
           // customers with service_paused_at set) and so dispatch can see the
-          // billing issue before dispatching the next visit.
+          // billing issue before dispatching the next visit. pauseApplied
+          // drives every downstream message: after a veto (or a failed
+          // write), the office SMS, health alert and autopay log must not
+          // claim a pause that does not exist.
+          let pauseApplied = false;
           try {
             // Concurrent-settlement guard: if ANY payment of this customer's
             // settled while this attempt was in flight (a portal payment
@@ -1193,10 +1197,19 @@ const BillingCron = {
             // already have run and seen nothing to clear. A sub-query-window
             // sliver remains (settlement between this check and the UPDATE);
             // the next settled payment or the manual button covers it.
+            // status='paid' ONLY — an ACH 'processing' row is accepted, not
+            // settled, and can still bounce; if it does settle later, its
+            // succeeded webhook finds the pause and auto-clears it. Both
+            // timestamps, because settlement takes two shapes: a NEW row
+            // (card, created_at) or an EXISTING processing row flipped to
+            // paid in place (ACH — the webhook's paid-marking updates stamp
+            // updated_at, not created_at).
             const racedSettlement = await db('payments')
-              .where({ customer_id: payment.customer_id })
-              .whereIn('status', ['paid', 'processing'])
-              .where('created_at', '>=', attemptStartedAt)
+              .where({ customer_id: payment.customer_id, status: 'paid' })
+              .where(function settledSinceAttempt() {
+                this.where('created_at', '>=', attemptStartedAt)
+                  .orWhere('updated_at', '>=', attemptStartedAt);
+              })
               .first('id');
             if (racedSettlement) {
               // No pause AND no "membership paused" email — the customer
@@ -1208,6 +1221,7 @@ const BillingCron = {
                 service_paused_at: pausedAt,
                 service_pause_reason: 'autopay_final_failure',
               });
+              pauseApplied = true;
               void AccountMembershipEmail.sendMembershipPaused({
                 customerId: payment.customer_id,
                 effectiveDate: pausedAt,
@@ -1222,7 +1236,7 @@ const BillingCron = {
           // sat on a dashboard — push-style SMS makes sure it lands).
           try {
             await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. Service paused until card is updated. Last error: ${err.message}`,
+              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. ${pauseApplied ? 'Service paused until card is updated.' : 'NOT paused — a payment settled during the attempt.'} Last error: ${err.message}`,
               { messageType: 'internal_alert', link: '/admin/revenue' },
             );
           } catch (officeErr) {
@@ -1236,12 +1250,12 @@ const BillingCron = {
               alert_type: 'payment_failure',
               severity: 'high',
               title: `Payment failed after 3 retries — $${amount}`,
-              description: `Monthly payment for ${customer.first_name} ${customer.last_name} failed 3 times. Service auto-paused. Last error: ${err.message}`,
+              description: `Monthly payment for ${customer.first_name} ${customer.last_name} failed 3 times. ${pauseApplied ? 'Service auto-paused.' : 'Not paused — a payment settled during the attempt.'} Last error: ${err.message}`,
               trigger_data: JSON.stringify({
                 payment_id: payment.id,
                 amount: payment.amount,
                 retry_count: newRetryCount,
-                service_paused: true,
+                service_paused: pauseApplied,
               }),
             });
           } catch (alertErr) {
@@ -1251,10 +1265,10 @@ const BillingCron = {
           await logAutopay(payment.customer_id, 'retry_failed', {
             amountCents: Math.round(parseFloat(payment.amount) * 100),
             paymentId: payment.id,
-            details: { source: 'autopay', retry_count: newRetryCount, reason: err.message, final: true, service_paused: true },
+            details: { source: 'autopay', retry_count: newRetryCount, reason: err.message, final: true, service_paused: pauseApplied },
           });
 
-          logger.warn(`[billing-cron] ESCALATED: customer id=${customer.id} — 3 retries exhausted, service paused`);
+          logger.warn(`[billing-cron] ESCALATED: customer id=${customer.id} — 3 retries exhausted${pauseApplied ? ', service paused' : ', pause vetoed by concurrent settlement'}`);
         } else {
           // Schedule next retry
           const nextRetry = new Date();
