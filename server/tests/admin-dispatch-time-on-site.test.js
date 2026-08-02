@@ -639,7 +639,9 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       (err) => { throw err; },
     );
     expect(TimeTracking.adminEditEntry).toHaveBeenCalledWith('te-1', expect.objectContaining({
-      clock_out: new Date(clockIn.getTime() + 45 * 60000).toISOString(),
+      // Duration-based: the audited edit derives clock_out from ITS locked
+      // row, closing the snapshot race (codex P1, audit round 21b).
+      target_duration_minutes: 45,
       edited_by: 'admin-1',
       edit_reason: expect.stringContaining('45 min'),
     }));
@@ -722,12 +724,66 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       (err) => { throw err; },
     );
     expect(TimeTracking.adminEditEntry).toHaveBeenCalledWith('te-sub', expect.objectContaining({
-      clock_out: new Date(clockIn.getTime() + 45 * 60000).toISOString(),
+      target_duration_minutes: 45,
     }));
     expect(res.body.timeEntryCorrected).toBe(true);
     // Divergence is judged on the AGGREGATE at stored precision — an entry
     // already landed exactly on the corrected minutes no-ops.
     expect(source).toMatch(/const totalMinutes = jobEntries\.reduce\(\(s, e\) => s \+ \(Number\(e\.duration_minutes\) \|\| 0\), 0\);\s*\n\s*if \(Math\.abs\(totalMinutes - minutes\) <= 0\.005\) return;/);
+    // And the audited edit is DURATION-based: clock_out derives from the
+    // service's own locked row, not from this sync's unlocked snapshot
+    // (codex P1, audit round 21b) — a concurrent clock_in edit can no
+    // longer skew the saved duration.
+    const timeTrackingSource = fs.readFileSync(
+      path.join(__dirname, '../services/time-tracking.js'),
+      'utf8',
+    );
+    expect(timeTrackingSource).toMatch(/if \(!clock_out && Number\.isFinite\(Number\(target_duration_minutes\)\) && Number\(target_duration_minutes\) > 0\) \{\s*\n\s*const baseIn = updates\.clock_in \|\| entry\.clock_in;\s*\n\s*updates\.clock_out = new Date\(new Date\(baseIn\)\.getTime\(\) \+ Number\(target_duration_minutes\) \* 60000\);/);
+  });
+
+  test('a concurrent payroll edit rejects the sync as entry_conflict — never silently replaced (codex P2 round 22)', async () => {
+    // The sync passes the updated_at it observed; the audited edit's
+    // locked read rejects on mismatch (staffTimeHttpError 409), and the
+    // response surfaces it instead of overwriting the newer manual edit.
+    const TimeTracking = require('../services/time-tracking');
+    TimeTracking.adminEditEntry.mockRejectedValueOnce(
+      Object.assign(new Error('Entry changed since it was read; reload before editing.'), { status: 409 }),
+    );
+    const observedUpdatedAt = new Date('2026-07-19T18:20:00.000Z');
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [{
+        id: 'te-c',
+        clock_in: new Date('2026-07-19T16:00:00.000Z'),
+        clock_out: new Date('2026-07-19T18:19:05.000Z'),
+        duration_minutes: 139,
+        status: 'active',
+        updated_at: observedUpdatedAt,
+      }],
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    // The observed version traveled with the edit…
+    expect(TimeTracking.adminEditEntry).toHaveBeenCalledWith('te-c', expect.objectContaining({
+      expected_updated_at: observedUpdatedAt,
+    }));
+    // …and the rejection surfaced rather than reading as success.
+    expect(res.statusCode).toBe(200);
+    expect(res.body.timeEntryCorrected).toBe(false);
+    expect(res.body.timeEntryCorrectionBlocked).toBe('entry_conflict');
+    // Service-side contract: the check runs against the LOCKED row.
+    const timeTrackingSource = fs.readFileSync(
+      path.join(__dirname, '../services/time-tracking.js'),
+      'utf8',
+    );
+    expect(timeTrackingSource).toMatch(/if \(expected_updated_at !== undefined\) \{\s*\n\s*const observed = expected_updated_at \? new Date\(expected_updated_at\)\.getTime\(\) : null;\s*\n\s*const current = entry\.updated_at \? new Date\(entry\.updated_at\)\.getTime\(\) : null;\s*\n\s*if \(observed !== current\) \{/);
   });
 
   test('duplicate entries matching the corrected minutes are DIVERGENT in aggregate — surfaced, not silently fine (codex P1, audit round 21)', async () => {
@@ -834,7 +890,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       (err) => { throw err; },
     );
     expect(TimeTracking.adminEditEntry).toHaveBeenCalledWith('te-up', expect.objectContaining({
-      clock_out: new Date(clockIn.getTime() + 60 * 60000).toISOString(),
+      target_duration_minutes: 60,
     }));
     expect(res.body.timeEntryCorrected).toBe(true);
     // The sync serializes under the scheduled-services row lock (held

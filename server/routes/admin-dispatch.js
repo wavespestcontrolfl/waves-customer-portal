@@ -859,7 +859,7 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy }
       const jobEntries = await timerTrx('time_entries')
         .where({ job_id: serviceId, entry_type: 'job' })
         .whereNot('status', 'voided')
-        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status');
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
       if (jobEntries.length === 0) return;
       // A still-running linked timer cannot be silently "fine" — the span
       // keeps growing past the corrected minutes and the audited edit
@@ -887,9 +887,17 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy }
       if (Math.abs(totalMinutes - minutes) <= 0.005) return;
       if (jobEntries.length === 1 && jobEntries[0].clock_in) {
         const entry = jobEntries[0];
-        const newClockOut = new Date(new Date(entry.clock_in).getTime() + minutes * 60000);
+        // Duration-based edit (codex P1, audit round 21b): adminEditEntry
+        // derives the clock_out from ITS locked row's start, so a
+        // concurrent clock_in edit between this snapshot and the save can
+        // never produce a duration different from the corrected minutes.
         await require('../services/time-tracking').adminEditEntry(entry.id, {
-          clock_out: newClockOut.toISOString(),
+          target_duration_minutes: minutes,
+          // Optimistic version (codex P2 round 22): a payroll admin's edit
+          // landing between this snapshot and the audited edit's locked
+          // read rejects the sync instead of being silently replaced — the
+          // 409 surfaces below as entry_conflict.
+          expected_updated_at: entry.updated_at ?? null,
           edit_reason: `Time-on-site correction: ${minutes} min (visit ${serviceId})`,
           edited_by: editedBy,
         });
@@ -901,7 +909,9 @@ async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy }
     });
   } catch (err) {
     corrected = false;
-    blocked = /approved/i.test(String(err.message)) ? 'approved_week' : 'edit_failed';
+    blocked = /approved/i.test(String(err.message))
+      ? 'approved_week'
+      : (/changed since it was read/i.test(String(err.message)) ? 'entry_conflict' : 'edit_failed');
     logger.warn(`[time-on-site] linked job timer sync blocked for service ${serviceId}: ${err.message}`);
   }
   return { corrected, blocked };

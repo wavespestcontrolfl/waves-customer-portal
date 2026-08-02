@@ -1682,8 +1682,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           // inflated span survives there until corrected by hand.
           if (patchResult?.timeEntryCorrected === false) {
             const timerReason =
-              patchResult?.timeEntryCorrectionBlocked === "entry_open"
-                ? "its timer is still running"
+              patchResult?.timeEntryCorrectionBlocked === "entry_conflict"
+                ? "it was edited by someone else at the same moment"
+                : patchResult?.timeEntryCorrectionBlocked === "entry_open"
+                  ? "its timer is still running"
                 : patchResult?.timeEntryCorrectionBlocked === "approved_week"
                   ? "its week is already approved"
                   : patchResult?.timeEntryCorrectionBlocked === "multiple_job_entries"
@@ -11605,8 +11607,10 @@ export function CompletionPanel({
       // value seeds the edit modal and no later save will retry it.
       if (result?.timeEntryCorrected === false) {
         const timerReason =
-          result?.timeEntryCorrectionBlocked === "entry_open"
-            ? "its timer is still running"
+          result?.timeEntryCorrectionBlocked === "entry_conflict"
+            ? "it was edited by someone else at the same moment"
+            : result?.timeEntryCorrectionBlocked === "entry_open"
+              ? "its timer is still running"
             : result?.timeEntryCorrectionBlocked === "approved_week"
               ? "its week is already approved"
               : result?.timeEntryCorrectionBlocked === "multiple_job_entries"
