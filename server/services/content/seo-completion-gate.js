@@ -344,9 +344,23 @@ function detectHardcodedPrice(body = '', brief = null) {
   // the bucket alone: category/spoke seeds share the operator_intercept
   // bucket and must keep the full price guard (Codex P0). Mined drafts and
   // legacy briefs without the marker fail closed.
-  const thirdPartyCitations = brief?.gsc_signal?.bucket === 'operator_intercept'
-    && brief?.gsc_signal?.intercept === true;
-  return findHardcodedPrice(body, { thirdPartyCitations }) !== null;
+  const isOperatorIntercept = brief?.gsc_signal?.bucket === 'operator_intercept';
+  const thirdPartyCitations = isOperatorIntercept && brief?.gsc_signal?.intercept === true;
+  // The source-and-date requirement means the price check also needs the
+  // CITATION context, or a properly sourced intercept parks here even though
+  // the run-context guardrail passed it — the same drift that put a private
+  // copy of this check out of step before (Codex). Sources come off the
+  // persisted brief so this stays usable from remediation.
+  const operatorBrief = brief?.voice_constraints?.operator_brief || null;
+  const requiredSourceUrls = [
+    ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
+    ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
+  ];
+  return findHardcodedPrice(body, {
+    thirdPartyCitations,
+    operatorCitations: isOperatorIntercept,
+    requiredSourceUrls,
+  }) !== null;
 }
 
 function hasDuplicateIntentFailure(result = {}) {

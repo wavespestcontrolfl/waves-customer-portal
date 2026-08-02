@@ -564,3 +564,26 @@ describe('SEO gate: the stand-in city link must match the brief CITY', () => {
     expect(codes(r)).not.toContain('P1_MISSING_SERVICE_LINK');
   });
 });
+
+describe('sourced competitor prices survive the SEO price check (r13)', () => {
+  const { detectHardcodedPrice } = SeoCompletionGate._internals;
+  const brief = {
+    gsc_signal: { bucket: 'operator_intercept', intercept: true },
+    voice_constraints: { operator_brief: { sources: ['https://www.consumeraffairs.com/homeowners/aptive.html'] } },
+  };
+  const sourced = 'Aptive charges a $199 cancellation fee as of July 2026 ([source](https://www.consumeraffairs.com/homeowners/aptive.html)).';
+
+  test('a sourced+dated intercept price is accepted here too', () => {
+    // Without the citation context this gate parked the exact intercepts the
+    // change exists to permit — the run-context guardrail passed them.
+    expect(detectHardcodedPrice(sourced, brief)).toBe(false);
+  });
+
+  test('an UNSOURCED intercept price still parks', () => {
+    expect(detectHardcodedPrice('Aptive charges a $199 cancellation fee.', brief)).toBe(true);
+  });
+
+  test('a non-intercept brief keeps the full guard', () => {
+    expect(detectHardcodedPrice(sourced, { gsc_signal: { bucket: 'seasonal_rising' } })).toBe(true);
+  });
+});
