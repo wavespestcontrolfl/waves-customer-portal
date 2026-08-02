@@ -1536,8 +1536,20 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
       .where({ customer_id: request.customer_id, stripe_payment_method_id: request.stripe_payment_method_id })
       .first('id');
     if (!pmRow) {
-      await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
-        .update({ fee_status: 'released', updated_at: new Date() }).catch(() => {});
+      // Exactly-one-row terminal stamp (Codex #3153 r18 P1): a swallowed
+      // failure would leave the row 'charging' forever while callers treat
+      // payment_method_revoked as a clean terminal outcome.
+      try {
+        const stamped = await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+          .update({ fee_status: 'released', updated_at: new Date() });
+        if (stamped !== 1) {
+          logger.error(`[appt-card-request] revoked-card release stamp lost for visit ${scheduledServiceId} — reporting charge_review`);
+          return { charged: false, reason: 'charge_review' };
+        }
+      } catch (stampErr) {
+        logger.error(`[appt-card-request] revoked-card release stamp failed for visit ${scheduledServiceId} — reporting charge_review: ${stampErr.message}`);
+        return { charged: false, reason: 'charge_review' };
+      }
       logger.warn(`[appt-card-request] no-show fee not charged — saved card was removed (visit ${scheduledServiceId})`);
       try {
         await require('./notification-service').notifyAdmin(
@@ -1568,6 +1580,7 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
   // a method that is detached NOW is detached because someone detached it.
   const StripeService = require('./stripe');
   let paymentIntent;
+  let submittedFeePi = null;
   try {
     // Payer ownership SERIALIZED through charge submission (Codex #3153 r15
     // P1, superseding the r8 snapshot check): payer assignment updates
@@ -1578,12 +1591,34 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
     // lookup failure throws a typed skip and rolls back with the row lock
     // released and no charge made.
     paymentIntent = await db.transaction(async (trx) => {
+      // Customer row FIRST, then the visit — the same customer→service
+      // lock order as chargeInvoiceWithSavedCard (Codex #3153 r18 P0):
+      // payer assignment can live on customers.payer_id too, and the admin
+      // customer update locks that row — without it a customer-level payer
+      // edit could commit between the check and the Stripe submission.
+      const lockedCustomer = await trx('customers')
+        .where({ id: request.customer_id })
+        .forUpdate()
+        .first('id');
+      if (!lockedCustomer) {
+        const e = new Error('customer missing at fee charge');
+        e.apptFeeSkip = 'charge_review';
+        throw e;
+      }
       const lockedSvc = await trx('scheduled_services')
         .where({ id: scheduledServiceId })
         .forUpdate()
         .first('id', 'customer_id');
       if (!lockedSvc) {
         const e = new Error('scheduled service missing at fee charge');
+        e.apptFeeSkip = 'charge_review';
+        throw e;
+      }
+      // The consent must belong to the visit's CURRENT customer (Codex
+      // #3153 r19 P0): a reassigned visit must never charge the prior
+      // customer's saved card — park for office review, charge nothing.
+      if (String(lockedSvc.customer_id) !== String(request.customer_id)) {
+        const e = new Error('visit customer changed since consent');
         e.apptFeeSkip = 'charge_review';
         throw e;
       }
@@ -1605,7 +1640,7 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
         e.apptFeeSkip = 'payer_billed';
         throw e;
       }
-      return StripeService.chargeSavedPaymentMethodOffSession({
+      const pi = await StripeService.chargeSavedPaymentMethodOffSession({
         customerId: request.customer_id,
         paymentMethodId: request.stripe_payment_method_id,
         amountDollars: feeAmount,
@@ -1618,8 +1653,22 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
         },
         idempotencyKey: `appt_card_no_show_${request.id}`,
       });
+      // Captured OUTSIDE the transaction result (Codex #3153 r19 P0): if
+      // the lock transaction fails to COMMIT after Stripe succeeded, the
+      // catch must see the submitted PI and park review — never classify a
+      // post-submission failure as a definite pre-charge one.
+      submittedFeePi = pi;
+      return pi;
     });
   } catch (err) {
+    if (!err.apptFeeSkip && submittedFeePi) {
+      // Stripe charged; only the lock transaction's commit failed. The
+      // claim must NOT revert (a retry past the idempotency window would
+      // double-charge) — proceed to the durable success write below, whose
+      // own failure path parks charge_review keeping the PI pointer.
+      logger.error(`[appt-card-request] fee charged but lock txn commit failed for visit ${scheduledServiceId} — proceeding as charged: ${err.message}`);
+      paymentIntent = submittedFeePi;
+    } else {
     if (err.apptFeeSkip === 'payer_billed') {
       // The appointment became payer-billed — close the fee event
       // terminally. Exactly one row or canonical review (Codex #3153 r15
@@ -1662,6 +1711,7 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
       .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
     logger.error(`[appt-card-request] no-show fee charge FAILED (no charge) for visit ${scheduledServiceId}: ${err.message}`);
     return { charged: false, reason: 'charge_failed', error: err.message };
+    }
   }
 
   // PI succeeded. A DB-write failure must NOT reopen the claim (Stripe's
@@ -1727,13 +1777,17 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
     // gates its deposit refund on released=true and the processors park
     // canonical 'charge_review' for office review — a fee may still land.
     if (unresolved) return { handled: false, released: false, reason: 'charge_review' };
-    if (skipReason === 'payer_billed') {
+    if (skipReason === 'payer_billed' || skipReason === 'not_completed') {
       // Terminal stamp for a payer-exempt cancellation (Codex #3153 r13
       // P1), REQUIRED not best-effort (r14): a lost stamp means either a
       // concurrent worker claimed the fee after our eligibility read or
       // the write failed — in both cases reporting a clean release could
       // let a fee land after offboarding refunded. Exactly-one row or the
-      // canonical non-released review outcome.
+      // canonical non-released review outcome. not_completed rows
+      // (pending/completing/satisfied — a row EXISTS) get the same stamp
+      // (r20 P0): a capture mid-flight at cancel time can finish as
+      // 'completed' afterwards, and a cancellation retry would then find
+      // an eligible row and charge a fee for this already-free cancel.
       try {
         const stamped = await db('appointment_card_requests')
           .where({ scheduled_service_id: scheduledServiceId })
@@ -1773,7 +1827,16 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
     }
   }
   if (start && isApptCardFeeRailEnabled() && isWithinApptCancelWindow({ request, serviceStart: start, now })) {
-    return chargeAppointmentNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
+    const chargeResult = await chargeAppointmentNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
+    // Normalized for cancellation callers (Codex #3153 r17 P1): unresolved
+    // charge outcomes (parked review, or a definite decline whose reverted
+    // claim a retry may still convert) carry released:false so the
+    // route-level alert and offboarding gates see them; every terminal
+    // outcome (charged, payer_billed, revoked, stale refusals — all of
+    // which stamped the fee event closed) releases cleanly.
+    const unresolvedCharge = chargeResult?.charged !== true
+      && ['charge_review', 'charge_failed'].includes(chargeResult?.reason);
+    return { ...chargeResult, handled: true, released: !unresolvedCharge };
   }
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
   const startPassed = startDate && !Number.isNaN(startDate.getTime()) && startDate.getTime() <= now.getTime();
@@ -1935,6 +1998,13 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
       return { charged: false, reason: 'visit_lookup_failed' };
     }
     if (!svc || svc.is_recurring === true) return { charged: false, reason: 'not_one_time' };
+    // The consent row must belong to the visit's CURRENT customer (Codex
+    // #3153 r19 P0): a reassigned visit must never ride a prior customer's
+    // accepted_amount into automatic collection.
+    if (String(laneRow.customer_id) !== String(svc.customer_id)) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: 'customer_mismatch' });
+      return { charged: false, reason: 'customer_mismatch' };
+    }
     // A field prepayment settles the visit outside this lane — charging on
     // top of one would double-bill (same posture as the hold recap rail).
     if (Number(svc.prepaid_amount) > 0) {

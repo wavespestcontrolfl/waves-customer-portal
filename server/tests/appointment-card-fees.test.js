@@ -155,9 +155,12 @@ function handlersWith({
   request = REQUEST(),
   hold = null,
   pmRow = { id: 'pm-row-1' },
-  // The fee charge serializes payer state via FOR UPDATE on the
-  // scheduled_services row inside its transaction (Codex #3153 r15).
-  trx = { scheduled_services: { first: () => ({ id: 'svc-1', customer_id: 'cust-1' }) } },
+  // The fee charge serializes payer state via FOR UPDATE on the customers
+  // row then the scheduled_services row inside its transaction (r15/r18).
+  trx = {
+    customers: { first: () => ({ id: 'cust-1' }) },
+    scheduled_services: { first: () => ({ id: 'svc-1', customer_id: 'cust-1' }) },
+  },
 } = {}) {
   return {
     appointment_card_requests: { first: () => request },
@@ -363,6 +366,18 @@ describe('unresolved fee states on the cancellation path (Codex #3153 r1)', () =
     require('../services/payer').resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-9' });
     const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
     expect(res).toEqual({ handled: false, released: true, reason: 'payer_billed' });
+    const released = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.fee_status === 'released');
+    expect(released).toBeTruthy();
+  });
+
+  test('cancelling with a capture still MID-FLIGHT stamps the row terminally — a later completion can never fee this cancel (Codex #3153 r20)', async () => {
+    mockTableHandlers = handlersWith({ request: { ...REQUEST(), status: 'pending' } });
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ handled: false, released: true, reason: 'not_completed' });
     const released = mockDbTouches
       .filter((t) => t.table === 'appointment_card_requests')
       .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
@@ -745,6 +760,15 @@ describe('handleAppointmentCardCancellation', () => {
     const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
     expect(res.charged).toBe(true);
     expect(mockChargeOffSession.mock.calls[0][0].metadata.reason).toBe('late_cancel');
+  });
+
+  test('in-window cancel whose charge DECLINES reports released:false — the route alert must fire (Codex #3153 r17)', async () => {
+    mockApptTime = new Date(Date.now() + 3 * HOUR);
+    mockChargeOffSession.mockRejectedValueOnce(Object.assign(new Error('card_declined'), { type: 'StripeCardError' }));
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res.charged).toBe(false);
+    expect(res.released).toBe(false);
+    expect(res.reason).toBe('charge_failed');
   });
 
   test('outside-window cancel → free, nothing charged, and the release is PERSISTED terminal (Codex #3153 r2)', async () => {

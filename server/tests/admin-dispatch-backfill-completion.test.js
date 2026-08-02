@@ -2230,7 +2230,9 @@ describe('completion route wiring (source contracts)', () => {
     // Fail-closed gate read + completed/satisfied row + no hold row.
     expect(source).toMatch(/isEnabled\('apptCardCompletionCharge'\)/);
     expect(source).toMatch(/\.whereIn\('status', \['completed', 'satisfied'\]\)/);
-    expect(source).toMatch(/apptCardOneTimeCharge = !!laneRow && !holdRow;/);
+    // r19: the lane additionally requires the consent row to belong to the
+    // visit's CURRENT customer — reassignment never inherits consent.
+    expect(source).toMatch(/apptCardOneTimeCharge = !!laneRow && !holdRow\s*\n\s*&& String\(laneRow\.customer_id\) === String\(svc\.customer_id\);/);
     // One-time visits only, never the other explicit billing lanes.
     expect(source).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& svc\.is_recurring !== true/);
     // The per-application acceptance-fee fallback and the setup-fee

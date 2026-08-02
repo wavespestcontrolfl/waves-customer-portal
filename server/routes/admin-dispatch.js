@@ -7244,11 +7244,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const laneRow = await db('appointment_card_requests')
             .where({ scheduled_service_id: svc.id })
             .whereIn('status', ['completed', 'satisfied'])
-            .first('id', 'accepted_amount');
+            .first('id', 'customer_id', 'accepted_amount');
           const holdRow = laneRow ? await db('estimate_card_holds')
             .where({ scheduled_service_id: svc.id })
             .first('id') : null;
-          apptCardOneTimeCharge = !!laneRow && !holdRow;
+          // The consent row must belong to the visit's CURRENT customer
+          // (Codex #3153 r19 P0) — a reassigned visit never rides a prior
+          // customer's consent into automatic collection.
+          apptCardOneTimeCharge = !!laneRow && !holdRow
+            && String(laneRow.customer_id) === String(svc.customer_id);
           // The lane's cap is the amount FROZEN at consent (Codex #3153 r1
           // P1) — appointment editors rewrite estimated_price, so the live
           // value is not what the customer accepted. NULL (pre-migration
