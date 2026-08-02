@@ -418,7 +418,7 @@ describe('stripe-webhook wiring', () => {
   test('the dispatch helper skips non-arrears money and resolves invoice-first', () => {
     const helperStart = src.indexOf('async function maybeAutoClearBillingPauseForIntent');
     expect(helperStart).toBeGreaterThan(-1);
-    const helper = src.slice(helperStart, helperStart + 2200);
+    const helper = src.slice(helperStart, src.indexOf('async function', helperStart + 10));
     // Statement = payer money; deposit and no-show fee are not balance payments.
     expect(helper).toContain('waves_statement_id');
     expect(helper).toContain('estimate_deposit');
@@ -426,7 +426,7 @@ describe('stripe-webhook wiring', () => {
     // Invoice authority, payer-billed yields NOTHING (no metadata fallthrough),
     // metadata only when no invoice matched at all.
     expect(helper).toMatch(/invoice\.payer_id \? null : invoice\.customer_id/);
-    expect(helper).toMatch(/: \(paymentIntent\?\.metadata\?\.waves_customer_id \|\| null\)/);
+    expect(helper).toContain('ledgerRow.customer_id || paymentIntent?.metadata?.waves_customer_id');
     // The settlement moment rides along for the ordering guard.
     expect(helper).toContain('settledAt');
     expect(helper).toContain('eventCreated');
@@ -437,7 +437,7 @@ describe('stripe-webhook wiring', () => {
     // because the row's own write times lie under delayed redelivery.
     const flipIdx = src.indexOf('const paymentUpdates = {');
     expect(flipIdx).toBeGreaterThan(-1);
-    const flip = src.slice(flipIdx, flipIdx + 1400);
+    const flip = src.slice(flipIdx, flipIdx + 2600);
     expect(flip).toContain("status: 'paid'");
     expect(flip).toContain('updated_at: new Date()');
     expect(flip).toContain("'{settled_event_at}'");
