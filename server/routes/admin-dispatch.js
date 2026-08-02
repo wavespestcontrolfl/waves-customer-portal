@@ -2282,12 +2282,16 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     let recordUpdated = false;
     let recordAmbiguous = false;
     let newEnd = null;
+    let committedCorrectionSeq = null;
     await db.transaction(async (trx) => {
       // Prior minutes come from the LOCKED row (codex P2 #3152 round 10):
       // two concurrent corrections serialize on this lock, and each audit
       // entry must record the value it actually superseded — the first
       // correction's committed minutes, not a shared pre-lock snapshot.
       const lockedSvc = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+      // The revision this save commits — the raw COALESCE(seq,0)+1 bump
+      // writes the same value; safe to compute here under the row lock.
+      committedCorrectionSeq = (Number(lockedSvc?.time_on_site_correction_seq) || 0) + 1;
       previousMinutes = positiveNumber(lockedSvc?.service_time_minutes)
         || positiveNumber(lockedSvc?.actual_duration_minutes)
         || null;
@@ -2402,7 +2406,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
           end_stamps_rewritten: !!newEnd,
           // Same value the raw COALESCE(seq,0)+1 bump commits — safe to
           // compute in JS because this transaction holds the row lock.
-          correction_seq: (Number(lockedSvc?.time_on_site_correction_seq) || 0) + 1,
+          correction_seq: committedCorrectionSeq,
         }),
       });
     });
@@ -2419,18 +2423,33 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     // pending for re-approval; an approved/immutable week or an ambiguous
     // shape is SURFACED in the response instead of forced — the client
     // warns that the timer needs a separate Timesheets correction.
-    let timeEntryCorrected = null; // null = no inflated linked entry to correct
+    let timeEntryCorrected = null; // null = no divergent linked entry to correct
     let timeEntryCorrectionBlocked = null;
     try {
-      const jobEntries = await db('time_entries')
-        .where({ job_id: svc.id, entry_type: 'job' })
-        .whereNot('status', 'voided')
-        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status');
-      const closed = jobEntries.filter((e) => e.clock_out != null);
-      const inflated = closed.filter((e) => Number(e.duration_minutes) > plan.minutes + 1);
-      if (inflated.length > 0) {
-        if (jobEntries.length === 1 && inflated.length === 1 && inflated[0].clock_in) {
-          const entry = inflated[0];
+      await db.transaction(async (timerTrx) => {
+        // Revision-fenced under the row lock (pre-push audit, both legs):
+        // concurrent corrections' post-commit syncs would otherwise finish
+        // out of order. The lock is HELD through the edit, so syncs
+        // serialize in commit order; a request that sees a NEWER revision
+        // than the one it committed skips — the newest correction's own
+        // pass lands the truth. (Null/absent seq — pre-migration — leaves
+        // the fence inactive, same posture as every other seq consumer.)
+        const rowNow = await timerTrx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+        const rowSeqNow = rowNow?.time_on_site_correction_seq == null
+          ? null
+          : Number(rowNow.time_on_site_correction_seq);
+        if (rowSeqNow != null && committedCorrectionSeq != null && rowSeqNow > committedCorrectionSeq) return;
+        const jobEntries = await timerTrx('time_entries')
+          .where({ job_id: svc.id, entry_type: 'job' })
+          .whereNot('status', 'voided')
+          .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status');
+        const closed = jobEntries.filter((e) => e.clock_out != null);
+        // ANY divergence syncs — an increased re-correction (45 → 60) must
+        // move the entry too, not only an inflated-timer decrease.
+        const divergent = closed.filter((e) => Math.abs(Number(e.duration_minutes) - plan.minutes) > 1);
+        if (divergent.length === 0) return;
+        if (jobEntries.length === 1 && divergent.length === 1 && divergent[0].clock_in) {
+          const entry = divergent[0];
           const newClockOut = new Date(new Date(entry.clock_in).getTime() + plan.minutes * 60000);
           await require('../services/time-tracking').adminEditEntry(entry.id, {
             clock_out: newClockOut.toISOString(),
@@ -2442,7 +2461,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
           timeEntryCorrected = false;
           timeEntryCorrectionBlocked = jobEntries.length > 1 ? 'multiple_job_entries' : 'entry_shape';
         }
-      }
+      });
     } catch (err) {
       timeEntryCorrected = false;
       timeEntryCorrectionBlocked = /approved/i.test(String(err.message)) ? 'approved_week' : 'edit_failed';

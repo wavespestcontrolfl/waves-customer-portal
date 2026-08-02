@@ -600,7 +600,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // so each audit records the value it actually superseded.
     const lockedRead = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.locked);
     expect(lockedRead).toBeTruthy();
-    expect(source).toMatch(/const lockedSvc = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);\s*\n\s*previousMinutes = positiveNumber\(lockedSvc\?\.service_time_minutes\)/);
+    expect(source).toMatch(/const lockedSvc = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*committedCorrectionSeq = \(Number\(lockedSvc\?\.time_on_site_correction_seq\) \|\| 0\) \+ 1;\s*\n\s*previousMinutes = positiveNumber\(lockedSvc\?\.service_time_minutes\)/);
     // The audit INSERT rides the correction transaction (codex P2 round
     // 19): concurrent corrections serialize on the row lock, so in-trx
     // audits land in commit order — outside it, whichever request finished
@@ -694,6 +694,45 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(res.statusCode).toBe(200);
     expect(res.body.timeEntryCorrected).toBe(false);
     expect(res.body.timeEntryCorrectionBlocked).toBe('approved_week');
+  });
+
+  test('an increased re-correction moves the linked timer too, fenced on the committed revision (codex P1 round 20)', async () => {
+    // 45 → 60: the entry diverges in the OTHER direction — sync is on any
+    // divergence, not only inflated-timer decreases.
+    const TimeTracking = require('../services/time-tracking');
+    const clockIn = new Date('2026-07-19T16:00:00.000Z');
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      timeEntries: [{
+        id: 'te-up',
+        clock_in: clockIn,
+        clock_out: new Date(clockIn.getTime() + 45 * 60000),
+        duration_minutes: 45,
+        status: 'active',
+      }],
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 60 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(TimeTracking.adminEditEntry).toHaveBeenCalledWith('te-up', expect.objectContaining({
+      clock_out: new Date(clockIn.getTime() + 60 * 60000).toISOString(),
+    }));
+    expect(res.body.timeEntryCorrected).toBe(true);
+    // The sync serializes under the scheduled-services row lock (held
+    // through the edit) and skips when the row already carries a NEWER
+    // revision than this request committed — an older request can never
+    // land its stale timer last.
+    expect(source).toMatch(/if \(rowSeqNow != null && committedCorrectionSeq != null && rowSeqNow > committedCorrectionSeq\) return;/);
+    const timerLockAt = source.indexOf("await timerTrx('scheduled_services').where({ id: svc.id }).forUpdate().first();");
+    const timerEditAt = source.indexOf("await require('../services/time-tracking').adminEditEntry(");
+    expect(timerLockAt).toBeGreaterThan(-1);
+    expect(timerEditAt).toBeGreaterThan(timerLockAt);
   });
 
   test('the tracker completed_at carries the adjusted instant for live corrections (codex P2 round 10)', () => {
