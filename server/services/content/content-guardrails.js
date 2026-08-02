@@ -975,32 +975,21 @@ function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] }
     for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
     for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
   }
+  // NO broad .gov/.edu TLD allowance (owner ruling 2026-08-01, third).
+  // A host-wide rule has to be defended at every position a URL can appear —
+  // src=, script bodies, form action, a ping, MDX expressions, Markdown
+  // images and their reference/collapsed/shortcut forms — and each one was a
+  // separate bypass into executable .mdx. The brief NAMES its sources, and
+  // those flow in above as requiredSourceUrls, so a statute or extension
+  // citation the operator asked for is allowed wherever it appears while an
+  // unnamed host never is. Position stops mattering.
   return hosts;
 }
 
-// Exact host or subdomain of an allowed host ("entnemdept.ufl.edu" is allowed
-// by "ufl.edu"; "evil-ufl.edu" is not — the dot prefix prevents suffix abuse).
-// US government and accredited-education TLDs are citation-grade by
-// registration policy (owner ruling 2026-08-01): .gov requires a verified
-// US government entity, .edu an accredited institution, so neither can be
-// stood up by the spam/injection vector this gate exists to stop — while
-// statute and extension-research citations are exactly the sourcing the
-// E-E-A-T rules ask for. The curated OPERATOR_CITATION_HOSTS list could
-// never enumerate them (flsenate.gov, every state extension service, …).
-// Kept to the exact suffixes: lookalikes like "gov.example.com" or a
-// ".gov.co" ccTLD registration do NOT match.
-//
-// OPERATOR-PROVENANCE ONLY, exactly like OPERATOR_CITATION_HOSTS: mined
-// drafts stay internal-only because untrusted SERP/PAA text reaches their
-// writer prompt, and "cite a .gov" is a plausible injection instruction.
-// Operator-directed briefs carry Adam's own source_notes, so the citation
-// is asked for rather than smuggled in.
-const CITATION_GRADE_TLD_RE = /\.(gov|edu)$/i;
 
-function hostAllowed(host, allowed, { citationGradeTlds = false } = {}) {
+function hostAllowed(host, allowed) {
   if (!host) return false;
   if (allowed.has(host)) return true;
-  if (citationGradeTlds && CITATION_GRADE_TLD_RE.test(host)) return true;
   for (const a of allowed) {
     if (a && host.endsWith(`.${a}`)) return true;
   }
@@ -1148,9 +1137,6 @@ const DEST_CONTROL_RE = new RegExp([
   // must hit every arm above — the sibling scheme regexes already carry it.
 ].join('|'), 'i');
 
-// Elements whose BODY is code/data rather than prose — a URL in there is
-// never a citation.
-const RAW_TEXT_TAGS = new Set(['script', 'style', 'noscript', 'template', 'iframe', 'object']);
 
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
@@ -1203,72 +1189,6 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
   // turn control of any delegated subdomain into live third-party code on the
   // customer site (Codex). Those spans lose the TLD leniency and fall back to
   // the explicit host allowlist.
-  // ALLOWLIST, not blocklist. Enumerating active positions missed script
-  // BODIES, form action= and a ping= (Codex), so the rule is inverted: the
-  // TLD leniency applies ONLY to a URL sitting in plain document text —
-  // outside every tag and outside every raw-text element body. That covers
-  // Markdown link destinations, reference definitions and bare prose URLs,
-  // which is what a citation actually looks like. A URL inside ANY tag
-  // (including <a href>) or inside a script/style body falls back to the
-  // explicit host allowlist.
-  const markupRanges = [];
-  {
-    const tags = [...eachTag(body)];
-    for (let i = 0; i < tags.length; i += 1) {
-      const tag = tags[i];
-      markupRanges.push([tag.start, tag.end]);
-      if (tag.isClose || tag.selfClosing || !RAW_TEXT_TAGS.has(tag.name)) continue;
-      const close = tags.slice(i + 1).find((t) => t.name === tag.name && t.isClose);
-      markupRanges.push([tag.end, close ? close.end : body.length - 1]);
-    }
-  }
-  // MDX EXPRESSION containers are executable too — a URL inside one is not a
-  // citation (Codex). Balanced and quote-aware.
-  for (let i = 0; i < body.length; i += 1) {
-    if (body[i] !== '{') continue;
-    let depth = 0;
-    let j = i;
-    for (; j < body.length; j += 1) {
-      const ch = body[j];
-      if (ch === '"' || ch === "'" || ch === '`') {
-        const q = ch; j += 1;
-        while (j < body.length && body[j] !== q) j += body[j] === '\\' ? 2 : 1;
-        continue;
-      }
-      if (ch === '{') depth += 1;
-      else if (ch === '}') { depth -= 1; if (depth === 0) break; }
-    }
-    if (j >= body.length) break;
-    markupRanges.push([i, j]);
-    i = j;
-  }
-  // Markdown IMAGES render as remote <img> resources, so their destinations
-  // are active even though no tag is written (Codex). Inline form, plus any
-  // reference definition an image points at.
-  {
-    const imgRe = /!\[[^\]\n]*\]\(([^)\s]+)[^)]*\)/g;
-    let im;
-    while ((im = imgRe.exec(body)) !== null) markupRanges.push([im.index, im.index + im[0].length]);
-    const imgRefs = new Set();
-    // Full "![alt][ref]", COLLAPSED "![ref][]" and SHORTCUT "![ref]" all
-    // resolve to a definition; the last two use the label itself (Codex).
-    const refUseRe = /!\[([^\]\n]*)\](?:\[([^\]\n]*)\])?/g;
-    let rm;
-    while ((rm = refUseRe.exec(body)) !== null) {
-      const after = body[rm.index + rm[0].length];
-      if (after === '(') continue; // inline form, already ranged above
-      const explicit = (rm[2] || '').trim();
-      imgRefs.add((explicit || (rm[1] || '')).trim().toLowerCase());
-    }
-    if (imgRefs.size) {
-      const defRe = /^[ \t]*\[([^\]\n]+)\]:[^\n]*/gm;
-      let dm;
-      while ((dm = defRe.exec(body)) !== null) {
-        if (imgRefs.has(dm[1].trim().toLowerCase())) markupRanges.push([dm.index, dm.index + dm[0].length]);
-      }
-    }
-  }
-  const inActiveResource = (idx) => markupRanges.some(([a, b]) => idx >= a && idx <= b);
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
   let m;
   while ((m = urlRe.exec(body)) !== null) {
@@ -1283,7 +1203,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     let host = null;
     try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
-    if (!hostAllowed(norm, allowed, { citationGradeTlds: operatorCitations && !inActiveResource(m.index) })) {
+    if (!hostAllowed(norm, allowed)) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
   }
