@@ -2023,7 +2023,20 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             // r32).
             ? (data.reportV2?.water?.rainInches ?? data.lawnAssessment?.waterContext?.rainfallInches7d ?? null)
             : null}
-          weeklyRainSource={{ open_meteo: 'Open-Meteo', fawn: 'FAWN', area: 'local area rain records' }[
+          weeklyRainSource={{
+            // MRMS is NOAA's gauge-corrected radar estimate; a mixed week
+            // takes measurements where radar had them and the model on the
+            // gaps, and the Source row has to say so rather than crediting
+            // one provider for both. Unmapped keys fall through to null (no
+            // Source row) instead of printing a raw enum at the customer.
+            open_meteo: 'Open-Meteo',
+            fawn: 'FAWN',
+            area: 'local area rain records',
+            mrms: 'NOAA radar + rain gauges',
+            'mrms+open_meteo': 'NOAA radar + rain gauges, with Open-Meteo on gaps',
+            property_point: 'Open-Meteo',
+            city_collective: 'Open-Meteo (local area)',
+          }[
             data.reportV2?.water?.rainProvider || data.lawnAssessment?.waterContext?.rainfall7dProvider
           ] || null}
         />

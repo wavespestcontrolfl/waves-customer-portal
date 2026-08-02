@@ -68,9 +68,19 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       warningCodes: warnings.map((w) => w.code),
     };
 
-    const existing = parseJsonObject(service.structured_notes);
-    const merged = { ...existing, lawnReportV2: frozen };
-    await knex('service_records').where({ id: service.id }).update({ structured_notes: JSON.stringify(merged) });
+    // ATOMIC key merge (codex P1 #3152 round 3): this runs POST-commit, and
+    // structured_notes has concurrent writers there — the completion flow's
+    // status stamps and the admin time-on-site correction. Merging from the
+    // stale in-memory snapshot and writing the whole column erased any key
+    // that landed between the snapshot and this write (timeOnSiteAdjusted,
+    // completionSmsStatus, ...). Only the lawnReportV2 key this gate owns
+    // travels; the column's CURRENT value keeps everything else.
+    await knex('service_records').where({ id: service.id }).update({
+      structured_notes: knex.raw(
+        "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+        [JSON.stringify({ lawnReportV2: frozen })],
+      ),
+    });
 
     return { smsSummary: frozen.smsSummary, frozen, warnings, persisted: true };
   } catch (err) {

@@ -26,13 +26,18 @@ const { isEnabled } = require('../config/feature-gates');
 const trackTransitions = require('../services/track-transitions');
 
 function query(result) {
-  return {
+  const q = {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     update: jest.fn().mockResolvedValue(result),
     first: jest.fn().mockResolvedValue(result),
   };
+  // knex .modify(fn) — applies the builder callback (the already-complete
+  // completed_at optimistic guard uses it) and keeps chaining.
+  q.modify = jest.fn((fn) => { fn(q); return q; });
+  q.whereRaw = jest.fn().mockReturnValue(q);
+  return q;
 }
 
 function socketStub() {
@@ -597,10 +602,14 @@ describe('track-transitions lifecycle side effects', () => {
     expect(payload).not.toHaveProperty('completed_at');
   });
 
-  test('markComplete WITHOUT the flag still stamps wall-clock completed_at — a passed completedAt is ignored', async () => {
+  test('markComplete WITHOUT the flag honors an explicit completedAt, wall clock only as fallback', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
-    // Backdating is exclusively an untrusted-span behavior; no live caller
-    // can shift completed_at by accident.
+    // Contract updated for the live admin time-on-site override (codex P2
+    // #3152 round 11): a trusted caller that EXPLICITLY passes a finite
+    // instant gets it stamped (the corrected end must reach completed_at so
+    // date-window readers attribute the visit to the corrected day); every
+    // caller that passes none keeps the wall clock exactly as before, so no
+    // live caller shifts completed_at by accident.
     const svc = {
       id: 'job-nf',
       technician_id: 'tech-nf',
@@ -613,13 +622,23 @@ describe('track-transitions lifecycle side effects', () => {
       .mockReturnValueOnce(update);
 
     const result = await trackTransitions.markComplete('job-nf', {
-      completedAt: new Date('2020-01-01T00:00:00.000Z'),
+      completedAt: new Date('2026-07-19T15:45:00.000Z'),
     });
 
     expect(result.ok).toBe(true);
     const payload = update.update.mock.calls[0][0];
-    expect(payload.completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
-    expect(result.completedAt).toEqual(new Date('2026-07-19T16:00:00.000Z'));
+    expect(payload.completed_at).toEqual(new Date('2026-07-19T15:45:00.000Z'));
+
+    // No completedAt (every pre-existing live caller) → wall clock.
+    const svc2 = { ...svc, id: 'job-nf2' };
+    const update2 = query(1);
+    db
+      .mockReturnValueOnce(query(svc2))
+      .mockReturnValueOnce(update2);
+    const result2 = await trackTransitions.markComplete('job-nf2', {});
+    expect(result2.ok).toBe(true);
+    const payload2 = update2.update.mock.calls[0][0];
+    expect(payload2.completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
   });
 
   test('markComplete re-emits refresh when already complete', async () => {
@@ -644,6 +663,281 @@ describe('track-transitions lifecycle side effects', () => {
       status: 'completed',
       updated_at: completedAt,
     }));
+  });
+
+  test('the first transition leaves completed_at alone when a newer correction owns it (codex P2 #3152 round 15)', async () => {
+    // Completion trx committed, track_state still on_property, and a
+    // correction landed in between: the row's stamp (60) no longer matches
+    // this caller's expectation (null — a plain timer completion), so the
+    // transition must not stamp `now` over the correction's completed_at.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f15',
+      technician_id: 'tech-f15',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      actual_end_time: new Date('2026-07-19T13:00:00.000Z'),
+      completed_at: new Date('2026-07-19T13:00:00.000Z'),
+      time_on_site_adjusted_minutes: 60,
+      time_on_site_correction_seq: 1,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-f15', { expectedCorrectionSeq: null });
+
+    expect(result.ok).toBe(true);
+    const payload = update.update.mock.calls[0][0];
+    expect(payload).not.toHaveProperty('completed_at');
+    expect(payload.track_state).toBe('complete');
+
+    // Matching expectation (the correction's own follow-up) still stamps.
+    const svcMatch = { ...svc, id: 'job-f15b' };
+    const update2 = query(1);
+    db
+      .mockReturnValueOnce(query(svcMatch))
+      .mockReturnValueOnce(update2);
+    const result2 = await trackTransitions.markComplete('job-f15b', {
+      expectedCorrectionSeq: 1,
+      completedAt: new Date('2026-07-19T13:00:00.000Z'),
+    });
+    expect(result2.ok).toBe(true);
+    expect(update2.update.mock.calls[0][0].completed_at).toEqual(new Date('2026-07-19T13:00:00.000Z'));
+  });
+
+  test('a mismatched in-memory stamp degrades to a transition-only flip — no lifecycle rewrite (codex P2 #3152 round 16)', async () => {
+    // Round 15 fenced completed_at; round 16 extends the fence to the
+    // correction-owned lifecycle columns: a stale finalizer must not rebuild
+    // end/duration fields from its snapshot over a newer correction.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f16a',
+      technician_id: 'tech-f16a',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      actual_end_time: new Date('2026-07-19T13:00:00.000Z'),
+      completed_at: new Date('2026-07-19T13:00:00.000Z'),
+      time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 2,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    // Same minutes value (45) as the caller expects — only the monotonic
+    // seq betrays the newer re-save (codex P2 round 17).
+    const result = await trackTransitions.markComplete('job-f16a', { expectedCorrectionSeq: 1 });
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    expect(Object.keys(update.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+  });
+
+  test('the first-transition stamp fence is atomic: a fenced 0-row write retries transition-only (codex P2 #3152 round 16)', async () => {
+    // The in-memory stamp matches the caller, but a correction commits
+    // between the load and the UPDATE — the fenced write matches 0 rows.
+    // The retry flips track_state without touching completed_at or the
+    // lifecycle columns the correction now owns.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f16b',
+      technician_id: 'tech-f16b',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 1,
+    };
+    const fencedUpdate = query(0);
+    const retryUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(fencedUpdate)
+      .mockReturnValueOnce(retryUpdate);
+
+    const result = await trackTransitions.markComplete('job-f16b', {
+      expectedCorrectionSeq: 1,
+      completedAt: new Date('2026-07-19T12:45:00.000Z'),
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    // The first write carried the atomic revision predicate (seq, not the
+    // minutes value — codex P2 round 17).
+    expect(fencedUpdate.whereRaw).toHaveBeenCalledWith(
+      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [1],
+    );
+    // The retry wrote only the flip.
+    expect(Object.keys(retryUpdate.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+  });
+
+  test('the fence is ON for callers with no stated revision — status-route completions are protected too (codex P2 #3152 round 18)', async () => {
+    // Ordinary PUT /:id/status completions pass no expectedCorrectionSeq,
+    // but their loadService→UPDATE window races the correction PATCH all
+    // the same. With no stated revision the fence uses the seq observed at
+    // load: a correction committing inside the window turns the stale full
+    // lifecycle write into the transition-only retry.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    // Never corrected (seq null): the default fence predicates on null and
+    // the full lifecycle write runs — a correction committing mid-window
+    // bumps the seq and the fenced write misses. (Any PRE-EXISTING revision
+    // now degrades to transition-only up front — codex round 26 — so the
+    // fenced-full-write path is exclusively the never-corrected shape.)
+    const svc = {
+      id: 'job-f18',
+      technician_id: 'tech-f18',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      time_on_site_correction_seq: null,
+    };
+    const fencedUpdate = query(0);
+    const retryUpdate = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(fencedUpdate)
+      .mockReturnValueOnce(retryUpdate);
+
+    const result = await trackTransitions.markComplete('job-f18', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    expect(fencedUpdate.whereRaw).toHaveBeenCalledWith(
+      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [null],
+    );
+    expect(Object.keys(retryUpdate.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+
+    // Un-raced default caller: the fenced write matches and the full
+    // lifecycle update lands exactly as before.
+    const svc2 = { ...svc, id: 'job-f18b' };
+    const update2 = query(1);
+    db
+      .mockReturnValueOnce(query(svc2))
+      .mockReturnValueOnce(update2);
+    const result2 = await trackTransitions.markComplete('job-f18b', {});
+    expect(result2.ok).toBe(true);
+    expect(update2.whereRaw).toHaveBeenCalledWith(
+      'time_on_site_correction_seq IS NOT DISTINCT FROM ?', [null],
+    );
+    expect(update2.update.mock.calls[0][0].completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
+  });
+
+  test('a prior correction WITHOUT a completed_at still owns the lifecycle — transition-only (codex P2 #3152 round 26)', async () => {
+    // Clamped/no-start corrections bump the seq while deliberately
+    // stamping NO end (unknown-end posture). A status-route completion
+    // must not pair wall-clock end stamps with that corrected duration.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f26',
+      technician_id: 'tech-f26',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      time_on_site_adjusted_minutes: 720,
+      time_on_site_correction_seq: 1,
+      completed_at: null,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-f26', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    expect(Object.keys(update.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+  });
+
+  test('a correction that committed BEFORE the load owns completed_at — the flip is transition-only (codex P2 #3152 round 20)', async () => {
+    // Unclosed-timer flow: the admin corrected the running timer (the PATCH
+    // stamped seq 1 and the derived completed_at), then the tech completes
+    // through the status route with no stated revision. The seq predicate
+    // only sees post-load movement, so this pre-load correction must be
+    // preserved by inspection: no `now` over the corrected instant, no
+    // lifecycle rebuild over the corrected columns.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f20',
+      technician_id: 'tech-f20',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      actual_end_time: new Date('2026-07-19T12:45:00.000Z'),
+      completed_at: new Date('2026-07-19T12:45:00.000Z'),
+      time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 1,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-f20', {});
+
+    expect(result.ok).toBe(true);
+    expect(result.completedAt).toBeNull();
+    expect(Object.keys(update.update.mock.calls[0][0]).sort()).toEqual(['track_state', 'updated_at']);
+  });
+
+  test('a fenced 0-row write whose retry also matches 0 rows reloads instead of guessing (codex P2 #3152 round 16)', async () => {
+    // Both writes miss → the state (not the stamp) moved: another writer
+    // completed the visit. Report the fresh row, write nothing.
+    const svc = {
+      id: 'job-f16c',
+      technician_id: 'tech-f16c',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      time_on_site_adjusted_minutes: 45,
+      time_on_site_correction_seq: 1,
+    };
+    const freshCompletedAt = new Date('2026-07-19T13:10:00.000Z');
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(query(0))
+      .mockReturnValueOnce(query(0))
+      .mockReturnValueOnce(query({ ...svc, track_state: 'complete', completed_at: freshCompletedAt }));
+
+    const result = await trackTransitions.markComplete('job-f16c', { expectedCorrectionSeq: 1 });
+
+    expect(result).toEqual({ ok: true, state: 'complete', completedAt: freshCompletedAt });
+    expect(clearTechCurrentJob).not.toHaveBeenCalled();
+  });
+
+  test('already-complete + a supplied finite instant still moves completed_at (codex P2 #3152 round 12)', async () => {
+    // The status-route-first shape: the visit was marked completed earlier
+    // (tracker stamped the wall clock), then the completion flow finalizes
+    // it with a live time correction — the corrected end must land even
+    // though the early return skips the transition update.
+    const staleCompletedAt = new Date('2026-05-15T14:30:00.000Z');
+    const correctedAt = new Date('2026-05-15T12:45:00.000Z');
+    const emit = jest.fn();
+    const to = jest.fn(() => ({ emit }));
+    getIo.mockReturnValue({ to });
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query({
+        id: 'job-6',
+        customer_id: 'cust-6',
+        technician_id: 'tech-6',
+        track_state: 'complete',
+        completed_at: staleCompletedAt,
+      }))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-6', { completedAt: correctedAt });
+
+    expect(result).toEqual({ ok: true, state: 'complete', completedAt: correctedAt });
+    expect(update.update.mock.calls[0][0].completed_at).toEqual(correctedAt);
+    // Same supplied instant on a retry → no second write (idempotent).
+    db.mockReturnValueOnce(query({
+      id: 'job-6',
+      customer_id: 'cust-6',
+      technician_id: 'tech-6',
+      track_state: 'complete',
+      completed_at: correctedAt,
+    }));
+    const retry = await trackTransitions.markComplete('job-6', { completedAt: correctedAt });
+    expect(retry).toEqual({ ok: true, state: 'complete', completedAt: correctedAt });
   });
 });
 

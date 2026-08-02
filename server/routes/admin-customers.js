@@ -3831,6 +3831,21 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       result = { invoice: updatedInvoice, term, payment };
     });
 
+    // A cash/check annual prepay is the customer paying — same automatic-
+    // clear contract as every other receipt path. The helper owns the rules
+    // (reason gate, causality, locking); settlement moment is NOW (a human
+    // is holding the money). Failure logs — the operator has the button.
+    try {
+      const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+      await maybeResumeBillingPauseOnPayment(customer.id, {
+        paymentIntentId: null,
+        source: 'customer360_annual_prepay',
+        settledAt: new Date(),
+      });
+    } catch (pauseErr) {
+      logger.warn(`[customers:annual-prepay] billing-pause auto-clear failed: ${pauseErr.message}`);
+    }
+
     await auditCustomerMutation(req, 'customer.annual_prepay.record', customer.id, {
       invoiceId: result.invoice.id,
       invoiceNumber: result.invoice.invoice_number,
@@ -4031,6 +4046,22 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
       throw err;
+    }
+
+    // A cash-backed PREPAYMENT is real money received — same automatic-
+    // clear contract. Adjustments/corrections (other kinds) move no cash
+    // and must not clear anything.
+    if (kind === 'prepayment') {
+      try {
+        const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+        await maybeResumeBillingPauseOnPayment(req.params.id, {
+          paymentIntentId: null,
+          source: 'account_credit_prepayment',
+          settledAt: new Date(),
+        });
+      } catch (pauseErr) {
+        logger.warn(`[admin-customers] billing-pause auto-clear failed: ${pauseErr.message}`);
+      }
     }
 
     await db('activity_log').insert({

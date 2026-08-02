@@ -127,7 +127,7 @@ async function checkConsentForPurpose(input, policy, contactState) {
   // not SMS_OPTED_OUT — callers like the receipt-delivery queue treat the
   // channel preference as an expected skip. But NOT before the per-purpose
   // toggles: a customer who turned the notice type itself off (e.g.
-  // billing_reminder=false) has opted out of the NOTICE, not just the text —
+  // payment_receipt=false) has opted out of the NOTICE, not just the text —
   // returning the email redirect would tell the Comms operator to email a
   // reminder the customer explicitly disabled (codex P1 on 5806621e). The
   // queue is indifferent: PURPOSE_OPTED_OUT maps to receipt_texts_opted_out,
@@ -174,7 +174,10 @@ async function checkConsentForPurpose(input, policy, contactState) {
     };
   }
 
-  // Per-purpose pref column(s) (e.g. billing_reminder, service_reminder_24h).
+  // Per-purpose pref column(s) (e.g. payment_receipt, service_reminder_24h).
+  // NOTE: the billing purpose deliberately has NONE (owner ruling 2026-08-01
+  // — billing notices carry no per-purpose opt-out; sms_enabled is the only
+  // kill switch and billing_channel still routes delivery).
   // A policy may name several (payment_receipt honors both the legacy
   // receipt kill switch and the portal texts toggle) — ALL must be non-false.
   for (const prefsColumn of [].concat(policy.prefsColumn || [])) {

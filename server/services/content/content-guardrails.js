@@ -50,33 +50,923 @@ function finding(severity, code, message) {
 // let exactly the fabricated-price shapes this covers slip both gates.
 const PRICE_RE_SRC = '(^|[\\s("\'“‘])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\b|\\b(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5})\\s+(?:dollars|bucks)\\b';
 
+// Blank every span the renderer drops, with spaces — LENGTH- and
+// NEWLINE-PRESERVING so callers keep using the original indices and sentence
+// boundaries still split.
+//
+// PROSE attribution must read what a READER SEES, so it blanks comments AND
+// tag markup: `class="other companies charge"` is not attribution any
+// customer can see (Codex r7), and neither is a comment (r6). TABLE
+// attribution deliberately reads the JSX structure (columns/rows props), so
+// it gets the comment-blanked text only — blanking tags there would erase the
+// very structure it resolves against.
+const COMMENT_SPAN_RE = /\{\s*\/\*[\s\S]*?\*\/\s*\}|<!--[\s\S]*?-->/g;
+const blankSpan = (span) => span.replace(/[^\n]/g, ' ');
+function blankComments(s) {
+  return String(s || '').replace(COMMENT_SPAN_RE, blankSpan);
+}
+
+// Tag stripping must be QUOTE-AWARE: a `>` inside an attribute value does not
+// end the tag, and a naive /<[^>]*>/ left the remainder of that invisible
+// attribute in the text — `<span title="x > Orkin charges a"> $89` then read
+// as attribution (pre-push Codex P0, r7). An unterminated tag is left alone.
+// Tags that START A NEW RENDERED BLOCK — attribution cannot cross one.
+const BLOCK_TAG_RE = /^<\/?(?:p|div|section|article|aside|main|header|footer|nav|figure|figcaption|blockquote|pre|hr|br|ul|ol|li|dl|dt|dd|table|thead|tbody|tfoot|tr|td|th|h[1-6])\b/i;
+
+// Enumerate HTML/JSX tags. Quote-aware AND brace-aware: a ">" inside an
+// attribute value or a JSX expression prop — title={"x" > "y"} — is not the
+// end of the tag, and treating it as one left the rest of the prop in the
+// rendered text (Codex r9 P0). ONE scanner serves every consumer below.
+function* eachTag(text) {
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '<') continue;
+    const m = /^<(\/?)([a-zA-Z][\w-]*)/.exec(text.slice(i, i + 64));
+    if (!m) continue;
+    // "<https://…>" is a Markdown AUTOLINK, not a tag named "https" —-
+    // treating it as markup cost a legitimate citation its allowance
+    // (Codex).
+    if (text[i + m[0].length] === ':') continue;
+    let j = i + m[0].length;
+    let braceDepth = 0;
+    for (; j < text.length; j += 1) {
+      const ch = text[j];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        const quote = ch;
+        j += 1;
+        while (j < text.length && text[j] !== quote) j += text[j] === '\\' ? 2 : 1;
+        continue;
+      }
+      if (ch === '{') { braceDepth += 1; continue; }
+      if (ch === '}') { braceDepth -= 1; continue; }
+      if (ch === '>' && braceDepth === 0) break;
+    }
+    if (j >= text.length) return;
+    yield {
+      start: i, end: j, name: m[2].toLowerCase(), isClose: m[1] === '/',
+      attrs: text.slice(i + m[0].length, j),
+      selfClosing: text[j - 1] === '/',
+    };
+    i = j;
+  }
+}
+
+// An element whose CONTENT a reader may never see. Conservative by design:
+// what cannot be proven visible must not supply attribution.
+// NATIVELY hidden containers render nothing without any hidden/style/class
+// attribute: a <dialog> is closed unless it carries `open`, and <datalist>
+// content is never prose (Codex).
+const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript', 'datalist']);
+
+// Visibility is decided by what can be PROVEN from the source, and anything
+// unprovable counts as hidden. Chasing literal forms lost three rounds in a
+// row — `display:none`, then style={{display:"none"}}, then
+// aria-hidden={1===1} and {"no"+"ne"} — because a static reader cannot
+// evaluate expressions at all. So: a visibility-affecting prop whose value is
+// an EXPRESSION is treated as hidden outright, no evaluation attempted
+// (Codex r9 P0 ×3). The cost is only a lost EXEMPTION — the price is still
+// flagged, which is the safe direction.
+// DEFINITELY not rendered — used by the VETO, which must err toward KEEPING
+// text. The broad "any styling is unprovable" rule below is right for
+// ATTRIBUTION (excluding text costs an exemption) but backwards here:
+// erasing styled copy would delete a first-party marker and GRANT the
+// exemption. Only certainties qualify (Codex).
+function opensDefinitelyHidden(tag) {
+  if (HIDDEN_TAGS.has(tag.name)) return true;
+  const a = tag.attrs || '';
+  if ((tag.name === 'dialog' || tag.name === 'details') && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
+  const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
+  if (ariaM) {
+    const v = ariaM[1].replace(/^[{"']|["'}]$/g, '').trim().toLowerCase();
+    if (v !== 'false') return true;
+  }
+  return /style\s*=\s*(?:["'`{])[^"'`]*(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(a);
+}
+
+function opensHiddenContent(tag) {
+  if (HIDDEN_TAGS.has(tag.name)) return true;
+  const a = tag.attrs || '';
+  if ((tag.name === 'dialog' || tag.name === 'details') && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
+  // aria-hidden in ANY form except a literal false.
+  const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
+  if (ariaM) {
+    const v = ariaM[1].replace(/^[{"']|["'}]$/g, '').trim().toLowerCase();
+    if (v !== 'false') return true;
+  }
+  // ANY styling or class makes visibility unprovable from source. Enumerating
+  // hidden CSS is a losing game — display:none, visibility:hidden, opacity:0,
+  // clip, font-size:0, transparent color, a `.hidden` utility class — so for
+  // ATTRIBUTION ELIGIBILITY the rule is inverted: only unstyled, unclassed
+  // markup counts as proven-visible (Codex r9 P0 ×4). The cost is a lost
+  // EXEMPTION on styled attribution, which parks the draft for review — the
+  // safe direction. Detection is unaffected.
+  if (/(?:^|\s)(?:style|class|className)\s*=/i.test(a)) return true;
+  return false;
+}
+
+// NESTING-AWARE: a regex stopping at the first </span> left the tail of a
+// hidden block visible (Codex r9 P0). Walk to the MATCHING close tag.
+function blankHiddenContent(str) {
+  const text = String(str || '');
+  const out = text.split('');
+  const tags = [...eachTag(text)];
+  for (let t = 0; t < tags.length; t += 1) {
+    const tag = tags[t];
+    if (tag.isClose || tag.selfClosing || !opensHiddenContent(tag)) continue;
+    let depth = 1;
+    let endIdx = -1;
+    for (let u = t + 1; u < tags.length; u += 1) {
+      const other = tags[u];
+      if (other.name !== tag.name || other.selfClosing) continue;
+      if (other.isClose) { depth -= 1; if (depth === 0) { endIdx = other.end; break; } }
+      else depth += 1;
+    }
+    // Never closed → blank to end: unterminated hidden content cannot be
+    // proven visible either.
+    const stop = endIdx === -1 ? text.length - 1 : endIdx;
+    for (let k = tag.start; k <= stop; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  }
+  return out.join('');
+}
+
+function blankTags(s) {
+  const text = String(s || '');
+  const out = text.split('');
+  for (const tag of eachTag(text)) {
+    const isBlock = BLOCK_TAG_RE.test(text.slice(tag.start, tag.end + 1));
+    for (let k = tag.start; k <= tag.end; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    // A BLOCK-level tag is a rendered boundary; a newline keeps the blanking
+    // length-preserving while still splitting the sentence (Codex r8).
+    if (isBlock && out[tag.start] !== '\n') out[tag.start] = '\n';
+  }
+  return out.join('');
+}
+
+// MDX EXPRESSION containers render conditionally and their value cannot be
+// proven statically, so `{show && "Orkin charges a"}` never counts as
+// visible attribution (Codex r9 P0). Quote-aware and balanced.
+function blankExpressions(str) {
+  const text = String(str || '');
+  const out = text.split('');
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '{') continue;
+    let depth = 0;
+    let j = i;
+    for (; j < text.length; j += 1) {
+      const ch = text[j];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        const quote = ch;
+        j += 1;
+        while (j < text.length && text[j] !== quote) j += text[j] === '\\' ? 2 : 1;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') { depth -= 1; if (depth === 0) break; }
+    }
+    if (j >= text.length) break; // unbalanced — leave the rest alone
+    for (let k = i; k <= j; k += 1) if (out[k] !== '\n') out[k] = ' ';
+    i = j;
+  }
+  return out.join('');
+}
+
+// A Markdown link's DESTINATION is not rendered text — readers see only the
+// anchor. Leaving the URL in place let an invisible "…/Orkin" supply the
+// attribution for a visible local price (Codex r9 P0). Blank the brackets and
+// the destination, keep the anchor where it is, length-preservingly.
+// A Markdown link's DESTINATION is not rendered text — readers see only the
+// anchor. Leaving the URL in place let an invisible ".../Orkin" attribute a
+// visible local price (Codex r9 P0). A regex could not do this: labels nest
+// brackets and destinations carry balanced parens, and a partial match left
+// the tail of the URL behind as attributable text. This is a balanced,
+// escape-aware scanner; anything malformed blanks WHOLE so no fragment of it
+// can attribute.
+function blankMarkdownLinkDestinations(str) {
+  // REFERENCE links render only their label: "[Local plan][1]" plus a
+  // "[1]: https://…/Orkin" definition showed readers a local price while the
+  // invisible definition supplied the attribution (Codex r10). Blank the
+  // definition lines and the "[ref]" tails; labels stay where they are.
+  const text = String(str || '')
+    .replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*/gm, blankSpan)
+    .replace(/\]\s*\[[^\]\n]*\]/g, blankSpan);
+  const out = text.split('');
+  const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] !== '[') continue;
+    const isImage = i > 0 && text[i - 1] === '!';
+    // Balanced label scan.
+    let depth = 0;
+    let j = i;
+    for (; j < text.length; j += 1) {
+      const ch = text[j];
+      if (ch === '\\') { j += 1; continue; }
+      if (ch === '[') depth += 1;
+      else if (ch === ']') { depth -= 1; if (depth === 0) break; }
+      else if (ch === '\n' && text[j + 1] === '\n') break; // paragraph end
+    }
+    if (j >= text.length || text[j] !== ']' || text[j + 1] !== '(') continue;
+    const labelStart = i;
+    const labelEnd = j;
+    // Balanced destination scan.
+    let k = j + 1;
+    let pdepth = 0;
+    for (; k < text.length; k += 1) {
+      const ch = text[k];
+      if (ch === '\\') { k += 1; continue; }
+      if (ch === '(') pdepth += 1;
+      else if (ch === ')') { pdepth -= 1; if (pdepth === 0) break; }
+      else if (ch === '\n' && text[k + 1] === '\n') break;
+    }
+    if (k >= text.length || text[k] !== ')') {
+      // Malformed: blank everything we scanned so no fragment attributes.
+      blank(isImage ? labelStart - 1 : labelStart, Math.min(k, text.length - 1));
+      i = Math.min(k, text.length - 1);
+      continue;
+    }
+    if (isImage) {
+      blank(labelStart - 1, k); // an image renders no text at all
+    } else {
+      blank(labelStart, labelStart);       // "["
+      blank(labelEnd, k);                  // "](destination)"
+    }
+    i = k;
+  }
+  return out.join('');
+}
+
+function blankToRenderedText(s) {
+  return blankExpressions(blankMarkdownLinkDestinations(blankTags(blankHiddenContent(blankComments(s)))));
+}
+
+// A cited competitor price must actually BE cited. The grammar alone —
+// party plus pricing verb — let "Other companies charge a $199 cancellation
+// fee" through with no source and no date, which is an invented figure as
+// far as the reader is concerned (Codex). The manifest's global rule is
+// "all dollar figures re-verified at publish + dated in-post ('as of
+// [date]')", so the amount's paragraph must carry BOTH a citation link and a
+// date. Absent either, the draft parks for review.
+// The date must be GOVERNED by "as of" — a bare "June 2026 was rainy" is not
+// a verification date, and accepting one let a stale price publish (Codex).
+const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,40}?\b(?:19|20)\d{2}\b/i;
+// Hosts that can EVIDENCE a claim: the curated citation list, curated
+// competitor-fact sources, and editorially-approved external domains. Our own
+// hub and spoke domains are deliberately absent.
+function citationOnlyHosts({ operatorCitations = false } = {}) {
+  const hosts = new Set();
+  for (const d of String(process.env.CONTENT_ALLOWED_LINK_DOMAINS || '').split(',')) {
+    const h = normalizeHost(d);
+    if (h) hosts.add(h);
+  }
+  if (operatorCitations) {
+    for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
+    for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
+  }
+  return hosts;
+}
+
+// URLs a READER can actually follow from this paragraph. An image
+// destination and an UNUSED reference definition are both stripped from the
+// rendered page, so neither is a citation — accepting them let an unrelated
+// "![image](…)" or a dangling "[unused]: …" stand in for the source (Codex).
+function visibleCitationUrls(citationParaRaw, renderedPara, citationDoc) {
+  // A code span renders literal text, not a link, and "\[" is an escaped
+  // bracket — neither produces something a reader can click, so neither is a
+  // citation (Codex). Blanked length-preservingly so offsets are unaffected.
+  const citationPara = String(citationParaRaw || '')
+    .replace(/(`+)(?:[^`]|(?!\1)`)*\1/g, blankSpan)
+    .replace(/\\[[\]()]/g, '  ');
+  const out = [];
+  const push = (u) => { if (u) out.push(String(u).replace(/[).,;:!?]+$/, '')); };
+  // Inline links — NOT images.
+  const inline = /(!)?\[[^\]\n]*\]\(\s*<?\s*(https?:\/\/[^)\s>]+)/g;
+  let m;
+  while ((m = inline.exec(citationPara)) !== null) { if (!m[1]) push(m[2]); }
+  // Autolinks and bare URLs the reader sees in the rendered text.
+  const bare = /https?:\/\/[^\s<>()"'\]]+/gi;
+  while ((m = bare.exec(renderedPara)) !== null) push(m[0]);
+  // Reference LINKS resolve to their definition; reference IMAGES do not.
+  // Full "[text][ref]", COLLAPSED "[ref][]" and SHORTCUT "[ref]" — the last
+  // two carry the label in the FIRST bracket, so reading only the second one
+  // parked compliant intercepts on formatting alone (Codex).
+  const refUse = /(!)?\[([^\]\n]*)\](?:\[([^\]\n]*)\])?/g;
+  const usedRefs = new Set();
+  while ((m = refUse.exec(citationPara)) !== null) {
+    if (m[1]) continue; // image
+    if (citationPara[m.index + m[0].length] === '(') continue; // inline link
+    // A DEFINITION line ("[label]: https://…") is not a use of itself —
+    // counting it made a dangling definition self-referencing (Codex).
+    if (citationPara[m.index + m[0].length] === ':') continue;
+    const label = ((m[3] || '').trim() || (m[2] || '').trim());
+    if (label) usedRefs.add(label.toLowerCase());
+  }
+  if (usedRefs.size) {
+    // Definitions are conventionally collected at the END of the document,
+    // so they are looked up DOC-WIDE — only the reference USE has to sit in
+    // the price's paragraph (Codex).
+    const defs = /^[ \t]*\[([^\]\n]+)\]:[ \t]*(https?:\/\/\S+)/gm;
+    while ((m = defs.exec(citationDoc)) !== null) {
+      if (usedRefs.has(m[1].trim().toLowerCase())) push(m[2]);
+    }
+  }
+  return out;
+}
+
+// Reads RENDERED text: a date or URL parked in a comment or a reference
+// definition is invisible to the customer and cannot satisfy a sourcing
+// rule that exists for their benefit (Codex).
+function priceParagraphIsSourced(citationText, renderedText, index, opts = {}) {
+  // SENTENCE scope, not paragraph. A citation anywhere in the paragraph let
+  // an unrelated link — a chinch-bug study next to a competitor fee —
+  // authorize the price (Codex). The briefs' own mandated shape puts the
+  // source in the sentence: "Aptive charges a $199 fee as of July 2026
+  // ([source](…))." Reference DEFINITIONS are still resolved doc-wide.
+  const para = (text) => sentenceAround(String(text || ''), index).text;
+  // The URL comes from text with link DESTINATIONS intact — rendered text
+  // blanks them, so an ordinary "[ConsumerAffairs](https://…)" citation
+  // could never qualify (Codex). Hidden content is still blanked there, so
+  // a URL buried in a comment does not count. The DATE must be rendered.
+  // The URL must be a CITATION the gate would actually accept — an
+  // allowlisted host or a source this brief named. Any-URL-will-do let an
+  // unrelated link stand in for the source (Codex).
+  // CITATION hosts only. allowedLinkHosts also carries every hub and spoke
+  // domain — navigation destinations, not third-party evidence — so a link
+  // to our own calculator was standing in as the source for a competitor's
+  // price (Codex).
+  const allowedHosts = citationOnlyHosts(opts);
+  const exact = allowedExactSourceUrls(opts.requiredSourceUrls);
+  const urls = visibleCitationUrls(para(citationText), para(renderedText), String(citationText || ''));
+  const cited = urls.some((u) => {
+    const raw = u.replace(/[).,;:!?]+$/, '');
+    if (exact.has(normalizeSourceUrl(raw) || '\u0000')) return true;
+    try { return hostAllowed(normalizeHost(new URL(raw).hostname), allowedHosts); } catch { return false; }
+  });
+  if (!cited) return false;
+  return AS_OF_DATE_RE.test(para(renderedText));
+}
+
+// Any markup in the amount's paragraph disqualifies the prose exemption.
+// Blunt by design: "<" opens a tag or comment, "{" an MDX expression, "&"
+// an entity. Over-matching costs an exemption; under-matching publishes a
+// first-party price.
+function paragraphHasMarkup(text, index) {
+  const s = String(text || '');
+  const start = (() => { const i = s.lastIndexOf('\n\n', index); return i === -1 ? 0 : i + 2; })();
+  const rawEnd = s.indexOf('\n\n', index);
+  const paragraph = s.slice(start, rawEnd === -1 ? s.length : rawEnd);
+  // Deletion markup is not an affirmative statement: "~~Other companies
+  // charge~~ $89 per visit" leaves the price as the operative claim (Codex).
+  // The semantic ELEMENTS say the same thing and carry no attributes, so the
+  // attribute-free allowance below would otherwise wave them through.
+  if (/~~/.test(paragraph)) return true;
+  if (/<\s*(?:del|s|strike)\b/i.test(paragraph)) return true;
+  if (/\{|&[#A-Za-z]|<!/.test(paragraph)) return true; // expression, entity, comment
+  // A tag with NO attributes cannot hide anything — it carries no hidden,
+  // style, class or aria-hidden — so plain wrappers like <p> and <strong>
+  // still allow the exemption. ANY attribute makes visibility unprovable
+  // and disqualifies the paragraph.
+  for (const tag of eachTag(paragraph)) {
+    if ((tag.attrs || '').replace(/\/\s*$/, '').trim()) return true;
+  }
+  return false;
+}
+
+// True when the amount sits on a Markdown table row. Deliberately blunt: a
+// pipe anywhere on the line disqualifies the line from the PROSE exemption.
+// Over-matching only costs an exemption (the draft parks); under-matching
+// would publish a first-party price.
+function isMarkdownTableRow(text, index) {
+  const s = String(text || '');
+  const start = s.lastIndexOf('\n', index - 1) + 1;
+  let end = s.indexOf('\n', index);
+  if (end === -1) end = s.length;
+  return s.slice(start, end).includes('|');
+}
+
+// …and the same for HTML/JSX table markup, which carries no pipes:
+// "<table><tr><td>Orkin charges a $199 fee.</td></tr></table>" is a table,
+// and the ruling is that EVERY table price fails closed. Walks the tag
+// stream and reports whether a table element is still open at the amount.
+const TABLE_TAGS = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'comparisontable']);
+function isInsideTableMarkup(text, index) {
+  let depth = 0;
+  // Comment-blanked: a comment containing "</td></tr></table>" is not a set
+  // of real closures, and counting it dropped the depth to zero while the
+  // browser kept the price inside the table (Codex).
+  for (const tag of eachTag(blankComments(String(text || '')))) {
+    // Inside a table tag's OWN span — the props of a self-closing
+    // <ComparisonTable … /> hold its cells, so an amount there is in a table
+    // even though no element is open around it (Codex).
+    if (TABLE_TAGS.has(tag.name) && index >= tag.start && index <= tag.end) return true;
+    if (tag.start >= index) break;
+    if (!TABLE_TAGS.has(tag.name) || tag.selfClosing) continue;
+    if (tag.isClose) depth = Math.max(0, depth - 1);
+    else depth += 1;
+  }
+  return depth > 0;
+}
+
 /**
  * findHardcodedPrice(text) → the offending price string, or null. Applies the
  * calculator/quote-framing and regulatory-fine exemptions, so callers share
  * ONE price policy. Exported for seo-completion-gate (its previous private
  * copy had drifted: no comma support, no regulatory exemption).
  */
-function findHardcodedPrice(text) {
+function findHardcodedPrice(text, { thirdPartyCitations = false, forbidAllPrices = false, operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const s = String(text || '');
+  // Attribution is decided against what READERS SEE. Comments and tag
+  // attributes are stripped at render, so "{/* other companies charge */} $89
+  // per visit" and `<span class="other companies charge">$89 …</span>` both
+  // showed the customer a bare first-party price while the guardrail read an
+  // exemption (Codex r6/r7). Detection still runs on the original text — a
+  // price hidden in markup stays flagged (conservative in both directions).
+  const proseText = blankToRenderedText(s);
+  // Link destinations intact, hidden content still gone — used only to look
+  // for the citation URL behind the price.
+  const citationText = blankTags(blankHiddenContent(blankComments(s)));
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
   while ((match = priceRe.exec(s)) !== null) {
     const window = s.slice(Math.max(0, match.index - 80), Math.min(s.length, match.index + 120));
     // Allowed when the surrounding copy points at the calculator / quote / a
     // "varies" framing rather than asserting a hard price.
-    if (/\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
+    // A brief-level BAN outranks every exemption below. B2/D1 say "NO
+    // TruGreen dollar amounts ANYWHERE in the post", and the seeder's own
+    // global instruction tells writers to add "though pricing varies by
+    // contract" — which landed exactly on this generic-framing exemption and
+    // made the ban a no-op (Codex). Nothing is exempt under a ban.
+    if (forbidAllPrices) return match[0].trim();
+    // Allowed when the surrounding copy points at the calculator / quote / a
+    // "varies" framing rather than asserting a hard price. NOT on an
+    // intercept draft: those are exactly the posts that quote competitor
+    // figures, and the framing words let one through unsourced, straight
+    // past the source-and-date requirement (Codex).
+    if (!thirdPartyCitations
+      && /\b(calculator|estimate|quote|pricing varies|depends|range)\b/i.test(window)) continue;
     // Regulatory fines are not Waves service pricing. Allow ordinance/citation
     // contexts while still blocking customer-facing service price claims.
     if (isRegulatoryPenaltyAmount(match[0].trim(), window)) continue;
+    // A price ATTRIBUTED to a named competitor is reporting, not our price
+    // list (owner ruling 2026-08-01) — "cancel your pest control contract"
+    // posts have to name the other company's cancellation fee to be useful.
+    //
+    // PROSE ONLY. A table-cell exemption was built and then REMOVED (owner
+    // ruling 2026-08-01, second): deciding ownership inside Markdown/JSX
+    // tables meant re-implementing a renderer here, and ~20 review rounds
+    // each found another construct that could launder a first-party price
+    // through it (entities, emphasis, inline tags, comments, reference
+    // links, hidden/styled/computed-visibility markup, spoofed props,
+    // code-span pipes). A price in a table now fails closed exactly as it
+    // does on main. The cost is small: a named-competitor post routes to
+    // human review anyway while GATE_NAMED_COMPETITOR_COMPARISON is off, so
+    // the table path was buying a parked draft a second look it already got.
+    // Scoped to the amount's OWN SENTENCE, not the surrounding window: a
+    // competitor named in a neighbouring sentence must never launder our
+    // price ("Orkin is expensive. Quarterly pest control is $129.").
+    // OPERATOR-PROVENANCE ONLY (same boundary as the .gov/.edu citation
+    // allowance): mined drafts compose from untrusted SERP/PAA text, and an
+    // injected "other companies charge $X" attribution must not publish an
+    // arbitrary price — the exemption exists for operator-directed
+    // competitor-intercept briefs, so only they get it.
+    // match.index sits on the captured LEADING character (possibly a
+    // newline/quote) — the token index must point at the amount itself or
+    // a boundary at that exact position is skipped by the >= scan
+    // ("## Other companies charge\n$89 …" read as one sentence, Codex r4).
+    const tokenIndex = match.index + (match[1] ? match[1].length : 0);
+    // PROSE ONLY, enforced here: a pipe on the amount's line means a Markdown
+    // table row, and the prose scanner would otherwise read the cell
+    // boundaries as ordinary spacing and exempt "| Aptive charges a | $199 |"
+    // (Codex). JSX tables already fail closed because blankToRenderedText
+    // blanks the whole <ComparisonTable …> tag out of the attribution text.
+    // The exemption requires PLAIN PROSE. Any markup in the amount's
+    // paragraph — a tag, an MDX expression, a comment, an entity —
+    // disqualifies it outright.
+    //
+    // This replaces a normalization approach that tried to compute what a
+    // reader sees. That direction does not terminate: every construct is
+    // two bugs, one where invisible text ATTRIBUTES a price and one where
+    // it SPLITS the first-party marker that should block it, and the two
+    // want opposite handling. Requiring plain prose closes both at once.
+    // The cost is only a lost exemption — a sourced competitor price in a
+    // marked-up paragraph parks for review, and sourced price sentences are
+    // plain prose in practice.
+    if (thirdPartyCitations
+      && !isMarkdownTableRow(s, tokenIndex)
+      && !isInsideTableMarkup(s, tokenIndex)
+      && !paragraphHasMarkup(s, tokenIndex)
+      && priceParagraphIsSourced(citationText, proseText, tokenIndex, { operatorCitations, requiredSourceUrls })
+      && isThirdPartyPriceCitation(proseText, tokenIndex, s)) continue;
     return match[0].trim();
   }
   return null;
 }
 
-function priceFinding(body) {
-  const hit = findHardcodedPrice(body);
+function priceFinding(body, opts = {}) {
+  const hit = findHardcodedPrice(body, opts);
   if (!hit) return null;
   return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
+}
+
+// Third-party price attribution (owner ruling 2026-08-01). A dollar figure
+// is reporting — not a Waves price claim — when the surrounding copy names
+// WHOSE price it is and that party isn't us. Two ways to qualify:
+//   1. a curated competitor brand name / alias sits in the window, or
+//   2. a generic third-party framing ("other companies charge…", "the
+//      previous provider's fee").
+// First-person framing anywhere in the window disqualifies it outright, so
+// "we charge $199" can never ride in on a competitor mention elsewhere in
+// the sentence. Waves prices stay banned everywhere — link the calculator.
+// ANY first-person / Waves marker in the price's sentence disqualifies the
+// exemption outright — no verb list to keep in sync (the earlier
+// charge|price|fee list missed "is", "starts at", "bill", "offers"), and a
+// sentence that mentions us AND a dollar figure is a Waves price claim
+// regardless of phrasing: "Our quarterly service is $89, unlike Orkin."
+// Brand TEMPLATE TOKENS count as first-party: spoke-shared copy never
+// writes "Waves" literally, it writes {{brandName}} (pre-push Codex P0 —
+// "Unlike Orkin, {{brandName}} charges $89" must stay blocked).
+// "us" is CASE-SENSITIVE lowercase: "US" is the country ("In the US, Aptive
+// charges…") and must not read as first-person (Codex r2 P2). Everything
+// else stays caseless.
+const FIRST_PARTY_CI_RE = /\b(we|we're|our|ours|i|i'm|i've|my|mine|myself|waves|waveguard)\b|\{\{\s*(?:brand|site|company)[a-zA-Z]*\s*\}\}/i;
+const FIRST_PARTY_US_RE = /\bus\b/;
+function hasFirstPartyMarker(sentence) {
+  return FIRST_PARTY_CI_RE.test(sentence) || FIRST_PARTY_US_RE.test(sentence);
+}
+
+// Clause boundaries INSIDE a sentence: punctuation plus contrast/coordination
+// conjunctions. A competitor named in a DIFFERENT clause does not own the
+// amount (pre-push Codex P0 — "Orkin charges too much, but quarterly pest
+// control is $129 per application").
+// COORDINATING conjunctions (and/or/plus) split too: they introduce a new
+// subject, and "Orkin charges too much and quarterly pest control costs
+// $129" must not let the Orkin predicate own the second amount (pre-push
+// Codex P0). Splitting here only ever NARROWS the exemption.
+const CLAUSE_SPLIT_RE = /[,;:—–]|\b(?:but|while|whereas|however|though|although|yet|meanwhile|and|or|plus)\b/gi;
+// Explicit third-party SUBJECTS only. Deliberately excludes vague nouns like
+// "the industry" or "a typical charge" — those describe a market, not a party
+// that owns a price, and they let ordinary marketing copy through
+// ("The industry-leading quarterly plan costs $129" — pre-push Codex P0).
+const GENERIC_THIRD_PARTY_RE = /\b(competitors?|other (?:companies|providers|firms)|national (?:chains?|companies|brands?)|big(?:-| )box (?:companies|chains?|providers?)|another company|(?:previous|current|prior|former|existing) (?:provider|company|contractor|exterminator)|most (?:companies|providers)|many (?:companies|providers)|industry average)\b/i;
+
+// A third party OWNS the amount only in an explicit pricing construction —
+// naming them earlier in the clause is not enough ("Avoid Orkin by choosing
+// quarterly pest control for $129" — pre-push Codex P0). Two shapes, both
+// requiring the third party to be the SUBJECT:
+//   (A) <party> …short filler… <pricing verb> … $amount
+//       "Orkin charges a $199 fee", "other companies typically charge $25"
+//   (B) <party>'s <price noun> is/was/starts at … $amount
+//       "Orkin's cancellation fee is $199"
+// Bare copulas ("is"/"are") are NOT accepted in shape A: "Orkin is expensive
+// and quarterly pest control is $129" must stay blocked.
+const PRICING_VERB_RE = /^(?:charges?|charged|bills?|billed|lists?|listed|quotes?|quoted|asks?|wants?|sets?|advertises?|prices?|priced|costs?|runs?|reports?|collects?|adds?)$/i;
+// WHITELIST, not a blocklist: every token between the third-party subject
+// and the amount must be either the pricing verb (once) or an innocuous
+// determiner/quantifier/price noun. Anything unexpected — a subordinating
+// conjunction, a second subject, another verb — rejects the exemption by
+// construction, which is what ends the "one more conjunction" arms race
+// ("Orkin charges too much because the standard rate is $129" — pre-push
+// Codex P0).
+// NOTE: no price NOUNS here (price/cost/charge/rate/pricing). They double as
+// verbs, which let a SECOND predicate ride through as filler — "Orkin reports
+// the quarterly plan costs $129" (pre-push Codex P0). Only the amount's own
+// trailing noun ("fee") and neutral determiners/quantifiers qualify.
+const PRICE_FILLER_WORD_RE = /^(?:a|an|the|about|around|approximately|roughly|nearly|almost|up|to|as|only|just|its|their|his|her|your|new|typical|typically|usual|usually|generally|often|standard|average|annual|monthly|quarterly|yearly|initial|first|one-time|onetime|early|cancellation|termination|contract|treatment|visit|plan|plans|fee|fees|minimum|customer|customers|client|clients|homeowner|homeowners|may|might|can|could|will|would|still|reportedly|both|per|of|from|at|near|flat|extra|additional)$/i;
+const MAX_ATTRIBUTION_TOKENS = 8;
+
+// RIGID TEMPLATE, deliberately small: the pricing verb must be the FIRST
+// token after the party (one optional modal/adverb), and only determiners or
+// hedges may sit between that verb and the amount. Eight adversarial review
+// rounds established that anything looser leaves room for a second subject
+// or predicate to slip in and launder a Waves price — so the accepted
+// language is a closed set ("Orkin charges a $199 fee", "other companies may
+// bill up to $25"), not "a pricing verb somewhere nearby". Sentences the
+// template rejects are still publishable, just rephrased into this shape.
+const PRE_VERB_MODIFIER_RE = /^(?:may|might|can|could|will|would|often|typically|usually|generally|reportedly|also|still|now|both|each|all|generally)$/i;
+const POST_VERB_MODIFIER_RE = /^(?:a|an|the|its|their|your|about|around|approximately|roughly|nearly|almost|up|to|as|much|as-much-as|only|just|from|over|under|another|one|each|per|flat|extra|additional|new|standard|typical|average|annual|monthly|quarterly|yearly|initial|first|one-time|onetime|early|cancellation|termination|contract|treatment|visit|plan|service)$/i;
+
+function attributionBindsToAmount(between) {
+  const tokens = String(between || '').replace(/^(?:'s|’s)/, ' ').split(/\s+/)
+    .map((t) => t.replace(/[^\w'-]/g, ''))
+    .filter(Boolean);
+  if (!tokens.length || tokens.length > MAX_ATTRIBUTION_TOKENS) return false;
+  let i = 0;
+  // At most two pre-verb modifiers ("may", "typically").
+  let modifiers = 0;
+  while (i < tokens.length && PRE_VERB_MODIFIER_RE.test(tokens[i])) {
+    if (++modifiers > 2) return false;
+    i += 1;
+  }
+  if (i >= tokens.length || !PRICING_VERB_RE.test(tokens[i])) return false;
+  i += 1;
+  // Everything remaining must be a determiner/hedge or an earlier amount in
+  // a range ("from $49 to $99", "between $49 and $99" — Codex r2 P1) — no
+  // second verb, no second subject.
+  for (; i < tokens.length; i += 1) {
+    if (POST_VERB_MODIFIER_RE.test(tokens[i])) continue;
+    if (/^\$?[\d,.]+$/.test(tokens[i])) continue;
+    if (/^(?:between|and)$/i.test(tokens[i])) continue;
+    return false;
+  }
+  return true;
+}
+// The price noun must be DIRECTLY governed by the possessive (at most two
+// modifiers) and the copula must land immediately before the amount — no
+// intervening subject or predicate. Rejects "Orkin's website notes the local
+// plan price is $129" (pre-push Codex P0) while keeping "Orkin's cancellation
+// fee is $199".
+const POSSESSIVE_PRICE_RE = /^(?:'s|’s)\s+(?:[A-Za-z-]+\s+){0,2}(?:fee|fees|price|prices|pricing|rate|rates|charge|charges|cost|costs|quote|quotes|minimum)\s+(?:is|was|are|were|starts?\s+at|runs?|comes?\s+to)\s*$/i;
+//   (C) benchmark subject + copula: "the industry average is $145". The
+//       phrase names a market statistic, so it can never denote a Waves
+//       price — a bare copula is safe here (it is not in shape A).
+const BENCHMARK_SUBJECT_RE = /^(?:industry average)$/i;
+const BENCHMARK_COPULA_RE = /^[^.!?]{0,20}?\b(?:is|was|are|were|runs?|comes? to|sits? at|hovers? around)\b[^.!?]{0,15}?$/i;
+
+function buildNameAlternation(names) {
+  // Longest-first so "Truly Nolen of America" wins over "Truly Nolen".
+  const alts = names
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .map((n) => escapeRegExp(n).replace(/\s+/g, '\\s+'));
+  return alts.length ? `\\b(?:${alts.join('|')})\\b` : null;
+}
+
+function competitorNamePatterns() {
+  if (competitorNamePatterns._res !== undefined) return competitorNamePatterns._res;
+  const names = [];
+  const csNames = [];
+  try {
+    const { COMPETITORS, COMPETITOR_BRAND_SIGNALS } = require('./competitor-facts');
+    for (const c of Array.isArray(COMPETITORS) ? COMPETITORS : []) {
+      if (c?.name) names.push(String(c.name));
+      for (const a of Array.isArray(c?.aliases) ? c.aliases : []) names.push(String(a));
+      // aliasesCS are deliberately CASE-SENSITIVE elsewhere ("Rodent
+      // Solutions" the company vs "rodent solutions" the phrase) — same
+      // sensitivity here (Codex r2 P2).
+      for (const a of Array.isArray(c?.aliasesCS) ? c.aliasesCS : []) csNames.push(String(a));
+    }
+    // Detection-only brands (Aptive, Hawx, …) attribute prices too — the
+    // B1/B3 intercept briefs mandate Aptive's cancellation fee, and the
+    // comparison gate separately polices whether NAMING them is authorized.
+    // This pattern only decides who can OWN a dollar figure.
+    for (const s of Array.isArray(COMPETITOR_BRAND_SIGNALS) ? COMPETITOR_BRAND_SIGNALS : []) names.push(String(s));
+  } catch { /* competitor-facts unavailable — generic framing still applies */ }
+  const res = [];
+  const ci = buildNameAlternation(names);
+  if (ci) res.push(new RegExp(ci, 'i'));
+  const cs = buildNameAlternation(csNames);
+  if (cs) res.push(new RegExp(cs));
+  competitorNamePatterns._res = res;
+  return res;
+}
+
+// The sentence containing `index`. Boundaries = . ! ? followed by whitespace
+// or end-of-string (so decimal amounts like "$49.99" never split), PLUS any
+// line break: an unpunctuated Markdown heading otherwise merges with the
+// block below it and "## Orkin\nQuarterly plan costs $129" would read as
+// attribution (pre-push Codex P0).
+function sentenceAround(text, index) {
+  const s = String(text || '');
+  // Trailing quotes/markdown markers after the punctuation are part of the
+  // boundary — 'Orkin charges $199.” $89 locally.' must split after the
+  // closing quote or the second amount inherits the attribution (pre-push
+  // Codex P0).
+  const boundaryRe = /[.!?]["”'’)\]*_]*(?=\s|$)|\r?\n/g;
+  let start = 0;
+  let m;
+  while ((m = boundaryRe.exec(s)) !== null) {
+    if (m.index >= index) break;
+    start = m.index + m[0].length;
+  }
+  boundaryRe.lastIndex = index;
+  const endMatch = boundaryRe.exec(s);
+  const end = endMatch ? endMatch.index + 1 : s.length;
+  return { text: s.slice(start, end), offset: start };
+}
+
+
+
+
+
+
+
+const unescapeStr = (v) => String(v ?? '').replace(/\\(.)/g, '$1');
+
+
+
+// What a READER sees in a table cell, for OWNERSHIP decisions only (never
+// for offsets). Three transforms, each a real bypass found in review:
+//   - entities: "O&#117;r quarterly service" renders as "Our …" but the raw
+//     text hides the first-party marker (Codex r9);
+//   - Markdown links: the B1/B3 briefs REQUIRE linked attribution, so
+//     "[Aptive](https://…)" must identify Aptive, not fail the exact-name
+//     test on its brackets and URL (Codex r9);
+//   - backslash escapes, as elsewhere in this file.
+// Remove tag markup entirely (no space inserted, so "O<span>u</span>r"
+// becomes "Our"), using the quote-aware scanner rather than a regex.
+function stripTags(text) {
+  const str = String(text || '');
+  const tags = [...eachTag(str)];
+  if (!tags.length) return str;
+  let out = '';
+  let cursor = 0;
+  for (const tag of tags) {
+    out += str.slice(cursor, tag.start);
+    cursor = tag.end + 1;
+  }
+  return out + str.slice(cursor);
+}
+
+// Delete (never blank) the spans a reader never sees: hidden element
+// content and MDX expression containers. Used only for IDENTITY decisions,
+// where introducing a word boundary would itself be the bug.
+function removeNonRendered(text) {
+  // Comments FIRST: an MDX comment is an expression container, so the
+  // expression pass below would otherwise unwrap "{/*x*/}" to "/*x*/" and
+  // splice that between the letters it was hiding (Codex).
+  let out = String(text || '').replace(COMMENT_SPAN_RE, '');
+  // Hidden elements, innermost-safe: repeat until stable.
+  for (let pass = 0; pass < 4; pass += 1) {
+    const tags = [...eachTag(blankComments(out))];
+    let cut = null;
+    for (let t = 0; t < tags.length && !cut; t += 1) {
+      const tag = tags[t];
+      if (tag.isClose || tag.selfClosing || !opensDefinitelyHidden(tag)) continue;
+      let depth = 1;
+      for (let u = t + 1; u < tags.length; u += 1) {
+        const other = tags[u];
+        if (other.name !== tag.name || other.selfClosing) continue;
+        if (other.isClose) { depth -= 1; if (depth === 0) { cut = [tag.start, other.end]; break; } }
+        else depth += 1;
+      }
+      if (!cut) cut = [tag.start, out.length - 1];
+    }
+    if (!cut) break;
+    out = out.slice(0, cut[0]) + out.slice(cut[1] + 1);
+  }
+  // Balanced MDX expressions.
+  for (let i = 0; i < out.length; i += 1) {
+    if (out[i] !== '{') continue;
+    let depth = 0;
+    let j = i;
+    for (; j < out.length; j += 1) {
+      const ch = out[j];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        const q = ch; j += 1;
+        while (j < out.length && out[j] !== q) j += out[j] === '\\' ? 2 : 1;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') { depth -= 1; if (depth === 0) break; }
+    }
+    if (j >= out.length) break;
+    // An expression that RENDERS must keep its value: `O{"ur"} service`
+    // displays as "Our service", so deleting it would erase the marker and
+    // GRANT the exemption. Only provably-empty values are dropped; anything
+    // unreadable keeps its inner text, which errs toward blocking (Codex).
+    const inner = out.slice(i + 1, j).trim();
+    const lit = /^(?:"([^"]*)"|'([^']*)'|`([^`$]*)`)$/.exec(inner);
+    let replacement;
+    if (lit) replacement = lit[1] ?? lit[2] ?? lit[3] ?? '';
+    else if (/^(?:null|undefined|false|''|""|``)$/.test(inner)) replacement = '';
+    else replacement = inner;
+    out = out.slice(0, i) + replacement + out.slice(j + 1);
+    i += replacement.length - 1;
+  }
+  return out;
+}
+
+function cellIdentity(v) {
+  // Hidden DESCENDANTS and MDX expressions render nothing, so they must be
+  // REMOVED (not blanked) before the veto — "O<span hidden>x</span>ur" and
+  // "O{null}ur" both display as "Our", and leaving the inner text or the
+  // expression in place split the marker into "Oxur" (Codex).
+  const seed = removeNonRendered(String(v ?? ''));
+  return decodeEntitiesForScan(unescapeStr(seed))
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // Reference, collapsed and shortcut links render as their label too:
+    // "O[ur][brand] service" displays as "Our service" (Codex). Definitions
+    // are dropped outright; leftover brackets are removed so no boundary is
+    // introduced.
+    .replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*$/gm, '')
+    .replace(/\[([^\]]*)\]\[[^\]]*\]/g, '$1')
+    .replace(/\[([^\]]*)\]/g, '$1')
+    // Inline emphasis renders away: "O**ur** quarterly service" reads as
+    // "Our quarterly service", and splitting on the asterisks hid the
+    // first-party marker (Codex r10). Inline TAGS do the same —
+    // "O<span>u</span>r" renders as "Our" — and must be removed WITHOUT
+    // inserting a space, or the marker stays split (Codex r10).
+    // COMMENTS render away with no boundary too: "O<!--x-->ur" displays as
+    // "Our" (Codex r10). Removed BEFORE emphasis stripping, or the "*" in an
+    // MDX comment is eaten first and the comment no longer matches.
+    .replace(COMMENT_SPAN_RE, '')
+    .replace(/[*_`~]+/g, '')
+    // Quote-aware: a ">" inside an attribute value does not end the tag, and
+    // a naive regex left the tail behind, re-splitting the marker
+    // (Codex r10). stripTags removes markup WITHOUT inserting a boundary.
+    .replace(/[\s\S]*/, (t) => stripTags(t));
+}
+
+
+// The clause containing `localIndex` within a sentence.
+// A conjunction continues a RANGE only when an explicit range marker
+// anchors it: "between $49 and $99" / "from $49 or $59". A bare
+// "charges $199 and $89 is the local rate" is TWO clauses — the second
+// amount must not inherit the attribution (pre-push Codex P0), so
+// amount-after-conjunction alone is NOT enough.
+// The anchor must also PAIR with its conjunction ("between … and", "from …
+// to") and what follows must be the range's ENDPOINT, not a fresh predicate:
+// "Aptive charges from $49 and $89 is the local quarterly rate" is two
+// claims, and reading it as one range laundered the second, first-party
+// amount (pre-push Codex P0, r6). Unrecognized range grammar fails closed —
+// the amount is simply scanned as its own clause.
+const RANGE_ANCHOR_RE = /\b(between|from)\s+\$[\d,.]*\s*$/i;
+const RANGE_PAIRS = { between: /^and$/i, from: /^to$/i };
+const PREDICATE_AFTER_ENDPOINT_RE = /^\s*\$[\d,.]+(?:\s+(?:per|a|an|each)\s+[\w-]+)?\s+(?:is|are|was|were|costs?|starts?|runs?|remains?|covers?|includes?|buys?|gets?)\b/i;
+function isRangeConjunction(s, m) {
+  const conj = m[0].trim();
+  if (!/^(?:and|or|to)$/i.test(conj)) return false;
+  const after = s.slice(m.index + m[0].length);
+  if (!/^\s*\$\d/.test(after)) return false;
+  const anchor = RANGE_ANCHOR_RE.exec(s.slice(0, m.index));
+  if (!anchor) return false;
+  const pair = RANGE_PAIRS[anchor[1].toLowerCase()];
+  if (!pair || !pair.test(conj)) return false;
+  return !PREDICATE_AFTER_ENDPOINT_RE.test(after);
+}
+
+function clauseAround(sentence, localIndex) {
+  const s = String(sentence || '');
+  const splitRe = new RegExp(CLAUSE_SPLIT_RE.source, CLAUSE_SPLIT_RE.flags);
+  let start = 0;
+  let m;
+  while ((m = splitRe.exec(s)) !== null) {
+    if (m.index >= localIndex) break;
+    if (isRangeConjunction(s, m)) continue;
+    start = m.index + m[0].length;
+  }
+  splitRe.lastIndex = localIndex;
+  let end = s.length;
+  while ((m = splitRe.exec(s)) !== null) {
+    if (isRangeConjunction(s, m)) continue;
+    end = m.index;
+    break;
+  }
+  return { text: s.slice(start, end), offset: start };
+}
+
+// True only when the amount's OWN CLAUSE attributes the price to someone who
+// isn't us, with the attribution standing BEFORE the amount (subject
+// position) — "Orkin charges a $199 cancellation fee", not "$199 … Orkin"
+// and not "Orkin charges too much, but our rate is $129". The first-party
+// disqualifier is SENTENCE-wide (deliberately broader than the attribution
+// scope): any mention of us anywhere in the sentence blocks the exemption.
+function isThirdPartyPriceCitation(text, amountIndex, vetoText) {
+  const { text: sentence, offset: sentenceOffset } = sentenceAround(text, amountIndex);
+  if (!sentence) return false;
+  // The first-party VETO reads the sentence DECODED — "O&#117;r service is
+  // different; Orkin charges $89" renders as "Our service…" and the raw text
+  // hid the marker (Codex r9 P0). Decoding is safe here because the sentence
+  // is only pattern-tested, never used for offsets; the clause scan below
+  // deliberately stays on the RAW text, since decoding there would only ever
+  // ADD third-party matches — the permissive direction.
+  // The veto reads the whole PARAGRAPH, not just the sentence. Sentence
+  // splitting cannot be made abbreviation-proof — "Our U.S. service differs;
+  // Orkin charges $89" split at "U.S." and lost the marker (Codex r10) — and
+  // enumerating abbreviations is the same losing game. A paragraph-scoped
+  // veto closes the class outright; it only ever blocks MORE, and the
+  // attribution side below stays sentence- and clause-scoped.
+  // The veto reads the RAW paragraph through cellIdentity, which strips
+  // emphasis and tag markup WITHOUT inserting a boundary. proseText blanks
+  // tags to spaces, so "O<span>u</span>r" and "O**ur**" arrived pre-split and
+  // the marker was missed — the same bypass already closed for table cells
+  // (Codex r10). Reading raw text here only ever blocks MORE.
+  const vt = typeof vetoText === 'string' ? vetoText : text;
+  const paraStart = (() => { const i = vt.lastIndexOf('\n\n', amountIndex); return i === -1 ? 0 : i + 2; })();
+  const paraEndRaw = vt.indexOf('\n\n', amountIndex);
+  const paragraph = vt.slice(paraStart, paraEndRaw === -1 ? vt.length : paraEndRaw);
+  if (hasFirstPartyMarker(cellIdentity(paragraph))) return false;
+  const localAmountIndex = amountIndex - sentenceOffset;
+  const { text: clause, offset: clauseOffset } = clauseAround(sentence, localAmountIndex);
+  if (!clause) return false;
+  const clauseAmountIndex = localAmountIndex - clauseOffset;
+  for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
+    if (!re) continue;
+    const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let m;
+    while ((m = scan.exec(clause)) !== null) {
+      if (m.index >= clauseAmountIndex) break;
+      const between = clause.slice(m.index + m[0].length, clauseAmountIndex);
+      // (A) the party is the subject of a pricing predicate that owns THIS
+      // amount — every linking token whitelisted (see attributionBindsToAmount).
+      if (attributionBindsToAmount(between)) return true;
+      // (B) possessive price noun: "Orkin's cancellation fee is $199".
+      if (POSSESSIVE_PRICE_RE.test(between)) return true;
+      // (C) benchmark subject + copula: "the industry average is $145".
+      if (BENCHMARK_SUBJECT_RE.test(m[0].trim()) && BENCHMARK_COPULA_RE.test(between)) return true;
+    }
+  }
+  return false;
 }
 
 function isRegulatoryPenaltyAmount(amount, context) {
@@ -192,6 +1082,37 @@ function curatedCompetitorSourceHosts() {
   return hosts;
 }
 
+// Scheme and host are case-INSENSITIVE; the PATH is not. Lowercasing the
+// whole URL made "/Payload.js" and "/payload.js" the same resource, so a
+// named citation could authorize a different file on the same host
+// (Codex).
+function normalizeSourceUrl(u) {
+  // Only sentence punctuation that CANNOT be part of a URL path is trimmed.
+  // Stripping ")" and "." conflated distinct resources — ".../a." and
+  // ".../a" are different paths (Codex).
+  const raw = String(u || '').trim().replace(/[,;:!?]+$/, '');
+  if (!/^https?:\/\//i.test(raw)) return null;
+  try {
+    const url = new URL(raw);
+    const path = `${url.pathname}${url.search}${url.hash}`.replace(/\/+$/, '');
+    // url.host keeps a non-default PORT — dropping it let a named source
+    // match the same path on a different port (Codex).
+    return `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}${path}`;
+  } catch { return null; }
+}
+
+// The EXACT URLs a brief named. Compared whole, so naming a citation page
+// never widens to its host — an operator asking for one document does not
+// authorize everything that domain can serve.
+function allowedExactSourceUrls(requiredSourceUrls = []) {
+  const urls = new Set();
+  for (const u of Array.isArray(requiredSourceUrls) ? requiredSourceUrls : []) {
+    const norm = normalizeSourceUrl(u);
+    if (norm) urls.add(norm);
+  }
+  return urls;
+}
+
 function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const hosts = new Set();
   for (const d of HUB_DOMAINS) hosts.add(normalizeHost(d));
@@ -200,21 +1121,27 @@ function allowedLinkHosts({ operatorCitations = false, requiredSourceUrls = [] }
     const h = normalizeHost(d);
     if (h) hosts.add(h);
   }
-  // Operator-mandated must-link citations: the brief's own required_sources
-  // URLs are binding writer instructions ("every source below must be linked
-  // in the body"), so their hosts are allowed for that draft.
-  for (const u of Array.isArray(requiredSourceUrls) ? requiredSourceUrls : []) {
-    try { hosts.add(normalizeHost(new URL(String(u)).hostname)); } catch { /* skip non-URLs */ }
-  }
+  // NOTE: brief-named sources are NOT host-allowlisted — see
+  // allowedExactSourceUrls. Allowing the HOST would let a named citation
+  // domain also serve "<script src=…/evil.js>", which is the executable-MDX
+  // hole the TLD rule had (Codex).
+
   if (operatorCitations) {
     for (const h of OPERATOR_CITATION_HOSTS) hosts.add(normalizeHost(h));
     for (const h of curatedCompetitorSourceHosts()) hosts.add(h);
   }
+  // NO broad .gov/.edu TLD allowance (owner ruling 2026-08-01, third).
+  // A host-wide rule has to be defended at every position a URL can appear —
+  // src=, script bodies, form action, a ping, MDX expressions, Markdown
+  // images and their reference/collapsed/shortcut forms — and each one was a
+  // separate bypass into executable .mdx. The brief NAMES its sources, and
+  // those flow in above as requiredSourceUrls, so a statute or extension
+  // citation the operator asked for is allowed wherever it appears while an
+  // unnamed host never is. Position stops mattering.
   return hosts;
 }
 
-// Exact host or subdomain of an allowed host ("entnemdept.ufl.edu" is allowed
-// by "ufl.edu"; "evil-ufl.edu" is not — the dot prefix prevents suffix abuse).
+
 function hostAllowed(host, allowed) {
   if (!host) return false;
   if (allowed.has(host)) return true;
@@ -365,9 +1292,141 @@ const DEST_CONTROL_RE = new RegExp([
   // must hit every arm above — the sibling scheme regexes already carry it.
 ].join('|'), 'i');
 
+
+// Generated posts publish as executable .mdx, and nothing in a blog post
+// needs to ship code. Banning these tags outright is what finally ends the
+// "is this URL in an executable position?" question: there IS no executable
+// position, so a named citation URL cannot be turned into one (Codex).
+// A CLOSED ALLOWLIST of raw HTML permitted in generated posts. A blacklist
+// kept missing actives — script/iframe/object/embed, then meta, base, link,
+// style — and each miss was executable in MDX (redirects, URL rebasing,
+// injected CSS). Anything not listed here is rejected, so the next active
+// element nobody thought of is rejected by default (Codex).
+//
+// Uppercase names are MDX COMPONENTS (<ComparisonTable>), which are the
+// writer contract and are validated by their own gates — not raw HTML.
+const PASSIVE_HTML_TAGS = new Set([
+  'p', 'br', 'hr', 'span', 'div', 'section', 'article', 'aside', 'header', 'footer', 'main', 'nav',
+  'strong', 'b', 'em', 'i', 'u', 's', 'del', 'ins', 'mark', 'small', 'sub', 'sup',
+  'code', 'pre', 'kbd', 'samp', 'var', 'abbr', 'cite', 'q', 'blockquote', 'time', 'address',
+  'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'colgroup', 'col',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'a', 'img', 'figure', 'figcaption', 'picture', 'details', 'summary',
+]);
+
+// Is this MDX expression a pure DATA LITERAL? Decided by tokenizing rather
+// than sniffing for "(" or "=>": character heuristics kept admitting other
+// executable shapes ("{globalThis.x}", "{a.b}", tagged templates). The only
+// tokens allowed are string / number / boolean / null literals, the array and
+// object punctuation, and identifiers in KEY position. Anything else — an
+// identifier that is not a key, an operator, a call — makes it executable.
+function isLiteralExpression(expr) {
+  const body = String(expr || '').replace(/^\{/, '').replace(/\}$/, '');
+  let i = 0;
+  const n = body.length;
+  while (i < n) {
+    const ch = body[i];
+    if (/\s/.test(ch)) { i += 1; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      i += 1;
+      let interpolated = false;
+      while (i < n && body[i] !== quote) {
+        if (quote === '`' && body[i] === '$' && body[i + 1] === '{') interpolated = true;
+        i += body[i] === '\\' ? 2 : 1;
+      }
+      if (i >= n) return false;
+      // A backtick string is a plain literal only WITHOUT interpolation —
+      // "${…}" executes.
+      if (interpolated) return false;
+      i += 1;
+      continue;
+    }
+    if ('[]{},:'.includes(ch)) { i += 1; continue; }
+    if (/[-+]/.test(ch) && /\d/.test(body[i + 1] || '')) { i += 1; continue; }
+    if (/\d/.test(ch)) { while (i < n && /[\d._eE+-]/.test(body[i])) i += 1; continue; }
+    if (/[A-Za-z_$]/.test(ch)) {
+      let j = i;
+      while (j < n && /[\w$]/.test(body[j])) j += 1;
+      const word = body.slice(i, j);
+      let k = j;
+      while (k < n && /\s/.test(body[k])) k += 1;
+      // A bare identifier is only data when it is an object KEY.
+      if (!['true', 'false', 'null', 'undefined'].includes(word) && body[k] !== ':') return false;
+      i = j;
+      continue;
+    }
+    return false; // operators, calls, backticks, anything else
+  }
+  return true;
+}
+
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
+  // MDX ESM: an "import"/"export" statement at the start of a line is
+  // executable module code, not prose, and no tag or expression scan sees it
+  // (Codex). Generated posts have no reason to carry either.
+  // No whitespace is required after the keyword — "import{x}from'y'" is
+  // valid — and the line may be indented with any Unicode space or a
+  // blockquote marker (Codex).
+  // Comment-blanked: "{/* … */}import x from 'y'" kept the line from
+  // starting with the keyword (Codex).
+  const esm = /^[\s>]*(import|export)(?=[\s{*'"(])/m.exec(blankComments(body));
+  if (esm) {
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains an MDX "${esm[1]}" statement — generated posts publish as .mdx and must never declare modules. Remove it.`);
+  }
+  // ANY MDX expression is executable at render, INCLUDING a component prop —
+  // "<Comp onClick={fetch('https://named-source')} />" is as live as a
+  // top-level one, and excluding tag interiors left exactly that hole
+  // (Codex). Real component props carry data, not URLs; links are Markdown.
+  {
+    for (let i = 0; i < body.length; i += 1) {
+      if (body[i] !== '{') continue;
+      let depth = 0;
+      let j = i;
+      for (; j < body.length; j += 1) {
+        const ch = body[j];
+        if (ch === '"' || ch === "'" || ch === '`') {
+          const q = ch; j += 1;
+          while (j < body.length && body[j] !== q) j += body[j] === '\\' ? 2 : 1;
+          continue;
+        }
+        if (ch === '{') depth += 1;
+        else if (ch === '}') { depth -= 1; if (depth === 0) break; }
+      }
+      if (j >= body.length) break;
+      const expr = body.slice(i, j + 1);
+      // A closed rule, not a URL sniff: an expression may only be a COMMENT
+      // or a LITERAL prop value. Calls, arrows and template interpolation
+      // execute, and an executable expression needs no literal URL to reach
+      // the network — "{fetch(atob('…'))}" has none (Codex).
+      const isComment = /^\{\s*\/\*[\s\S]*\*\/\s*\}$/.test(expr);
+      const isLiteral = isLiteralExpression(expr);
+      if (!isComment && !isLiteral) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains an executable MDX expression — generated posts may carry only literal component props and comments. Write content as Markdown.');
+      }
+      if (/:\/\//.test(expr)) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a URL inside an MDX expression — expressions execute at render and are never citations. Write the link as Markdown.');
+      }
+      i = j;
+    }
+  }
+  for (const tag of eachTag(body)) {
+    if (/^[A-Z]/.test(tag.name.charAt(0)) || /^[A-Z]/.test((/^<\/?([A-Za-z][\w-]*)/.exec(body.slice(tag.start, tag.end + 1)) || [])[1] || '')) continue;
+    if (PASSIVE_HTML_TAGS.has(tag.name)) {
+      // A passive ELEMENT can still carry an active ATTRIBUTE: any "on*"
+      // handler is inline JavaScript regardless of which tag holds it
+      // (Codex). Allowlisting the tag is not allowlisting its attributes.
+      const handler = /(?:^|\s)(on[a-z]+)\s*=/i.exec(tag.attrs || '');
+      if (handler) {
+        return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains the inline event handler "${handler[1]}" — generated posts must never ship JavaScript. Remove it.`);
+      }
+      continue;
+    }
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains the raw HTML tag "<${tag.name}", which is not on the passive-content allowlist — generated posts publish as .mdx and must never ship code, redirects, rebased URLs or injected styles. Use Markdown or an approved component.`);
+  }
   if (DEST_CONTROL_RE.test(body)) {
     return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link destination with embedded control characters (tab/newline) — browsers strip these while parsing, which can smuggle an executable scheme. Remove them.');
   }
@@ -410,6 +1469,13 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     }
   }
   const allowed = allowedLinkHosts({ operatorCitations, requiredSourceUrls });
+  const exactUrls = allowedExactSourceUrls(requiredSourceUrls);
+  // The broad .gov/.edu allowance is for CITATIONS — passive hyperlink
+  // destinations. It must not extend to ACTIVE resource positions: posts are
+  // published as executable .mdx, so a "<script src=…edu/payload.js>" would
+  // turn control of any delegated subdomain into live third-party code on the
+  // customer site (Codex). Those spans lose the TLD leniency and fall back to
+  // the explicit host allowlist.
   const urlRe = new RegExp(ABSOLUTE_URL_RE.source, 'gi');
   let m;
   while ((m = urlRe.exec(body)) !== null) {
@@ -424,6 +1490,7 @@ function externalLinkFinding(text, { operatorCitations = false, requiredSourceUr
     let host = null;
     try { host = new URL(rawUrl).hostname; } catch { host = null; }
     const norm = normalizeHost(host);
+    if (exactUrls.has(normalizeSourceUrl(rawUrl) || '\u0000')) continue;
     if (!hostAllowed(norm, allowed)) {
       return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft links to "${host || rawUrl.slice(0, 60)}", which is not the hub, a fleet spoke, or an allowlisted citation domain — external links are blocked (spam/injection guard). Use internal links, or add the domain to CONTENT_ALLOWED_LINK_DOMAINS if this citation is editorially approved.`);
     }
@@ -1894,7 +2961,7 @@ function literalPhoneInTitleFinding(frontmatter) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, competitorPriceCitations = false, forbidAllPrices = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -1936,8 +3003,13 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   }
 
   const findings = [
-    // Price must cover everything that ships: body AND meta.
-    priceFinding(publishableText),
+    // Price must cover everything that ships: body AND meta. Third-party
+    // price citations carry their OWN flag, stricter than operatorCitations:
+    // category/spoke seeds share the operator_intercept bucket and DO get
+    // citation hosts, but only true competitor-intercept briefs may cite
+    // competitor prices (Codex: seed lanes auto-publish informational posts
+    // and must keep the full price guard).
+    priceFinding(publishableText, { thirdPartyCitations: competitorPriceCitations, forbidAllPrices, operatorCitations, requiredSourceUrls }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
@@ -2018,6 +3090,7 @@ module.exports = {
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
+  isThirdPartyPriceCitation,
   // single source of truth for the product-claim + prevention-promise
   // policies — consumed by the writer prompts so instruction and enforcement
   // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).

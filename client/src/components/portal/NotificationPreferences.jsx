@@ -5,7 +5,8 @@ const NOTIFICATION_TYPES = [
   { key: 'techEnRoute', channelKey: 'enRouteChannel', label: 'Tech En Route', desc: 'Alert when your technician is on the way' },
   { key: 'serviceCompleted', channelKey: 'serviceCompleteChannel', label: 'Service Complete', desc: 'Summary after each service visit' },
   { key: 'paymentReceipt', channelKey: 'paymentReceiptChannel', label: 'Payment Receipts', desc: 'Confirmation when payments are processed' },
-  { key: 'billingAlerts', channelKey: 'billingChannel', label: 'Billing Alerts', desc: 'Invoice and billing notifications' },
+  // Billing Alerts row removed (owner ruling 2026-08-01): billing notices
+  // carry no opt-out — delivery method is configured on the Billing tab.
   { key: 'reviewRequest', channelKey: 'reviewRequestChannel', label: 'Review Requests', desc: 'Invitation to leave feedback after service' },
   { key: 'referralNudge', channelKey: 'referralChannel', label: 'Referral Program', desc: 'Referral rewards and program updates' },
   { key: 'seasonalTips', channelKey: 'seasonalChannel', label: 'Seasonal Tips', desc: 'Lawn and pest care tips for the season' },

@@ -101,6 +101,8 @@ const {
 } = require('../services/track-transition-alerts');
 const {
   finiteDate,
+  positiveNumber,
+  positiveMinutesBetween,
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
@@ -794,6 +796,292 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
   return toETNoonServiceDate(serviceDate);
 }
 
+// Live time-on-site override (forgotten-closeout fix, same-day leg): the
+// completion panel's timer keeps running when a visit isn't closed out
+// promptly, and a live completion ships that inflated elapsed verbatim into
+// the duration columns. An admin may instead type corrected minutes — the
+// wire contract is TYPE-based on the existing timeOnSite field: a string is
+// the panel's auto-elapsed timer (unchanged behavior), a NUMBER is an
+// operator-typed override (only backfill bodies carry numbers today).
+// ADMIN-ONLY, fail-closed like backfillCompletionPlan: the tech portal never
+// sends numbers, so a numeric value on a technician token is tampering or a
+// client bug — 403, never silently degraded. Out-of-range from an admin is a
+// 400 (unlike backfill's degrade-to-unknown: the admin is live at the panel
+// and can correct the typo; the backlog-closeout must-land argument doesn't
+// apply). Backfill bodies pass through untouched — the backfill sanitizer
+// owns that branch. Pure for testability (_test).
+// Timer-vs-operator classification is the SHARED rule in
+// completion-attempts (isOperatorTimeOnSite) — the intake gate here and the
+// idempotency MODE hash must never disagree about what counts as an
+// operator-entered duration (codex P2 #3152 round 14). Non-timer shapes —
+// bare "45", "45 min", numbery arrays — are operator input wearing a string
+// costume and take the admin gate (codex P1 round 13).
+//
+// Timer-SHAPED strings are additionally validated against the server's own
+// span (codex P1 round 14): the format alone cannot distinguish the panel's
+// real timer from a forged "45:00", but the server owns the start stamp.
+// Within this tolerance the client's second-level precision is kept
+// (network latency + modest clock drift); outside it the server-derived
+// span is recorded instead.
+const LIVE_TIMER_TOLERANCE_MINUTES = 5;
+
+// Server-derived minutes rendered in the panel timer's own "H:MM:SS" shape,
+// so a substituted value flows through every downstream type-based contract
+// (structured_notes freeze, the numeric-means-adjusted signals) exactly
+// like a genuine timer submission.
+function minutesAsElapsedString(minutes) {
+  const whole = Math.max(0, Math.round(minutes));
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}:00`;
+}
+
+// Linked job timer sync — shared by the after-the-fact PATCH and the live
+// completion override (codex P1, pre-push audit round 20): job costing
+// overrides the inflated entry via the durable stamp, but timesheet detail,
+// utilization, and actual-duration analytics read time_entries directly.
+// Revision-fenced under the scheduled_services row lock, which is HELD
+// through the audited edit so concurrent corrections' syncs serialize in
+// commit order; a request that finds a NEWER revision than the one it
+// committed skips — the newest correction's own pass lands the truth. The
+// safe shape is exactly one non-voided, CLOSED job entry diverging from the
+// corrected minutes in either direction; everything else is surfaced as a
+// blocked reason (entry_open / multiple_job_entries / entry_shape /
+// approved_week / edit_failed) rather than forced.
+async function syncLinkedJobTimer({ serviceId, minutes, committedSeq, editedBy, entriesSnapshot = null }) {
+  let corrected = null; // null = no divergent linked entry to correct
+  let blocked = null;
+  try {
+    await db.transaction(async (timerTrx) => {
+      const rowNow = await timerTrx('scheduled_services').where({ id: serviceId }).forUpdate().first();
+      const rowSeqNow = rowNow?.time_on_site_correction_seq == null
+        ? null
+        : Number(rowNow.time_on_site_correction_seq);
+      if (rowSeqNow != null && committedSeq != null && rowSeqNow > committedSeq) return;
+      // The version boundary is the CORRECTION, not this post-commit sync
+      // (codex P2 #3152 round 23): callers capture the entry snapshot
+      // inside the correction transaction, so a payroll edit landing
+      // between the correction's commit and this sync carries a newer
+      // updated_at than the snapshot and the audited edit 409s instead of
+      // silently replacing it. The LIVE set is still read for the
+      // membership recheck below; on the crash-resume path (no transaction
+      // ran in this process, no snapshot to hand over) it is also the
+      // divergence input — but never an edit basis, see the resume guard.
+      const liveEntries = await timerTrx('time_entries')
+        .where({ job_id: serviceId, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+      let jobEntries = liveEntries;
+      if (entriesSnapshot !== null) {
+        // Membership recheck (codex P2 #3152 round 24): a job timer
+        // started for this visit after the snapshot means the snapshot's
+        // aggregate no longer describes payroll reality — editing the
+        // snapshotted row could report success while the true total stays
+        // wrong. Versions and values still come from the SNAPSHOT (the
+        // correction's ordering boundary); only the id-set is compared.
+        const snapIds = entriesSnapshot.map((e) => String(e.id)).sort().join(',');
+        const liveIds = liveEntries.map((e) => String(e.id)).sort().join(',');
+        if (snapIds !== liveIds) {
+          corrected = false;
+          blocked = 'entry_conflict';
+          return;
+        }
+        jobEntries = entriesSnapshot;
+      }
+      if (jobEntries.length === 0) return;
+      // A still-running linked timer cannot be silently "fine" — the span
+      // keeps growing past the corrected minutes and the audited edit
+      // workflow is for completed intervals. Surface it (codex P1, audit
+      // round 20c) so the admin closes/fixes it in Timesheets.
+      const open = jobEntries.filter((e) => e.clock_out == null);
+      if (open.length > 0) {
+        corrected = false;
+        blocked = 'entry_open';
+        return;
+      }
+      // Divergence is judged on the AGGREGATE (codex P1, audit round 21):
+      // timesheets, utilization, and job costing all SUM the linked
+      // entries, and a legitimate split visit (20 + 25 against a 45-minute
+      // correction) is in sync while two duplicate 45s against 45 are not
+      // — a per-entry comparison called that duplicate shape "fine".
+      // ANY aggregate divergence syncs — an increased re-correction
+      // (45 → 60) must move the entry too, not only an inflated-timer
+      // decrease — compared at the stored hundredth-minute precision
+      // (codex P2 round 21): a one-minute tolerance left a 45.01–46.00
+      // entry silently unsynced. Half a hundredth absorbs float noise
+      // only; an entry this sync wrote lands exactly on the corrected
+      // minutes, so re-runs still no-op.
+      //
+      // The no-op decision reads the LIVE set (codex P2 round 26): a
+      // payroll edit after the snapshot that changes a duration without
+      // changing the id-set would otherwise slip through — the snapshot
+      // total still agrees and the version fence on the edit path is never
+      // reached. A live-divergent timer falls through instead: the edit
+      // path's expected_updated_at (from the SNAPSHOT) then 409s and the
+      // conflict is surfaced; a payroll edit that already landed the
+      // corrected minutes stays silent, as it should.
+      const totalMinutes = liveEntries.reduce((s, e) => s + (Number(e.duration_minutes) || 0), 0);
+      if (Math.abs(totalMinutes - minutes) <= 0.005) return;
+      if (jobEntries.length === 1 && jobEntries[0].clock_in) {
+        // Crash-resume guard (codex P2 #3152 round 24): with no
+        // transaction-time snapshot there is no version that predates the
+        // correction — a fresh updated_at would bless a NEWER payroll edit
+        // for overwrite. A divergent timer on the resume path is surfaced,
+        // never edited. (An already-agreeing timer returned at the
+        // aggregate check above, so resumes stay quiet when the first run
+        // finished its sync.)
+        if (entriesSnapshot === null) {
+          corrected = false;
+          blocked = 'entry_conflict';
+          return;
+        }
+        const entry = jobEntries[0];
+        // Duration-based edit (codex P1, audit round 21b): adminEditEntry
+        // derives the clock_out from ITS locked row's start, so a
+        // concurrent clock_in edit between this snapshot and the save can
+        // never produce a duration different from the corrected minutes.
+        await require('../services/time-tracking').adminEditEntry(entry.id, {
+          target_duration_minutes: minutes,
+          // Optimistic version (codex P2 round 22): a payroll admin's edit
+          // landing between this snapshot and the audited edit's locked
+          // read rejects the sync instead of being silently replaced — the
+          // 409 surfaces below as entry_conflict.
+          expected_updated_at: entry.updated_at ?? null,
+          edit_reason: `Time-on-site correction: ${minutes} min (visit ${serviceId})`,
+          edited_by: editedBy,
+        });
+        corrected = true;
+      } else {
+        corrected = false;
+        blocked = jobEntries.length > 1 ? 'multiple_job_entries' : 'entry_shape';
+      }
+    });
+  } catch (err) {
+    corrected = false;
+    blocked = /approved/i.test(String(err.message))
+      ? 'approved_week'
+      : (/changed since it was read/i.test(String(err.message))
+        ? 'entry_conflict'
+        : (/into the future/i.test(String(err.message)) ? 'exceeds_elapsed' : 'edit_failed'));
+    logger.warn(`[time-on-site] linked job timer sync blocked for service ${serviceId}: ${err.message}`);
+  }
+  return { corrected, blocked };
+}
+
+function liveTimeOnSitePlan({ timeOnSite, role, backfill = false, service = {}, now = new Date() } = {}) {
+  const isEmpty = timeOnSite == null || timeOnSite === '';
+  if (backfill === true || isEmpty) {
+    return { adjusted: false, effectiveTimeOnSite: timeOnSite };
+  }
+  if (!CompletionAttempts.isOperatorTimeOnSite(timeOnSite)) {
+    // Panel-timer shape — validate the claim against the server's span.
+    const claimedMinutes = minutesFromElapsed(timeOnSite);
+    const realStart = BACKFILL_INFERRED_START_FIELDS
+      .map((field) => finiteDate(service?.[field]))
+      .find(Boolean) || null;
+    if (!realStart) {
+      // No row-backed start = no reference to validate against. An admin
+      // keeps their value (they hold the typed override anyway); any other
+      // role records unknown rather than trusting an unverifiable claim —
+      // the genuine no-start panel submits "0:00", which carries no
+      // duration either way.
+      return role === 'admin'
+        ? { adjusted: false, effectiveTimeOnSite: timeOnSite }
+        : { adjusted: false, effectiveTimeOnSite: null };
+    }
+    // With a row-backed start and a valid `now`, a null from
+    // positiveMinutesBetween means the elapsed span rounded to zero (or the
+    // start sits ahead of the clock) — NOT "unknown". Trusting the claim on
+    // that null let a check-in-and-immediately-submit freeze any
+    // timer-shaped value ("720:00") into the report (codex P1 #3152 round
+    // 17). Zero IS the server's reference span: the claim survives only
+    // within tolerance of it, otherwise the server-derived timer is
+    // recorded, exactly like every other divergent claim.
+    const serverMinutes = positiveMinutesBetween(realStart, finiteDate(now) || new Date()) ?? 0;
+    if (claimedMinutes != null && Math.abs(claimedMinutes - serverMinutes) <= LIVE_TIMER_TOLERANCE_MINUTES) {
+      return { adjusted: false, effectiveTimeOnSite: timeOnSite };
+    }
+    return { adjusted: false, effectiveTimeOnSite: minutesAsElapsedString(serverMinutes) };
+  }
+  if (role !== 'admin') {
+    return {
+      adjusted: false,
+      status: 403,
+      error: {
+        error: 'Adjusting time on site is an office override — admin login required',
+        code: 'time_on_site_admin_only',
+      },
+    };
+  }
+  const minutes = backfillTimeOnSiteMinutes(timeOnSite);
+  if (!minutes) {
+    return {
+      adjusted: false,
+      status: 400,
+      error: {
+        error: `Adjusted time on site must be between 1 and ${BACKFILL_MAX_TIME_ON_SITE_MINUTES} minutes`,
+        code: 'time_on_site_invalid',
+      },
+    };
+  }
+  return { adjusted: true, effectiveTimeOnSite: minutes };
+}
+
+// End instant for an operator-typed duration against a live row: with a real
+// row-backed start, the honest end is start + minutes — stamping it keeps
+// every timestamp-pair reader (report visit-timeline, publicTimingFields,
+// the PDF's Time In/Out, job-costing's span fallback) in agreement with the
+// typed duration, with no read-side changes. Returns null when there is no
+// row-backed start (buildCompletionLifecycleUpdates then back-derives the
+// start from the wall-clock end) or when start + minutes lands in the future
+// (typed minutes exceed the actual elapsed — e.g. a late check-in; a future
+// end stamp would be a lie, so the wall-clock end stays and the explicit
+// duration columns win in every priority-ordered reader). Pure (_test).
+function adjustedCompletionEndInstant(service = {}, minutes, now = new Date()) {
+  const explicitMinutes = backfillTimeOnSiteMinutes(minutes);
+  const realStart = BACKFILL_INFERRED_START_FIELDS
+    .map((field) => finiteDate(service?.[field]))
+    .find(Boolean) || null;
+  const nowInstant = finiteDate(now) || new Date();
+  if (!realStart || !explicitMinutes) return null;
+  const end = new Date(realStart.getTime() + explicitMinutes * 60000);
+  return end.getTime() <= nowInstant.getTime() ? end : null;
+}
+
+// Validation/shape plan for the after-the-fact edit (PATCH /:serviceId/
+// time-on-site): the forgotten-closeout fix's second leg, correcting a row
+// that already completed with an inflated duration. Only completed rows
+// qualify — open rows get their correction at close-out (live override or
+// backfill). newEnd reuses adjustedCompletionEndInstant: end stamps are
+// rewritten only when a real row-backed start exists and start + minutes is
+// not in the future; a backfilled row with stripped stamps (or no start)
+// gets duration columns + structured_notes only — never fabricated
+// timestamps. Pure for testability (_test).
+function timeOnSiteEditPlan({ minutes, service = {}, structuredNotes = {}, now = new Date() } = {}) {
+  const rounded = Math.round(Number(minutes));
+  if (!Number.isFinite(rounded) || rounded < 1 || rounded > BACKFILL_MAX_TIME_ON_SITE_MINUTES) {
+    return {
+      status: 400,
+      error: {
+        error: `Time on site must be between 1 and ${BACKFILL_MAX_TIME_ON_SITE_MINUTES} minutes`,
+        code: 'time_on_site_invalid',
+      },
+    };
+  }
+  if (service.status !== 'completed') {
+    return {
+      status: 409,
+      error: {
+        error: 'Time on site can only be edited on a completed visit — close the visit out first',
+        code: 'service_not_completed',
+      },
+    };
+  }
+  return {
+    minutes: rounded,
+    newEnd: adjustedCompletionEndInstant(service, rounded, now),
+    isBackfillRecord: structuredNotes.backfill === true,
+  };
+}
+
 // Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
 // completion transaction commits, the record's structured_notes freeze IS the
 // completion — and the request hash carries `backfill`/`timeOnSite` in a
@@ -1339,6 +1627,27 @@ async function attachLawnAssessmentOutcomePhotoRefs(outcome, assessmentId) {
 
 function serializeJsonb(value) {
   return JSON.stringify(value ?? null);
+}
+
+// ATOMIC post-commit structured_notes key merge (codex P1 #3152 — the same
+// clobber class pdf-queue's clearLawnPdfCorrectionMarker fixed): once the
+// completion transaction has committed, service_records.structured_notes has
+// CONCURRENT writers — the completion side-effect status stamps below and
+// the admin time-on-site correction (PATCH /:serviceId/time-on-site) — and a
+// whole-column snapshot write from either side erases the other's keys.
+// Every post-commit writer therefore merges ONLY the keys it owns; the
+// in-memory record.structured_notes snapshots stay as they were (they feed
+// the response payload and later deltas), but what lands in the column is
+// the delta applied to its CURRENT committed value. Whole-column
+// serializeJsonb writes on structured_notes remain legal only INSIDE the
+// completion transaction, where nothing can race them.
+function mergeRecordNotesKeys(recordId, patch) {
+  return db('service_records').where({ id: recordId }).update({
+    structured_notes: db.raw(
+      "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify(patch)],
+    ),
+  });
 }
 
 function composeCompletionSmsBody({ recapText, body, suffix = '', maxSegments = 2 }) {
@@ -2041,6 +2350,302 @@ router.patch('/:serviceId/note', async (req, res, next) => {
       .returning(['id', 'notes']);
     if (!updated.length) return res.status(404).json({ error: 'Service not found' });
     res.json({ success: true, notes: updated[0].notes });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/dispatch/:serviceId/time-on-site — after-the-fact
+// correction of a completed visit's recorded duration (forgotten-closeout
+// fix, second leg: the visit already closed out with the inflated timer).
+// ADMIN-ONLY. A pure data correction by design: no status transition, no
+// markComplete, and NO customer communications of any kind — the visit's
+// comms already fired (or were suppressed) at its real completion.
+//
+// What it rewrites (single transaction):
+//  - scheduled_services: both duration families (service_time_minutes +
+//    actual_duration_minutes), and — only when the row carries a real
+//    start AND start + minutes is not in the future — every kept end stamp
+//    (actual_end_time/check_out_time/completed_at) to start + minutes, so
+//    timestamp-pair readers agree with the corrected duration. Rows without
+//    a usable start (incl. backfilled closeouts with stripped stamps) get
+//    duration columns only — never fabricated timestamps.
+//  - service_records (latest row, when present): structured_notes.timeOnSite
+//    (what the report's on-site metric reads), a durable timeOnSiteAdjusted
+//    marker with the first pre-edit value in timeOnSitePrior, the same end
+//    stamps, and pdf_storage_key → NULL so the cached report PDF re-renders
+//    with the corrected figure (its cache signature does not vary on
+//    duration).
+// Post-commit: job costing recalc (labor books from the corrected value —
+// the durable structured_notes.timeOnSiteAdjusted marker re-derives an
+// overrideLaborMinutes that outranks even a job-tied time entry, here and
+// on every later no-opts recalculation; see calculateJobCost) and an
+// activity_log audit entry — both best-effort, never failing the edit.
+// Known scope-out: estimate-actuals only re-reconciles rows inside its
+// 7-day nightly rescan window.
+router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    // Canonical record resolution (codex P2 #3152 round 2): visits completed
+    // before migration 20260427000007 have service_records rows with a NULL
+    // scheduled_service_id, so an FK-only lookup would miss a record that
+    // exists and leave the customer report (and job costing's marker read)
+    // uncorrected. resolveServiceRecord is job-costing's own resolver — FK
+    // first, then the legacy (customer, date, type) soft-join with ambiguity
+    // detection — so the record this edit stamps is the SAME record
+    // calculateJobCost reads the marker from. An AMBIGUOUS legacy match is
+    // left untouched (job-costing skips those too: correcting the newest of
+    // several colliding records would stamp the wrong visit); the
+    // scheduled_services columns still correct, and the response says the
+    // record leg was skipped. Lookup failures PROPAGATE (codex P2 #3152):
+    // a thrown error here is a real DB failure — a 500 the admin retries,
+    // never a 200 that silently skipped the report-side correction.
+    // Schema lookup failures PROPAGATE too (codex P2 #3152 round 4): a
+    // degraded {} would make resolveServiceRecord skip the authoritative FK
+    // lookup AND strip the pdf-invalidation / timing / FK-heal legs off the
+    // record update — a partial correction behind a 200. A transient
+    // metadata failure must 500 so the admin retries whole.
+    const serviceRecordCols = await db('service_records').columnInfo();
+
+    const plan = timeOnSiteEditPlan({ minutes: req.body?.minutes, service: svc });
+    if (plan.error) return res.status(plan.status).json(plan.error);
+
+    let previousMinutes = null;
+    let recordUpdated = false;
+    let recordAmbiguous = false;
+    let newEnd = null;
+    let committedCorrectionSeq = null;
+    let timerEntriesSnapshot = null;
+    await db.transaction(async (trx) => {
+      // Prior minutes come from the LOCKED row (codex P2 #3152 round 10):
+      // two concurrent corrections serialize on this lock, and each audit
+      // entry must record the value it actually superseded — the first
+      // correction's committed minutes, not a shared pre-lock snapshot.
+      const lockedSvc = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+      // The revision this save commits — the raw COALESCE(seq,0)+1 bump
+      // writes the same value; safe to compute here under the row lock.
+      committedCorrectionSeq = (Number(lockedSvc?.time_on_site_correction_seq) || 0) + 1;
+      // Linked-timer snapshot INSIDE the correction transaction (codex P2
+      // #3152 round 23): this is the sync's version boundary — a payroll
+      // edit after this commit outdates the snapshot and rejects the sync.
+      // (No try/catch: a failed statement would poison the transaction
+      // anyway, and time_entries is a core table like the others read here.)
+      timerEntriesSnapshot = await trx('time_entries')
+        .where({ job_id: svc.id, entry_type: 'job' })
+        .whereNot('status', 'voided')
+        .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+      previousMinutes = positiveNumber(lockedSvc?.service_time_minutes)
+        || positiveNumber(lockedSvc?.actual_duration_minutes)
+        || null;
+      // Record resolution runs UNDER the same row lock (codex P2 #3152
+      // round 13): the status-route-first flow leaves the visit completed
+      // while a later /complete finalization creates its service_records
+      // row inside a transaction that updates this same scheduled_services
+      // row. Resolving before the lock could permanently miss that fresh
+      // record; blocking here until the finalization commits, then
+      // resolving through the trx, sees whatever record exists once it
+      // settled. Runs BEFORE any write so a resolution failure aborts the
+      // whole correction.
+      const { record: resolvedRecord, viaFk: recordViaFk, ambiguous } = await require('../services/job-costing')
+        .resolveServiceRecord(trx, lockedSvc || svc, serviceRecordCols);
+      recordAmbiguous = ambiguous;
+      const record = ambiguous ? null : resolvedRecord;
+      if (ambiguous) {
+        logger.warn(`[time-on-site] ambiguous legacy service_record match for service ${svc.id} — correcting scheduled_services only`);
+      }
+      // End instant from the LOCKED row too — its start fields are the
+      // settled truth after any in-flight finalization.
+      newEnd = adjustedCompletionEndInstant(lockedSvc || svc, plan.minutes);
+      const serviceUpdate = {
+        service_time_minutes: plan.minutes,
+        actual_duration_minutes: plan.minutes,
+        // Durable stamp on the visit ROW (codex P2 #3152 round 5): the
+        // structured_notes marker can't exist when the record leg is skipped
+        // (no/ambiguous legacy record), and without a durable signal every
+        // later no-opts job-cost recalculation re-books labor from the
+        // inflated job-linked time entry. calculateJobCost reads this column
+        // off the row it already holds.
+        time_on_site_adjusted_minutes: plan.minutes,
+        // Monotonic revision (codex P2 #3152 round 17): the fences compare
+        // THIS, not the minutes value — a same-minutes re-save (repairing
+        // previously clamped end fields) must still read as a new
+        // correction to any in-flight finalization or tracker write.
+        time_on_site_correction_seq: trx.raw('COALESCE(time_on_site_correction_seq, 0) + 1'),
+        updated_at: new Date(),
+      };
+      let clearedDerivedEnd = false;
+      if (newEnd) {
+        // Both timestamp families together, plus completed_at — same-day
+        // stamps stay on the visit's day, so billing recovery's aging and
+        // pricing-reality-check's month bucketing never shift buckets.
+        serviceUpdate.actual_end_time = newEnd;
+        serviceUpdate.check_out_time = newEnd;
+        serviceUpdate.completed_at = newEnd;
+      } else {
+        // Clamped re-correction (codex P2 #3152 round 25): this save cannot
+        // derive a nonfuture end (start + minutes is still ahead of the
+        // wall clock). If the CURRENT end stamps are the DERIVED shape a
+        // prior correction wrote (start + previously stamped minutes),
+        // leaving them would pair the old derived completion instant with
+        // the new larger duration — the customer timeline prefers the
+        // timestamp pair and would show an inconsistent span. Derived
+        // stamps are cleared to the unknown-end posture (explicit duration
+        // columns win at read time, as in backfill); completed_at is KEPT —
+        // it drives day-window attribution (billing aging, pricing month
+        // buckets) and both instants sit on the same service day, while a
+        // NULL there has previously hidden visits from Billing Recovery. A
+        // genuine wall-clock closeout end never matches the derived shape
+        // and is preserved untouched.
+        const priorStampedMinutes = Number(lockedSvc?.time_on_site_adjusted_minutes);
+        const shapeStart = [lockedSvc?.actual_start_time, lockedSvc?.check_in_time, lockedSvc?.arrived_at]
+          .map((v) => finiteDate(v))
+          .find(Boolean);
+        const currentEnd = finiteDate(lockedSvc?.actual_end_time) || finiteDate(lockedSvc?.check_out_time);
+        if (Number.isFinite(priorStampedMinutes) && priorStampedMinutes > 0 && shapeStart && currentEnd
+          && Math.abs(currentEnd.getTime() - (shapeStart.getTime() + priorStampedMinutes * 60000)) < 1000) {
+          serviceUpdate.actual_end_time = null;
+          serviceUpdate.check_out_time = null;
+          clearedDerivedEnd = true;
+        }
+      }
+      await trx('scheduled_services').where({ id: svc.id }).update(serviceUpdate);
+
+      if (record) {
+        const recordCols = serviceRecordCols;
+        const recordUpdate = {
+          // ATOMIC key merge (codex P1 #3152, same clobber class as
+          // pdf-queue.js clearLawnPdfCorrectionMarker): a whole-column
+          // read-modify-write races the completion flow's post-commit
+          // structured_notes writers (SMS status, photo notes) — either side
+          // could erase the other's keys. This single statement merges ONLY
+          // the correction keys against the column's CURRENT value, and
+          // captures timeOnSitePrior from that same value — first edit only
+          // (`-> 'timeOnSitePrior' IS NOT NULL` detects the key even when it
+          // holds JSON null, which is exactly what a no-prior first edit
+          // writes).
+          structured_notes: trx.raw(
+            `(COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb)
+             || jsonb_build_object('timeOnSiteRev',
+                  COALESCE(NULLIF(COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'timeOnSiteRev', ''), '0')::int + 1)
+             || (CASE WHEN COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'timeOnSitePrior' IS NOT NULL
+                  THEN '{}'::jsonb
+                  ELSE jsonb_build_object('timeOnSitePrior', COALESCE(structured_notes::jsonb -> 'timeOnSite', 'null'::jsonb))
+                END)`,
+            [JSON.stringify({ timeOnSite: plan.minutes, timeOnSiteAdjusted: true })],
+          ),
+        };
+        if (newEnd) {
+          for (const field of BACKFILL_RECORD_END_FIELDS) {
+            if (recordCols[field]) recordUpdate[field] = newEnd;
+          }
+        } else if (clearedDerivedEnd) {
+          // Mirror the row-side clearing (codex P2 #3152 round 25): the
+          // record's end fields carry the same prior-derived instant and
+          // feed the customer timeline directly. completed_at is EXEMPT on
+          // the record too (codex P2 round 26) — it is the durable
+          // completion stamp report logic keys off (mowing-history cap
+          // falls back to updated_at without it), same reasoning that
+          // keeps the scheduled_services stamp; only the duration-pair
+          // end fields clear.
+          for (const field of BACKFILL_RECORD_END_FIELDS) {
+            if (field !== 'completed_at' && recordCols[field]) recordUpdate[field] = null;
+          }
+        }
+        if (recordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;
+        // FK-heal (codex P2 #3152 round 3): a pre-FK record found through the
+        // legacy soft-join gets its scheduled_service_id stamped in the same
+        // update, so every later lookup — this endpoint, job costing's marker
+        // read — is tuple-independent and a subsequent date/service-type edit
+        // can no longer orphan the corrected record.
+        if (!recordViaFk && recordCols.scheduled_service_id) {
+          recordUpdate.scheduled_service_id = svc.id;
+        }
+        await trx('service_records').where({ id: record.id }).update(recordUpdate);
+        recordUpdated = true;
+      }
+
+      // The audit rides the correction transaction (codex P2 #3152 round
+      // 19): concurrent corrections serialize on the row lock, so in-trx
+      // inserts land in COMMIT order — outside the transaction, whichever
+      // request finished its independent costing run first wrote its audit
+      // first, and activity_log.created_at could present "45 → 60" before
+      // "original → 45". The committed revision is frozen in metadata too,
+      // so readers can order by it even across clock skew. Atomic with the
+      // correction on purpose: an audit that can't be written rolls the
+      // correction back rather than leaving an unaudited financial-adjacent
+      // change (previousMinutes accuracy is already load-bearing per round
+      // 10 — this is the same posture).
+      await trx('activity_log').insert({
+        admin_user_id: req.technicianId,
+        customer_id: svc.customer_id,
+        action: 'time_on_site_adjusted',
+        description: `Time on site corrected to ${plan.minutes} min (was ${previousMinutes != null ? `${previousMinutes} min` : 'unrecorded'}) for ${svc.service_type || 'service'}`,
+        metadata: JSON.stringify({
+          scheduled_service_id: svc.id,
+          previous_minutes: previousMinutes,
+          new_minutes: plan.minutes,
+          end_stamps_rewritten: !!newEnd,
+          // Same value the raw COALESCE(seq,0)+1 bump commits — safe to
+          // compute in JS because this transaction holds the row lock.
+          correction_seq: committedCorrectionSeq,
+        }),
+      });
+    });
+
+    // Linked job timer (codex P1, pre-push audit round 20): the forgotten
+    // closeout that inflated the visit timer usually inflated the linked
+    // time_entries row too — job costing overrides it via the durable
+    // stamp, but timesheet detail, utilization, and actual-duration
+    // analytics read time_entries directly, so the visit would still look
+    // uncorrected there. Route the fix through the audited admin-edit
+    // workflow WHEN SAFE: exactly one non-voided closed job entry whose
+    // recorded span exceeds the corrected minutes. adminEditEntry preserves
+    // originals, recomputes the paid duration, and returns the day to
+    // pending for re-approval; an approved/immutable week or an ambiguous
+    // shape is SURFACED in the response instead of forced — the client
+    // warns that the timer needs a separate Timesheets correction.
+    const { corrected: timeEntryCorrected, blocked: timeEntryCorrectionBlocked } = await syncLinkedJobTimer({
+      serviceId: svc.id,
+      minutes: plan.minutes,
+      committedSeq: committedCorrectionSeq,
+      editedBy: req.technicianId,
+      entriesSnapshot: timerEntriesSnapshot,
+    });
+
+    // A failed recalc is SURFACED, not swallowed (codex P2 #3152 round 9):
+    // the correction itself stands (costing is derived state any later
+    // recalc heals from the durable stamp), but the response says so and
+    // the client warns instead of promising updated job costing.
+    let costingUpdated = false;
+    try {
+      const JobCosting = require('../services/job-costing');
+      // NO request-local minutes here (codex P2 #3152 round 7): concurrent
+      // corrections of the same visit serialize their transactions on the
+      // scheduled_services row lock, but their post-commit recalcs can
+      // interleave — an older request's recalc finishing last would bake ITS
+      // stale minutes into job_costs while the row carries the newer value.
+      // calculateJobCost re-reads the row and derives the override from the
+      // durable time_on_site_adjusted_minutes stamp committed above (round
+      // 5), so whichever recalc runs last converges on the newest committed
+      // correction, and any interleaving self-heals on the next recalc —
+      // no request-local state involved. A staleSkipped result still counts
+      // as updated: it means a NEWER correction owns the costing and its
+      // own recalculation lands (or landed) the truth.
+      await JobCosting.calculateJobCost(svc.id);
+      costingUpdated = true;
+    } catch (err) {
+      logger.warn(`[time-on-site] job costing recalc failed for service ${svc.id}: ${err.message}`);
+    }
+    res.json({
+      success: true,
+      timeOnSiteMinutes: plan.minutes,
+      endStampsRewritten: !!newEnd,
+      recordUpdated,
+      costingUpdated,
+      ...(recordAmbiguous ? { recordAmbiguous: true } : {}),
+      ...(timeEntryCorrected != null ? { timeEntryCorrected } : {}),
+      ...(timeEntryCorrectionBlocked ? { timeEntryCorrectionBlocked } : {}),
+    });
   } catch (err) { next(err); }
 });
 
@@ -3143,9 +3748,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // structured_notes stamp wins (frozenResumeCompletionState below; the
     // hash excludes timeOnSite, so a retry can legally carry the panel's
     // auto-elapsed instead of the committed typed duration).
+    // Live override leg (forgotten-closeout fix): a NUMERIC timeOnSite on a
+    // non-backfill completion is an admin-typed correction of the running
+    // timer — validated fail-closed (403 non-admin, 400 out-of-range) before
+    // anything commits. Strings (the panel's auto-elapsed) pass through
+    // untouched. Runs AFTER backfillPlan so a technician's backfill body
+    // still fails as backfill_admin_only, not time_on_site_admin_only.
+    const livePlan = liveTimeOnSitePlan({ timeOnSite, role: req.techRole, backfill: isBackfillCompletion, service: svc });
+    if (livePlan.error) {
+      return res.status(livePlan.status).json(livePlan.error);
+    }
+    const liveAdjustedTimeOnSite = livePlan.adjusted;
     let effectiveTimeOnSite = isBackfillCompletion
       ? backfillTimeOnSiteMinutes(timeOnSite)
-      : timeOnSite;
+      : livePlan.effectiveTimeOnSite;
     if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
       logger.warn(`[completion] backfill timeOnSite ${JSON.stringify(timeOnSite)} rejected for service ${svc.id} (not a positive duration ≤ ${BACKFILL_MAX_TIME_ON_SITE_MINUTES}min) — recorded as unknown`);
     }
@@ -4419,6 +5035,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let record;
     let turfOcrReadingId = null; // set when a gauge photo was captured → async OCR post-commit
     let linkedLawnAssessmentId = null;
+    // The completion transaction's wall clock, hoisted to handler scope so
+    // the post-commit tracker instant reuses the SAME clamp decision the
+    // lifecycle stamps were computed against (codex P2 #3152 round 14).
+    // Stays null on a crash-resumed retry (no transaction runs) — the
+    // tracker recompute falls back to the current clock there.
+    let completionWallClockAt = null;
+    // Linked-timer snapshot captured inside the completion transaction —
+    // the post-commit sync's version boundary (codex P2 #3152 round 23).
+    // Stays null on the crash-resume path (no transaction runs here), and
+    // the sync then falls back to a fresh read.
+    let completionTimerEntriesSnapshot = null;
     if (resumingCommittedCompletion) {
       record = await db('service_records').where({ id: claim.serviceRecordId }).first();
       if (!record) {
@@ -4547,8 +5174,76 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           technicianReportBody = technicianReport?.body || null;
         }
 
+        completionTimerEntriesSnapshot = null;
         await db.transaction(async (trx) => {
+          // The finalization takes the scheduled_services row lock FIRST
+          // (codex P2 #3152 round 14): the time-on-site PATCH serializes on
+          // this lock, and without it the finalizer's service_records
+          // INSERT lands before its scheduled_services UPDATE would block —
+          // a correction slipping between the two missed the fresh record
+          // and was then overwritten. Locking up front makes finalization
+          // and correction strictly ordered whichever starts first.
+          const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+          // Linked-timer snapshot under the same lock (codex P2 #3152
+          // round 23): the post-commit sync's version boundary is THIS
+          // transaction — a payroll edit landing after the commit outdates
+          // the snapshot's updated_at and the audited edit rejects it.
+          if (!isBackfillCompletion) {
+            completionTimerEntriesSnapshot = await trx('time_entries')
+              .where({ job_id: svc.id, entry_type: 'job' })
+              .whereNot('status', 'voided')
+              .select('id', 'clock_in', 'clock_out', 'duration_minutes', 'status', 'updated_at');
+          }
+          // Reconcile with anything that committed between the handler's svc
+          // load and this lock (codex P2 #3152 round 15): a time-on-site
+          // correction in that window already moved the duration columns,
+          // end stamps, and the durable stamp — building the finalization
+          // from the stale snapshot would silently overwrite it. Lifecycle
+          // state adopts the locked row (start fields are write-once and
+          // cannot have moved), and a correction stamped mid-flight outranks
+          // a plain stale-timer elapsed in THIS request — the timer being
+          // wrong is the exact failure the correction fixed. An explicit
+          // adjusted or backfill value in this request is the newer operator
+          // statement and keeps its authority ONLY while the durable stamp
+          // still reads what it read when this request loaded the row (codex
+          // P2 #3152 round 16): the request's values were typed before a
+          // stamp that moved in that window committed, so the moved stamp is
+          // the newer statement regardless of the request's mode — the
+          // request's live/backfill override joins the preserved lane below
+          // and its end-instant forcing is suppressed.
+          let correctionPreservedMidFlight = false;
+          if (lockedSvcRow) {
+            const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
+            const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
+            const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);
+            for (const field of [
+              'actual_end_time', 'check_out_time', 'completed_at',
+              'service_time_minutes', 'actual_duration_minutes',
+              'time_on_site_adjusted_minutes', 'time_on_site_correction_seq',
+            ]) {
+              if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];
+            }
+            const stampedMinutes = Number(lockedSvcRow.time_on_site_adjusted_minutes);
+            // Moved = the monotonic correction seq changed, NOT the minutes
+            // value (codex P2 #3152 round 17): a correction that re-saves
+            // the same minutes to repair previously clamped end fields bumps
+            // the seq while the value comparison stays blind. Rows without
+            // the seq column (pre-migration environments) fall back to the
+            // round-16 value comparison so the fence never weakens.
+            const stampMovedMidFlight = Object.prototype.hasOwnProperty.call(lockedSvcRow, 'time_on_site_correction_seq')
+              ? normStampVal(lockedSvcRow.time_on_site_correction_seq) !== preLockSeq
+              : (Object.prototype.hasOwnProperty.call(lockedSvcRow, 'time_on_site_adjusted_minutes')
+                && normStampVal(lockedSvcRow.time_on_site_adjusted_minutes) !== preLockStamp);
+            if (Number.isFinite(stampedMinutes) && stampedMinutes > 0
+              && (stampMovedMidFlight
+                || (!isBackfillCompletion && !liveAdjustedTimeOnSite
+                  && typeof effectiveTimeOnSite !== 'number'))) {
+              effectiveTimeOnSite = stampedMinutes;
+              correctionPreservedMidFlight = true;
+            }
+          }
           const completionEndedAt = new Date();
+          completionWallClockAt = completionEndedAt;
           // Backfill: the service happened on its scheduled day — stamp the
           // record (and everything keyed off it: activity-score dates, the
           // completion invoice's service linkage) with that date, not today.
@@ -4570,7 +5265,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const backfillEndedAt = isBackfillCompletion
             ? backfillCompletionEndInstant(completionServiceDate, effectiveTimeOnSite, svc)
             : null;
-          const completionLifecycleAt = backfillEndedAt || completionEndedAt;
+          // Live admin override: with a real row-backed start, the honest end
+          // is start + typed minutes — stamping it keeps every timestamp-pair
+          // reader in agreement with the typed duration. Null (no start, or
+          // typed minutes exceed the actual elapsed) falls through to the
+          // wall clock and the explicit duration columns win at read time.
+          // Suppressed when a mid-flight correction outranked this request
+          // (round 16): the request's typed minutes lost authority, so its
+          // derived end must not be stamped either — the preserved lane's
+          // posture (row-backed end or wall clock + correction's duration
+          // columns) applies instead.
+          const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite
+            && !correctionPreservedMidFlight
+            ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionEndedAt)
+            : null;
+          const completionLifecycleAt = backfillEndedAt || adjustedEndedAt || completionEndedAt;
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, { elapsed: effectiveTimeOnSite });
           // Backfill: never derive a duration from the stale on-row
           // timestamps (a weeks-old check-in against today's checkout), and
@@ -4579,6 +5288,43 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // unknown; row-backed start timestamps or none. See
           // applyBackfillDurationPolicy.
           if (isBackfillCompletion) applyBackfillDurationPolicy(lifecycleUpdates, effectiveTimeOnSite, svc);
+          // Live admin override (codex P2 #3152 round 3): the shared helper
+          // prefers a ROW-BACKED end stamp over its `at` argument, so a row
+          // that already carries one (a legacy operational completion being
+          // finalized later) would keep the stale end while the duration
+          // columns took the typed minutes — and every start→end pair reader
+          // would still derive the inflated span. Force the kept end fields
+          // onto the adjusted instant; the pair must equal the operator's
+          // statement exactly (same posture as backfillCompletionEndInstant's
+          // real-start branch).
+          if (!isBackfillCompletion && liveAdjustedTimeOnSite && !correctionPreservedMidFlight) {
+            if (adjustedEndedAt) {
+              lifecycleUpdates.actual_end_time = adjustedEndedAt;
+              lifecycleUpdates.check_out_time = adjustedEndedAt;
+            }
+            // Durable row stamp for live overrides too (codex P2 #3152
+            // round 11): the costing fence and the no-opts labor override
+            // both read scheduled_services.time_on_site_adjusted_minutes —
+            // without it a straddling recalculation sees null → null and
+            // can overwrite the corrected financials. Same stamp the
+            // after-the-fact endpoint writes; stamped even when the end
+            // instant was clamped (the MINUTES are the operator statement).
+            lifecycleUpdates.time_on_site_adjusted_minutes = effectiveTimeOnSite;
+            // …and the monotonic revision advances with it (codex P2 #3152
+            // round 19): a live override IS a correction — without a bump,
+            // an ordinary status-route markComplete that loaded before this
+            // commit still matches the old revision under the default-on
+            // fence and overwrites the override's duration/end fields. A
+            // plain value is safe here: this transaction holds the row lock,
+            // so the locked row's seq cannot move underneath it. The
+            // in-memory svc adopts it so the post-commit markComplete
+            // callers fence on the revision this finalization created.
+            if (Object.prototype.hasOwnProperty.call(lockedSvcRow || svc, 'time_on_site_correction_seq')) {
+              const bumpedSeq = (Number((lockedSvcRow || svc).time_on_site_correction_seq) || 0) + 1;
+              lifecycleUpdates.time_on_site_correction_seq = bumpedSeq;
+              svc.time_on_site_correction_seq = bumpedSeq;
+            }
+          }
           const structuredNotes = {
             visitOutcome,
             // Internal-only consultations never request a customer review —
@@ -4602,6 +5348,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // Backfill frozen on the record: a crash-resumed retry may lack
             // the body flag, and the quiet/backdate posture must survive it.
             ...(isBackfillCompletion ? { backfill: true } : {}),
+            // Durable audit marker: this duration is an admin-typed override
+            // of the running timer, not the timer itself (or a mid-flight
+            // correction this finalization preserved — codex round 15). No
+            // reader keys off it — the corrected end stamps/duration columns
+            // already agree.
+            ...(liveAdjustedTimeOnSite || correctionPreservedMidFlight ? { timeOnSiteAdjusted: true } : {}),
             // REQUIRED-mint posture frozen at commit (Codex P0, fix round
             // 8): derived from the LIVE billing profile above — the profile
             // the operator saw — and stamped in the SAME transaction as the
@@ -5629,7 +6381,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         effectiveTimeOnSite,
         svc,
       )
-      : null;
+      // Live admin override (codex P2 #3152 round 10): the tracker's
+      // completed_at must carry the corrected end too — date-window readers
+      // (pricing-reality-check's lookback COALESCE, billing recovery aging)
+      // prefer completed_at over the corrected end columns, so a correction
+      // crossing an ET day boundary would otherwise stay attributed to the
+      // late-closeout day. A NUMERIC effectiveTimeOnSite is the durable mode
+      // signal (validated at intake on first run, restored from the frozen
+      // structured_notes on a crash-resumed retry); the same pure helper
+      // yields the same start + minutes instant the lifecycle columns carry,
+      // and null (no real start / clamped) falls through to the tracker's
+      // wall clock exactly like a plain live completion.
+      // Anchored to the transaction's own wall clock so the clamp decision
+      // here matches the committed lifecycle stamps exactly (codex P2
+      // round 14). On a crash-resumed retry no transaction ran in THIS
+      // process and the clamp anchor exists only in memory — recomputing
+      // against the current clock flips a committed clamp once
+      // start + minutes has passed (codex P2 round 20), splitting the
+      // tracker's completed_at from the committed end fields. The committed
+      // lifecycle end IS the clamp outcome, so the resume path carries the
+      // persisted stamp instead of recomputing.
+      : (typeof effectiveTimeOnSite === 'number'
+        ? (completionWallClockAt
+          ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionWallClockAt)
+          : (finiteDate(svc.actual_end_time) || finiteDate(svc.check_out_time) || null))
+        : null);
 
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
     // durably committed. Runs on BOTH first-run and durable-resume paths. On
@@ -5684,17 +6460,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       }
       const latestNotes = parseJsonObject(record.structured_notes);
-      const photoNotes = {
-        ...latestNotes,
+      const completionPhotosDelta = {
         completionPhotos: {
           uploaded: completionPhotoUploadResult.uploaded,
           failed: completionPhotoUploadResult.failed,
           uploadedAt: new Date().toISOString(),
         },
       };
-      await db('service_records').where({ id: record.id }).update({
-        structured_notes: serializeJsonb(photoNotes),
-      }).catch((updateErr) => {
+      const photoNotes = { ...latestNotes, ...completionPhotosDelta };
+      await mergeRecordNotesKeys(record.id, completionPhotosDelta).catch((updateErr) => {
         logger.warn(`[dispatch] completion photo status update failed: ${updateErr.message}`);
       });
       record.structured_notes = photoNotes;
@@ -6005,6 +6779,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // survive.
         untrustedLifecycleSpan: isBackfillCompletion,
         completedAt: backfillTrackerCompletedAt,
+        // Fences the tracker writes (codex P2 #3152 rounds 13/17): this
+        // instant belongs to the correction revision this request observed
+        // on the (lock-reconciled) row — null when it has never been
+        // corrected. If a newer time-on-site PATCH landed since, the row's
+        // monotonic seq differs (even for a same-minutes re-save) and the
+        // tracker must not restore ours.
+        expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -6209,6 +6990,28 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    // Live-override completions correct the linked technician timer too
+    // (codex P1, pre-push audit round 20c): the correction is authoritative
+    // for costing via the durable stamp, but without this sync timesheets
+    // and utilization kept the inflated span — and the corrected value
+    // becomes the edit modal's seed, so no later save would re-invoke the
+    // after-the-fact PATCH. Same revision-fenced audited sync the PATCH
+    // uses; committedSeq is the revision this finalization created (or
+    // adopted). Runs on crash-resumed retries too — idempotent, the
+    // divergence check no-ops once the entry agrees. Backfills are
+    // excluded: their entries are historic and the quiet-closeout posture
+    // owns them.
+    let completionTimerSync = { corrected: null, blocked: null };
+    if (!isBackfillCompletion && typeof effectiveTimeOnSite === 'number') {
+      completionTimerSync = await syncLinkedJobTimer({
+        serviceId: svc.id,
+        minutes: effectiveTimeOnSite,
+        committedSeq: svc.time_on_site_correction_seq ?? null,
+        editedBy: req.technicianId,
+        entriesSnapshot: completionTimerEntriesSnapshot,
+      });
+    }
+
     if (isIncompleteVisit) {
       // Recurring plan refill / end-of-plan flag — an incomplete-outcome
       // completion still flips the scheduled_services row to 'completed'
@@ -6235,6 +7038,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
         }),
+        ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
+        ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
       };
       await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice: null, response: responsePayload });
       markedSucceeded = true;
@@ -8008,8 +8813,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // carry the marker forward instead of clobbering it.
           recordStructuredNotes.paymentFailedNoticeStatus = 'sending';
           recordStructuredNotes.paymentFailedNoticeAttemptedAt = new Date().toISOString();
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(recordStructuredNotes),
+          await mergeRecordNotesKeys(record.id, {
+            paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+            paymentFailedNoticeAttemptedAt: recordStructuredNotes.paymentFailedNoticeAttemptedAt,
           });
           const failResult = await sendCustomerMessage({
             to: svc.cust_phone,
@@ -8027,8 +8833,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           recordStructuredNotes.paymentFailedNoticeStatus = failResult.sent ? 'sent' : 'failed';
           if (failResult.sent) recordStructuredNotes.paymentFailedNoticeSentAt = new Date().toISOString();
           else recordStructuredNotes.paymentFailedNoticeError = failResult.code || failResult.reason || 'unknown';
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(recordStructuredNotes),
+          await mergeRecordNotesKeys(record.id, {
+            paymentFailedNoticeStatus: recordStructuredNotes.paymentFailedNoticeStatus,
+            ...(failResult.sent
+              ? { paymentFailedNoticeSentAt: recordStructuredNotes.paymentFailedNoticeSentAt }
+              : { paymentFailedNoticeError: recordStructuredNotes.paymentFailedNoticeError }),
           }).catch((noteErr) => logger.warn(`[dispatch] payment-failed notice status write failed: ${noteErr.message}`));
           record.structured_notes = recordStructuredNotes;
           if (!failResult.sent) {
@@ -8303,8 +9112,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
         if (sentSmsBody) {
-          const sendingNotes = {
-            ...recordStructuredNotes,
+          // smsNotesDelta accumulates every key this SMS leg owns — each
+          // persisted write below merges the delta only (mergeRecordNotesKeys),
+          // never the whole snapshot.
+          const smsNotesDelta = {
             completionSmsStatus: 'sending',
             completionSmsType: sentSmsType,
             completionSmsBody: sentSmsBody,
@@ -8315,9 +9126,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               completionSmsBundledReviewUrl: bundledReviewUrl,
             } : {}),
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(sendingNotes),
-          });
+          const sendingNotes = { ...recordStructuredNotes, ...smsNotesDelta };
+          await mergeRecordNotesKeys(record.id, smsNotesDelta);
           const smsMetadata = { original_message_type: sentSmsType, service_record_id: record.id };
           if (serviceReportV1Delivery || String(sentSmsType || '').startsWith('service_report_v1')) {
             smsMetadata.report_template_version = 'service_report_v1';
@@ -8361,35 +9171,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             });
             sentSmsChannel = 'sms';
             mmsFallbackToSms = true;
-            sendingNotes.completionSmsMmsFallbackAt = new Date().toISOString();
-            sendingNotes.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+            smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
+            smsNotesDelta.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+            sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
+            sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
           }
           if (!smsResult.sent) {
-            const failedNotes = {
-              ...sendingNotes,
+            Object.assign(smsNotesDelta, {
               completionSmsStatus: smsResult.blocked ? 'blocked' : 'failed',
               completionSmsError: smsResult.reason || smsResult.code || 'SMS send failed',
               completionSmsFailedAt: new Date().toISOString(),
-            };
-            await db('service_records').where({ id: record.id }).update({
-              structured_notes: serializeJsonb(failedNotes),
             });
+            const failedNotes = { ...sendingNotes, ...smsNotesDelta };
+            await mergeRecordNotesKeys(record.id, smsNotesDelta);
             record.structured_notes = failedNotes;
             await markBundledReviewFailed(smsResult);
             logger.warn(`[dispatch] Completion SMS blocked/failed for customer ${svc.customer_id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
           } else {
-            const sentNotes = {
-              ...sendingNotes,
+            Object.assign(smsNotesDelta, {
               completionSmsStatus: 'sent',
               sentSmsBody,
               sentSmsAt: new Date().toISOString(),
               sentSmsType,
               sentSmsChannel,
               serviceReportPreviewAssetId: serviceReportPreviewAsset?.id || null,
-            };
-            await db('service_records').where({ id: record.id }).update({
-              structured_notes: serializeJsonb(sentNotes),
             });
+            const sentNotes = { ...sendingNotes, ...smsNotesDelta };
+            await mergeRecordNotesKeys(record.id, smsNotesDelta);
             await db('service_report_events').insert({
               service_record_id: record.id,
               customer_id: svc.customer_id,
@@ -8442,15 +9250,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           }
         }
       } catch (e) {
-        const failedNotes = {
-          ...parseJsonObject(record.structured_notes),
+        const failedDelta = {
           completionSmsStatus: 'failed',
           completionSmsError: e.message || 'SMS send failed',
           completionSmsFailedAt: new Date().toISOString(),
         };
-        await db('service_records').where({ id: record.id }).update({
-          structured_notes: serializeJsonb(failedNotes),
-        }).catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
+        const failedNotes = { ...parseJsonObject(record.structured_notes), ...failedDelta };
+        await mergeRecordNotesKeys(record.id, failedDelta)
+          .catch((updateErr) => logger.error(`Completion SMS failure status update failed: ${updateErr.message}`));
         record.structured_notes = failedNotes;
         await markBundledReviewFailed();
         logger.error(`Completion SMS failed: ${e.message}`);
@@ -8459,14 +9266,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // Record the skip in structured_notes so the audit trail (and the
       // completionSmsStatus surfaced in the response) shows WHY no
       // completion SMS went out for a visit that asked for one.
-      const skippedNotes = {
-        ...recordStructuredNotes,
+      const skippedDelta = {
         completionSmsStatus: 'skipped_recap_sms_already_sent',
         completionSmsSkippedAt: new Date().toISOString(),
       };
-      await db('service_records').where({ id: record.id }).update({
-        structured_notes: serializeJsonb(skippedNotes),
-      }).catch((updateErr) => logger.warn(`[dispatch] completion SMS skip status update failed: ${updateErr.message}`));
+      const skippedNotes = { ...recordStructuredNotes, ...skippedDelta };
+      await mergeRecordNotesKeys(record.id, skippedDelta)
+        .catch((updateErr) => logger.warn(`[dispatch] completion SMS skip status update failed: ${updateErr.message}`));
       record.structured_notes = skippedNotes;
       logger.info(`[dispatch] Recap SMS already texted for service ${svc.id}; skipping completion SMS to avoid double-texting`);
     } else if (effectiveSendCompletionSms && svc.cust_phone && completionSmsAlreadyHandled) {
@@ -8502,14 +9308,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && !serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
       if (!latestNotes.serviceReportV1EmailStatus) {
-        const disabledNotes = {
-          ...latestNotes,
+        const disabledDelta = {
           serviceReportV1EmailStatus: 'disabled',
           serviceReportV1EmailDisabledAt: new Date().toISOString(),
         };
-        await db('service_records').where({ id: record.id }).update({
-          structured_notes: serializeJsonb(disabledNotes),
-        }).catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
+        const disabledNotes = { ...latestNotes, ...disabledDelta };
+        await mergeRecordNotesKeys(record.id, disabledDelta)
+          .catch((updateErr) => logger.warn(`[dispatch] v1 report email disabled status update failed: ${updateErr.message}`));
         record.structured_notes = disabledNotes;
       }
     }
@@ -8572,27 +9377,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
             }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
           }
-          const queuedNotes = {
-            ...latestNotes,
+          const queuedDelta = {
             serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
             serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
             serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
             serviceReportV1EmailError: queued.ok ? null : queued.error || null,
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(queuedNotes),
-          });
+          const queuedNotes = { ...latestNotes, ...queuedDelta };
+          await mergeRecordNotesKeys(record.id, queuedDelta);
           record.structured_notes = queuedNotes;
         } catch (err) {
-          const failedNotes = {
-            ...latestNotes,
+          const failedDelta = {
             serviceReportV1EmailStatus: 'failed',
             serviceReportV1EmailError: err.message || 'Email queue failed',
             serviceReportV1EmailFailedAt: new Date().toISOString(),
           };
-          await db('service_records').where({ id: record.id }).update({
-            structured_notes: serializeJsonb(failedNotes),
-          }).catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
+          const failedNotes = { ...latestNotes, ...failedDelta };
+          await mergeRecordNotesKeys(record.id, failedDelta)
+            .catch((updateErr) => logger.error(`[dispatch] v1 report email queue status update failed: ${updateErr.message}`));
           record.structured_notes = failedNotes;
           logger.error(`[dispatch] v1 report email queue failed: ${err.message}`);
         }
@@ -8639,6 +9441,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // completed_at stamp too.
         untrustedLifecycleSpan: isBackfillCompletion,
         completedAt: backfillTrackerCompletedAt,
+        // Same fence as the first markComplete above (codex rounds 13/17).
+        expectedCorrectionSeq: svc.time_on_site_correction_seq ?? null,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -8922,6 +9726,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
       }),
+      ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
+      ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
       ...(typedFindingsType ? {
         typedFindingsType,
         typedDeliveryMode,
@@ -11375,6 +12181,9 @@ module.exports._test = {
   applyBackfillRecordTimingPolicy,
   backfillCompletionEndInstant,
   backfillTimeOnSiteMinutes,
+  liveTimeOnSitePlan,
+  adjustedCompletionEndInstant,
+  timeOnSiteEditPlan,
   frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,

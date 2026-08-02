@@ -224,6 +224,10 @@ function buildTriageItem({
     // is not on any of that customer's phone slots — the office confirms the
     // identity and saves the number to the account if it's really them.
     caller_phone_not_on_file: 'customer_field_conflict',
+    // The intake call died mid-conversation before the service address was
+    // captured — the office calls the prospect back (an address-request text
+    // may also have gone out; the payload says which).
+    call_dropped_mid_intake: 'address_review',
     unassigned_auto_booking: 'time_ambiguous',
     // Advisory schedule-clash / time-sanity cards for AI call bookings
     // (call-recording-processor): the visit BOOKED as normal — the card
