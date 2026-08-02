@@ -1859,28 +1859,83 @@ function isInitialRodentTrapSetup(projectType, _visitSequence, values = {}) {
 // roofline for entry points" is a legitimate sentence on a setup visit. The
 // re-verbs deliberately exclude a bare "set" — that is the wording a setup
 // visit is SUPPOSED to use (codex P2 on #3159).
-const TRAP_NOUN_RE = '(?:traps?|devices?)';
-const SETUP_RECHECK_RES = [
-  // ACTIVE voice, both verbs: "we checked 8 traps", "we inspected 8 traps".
-  // `inspect` was missing on the first pass, so the single most natural
-  // re-check sentence walked through both screens (codex P1 on #3159).
-  new RegExp(`\\b(?:re-?)?(?:check|inspect)(?:ed|ing)?\\b[^.!?]{0,40}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
-  // Passive forms take BOTH numbers — "one trap was reset" is as much a
-  // re-check claim as "the traps were reset", and hard-coding `were` let the
-  // singular through (codex P1 round 5).
-  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,40}?\\b(?:were|was)\\s+(?:re-?)?(?:check|inspect)(?:ed)?\\b`, 'i'),
-  // Follow-up-only ACTIONS. Every verb the structured validator rejects on a
-  // setup (reset / moved / replaced / rebaited / refreshed) has to reject in
-  // prose too, or the draft publishes what the checklist just refused. The
-  // object is any trap phrase — "the traps", "all 8 traps", "the damaged
-  // traps" — not the literal words "the traps", which was the earlier gap
-  // (codex P1 round 4).
-  new RegExp(`\\b(?:re-?set|re-?bait(?:ed|ing)?|rebait(?:ed|ing)?|re-?fresh(?:ed|ing)?|refresh(?:ed|ing)?|re-?position(?:ed|ing)?|replac(?:ed|ing)|swapped(?:\\s+out)?|moved)\\b[^.!?]{0,30}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
-  // …and their passive forms, singular and plural: "the traps were
-  // replaced", "all 8 traps were rebaited", "one trap was reset".
-  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,30}?\\b(?:were|was)\\s+(?:re-?set|re-?baited|rebaited|re-?freshed|refreshed|re-?positioned|replaced|swapped(?:\\s+out)?|moved)\\b`, 'i'),
-  new RegExp(`\\b(?:existing|previous(?:ly)?\\s+(?:set|placed)|damaged|missing|old)\\s+${TRAP_NOUN_RE}\\b`, 'i'),
-];
+// Six rounds of pattern-list extension leaked in BOTH directions at once —
+// missing "have been checked" while rejecting "we inspected the attic and set
+// eight traps" (codex round 6). A blocklist of surface forms was the wrong
+// shape, so this classifies by OBJECT BINDING instead: a re-check verb only
+// contradicts a setup when the thing it acts on is a trap.
+const TRAP_NOUNS = /^(?:traps?|devices?)$/i;
+// Verbs that assert a trap was already in place. `set` and `place` are
+// deliberately absent — they are the wording a setup is SUPPOSED to use.
+// Inflections are spelled out rather than glued on with a generic suffix
+// group: silent-e stems ("replace" → "replaced", not "replaceed") and
+// doubling stems ("swap" → "swapped") do not survive that shortcut.
+// The `re-` prefix is per-verb, not global. Bare `check`/`inspect` are
+// already re-check claims, but bare `bait`/`fresh`/`position`/`set` are what
+// a SETUP legitimately does — only their re- forms contradict one. Writing
+// `set` as `re-?set` is what finally admits "re-set the traps" while still
+// letting "set the traps" through.
+const RECHECK_VERB = new RegExp('^(?:'
+  + 're-?set(?:ting|s)?'
+  + '|(?:re-?)?check(?:ed|ing|s)?'
+  + '|(?:re-?)?inspect(?:ed|ing|s)?'
+  + '|re-?bait(?:ed|ing|s)?'
+  + '|re-?fresh(?:ed|ing|es)?'
+  + '|re-?position(?:ed|ing|s)?'
+  + '|replace[sd]?|replacing'
+  + '|swap(?:ped|ping|s)?'
+  + '|move[sd]?|moving'
+  + ')$', 'i');
+const RECHECK_PARTICIPLE = /^(?:re-?)?(?:checked|inspected|reset|rebaited|refreshed|repositioned|replaced|swapped|moved)$/i;
+// Words that can sit between a verb and its object head without changing it:
+// determiners, quantifiers, numerals and the adjectives a trap phrase takes.
+const OBJECT_FILLER = /^(?:the|a|an|all|both|each|every|any|some|several|two|three|four|five|six|seven|eight|nine|ten|of|out|those|these|its|their|our|my|remaining|existing|previous|previously|damaged|missing|old|new|other|exterior|interior|attic|garage|first|second|\d+)$/i;
+const PASSIVE_AUX = /\b(?:was|were|has\s+been|have\s+been|had\s+been|is\s+being|are\s+being)\b/i;
+
+function words(text) {
+  return String(text).split(/[^A-Za-z0-9-]+/).filter(Boolean);
+}
+
+// True when a re-check VERB in this clause takes a trap as its object: scan
+// forward past filler to the first real noun and require it to be a trap.
+// "inspected the attic" binds to `attic` and does not match; "inspected all
+// 8 traps" binds to `traps` and does.
+function activeRecheckOnTrap(clause) {
+  const toks = words(clause);
+  for (let i = 0; i < toks.length; i += 1) {
+    if (!RECHECK_VERB.test(toks[i])) continue;
+    for (let j = i + 1; j < toks.length; j += 1) {
+      if (OBJECT_FILLER.test(toks[j])) continue;
+      if (TRAP_NOUNS.test(toks[j])) return toks.slice(i, j + 1).join(' ');
+      break; // the object head is something else — this verb is not about traps
+    }
+  }
+  return null;
+}
+
+// "<trap noun> … <auxiliary> … <participle>", any number and any tense:
+// "one trap was reset", "eight traps have been checked", "the devices had
+// been inspected".
+function passiveRecheckOnTrap(clause) {
+  const toks = words(clause);
+  const trapAt = toks.findIndex((t) => TRAP_NOUNS.test(t));
+  if (trapAt === -1) return null;
+  const tail = toks.slice(trapAt + 1).join(' ');
+  if (!PASSIVE_AUX.test(tail)) return null;
+  const after = tail.replace(new RegExp(`^.*?${PASSIVE_AUX.source}\\s*`, 'i'), '');
+  const head = words(after)[0];
+  return head && RECHECK_PARTICIPLE.test(head) ? `${toks[trapAt]} … ${head}` : null;
+}
+
+// Clause split: sentence enders plus the coordinators that introduce a NEW
+// verb phrase, so "we inspected the attic AND set eight traps" is judged as
+// two clauses rather than one 40-character window.
+function clauses(text) {
+  return String(text || '')
+    .split(/[.!?;,]|\b(?:and|but|then|while|before|after|so)\b/i)
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
 // trap_actions values that presuppose traps were ALREADY on the property,
 // so they contradict a declared setup. 'New traps added' and 'Exterior
 // inspection completed' are legitimate on a setup and stay legal.
@@ -1907,9 +1962,9 @@ const SETUP_EMPTY_CAPTURE_RES = [
 function setupContradictions(text) {
   const str = String(text || '');
   const found = [];
-  for (const rx of SETUP_RECHECK_RES) {
-    const match = str.match(rx);
-    if (match) found.push(`setup_recheck_claim:${match[0].trim().toLowerCase()}`);
+  for (const clause of clauses(str)) {
+    const hit = activeRecheckOnTrap(clause) || passiveRecheckOnTrap(clause);
+    if (hit) found.push(`setup_recheck_claim:${hit.toLowerCase()}`);
   }
   for (const rx of SETUP_EMPTY_CAPTURE_RES) {
     const match = str.match(rx);

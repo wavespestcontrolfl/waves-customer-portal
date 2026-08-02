@@ -671,6 +671,10 @@ function buildStationMapReportContext({
   // summary counted them as inspected. Left unset, the map keeps its
   // re-check wording, so legacy reports are untouched (codex P1 on #3159).
   initialSetup = false,
+  // The frozen typed traps_checked, when the snapshot carries one. Used only
+  // to confirm the map and the typed finding agree before the map restates
+  // that count in setup wording.
+  typedTrapCount = null,
 } = {}) {
   if (!isStationMapReportEnabled()) return { available: false, reason: 'disabled' };
   // The visit's typed flow picks the PROGRAM: a rodent bait report renders
@@ -747,7 +751,18 @@ function buildStationMapReportContext({
     program,
     // Trapping only: a setup declaration has no meaning for bait stations,
     // which are installed once and checked forever.
-    ...(initialSetup && program === 'trapping' ? { initialSetup: true } : {}),
+    //
+    // Also withheld when the map's own accessible-pin count disagrees with
+    // the typed count the report publishes (codex P2 on #3159). The closeout
+    // autofills traps_checked from the pins but RELINQUISHES the field once
+    // the tech hand-edits it, so the two can legitimately diverge — and the
+    // setup summary is the one line that restates that number back to the
+    // customer. When they disagree we say nothing rather than contradict the
+    // typed finding; the map keeps its neutral wording.
+    ...(initialSetup && program === 'trapping'
+      && (typedTrapCount == null || typedTrapCount === summary.checked)
+      ? { initialSetup: true }
+      : {}),
     image: {
       url: satelliteMap.live.url,
       width: satelliteMap.live.width || 640,

@@ -514,6 +514,8 @@ test('plain setup wording is not mistaken for a re-check', () => {
   for (const text of [
     'We reset the traps along the roofline.',
     'We re-set the traps.',
+    'We rebaited all 7 traps.',
+    'Seven traps have been checked today.',
     'The traps were reset.',
     'We repositioned the traps near the plenum.',
   ]) {

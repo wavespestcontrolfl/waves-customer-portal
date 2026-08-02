@@ -2793,6 +2793,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // pattern for report-time helpers.
     initialSetup: [typedSnapshot, ...companionReports].some((snap) => require('./activity-indicators')
       .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)),
+    // The trapping snapshot's own count, so the map can confirm it agrees
+    // before restating it (the tech may have hand-edited it away from the
+    // autofilled pin count).
+    typedTrapCount: (() => {
+      const trapSnap = [typedSnapshot, ...companionReports]
+        .find((snap) => snap?.type === 'rodent_trapping');
+      const n = Number(trapSnap?.values?.traps_checked);
+      return Number.isInteger(n) ? n : null;
+    })(),
   });
 
   const onSiteMin = computeOnSiteMin({

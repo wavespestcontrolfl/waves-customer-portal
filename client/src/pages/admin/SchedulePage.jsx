@@ -8096,10 +8096,16 @@ export function StationMarkingStep({
         bestDist = dist;
       }
     });
-    // The tap target is a THUMB, so its tolerance is fixed in screen pixels —
-    // in frame units it has to shrink with the zoom, or a zoomed-in tap
-    // aimed at open ground half a house away would still grab a pin.
-    return bestDist <= STATION_TAP_RADIUS_PX * viewScale ? best : null;
+    // The tap target is a THUMB, so its tolerance is fixed in screen pixels
+    // and converted with the CURRENT rendered width — not with the nominal
+    // 640-unit frame. Using the frame made the radius scale with the card's
+    // rendered size: on a 390px phone (~340px frame) at 2× it was ~11.7
+    // physical px, so a 15px-off tap missed the pin and add-mode could drop
+    // a duplicate beside it. The 640px test stub hid this because there the
+    // two denominators are equal (codex P2 on #3159).
+    const rect = svgRef.current?.getBoundingClientRect();
+    const unitsPerClientPx = rect?.width ? view.w / rect.width : viewScale;
+    return bestDist <= STATION_TAP_RADIUS_PX * unitsPerClientPx ? best : null;
   };
 
   const changeZoom = (factor) => {

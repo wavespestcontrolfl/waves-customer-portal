@@ -751,15 +751,16 @@ describe('setup-stage guards — round 3 gaps', () => {
     }
   });
 
-  test('the match is proximity-based, and deliberately errs toward rejecting', () => {
-    // "inspected … the traps" in one sentence rejects even when the object of
-    // the inspection was something else. That is the intended bias: an
-    // over-rejection costs a narrative and falls back to safe deterministic
-    // copy, while an under-rejection PUBLISHES a contradiction — which is
-    // exactly what round 3's P1 was. Pinned so the trade-off is a decision
-    // rather than a surprise.
-    expect(setupContradictions('We inspected the exterior before placing the traps.').length)
-      .toBeGreaterThan(0);
+  test('the verb binds to its OWN object, so neighbouring trap nouns are not guilt by association', () => {
+    // Earlier revisions matched on proximity — any trap noun within 40
+    // characters of a re-check verb — and this sentence was pinned as a
+    // deliberate over-rejection. The object-binding rewrite (codex round 6)
+    // removed the need for that trade-off: `inspected` binds to `exterior`
+    // and `attic`, not to the traps mentioned later in the sentence.
+    expect(setupContradictions('We inspected the exterior before placing the traps.')).toEqual([]);
+    expect(setupContradictions('We inspected the attic and set eight traps today.')).toEqual([]);
+    // …while the verb whose object IS a trap still rejects.
+    expect(setupContradictions('We inspected the traps in the attic.').length).toBeGreaterThan(0);
   });
 
   test('the screen reaches the technician draft, so an inspection draft is refused', () => {
@@ -903,5 +904,45 @@ describe('setup guards — singular passive (round 5)', () => {
     expect(setupContradictions('The traps were replaced.').length).toBeGreaterThan(0);
     expect(setupContradictions('We set 8 traps today.')).toEqual([]);
     expect(setupContradictions('A trap was set at the plenum.')).toEqual([]);
+  });
+});
+
+// Round 6 replaced the pattern list with object binding, after it leaked in
+// BOTH directions at once — missing "have been checked" while rejecting
+// "we inspected the attic and set eight traps". These pin the construction.
+describe('setup matcher binds verbs to their objects (round 6)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('re-check claims reject across voice, number and tense', () => {
+    for (const text of [
+      'We inspected 8 traps today.',                 // active
+      'One trap was replaced today.',                // passive singular
+      'The traps were reset.',                       // passive plural
+      'Eight traps have been checked today.',        // perfect passive
+      'The devices had been inspected.',             // pluperfect passive
+      'We rebaited all 8 traps.',                    // quantified object
+      'We replaced the damaged traps today.',        // adjective before object
+      'We swapped out the old traps.',               // particle verb
+      'We re-set the traps.',                        // hyphenated re- form
+      'We repositioned two of the traps.',           // partitive object
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('setup prose passes, including verbs whose object is NOT a trap', () => {
+    for (const text of [
+      'We set 8 traps today.',
+      'A trap was set at the plenum.',
+      'We placed the devices along the documented runways.',
+      'We inspected the attic and set eight traps today.',
+      'We inspected the exterior before placing the traps.',
+      'We inspected the roofline for entry points.',
+      // baiting/positioning are what a setup DOES — only their re- forms
+      // contradict one.
+      'We baited the traps as we set them.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
   });
 });

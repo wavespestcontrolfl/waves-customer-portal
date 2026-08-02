@@ -112,3 +112,40 @@ describe('StationMapCard — declared trap setup', () => {
     expect(text).toContain('inspected');
   });
 });
+
+// codex P2 round 6: the closeout autofills traps_checked from the pins but
+// relinquishes the field once the tech hand-edits it, so the map's count and
+// the typed count can legitimately diverge. The server withholds the flag in
+// that case, so the card falls back to neutral wording rather than restating
+// a number that contradicts the typed finding.
+describe('StationMapCard — setup counts stay consistent', () => {
+  it('counts accessible pins, not every pin', () => {
+    const { container } = render(<StationMapCard trapPins stationMap={{
+      ...STATION_MAP,
+      initialSetup: true,
+      summary: { total: 3, checked: 2, activity: 0, serviced: 0, inaccessible: 1 },
+      stations: [
+        { id: 's1', number: 1, label: null, cx: 0.2, cy: 0.5, status: 'ok' },
+        { id: 's2', number: 2, label: null, cx: 0.5, cy: 0.5, status: 'ok' },
+        { id: 's3', number: 3, label: null, cx: 0.8, cy: 0.5, status: 'inaccessible' },
+      ],
+    }} />);
+    // 2 accessible, matching what the closeout's autofill would have written.
+    expect(container.textContent).toContain('2 traps set this visit');
+    expect(container.textContent).toContain('1 not accessible');
+    expect(container.textContent).not.toContain('3 traps set this visit');
+  });
+
+  it('without the flag the map says nothing about setup', () => {
+    const { container } = render(<StationMapCard trapPins stationMap={{
+      ...STATION_MAP,
+      summary: { total: 2, checked: 2, activity: 0, serviced: 0, inaccessible: 0 },
+      stations: [
+        { id: 's1', number: 1, label: null, cx: 0.25, cy: 0.5, status: 'ok' },
+        { id: 's2', number: 2, label: null, cx: 0.75, cy: 0.5, status: 'ok' },
+      ],
+    }} />);
+    expect(container.textContent).toContain('2 of 2 stations inspected');
+    expect(container.textContent).not.toContain('set this visit');
+  });
+});
