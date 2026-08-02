@@ -266,9 +266,14 @@ describe('calculateJobCost — durable backfill labor guard (Codex P1)', () => {
         },
         insert: (row) => { writes.jobCosts.push(row); return Promise.resolve([1]); },
         update: (upd) => { writes.serviceRecordUpdates.push(upd); return Promise.resolve(1); },
+        forUpdate: () => chain,
       };
       return chain;
     };
+    // The stamp fence wraps the financial writes in a transaction holding
+    // the scheduled_services row lock (codex P2 #3152 round 9) — the fake
+    // hands the same handle back as the trx.
+    db.transaction = async (fn) => fn(db);
     db.writes = writes;
     return db;
   }

@@ -545,6 +545,7 @@ export function completionPreferencesNeedDraft({
   backfillCloseout = false,
   backfillCloseoutDefault = false,
   backfillTimeOnSite = "",
+  adjustedTimeOnSite = "",
 } = {}) {
   return sendSms !== true
     || includePayLink !== true
@@ -556,7 +557,10 @@ export function completionPreferencesNeedDraft({
     // is drift from the panel default — either direction — that needs a
     // draft. Typed minutes ride along like any other text field.
     || backfillCloseout !== backfillCloseoutDefault
-    || String(backfillTimeOnSite || "").trim() !== "";
+    || String(backfillTimeOnSite || "").trim() !== ""
+    // The live admin override rides along the same way: losing typed
+    // minutes across a reload silently records the inflated timer instead.
+    || String(adjustedTimeOnSite || "").trim() !== "";
 }
 
 // timeOnSite fragment of the completion POST body. The panel's running
@@ -565,9 +569,22 @@ export function completionPreferencesNeedDraft({
 // as explicit operator input (persisted service duration + job-costing
 // labor). Under a backdated closeout only an operator-TYPED positive number
 // of minutes may travel; blank/invalid omits the key so the duration stays
-// unknown. Non-backfill submits keep today's auto-elapsed exactly.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed }) {
-  if (!backfill) return { timeOnSite: elapsed };
+// unknown. On a live completion the wire contract is TYPE-based: a NUMBER
+// is an admin-typed override of the running timer (validated 1..720 —
+// out-of-range falls back to the elapsed string so a stray value never
+// ships as operator input; handleSubmit blocks it with an alert first), a
+// string is the auto-elapsed timer, recorded exactly as before.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "" }) {
+  if (!backfill) {
+    const trimmed = String(adjustedMinutes ?? "").trim();
+    if (trimmed !== "") {
+      const minutes = Math.round(Number(trimmed));
+      if (Number.isFinite(minutes) && minutes >= 1 && minutes <= 720) {
+        return { timeOnSite: minutes };
+      }
+    }
+    return { timeOnSite: elapsed };
+  }
   const minutes = Math.round(Number(typedMinutes));
   return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
 }
@@ -589,6 +606,10 @@ export function restoredBackfillChoices(savedDraft, backfillCloseoutDefault = fa
     backfillTimeOnSite:
       typeof savedDraft?.backfillTimeOnSite === "string"
         ? savedDraft.backfillTimeOnSite
+        : "",
+    adjustedTimeOnSite:
+      typeof savedDraft?.adjustedTimeOnSite === "string"
+        ? savedDraft.adjustedTimeOnSite
         : "",
   };
 }
@@ -1027,6 +1048,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     })(),
   });
   const [saving, setSaving] = useState(false);
+  // Recorded time on-site for a COMPLETED visit (forgotten-closeout fix,
+  // after-the-fact leg): admin-only correction of an inflated recorded
+  // duration. Deliberately OUTSIDE `form` — it saves through the dedicated
+  // PATCH /admin/dispatch/:id/time-on-site endpoint, never update-details
+  // (whose allowlist stays timing-free). Seeded from whichever recorded
+  // field the payload carries (dispatch rows: serviceTimeMinutes; schedule
+  // rows: actualDuration); the seed doubles as the dirty check so an
+  // untouched field never PATCHes.
+  const timeOnSiteSeed = (() => {
+    const v = service.serviceTimeMinutes ?? service.actualDuration ?? null;
+    return v != null && Number(v) > 0 ? String(Math.round(Number(v))) : "";
+  })();
+  const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
+  const isCompletedVisit =
+    String(service.status || "").toLowerCase() === "completed";
   // Immediate reschedule text when this save moves the visit's date or
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
@@ -1432,6 +1468,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   const handleSave = async ({ takePayment = false } = {}) => {
     setSaving(true);
+    // Time-on-site correction rides the same Save button but its own
+    // endpoint: validate before anything writes so a typo aborts the whole
+    // save rather than landing the update-details half only. The PATCH
+    // itself runs AFTER update-details succeeds (codex P2 #3152 round 2):
+    // its server-side job-costing recalculation must see the saved service
+    // type/price/assignment, and a rejected details save must not leave the
+    // correction half-committed behind a "Save failed" alert.
+    const timeOnSiteDirty =
+      isCompletedVisit &&
+      isAdminUser &&
+      String(timeOnSiteMinutes || "").trim() !== "" &&
+      String(timeOnSiteMinutes || "").trim() !== timeOnSiteSeed;
+    if (timeOnSiteDirty) {
+      const minutes = Math.round(Number(String(timeOnSiteMinutes).trim()));
+      if (!Number.isFinite(minutes) || minutes < 1 || minutes > 720) {
+        alert("Time on site must be 1–720 minutes.");
+        setSaving(false);
+        return;
+      }
+    }
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -1562,6 +1618,90 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         alert(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
+      }
+      // Details are saved — now the duration correction, so its server-side
+      // job-costing recalc prices against the values just persisted. A
+      // failure here is a PARTIAL save (details landed, correction didn't):
+      // say exactly that, matching the notification partial-failure above.
+      if (timeOnSiteDirty) {
+        try {
+          const correctionMinutes = Math.round(
+            Number(String(timeOnSiteMinutes).trim()),
+          );
+          const patchResult = await adminFetch(
+            `/admin/dispatch/${service.id}/time-on-site`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({ minutes: correctionMinutes }),
+            },
+          );
+          // The record leg can be skipped server-side (ambiguous legacy
+          // match, or no report record found) — the appointment's duration
+          // still corrected, but the customer report did not. Silence here
+          // would read as a full success (codex P2 round 3).
+          if (patchResult?.recordUpdated === false) {
+            alert(
+              patchResult?.recordAmbiguous
+                ? "Duration corrected on the appointment, but several legacy report records match this visit — the customer report was NOT changed and needs a manual fix."
+                : "Duration corrected on the appointment, but no report record was found for this visit — the customer report was not changed.",
+            );
+          }
+          // The costing refresh is derived state — a failure there must not
+          // read as full success (codex P2 round 9). "Re-save this
+          // correction" as advice was a dead end (codex P2 round 17): after
+          // the refresh the corrected value becomes the seed, the dirty flag
+          // clears, and Save never re-invokes this PATCH — so the retry
+          // happens HERE, while the correction is still in hand.
+          if (patchResult?.costingUpdated === false) {
+            const retryNow = window.confirm(
+              "Duration corrected, but the job-cost refresh failed — costs may show the old labor until the next recalculation. Retry the refresh now?",
+            );
+            let retried = null;
+            if (retryNow) {
+              try {
+                retried = await adminFetch(
+                  `/admin/dispatch/${service.id}/time-on-site`,
+                  {
+                    method: "PATCH",
+                    body: JSON.stringify({ minutes: correctionMinutes }),
+                  },
+                );
+              } catch {
+                retried = null;
+              }
+            }
+            if (retryNow && retried?.costingUpdated !== true) {
+              alert(
+                "The job-cost refresh failed again — the corrected duration itself is saved; use Job Costs → Recalculate to refresh the labor cost.",
+              );
+            }
+          }
+          // The linked technician job timer feeds timesheets and
+          // utilization — when the server couldn't route it through the
+          // audited edit (approved week, several linked entries), the
+          // inflated span survives there until corrected by hand.
+          if (patchResult?.timeEntryCorrected === false) {
+            const timerReason =
+              patchResult?.timeEntryCorrectionBlocked === "exceeds_elapsed"
+                ? "the corrected minutes exceed the time elapsed since its clock-in"
+                : patchResult?.timeEntryCorrectionBlocked === "entry_conflict"
+                  ? "it was edited by someone else at the same moment"
+                : patchResult?.timeEntryCorrectionBlocked === "entry_open"
+                  ? "its timer is still running"
+                : patchResult?.timeEntryCorrectionBlocked === "approved_week"
+                  ? "its week is already approved"
+                  : patchResult?.timeEntryCorrectionBlocked === "multiple_job_entries"
+                    ? "several timer entries are linked to this visit"
+                    : "it could not be edited automatically";
+            alert(
+              `Duration corrected, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
+            );
+          }
+        } catch (patchErr) {
+          alert(
+            `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
+          );
+        }
       }
       onSaved?.();
     } catch (e) {
@@ -2812,6 +2952,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
+              {isCompletedVisit && isAdminUser && (
+                <div style={{ marginBottom: 14 }}>
+                  {" "}
+                  <label style={labelStyle}>Time on site (minutes)</label>{" "}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="720"
+                    step="1"
+                    value={timeOnSiteMinutes}
+                    onChange={(e) => setTimeOnSiteMinutes(e.target.value)}
+                    placeholder="Not recorded"
+                    className="font-medium"
+                    style={inputStyle}
+                  />{" "}
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                    Recorded duration for this completed visit — correct it
+                    here if the on-site timer wasn&rsquo;t closed out on time.
+                    Saving updates the report and job costing; no customer
+                    messages are sent, and the report PDF regenerates.
+                  </div>{" "}
+                </div>
+              )}{" "}
               {scheduleMoved && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
@@ -8442,12 +8606,22 @@ export function CompletionPanel({
   // must never inherit it — blank submits no timeOnSite and the duration
   // stays unknown (see completionTimeOnSiteBody).
   const [backfillTimeOnSite, setBackfillTimeOnSite] = useState("");
+  // Admin-typed minutes overriding the running timer on a LIVE completion
+  // (forgotten-closeout fix: the timer kept running, so the auto-elapsed is
+  // inflated). Starts EMPTY — blank records the timer exactly as before.
+  // Admin-only server-side (403 for a tech token), so like backfill the
+  // input never renders for technician users.
+  const [adjustedTimeOnSite, setAdjustedTimeOnSite] = useState("");
   // A backdated quiet closeout suppresses every customer send server-side —
   // the client-side flags must agree, or the success overlay and CTA
   // sub-label claim sends for a completion that texted nobody. Derived here,
   // above the recap/review state, so recap eligibility and the review
   // suppression chain can fold it in.
   const backfillQuietCloseout = backfillEligible && backfillCloseout;
+  // The live override input hides while the backfill checkbox is checked —
+  // that mode has its own minutes input with different blank semantics
+  // (blank = unknown, not "use timer").
+  const liveAdjustEligible = panelIsAdmin && !backfillQuietCloseout;
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
   const [recapSource, setRecapSource] = useState("template");
@@ -9706,6 +9880,7 @@ export function CompletionPanel({
         backfillCloseout,
         backfillCloseoutDefault,
         backfillTimeOnSite,
+        adjustedTimeOnSite,
       }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) {
@@ -9739,6 +9914,9 @@ export function CompletionPanel({
         // any panel reload, or the restored submit silently turns LOUD.
         backfillCloseout,
         backfillTimeOnSite,
+        // Live-override minutes are operator input the same way: losing
+        // them across a reload records the inflated timer instead.
+        adjustedTimeOnSite,
         visitOutcome,
         customerRecap,
         recapSource,
@@ -9820,6 +9998,7 @@ export function CompletionPanel({
     oneTimeRecapOnly,
     backfillCloseout,
     backfillTimeOnSite,
+    adjustedTimeOnSite,
     visitOutcome,
     customerRecap,
     recapSource,
@@ -9901,6 +10080,7 @@ export function CompletionPanel({
     );
     setBackfillCloseout(restoredBackfill.backfillCloseout);
     setBackfillTimeOnSite(restoredBackfill.backfillTimeOnSite);
+    setAdjustedTimeOnSite(restoredBackfill.adjustedTimeOnSite);
     setVisitOutcome(savedDraft.visitOutcome || "completed");
     setCustomerRecap(savedDraft.customerRecap || "");
     setRecapSource(savedDraft.recapSource || "draft");
@@ -10863,6 +11043,17 @@ export function CompletionPanel({
       );
       return;
     }
+    // A typo in the live time-on-site override must never silently fall
+    // back to the inflated timer — the whole point of the field is that the
+    // timer is wrong. Block here; completionTimeOnSiteBody's range check is
+    // only the belt-and-suspenders for a stale draft restore.
+    if (liveAdjustEligible && String(adjustedTimeOnSite || "").trim() !== "") {
+      const adjusted = Math.round(Number(adjustedTimeOnSite));
+      if (!Number.isFinite(adjusted) || adjusted < 1 || adjusted > 720) {
+        alert("Adjusted time on site must be 1–720 minutes.");
+        return;
+      }
+    }
     // The server normalizer silently trims each observation/recommendation
     // line to 240 chars and keeps at most 20 entries — reject oversized
     // input here instead of letting the saved report lose text without
@@ -11243,11 +11434,13 @@ export function CompletionPanel({
           ? null
           : selectedReviewScheduledFor,
         // Backfill: never the auto-elapsed (it spans the stale gap) — only
-        // what the operator typed, or nothing. See completionTimeOnSiteBody.
+        // what the operator typed, or nothing. Live: an admin-typed number
+        // overrides the running timer. See completionTimeOnSiteBody.
         ...completionTimeOnSiteBody({
           backfill: backfillEligible && backfillCloseout,
           typedMinutes: backfillTimeOnSite,
           elapsed,
+          adjustedMinutes: liveAdjustEligible ? adjustedTimeOnSite : "",
         }),
         // Single source of truth for the treated areas. The server reads
         // areasServiced (falling back to a legacy areasTreated only if present),
@@ -11408,6 +11601,27 @@ export function CompletionPanel({
       if (photoResult?.failed > 0) {
         alert(
           `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
+        );
+      }
+      // A live time-on-site override syncs the technician's linked job
+      // timer server-side; when that sync is blocked the inflated span
+      // survives in Timesheets/utilization — say so, since the corrected
+      // value seeds the edit modal and no later save will retry it.
+      if (result?.timeEntryCorrected === false) {
+        const timerReason =
+          result?.timeEntryCorrectionBlocked === "exceeds_elapsed"
+            ? "the corrected minutes exceed the time elapsed since its clock-in"
+            : result?.timeEntryCorrectionBlocked === "entry_conflict"
+              ? "it was edited by someone else at the same moment"
+            : result?.timeEntryCorrectionBlocked === "entry_open"
+              ? "its timer is still running"
+            : result?.timeEntryCorrectionBlocked === "approved_week"
+              ? "its week is already approved"
+              : result?.timeEntryCorrectionBlocked === "multiple_job_entries"
+                ? "several timer entries are linked to this visit"
+                : "it could not be edited automatically";
+        alert(
+          `Service completed with the corrected duration, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
         );
       }
       localStorage.removeItem(completionDraftKey(service.id));
@@ -13556,6 +13770,54 @@ export function CompletionPanel({
                   </span>{" "}
                 </div>
               )}{" "}
+              {liveAdjustEligible && (
+                <div
+                  style={{
+                    padding: "14px 16px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    marginBottom: 8,
+                  }}
+                >
+                  {" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 15,
+                      color: M.ink,
+                      marginBottom: 8,
+                    }}
+                  >
+                    Adjust time on site (minutes)
+                  </span>{" "}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="720"
+                    step="1"
+                    value={adjustedTimeOnSite}
+                    onChange={(e) => setAdjustedTimeOnSite(e.target.value)}
+                    placeholder="Use timer"
+                    style={mInput}
+                  />{" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 14,
+                      color: M.ink3,
+                      marginTop: 6,
+                    }}
+                  >
+                    Overrides the running timer ({elapsed}) in the recorded
+                    duration — use it when the visit wasn't closed out on
+                    time. Leave blank to record the timer.
+                  </span>{" "}
+                </div>
+              )}{" "}
               <label
                 style={{
                   display: "flex",
@@ -15372,6 +15634,30 @@ export function CompletionPanel({
               <div style={{ fontSize: 14, color: D.muted }}>
                 The running timer spans the missed days and is not submitted —
                 leave blank to record no duration.
+              </div>{" "}
+            </div>
+          )}{" "}
+          {liveAdjustEligible && (
+            <div style={{ marginBottom: 8 }}>
+              {" "}
+              <div style={{ fontSize: 14, color: D.text, marginBottom: 4 }}>
+                Adjust time on site (minutes)
+              </div>{" "}
+              <input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                max="720"
+                step="1"
+                value={adjustedTimeOnSite}
+                onChange={(e) => setAdjustedTimeOnSite(e.target.value)}
+                placeholder="Use timer"
+                style={{ ...inputStyle, fontSize: 14, marginBottom: 4 }}
+              />{" "}
+              <div style={{ fontSize: 14, color: D.muted }}>
+                Overrides the running timer ({elapsed}) in the recorded
+                duration — use it when the visit wasn't closed out on time.
+                Leave blank to record the timer.
               </div>{" "}
             </div>
           )}{" "}
