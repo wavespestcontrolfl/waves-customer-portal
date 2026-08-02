@@ -554,12 +554,19 @@ async function alertRecapCardHoldNeedsReview({ scheduledServiceId, customerId, r
 // then finds the just-committed invoice instead of minting a second one.
 // Reuse is by service_record_id OR (pre-completion Charge-now/Tap-to-Pay)
 // scheduled_service_id, back-linking the latter like the /complete path.
-// Shared with the appointment-card recap lane (Codex #3153 r1 P1) — the ONE
-// lock key covers both rails, so the two lanes can never mint duplicate
-// invoices for the same visit.
+// Shared with the appointment-card recap lane (Codex #3153 r1 P1) — one
+// helper, so the two rails can never mint duplicate invoices for the same
+// visit — and serialized on the CANONICAL ['schedule.invoice.mint', svc.id]
+// two-key lock every other scheduled-service invoice writer takes
+// (scheduled-invoice-mint.js; Codex #3153 r4 P1): a recap overlapping the
+// dispatch /complete mint must contend on the SAME lock or both paths mint
+// separate collectible invoices and both auto-charge.
 async function resolveOrMintRecapCompletionInvoice({ scheduledServiceId, serviceRecordId, serviceType = null }) {
   return db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`card_hold_recap_invoice:${scheduledServiceId}`]);
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      ['schedule.invoice.mint', String(scheduledServiceId)],
+    );
     const bySr = await trx('invoices').where({ service_record_id: serviceRecordId })
       .whereNot('status', 'void').orderBy('created_at', 'desc').first('id');
     if (bySr?.id) return bySr.id;

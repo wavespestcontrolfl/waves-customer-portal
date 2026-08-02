@@ -1238,10 +1238,16 @@ async function loadSecureCardPageData(token) {
       disclosure.no_show_fee_amount = null;
       disclosure.cancel_window_hours = 0;
     }
-    if (planContext) {
+    // The stamped cap is the EXACT number in the returned payload —
+    // planContext.perVisit, the value the client renders — not this GET's
+    // earlier visitPrice read (Codex #3153 r4 P1: a concurrent reprice
+    // between the two reads would freeze a cap higher than displayed).
+    const displayedPrice = planContext && Number(planContext.perVisit) > 0
+      ? Number(planContext.perVisit) : null;
+    if (displayedPrice != null) {
       disclosure.accepted_amount = db.raw(
         'CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount, ?::numeric), ?::numeric) END',
-        [visitPrice, visitPrice],
+        [displayedPrice, displayedPrice],
       );
     } else {
       disclosure.accepted_amount = 0;
@@ -1428,7 +1434,7 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
       customerId: request.customer_id,
       paymentMethodId: request.stripe_payment_method_id,
       amountDollars: feeAmount,
-      description: 'Waves one-time visit — no-show / late-cancellation fee',
+      description: 'Waves appointment — no-show / late-cancellation fee',
       metadata: {
         purpose: 'appointment_card_no_show_fee',
         request_id: String(request.id),
@@ -1767,7 +1773,10 @@ async function settleAppointmentNoShowFee(paymentIntent) {
   const feeLabel = reason === 'late_cancel' ? 'Late-cancellation fee' : 'No-show fee';
 
   const InvoiceService = require('./invoice');
-  const description = `One-time visit — ${feeLabel.toLowerCase()}`;
+  // Neutral "appointment" wording (Codex #3153 r4 P2): the fee rail also
+  // covers recurring plan-choice visits — "one-time visit" on their
+  // invoice/receipt would be inaccurate billing copy.
+  const description = `Appointment — ${feeLabel.toLowerCase()}`;
   const result = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${piId}`]);
     const existing = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
@@ -1778,7 +1787,7 @@ async function settleAppointmentNoShowFee(paymentIntent) {
       database: trx,
       customerId,
       title: description,
-      lineItems: [{ description: `${feeLabel} — one-time visit`, quantity: 1, unit_price: amount, amount }],
+      lineItems: [{ description: `${feeLabel} — appointment`, quantity: 1, unit_price: amount, amount }],
       taxRate: 0,
       dueDate: etDateString(),
       skipAccrual: true,

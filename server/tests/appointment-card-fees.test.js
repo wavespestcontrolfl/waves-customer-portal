@@ -408,6 +408,16 @@ describe('pest-recap wiring (source contract)', () => {
     expect(src).toContain('chargeAppointmentCardForRecapCompletion({');
   });
 
+  test('the shared recap mint serializes on the CANONICAL schedule.invoice.mint lock (Codex #3153 r4)', () => {
+    const holds = require('fs').readFileSync(require.resolve('../services/estimate-card-holds.js'), 'utf8');
+    const fn = holds.slice(
+      holds.indexOf('async function resolveOrMintRecapCompletionInvoice'),
+      holds.indexOf('async function chargeCardHoldForRecapCompletion'),
+    );
+    expect(fn).toContain("'schedule.invoice.mint'");
+    expect(fn).not.toContain('card_hold_recap_invoice');
+  });
+
   test('the fallback runs AFTER the hold rail and forwards the prior-non-performed guard', () => {
     const holdIdx = src.indexOf('chargeCardHoldForRecapCompletion({');
     const apptIdx = src.indexOf('chargeAppointmentCardForRecapCompletion({');

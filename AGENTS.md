@@ -1140,8 +1140,12 @@ violations at the severity noted.
   (`pest-recap.js`, which completes without invoicing) runs
   `chargeAppointmentCardForRecapCompletion` as the no-hold fallback after
   the card-hold recap rail — same exclusions and frozen cap, invoice
-  minted through the SHARED `resolveOrMintRecapCompletionInvoice` advisory
-  lock so the two rails can never double-mint, autopay-log source
+  minted through the SHARED `resolveOrMintRecapCompletionInvoice` helper,
+  which serializes on the CANONICAL `['schedule.invoice.mint', svc.id]`
+  advisory lock (the same lock every scheduled-service invoice writer
+  takes — a recap overlapping the dispatch /complete mint must contend on
+  it or both paths mint and auto-charge separate invoices; r4),
+  autopay-log source
   `appointment_card_recap_completion`, every non-charge outcome alerts the
   office (recap has no pay-link fallback). Source contracts pin the guard
   strings — `admin-dispatch-backfill-completion.test.js` and
