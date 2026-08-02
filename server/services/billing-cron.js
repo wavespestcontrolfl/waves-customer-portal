@@ -1229,6 +1229,12 @@ const BillingCron = {
             const attemptAnchor = new Date(Math.floor(attemptStartedAt.getTime() / 1000) * 1000);
             const pausedRows = await db('customers')
               .where({ id: payment.customer_id })
+              // Never OVERWRITE an existing pause: a manual pause set while
+              // this retry was in flight would be silently converted into an
+              // auto-clearable autopay_final_failure one — and a later
+              // payment would clear a pause the UI promises only clears
+              // manually.
+              .whereNull('service_paused_at')
               .whereNotExists(
                 db('payments')
                   .select(db.raw('1'))
@@ -1257,10 +1263,19 @@ const BillingCron = {
                 service_pause_reason: 'autopay_final_failure',
               });
             if (!pausedRows) {
-              // No pause AND no "membership paused" email — the customer
-              // just paid; telling them they're paused would be false.
-              pauseOutcome = 'settlement_veto';
-              logger.warn(`[billing-cron] NOT pausing customer ${payment.customer_id} — a payment settled during the final retry attempt`);
+              // Two distinct reasons the UPDATE matched nothing, and they
+              // demand different messages: an existing pause (preserved) vs
+              // a settlement veto (customer just paid).
+              const existing = await db('customers')
+                .where({ id: payment.customer_id })
+                .first('service_paused_at', 'service_pause_reason');
+              if (existing?.service_paused_at) {
+                pauseOutcome = 'already_paused';
+                logger.warn(`[billing-cron] NOT pausing customer ${payment.customer_id} — an existing pause (${existing.service_pause_reason || 'no reason'}) is preserved`);
+              } else {
+                pauseOutcome = 'settlement_veto';
+                logger.warn(`[billing-cron] NOT pausing customer ${payment.customer_id} — a payment settled during the final retry attempt`);
+              }
             } else {
               pauseOutcome = 'applied';
               void AccountMembershipEmail.sendMembershipPaused({
@@ -1277,7 +1292,7 @@ const BillingCron = {
           // sat on a dashboard — push-style SMS makes sure it lands).
           try {
             await TwilioService.sendSMS(ADMIN_ALERT_PHONE,
-              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. ${pauseOutcome === 'applied' ? 'Service paused until card is updated.' : pauseOutcome === 'settlement_veto' ? 'NOT paused — a payment settled during the attempt.' : 'PAUSE WRITE FAILED — customer is NOT paused, check logs.'} Last error: ${err.message}`,
+              `🚨 Autopay exhausted: ${customer.first_name} ${customer.last_name} — $${amount} failed 3x. ${pauseOutcome === 'applied' ? 'Service paused until card is updated.' : pauseOutcome === 'settlement_veto' ? 'NOT paused — a payment settled during the attempt.' : pauseOutcome === 'already_paused' ? 'Existing pause preserved.' : 'PAUSE WRITE FAILED — customer is NOT paused, check logs.'} Last error: ${err.message}`,
               { messageType: 'internal_alert', link: '/admin/revenue' },
             );
           } catch (officeErr) {
@@ -1291,7 +1306,7 @@ const BillingCron = {
               alert_type: 'payment_failure',
               severity: 'high',
               title: `Payment failed after 3 retries — $${amount}`,
-              description: `Monthly payment for ${customer.first_name} ${customer.last_name} failed 3 times. ${pauseOutcome === 'applied' ? 'Service auto-paused.' : pauseOutcome === 'settlement_veto' ? 'Not paused — a payment settled during the attempt.' : 'PAUSE WRITE FAILED — customer is not paused; investigate.'} Last error: ${err.message}`,
+              description: `Monthly payment for ${customer.first_name} ${customer.last_name} failed 3 times. ${pauseOutcome === 'applied' ? 'Service auto-paused.' : pauseOutcome === 'settlement_veto' ? 'Not paused — a payment settled during the attempt.' : pauseOutcome === 'already_paused' ? 'Existing pause preserved.' : 'PAUSE WRITE FAILED — customer is not paused; investigate.'} Last error: ${err.message}`,
               trigger_data: JSON.stringify({
                 payment_id: payment.id,
                 amount: payment.amount,

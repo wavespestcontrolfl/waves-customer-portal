@@ -281,6 +281,7 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     // (whereNotExists), so no settled-and-committed payment can slip
     // between a separate check and the write.
     expect(before).toContain('whereNotExists');
+    expect(before).toContain("whereNull('service_paused_at')");
     expect(before).toContain('attemptStartedAt');
     // 'paid' ONLY — a 'processing' ACH row is accepted, not settled, and can
     // still bounce.
@@ -306,7 +307,7 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     expect(before).toContain("whereNull('payments.statement_id')");
     expect(before).toMatch(/payer_id'\) IS NULL/);
     // The paused-email fires only when the UPDATE actually matched.
-    const after = cronSrc.slice(pauseIdx, pauseIdx + 900);
+    const after = cronSrc.slice(pauseIdx, pauseIdx + 2200);
     expect(after).toContain('if (!pausedRows)');
     expect(after).toContain('sendMembershipPaused');
   });
@@ -317,8 +318,11 @@ describe('billing-cron pause write — concurrent-settlement guard', () => {
     // reassuring message. Three distinct states, defaulting to 'error' so a
     // throw cannot masquerade as a veto.
     const pauseIdx = cronSrc.indexOf("service_pause_reason: 'autopay_final_failure'");
-    const block = cronSrc.slice(Math.max(0, pauseIdx - 4200), pauseIdx + 4200);
+    const block = cronSrc.slice(Math.max(0, pauseIdx - 5200), pauseIdx + 5200);
     expect(block).toContain("let pauseOutcome = 'error';");
+    // An existing (possibly manual) pause is PRESERVED, never overwritten
+    // into an auto-clearable reason — and reported as its own outcome.
+    expect(block).toContain("pauseOutcome = 'already_paused';");
     expect(block).toContain("pauseOutcome = 'settlement_veto';");
     expect(block).toContain("pauseOutcome = 'applied';");
     expect(block).toContain("PAUSE WRITE FAILED");
