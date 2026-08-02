@@ -355,21 +355,24 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
     return { sent: false, skipped: 'claim_insert_failed' };
   }
   if (!phoneClaimed) {
-    // Stale in-flight recovery: a worker that died between the claim insert
-    // and completion leaves outcome='claimed' forever, wedging the phone
-    // with no text ever sent (codex P2). Take over a 'claimed' row older
-    // than an hour — every live send completes in seconds.
+    // Stale in-flight claims: a worker that died between the claim insert
+    // and completion leaves outcome='claimed' forever. But a crash can also
+    // land AFTER Twilio accepted and before any stamp/log write — whether a
+    // text went out is UNKNOWABLE, so re-sending risks a double text and
+    // the one-text-per-phone-EVER contract wins over delivery (codex P1):
+    // the stale row is consumed as dispatch_unknown, never re-claimed for a
+    // fresh send. This still un-wedges the state machine (the row leaves
+    // 'claimed', so bounce handling and reporting see a terminal outcome).
     try {
-      const recovered = await db('dropped_call_sms_claims')
+      const consumed = await db('dropped_call_sms_claims')
         .where({ phone, outcome: 'claimed' })
         .where('created_at', '<', new Date(Date.now() - 60 * 60 * 1000))
-        .update({ lead_id: leadId, call_log_id: call.id || null, created_at: new Date() });
-      if (!recovered) return { sent: false, skipped: 'already_sent_to_phone' };
-      logger.info(`[dropped-call-sms] Recovered stale in-flight claim for ${maskPhone(phone)}`);
+        .update({ outcome: 'dispatch_unknown' });
+      if (consumed) logger.info(`[dropped-call-sms] Stale in-flight claim for ${maskPhone(phone)} consumed as dispatch_unknown`);
     } catch (e) {
-      logger.warn(`[dropped-call-sms] stale claim recovery failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
-      return { sent: false, skipped: 'already_sent_to_phone' };
+      logger.warn(`[dropped-call-sms] stale claim consume failed: ${e.code || e.name || 'db_error'}`);
     }
+    return { sent: false, skipped: 'already_sent_to_phone' };
   }
 
   try {

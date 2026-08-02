@@ -7116,7 +7116,10 @@ const CallRecordingProcessor = {
                 flag: 'call_dropped_mid_intake',
                 extraction: v2Result?.status === 'valid' ? v2Result.extraction : null,
                 extraPayload: {
-                  caller_phone: phone || null,
+                  // The ANI the text went to (never a dictated callback
+                  // number) — the bounce handler's legacy fallback and the
+                  // office both need the number that was actually texted.
+                  caller_phone: smsAni || phone || null,
                   dropped_after_seconds: droppedCallSeconds || null,
                   address_request_sms: smsOutcome.sent ? 'sent' : (smsOutcome.skipped || 'not_sent'),
                   ...(smsOutcome.code ? { address_request_sms_code: smsOutcome.code } : {}),
@@ -7144,7 +7147,7 @@ const CallRecordingProcessor = {
             // claim outcome is the bounce handler's authority: reconcile the
             // fresh card so it never permanently says 'sent' for a text that
             // already bounced.
-            const bounceOutcome = smsOutcome.sent ? await DroppedCallSms.terminalBounceOutcome(phone) : null;
+            const bounceOutcome = smsOutcome.sent ? await DroppedCallSms.terminalBounceOutcome(smsAni || phone) : null;
             if (bounceOutcome) {
               await db('triage_items')
                 .where({ call_log_id: call.id, reason_code: 'call_dropped_mid_intake' })

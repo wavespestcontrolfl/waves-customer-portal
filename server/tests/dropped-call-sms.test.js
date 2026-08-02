@@ -328,11 +328,14 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });
 
-  it('abandoned in-flight claim (worker died mid-send >1h ago) — recovered and re-sent', async () => {
+  it('abandoned in-flight claim — consumed as dispatch_unknown, NEVER re-sent (double-text risk)', async () => {
     state.insertResults.dropped_call_sms_claims = [[]]; // insert conflicts
-    state.updateResults.dropped_call_sms_claims = [1]; // stale takeover wins
+    state.updateResults.dropped_call_sms_claims = [1]; // stale consume matches
     const res = await sendDroppedCallAddressRequest(sendArgs());
-    expect(res).toEqual({ sent: true });
+    expect(res).toEqual({ sent: false, skipped: 'already_sent_to_phone' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const consume = state.updates.find((u) => u.table === 'dropped_call_sms_claims');
+    expect(consume.payload.outcome).toBe('dispatch_unknown');
   });
 
   it('landline — claim kept and stamped, no send', async () => {
