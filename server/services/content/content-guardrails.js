@@ -306,7 +306,9 @@ function blankToRenderedText(s) {
 // "all dollar figures re-verified at publish + dated in-post ('as of
 // [date]')", so the amount's paragraph must carry BOTH a citation link and a
 // date. Absent either, the draft parks for review.
-const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,30}\b(?:19|20)\d{2}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(?:19|20)\d{2}\b/i;
+// The date must be GOVERNED by "as of" — a bare "June 2026 was rainy" is not
+// a verification date, and accepting one let a stale price publish (Codex).
+const AS_OF_DATE_RE = /\bas of\b[^.\n]{0,40}?\b(?:19|20)\d{2}\b/i;
 // Hosts that can EVIDENCE a claim: the curated citation list, curated
 // competitor-fact sources, and editorially-approved external domains. Our own
 // hub and spoke domains are deliberately absent.
@@ -1283,14 +1285,31 @@ const DEST_CONTROL_RE = new RegExp([
 // needs to ship code. Banning these tags outright is what finally ends the
 // "is this URL in an executable position?" question: there IS no executable
 // position, so a named citation URL cannot be turned into one (Codex).
-const EXECUTABLE_TAG_RE = /<\s*(script|iframe|object|embed|applet|frame|frameset)\b/i;
+// A CLOSED ALLOWLIST of raw HTML permitted in generated posts. A blacklist
+// kept missing actives — script/iframe/object/embed, then meta, base, link,
+// style — and each miss was executable in MDX (redirects, URL rebasing,
+// injected CSS). Anything not listed here is rejected, so the next active
+// element nobody thought of is rejected by default (Codex).
+//
+// Uppercase names are MDX COMPONENTS (<ComparisonTable>), which are the
+// writer contract and are validated by their own gates — not raw HTML.
+const PASSIVE_HTML_TAGS = new Set([
+  'p', 'br', 'hr', 'span', 'div', 'section', 'article', 'aside', 'header', 'footer', 'main', 'nav',
+  'strong', 'b', 'em', 'i', 'u', 's', 'del', 'ins', 'mark', 'small', 'sub', 'sup',
+  'code', 'pre', 'kbd', 'samp', 'var', 'abbr', 'cite', 'q', 'blockquote', 'time', 'address',
+  'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+  'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'colgroup', 'col',
+  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+  'a', 'img', 'figure', 'figcaption', 'picture', 'details', 'summary',
+]);
 
 function externalLinkFinding(text, { operatorCitations = false, requiredSourceUrls = [] } = {}) {
   const body = decodeEntitiesForScan(String(text || ''));
   if (!body) return null;
-  const execTag = EXECUTABLE_TAG_RE.exec(body);
-  if (execTag) {
-    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains an executable/embedding tag ("<${execTag[1]}") — generated posts publish as .mdx and must never ship code or embed third-party frames. Remove it.`);
+  for (const tag of eachTag(body)) {
+    if (/^[A-Z]/.test(tag.name.charAt(0)) || /^[A-Z]/.test((/^<\/?([A-Za-z][\w-]*)/.exec(body.slice(tag.start, tag.end + 1)) || [])[1] || '')) continue;
+    if (PASSIVE_HTML_TAGS.has(tag.name)) continue;
+    return finding('P0', 'DISALLOWED_EXTERNAL_LINK', `Draft contains the raw HTML tag "<${tag.name}", which is not on the passive-content allowlist — generated posts publish as .mdx and must never ship code, redirects, rebased URLs or injected styles. Use Markdown or an approved component.`);
   }
   if (DEST_CONTROL_RE.test(body)) {
     return finding('P0', 'DISALLOWED_EXTERNAL_LINK', 'Draft contains a link destination with embedded control characters (tab/newline) — browsers strip these while parsing, which can smuggle an executable scheme. Remove them.');

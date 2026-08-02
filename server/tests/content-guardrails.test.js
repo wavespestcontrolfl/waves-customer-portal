@@ -2414,6 +2414,31 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice('Per [CA][1], as of June 2026, Orkin charges a $199 fee.\n\nMore prose.\n\n[1]: https://www.consumeraffairs.com/x', OP)).toBeNull();
   });
 
+  test('raw HTML is a CLOSED allowlist, not a blacklist (r14 P0)', () => {
+    // A blacklist kept missing actives — script/iframe, then meta/base/link/
+    // style — and each was executable in MDX.
+    const OPC = { operatorCitations: true, requiredSourceUrls: [] };
+    for (const body of [
+      '<meta http-equiv="refresh" content="0;url=https://evil.example">',
+      '<base href="https://evil.example/">',
+      '<link rel="stylesheet" href="https://evil.example/x.css">',
+      '<style>body{display:none}</style>',
+      '<script>x()</script>',
+      '<form action="https://evil.example"></form>',
+    ]) {
+      expect(guardrails._internals.externalLinkFinding(body, OPC)?.code).toBe('DISALLOWED_EXTERNAL_LINK');
+    }
+    // Passive formatting and MDX components are unaffected.
+    for (const body of ['<p>Orkin charges a fee.</p>', '<table><tr><td>x</td></tr></table>', '<ComparisonTable columns={["a"]} />']) {
+      expect(guardrails._internals.externalLinkFinding(body, OPC)).toBeNull();
+    }
+  });
+
+  test('the date must be GOVERNED by "as of" (r14)', () => {
+    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), Orkin charges a $199 fee. June 2026 was rainy.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Per [CA](https://www.consumeraffairs.com/x), as of June 2026, Orkin charges a $199 fee.', OP)).toBeNull();
+  });
+
   test('shortcut and collapsed reference citations qualify (r14)', () => {
     // The label lives in the FIRST bracket for these two forms.
     expect(findHardcodedPrice('Aptive charges a $199 cancellation fee as of July 2026 [source].\n\n[source]: https://www.consumeraffairs.com/x', OP)).toBeNull();
