@@ -366,6 +366,14 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(mockChargeSavedCard).not.toHaveBeenCalled();
   });
 
+  test('an unexpected dependency crash AFTER the lane check still alerts the office (Codex #3153 r2 — recap has no fallback)', async () => {
+    recapHandlers({ customers: { first: () => { throw new Error('db down'); } } });
+    const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
+    expect(res.reason).toBe('error');
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockChargeSavedCard).not.toHaveBeenCalled();
+  });
+
   test('declined charge → charge_failed with office alert + autopay failure log', async () => {
     recapHandlers();
     mockChargeSavedCard.mockRejectedValueOnce(new Error('card_declined'));
@@ -451,13 +459,13 @@ describe('chargeAppointmentNoShowFee — charge outcomes', () => {
     expect(final.fee_charged_amount).toBe(49);
   });
 
-  test('claim race lost (0 rows) → fee_claim_lost, nothing charged', async () => {
+  test('claim race lost (0 rows) → canonical charge_review, nothing charged (Codex #3153 r2 — the winner may still charge)', async () => {
     mockTableHandlers = handlersWith({
       request: REQUEST(),
     });
     mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.fee_status === 'charging' ? 0 : 1);
     const res = await chargeAppointmentNoShowFee({ scheduledServiceId: 'svc-1' });
-    expect(res.reason).toBe('fee_claim_lost');
+    expect(res.reason).toBe('charge_review');
     expect(mockChargeOffSession).not.toHaveBeenCalled();
   });
 
@@ -540,11 +548,26 @@ describe('handleAppointmentCardCancellation', () => {
     expect(mockChargeOffSession.mock.calls[0][0].metadata.reason).toBe('late_cancel');
   });
 
-  test('outside-window cancel → free, nothing charged', async () => {
+  test('outside-window cancel → free, nothing charged, and the release is PERSISTED terminal (Codex #3153 r2)', async () => {
     mockApptTime = new Date(Date.now() + 100 * HOUR);
     const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
     expect(res).toEqual({ handled: true, released: true, reason: 'cancel_outside_window' });
     expect(mockChargeOffSession).not.toHaveBeenCalled();
+    // A cancellation retry that lands inside the window (or after a gate
+    // flip) must find a resolved fee event, never a chargeable row.
+    const released = mockDbTouches
+      .filter((t) => t.table === 'appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.fee_status === 'released');
+    expect(released).toBeTruthy();
+  });
+
+  test('free-release stamp lost to a concurrent charge claim → NON-released charge_review (Codex #3153 r2)', async () => {
+    mockApptTime = new Date(Date.now() + 100 * HOUR);
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.fee_status === 'released' ? 0 : 1);
+    const res = await handleAppointmentCardCancellation({ scheduledServiceId: 'svc-1' });
+    expect(res).toEqual({ handled: false, released: false, reason: 'charge_review' });
   });
 
   test('no fee lane on the visit → handled:false but released (never blocks a cancel)', async () => {

@@ -1085,7 +1085,16 @@ violations at the severity noted.
   renders `unavailable` instead of the card form (an earlier render's
   higher terms must never sit chargeable behind a lower disclosure), and
   the fee rail refuses any row without a recorded `fee_agreed_at` +
-  positive frozen window (`no_fee_consent`). Fee terms live on COMPLETED rows only; a `satisfied`
+  positive frozen window (`no_fee_consent`). `accepted_amount` stamps
+  ONLY when the page DISPLAYED the price (planContext present — r2): with
+  `GATE_SECURE_PLAN_CHOICE` off no number renders, so page-secured rows
+  stay uncharged (completion routes to review) until that gate is on —
+  flip order matters. Fee-state machine is terminal-everything: a timely
+  free cancel persists `fee_status='released'` BEFORE reporting release
+  (cancellation retries re-run side effects — an unpersisted free cancel
+  must never become chargeable later), and BOTH races (lost charge claim,
+  lost free-release stamp) report the canonical NON-released
+  `charge_review`, never a clean outcome. Fee terms live on COMPLETED rows only; a `satisfied`
   auto-secured row never saw the disclosure and is NEVER fee-charged (it
   does get `accepted_amount`, frozen at auto-secure time); rows from
   before the fee-terms migrations stay unchargeable. (1)

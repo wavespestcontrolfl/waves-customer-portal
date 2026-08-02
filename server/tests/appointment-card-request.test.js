@@ -895,7 +895,7 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(update[1]).toMatchObject({ stripe_setup_intent_id: 'seti_1' });
   });
 
-  test('ready render stamps the DISCLOSED terms onto the pending row — fee + completion cap frozen at disclosure (Codex #3153 r1)', async () => {
+  test('ready render stamps the DISCLOSED terms onto the pending row — fee frozen at disclosure (Codex #3153 r1)', async () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('ready');
     const stamp = touches('appointment_card_requests')
@@ -903,11 +903,31 @@ describe('loadSecureCardPageData — page state machine', () => {
       .map(([, patch]) => patch)
       .find((p) => 'accepted_amount' in p);
     expect(stamp).toBeTruthy();
-    expect(Number(stamp.accepted_amount)).toBe(135);
+    // planContext is null here (gate off) → the page shows NO price, so
+    // nothing is accepted and the completion lane must stay unchargeable
+    // (Codex #3153 r2). The fee disclosure renders regardless and stamps.
+    expect(stamp.accepted_amount).toBeNull();
     expect(Number(stamp.no_show_fee_amount)).toBeGreaterThan(0);
     expect(Number(stamp.cancel_window_hours)).toBeGreaterThan(0);
     // Consent is NOT recorded at render — only /complete stamps fee_agreed_at.
     expect(stamp.fee_agreed_at).toBeUndefined();
+  });
+
+  test('with the price DISPLAYED (planContext present) the render freezes it as the completion cap', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'buildSecurePlanContext')
+      .mockResolvedValueOnce({ mode: 'one_time', perVisit: 135, selected: null });
+    try {
+      const res = await loadSecureCardPageData(REQUEST.token);
+      expect(res.state).toBe('ready');
+      const stamp = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+        .map(([, patch]) => patch)
+        .find((p) => 'accepted_amount' in p);
+      expect(Number(stamp.accepted_amount)).toBe(135);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('a FAILED disclosure stamp renders unavailable — never a form over terms the row does not carry (pre-push r2 P0)', async () => {

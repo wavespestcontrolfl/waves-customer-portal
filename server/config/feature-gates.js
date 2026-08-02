@@ -89,9 +89,13 @@ const gates = {
   // hard-capped at the accepted_amount FROZEN on the lane row at consent
   // (+ disclosed tax/surcharge; never the live estimated_price, which
   // appointment editors rewrite — Codex #3153 r1) with the same above-quote
-  // review routing as the per-application rail. Money surface — fail-closed
-  // ==='true' in EVERY environment. Gate off: completion invoices go out as
-  // pay links exactly as today. Kill switch: unset or any non-'true' value.
+  // review routing as the per-application rail. Page-secured rows only get
+  // an accepted_amount when the /secure page DISPLAYED the price, which
+  // requires GATE_SECURE_PLAN_CHOICE — flip that gate first or completions
+  // route to office review instead of charging (Codex #3153 r2). Money
+  // surface — fail-closed ==='true' in EVERY environment. Gate off:
+  // completion invoices go out as pay links exactly as today. Kill switch:
+  // unset or any non-'true' value.
   apptCardCompletionCharge: process.env.GATE_APPT_CARD_COMPLETION_CHARGE === 'true',
 
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An

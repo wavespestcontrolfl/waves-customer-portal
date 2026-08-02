@@ -1192,7 +1192,15 @@ async function loadSecureCardPageData(token) {
   // a reload retries, and a row that raced to completed re-renders secured.
   let disclosureStamped = false;
   try {
-    const disclosure = { accepted_amount: visitPrice, updated_at: new Date() };
+    // accepted_amount is stamped ONLY when the page actually DISPLAYS the
+    // price (Codex #3153 r2 P1): the one-time service-total row and the
+    // recurring per-application price both render exclusively from
+    // planContext — with GATE_SECURE_PLAN_CHOICE off (or derivation null)
+    // no number is shown, so nothing is accepted and the row stays
+    // unchargeable by the completion lane (routes to office review).
+    // Auto-secured `satisfied` rows are different: their cap rests on the
+    // saved-method enrollment consent, not this page.
+    const disclosure = { accepted_amount: planContext ? visitPrice : null, updated_at: new Date() };
     const { cardHoldNoShowFee, cardHoldCancelWindowHours } = require('./estimate-card-holds');
     const feeAmount = Number(cardHoldNoShowFee());
     if (base.cancelFeeNote && feeAmount > 0) {
@@ -1364,7 +1372,14 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
     .where({ id: request.id })
     .whereNull('fee_status')
     .update({ fee_status: 'charging', updated_at: new Date() });
-  if (claimed !== 1) return { charged: false, reason: 'fee_claim_lost' };
+  if (claimed !== 1) {
+    // Lost the claim race — a concurrent worker is charging (or already
+    // resolved) this visit's one fee RIGHT NOW (Codex #3153 r2 P1): report
+    // the canonical unresolved outcome so no caller sends a no-charge
+    // notice or reports a clean cancellation while the fee may land.
+    logger.warn(`[appt-card-request] fee claim lost for visit ${scheduledServiceId} — reporting charge_review`);
+    return { charged: false, reason: 'charge_review' };
+  }
 
   // Charge FIRST (separately from the row write) so a post-charge DB failure
   // is never confused with a pre-charge failure. Attach self-heal is
@@ -1476,6 +1491,21 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
   }
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
   const startPassed = startDate && !Number.isNaN(startDate.getTime()) && startDate.getTime() <= now.getTime();
+  // Persist the free cancel as a TERMINAL fee state before reporting it
+  // (Codex #3153 r2 P1): processCancellationRequest deliberately re-runs
+  // side effects on retry, so an unpersisted timely cancel could re-enter
+  // the window (or the gate could flip on) and charge a fee for a
+  // cancellation that was free when it happened. Atomic on NULL — losing
+  // this write to a concurrent charge claim is the same unresolved race
+  // as losing the claim itself.
+  const releasedStamp = await db('appointment_card_requests')
+    .where({ id: request.id })
+    .whereNull('fee_status')
+    .update({ fee_status: 'released', updated_at: new Date() });
+  if (releasedStamp !== 1) {
+    logger.warn(`[appt-card-request] free-cancel release lost a race for visit ${scheduledServiceId} — reporting charge_review`);
+    return { handled: false, released: false, reason: 'charge_review' };
+  }
   return { handled: true, released: true, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' };
 }
 
@@ -1526,6 +1556,9 @@ async function alertRecapApptCardNeedsReview({ scheduledServiceId, customerId, r
 // accepted_amount). Dark behind GATE_APPT_CARD_COMPLETION_CHARGE; every
 // failure mode alerts the office instead of charging. Never throws.
 async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, serviceRecordId, priorNonPerformed = false }) {
+  // Captured as soon as a lane row is known so the outer catch can still
+  // point the office at the right customer (Codex #3153 r2 P1).
+  let alertCustomerId = null;
   try {
     if (!require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
       return { charged: false, reason: 'feature_disabled' };
@@ -1536,6 +1569,7 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
       .whereIn('status', ['completed', 'satisfied'])
       .first('id', 'customer_id', 'accepted_amount');
     if (!laneRow) return { charged: false, reason: 'no_lane_row' };
+    alertCustomerId = laneRow.customer_id || null;
     // Lane exclusivity — fail CLOSED on a lookup error: the hold rail owns
     // any visit with a hold row, and its own recap fallback already ran.
     let holdRow;
@@ -1648,7 +1682,15 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
     logger.info(`[appt-card-request] recap completion charged invoice ${invoice.id} for visit ${scheduledServiceId}`);
     return { charged: true, invoiceId: invoice.id };
   } catch (err) {
+    // An unexpected dependency failure past the lane check leaves a
+    // completed visit unbilled with NO pay-link fallback — the office must
+    // hear about it (Codex #3153 r2 P1). Before the lane check
+    // (alertCustomerId null) a silent return is correct: the visit isn't
+    // this lane's to bill.
     logger.error(`[appt-card-request] recap completion charge errored for visit ${scheduledServiceId}: ${err.message}`);
+    if (alertCustomerId !== null) {
+      await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: alertCustomerId, reason: 'error' });
+    }
     return { charged: false, reason: 'error', error: err.message };
   }
 }
