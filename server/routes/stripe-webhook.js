@@ -924,10 +924,13 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     // Invoice owner FIRST: customer merges repoint invoices while old Stripe
     // metadata stays tied to the merged-away row — the locally bound invoice
     // is the authority whenever one exists, metadata only for genuinely
-    // invoice-less paths.
-    const pausedCustomerId = invoiceForTenderGuard?.customer_id
-      || paymentIntent.metadata?.waves_customer_id
-      || null;
+    // invoice-less paths. But a PAYER-billed invoice proves nothing about
+    // the homeowner's tender — the builder/AP payer supplied the money, and
+    // the homeowner's dead card is exactly why they are paused. No metadata
+    // fallthrough either: the invoice exists and answers the question.
+    const pausedCustomerId = invoiceForTenderGuard
+      ? (invoiceForTenderGuard.payer_id ? null : invoiceForTenderGuard.customer_id)
+      : (paymentIntent.metadata?.waves_customer_id || null);
     if (pausedCustomerId) {
       const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
       await maybeResumeBillingPauseOnPayment(pausedCustomerId, {

@@ -220,15 +220,27 @@ describe('stripe-webhook wiring', () => {
     expect(between).toContain('estimate_deposit');
     expect(between).toContain('card_hold_no_show_fee');
     expect(between).toContain('findInvoiceForPaymentIntent');
-    const callBlock = src.slice(callIdx - 900, callIdx + 500);
+    const callBlock = src.slice(callIdx - 1200, callIdx + 500);
     // Invoice owner FIRST — customer merges repoint invoices while stale PI
     // metadata stays tied to the merged-away row.
-    const invoiceIdx = callBlock.indexOf('invoiceForTenderGuard?.customer_id');
+    const invoiceIdx = callBlock.indexOf('invoiceForTenderGuard.customer_id');
     const metadataIdx = callBlock.indexOf('waves_customer_id');
     expect(invoiceIdx).toBeGreaterThan(-1);
     expect(metadataIdx).toBeGreaterThan(invoiceIdx);
     // The settlement moment rides along for the ordering guard.
     expect(callBlock).toContain('settledAt');
     expect(callBlock).toContain('eventCreated');
+  });
+
+  test('a payer-billed invoice never resumes the homeowner — and never falls through to metadata', () => {
+    // The builder/AP payer supplied the tender, not the homeowner whose dead
+    // card caused the pause. When an invoice matched, it answers the
+    // question — stale PI metadata must not sneak the homeowner back in.
+    const fnStart = src.indexOf('async function handlePaymentIntentSucceeded');
+    const callIdx = src.indexOf('maybeResumeBillingPauseOnPayment', fnStart);
+    const callBlock = src.slice(callIdx - 1200, callIdx);
+    expect(callBlock).toMatch(/invoiceForTenderGuard\.payer_id \? null : invoiceForTenderGuard\.customer_id/);
+    // Metadata only when NO invoice matched at all.
+    expect(callBlock).toMatch(/: \(paymentIntent\.metadata\?\.waves_customer_id \|\| null\)/);
   });
 });
