@@ -2691,7 +2691,22 @@ router.put('/:serviceId/status', async (req, res, next) => {
           if (apptFeeResult?.charged === true) noShowFeeOutcome = 'charged';
           else if (apptFeeResult?.reason === 'charge_review') noShowFeeOutcome = 'review';
         }
-      } catch (e) { logger.error(`[admin-dispatch] no-show card-hold fee charge failed: ${e.message}`); }
+      } catch (e) {
+        // A THROWN fee step means lane ownership was never resolved (Codex
+        // #3153 r21 P1) — a retry can still charge, so the customer notice
+        // must use the cautious review copy, never an unequivocal "no
+        // charge", and the office needs to hear about it.
+        noShowFeeOutcome = 'review';
+        logger.error(`[admin-dispatch] no-show card-hold fee charge failed — outcome parked review: ${e.message}`);
+        try {
+          await require('../services/notification-service').notifyAdmin(
+            'billing',
+            'No-show fee needs review',
+            'The no-show fee step errored before lane ownership was resolved — review the customer\'s billing; a fee may still apply.',
+            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_step_error' } },
+          );
+        } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
+      }
 
       // Notify the customer we missed them and invite a reschedule.
       // Best-effort — a Twilio/template failure must not fail the
@@ -7293,7 +7308,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // is unchargeable, so credit must not touch its bill either).
         const creditResult = await applyAccountCreditToInvoice({
           invoiceId: invoice.id,
-          ...(apptCardOneTimeCharge ? { maxAuthorizedSubtotal: apptCardAcceptedAmount != null ? apptCardAcceptedAmount : 0 } : {}),
+          ...(apptCardOneTimeCharge ? {
+            maxAuthorizedSubtotal: apptCardAcceptedAmount != null ? apptCardAcceptedAmount : 0,
+            // Live payer serialized inside the credit transaction (Codex
+            // #3153 r21 P1) — a payer assigned after the invoice was
+            // pre-minted must not have the homeowner's credit consumed.
+            requireSelfPayScheduledServiceId: svc.id,
+          } : {}),
         });
         if (creditResult?.applied > 0) {
           const fresh = await db('invoices').where({ id: invoice.id })

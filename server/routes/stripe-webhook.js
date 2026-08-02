@@ -4538,7 +4538,38 @@ async function handleDisputeClosed(dispute) {
     // NO catch around the re-settlement itself (Codex #3153 r19 P1): a
     // failure must propagate so the event is retried — acknowledging it
     // would permanently strand the reinstated fee without its invoice.
-    const feeRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status', 'metadata');
+    let feeRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status', 'metadata');
+    if (!feeRow) {
+      // WON delivered before BOTH created and succeeded (Codex #3153 r21
+      // P1): identify the lane from trusted PI metadata and persist the
+      // final state under the fee lock — otherwise a late created event
+      // writes a permanently 'disputed' marker, or a late created after
+      // settlement reopens the paid invoice (no dispute_final on record).
+      const wonPi = await require('../services/stripe').retrievePaymentIntent(dispute.payment_intent);
+      if (wonPi?.metadata?.purpose === 'appointment_card_no_show_fee') {
+        await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
+          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id');
+          if (rowInLock) return;
+          await trx('payments').insert({
+            customer_id: wonPi.metadata?.waves_customer_id || null,
+            processor: 'stripe',
+            payment_date: etDateString(),
+            amount: (Number(dispute.amount) || 0) / 100,
+            status: 'paid',
+            stripe_payment_intent_id: dispute.payment_intent,
+            stripe_charge_id: chargeId,
+            metadata: JSON.stringify({
+              purpose: 'appointment_card_no_show_fee',
+              pre_settlement_dispute: true,
+              dispute_id: dispute.id,
+              dispute_final: status,
+            }),
+          });
+        });
+        feeRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status', 'metadata');
+      }
+    }
     let feeMeta = {};
     try {
       feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};

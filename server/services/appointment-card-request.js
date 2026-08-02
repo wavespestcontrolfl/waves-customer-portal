@@ -700,12 +700,40 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // email on file, or a SendGrid failure never changes the funnel result.
     try {
       const { sendAutopaySetupInvitation } = require('./card-enrollment-email');
+      // The EMAIL's disclosed fee terms become another monotonic bound on
+      // the row BEFORE the email leaves (Codex #3153 r21 P1): a config
+      // change between this invitation and the customer's later /secure
+      // render must never let the row enforce wider/higher terms than the
+      // invitation stated. If the stamp cannot be persisted, the email
+      // omits the fee sentence entirely — never a term we didn't freeze.
+      let emailFeeDisclosure = readCancelFeeDisclosure();
+      if (emailFeeDisclosure) {
+        try {
+          await db('appointment_card_requests')
+            .where({ scheduled_service_id: visit.id, status: 'pending' })
+            .update({
+              no_show_fee_amount: db.raw(
+                'CASE WHEN cancel_window_hours = 0 THEN NULL ELSE LEAST(COALESCE(no_show_fee_amount, ?::numeric), ?::numeric) END',
+                [emailFeeDisclosure.feeAmount, emailFeeDisclosure.feeAmount],
+              ),
+              cancel_window_hours: db.raw(
+                'CASE WHEN cancel_window_hours = 0 THEN 0 ELSE LEAST(COALESCE(cancel_window_hours, ?::int), ?::int) END',
+                [emailFeeDisclosure.windowHours, emailFeeDisclosure.windowHours],
+              ),
+              updated_at: new Date(),
+            });
+        } catch (stampErr) {
+          logger.warn(`[appt-card-request] email disclosure stamp failed for visit ${visit.id} — omitting the fee sentence: ${stampErr.message}`);
+          emailFeeDisclosure = null;
+        }
+      }
       sendAutopaySetupInvitation({
         customerId: visit.customer_id,
         scheduledServiceId: visit.id,
         serviceType: visit.service_type || 'service',
         dateLine: dateLineFor(visit.scheduled_date),
         secureUrl,
+        feeDisclosure: emailFeeDisclosure,
         // The email variant follows the copy that ACTUALLY went out on the
         // SMS leg — not the raw probe — so the two legs of one invite can
         // never contradict each other (base SMS's unconditional "only
@@ -2260,6 +2288,7 @@ async function settleAppointmentNoShowFee(paymentIntent) {
     const existing = await trx('payments').where({ stripe_payment_intent_id: piId })
       .first('id', 'status', 'refund_status', 'refund_amount', 'metadata');
     let adoptMarkerRowId = null;
+    let liveRefundIds = [];
     let markerMeta = null;
     let markerRefundedCents = 0;
     if (existing) {
@@ -2341,8 +2370,44 @@ async function settleAppointmentNoShowFee(paymentIntent) {
         }
         const chargedCents = Math.round(Number(ch.amount || 0));
         preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
+        liveRefundIds = Array.isArray(ch.refunds?.data)
+          ? ch.refunds.data.map((r) => r?.id).filter(Boolean)
+          : [];
         if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
-          logger.warn(`[appt-card-request] no-show fee fully refunded before settlement — skipping (${piId})`);
+          // Durable FULL-refund marker with canonical attribution (Codex
+          // #3153 r21 P1): the delayed charge.refunded may BOUNCE via
+          // refund.failed first — an unmarked return would leave retained
+          // money with nothing for the bounce handler to unwind, and the
+          // late charge.refunded would be skipped.
+          const fullMeta = {
+            purpose: 'appointment_card_no_show_fee',
+            pre_settlement_refund: true,
+            ...(liveRefundIds.length ? { stamped_refund_ids: liveRefundIds } : {}),
+          };
+          const fullFields = {
+            refund_amount: preRefundedCents / 100,
+            refund_status: 'full',
+            status: 'refunded',
+            stripe_refund_id: liveRefundIds[liveRefundIds.length - 1] || null,
+          };
+          if (adoptMarkerRowId) {
+            await trx('payments').where({ id: adoptMarkerRowId }).update({
+              ...fullFields,
+              metadata: JSON.stringify({ ...(markerMeta || {}), ...fullMeta }),
+            });
+          } else {
+            await trx('payments').insert({
+              customer_id: customerId,
+              processor: 'stripe',
+              payment_date: etDateString(),
+              amount,
+              stripe_payment_intent_id: piId,
+              stripe_charge_id: ch.id,
+              ...fullFields,
+              metadata: JSON.stringify(fullMeta),
+            });
+          }
+          logger.warn(`[appt-card-request] no-show fee fully refunded before settlement — durable marker written, skipping (${piId})`);
           return { refundedPreSettlement: true };
         }
       }
@@ -2379,12 +2444,19 @@ async function settleAppointmentNoShowFee(paymentIntent) {
       amount,
       refund_amount: preRefundedCents > 0 ? preRefundedCents / 100 : 0,
       refund_status: preRefundedCents > 0 ? 'partial' : null,
+      // Canonical attribution for refunds discovered by the live retrieve
+      // (Codex #3153 r21 P1) — a later refund.failed bounce must find the
+      // ids it unwinds by.
+      ...(preRefundedCents > 0 && liveRefundIds.length
+        ? { stripe_refund_id: liveRefundIds[liveRefundIds.length - 1] }
+        : {}),
       status: 'paid',
       description,
       metadata: JSON.stringify({
         // Marker metadata (stamped_refund_ids, pre_settlement_refund) rides
         // forward so a later refund bounce can still unwind it (r17).
         ...(markerMeta || {}),
+        ...(preRefundedCents > 0 && liveRefundIds.length ? { stamped_refund_ids: liveRefundIds } : {}),
         purpose: 'appointment_card_no_show_fee',
         invoice_id: inv.id,
         request_id: requestId,
@@ -2396,6 +2468,23 @@ async function settleAppointmentNoShowFee(paymentIntent) {
       await trx('payments').where({ id: adoptMarkerRowId }).update(settledPaymentFields);
     } else {
       await trx('payments').insert(settledPaymentFields);
+    }
+    // Heal a stuck fee claim (Codex #3153 r21 P1): if the charging worker
+    // died after Stripe accepted the PaymentIntent but before its row
+    // update, the request sits 'charging' forever and every cancellation/
+    // offboarding parks review despite the fee being durably settled here.
+    // Monotonic: only a 'charging' row advances; the trusted request_id
+    // comes from the PI metadata this settlement already keys on.
+    if (requestId) {
+      await trx('appointment_card_requests')
+        .where({ id: requestId, fee_status: 'charging' })
+        .update({
+          fee_status: 'charged',
+          no_show_payment_intent_id: piId,
+          fee_charged_amount: amount,
+          fee_charged_at: new Date(),
+          updated_at: new Date(),
+        });
     }
     return { invoice: inv };
   });

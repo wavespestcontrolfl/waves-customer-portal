@@ -2278,7 +2278,9 @@ describe('completion route wiring (source contracts)', () => {
     // r16: the appointment lane's frozen cap also rides INTO the credit
     // apply itself (locked re-check) — the call carries the conditional
     // maxAuthorizedSubtotal spread.
-    expect(source).toMatch(/if \(!isBackfillCompletion\s*\n\s*&& invoice\?\.id && !alreadyPaid && !invoice\.payer_id\s*\n\s*&& !\['paid', 'prepaid'\][\s\S]{0,500}!apptCardOverCap && !apptCardLaneUnresolved[\s\S]{0,200}autoApplyAccountCredit\) \{[\s\S]{0,700}applyAccountCreditToInvoice\(\{\s*\n\s*invoiceId: invoice\.id,\s*\n\s*\.\.\.\(apptCardOneTimeCharge \? \{ maxAuthorizedSubtotal:/);
+    // r21: the appointment lane's credit apply carries the frozen cap AND
+    // the serialized live-payer check into the credit transaction.
+    expect(source).toMatch(/if \(!isBackfillCompletion\s*\n\s*&& invoice\?\.id && !alreadyPaid && !invoice\.payer_id\s*\n\s*&& !\['paid', 'prepaid'\][\s\S]{0,500}!apptCardOverCap && !apptCardLaneUnresolved[\s\S]{0,200}autoApplyAccountCredit\) \{[\s\S]{0,700}applyAccountCreditToInvoice\(\{\s*\n\s*invoiceId: invoice\.id,\s*\n\s*\.\.\.\(apptCardOneTimeCharge \? \{\s*\n\s*maxAuthorizedSubtotal:[\s\S]{0,400}requireSelfPayScheduledServiceId: svc\.id,/);
   });
 
   test('backfill never auto-applies the prepaid credit — invoice mutation stays with the reviewer', () => {

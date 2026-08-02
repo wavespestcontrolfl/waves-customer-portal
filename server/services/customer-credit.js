@@ -193,10 +193,38 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null }, trx = null) {
   const run = async (t) => {
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // Live payer SERIALIZED with the credit apply (Codex #3153 r21 P1):
+    // payer assignment updates scheduled_services while a reused invoice
+    // keeps payer_id null — the invoice-field check below can't see it.
+    // FOR UPDATE on the visit row + a re-resolve on this connection orders
+    // the credit against a concurrently-committing payer edit; a payer hit
+    // (or lookup failure — fail closed) consumes nothing. Opt-in.
+    if (requireSelfPayScheduledServiceId != null) {
+      try {
+        const lockedSvc = await t('scheduled_services')
+          .where({ id: requireSelfPayScheduledServiceId })
+          .forUpdate()
+          .first('id', 'customer_id');
+        if (!lockedSvc) return { applied: 0, skipped: 'service_missing' };
+        if (String(lockedSvc.customer_id) !== String(invoice.customer_id)) {
+          return { applied: 0, skipped: 'customer_mismatch' };
+        }
+        const resolved = await require('./payer').resolveForInvoice({
+          database: t,
+          customerId: String(lockedSvc.customer_id),
+          scheduledServiceId: String(lockedSvc.id),
+          throwOnError: true,
+        });
+        if (resolved?.payerId) return { applied: 0, skipped: 'payer_billed' };
+      } catch (payerErr) {
+        logger.warn(`[customer-credit] live payer re-check failed for invoice ${invoiceId} — credit not applied: ${payerErr.message}`);
+        return { applied: 0, skipped: 'payer_check_failed' };
+      }
+    }
     // Frozen-consent cap, enforced against the LOCKED invoice (Codex #3153
     // r16 P1): the appointment-card completion lane's preflight compares an
     // unlocked snapshot — an invoice edit racing this credit apply could

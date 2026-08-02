@@ -150,6 +150,11 @@ export default function SecureAppointmentPage() {
         return;
       }
     } catch { /* fall through to the secured fallback */ }
+    // Suppress term-specific copy in the fallback (Codex #3153 r21 P2):
+    // the pre-completion note may be stale (a concurrent tab can have
+    // monotonically lowered/cleared the frozen terms) — secured posture
+    // without quoting terms we could not refresh.
+    setData((d) => (d ? { ...d, cancelFeeNote: null } : d));
     setState('secured');
   }, [token]);
 
