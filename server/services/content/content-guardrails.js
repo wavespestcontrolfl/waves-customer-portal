@@ -295,6 +295,26 @@ function blankToRenderedText(s) {
   return blankExpressions(blankMarkdownLinkDestinations(blankTags(blankHiddenContent(blankComments(s)))));
 }
 
+// Any markup in the amount's paragraph disqualifies the prose exemption.
+// Blunt by design: "<" opens a tag or comment, "{" an MDX expression, "&"
+// an entity. Over-matching costs an exemption; under-matching publishes a
+// first-party price.
+function paragraphHasMarkup(text, index) {
+  const s = String(text || '');
+  const start = (() => { const i = s.lastIndexOf('\n\n', index); return i === -1 ? 0 : i + 2; })();
+  const rawEnd = s.indexOf('\n\n', index);
+  const paragraph = s.slice(start, rawEnd === -1 ? s.length : rawEnd);
+  if (/\{|&[#A-Za-z]|<!/.test(paragraph)) return true; // expression, entity, comment
+  // A tag with NO attributes cannot hide anything — it carries no hidden,
+  // style, class or aria-hidden — so plain wrappers like <p> and <strong>
+  // still allow the exemption. ANY attribute makes visibility unprovable
+  // and disqualifies the paragraph.
+  for (const tag of eachTag(paragraph)) {
+    if ((tag.attrs || '').replace(/\/\s*$/, '').trim()) return true;
+  }
+  return false;
+}
+
 // True when the amount sits on a Markdown table row. Deliberately blunt: a
 // pipe anywhere on the line disqualifies the line from the PROSE exemption.
 // Over-matching only costs an exemption (the draft parks); under-matching
@@ -387,9 +407,22 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
     // boundaries as ordinary spacing and exempt "| Aptive charges a | $199 |"
     // (Codex). JSX tables already fail closed because blankToRenderedText
     // blanks the whole <ComparisonTable …> tag out of the attribution text.
+    // The exemption requires PLAIN PROSE. Any markup in the amount's
+    // paragraph — a tag, an MDX expression, a comment, an entity —
+    // disqualifies it outright.
+    //
+    // This replaces a normalization approach that tried to compute what a
+    // reader sees. That direction does not terminate: every construct is
+    // two bugs, one where invisible text ATTRIBUTES a price and one where
+    // it SPLITS the first-party marker that should block it, and the two
+    // want opposite handling. Requiring plain prose closes both at once.
+    // The cost is only a lost exemption — a sourced competitor price in a
+    // marked-up paragraph parks for review, and sourced price sentences are
+    // plain prose in practice.
     if (thirdPartyCitations
       && !isMarkdownTableRow(s, tokenIndex)
       && !isInsideTableMarkup(s, tokenIndex)
+      && !paragraphHasMarkup(s, tokenIndex)
       && isThirdPartyPriceCitation(proseText, tokenIndex, s)) continue;
     return match[0].trim();
   }

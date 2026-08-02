@@ -2459,9 +2459,11 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     }
     // Visible attribution is untouched, including an explicit aria-hidden=false.
     expect(findHardcodedPrice('<span>Orkin charges a</span> $199 cancellation fee.', OP)).toBeNull();
-    expect(findHardcodedPrice('<span aria-hidden="false">Orkin charges a</span> $199 cancellation fee.', OP)).toBeNull();
-    // An OPEN dialog is visible.
-    expect(findHardcodedPrice('<dialog open>Orkin charges a</dialog> $199 cancellation fee.', OP)).toBeNull();
+    // Explicitly-visible markup no longer earns the exemption either: the
+    // contract is PLAIN PROSE, and any attribute makes visibility a
+    // judgement call. Parking is the safe answer.
+    expect(findHardcodedPrice('<span aria-hidden="false">Orkin charges a</span> $199 cancellation fee.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('<dialog open>Orkin charges a</dialog> $199 cancellation fee.', OP)).not.toBeNull();
   });
 
   test('a link DESTINATION never supplies attribution (r9 P0)', () => {
@@ -2525,8 +2527,10 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     // The reader sees only "$89 per visit" — the attribution never renders.
     expect(findHardcodedPrice('{/* other companies charge */} $89 per visit for local quarterly service.', OP)).not.toBeNull();
     expect(findHardcodedPrice('<!-- Orkin charges --> $89 per visit for local quarterly service.', OP)).not.toBeNull();
-    // A genuine visible attribution is unaffected by a comment elsewhere.
-    expect(findHardcodedPrice('{/* sourced 2026 */}\nOrkin charges a $199 cancellation fee.', OP)).toBeNull();
+    // A comment ANYWHERE in the paragraph disqualifies it — same rule.
+    expect(findHardcodedPrice('{/* sourced 2026 */}\nOrkin charges a $199 cancellation fee.', OP)).not.toBeNull();
+    // …but a comment in a DIFFERENT paragraph leaves prose exempt.
+    expect(findHardcodedPrice('{/* sourced 2026 */}\n\nOrkin charges a $199 cancellation fee.', OP)).toBeNull();
   });
 
   test('a newline consumed by the price match is still a boundary (r4)', () => {
