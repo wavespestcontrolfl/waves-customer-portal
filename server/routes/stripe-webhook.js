@@ -2499,6 +2499,7 @@ async function handleChargeRefunded(charge) {
   // it with the customer's returned credit stranded. Safe to retry: keyed on
   // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
+  let feeRefundFencedInLock = false;
   const refundedPayment = await db.transaction(async (trx) => {
     // Fee-lane refunds serialize with settlement's marker adoption (Codex
     // #3153 r24 P1): an existing fee row (pre-settlement marker or settled
@@ -2508,6 +2509,36 @@ async function handleChargeRefunded(charge) {
     // trusted charge metadata (mirrors the PI's).
     if (charge.payment_intent && charge.metadata?.purpose === 'appointment_card_no_show_fee') {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${charge.payment_intent}`]);
+      // BOTH durable bounce fences RE-READ under the lock (Codex #3153
+      // r26 P1): serialization alone doesn't preserve the fence —
+      // refund.failed can acquire this lock first and commit its fence
+      // (stripe_failed_refunds or the row's failed_refund_ids) between
+      // this handler's unlocked probes and our lock acquisition; stamping
+      // afterwards would mark the bounced refund successful while the
+      // failed event's replay sees its fence and skips the unwind. A
+      // fence-read failure throws (fail closed → Stripe retries).
+      if (refundId) {
+        if (await db.schema.hasTable('stripe_failed_refunds')) {
+          const fencedInLock = await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+          if (fencedInLock) {
+            logger.warn(`[stripe-webhook] fee refund ${refundId} was fenced as failed while waiting for the lock — skipping stamp + side effects`);
+            feeRefundFencedInLock = true;
+            return null;
+          }
+        }
+        const rowForFence = await trx('payments').where({ stripe_charge_id: chargeId }).first('metadata');
+        if (rowForFence) {
+          let fenceMeta = {};
+          try {
+            fenceMeta = rowForFence.metadata ? (typeof rowForFence.metadata === 'string' ? JSON.parse(rowForFence.metadata) : rowForFence.metadata) : {};
+          } catch { fenceMeta = {}; }
+          if (Array.isArray(fenceMeta.failed_refund_ids) && fenceMeta.failed_refund_ids.includes(refundId)) {
+            logger.warn(`[stripe-webhook] fee refund ${refundId} already recorded as failed on the payments row — skipping stamp + side effects`);
+            feeRefundFencedInLock = true;
+            return null;
+          }
+        }
+      }
     }
     await trx('payments')
       .where({ stripe_charge_id: chargeId })
@@ -2585,6 +2616,10 @@ async function handleChargeRefunded(charge) {
     }
     return result;
   });
+  // A fence discovered under the lock means the refund BOUNCED — nothing
+  // was stamped, and no refund email/notification may fire for money
+  // Stripe kept (the refund.failed handler already notified the office).
+  if (feeRefundFencedInLock) return;
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,

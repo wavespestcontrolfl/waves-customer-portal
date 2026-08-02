@@ -587,6 +587,49 @@ describe('handleRefundFailed', () => {
     expect(notificationInsert).not.toHaveBeenCalled();
   });
 
+  test('fee charge.refunded fenced while waiting for the lock → no stamp, no refund comms (r26)', async () => {
+    // The unlocked probes see nothing, refund.failed commits its fence
+    // while this handler waits for the fee lock — the in-lock re-read must
+    // catch it and skip the stamp + side effects entirely.
+    let fenceReads = 0;
+    const fenceQuery = {
+      where: jest.fn(() => fenceQuery),
+      first: jest.fn(async () => (++fenceReads >= 2 ? { stripe_refund_id: 're_fail' } : undefined)),
+    };
+    const paymentUpdates = [];
+    const paymentsQuery = {
+      where: jest.fn(() => paymentsQuery),
+      first: jest.fn(async () => ({ id: 'pay-1', metadata: null, statement_id: null, customer_id: 'cust-1' })),
+      update: jest.fn(async (patch) => { paymentUpdates.push(patch); return 1; }),
+    };
+    const emptyQuery = { where: jest.fn(() => emptyQuery), first: jest.fn(async () => undefined) };
+    db.mockImplementation((table) => {
+      if (table === 'stripe_failed_refunds') return fenceQuery;
+      if (table === 'payments') return paymentsQuery;
+      if (table === 'payer_statements') return emptyQuery;
+      if (table === 'appointment_card_requests') return emptyQuery;
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+    db.schema = { hasTable: jest.fn(async () => true) };
+    db.raw = jest.fn(async () => ({}));
+    db.transaction.mockImplementation(async (cb) => cb(db));
+
+    await handleChargeRefunded({
+      id: 'ch_1',
+      payment_intent: 'pi_1',
+      metadata: { purpose: 'appointment_card_no_show_fee' },
+      amount: 4900,
+      amount_refunded: 4900,
+      refunded: true,
+      refunds: { data: [{ id: 're_fail', amount: 4900, created: 1751000000 }] },
+    });
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['appointment_card_no_show_fee:pi_1']);
+    expect(paymentUpdates).toHaveLength(0);
+    expect(notificationInsert).not.toHaveBeenCalled();
+    expect(require('../services/payment-lifecycle-email').sendRefundIssued).not.toHaveBeenCalled();
+    expect(require('../services/notification-triggers').triggerNotification).not.toHaveBeenCalled();
+  });
+
   test('no payments row (estimate-deposit refund) still notifies with the deposit hint', async () => {
     const emptyQuery = {
       where: jest.fn(() => emptyQuery),
