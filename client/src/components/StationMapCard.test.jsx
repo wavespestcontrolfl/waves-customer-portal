@@ -73,3 +73,42 @@ describe('StationMapCard — trap pins', () => {
     expect(eligibleTrapIndices([])).toEqual([]);
   });
 });
+
+// A declared trap SETUP means the pins went out on THIS visit. The default
+// 'ok' status previously read "Checked — no capture" and the summary counted
+// them as "inspected", both of which contradicted the same report's "Traps
+// set" finding (codex P1 on #3159).
+describe('StationMapCard — declared trap setup', () => {
+  const SETUP_MAP = {
+    ...STATION_MAP,
+    initialSetup: true,
+    summary: { total: 2, checked: 2, activity: 0, serviced: 0, inaccessible: 0 },
+    stations: [
+      { id: 's1', number: 1, label: null, cx: 0.25, cy: 0.5, status: 'ok' },
+      { id: 's2', number: 2, label: 'Garage', cx: 0.75, cy: 0.5, status: 'ok' },
+    ],
+  };
+
+  it('says the traps were set, never checked or inspected', () => {
+    const { container } = render(<StationMapCard stationMap={SETUP_MAP} trapPins />);
+    const text = container.textContent;
+    expect(text).toContain('2 traps set this visit');
+    expect(text).toContain('Set this visit');
+    expect(text).not.toContain('inspected');
+    expect(text).not.toContain('Checked — no capture');
+  });
+
+  it('a visit WITHOUT the flag keeps the ratified re-check wording', () => {
+    const { container } = render(<StationMapCard stationMap={STATION_MAP} trapPins />);
+    const text = container.textContent;
+    expect(text).toContain('2 of 2 stations inspected');
+    expect(text).not.toContain('set this visit');
+  });
+
+  it('the plan embed ignores it — that variant aggregates across visits', () => {
+    const { container } = render(<StationMapCard stationMap={SETUP_MAP} variant="plan" />);
+    const text = container.textContent;
+    expect(text).not.toContain('set this visit');
+    expect(text).toContain('inspected');
+  });
+});

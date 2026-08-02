@@ -1224,6 +1224,15 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
         + 'either clear them or set this visit to "Follow-up check"'
       );
     }
+    // A setup that placed no traps is not a setup (codex P2 on #3159).
+    // Blank or 0 published "Traps set: 0" into the immutable report while
+    // the body still promised "we return to check them". Count fields
+    // legitimately accept 0 elsewhere (a re-check can find zero captures),
+    // so this is a stage-specific floor rather than a schema change.
+    const trapsPlaced = Number(values.traps_checked);
+    if (!Number.isInteger(trapsPlaced) || trapsPlaced < 1) {
+      errors.push('An initial setup must record how many traps were set — enter the count, or set this visit to "Follow-up check"');
+    }
   }
   // rodent_sanitation publishes "contamination was cleaned and sanitized"
   // copy — with evidence_cleaned retired (2026-07-23), the work chips are
@@ -1808,22 +1817,32 @@ function composedWorkSentence(projectType, values = {}) {
  * it's a secondary trapping", and "it could be just the first time trapping,
  * but it also could be the second time".)
  *
- * The tech's `trap_visit_type` selection is AUTHORITATIVE — a trapping visit
- * is a setup or a re-check because of what happened on it, not because of
- * where it falls in a sequence. visitSequence is only the fallback for
- * completions that carry no selection (pre-field snapshots, API callers, a
- * closeout whose pre-select had nothing to go on), and it is a weak signal:
- * it counts the whole rodent family, so a first trapping that follows a
- * rodent inspection lands on visit 2 and reads as a re-check.
+ * ONLY the tech's explicit `trap_visit_type` selection says so. A trapping
+ * visit is a setup or a re-check because of what happened on it, never
+ * because of where it falls in a sequence — that was the owner's whole
+ * point, and the counter is doubly wrong here because it spans the entire
+ * rodent family (a first trapping after an inspection lands on visit 2).
+ *
+ * There is deliberately NO visitSequence fallback (codex P0 on #3159). An
+ * earlier revision inferred setup from `visitSequence <= 1` whenever the
+ * field was absent, which meant EVERY pre-change snapshot — none of which
+ * carry the field — was reclassified as a setup at view time. The
+ * narrative's live grounding would then have told an already-delivered
+ * report that the traps were set today, contradicting the frozen
+ * "checked/reset" copy persisted in that same snapshot. Existing rows must
+ * keep rendering exactly as they were written (AGENTS.md: breaking existing
+ * DB rows is P0). Absent the field, this is false and every legacy report
+ * keeps its original re-check wording.
+ *
+ * Nothing is lost going forward: the field is REQUIRED on the rodent
+ * trapping schema, so every new completion carries a declaration.
  *
  * Wildlife trapping is deliberately excluded: its checklist carries an
  * explicit 'Trap installed' chip that already reads right on visit 1.
  */
-function isInitialRodentTrapSetup(projectType, visitSequence, values = {}) {
+function isInitialRodentTrapSetup(projectType, _visitSequence, values = {}) {
   if (projectType !== 'rodent_trapping') return false;
-  const declared = String(values?.trap_visit_type || '').trim();
-  if (declared) return declared === 'Initial setup';
-  return !(Number(visitSequence) > 1);
+  return String(values?.trap_visit_type || '').trim() === 'Initial setup';
 }
 
 // Wording that CONTRADICTS a declared trap setup. Lives here rather than in
@@ -1847,9 +1866,16 @@ const SETUP_RECHECK_RES = [
   // re-check sentence walked through both screens (codex P1 on #3159).
   new RegExp(`\\b(?:re-?)?(?:check|inspect)(?:ed|ing)?\\b[^.!?]{0,40}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
   new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,40}?\\bwere\\s+(?:re-?)?(?:check|inspect)(?:ed)?\\b`, 'i'),
-  new RegExp(`\\b(?:re-?set|re-?bait(?:ed)?|rebait(?:ed)?|refresh(?:ed)?|re-?position(?:ed)?|moved)\\b[^.!?]{0,20}?\\bthe\\s+${TRAP_NOUN_RE}\\b`, 'i'),
-  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,20}?\\bwere\\s+re-?set\\b`, 'i'),
-  new RegExp(`\\b(?:existing|previous(?:ly)?\\s+(?:set|placed))\\s+${TRAP_NOUN_RE}\\b`, 'i'),
+  // Follow-up-only ACTIONS. Every verb the structured validator rejects on a
+  // setup (reset / moved / replaced / rebaited / refreshed) has to reject in
+  // prose too, or the draft publishes what the checklist just refused. The
+  // object is any trap phrase — "the traps", "all 8 traps", "the damaged
+  // traps" — not the literal words "the traps", which was the earlier gap
+  // (codex P1 round 4).
+  new RegExp(`\\b(?:re-?set|re-?bait(?:ed|ing)?|rebait(?:ed|ing)?|re-?fresh(?:ed|ing)?|refresh(?:ed|ing)?|re-?position(?:ed|ing)?|replac(?:ed|ing)|swapped(?:\\s+out)?|moved)\\b[^.!?]{0,30}?\\b${TRAP_NOUN_RE}\\b`, 'i'),
+  // …and their passive forms: "the traps were replaced", "all 8 traps were rebaited".
+  new RegExp(`\\b${TRAP_NOUN_RE}\\b[^.!?]{0,30}?\\bwere\\s+(?:re-?set|re-?baited|rebaited|re-?freshed|refreshed|re-?positioned|replaced|swapped(?:\\s+out)?|moved)\\b`, 'i'),
+  new RegExp(`\\b(?:existing|previous(?:ly)?\\s+(?:set|placed)|damaged|missing|old)\\s+${TRAP_NOUN_RE}\\b`, 'i'),
 ];
 // trap_actions values that presuppose traps were ALREADY on the property,
 // so they contradict a declared setup. 'New traps added' and 'Exterior

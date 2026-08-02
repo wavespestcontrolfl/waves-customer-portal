@@ -61,7 +61,7 @@ const PLAN_STATUS_LABELS = {
 };
 const PLAN_INTRO_SUFFIX = 'Colors reflect the most recent check.';
 
-function stationStatusMeta(status, programMeta, plan = false) {
+function stationStatusMeta(status, programMeta, plan = false, initialSetup = false) {
   const base = STATION_STATUS_META[status] || STATION_ON_FILE_META;
   if (plan && PLAN_STATUS_LABELS[status]) return { ...base, label: PLAN_STATUS_LABELS[status] };
   if (status === 'activity') return { ...base, label: programMeta.activityLegend };
@@ -69,15 +69,21 @@ function stationStatusMeta(status, programMeta, plan = false) {
     return { ...base, label: 'Checked — no consumption' };
   }
   if (status === 'ok' && programMeta === STATION_CARD_PROGRAM_META.trapping) {
-    return { ...base, label: 'Checked — no capture' };
+    // On a declared trap SETUP the pins went out on this visit — "Checked —
+    // no capture" would claim a check that never happened, and contradict
+    // the same report's "Traps set" finding (codex P1 on #3159).
+    return { ...base, label: initialSetup ? 'Set this visit' : 'Checked — no capture' };
   }
   return base;
 }
 
-function stationSummaryLine(summary, programMeta) {
+function stationSummaryLine(summary, programMeta, initialSetup = false) {
   if (!summary || !summary.total) return null;
   const parts = [];
-  if (summary.checked > 0) {
+  // Same rule as the pin label: traps placed today were SET, not inspected.
+  if (initialSetup) {
+    parts.push(`${summary.total} trap${summary.total === 1 ? '' : 's'} set this visit`);
+  } else if (summary.checked > 0) {
     parts.push(`${summary.checked} of ${summary.total} station${summary.total === 1 ? '' : 's'} inspected`);
   } else {
     parts.push(`${summary.total} station${summary.total === 1 ? '' : 's'} on file`);
@@ -278,9 +284,14 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
   const plan = variant === 'plan';
   const programMeta = STATION_CARD_PROGRAM_META[stationMap.program] || STATION_CARD_PROGRAM_META.termite;
   const onFileMeta = plan ? PLAN_ON_FILE_META : STATION_ON_FILE_META;
+  // A declared trap SETUP is a per-VISIT fact, so it never applies to the
+  // 'plan' variant (that embed aggregates the latest check across visits).
+  const initialSetup = !plan && stationMap.initialSetup === true;
   const intro = plan
     ? programMeta.intro.replace('Colors reflect this visit.', PLAN_INTRO_SUFFIX)
-    : programMeta.intro;
+    : (initialSetup
+      ? 'Numbered pins show where the traps went out on this visit. We check them and adjust placements from here.'
+      : programMeta.intro);
   const width = stationMap.image.width || 640;
   const height = stationMap.image.height || 340;
   const legendKeys = [];
@@ -290,8 +301,8 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
   });
   const legend = legendKeys.map((key) => (key === 'on_file'
     ? { key, ...onFileMeta }
-    : { key, ...stationStatusMeta(key, programMeta, plan) }));
-  const summaryLine = stationSummaryLine(stationMap.summary, programMeta);
+    : { key, ...stationStatusMeta(key, programMeta, plan, initialSetup) }));
+  const summaryLine = stationSummaryLine(stationMap.summary, programMeta, initialSetup);
   const mutedColor = plan ? '#475569' : 'var(--muted)';
   const lineColor = plan ? '#E7E2D7' : 'var(--line)';
   const Wrapper = plan ? 'div' : 'section';
@@ -319,7 +330,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
           {useTrapPins && <style>{TRAP_PIN_STYLES}</style>}
           {stations.map((station, index) => {
             const meta = STATION_STATUS_META[station.status]
-              ? stationStatusMeta(station.status, programMeta, plan)
+              ? stationStatusMeta(station.status, programMeta, plan, initialSetup)
               : onFileMeta;
             const cx = station.cx * width;
             const cy = station.cy * height;

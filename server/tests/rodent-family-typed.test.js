@@ -368,10 +368,10 @@ describe('trap setup vs. re-check — the tech declares it', () => {
     expect(result.missing).toContain('trap_visit_type');
   });
 
-  test('the visitSequence fallback still resolves snapshots that carry no value', () => {
-    // Completions frozen before the field existed replay through the same
-    // copy path — they must still render, on the old inference.
-    expect(todaysResult(SETUP_VALUES, 1).body).toContain('We set 8 traps today.');
+  test('an undeclared snapshot keeps re-check wording at every sequence', () => {
+    // The visitSequence fallback was REMOVED (codex P0): inferring setup from
+    // a missing field reclassified every pre-change report at view time.
+    expect(todaysResult(SETUP_VALUES, 1).body).toContain('We checked 8 traps');
     expect(todaysResult(SETUP_VALUES, 2).body).toContain('We checked 8 traps');
   });
 
@@ -387,11 +387,11 @@ describe('trap setup vs. re-check — the tech declares it', () => {
     expect(findBannedCustomerCopy(JSON.stringify(result))).toEqual([]);
   });
 
-  test('visit 1 reads as a setup — traps SET, no re-check or empty-check wording', () => {
+  test('a declared setup reads as one — traps SET, no re-check or empty-check wording', () => {
     const result = buildTodaysResult({
       projectType: 'rodent_trapping',
       reportTypeLabel: 'Rodent Trapping Summary',
-      values: SETUP_VALUES,
+      values: { ...SETUP_VALUES, trap_visit_type: 'Initial setup' },
       chips: ['Continue trapping'],
       activity: { score: 3 },
       visitSequence: 1,
@@ -419,14 +419,15 @@ describe('trap setup vs. re-check — the tech declares it', () => {
     expect(result.body).not.toContain('We return to check them, record what they catch');
   });
 
-  test('the setup visit relabels the count finding to "Traps set"', () => {
+  test('the declared setup relabels the count finding to "Traps set"', () => {
     const setup = buildTypedReportSnapshot({
       projectType: 'rodent_trapping',
       serviceKey: 'rodent_trapping_setup',
       serviceLabel: 'Rodent Trapping',
-      values: SETUP_VALUES,
+      values: { ...SETUP_VALUES, trap_visit_type: 'Initial setup' },
       nextStepChips: ['Continue trapping'],
-      visitSequence: 1,
+      // Sequence is irrelevant now — the declaration decides.
+      visitSequence: 4,
       activity: { indicatorKey: 'rodent_activity', label: 'Rodent Activity', score: 3, source: 'tech' },
     });
     expect(setup.findings.find((f) => f.fieldKey === 'traps_checked').customerLabel).toBe('Traps set');
@@ -797,5 +798,86 @@ describe('setup-stage guards — round 3 gaps', () => {
     expect(submit('Initial setup', 'New traps added, Exterior inspection completed').ok).toBe(true);
     // One offender in a mixed list is enough to reject.
     expect(submit('Initial setup', 'New traps added, Bait/lure refreshed').ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex round 4 on #3159. The P0 is the one that matters: an earlier revision
+// inferred "setup" from visitSequence whenever trap_visit_type was absent,
+// which silently reclassified EVERY pre-change snapshot at view time.
+// ---------------------------------------------------------------------------
+describe('legacy snapshots are never reclassified', () => {
+  const { isInitialRodentTrapSetup } = require('../services/service-report/activity-indicators');
+
+  test('a snapshot with no declaration is NOT a setup, whatever its sequence', () => {
+    // Every report completed before this PR looks exactly like this.
+    for (const seq of [1, 2, 9, null, undefined]) {
+      expect(isInitialRodentTrapSetup('rodent_trapping', seq, {})).toBe(false);
+      expect(isInitialRodentTrapSetup('rodent_trapping', seq, { trap_visit_type: '' })).toBe(false);
+    }
+  });
+
+  test('only an explicit declaration decides, and it beats the sequence both ways', () => {
+    expect(isInitialRodentTrapSetup('rodent_trapping', 9, { trap_visit_type: 'Initial setup' })).toBe(true);
+    expect(isInitialRodentTrapSetup('rodent_trapping', 1, { trap_visit_type: 'Follow-up check' })).toBe(false);
+  });
+
+  test('a legacy snapshot keeps its original re-check wording end to end', () => {
+    const legacy = { species: 'Roof rat', traps_checked: '7', captures: '0' };
+    const result = buildTodaysResult({
+      projectType: 'rodent_trapping',
+      reportTypeLabel: 'Rodent Trapping Summary',
+      values: legacy,
+      chips: ['Continue trapping'],
+      activity: { score: 2 },
+      visitSequence: 1,
+    });
+    expect(result.body).toContain('We checked 7 traps');
+    expect(result.body).not.toContain('We set 7 traps');
+    expect(result.body).not.toContain('We return to check them');
+  });
+});
+
+describe('setup guards — round 4 gaps', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  // P1: every verb the structured validator rejects on a setup has to reject
+  // in prose too, in the natural quantified and passive forms.
+  test('replacement, rebaiting and quantified/passive forms all reject', () => {
+    for (const text of [
+      'We replaced the damaged traps today.',
+      'We rebaited all 8 traps.',
+      'All 8 traps were rebaited.',
+      'The traps were replaced.',
+      'We swapped out the old traps.',
+      'We repositioned two of the traps.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('placement wording still survives', () => {
+    for (const text of [
+      'We set 8 traps today.',
+      'We placed the devices along the runways.',
+      'We set traps in the attic and the garage.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+
+  // P2: "Traps set: 0" was reachable whenever the trap map was off.
+  test('a setup that placed no traps is rejected; a re-check finding none is not', () => {
+    const submit = (trap_visit_type, traps_checked) => validateTypedFindings({
+      type: 'rodent_trapping',
+      values: { species: 'Roof rat', trap_visit_type, traps_checked },
+      expectedType: 'rodent_trapping',
+      enforceRequired: true,
+    });
+    expect(submit('Initial setup', '8').ok).toBe(true);
+    expect(submit('Initial setup', '0').ok).toBe(false);
+    expect(submit('Initial setup', '').ok).toBe(false);
+    // A re-check legitimately records zero — captures, not placements.
+    expect(submit('Follow-up check', '0').ok).toBe(true);
   });
 });

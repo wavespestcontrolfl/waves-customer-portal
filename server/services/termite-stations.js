@@ -666,6 +666,11 @@ function buildStationMapReportContext({
   imageContext = {},
   typedTypes = [],
   serviceDate = null,
+  // Declared trap SETUP: the pins went out on THIS visit, so every default
+  // 'ok' pin means "set today", not "checked, nothing caught" — and the
+  // summary counted them as inspected. Left unset, the map keeps its
+  // re-check wording, so legacy reports are untouched (codex P1 on #3159).
+  initialSetup = false,
 } = {}) {
   if (!isStationMapReportEnabled()) return { available: false, reason: 'disabled' };
   // The visit's typed flow picks the PROGRAM: a rodent bait report renders
@@ -740,6 +745,9 @@ function buildStationMapReportContext({
   return {
     available: true,
     program,
+    // Trapping only: a setup declaration has no meaning for bait stations,
+    // which are installed once and checked forever.
+    ...(initialSetup && program === 'trapping' ? { initialSetup: true } : {}),
     image: {
       url: satelliteMap.live.url,
       width: satelliteMap.live.width || 640,

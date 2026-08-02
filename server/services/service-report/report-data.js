@@ -2156,13 +2156,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // save endpoint accepts any service type, so a UI-only fix left three
   // other ways to publish one, including traces saved before this change
   // (codex P2 round 3). Same reasoning the bed-bug lane already documents.
-  let trapLaneNoSprayMap = false;
+  // FAIL CLOSED (codex P2 on #3159): the live profile lookup can throw,
+  // return the default profile, or stop matching a repointed service — and a
+  // suppression guard that degrades OPEN republishes the exact spray outline
+  // it exists to remove. The immutable snapshot is the authority; the live
+  // profile only widens it. Seeded before the try/catch so a throw leaves
+  // the snapshot verdict standing.
+  let trapLaneNoSprayMap = parseJsonObject(service.service_data)
+    ?.typedReportSnapshot?.type === 'rodent_trapping';
   if (!interiorOnlyLane && scheduledServiceRow) {
     try {
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
       const laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
       interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
-      trapLaneNoSprayMap = laneProfile?.findingsType === 'rodent_trapping';
+      trapLaneNoSprayMap = trapLaneNoSprayMap || laneProfile?.findingsType === 'rodent_trapping';
     } catch { /* label fallback stands */ }
   }
   const structured = parseJsonObject(service.structured_notes);
@@ -2777,6 +2784,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
     serviceDate: service.service_date || null,
+    // Read off the FROZEN snapshot, so the map's wording and the typed
+    // findings' "Traps set" label can never disagree (codex P1 on #3159).
+    // Scoped require matches this file's pattern for report-time helpers.
+    initialSetup: require('./activity-indicators').isInitialRodentTrapSetup(
+      typedSnapshot?.type,
+      typedSnapshot?.visitSequence,
+      typedSnapshot?.values,
+    ),
   });
 
   const onSiteMin = computeOnSiteMin({
