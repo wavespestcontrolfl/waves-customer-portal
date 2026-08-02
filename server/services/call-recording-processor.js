@@ -7083,6 +7083,7 @@ const CallRecordingProcessor = {
               isOutbound: isOutboundCall(call),
               v2Status: v2Result?.status,
               callNature: v2Result?.extraction?.call_nature,
+              doNotContactRequested: v2Result?.extraction?.consent?.do_not_contact_request === true,
             });
             if (genuineNewProspect) {
               // Inner catch: the review card below MUST still open when the

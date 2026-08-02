@@ -876,8 +876,16 @@ router.post('/status', async (req, res) => {
   try {
     const { MessageSid, MessageStatus, ErrorCode, ErrorMessage, From, To } = req.body;
     if (MessageSid && MessageStatus) {
-      await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
-      await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() });
+      // Bookkeeping is isolated: a transient DB error here must not jump to
+      // the outer catch and skip the bounce-remediation handlers below —
+      // the webhook answers 200 regardless, so Twilio would never redeliver
+      // and a bounce would be lost (codex P2).
+      try {
+        await db('sms_log').where({ twilio_sid: MessageSid }).update({ status: MessageStatus });
+        await updateByTwilioSid(MessageSid, { delivery_status: MessageStatus, updated_at: new Date() });
+      } catch (bookkeepingErr) {
+        logger.error(`[twilio-status] status bookkeeping failed (continuing to handlers): ${bookkeepingErr.message}`);
+      }
       if (isFailureStatus(MessageStatus)) {
         notifyTwilioFailure({
           channel: 'sms',

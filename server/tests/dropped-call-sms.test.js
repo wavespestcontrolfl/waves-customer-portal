@@ -237,6 +237,10 @@ describe('eligibleNewProspect', () => {
     expect(eligibleNewProspect({ ...BASE, isOutbound: true })).toBe(false);
   });
 
+  it('caller asked not to be contacted on the call — never eligible for the text', () => {
+    expect(eligibleNewProspect({ ...BASE, doNotContactRequested: true })).toBe(false);
+  });
+
   it('fails closed on classification: null/indeterminate nature and invalid V2 are card-only', () => {
     expect(eligibleNewProspect({ ...BASE, callNature: null })).toBe(false);
     expect(eligibleNewProspect({ ...BASE, callNature: 'other' })).toBe(false);

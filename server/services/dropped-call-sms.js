@@ -51,7 +51,11 @@ const { recordSuppression } = require('./messaging/validators/suppression');
 // locally).
 async function recordProviderOptOutSuppression(phone, source) {
   try {
-    await recordSuppression({ phone, reason: 'opt_out', source });
+    // recordSuppression resolves { ok: false } on a swallowed DB error — it
+    // does NOT reject (codex P1) — so the escalation must check the result,
+    // not rely on the catch.
+    const result = await recordSuppression({ phone, reason: 'opt_out', source });
+    if (result?.ok === false) throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
   } catch (e) {
     // A failed write here means OTHER workflows may keep texting an
     // opted-out number — that must never fail silently (codex P1). The
@@ -138,11 +142,14 @@ function detectDroppedMidIntake({ durationSeconds, transcription, extracted = {}
  * "they called us", and on outbound legs to_phone is the prospect's own
  * number. call_nature must be POSITIVELY 'new_lead' (fail closed).
  */
-function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, v2Status, callNature } = {}) {
+function eligibleNewProspect({ customerId, createdCustomerFromCall, isOutbound, v2Status, callNature, doNotContactRequested } = {}) {
   return isOutbound !== true
     && (!customerId || createdCustomerFromCall === true)
     && v2Status === 'valid'
-    && callNature === 'new_lead';
+    && callNature === 'new_lead'
+    // The caller explicitly asked not to be contacted on the call itself —
+    // the transactional consent basis cannot stand against that (codex P1).
+    && doNotContactRequested !== true;
 }
 
 /**
