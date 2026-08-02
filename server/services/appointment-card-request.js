@@ -709,7 +709,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       let emailFeeDisclosure = readCancelFeeDisclosure();
       if (emailFeeDisclosure) {
         try {
-          await db('appointment_card_requests')
+          const stampedRows = await db('appointment_card_requests')
             .where({ scheduled_service_id: visit.id, status: 'pending' })
             .update({
               no_show_fee_amount: db.raw(
@@ -722,6 +722,13 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
               ),
               updated_at: new Date(),
             });
+          if (stampedRows !== 1) {
+            // The row left 'pending' between our read and this stamp
+            // (Codex #3153 r22 P1) — the email must not state terms the
+            // row is not bound by. Omit the sentence entirely.
+            logger.warn(`[appt-card-request] email disclosure stamp hit ${stampedRows} rows for visit ${visit.id} — omitting the fee sentence`);
+            emailFeeDisclosure = null;
+          }
         } catch (stampErr) {
           logger.warn(`[appt-card-request] email disclosure stamp failed for visit ${visit.id} — omitting the fee sentence: ${stampErr.message}`);
           emailFeeDisclosure = null;
