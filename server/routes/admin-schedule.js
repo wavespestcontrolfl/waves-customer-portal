@@ -7783,6 +7783,16 @@ router.get('/annual-prepay-availability', async (_req, res, next) => {
 // normal answer, not an error) so the modal can disable the choice BEFORE
 // save instead of booking and failing the mint afterwards. Fail closed:
 // anything unsound is ineligible, never a guessed price.
+//
+// TWO input modes:
+//   draft     — customerId + serviceType + price + cadence…, the pre-save
+//               probe that prices the control while the operator composes.
+//   committed — scheduledServiceId, the AUTHORITATIVE one the modal uses at
+//               mint time. Every input is re-read from the persisted series
+//               (Codex #3161 P2): the booking endpoint recomputes discounts
+//               and persists its own estimated_price, so a draft-shaped
+//               payload replayed after save could invoice a per-visit amount
+//               the committed series never carried.
 router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
   try {
     // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
@@ -7795,19 +7805,82 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       annualPrepayOverlapStatusClause,
     } = require('../services/secure-appointment-plans');
 
+    // Local-calendar date-only reads (NOT toISOString) — a UTC slice on a
+    // timestamptz shifts the boundary a day in ET.
+    const { callBookingDateOnly } = require('../services/call-booking-catalog');
+
     const blocked = (blockReason) => res.json({ eligible: false, blockReason });
 
-    const customerId = String(req.query.customerId || '').trim();
-    const coverageServiceType = String(req.query.serviceType || '').trim();
+    // ── Resolve the plan inputs ──────────────────────────────────────────
+    // Committed mode wins when a visit id is supplied; the series PARENT owns
+    // the cadence and the weekend rule, so a child row resolves to it.
+    const scheduledServiceId = String(req.query.scheduledServiceId || '').trim();
+    let input = null;
+    if (scheduledServiceId) {
+      const visit = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('id', 'customer_id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
+          'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id', 'skip_weekends',
+          'booster_months', 'source_estimate_id');
+      if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+      const parent = visit.recurring_parent_id
+        ? await db('scheduled_services')
+          .where({ id: visit.recurring_parent_id })
+          .first('id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
+            'recurring_pattern', 'recurring_interval_days', 'skip_weekends', 'booster_months', 'source_estimate_id')
+        : visit;
+      const anchor = parent || visit;
+      // An estimate-origin series already made its billing choice at accept —
+      // that lane owns its own prepay control.
+      if (anchor.source_estimate_id) {
+        return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
+      }
+      const addonCount = await db('scheduled_service_addons')
+        .where({ scheduled_service_id: anchor.id })
+        .count({ n: '*' })
+        .first()
+        .catch(() => ({ n: 0 }));
+      const boosters = (() => {
+        const raw = anchor.booster_months;
+        if (!raw) return [];
+        try { return Array.isArray(raw) ? raw : JSON.parse(raw); } catch { return []; }
+      })();
+      input = {
+        customerId: String(anchor.customer_id || visit.customer_id || ''),
+        coverageServiceType: String(anchor.service_type || '').trim(),
+        perVisit: anchor.estimated_price != null ? Number(anchor.estimated_price) : null,
+        rawCadence: String(anchor.recurring_pattern || '').trim(),
+        intervalDays: Number(anchor.recurring_interval_days),
+        hasAddons: Number(addonCount?.n || 0) > 0,
+        hasBoosters: Array.isArray(boosters) && boosters.length > 0,
+        skipWeekends: !!anchor.skip_weekends,
+        firstVisitDateRaw: callBookingDateOnly(anchor.scheduled_date),
+        windowStartRaw: anchor.window_start || null,
+      };
+    } else {
+      input = {
+        customerId: String(req.query.customerId || '').trim(),
+        coverageServiceType: String(req.query.serviceType || '').trim(),
+        perVisit: req.query.price === undefined || req.query.price === null || req.query.price === ''
+          ? null
+          : Number(req.query.price),
+        rawCadence: String(req.query.cadence || '').trim(),
+        intervalDays: Number(req.query.intervalDays),
+        hasAddons: req.query.hasAddons === 'true',
+        hasBoosters: req.query.hasBoosters === 'true',
+        skipWeekends: req.query.skipWeekends === 'true',
+        firstVisitDateRaw: req.query.firstVisitDate,
+        windowStartRaw: req.query.windowStart,
+      };
+    }
+
+    const { customerId, coverageServiceType, perVisit } = input;
     if (!customerId || !coverageServiceType) {
       return res.status(400).json({ error: 'customerId and serviceType are required' });
     }
 
     // A blank / zero rate is "manual quote pending", NEVER $0 (waves-billing
     // invariant 8) — there is no year to price yet.
-    const perVisit = req.query.price === undefined || req.query.price === null || req.query.price === ''
-      ? null
-      : Number(req.query.price);
     if (!(perVisit > 0)) {
       return blocked('needs a per-visit price — a blank rate means the quote is still manual');
     }
@@ -7815,10 +7888,9 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // The modal encodes every-6-weeks as pattern 'custom' + 42-day interval;
     // normalize the same way the prepay-on-book preflight does, else a valid
     // 6-week plan reads as an unsupported custom cadence.
-    const rawCadence = String(req.query.cadence || '').trim();
-    const cadence = (rawCadence === 'custom' && Number(req.query.intervalDays) === 42)
+    const cadence = (input.rawCadence === 'custom' && input.intervalDays === 42)
       ? 'every_6_weeks'
-      : rawCadence;
+      : input.rawCadence;
     if (!cadence || cadence === 'one_time') return blocked('needs a recurring visit');
     const visitsPerYear = visitsPerYearForCadence(cadence);
     const coverageCadence = prepayCoverageCadenceForPattern(cadence);
@@ -7829,10 +7901,23 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // Same two combinations the quote-linked prepay control refuses: the
     // prepay invoice prices ONE recurring plan, so add-on lines and booster
     // months would bill outside the coverage the customer paid for.
-    if (req.query.hasAddons === 'true') {
+    if (input.hasAddons) {
       return blocked('can’t be combined with add-on service lines — book them as a separate appointment');
     }
-    if (req.query.hasBoosters === 'true') return blocked('can’t be combined with booster months');
+    if (input.hasBoosters) return blocked('can’t be combined with booster months');
+
+    // Weekend rule (Codex #3161 P1). An ongoing booking pre-seeds only its
+    // first visits; the rest of the sold year is filled at payment by
+    // coverageScheduleDates, which walks same-day-of-month / fixed-day
+    // arithmetic and knows nothing about skip_weekends. On a series booked
+    // with the weekend rule on, those later prepaid visits could land on the
+    // Sat/Sun the operator explicitly excluded. Refuse rather than sell a
+    // year whose back half we can't reproduce — same fail-closed reasoning
+    // that keeps monthly_nth_weekday and seasonal_feb_oct out of the
+    // supported-cadence map.
+    if (input.skipWeekends) {
+      return blocked('isn’t available on a series that skips weekends — the prepaid year’s later visits are seeded without that rule');
+    }
 
     const customer = await db('customers')
       .where({ id: customerId })
@@ -7876,9 +7961,6 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       .where(annualPrepayOverlapStatusClause())
       .orderBy('term_end', 'desc')
       .first('id', 'term_end');
-    // Local-calendar date-only read (NOT toISOString) — a UTC slice on a
-    // timestamptz term_end shifts the boundary a day in ET.
-    const { callBookingDateOnly } = require('../services/call-booking-catalog');
     const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
     const today = etDateString();
     if (overlapEnd && today <= overlapEnd) {
@@ -7888,10 +7970,12 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // The term is anchored on the visit being booked, so the coverage seeder
     // ADOPTS this series instead of seeding a duplicate one (the mint's
     // firstVisitDate/firstVisitWindowStart contract, PR #3126).
-    const firstVisitDate = validScheduleDate(req.query.firstVisitDate) ? String(req.query.firstVisitDate) : null;
+    const firstVisitDate = validScheduleDate(input.firstVisitDateRaw)
+      ? String(input.firstVisitDateRaw).split('T')[0]
+      : null;
     const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
-    const firstVisitWindowStart = firstVisitDate && req.query.windowStart
-      ? AnnualPrepayTimes.normalizeWindowStart(String(req.query.windowStart))
+    const firstVisitWindowStart = firstVisitDate && input.windowStartRaw
+      ? AnnualPrepayTimes.normalizeWindowStart(String(input.windowStartRaw))
       : null;
     const termStart = firstVisitDate || today;
 

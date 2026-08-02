@@ -1273,10 +1273,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       intervalDays: String(group.intervalDays || ''),
       hasAddons: String(group.lines.length > 1),
       hasBoosters: String(group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0)),
+      // The coverage seeder can't reproduce a weekend rule on the visits it
+      // fills in after the booked ones, so the server refuses those series —
+      // send it pre-save too, or the control would price a year it can't sell.
+      skipWeekends: String(!!skipWeekends),
       firstVisitDate: String(apptDate || '').split('T')[0],
       windowStart,
     };
-  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart]);
+  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends]);
 
   // Preview fetch. Runs whenever the control is on screen — NOT only once
   // armed — so the operator sees the real price on the button and an
@@ -1585,10 +1589,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // can change the rate or date after the last preview), and the server's
     // own mintPayload is what gets posted.
     let prepayNotice = '';
-    if (billAsManualPrepay && prepayOnBookAvailable && !linkedEstimate && manualPrepayQuery) {
+    const committedSeriesId = results.find((r) => r?.id)?.id || null;
+    if (billAsManualPrepay && prepayOnBookAvailable && !linkedEstimate && manualPrepayQuery && committedSeriesId) {
       setSaving(true);
       try {
-        const params = new URLSearchParams(manualPrepayQuery);
+        // Price from the row the server actually persisted, never from the
+        // draft payload (Codex #3161 P2): the booking endpoint re-resolves
+        // discounts and writes its OWN estimated_price, so replaying the
+        // client-derived shape could invoice a per-visit amount this series
+        // never carried. The endpoint re-derives cadence, coverage anchor and
+        // every eligibility guard from that row too.
+        const params = new URLSearchParams({ scheduledServiceId: String(committedSeriesId) });
         const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
         if (!fresh?.eligible) {
           throw new Error(`annual prepay ${fresh?.blockReason || 'is no longer available for this booking'}`);

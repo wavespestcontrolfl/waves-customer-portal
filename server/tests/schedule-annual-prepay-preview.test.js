@@ -40,20 +40,51 @@ const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
 
-// Far enough out that validScheduleDate (which rejects past dates) accepts it
-// regardless of when the suite runs.
-const FUTURE_DATE = '2030-05-01';
+// Derived from TODAY in ET, never a calendar literal (Codex #3161 P1): a
+// hardcoded future date silently becomes a past date, and validScheduleDate
+// rejects past dates — the suite would start failing on its own with no code
+// change behind it.
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const FUTURE_DATE = etDateString(addETDays(new Date(), 120));
 
-function stubTables({ customer = { id: 'cust-1', property_type: 'residential' }, term = undefined } = {}) {
+function stubTables({
+  customer = { id: 'cust-1', property_type: 'residential' },
+  term = undefined,
+  visit = undefined,
+  addonCount = 0,
+} = {}) {
   db.mockImplementation((table) => {
     const q = {};
     q.where = jest.fn(() => q);
     q.whereNull = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
-    q.first = jest.fn(async () => (table === 'customers' ? customer : term));
+    q.count = jest.fn(() => q);
+    q.catch = jest.fn(async () => ({ n: addonCount }));
+    q.first = jest.fn(async () => {
+      if (table === 'customers') return customer;
+      if (table === 'scheduled_services') return visit;
+      if (table === 'scheduled_service_addons') return { n: addonCount };
+      return term;
+    });
     return q;
   });
 }
+
+// A committed series row as the booking endpoint persists it.
+const COMMITTED_VISIT = {
+  id: 'svc-1',
+  customer_id: 'cust-1',
+  service_type: 'Quarterly Pest Control Service',
+  estimated_price: 390,
+  scheduled_date: FUTURE_DATE,
+  window_start: '08:00',
+  recurring_pattern: 'quarterly',
+  recurring_interval_days: 30,
+  recurring_parent_id: null,
+  skip_weekends: false,
+  booster_months: null,
+  source_estimate_id: null,
+};
 
 async function preview(params) {
   const app = express();
@@ -237,6 +268,76 @@ describe('annual-prepay preview — refusals (fail closed)', () => {
     stubTables({ customer: null });
     const { status } = await preview({});
     expect(status).toBe(404);
+  });
+});
+
+describe('annual-prepay preview — priced from the committed series', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
+  // The booking endpoint re-resolves discounts and writes its OWN
+  // estimated_price. Replaying the draft payload after save could invoice a
+  // per-visit amount the committed series never carried, so the mint-time
+  // call names the visit and the server reads everything off it.
+  test('scheduledServiceId prices the PERSISTED rate, not whatever the client last sent', async () => {
+    stubTables({ visit: COMMITTED_VISIT });
+    const { body } = await preview({ scheduledServiceId: 'svc-1', price: '999' });
+    expect(body.eligible).toBe(true);
+    expect(body.perVisit).toBe(390);
+    expect(body.prepayTotal).toBe(1560);
+    expect(body.mintPayload).toMatchObject({
+      amount: 1560,
+      visitCount: 4,
+      firstVisitDate: FUTURE_DATE,
+      firstVisitWindowStart: '08:00',
+    });
+  });
+
+  test('an unknown visit id is a 404, never a draft-shaped fallback', async () => {
+    stubTables({ visit: null });
+    const { status } = await preview({ scheduledServiceId: 'missing' });
+    expect(status).toBe(404);
+  });
+
+  test('a persisted estimate-origin series is refused — the quote lane owns it', async () => {
+    stubTables({ visit: { ...COMMITTED_VISIT, source_estimate_id: 'est-1' } });
+    const { body } = await preview({ scheduledServiceId: 'svc-1' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/linked quote/);
+  });
+
+  test('persisted booster months block it even when the client claims otherwise', async () => {
+    stubTables({ visit: { ...COMMITTED_VISIT, booster_months: JSON.stringify([3, 7]) } });
+    const { body } = await preview({ scheduledServiceId: 'svc-1', hasBoosters: 'false' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/booster months/);
+  });
+});
+
+// An ongoing booking pre-seeds only its first visits; coverageScheduleDates
+// fills the rest of the sold year with same-day-of-month math and no weekend
+// rule, so a skip-weekends series would get prepaid visits on the Sat/Sun the
+// operator excluded (Codex #3161 P1).
+describe('annual-prepay preview — weekend rule', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockResolveForInvoice.mockResolvedValue({ payerId: null });
+  });
+
+  test('refuses a draft booking that skips weekends', async () => {
+    stubTables();
+    const { body } = await preview({ skipWeekends: 'true' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/skips weekends/);
+  });
+
+  test('refuses it from the persisted row too', async () => {
+    stubTables({ visit: { ...COMMITTED_VISIT, skip_weekends: true } });
+    const { body } = await preview({ scheduledServiceId: 'svc-1' });
+    expect(body.eligible).toBe(false);
+    expect(body.blockReason).toMatch(/skips weekends/);
   });
 });
 
