@@ -2927,35 +2927,44 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // ONE_TIME_CARD_HOLD; best-effort — never blocks the committed cancels.
       // Tracks the target actually being processed so a mid-loop throw
       // alerts on the RIGHT visit (Codex #3153 r23 P2).
-      let seriesFeeTargetId = svc.id;
-      try {
+      // Fee handling is isolated PER TARGET (Codex #3153 r25 P1): the
+      // cancels are already committed, so a thrown fee step on one target
+      // must alert that visit and CONTINUE — aborting the loop would leave
+      // every later already-cancelled target with neither a terminal fee
+      // stamp nor an alert, and the series retry (409: nothing cancellable)
+      // would never revisit them.
+      {
         const CardHolds = require('../services/estimate-card-holds');
         const ApptCardRequests = require('../services/appointment-card-request');
         const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
         for (const target of targets) {
-          seriesFeeTargetId = target.id;
-          const holdResult = await CardHolds.handleCardHoldCancellation({
-            scheduledServiceId: target.id,
-            waiveFee,
-          });
-          // Appointment-card fee rail fallback: visits with no hold row may
-          // still carry the /secure lane's agreed fee (mutually exclusive
-          // lanes — the rail itself re-checks). Same waive flag.
-          if (holdResult?.reason === 'no_hold') {
-            const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
+          try {
+            const holdResult = await CardHolds.handleCardHoldCancellation({
               scheduledServiceId: target.id,
               waiveFee,
             });
-            // Unresolved (non-released) fee outcomes must reach the office
-            // (Codex #3153 r16 P1) — never a silent successful cancel.
-            await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: apptFeeOutcome });
+            // Appointment-card fee rail fallback: visits with no hold row may
+            // still carry the /secure lane's agreed fee (mutually exclusive
+            // lanes — the rail itself re-checks). Same waive flag.
+            if (holdResult?.reason === 'no_hold') {
+              const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
+                scheduledServiceId: target.id,
+                waiveFee,
+              });
+              // Unresolved (non-released) fee outcomes must reach the office
+              // (Codex #3153 r16 P1) — never a silent successful cancel.
+              await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: apptFeeOutcome });
+            }
+          } catch (e) {
+            // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
+            logger.error(`[admin-dispatch] series cancellation card-hold handling failed (target ${target.id}): ${e.message}`);
+            try {
+              await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: { released: false, reason: 'fee_step_error' } });
+            } catch (alertErr) {
+              logger.error(`[admin-dispatch] series cancellation fee alert failed (target ${target.id}): ${alertErr.message}`);
+            }
           }
         }
-      } catch (e) {
-        // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
-        logger.error(`[admin-dispatch] series cancellation card-hold handling failed (target ${seriesFeeTargetId}): ${e.message}`);
-        await require('../services/appointment-card-request')
-          .alertUnresolvedCancellationFee({ scheduledServiceId: seriesFeeTargetId, outcome: { released: false, reason: 'fee_step_error' } });
       }
 
       // Void any still-open invoices pre-minted for the cancelled visits so
