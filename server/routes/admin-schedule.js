@@ -7933,32 +7933,43 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
       return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
     }
 
-    // Coverage-seeding math must match the math the BOOKING used, or the
-    // prepaid visits the seeder adds land on different days than the series
-    // the operator sold (Codex #3161 r6 P1). The booking dates month-interval
-    // cadences with addETMonthsByWeekday — ordinal weekday, "4th Tuesday" —
-    // while coverageScheduleDates walks addMonthsSameDay. That only bites
-    // when coverage has to CREATE visits the booking didn't: an ongoing
-    // booking pre-seeds 4, so a 12-visit monthly or 6-visit bimonthly year
-    // gets its tail seeded on the day of the month instead of the booked
-    // weekday. Quarterly and slower are fully pre-seeded (coverage adopts
-    // them), and every_6_weeks is day-gap arithmetic in BOTH places, so both
-    // stay eligible. Booking the full year explicitly (a finite count) also
-    // stays eligible — every visit then exists to be adopted.
-    const MONTH_BASED_COVERAGE = new Set(['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'annual']);
-    const ONGOING_PRESEEDED_VISITS = 4;
-    if (input.bookedVisitCount == null
-      && visitsPerYear > ONGOING_PRESEEDED_VISITS
-      && MONTH_BASED_COVERAGE.has(coverageCadence)) {
-      return blocked(`isn’t available on an ongoing ${coverageCadence} series — the booking only pre-seeds ${ONGOING_PRESEEDED_VISITS} visits and the prepaid year’s remaining ${visitsPerYear - ONGOING_PRESEEDED_VISITS} would be scheduled by day-of-month instead of the booked weekday. Enter ${visitsPerYear} in Visits to book the whole year`);
-    }
-
     // A capped series sells FEWER visits than the prepaid year covers (Codex
     // #3161 r3 P2): booking 2 quarterly visits then selling a 4-visit year
     // would have the coverage seeder schedule the 2 extra visits the operator
     // explicitly capped away. Leave the series ongoing, or book the full year.
     if (input.bookedVisitCount != null && input.bookedVisitCount < visitsPerYear) {
       return blocked(`needs the full year on the schedule — this booking is capped at ${input.bookedVisitCount} visit${input.bookedVisitCount === 1 ? '' : 's'} but a prepaid year covers ${visitsPerYear}. Leave Visits blank (ongoing) or book ${visitsPerYear}`);
+    }
+
+    // THE question behind both guards below: will the coverage seeder have to
+    // CREATE visits, or only adopt ones the booking already put on the
+    // schedule? A finite series that covers the year is fully booked (the cap
+    // guard above proved bookedVisitCount >= visitsPerYear), and an ongoing
+    // series pre-seeds 4. Nothing is seeded ⇒ the seeder's date arithmetic
+    // never runs ⇒ neither its weekday nor its weekend blindness can move a
+    // visit, and the sale is safe (Codex #3161 r7 P2).
+    const ONGOING_PRESEEDED_VISITS = 4;
+    const coverageSeedsTail = input.bookedVisitCount == null
+      && visitsPerYear > ONGOING_PRESEEDED_VISITS;
+
+    // Coverage-seeding math must match the math the BOOKING used, or the
+    // prepaid visits the seeder adds land on different days than the series
+    // the operator sold (Codex #3161 r6 P1). The booking dates month-interval
+    // cadences with addETMonthsByWeekday — ordinal weekday, "4th Tuesday" —
+    // while coverageScheduleDates walks addMonthsSameDay. Quarterly and
+    // slower are fully pre-seeded, and every_6_weeks is day-gap arithmetic in
+    // BOTH places, so both stay eligible.
+    const MONTH_BASED_COVERAGE = new Set(['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'annual']);
+    if (coverageSeedsTail && MONTH_BASED_COVERAGE.has(coverageCadence)) {
+      return blocked(`isn’t available on an ongoing ${coverageCadence} series — the booking only pre-seeds ${ONGOING_PRESEEDED_VISITS} visits and the prepaid year’s remaining ${visitsPerYear - ONGOING_PRESEEDED_VISITS} would be scheduled by day-of-month instead of the booked weekday. Enter ${visitsPerYear} in Visits to book the whole year`);
+    }
+
+    // Weekend rule (Codex #3161 r1 P1, scoped in r7): coverageScheduleDates
+    // knows nothing about skip_weekends, so a seeded tail can land on the
+    // Sat/Sun the operator excluded. Only refuse when there IS a tail — a
+    // fully pre-seeded year is adopted as booked, weekend rule included.
+    if (coverageSeedsTail && input.skipWeekends) {
+      return blocked(`isn’t available on an ongoing series that skips weekends — the ${visitsPerYear - ONGOING_PRESEEDED_VISITS} visits seeded after the booked ones ignore that rule. Enter ${visitsPerYear} in Visits to book the whole year`);
     }
 
     // Same two combinations the quote-linked prepay control refuses: the
@@ -7969,19 +7980,6 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     }
     if (input.hasBoosters) return blocked('can’t be combined with booster months');
 
-    // Weekend rule (Codex #3161 P1). An ongoing booking pre-seeds only its
-    // first visits; the rest of the sold year is filled at payment by
-    // coverageScheduleDates, which walks same-day-of-month / fixed-day
-    // arithmetic and knows nothing about skip_weekends. On a series booked
-    // with the weekend rule on, those later prepaid visits could land on the
-    // Sat/Sun the operator explicitly excluded. Refuse rather than sell a
-    // year whose back half we can't reproduce — same fail-closed reasoning
-    // that keeps monthly_nth_weekday and seasonal_feb_oct out of the
-    // supported-cadence map.
-    if (input.skipWeekends) {
-      return blocked('isn’t available on a series that skips weekends — the prepaid year’s later visits are seeded without that rule');
-    }
-
     const customer = await db('customers')
       .where({ id: customerId })
       .whereNull('deleted_at')
@@ -7991,14 +7989,17 @@ router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
     // Monthly members' visits are covered by dues — the booking POST strips
     // estimated_price for them (memberSeriesCovered), so an armed prepay
     // would book fine and then find an unpriced series with nothing to
-    // invoice. An existing annual-prepay lane is already covered. Refuse both
-    // up front (Codex #3161 r4 P2) — same exclusions the /secure picker takes.
+    // invoice (Codex #3161 r4 P2).
+    //
+    // billing_mode 'annual_prepay' is deliberately NOT refused here (Codex
+    // #3161 r7 P2): that mode persists after a term expires, so refusing on
+    // it would block the renewal sale — booking next year's first visit after
+    // the current term_end. What actually matters is whether a term still
+    // COVERS the proposed start, which the overlap check below tests against
+    // termStart, exactly as the mint's own guard does.
     const lane = resolveBillingLane(customer);
     if (lane.mode === 'monthly_membership') {
       return blocked('isn’t available for monthly members — their visits are covered by dues, so this booking carries no per-visit price to sell');
-    }
-    if (lane.mode === 'annual_prepay') {
-      return blocked('isn’t available — this customer is already on an annual prepay plan');
     }
 
     // Commercial/business invoices carry county tax (InvoiceService.create

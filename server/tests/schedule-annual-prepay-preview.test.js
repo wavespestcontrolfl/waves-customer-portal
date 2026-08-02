@@ -255,11 +255,23 @@ describe('annual-prepay preview — refusals (fail closed)', () => {
     expect(body.blockReason).toMatch(/monthly members/);
   });
 
-  test('refuses a customer already on the annual-prepay lane', async () => {
+  // billing_mode 'annual_prepay' persists after a term expires, so it must
+  // NOT block by itself — that would kill the renewal sale. Only a term that
+  // still covers the proposed start blocks (see the renewal-window tests).
+  test('an annual-prepay customer with no live term CAN be sold the renewal', async () => {
     stubTables({ customer: { id: 'cust-1', property_type: 'residential', billing_mode: 'annual_prepay' } });
     const { body } = await preview({});
+    expect(body.eligible).toBe(true);
+  });
+
+  test('an annual-prepay customer whose term still covers the visit is blocked', async () => {
+    stubTables({
+      customer: { id: 'cust-1', property_type: 'residential', billing_mode: 'annual_prepay' },
+      term: { id: 'term-1', term_end: TERM_END_AFTER_VISIT },
+    });
+    const { body } = await preview({});
     expect(body.eligible).toBe(false);
-    expect(body.blockReason).toMatch(/already on an annual prepay plan/);
+    expect(body.blockReason).toMatch(/already has an annual prepay term/);
   });
 
   test('refuses a third-party-billed customer', async () => {
@@ -381,18 +393,40 @@ describe('annual-prepay preview — weekend rule', () => {
     mockResolveForInvoice.mockResolvedValue({ payerId: null });
   });
 
-  test('refuses a draft booking that skips weekends', async () => {
+  // Only bites when coverage must CREATE visits: an ongoing every-6-weeks
+  // year is 9 visits against 4 pre-seeded, so 5 are seeded without the rule.
+  test('refuses an ongoing series whose seeded tail would ignore the rule', async () => {
     stubTables();
-    const { body } = await preview({ skipWeekends: 'true' });
+    const { body } = await preview({ skipWeekends: 'true', cadence: 'custom', intervalDays: '42' });
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/skips weekends/);
   });
 
   test('refuses it from the persisted row too', async () => {
-    stubTables({ visit: { ...COMMITTED_VISIT, skip_weekends: true } });
+    stubTables({
+      visit: {
+        ...COMMITTED_VISIT, skip_weekends: true, recurring_pattern: 'custom', recurring_interval_days: 42,
+      },
+    });
     const { body } = await preview({ scheduledServiceId: 'svc-1' });
     expect(body.eligible).toBe(false);
     expect(body.blockReason).toMatch(/skips weekends/);
+  });
+
+  // Nothing is seeded for a quarterly year (4 visits, all pre-seeded), so the
+  // seeder's weekend blindness cannot move anything — the sale is safe.
+  test('a fully pre-seeded quarterly year is sellable even with the weekend rule on', async () => {
+    stubTables();
+    const { body } = await preview({ skipWeekends: 'true' });
+    expect(body.eligible).toBe(true);
+  });
+
+  test('a fully booked finite year is sellable with the weekend rule on', async () => {
+    stubTables();
+    const { body } = await preview({
+      skipWeekends: 'true', serviceType: 'Monthly Lawn Care', cadence: 'monthly', price: '120', recurringCount: '12',
+    });
+    expect(body.eligible).toBe(true);
   });
 });
 
