@@ -2516,16 +2516,21 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(repairInventedInternalRoutes('[x](/pest-control/)').body).toBe('[x](/pest-control-services/)');
   });
 
-  test('a refresh never UNLINKS, only aliases (r7: PII in anchor text)', () => {
-    // Unlinking removes UNKNOWN_INTERNAL_ROUTE — the finding that parks the
-    // draft — and a refresh runs neither the redaction bundle nor the SEO
-    // gate, so the anchor text would publish as prose.
+  test('a REFRESH is never repaired at all (r7/r9: PII in anchor text)', () => {
+    // Every repair converts a draft the route gate would PARK into one it
+    // PASSES, and a refresh runs neither the redaction bundle nor the SEO
+    // gate — so the anchor text publishes whether the route is aliased or
+    // unlinked.
     const pii = '[Alice Smith](/invented/)';
-    expect(repairInventedInternalRoutes(pii, [], { refreshPriorBody: 'prior' }).body).toBe(pii);
-    // Aliasing still works on a refresh, and a NEW page still unlinks.
-    expect(repairInventedInternalRoutes('[x](/pest-control/)', [], { refreshPriorBody: 'prior' }).body)
-      .toContain('/pest-control-services/');
+    const aliasable = '[Alice Smith](/pest-control/)';
+    for (const body of [pii, aliasable]) {
+      const r = repairInventedInternalRoutes(body, [], { refreshPriorBody: 'prior' });
+      expect(r.body).toBe(body);
+      expect(r.repairs).toEqual([]);
+    }
+    // A NEW page still repairs both ways — it runs the redaction bundle.
     expect(repairInventedInternalRoutes(pii).body).toBe('Alice Smith');
+    expect(repairInventedInternalRoutes(aliasable).body).toContain('/pest-control-services/');
   });
 
   test('a title-bearing unknown route is never unlinked (r8 P1)', () => {
@@ -2538,6 +2543,22 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     // A plain unknown route still unlinks, and aliasing keeps its title.
     expect(repairInventedInternalRoutes('[plan](/invented/)').body).toBe('plan');
     expect(repairInventedInternalRoutes('[svc](/pest-control/ "Guide")').body).toContain('"Guide"');
+  });
+
+  test('an UNCLOSED fence runs to the end of the document (r9 P2)', () => {
+    // A shorter run partway down closes nothing, so the remainder is still
+    // literal code. The run length is pinned so a backreference cannot
+    // backtrack to a shorter opener.
+    for (const body of [
+      '````\n[x](/pest-control/)\n```\n[y](/pest-control/)',
+      '```\n[x](/pest-control/)\n[y](/pest-control/)',
+    ]) {
+      const r = repairInventedInternalRoutes(body);
+      expect(r.body).toBe(body);
+      expect(r.repairs).toEqual([]);
+    }
+    // A properly closed fence masks only itself.
+    expect(repairInventedInternalRoutes('```\n[x](/pest-control/)\n```\n[y](/pest-control/)').repairs.length).toBe(1);
   });
 
   test('container-prefixed and longer-closer fences are masked (r8 P2)', () => {
@@ -2566,16 +2587,15 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     }
   });
 
-  test('an empty domain list on a refresh is not read as hub-only (r3)', () => {
-    // A legacy refresh keeps multi-domain targeting with an empty list.
-    const r = repairInventedInternalRoutes('[services](/pest-control/)', [], {
-      targetDomains: [], assumeSpokeWhenUnknown: true,
-    });
-    expect(r.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
-    // A declared hub domain still wins over the assumption.
-    expect(repairInventedInternalRoutes('[services](/pest-control/)', [], {
-      targetDomains: ['www.wavespestcontrol.com'], assumeSpokeWhenUnknown: true,
-    }).body).toBe('[services](/pest-control-services/)');
+  test('spoke-targeted content gets absolute hub URLs (r3)', () => {
+    // A relative alias resolves against the SPOKE, where the hub-only target
+    // does not exist. (Refreshes are no longer repaired at all — see the
+    // refresh test above — so this is exercised on new-page content.)
+    const spoke = repairInventedInternalRoutes('[services](/pest-control/)', [], { targetDomains: ['sarasotafllawncare.com'] });
+    expect(spoke.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
+    // Hub content keeps relative paths.
+    expect(repairInventedInternalRoutes('[services](/pest-control/)', [], { targetDomains: ['www.wavespestcontrol.com'] }).body)
+      .toBe('[services](/pest-control-services/)');
   });
 
   test('mismatched angle delimiters are left for the gate (r3)', () => {

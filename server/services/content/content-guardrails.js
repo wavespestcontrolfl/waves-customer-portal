@@ -2632,9 +2632,20 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     // rewritten (Codex). The CLOSER must also be at least as long as the
     // opener — a shorter run does not close the block, and treating it as a
     // closer ended the mask early.
-    const fence = /^[ \t>]*((`|~)\2{2,})[^\n]*\n[\s\S]*?^[ \t>]*\2{3,}[ \t]*$/gm;
+    const fence = /^[ \t>]*((`|~)\2{2,})(?!\2)[^\n]*\n[\s\S]*?^[ \t>]*\1\2*[ \t]*$/gm;
     let fm;
     while ((fm = fence.exec(text)) !== null) ranges.push([fm.index, fm.index + fm[0].length]);
+    // An UNCLOSED fence runs to the end of the document — CommonMark keeps
+    // everything after it inside the code block, so a shorter run partway
+    // down closes nothing and the remainder is still literal (Codex).
+    const opener = /^[ \t>]*((`|~)\2{2,})(?!\2)[^\n]*$/gm;
+    let om;
+    while ((om = opener.exec(text)) !== null) {
+      if (ranges.some(([a, b]) => om.index >= a && om.index < b)) continue;
+      const rest = text.slice(om.index + om[0].length);
+      const closerRe = new RegExp(`^[ \t>]*${om[1]}${om[2]}*[ \t]*$`, 'm');
+      if (!closerRe.test(rest)) ranges.push([om.index, text.length - 1]);
+    }
     const indented = /(?:^(?:[ ]{4}|\t)[^\n]*$\n?)+/gm;
     let im;
     while ((im = indented.exec(text)) !== null) ranges.push([im.index, im.index + im[0].length]);
@@ -2723,6 +2734,13 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) return whole;
     const left = exemptLeft.get(norm) || 0;
     if (left > 0) { exemptLeft.set(norm, left - 1); return whole; } // preserved legacy
+    // REFRESH drafts are not repaired at all. Every repair converts a draft
+    // the route gate would PARK into one it PASSES, and a refresh runs
+    // neither the redaction bundle nor the SEO gate — so "[Alice Smith](/pest-control/)"
+    // would publish the name whether the route is aliased or unlinked. The
+    // earlier fix covered only unlinking; aliasing keeps the anchor text and
+    // title just the same (Codex).
+    if (options.refreshPriorBody || options.assumeSpokeWhenUnknown) return whole;
     const alias = INVENTED_ROUTE_ALIASES[norm];
     if (alias) {
       repairs.push({ from: norm, to: alias, action: 'aliased' });
