@@ -198,7 +198,11 @@ export default function SecureAppointmentPage() {
         return;
       }
       await complete(confirmed.setupIntentId);
-      setState('secured');
+      // Re-pull the payload so the secured confirmation renders the FROZEN
+      // row terms, never this render's pre-completion disclosure (Codex
+      // #3153 r16 — a concurrent tab or a monotonic-down stamp can make
+      // the stale note wrong in either direction).
+      await refresh();
     } catch (err) {
       // The visit was cancelled / became payer-billed since the page
       // loaded — nothing to save; show the "nothing needed" state.
@@ -208,9 +212,10 @@ export default function SecureAppointmentPage() {
       }
       // The Stripe webhook (or another tab) won the completion claim and
       // is saving this card right now — the SetupIntent already succeeded,
-      // so the durable webhook path finishes it. Not a failure.
+      // so the durable webhook path finishes it. Not a failure. Re-pull so
+      // the secured render carries the frozen row terms (Codex #3153 r16).
       if (err?.code === 'completion_in_progress') {
-        setState('secured');
+        await refresh();
         return;
       }
       // The server requires a recorded plan selection before the capture

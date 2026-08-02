@@ -2333,10 +2333,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
           // still carry the /secure lane's agreed fee (mutually exclusive
           // lanes — the rail itself re-checks). Same waive flag.
           if (holdResult?.reason === 'no_hold') {
-            await ApptCardRequests.handleAppointmentCardCancellation({
+            const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
               scheduledServiceId: target.id,
               waiveFee,
             });
+            // Unresolved (non-released) fee outcomes must reach the office
+            // (Codex #3153 r16 P1) — never a silent successful cancel.
+            await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: apptFeeOutcome });
           }
         }
       } catch (e) { logger.error(`[admin-dispatch] series cancellation card-hold handling failed: ${e.message}`); }
@@ -2606,10 +2609,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // (mutually exclusive lanes — the rail re-checks). Same waive flag.
         if (holdResult?.reason === 'no_hold') {
           const ApptCardRequests = require('../services/appointment-card-request');
-          await ApptCardRequests.handleAppointmentCardCancellation({
+          const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
             scheduledServiceId: svc.id,
             waiveFee,
           });
+          // Unresolved (non-released) fee outcomes must reach the office
+          // (Codex #3153 r16 P1) — never a silent successful cancel.
+          await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: apptFeeOutcome });
         }
       } catch (e) { logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`); }
 

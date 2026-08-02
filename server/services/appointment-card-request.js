@@ -1795,6 +1795,31 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
   return { handled: true, released: true, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' };
 }
 
+// Route-side surfacing for unresolved cancellation-fee outcomes (Codex
+// #3153 r16 P1): the admin cancel routes proceed with the cancellation
+// regardless (the visit is already being cancelled), but a NON-released
+// outcome means a fee may still land after an attempted waiver — the
+// operator must hear about it, never read a silent success. Never throws.
+async function alertUnresolvedCancellationFee({ scheduledServiceId, outcome }) {
+  if (!outcome || outcome.released !== false) return;
+  try {
+    const row = await db('appointment_card_requests')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('customer_id');
+    await require('./notification-service').notifyAdmin(
+      'billing',
+      'Cancellation fee needs review',
+      `A cancelled visit's saved-card fee state is unresolved (${outcome.reason}) — review the customer's billing before assuming no fee was (or will be) charged.`,
+      {
+        link: row?.customer_id ? `/admin/customers/${row.customer_id}` : '/admin/dispatch',
+        metadata: { scheduledServiceId, reason: outcome.reason },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[appt-card-request] unresolved-fee alert failed for visit ${scheduledServiceId}: ${err.message}`);
+  }
+}
+
 // Read-only preview for the admin cancel UIs — merged into the existing
 // GET /admin/dispatch/:serviceId/card-hold response so the client confirm
 // prompts cover both lanes unchanged.
@@ -2189,6 +2214,7 @@ module.exports = {
   completeSecureCardCaptureFromWebhook,
   chargeAppointmentNoShowFee,
   handleAppointmentCardCancellation,
+  alertUnresolvedCancellationFee,
   appointmentCardCancelPreview,
   chargeAppointmentCardForRecapCompletion,
   settleAppointmentNoShowFee,
