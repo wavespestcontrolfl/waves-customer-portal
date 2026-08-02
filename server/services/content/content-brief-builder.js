@@ -733,6 +733,10 @@ class ContentBriefBuilder {
         : {},
       gsc_signal: {
         bucket: opportunity.bucket,
+        // True competitor-intercept marker: category/spoke seeds share the
+        // operator_intercept bucket, so downstream price policy needs this
+        // to tell them apart after the content_briefs round-trip.
+        intercept: Boolean(opportunity.signal_metadata?.intercept_brief),
         // Fallback covers rows mined BEFORE seasonal_rising started writing
         // the canonical key — without it those queued rows keep failing
         // gsc_signal_attached until they are re-mined.

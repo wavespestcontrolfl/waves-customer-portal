@@ -4123,7 +4123,6 @@ function BillingTab({ customer }) {
   const [yearFilter, setYearFilter] = useState('All');
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
-  const [billingSmsEnabled, setBillingSmsEnabled] = useState(false);
   const [paymentSmsEnabled, setPaymentSmsEnabled] = useState(true);
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
   const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
@@ -4239,7 +4238,6 @@ function BillingTab({ customer }) {
         setBillingPrefsLoadError(!prefsData);
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
-          setBillingSmsEnabled(!!prefsData.billingReminder);
           setPaymentSmsEnabled(prefsData.paymentConfirmationSms !== false);
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
@@ -4631,19 +4629,33 @@ function BillingTab({ customer }) {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: 'Payment failed - update your payment method',
-      detail: 'Your last payment could not be processed. Update your card to avoid service interruption.',
+      // No interruption claim: a balance never withholds service (nothing
+      // reads service_paused_at to block a visit). No retry promise either —
+      // billing-cron only retries rows it armed with next_retry_at, which
+      // happens solely in the MONTHLY dues failure path, so a per-visit or
+      // Auto Pay-off customer seeing this banner is never retried. And a
+      // saved card never settles an EXISTING invoice — so this points at Pay
+      // now for the balance, exactly like the Auto Pay-off banner below.
+      // No promise about future charges either: this banner also renders
+      // after the final retry sets service_paused_at, which billing-cron
+      // skips and no card update clears (there is no resume path today), and
+      // it renders with Auto Pay off. Both actions are stated plainly and
+      // nothing is guaranteed about what happens next.
+      detail: primaryOpenInvoice
+        ? `Your last payment could not be processed. Pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above, and update your saved card below.`
+        : 'Your last payment could not be processed. Update your saved card below.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: `Card ending in ${cardExpiringSoon?.last4 || ''} has expired`,
-      detail: 'This card can no longer be charged. Update your payment method to avoid any disruption to service.',
+      detail: 'This card can no longer be charged. Update your saved payment method below.',
     },
     expiring: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'warning',
       badge: 'Card expiring', titleColor: B.orange, subtitleColor: B.grayDark,
       title: `Card ending in ${cardExpiringSoon?.last4 || ''} expires in ${cardExpiringSoon?.months || 0} month${cardExpiringSoon?.months === 1 ? '' : 's'}`,
-      detail: 'Update your payment method to avoid any disruption to service.',
+      detail: 'Update your saved payment method below before this card expires.',
     },
     active: {
       bg: '#F0FDF4', border: '#BBF7D0', icon: 'check',
@@ -4836,7 +4848,6 @@ function BillingTab({ customer }) {
     setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
-      billingReminder: billingSmsEnabled,
       paymentConfirmationSms: paymentSmsEnabled,
       // No email on file (or email messages opted out portal-wide) → the
       // dropdowns render locked to Text; persist what is shown so an
@@ -5480,13 +5491,17 @@ function BillingTab({ customer }) {
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '14px 16px', background: subtle, borderRadius: 8, marginBottom: 14, border: '1px solid #E7E2D7', gap: 12,
         }}>
+          {/* No on/off toggle (owner ruling 2026-08-01): billing reminders
+              are account-operational — every customer gets them, like
+              receipts. Only the delivery method is a choice; STOP remains
+              the master kill switch. */}
           <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Billing reminder texts</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Get text reminders for upcoming or overdue billing items.</div>
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Billing reminders</div>
+            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>How you receive reminders for upcoming or overdue billing items.</div>
           </div>
           {(() => {
             const opts = hasBillingEmail ? CHANNEL_OPTIONS : CHANNEL_OPTIONS.filter(o => o.value === 'sms');
-            const selectable = billingSmsEnabled && hasBillingEmail;
+            const selectable = hasBillingEmail;
             return (
               <select
                 value={hasBillingEmail ? billingReminderChannel : 'sms'}
@@ -5504,24 +5519,6 @@ function BillingTab({ customer }) {
               </select>
             );
           })()}
-          <button
-            type="button"
-            onClick={() => setBillingSmsEnabled(!billingSmsEnabled)}
-            aria-label={`Billing reminder texts ${billingSmsEnabled ? 'enabled' : 'disabled'}`}
-            style={{
-              width: 48, height: 32, borderRadius: 16, border: 'none', cursor: 'pointer',
-              background: billingSmsEnabled ? B.yellow : `${B.wavesBlue}55`,
-              position: 'relative', transition: 'background 0.2s ease', flexShrink: 0,
-            }}
-          >
-            <div style={{
-              width: 22, height: 22, borderRadius: 11, background: '#fff',
-              position: 'absolute', top: 5,
-              left: billingSmsEnabled ? 24 : 2,
-              transition: 'left 0.2s ease',
-              boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-            }} />
-          </button>
         </div>
 
         <div style={{
@@ -7906,7 +7903,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                 >
                   {options.map((option) => (
                     <option key={option.id} value={option.id}>
-                      {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ` - ${money(option.monthly)}/mo` : ` - ${money(option.oneTime || option.dueAtStart)}`}
+                      {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ' - priced per application' : ` - ${money(option.oneTime || option.dueAtStart)}`}
                     </option>
                   ))}
                 </select>
@@ -7928,7 +7925,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     </div>
                     <div style={{ textAlign: compact ? 'left' : 'right' }}>
                       <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 850, lineHeight: 1 }}>
-                        {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? `${money(selected.monthly)}/mo` : money(selected.oneTime || selected.dueAtStart)}
+                        {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? 'Priced per application' : money(selected.oneTime || selected.dueAtStart)}
                       </div>
                       <div style={{ marginTop: 4, color: '#475569', fontSize: 12 }}>
                         {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
@@ -8288,7 +8285,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                     >
                       {options.map(option => (
                         <option key={option.id} value={option.id}>
-                          {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ` - ${money(option.monthly)}/mo` : ` - ${money(option.oneTime || option.dueAtStart)}`}
+                          {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ' - priced per application' : ` - ${money(option.oneTime || option.dueAtStart)}`}
                         </option>
                       ))}
                     </select>
@@ -8303,7 +8300,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                         </div>
                         <div style={{ textAlign: compact ? 'left' : 'right' }}>
                           <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 850, lineHeight: 1 }}>
-                            {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? `${money(selected.monthly)}/mo` : money(selected.oneTime || selected.dueAtStart)}
+                            {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? 'Priced per application' : money(selected.oneTime || selected.dueAtStart)}
                           </div>
                           <div style={{ marginTop: 4, color: PORTAL_SHELL.muted, fontSize: 12 }}>
                             {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}

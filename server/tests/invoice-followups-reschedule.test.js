@@ -42,6 +42,10 @@ const {
 
 function setupDb({ seq, invoice }) {
   const seqUpdate = jest.fn(async () => 1);
+  // Every sequence UPDATE stamps updated_at via knex's `.fn.now()` (the
+  // ownership-change checks read that column), so the stub connection needs
+  // the same surface the real knex instance exposes.
+  db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.mockImplementation((table) => {
     if (table === 'invoice_followup_sequences') {
       const q = {
@@ -197,6 +201,32 @@ describe('release paths re-arm from the shifted anchor when one exists', () => {
     // midnight, which is the PRIOR evening in NY — so '2026-07-15' anchors
     // the NY calendar day Jul 14, and d3 lands Jul 17, 10 AM EDT.
     expect(patch.next_touch_at.toISOString()).toBe('2026-07-17T14:00:00.000Z');
+  });
+
+  it('every sequence mutation stamps updated_at — the touched-since signal', async () => {
+    // `timestamps(true, true)` only DEFAULTS updated_at at insert; knex does
+    // not maintain it and 20260414000032 installs no trigger. So an unstamped
+    // mutation left the value frozen at creation, and any "has this sequence
+    // been touched since <time>?" read — audit, reconciliation, the ownership
+    // checks in fireStep — saw a sequence that had already dunned as pristine.
+    // A blanket trigger is NOT the fix: it would also fire on pure ownership
+    // repoints, which must stay invisible to those checks.
+    const cases = [
+      ['resumeSequence', () => resumeSequence('inv-1'), { id: 'seq-1', status: 'paused', step_index: 0, anchor_at: null }],
+      ['releaseFromAutopayHold', () => releaseFromAutopayHold('inv-1'), { id: 'seq-1', status: 'autopay_hold', step_index: 0, anchor_at: null }],
+      ['rescheduleForInvoiceEdit', () => rescheduleForInvoiceEdit('inv-1', { previousDueDate: '2026-07-15', newDueDate: '2026-08-14' }), { id: 'seq-1', status: 'active', step_index: 0, anchor_at: null }],
+    ];
+    for (const [label, run, seq] of cases) {
+      jest.clearAllMocks();
+      const { seqUpdate } = setupDb({
+        seq,
+        invoice: { id: 'inv-1', status: 'sent', sent_at: '2026-07-01T15:00:00Z', due_date: '2026-07-15', created_at: '2026-07-01T15:00:00Z' },
+      });
+      await run();
+      expect(seqUpdate).toHaveBeenCalled();
+      expect(seqUpdate.mock.calls[0][0]).toHaveProperty('updated_at');
+      expect(`${label}:${seqUpdate.mock.calls[0][0].updated_at}`).toBe(`${label}:CURRENT_TIMESTAMP`);
+    }
   });
 
   it('releaseFromAutopayHold schedules from anchor_at the same way', async () => {

@@ -329,6 +329,17 @@ const UNIT_DESIGNATOR_CANONICAL = {
 // their full shape so "Bldg 2 Apt 4" never collides with "Apt 4".
 function unitLineValueKey(normalizedUnitLine) {
   const tokens = String(normalizedUnitLine || '').toLowerCase().split(' ').filter(Boolean)
+    // '#6' / '# 6' are the HASH spelling of the dwelling designator —
+    // normalizeUnitLine already reads '#6' as 'Unit 6', but this key
+    // function also receives RAW split units (address-compare feeds
+    // splitStreetLineUnit output directly), and an unexpanded '#6' keyed
+    // as '#6' while 'Apt 6' keyed as '6' — the exact-unit compare then
+    // rejected the RIGHT row.
+    .flatMap((token) => {
+      if (token === '#') return ['unit'];
+      if (token.startsWith('#')) return ['unit', token.slice(1)];
+      return [token];
+    })
     .map((token) => UNIT_DESIGNATOR_CANONICAL[token] || token);
   return tokens.length === 2 && tokens[0] === 'unit' ? tokens[1] : tokens.join(' ');
 }
@@ -569,5 +580,19 @@ module.exports = {
   normalizeState,
   parseRawAddress,
   STREET_SUFFIX_ALIASES,
+  // Canonical comma-free boundary vocabulary (long + short forms). Shared
+  // so callers that must decide "is this token a street suffix?" — e.g. the
+  // estimator's no-comma locality parser — reuse this set instead of
+  // maintaining a parallel hand-written list that drifts.
+  STREET_SPLIT_SUFFIXES,
+  // Suffix-shaped tokens that commonly START a city name ("St James City",
+  // "Lake Wales", "Key Largo", "Ridge Manor"). Shared so callers that split
+  // street from city apply the same protection splitStreetAndCity does.
+  CITY_PREFIX_TOKENS,
   UNIT_DESIGNATORS,
+  // The canonical 'fl' disambiguation: 'fl' followed by a ZIP-shaped value
+  // is the STATE marker ("FL 34236"), otherwise the FLOOR designator.
+  // Shared so unit extraction elsewhere applies the identical rule.
+  ZIP_SHAPED,
+  isStateZipPair,
 };

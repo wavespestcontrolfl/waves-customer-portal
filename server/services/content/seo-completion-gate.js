@@ -87,7 +87,7 @@ function evaluate(input = {}) {
   if (detectPii(body)) {
     findings.push(finding('P0', 'P0_PII_DETECTED', 'Draft appears to contain customer PII.', 'Remove customer phone numbers, emails, and verbatim customer details before publishing.'));
   }
-  if (detectHardcodedPrice(body)) {
+  if (detectHardcodedPrice(body, brief)) {
     findings.push(finding('P0', 'P0_HARDCODED_PRICE_NOT_APPROVED', 'Draft appears to hardcode unapproved pricing.', 'Use estimate/calculator language and link to the calculator instead of publishing fixed prices.'));
   }
   if (uniquenessResult?.ok === false && hasDuplicateIntentFailure(uniquenessResult)) {
@@ -339,8 +339,48 @@ function detectPii(body = '') {
 // Single-sourced from content-guardrails (comma-grouped amounts, single-digit
 // prices, calculator-framing AND regulatory-fine exemptions) — this gate's
 // previous private copy had drifted on all four.
-function detectHardcodedPrice(body = '') {
-  return findHardcodedPrice(body) !== null;
+// Mirrors the runner's briefForbidsCompetitorPrices: a brief may forbid
+// dollar amounts even though it is an intercept ("NO TruGreen dollar amounts
+// anywhere in the post"). Tight on purpose — "no" must directly negate the
+// noun, or unrelated prose like "no-cost retreatments; large price" matches.
+const BRIEF_PRICE_PROHIBITION_RE = /\bno\s+(?:[\w-]+\s+){0,3}(?:dollar amounts?|prices|pricing)\b/i;
+function briefForbidsPrices(...sources) {
+  let forbids = false;
+  const walk = (v) => {
+    if (forbids) return;
+    if (typeof v === 'string') { if (BRIEF_PRICE_PROHIBITION_RE.test(v)) forbids = true; return; }
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  try { sources.forEach(walk); } catch { return true; }
+  return forbids;
+}
+
+function detectHardcodedPrice(body = '', brief = null) {
+  // Competitor-price provenance = the persisted TRUE-intercept marker, not
+  // the bucket alone: category/spoke seeds share the operator_intercept
+  // bucket and must keep the full price guard (Codex P0). Mined drafts and
+  // legacy briefs without the marker fail closed.
+  const isOperatorIntercept = brief?.gsc_signal?.bucket === 'operator_intercept';
+  const thirdPartyCitations = isOperatorIntercept && brief?.gsc_signal?.intercept === true;
+  // The source-and-date requirement means the price check also needs the
+  // CITATION context, or a properly sourced intercept parks here even though
+  // the run-context guardrail passed it — the same drift that put a private
+  // copy of this check out of step before (Codex). Sources come off the
+  // persisted brief so this stays usable from remediation.
+  const operatorBrief = brief?.voice_constraints?.operator_brief || null;
+  const requiredSourceUrls = [
+    ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
+    ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
+  ];
+  // A brief-level ban outranks every exemption here too (Codex).
+  const forbidAllPrices = briefForbidsPrices(operatorBrief, brief?.gsc_signal);
+  return findHardcodedPrice(body, {
+    thirdPartyCitations,
+    operatorCitations: isOperatorIntercept,
+    requiredSourceUrls,
+    forbidAllPrices,
+  }) !== null;
 }
 
 function hasDuplicateIntentFailure(result = {}) {

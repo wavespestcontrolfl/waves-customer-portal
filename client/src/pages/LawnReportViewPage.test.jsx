@@ -68,3 +68,68 @@ describe('LawnReportViewPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/add your name/i);
   });
 });
+
+// "Per month" audit 2026-08-01: a tier with a monthly figure but no visit
+// count used to fall back to "$45/mo" — a flat monthly framing for a plan
+// billed per application. The fallback now names the billing unit instead.
+describe('pricing tier fallbacks', () => {
+  it('renders per-application pricing when visits are derivable', async () => {
+    const report = {
+      ...REPORT,
+      pricing: { service_label: 'Your lawn program', tiers: [
+        { label: 'Standard', monthly: 45, annual: 540, visits: 6, recommended: true },
+      ] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText(/\$90\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/\/ application/)).toBeInTheDocument();
+    expect(screen.queryByText(/\/mo\b/)).not.toBeInTheDocument();
+  });
+
+  it('never shows a monthly amount when no per-application figure is derivable', async () => {
+    const report = {
+      ...REPORT,
+      pricing: { service_label: 'Your lawn program', tiers: [
+        { label: 'Standard', monthly: 45 },
+      ] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText('Priced per application')).toBeInTheDocument();
+    expect(screen.queryByText(/\$45/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/mo\b/)).not.toBeInTheDocument();
+  });
+
+  // Codex #3128 r1: legacy snapshots keep their quoted amount — the sanitized
+  // per_visit field and a cadence stated in the tier label are both
+  // trustworthy sources when the visit count is missing.
+  it('uses the sanitized per_visit amount when visits are missing', async () => {
+    const report = {
+      ...REPORT,
+      pricing: { service_label: 'Your lawn program', tiers: [
+        { label: 'Standard', monthly: 45, per_visit: 90 },
+      ] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText(/\$90\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/\/ application/)).toBeInTheDocument();
+  });
+
+  it('infers the cadence from the tier label for legacy snapshots', async () => {
+    // The pest-identification legacy fixture shape: monthly 39 / annual 468,
+    // no visits, cadence only in the label → 468 / 4 = $117.00.
+    const report = {
+      ...REPORT,
+      pricing: { service_label: 'Your program', tiers: [
+        { label: 'Quarterly Pest Control', monthly: 39, annual: 468 },
+      ] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText(/\$117\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/\/ application/)).toBeInTheDocument();
+    expect(screen.queryByText(/\$39/)).not.toBeInTheDocument();
+  });
+});

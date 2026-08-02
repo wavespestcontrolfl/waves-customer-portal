@@ -121,8 +121,10 @@ const CHANNEL_VALUES = ['sms', 'email', 'both'];
 // NOT listed here — billing sends target the charged customer row, so
 // billing_channel / payment_receipt_channel (migration-104 columns, also read
 // by the estimate-deposits / estimate-card-holds receipt senders and the
-// messaging consent gate) stay per-row next to the billing_reminder /
-// payment_confirmation_sms toggles and billing_email they modify.
+// messaging consent gate) stay per-row next to the payment_confirmation_sms
+// toggle and billing_email they modify. (billing_reminder is RETIRED —
+// owner ruling 2026-08-01: billing notices carry no per-purpose opt-out;
+// the column itself drops in a follow-up deploy.)
 const CHANNEL_DB_COLUMNS = [
   'appointment_confirmation_channel',
   'service_reminder_72h_channel',
@@ -139,7 +141,6 @@ const PREF_SELECT = [
   'tech_arrived',
   'auto_flip_en_route',
   'service_completed',
-  'billing_reminder',
   'seasonal_tips',
   'sms_enabled',
   'email_enabled',
@@ -175,7 +176,6 @@ function preferencePayload(prefs = {}, { includeChannels = true } = {}) {
     techArrived: prefs.tech_arrived !== false,
     autoFlipEnRoute: prefs.auto_flip_en_route !== false,
     serviceCompleted: prefs.service_completed !== false,
-    billingReminder: !!prefs.billing_reminder,
     seasonalTips: prefs.seasonal_tips !== false,
     smsEnabled: prefs.sms_enabled !== false,
     emailEnabled: prefs.email_enabled !== false,
@@ -217,7 +217,6 @@ function notificationPrefsDbUpdates(updates = {}, existing = {}) {
   if (updates.appointmentNotifyPrimary !== undefined) dbUpdates.appointment_notify_primary = updates.appointmentNotifyPrimary;
   if (updates.autoFlipEnRoute !== undefined) dbUpdates.auto_flip_en_route = updates.autoFlipEnRoute;
   if (updates.serviceCompleted !== undefined) dbUpdates.service_completed = updates.serviceCompleted;
-  if (updates.billingReminder !== undefined) dbUpdates.billing_reminder = updates.billingReminder;
   if (updates.seasonalTips !== undefined) dbUpdates.seasonal_tips = updates.seasonalTips;
   if (updates.smsEnabled !== undefined) dbUpdates.sms_enabled = updates.smsEnabled;
   if (updates.emailEnabled !== undefined) dbUpdates.email_enabled = updates.emailEnabled;
@@ -257,7 +256,6 @@ const ACCOUNT_PREF_LABELS = {
   appointmentNotifyPrimary: 'Primary Account Appointment Copies',
   autoFlipEnRoute: 'Auto En Route from GPS',
   serviceCompleted: 'Service Complete Report',
-  billingReminder: 'Billing Reminder',
   seasonalTips: 'Seasonal Lawn Tips',
   smsEnabled: 'Text Messages',
   emailEnabled: 'Email Messages',
@@ -297,7 +295,6 @@ const DB_FIELD_BY_PREF = {
   appointmentNotifyPrimary: 'appointment_notify_primary',
   autoFlipEnRoute: 'auto_flip_en_route',
   serviceCompleted: 'service_completed',
-  billingReminder: 'billing_reminder',
   seasonalTips: 'seasonal_tips',
   smsEnabled: 'sms_enabled',
   emailEnabled: 'email_enabled',
@@ -381,7 +378,6 @@ async function ensurePrefs(customerId) {
       tech_en_route: true,
       tech_arrived: true,
       service_completed: true,
-      billing_reminder: false,
       seasonal_tips: true,
       sms_enabled: true,
       email_enabled: true,
@@ -507,7 +503,12 @@ router.put('/preferences', async (req, res, next) => {
       appointmentNotifyPrimary: Joi.boolean(),
       autoFlipEnRoute: Joi.boolean(),
       serviceCompleted: Joi.boolean(),
-      billingReminder: Joi.boolean(),
+      // Tolerated + DISCARDED: the billing_reminder opt-out is removed
+      // (owner ruling 2026-08-01), but a customer holding a cached portal
+      // bundle still sends this key, and Joi rejects unknown keys — which
+      // would fail their ENTIRE prefs save until they refresh. Safe to
+      // delete after a deploy cycle.
+      billingReminder: Joi.boolean().strip(),
       seasonalTips: Joi.boolean(),
       smsEnabled: Joi.boolean(),
       emailEnabled: Joi.boolean(),

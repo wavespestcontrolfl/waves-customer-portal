@@ -526,6 +526,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
+  // renames from the unit-review queue only: "Gallons" -> gal at factor 1;
+  // missing-unit and ambiguous-oz rows stay parked for review). Gate is
+  // opt-in in EVERY environment (auto-writer pattern); kill = unset
+  // GATE_INVENTORY_UNIT_AUTOFIX. Every fix leaves a movement audit row.
+  // =========================================================================
+  cron.schedule('45 3 * * *', async () => {
+    if (!isEnabled('inventoryUnitAutofix')) return;
+    logger.info('Running: Inventory unit alias auto-fix sweep');
+    try {
+      await runExclusive('inventory-unit-autofix', () =>
+        require('./inventory-unit-review').runInventoryUnitAutofixSweep());
+    } catch (err) {
+      logger.error(`Inventory unit autofix sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // Point-in-time MRR snapshot — keeps the MRR Trend honest: past months read
   // their real recorded MRR instead of being recomputed at today's prices.
   //  - DAILY 6:05AM ET: refresh the CURRENT month's row (in-progress month stays
@@ -667,17 +685,29 @@ function initScheduledJobs() {
   // everything ambiguous stays in the /admin/customers/duplicates review
   // queue. Double-gated (cronJobs AND customerDedupeAutoMerge, the latter
   // opt-in in every environment). Every merge is journaled + admin-notified.
+  // Same tick, own gate (customerDedupeAutoDismissRed): after the merge
+  // pass, red-tier pairs — the detector's own "two different people sharing
+  // a phone" verdict, which can never be merged — get the same "not a
+  // duplicate" dismissal an operator would click ('auto:red-tier').
   // =========================================================================
   cron.schedule('40 4 * * *', async () => {
-    if (!isEnabled('customerDedupeAutoMerge')) return;
+    const mergeOn = isEnabled('customerDedupeAutoMerge');
+    const dismissRedOn = isEnabled('customerDedupeAutoDismissRed');
+    if (!mergeOn && !dismissRedOn) return;
     logger.info('Running: Customer duplicate auto-merge sweep');
     try {
       // runExclusive: read-then-act — an overlapping tick could pick the same
       // loser row before the first merge soft-deletes it.
       await runExclusive('customer-dedupe-auto-merge', async () => {
-        const { runAutoMergeSweep } = require('./customer-dedupe');
-        const result = await runAutoMergeSweep();
-        logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+        const { runAutoMergeSweep, runRedPairAutoDismissSweep } = require('./customer-dedupe');
+        if (mergeOn) {
+          const result = await runAutoMergeSweep();
+          logger.info(`[customer-dedupe] sweep merged=${result.merged.length} skipped=${result.skipped.length}`);
+        }
+        if (dismissRedOn) {
+          const result = await runRedPairAutoDismissSweep();
+          logger.info(`[customer-dedupe] red-pair auto-dismiss dismissed=${result.dismissed.length}${result.aborted ? ` aborted=${result.aborted}` : ''}`);
+        }
       });
     } catch (err) {
       logger.error(`Customer dedupe sweep failed: ${err.message}`);
@@ -2072,9 +2102,21 @@ function initScheduledJobs() {
                   // generic "Thanks for reaching out — your balance is $X"
                   // must not unlock payment-history amounts.
                   const ackBody = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i.test(String(msg.message_body || ''));
+                  // Monthly-membership dues are a CURRENT obligation, so they
+                  // belong in this set on the same terms as the balance
+                  // (codex #3141 r3). Without them a reviewed "$98.50/mo"
+                  // reply that an operator scheduled instead of sending
+                  // immediately was deterministically retired here as a stale
+                  // amount, so the monthly lane could be drafted and approved
+                  // but never actually sent. Shared definition with the
+                  // drafter's draft-time guard — these two lists had already
+                  // drifted once — and it re-reads the FRESH context above,
+                  // so a lane that stopped collecting between review and fire
+                  // publishes nothing and correctly blocks the send.
                   const authorized = new Set([
                     ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
                     ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
+                    ...ContextAggregator.authorizedDuesCents(ctx),
                     ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
                   ].filter((v) => Number.isFinite(v)));
                   amountsStale = bodyAmounts.some((a) => !authorized.has(a));

@@ -4636,6 +4636,86 @@ export default function Customer360ProfileV2({
       .catch(() => setPayers([]));
   }, []);
 
+  // Clearing a billing pause. billing-cron sets service_paused_at when
+  // autopay's 3-retry ladder exhausts and then skips that customer forever;
+  // nothing in the product could clear it before this, so the only remedy
+  // was editing the row by hand.
+  const [resumingBilling, setResumingBilling] = useState(false);
+  const [resumeBillingErr, setResumeBillingErr] = useState("");
+  const [resumeBillingNote, setResumeBillingNote] = useState("");
+  const resumeSeqRef = useRef(0);
+
+  // These three are shared component state, so switching customers has to
+  // clear them: an in-flight resume for A whose response is discarded (see
+  // stillViewing below) would otherwise leave B's Resume button stuck
+  // disabled forever, and A's error/note reading as B's.
+  useEffect(() => {
+    setResumingBilling(false);
+    setResumeBillingErr("");
+    setResumeBillingNote("");
+  }, [customerId]);
+
+  const resumeBilling = async () => {
+    // Everything below writes shared component state, so pin THIS attempt:
+    // an admin who starts a resume for A and switches to B must not see A's
+    // outcome on B. A customerId check alone is not enough — going A → B → A
+    // and clicking again would let the first, still-in-flight response land
+    // on the second attempt's result. The sequence number makes each click
+    // the only writer of its own outcome.
+    resumeSeqRef.current += 1;
+    const seq = resumeSeqRef.current;
+    const forCustomerId = customerId;
+    const stillViewing = () =>
+      resumeSeqRef.current === seq
+      && String(customerIdRef.current) === String(forCustomerId);
+
+    setResumingBilling(true);
+    setResumeBillingErr("");
+    setResumeBillingNote("");
+    // Tracked separately from the try/catch because the profile reload below
+    // must not be able to report itself as a failed resume: the money-moving
+    // half already succeeded, and telling an admin otherwise invites a second
+    // click on an action they believe did not happen.
+    let resumeLanded = false;
+    try {
+      const result = await adminFetch(
+        `/admin/customers/${forCustomerId}/resume-service`,
+        { method: "POST" },
+      );
+      if (!stillViewing()) return;
+      // The server deliberately refuses when the pause moved between its read
+      // and its write (billing-cron re-paused, or another admin got there
+      // first). Treating that as success would show a cleared banner that
+      // reappears on the next load with no explanation.
+      if (result?.resumed === false) {
+        setResumeBillingErr(
+          "The pause was not cleared — it changed while you were looking at it. Reloading the current state.",
+        );
+      } else {
+        resumeLanded = true;
+      }
+    } catch (err) {
+      if (!stillViewing()) return;
+      setResumeBillingErr(err.message || "Could not clear the billing pause");
+      setResumingBilling(false);
+      return;
+    }
+
+    try {
+      await reloadCustomer();
+    } catch {
+      if (stillViewing()) {
+        setResumeBillingNote(
+          resumeLanded
+            ? "The billing pause was cleared. Refreshing this profile failed — reload the page to see the current state."
+            : "Refreshing this profile failed — reload the page to see the current state.",
+        );
+      }
+    } finally {
+      if (stillViewing()) setResumingBilling(false);
+    }
+  };
+
   const savePayer = async (payerId) => {
     setPayerSaving(true);
     setProfileActionErr("");
@@ -5774,6 +5854,60 @@ export default function Customer360ProfileV2({
                 <div>
                   {" "}
                   <SectionTitle>Billing Summary</SectionTitle>{" "}
+                  {c.servicePausedAt && (
+                    <div
+                      role="alert"
+                      className="mb-3 rounded border border-hairline p-2.5"
+                    >
+                      <div className="text-12 font-medium text-alert-fg">
+                        {/* servicePausedOn is the ET calendar date; the raw
+                            servicePausedAt timestamp would render in the
+                            browser's timezone and land on the wrong day. */}
+                        Billing paused since{" "}
+                        {fmtDate(c.servicePausedOn || c.servicePausedAt)}
+                      </div>
+                      <div className="text-12 text-ink-secondary mt-0.5">
+                        Monthly dues are not being collected
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? " — autopay failed three times"
+                          : ""}
+                        . Visits are unaffected.{" "}
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? "The pause clears on its own when a payment from this customer succeeds; clearing"
+                          : "This pause was set manually and only clears manually; clearing"}{" "}
+                        it removes this block only — other billing guards
+                        (autopay state, plan type, prepaid coverage) still
+                        apply — and the paused months are never back-billed.
+                      </div>
+                      {isAdmin && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="mt-2"
+                          onClick={resumeBilling}
+                          disabled={resumingBilling}
+                        >
+                          {resumingBilling ? "Clearing…" : "Clear billing pause"}
+                        </Button>
+                      )}
+                      {resumeBillingErr && (
+                        <div className="text-12 text-alert-fg mt-1">
+                          {resumeBillingErr}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Outside the banner: the pause is cleared by now, so the
+                      banner is gone, but dues still will not run and that is
+                      the whole reason someone clicked. */}
+                  {resumeBillingNote && (
+                    <div
+                      role="status"
+                      className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
+                    >
+                      {resumeBillingNote}
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2 mb-3">
                     {" "}
                     <StatCardV2

@@ -126,6 +126,12 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'nextFollowUp', 'followUpNotes',
   'crmNotes', 'referralCode', 'hasLeftGoogleReview', 'reviewMarkedAt',
+  // Billing pause: a failed-autopay state and its reason. Same class as
+  // monthlyRate/billingMode — office-only. A technician opening Customer 360
+  // for a visit they're assigned must not see "autopay failed three times"
+  // (and the Resume control is admin-gated in the client anyway, so the
+  // fields would only render an alert they cannot act on).
+  'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
 function techSafe360Payload(payload) {
@@ -2328,6 +2334,16 @@ router.get('/:id', async (req, res, next) => {
         property: { type: c.property_type, lawnType: c.lawn_type, sqft: c.property_sqft, lotSqft: c.lot_sqft, palmCount: c.palm_count },
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
         billingMode: c.billing_mode || null,
+        // Billing pause. Set when autopay's 3-retry ladder exhausts
+        // (billing-cron); until now nothing in the product ever showed it on
+        // the customer record or cleared it, so a paused customer's dues
+        // stopped permanently and the only fix was editing the row by hand.
+        servicePausedAt: c.service_paused_at || null,
+        // The ET calendar date the pause landed on. The raw timestamp above
+        // renders in the BROWSER's timezone, which puts an evening pause on
+        // the wrong day for anyone west of ET; this is the one the UI shows.
+        servicePausedOn: c.service_paused_at ? etDateString(new Date(c.service_paused_at)) : null,
+        servicePauseReason: c.service_pause_reason || null,
         memberSince: c.member_since, active: c.active,
         pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
         leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
@@ -3030,6 +3046,107 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * POST /api/admin/customers/:id/resume-service — clear a billing pause.
+ *
+ * billing-cron sets customers.service_paused_at + service_pause_reason when
+ * autopay's 3-retry ladder exhausts, and the monthly cron then skips that
+ * customer (.whereNull('service_paused_at')). Migration 20260418000002
+ * described an admin action to unset it — that action was never built, so
+ * the pause was permanent: dues stopped for good even after the customer
+ * paid and fixed their card, and the only remedy was a hand-edited row.
+ *
+ * Resuming does NOT bill arrears. processMonthlyBilling charges only on the
+ * customer's billing_day (isBillingDayMatch) and skips anyone already
+ * charged for the current month key, so a customer paused for three months
+ * is charged exactly once, on their next billing day. The unpaid obligation
+ * from the original failure stays where it is — dunning owns that, not this.
+ *
+ * Deliberately manual: no automatic resume-on-payment. Whether a payment
+ * should silently restart recurring billing is an owner policy call, not a
+ * default this endpoint gets to make.
+ *
+ * Scope: this clears the pause and says NOTHING about whether dues will now
+ * collect. An earlier revision returned a `blockers` array enumerating the
+ * cron's other guards (autopay, lane, annual-prepay coverage...). That was a
+ * second implementation of processMonthlyBilling's guard chain, and review
+ * found a further missed guard on three consecutive rounds — evidence about
+ * the approach, not just the code. The response no longer claims anything
+ * about future collection, so it cannot be wrong about it; the cron's own
+ * autopay_log skip reasons remain the authority on why a customer was not
+ * charged.
+ */
+router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Idempotent: clicking twice, or racing another admin, is a no-op rather
+    // than a spurious audit entry.
+    if (!customer.service_paused_at) {
+      return res.json({ success: true, resumed: false, reason: 'not_paused', servicePausedAt: null });
+    }
+
+    const pausedAt = customer.service_paused_at;
+    const pauseReason = customer.service_pause_reason || null;
+    // ET, not UTC: toISOString() would file a pause applied at 8pm ET on the
+    // FOLLOWING business day, and this date is what the audit trail and the
+    // UI both read.
+    const pausedSince = etDateString(new Date(pausedAt));
+
+    // Clear the state and write its audit trail atomically. A money-affecting
+    // admin action that succeeds with no durable record is worse than one
+    // that fails loudly, so a failed insert rolls the resume back rather than
+    // being swallowed.
+    const resumed = await db.transaction(async (trx) => {
+      // Compare-and-swap on THIS pause, not merely "some pause": billing-cron
+      // runs on its own schedule, so between the SELECT above and this UPDATE
+      // the original pause can be cleared and a NEWER failure applied. A
+      // whereNotNull guard would silently wipe that new pause and quietly put
+      // a customer with a dead card back into the billing run.
+      const cleared = await trx('customers')
+        .where({ id: req.params.id, service_paused_at: pausedAt })
+        .whereNull('deleted_at')
+        .update({ service_paused_at: null, service_pause_reason: null });
+      if (!cleared) return false;
+
+      await trx('customer_interactions').insert({
+        customer_id: req.params.id,
+        interaction_type: 'note',
+        subject: 'Billing pause cleared',
+        body: `Billing pause cleared (paused ${pausedSince}${pauseReason ? `, reason: ${pauseReason}` : ''}). `
+          + 'This removes the pause block only — other billing guards (autopay state, '
+          + 'plan type, prepaid coverage) still apply. The paused months are not back-billed.',
+        admin_user_id: req.technicianId,
+      });
+
+      await recordAuditEvent({
+        actor_type: 'admin',
+        actor_id: req.technicianId || null,
+        action: 'customer.billing_pause_cleared',
+        resource_type: 'customer',
+        resource_id: req.params.id,
+        metadata: { paused_since: pausedSince, pause_reason: pauseReason },
+        critical: true,
+        trx,
+      });
+
+      return true;
+    });
+
+    if (!resumed) {
+      // Either another admin got there first, or billing-cron re-paused this
+      // customer. Both mean "the pause you saw is gone" — re-read before
+      // acting again.
+      return res.json({ success: true, resumed: false, reason: 'pause_changed' });
+    }
+
+    logger.info(`[customers] Billing pause cleared for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`);
+
+    res.json({ success: true, resumed: true, pausedSince, pauseReason, servicePausedAt: null });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/customers/:id/tags
 router.post('/:id/tags', requireAdmin, async (req, res, next) => {
   try {
@@ -3714,6 +3831,21 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       result = { invoice: updatedInvoice, term, payment };
     });
 
+    // A cash/check annual prepay is the customer paying — same automatic-
+    // clear contract as every other receipt path. The helper owns the rules
+    // (reason gate, causality, locking); settlement moment is NOW (a human
+    // is holding the money). Failure logs — the operator has the button.
+    try {
+      const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+      await maybeResumeBillingPauseOnPayment(customer.id, {
+        paymentIntentId: null,
+        source: 'customer360_annual_prepay',
+        settledAt: new Date(),
+      });
+    } catch (pauseErr) {
+      logger.warn(`[customers:annual-prepay] billing-pause auto-clear failed: ${pauseErr.message}`);
+    }
+
     await auditCustomerMutation(req, 'customer.annual_prepay.record', customer.id, {
       invoiceId: result.invoice.id,
       invoiceNumber: result.invoice.invoice_number,
@@ -3914,6 +4046,22 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
       throw err;
+    }
+
+    // A cash-backed PREPAYMENT is real money received — same automatic-
+    // clear contract. Adjustments/corrections (other kinds) move no cash
+    // and must not clear anything.
+    if (kind === 'prepayment') {
+      try {
+        const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+        await maybeResumeBillingPauseOnPayment(req.params.id, {
+          paymentIntentId: null,
+          source: 'account_credit_prepayment',
+          settledAt: new Date(),
+        });
+      } catch (pauseErr) {
+        logger.warn(`[admin-customers] billing-pause auto-clear failed: ${pauseErr.message}`);
+      }
     }
 
     await db('activity_log').insert({

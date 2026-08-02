@@ -10668,19 +10668,23 @@ export function CompletionPanel({
         // control and trims rather than typing from scratch. Editable as before.
         // Protocol-added products (addProduct(action.product)) are serialized
         // without target_pests, so fall back to the loaded catalog row by id.
-        // Broad-label products (Bifen etc.) carry turf pests on the label —
-        // on a non-lawn visit those prefills read wrong on the report (owner
-        // 2026-07-30), so they're dropped here; the tech can still add any
-        // target by hand. Keyed to the detected service CATEGORY, not the
-        // panel's `isLawn` (which is false for typed lawn visits — codex P2:
-        // a typed lawn treatment must keep its turf targets).
+        // Only targets belonging to THIS visit's service line(s) prefill,
+        // capped at MAX_LABEL_TARGET_PREFILL (owner 2026-08-01) — a pest
+        // visit drops Talstar's chinch bugs, a lawn visit drops its ants and
+        // roaches; the tech can still add any target by hand. Keyed to the
+        // detected service lines, not the panel's `isLawn` (false for typed
+        // lawn visits — codex P2). The lines come from the whole visit, not
+        // just its primary name: serviceTypeRaw survives the normalization
+        // that collapses "Lawn + Tree & Shrub" to "Tree & Shrub Care" (codex
+        // P1 r1), and scheduled add-ons contribute their own lines (codex P2
+        // r2) so a pest visit with a mosquito add-on keeps In2Care's targets.
         targets: filterLabelTargetsForLine(
           normalizeLabelTargets(
             product.target_pests
               ?? product.targetPests
               ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
           ),
-          { isLawn: detectServiceCategory(service.serviceType) === "lawn" },
+          allowedTargetLinesForVisit(service),
         ),
       },
     ]);
@@ -15628,16 +15632,202 @@ function normalizeLabelTargets(value) {
   return v.map((t) => String(t).trim()).filter(Boolean);
 }
 
+// Every service line a label target can be classified onto.
+export const ALL_TARGET_LINES = ["pest", "lawn", "tree_shrub", "termite", "mosquito"];
+
 // Turf-only label targets that must not prefill on a structural-pest (or any
 // non-lawn) visit: turf insects, turf diseases, and weeds. Matching is
 // substring-loose because catalog target_pests values are free text pulled
 // from labels ("Southern Chinch Bugs", "sod webworm", "chinch bug (southern)").
 const LAWN_ONLY_TARGET_RE =
-  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|kyllinga|dollarweed|doveweed|chamberbitter|spurge|clover|nutsedge|\bsedge\b|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|gray leaf spot|take-?all|fairy ring|pythium|turf/i;
+  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|bahiagrass|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|burweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|yellow tuft|turf/i;
 
-function filterLabelTargetsForLine(targets, { isLawn } = {}) {
-  if (isLawn) return targets;
-  return targets.filter((t) => !LAWN_ONLY_TARGET_RE.test(t));
+// Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
+// borers, and foliar issues. Checked BEFORE the structural set so "Spider
+// mites" classifies as ornamental instead of matching the spider pattern.
+const ORNAMENTAL_ONLY_TARGET_RE =
+  /whitefl|spiraling|scale insect|soft scale|mealybug|aphid|thrips|\bmites?\b|leafminer|\bborer|weevil|sooty mold|powdery mildew|fungal leaf spot/i;
+
+// Targets NOTHING controls. UF/IFAS is explicit that Ganoderma butt rot has no
+// chemical control and Thielaviopsis trunk rot has no prevention or cure, so
+// they must never prefill: a chip on a completed visit reads as "this product
+// treated it", which would be a claim no product can support. A tech can still
+// type either by hand as an observation — this only blocks the automatic fill.
+const NO_CONTROL_TARGET_RE = /ganoderma|thielaviopsis/i;
+
+// Palm and ornamental diseases. Checked BEFORE the turf pattern because the
+// lawn regex claims a bare "leaf spot" — without this, "Palm leaf spot" files
+// as turf. Palm disease tokens carry an explicit "(palm)" marker so the intent
+// is legible in the catalog as well as here; turf oomycetes keep their own
+// "Pythium ..." wording and stay on the lawn line.
+// NOTE: no bare "downy mildew" here. Yellow tuft — a St. Augustine turf
+// disease — is written "Yellow tuft (downy mildew)" on the Subdue Maxx turf
+// directions, so a generic downy-mildew rule would steal a turf target and
+// drop it from lawn visits. The turf form is claimed by the lawn pattern below.
+const ORNAMENTAL_DISEASE_RE =
+  /fungal leaf spot|\(palm\)|palm leaf spot|palm bud rot|lethal bronzing|lethal yellowing|fusarium wilt/i;
+
+// Nutrition goals, not pests: what a feeding is meant to correct or stimulate.
+// Fertilizer-family products get applied on turf AND on palms/ornamentals, so
+// these read on every line. Checked AFTER the turf pattern so an explicitly
+// turf-worded goal ("Iron chlorosis (yellowing turf)") stays a lawn target.
+const NUTRITION_TARGET_RE =
+  /deficiency|green-?up|deep green|color & density|root support|root strength|balanced feeding|slow-release|micronutrient|winter hardiness|chlorosis/i;
+
+// Caterpillars feed on both turf (sod webworms, armyworms are caterpillars —
+// Conserve SC is labeled for all three) and ornamentals, so a bare
+// "Caterpillars" target belongs on either line.
+const CATERPILLAR_TARGET_RE = /caterpillar/i;
+
+// Wood-destroying-organism targets: pass on termite/WDO visits, and carpenter
+// ants also read fine on a general pest visit.
+// "Wood borers" alone stays ornamental (the pattern above claims it — Tree-Age
+// and Ima-Jet are injection products), but the wood-DESTROYING organisms off a
+// Bora-Care label are WDO work.
+const TERMITE_TARGET_RE = /termite|wood-?boring|wood borer|wood-?destroying|wood-? ?decay/i;
+const CARPENTER_ANT_RE = /carpenter ant/i;
+
+const MOSQUITO_TARGET_RE = /mosquito/i;
+
+// Fleas and ticks are yard pests as much as indoor ones — the turf insecticides
+// carry them on the label right alongside mole crickets (Topchoice Granular:
+// fire ants, tawny mole crickets, fleas, ticks), and the yard is where the
+// life cycle actually breaks. So they read on both lines, like fire ants
+// (codex P2 r2).
+const FLEA_TICK_TARGET_RE = /\bfleas?\b|\bticks?\b/i;
+
+// Structural/household pests — the general-pest line. Broad on purpose: any
+// ant species, roaches, spiders (mites already claimed above), the usual
+// occasional invaders, stingers, biters, and vertebrates. `\bmoles?\b` is safe
+// here only because the turf pattern claims "Tawny mole crickets" first, the
+// same way it claims them ahead of the bare `cricket` alternative.
+const STRUCTURAL_ONLY_TARGET_RE =
+  /\bants?\b|roach|spider|silverfish|earwig|centipede|millipede|springtail|booklice|cricket|wasp|mud dauber|yellowjacket|hornet|\bfl(y|ies)\b|flea|tick|bed bug|pantry|darkling beetle|scorpion|\brats?\b|\bmouse\b|\bmice\b|rodent|\bmoles?\b/i;
+
+// Every service line a label target belongs on. Precedence matters: turf
+// before structural ("Tawny mole crickets" is a lawn pest, not a cricket),
+// ornamental before structural ("Spider mites" is not a spider),
+// termite/carpenter-ant before the generic ant pattern.
+//
+// Returns [] for a target no pattern claims, which drops it from the prefill
+// (codex P2 r2). This used to fail OPEN — an unclassified target passed on
+// every line, which recreated exactly the cross-line prefills this filtering
+// exists to remove: "Chickweed" is a lawn weed no pattern matched, so a pest
+// visit dropped SpeedZone's three recognized weeds and prefilled Chickweed
+// alone. Failing closed can only ever under-fill, and the picker stays
+// free-text, so the tech can add anything by hand. Every target the catalog
+// carries AND every target the seed migrations write classifies — the contract
+// test fixture covers both, since a value can be seeded (Talpirid's "Moles")
+// without appearing in the prod catalog snapshot.
+export function labelTargetLines(target) {
+  // Nothing controls these, so nothing may prefill them — checked first so no
+  // later pattern can claim them onto a line.
+  if (NO_CONTROL_TARGET_RE.test(target)) return [];
+  if (/fire ant/i.test(target)) return ["pest", "lawn"];
+  if (ORNAMENTAL_DISEASE_RE.test(target)) return ["tree_shrub"];
+  if (LAWN_ONLY_TARGET_RE.test(target)) return ["lawn"];
+  if (CATERPILLAR_TARGET_RE.test(target)) return ["tree_shrub", "lawn"];
+  if (ORNAMENTAL_ONLY_TARGET_RE.test(target)) return ["tree_shrub"];
+  if (TERMITE_TARGET_RE.test(target)) return ["termite"];
+  if (CARPENTER_ANT_RE.test(target)) return ["termite", "pest"];
+  if (MOSQUITO_TARGET_RE.test(target)) return ["mosquito"];
+  if (FLEA_TICK_TARGET_RE.test(target)) return ["pest", "lawn"];
+  if (STRUCTURAL_ONLY_TARGET_RE.test(target)) return ["pest"];
+  // Nutrition goals apply wherever a fertilizer does — turf and palms alike.
+  if (NUTRITION_TARGET_RE.test(target)) return ALL_TARGET_LINES;
+  return [];
+}
+
+// The service lines whose targets may prefill on this visit. The primary line
+// comes from the classifier, but a combined display name carries companion
+// sections whose targets are just as legitimate — "Lawn + Tree & Shrub"
+// classifies lawn yet must keep ornamental prefills (and the day view
+// normalizes that name to "Tree & Shrub Care", so callers pass serviceTypeRaw
+// when present). Companion token rules mirror detectServiceCategory's own
+// exclusions ("Tree Line Mosquito Treatment" adds mosquito, not tree_shrub;
+// "Palmetto" never reads as palm work).
+export function allowedTargetLinesForServiceType(rawServiceType) {
+  const lines = new Set([detectServiceCategory(rawServiceType)]);
+  const s = String(rawServiceType || "").toLowerCase();
+  if (
+    !s.includes("mosquito") &&
+    !s.includes("termite") &&
+    !s.includes("wdo") &&
+    (s.includes("tree") ||
+      s.includes("shrub") ||
+      s.includes("ornamental") ||
+      s.includes("arborjet") ||
+      /\bpalm(s)?\b/.test(s))
+  ) {
+    lines.add("tree_shrub");
+  }
+  if (
+    s.includes("lawn") ||
+    s.includes("turf") ||
+    s.includes("grass") ||
+    s.includes("sod")
+  ) {
+    lines.add("lawn");
+  }
+  if (s.includes("mosquito")) lines.add("mosquito");
+  // Termite tokens mirror the classifier's aliases — a pest-primary combined
+  // name ("Quarterly Pest + Termite Bait Station") classifies pest but must
+  // keep its termite targets (codex P1 r2).
+  if (
+    s.includes("termite") ||
+    s.includes("wdo") ||
+    s.includes("bora") ||
+    s.includes("trelona") ||
+    s.includes("termidor") ||
+    /\badvance\b/.test(s)
+  ) {
+    lines.add("termite");
+  }
+  if (/\bpest\b/.test(s)) lines.add("pest");
+  return lines;
+}
+
+// Same question, asked of the whole visit rather than one name. A scheduled
+// add-on is a real service line on the appointment — a quarterly pest visit
+// with a One-Time Mosquito Treatment add-on genuinely treats for mosquitoes,
+// so In2Care must keep its mosquito targets there. The schedule payloads carry
+// those companion lines in serviceAddons/extraServiceTypes; union them into
+// the allowed set (codex P2 r2).
+export function allowedTargetLinesForVisit(service) {
+  const lines = allowedTargetLinesForServiceType(
+    service?.serviceTypeRaw || service?.serviceType,
+  );
+  const addonNames = [
+    ...(Array.isArray(service?.extraServiceTypes) ? service.extraServiceTypes : []),
+    ...(Array.isArray(service?.serviceAddons)
+      ? service.serviceAddons.map((a) => a?.serviceName)
+      : []),
+  ].filter(Boolean);
+  addonNames.forEach((name) => {
+    allowedTargetLinesForServiceType(name).forEach((line) => lines.add(line));
+  });
+  return lines;
+}
+
+// A prefill is a starting point, not a transcription of the label — cap it at
+// the few most popular targets (catalog arrays are ordered most-common-first)
+// and let the tech add the rest by hand (owner 2026-08-01: "3 at most, and
+// popular SWFL pests").
+export const MAX_LABEL_TARGET_PREFILL = 3;
+
+// Keep only the label targets that belong on one of the visit's service lines
+// (a Set from allowedTargetLinesForServiceType), then cap. Filtering runs in
+// BOTH directions now — a lawn visit drops Talstar's ants/roaches just like a
+// pest visit drops its chinch bugs (owner 2026-08-01: targets must populate
+// for the service at hand).
+export function filterLabelTargetsForLine(targets, allowedLines) {
+  const allowed =
+    allowedLines instanceof Set && allowedLines.size
+      ? allowedLines
+      : new Set(["pest"]);
+  return targets
+    .filter((t) => labelTargetLines(t).some((line) => allowed.has(line)))
+    .slice(0, MAX_LABEL_TARGET_PREFILL);
 }
 
 // Species-specific, not category-broad (owner request 2026-07-23): the chips

@@ -646,6 +646,17 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
       service,
       primaryKeyword: data.primary_keyword || null,
       operatorFaqException: opts.operatorFaqException === true,
+      // Operator provenance rides guardContext from the autonomous lane —
+      // without it this preflight reclassified authorized competitor prices
+      // and .gov citations as HARDCODED_PRICE / DISALLOWED_EXTERNAL_LINK and
+      // parked every otherwise-valid fix (Codex r3).
+      operatorCitations: runContext.operatorCitations === true,
+      competitorPriceCitations: runContext.competitorPriceCitations === true,
+      // A brief that FORBIDS prices must be honoured here too, or a banned
+      // price framed with "calculator"/"quote"/"pricing varies" clears this
+      // preflight and only parks later in revalidation (Codex).
+      forbidAllPrices: runContext.forbidAllPrices === true,
+      requiredSourceUrls: Array.isArray(runContext.requiredSourceUrls) ? runContext.requiredSourceUrls : [],
       allowedInternalLinks: Array.isArray(runContext.allowedInternalLinks) ? runContext.allowedInternalLinks : [],
       isRefresh: runContext.isRefresh === true,
       priorBody: typeof runContext.priorBody === 'string' ? runContext.priorBody : null,

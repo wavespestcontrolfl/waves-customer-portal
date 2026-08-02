@@ -817,14 +817,34 @@ function dynamicHeroSummary(data) {
   return 'Your routine service is complete.';
 }
 
-function conditionRows(conditions = {}) {
+function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource = null } = {}) {
+  // Lawn reports show the week's rain (the number the water card and 7-day
+  // chart are built from) so every rain figure on the page agrees; other
+  // lines keep the trailing-24h capture (owner 2026-07-30).
+  const usingWeeklyRain = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn));
+  const rainRow = usingWeeklyRain
+    ? ['Rain this week', weeklyRainIn, ' in']
+    : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
+  // Credit the weekly figure's ACTUAL provider when it differs from the
+  // point-capture source — the property-week series is Open-Meteo, but the
+  // area-snapshot fallback's rainfall is local area records, not Open-Meteo
+  // (codex P2 #3093 ×2).
+  const sourceValue = usingWeeklyRain && weeklyRainSource
+    ? (conditions.source
+      ? (String(conditions.source).toLowerCase().includes(String(weeklyRainSource).toLowerCase())
+        ? conditions.source
+        : `${conditions.source} + ${weeklyRainSource}`)
+      // No point-capture source on the record — the weekly figure still has
+      // a known provider, and the Source row must credit it (codex P2 r14).
+      : weeklyRainSource)
+    : conditions.source;
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
     ['Humidity', conditions.humidity_pct ?? conditions.humidity, '%'],
     ['Wind', conditions.wind_mph ?? conditions.wind, ' mph'],
-    ['Rain last 24 hr', conditions.rain_24h_in, ' in'],
+    rainRow,
     ['Sky', conditions.sky ?? conditions.cloudCover, ''],
-    ['Source', conditions.source, ''],
+    ['Source', sourceValue, ''],
   ];
   return rows
     .filter(([, value]) => value !== null && value !== undefined && value !== '')
@@ -1147,10 +1167,13 @@ function conditionInterpretation(conditions = {}) {
     return 'Wind was elevated, so treatment was adjusted to match label and site conditions.';
   }
   if (Number.isFinite(rain) && rain > 0.25) {
-    return 'Recent rainfall was noted. Treatment decisions were adjusted for site conditions.';
+    return 'Rainfall in the 24 hours before treatment was noted. Treatment decisions were adjusted for site conditions.';
   }
   if (hasRain && hasWind && rain <= 0.1 && wind <= 10) {
-    return 'Weather was suitable for treatment. Low rainfall and moderate wind supported exterior application.';
+    // rain_24h_in is a point-in-time 24-hour capture — a wet week can end
+    // in a dry final day, and unqualified "low rainfall" beside the weekly
+    // "Rain this week" row reads as a contradiction (codex P2 r39).
+    return 'Weather was suitable for treatment. Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
   }
   if ((!hasRain || rain <= 0.1) && (!hasWind || wind <= 10)) {
     return 'Weather was marked suitable for treatment.';
@@ -1993,6 +2016,29 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           live={mode === 'live'}
+          weeklyRainIn={data.serviceLine === 'lawn'
+            // Legacy lawn payloads (no reportV2) still carry the weekly
+            // total on the water context — the all-lawn weekly-rain
+            // invariant must hold on those permanent links too (codex P2
+            // r32).
+            ? (data.reportV2?.water?.rainInches ?? data.lawnAssessment?.waterContext?.rainfallInches7d ?? null)
+            : null}
+          weeklyRainSource={{
+            // MRMS is NOAA's gauge-corrected radar estimate; a mixed week
+            // takes measurements where radar had them and the model on the
+            // gaps, and the Source row has to say so rather than crediting
+            // one provider for both. Unmapped keys fall through to null (no
+            // Source row) instead of printing a raw enum at the customer.
+            open_meteo: 'Open-Meteo',
+            fawn: 'FAWN',
+            area: 'local area rain records',
+            mrms: 'NOAA radar + rain gauges',
+            'mrms+open_meteo': 'NOAA radar + rain gauges, with Open-Meteo on gaps',
+            property_point: 'Open-Meteo',
+            city_collective: 'Open-Meteo (local area)',
+          }[
+            data.reportV2?.water?.rainProvider || data.lawnAssessment?.waterContext?.rainfall7dProvider
+          ] || null}
         />
       </div>
     </section>
@@ -2159,8 +2205,8 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false }) {
-  const rows = conditionRows(conditions);
+function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null, weeklyRainSource = null }) {
+  const rows = conditionRows(conditions, { weeklyRainIn, weeklyRainSource });
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);
@@ -4943,7 +4989,7 @@ function LegacyReport({ data, token, glass = false }) {
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
       </div>
-      <BrandFooter />
+      <BrandFooter appBadges={false} />
     </div>
   );
 }
@@ -8660,7 +8706,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             sms_preview keep the quiet document sign-off so the print
             pipeline stays byte-identical. */}
         {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-        <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
+        <BrandFooter variant={mode === 'live' ? undefined : 'document'} appBadges={false} />
       </div>
     </div>
   );

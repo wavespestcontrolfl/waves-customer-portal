@@ -381,7 +381,7 @@ exports.up = async function up(knex) {
     }
   }
 
-  // eslint-disable-next-line no-console
+   
   console.log(`[house-voice-sweep] rewrote ${updated}; skipped ${skipped.length}${skipped.length ? ` (edited since audit or missing): ${skipped.join(', ')}` : ''}`);
 };
 

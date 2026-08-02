@@ -19,7 +19,15 @@
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
-const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty } = require('../services/call-triage-flags');
+const {
+  canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty,
+  dispatchesToOnFileAddress,
+} = require('../services/call-triage-flags');
+// Production's own fail-open context builder + V1-conflict demotion, so this
+// audit cannot drift from the live contract (local pre-push audit P1).
+const {
+  buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict,
+} = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
@@ -102,7 +110,9 @@ async function main() {
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
-    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model');
+    // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
+    // exactly as the live path passes `extracted` to it.
+    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'customer_id');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -136,6 +146,63 @@ async function main() {
   const boundedRouteRows = cohortSince
     ? allRouteRows.filter((r) => new Date(r.created_at) > cohortSince)
     : allRouteRows;
+
+  // Effective-verdict reconstruction for RECOVERED addresses (codex round-11
+  // P2): the processor deliberately persists the ORIGINAL unresolvable
+  // verdict in ai_address_validation while ROUTING with the recovery's
+  // accepting result — the durable trace of that split is the
+  // address_recovered card. Auditing with the stored verdict alone reports
+  // triage for calls production auto-created, depressing v1↔v2 agreement.
+  // Recovery adopts only when it confirmed exactly ONE real in-area premise,
+  // so 'corrected' + inServiceArea is the faithful reconstruction.
+  //
+  // The card must speak for the CURRENT pass (codex final-round P2). A call
+  // recovered once and later reprocessed WITHOUT a successful recovery keeps
+  // its old card — a bare existence check would let that stale row turn the
+  // latest unverified verdict into 'corrected', count an unvalidated address
+  // as auto-routable, and skew the promotion gate PERMISSIVE. The processor
+  // stamps the card with the same provenance the call_log row carries, so
+  // only an exact model+prompt match reconstructs. Cards written before that
+  // stamp shipped are excluded (fail-closed = stricter gate) and both counts
+  // are printed below — never silently dropped.
+  const rowById = new Map(boundedRouteRows.map((r) => [r.id, r]));
+  const recoveryCards = await db('triage_items')
+    .whereIn('call_log_id', boundedRouteRows.map((r) => r.id))
+    .where({ reason_code: 'address_recovered' })
+    .select('call_log_id', 'payload');
+  const recoveredCallIds = new Set();
+  let unstampedRecoveryCards = 0;
+  let staleRecoveryCards = 0;
+  for (const card of recoveryCards) {
+    // Card payloads are operator-visible jsonb; a malformed one must not
+    // crash the whole readiness run — it just fails to prove its pass.
+    let p = {};
+    try { p = parseJson(card.payload) || {}; } catch { p = {}; }
+    const row = rowById.get(card.call_log_id);
+    if (!p.extraction_model || !p.extraction_prompt_version) { unstampedRecoveryCards++; continue; }
+    if (p.extraction_model !== row?.ai_extraction_model
+      || p.extraction_prompt_version !== row?.ai_extraction_prompt_version) { staleRecoveryCards++; continue; }
+    recoveredCallIds.add(card.call_log_id);
+  }
+
+  // On-file-address fail-open context (codex round-12 P2): production routes
+  // established customers with failOpen + callerAni + knownCustomer
+  // { hasAddress } (call-recording-processor ~5356), letting a caller who
+  // did not restate their on-file address auto-route. Auditing without that
+  // context scores those production auto-creates as blocked.
+  //
+  // Built by production's OWN helper now, not a local approximation: the
+  // hand-rolled version also granted the lane to outbound calls and to
+  // dormant/lost accounts whose stale address must never clear a blocker,
+  // both of which make this gate permissive. Full customer rows, because
+  // summarizeKnownCaller reads the pipeline stage and every address
+  // component.
+  const auditFailOpen = process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true';
+  const linkedCustomerIds = [...new Set(boundedRouteRows.map((r) => r.customer_id).filter(Boolean))];
+  const customerById = new Map((linkedCustomerIds.length
+    ? await db('customers').whereIn('id', linkedCustomerIds)
+      .select('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+    : []).map((c) => [c.id, c]));
 
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
@@ -190,6 +257,9 @@ async function main() {
   let wouldAutoRoute = 0, wouldTriage = 0;
   let smsWithoutConsent = 0;
   const phantomRisks = [];
+  // Auto-routes that trip a raw risk signal but dispatch to the customer's
+  // on-file address under the fail-open ruling — reported, never gating.
+  const failOpenRoutes = [];
   const triageReasonCounts = {};
 
   // Safety/semantic criteria (v1↔v2 agreement, SMS consent, phantom risk)
@@ -208,9 +278,33 @@ async function main() {
     if (isPrimaryRow) validCount++;
 
     // Match production: pass the call's contact phone (ANI) so the
-    // caller_phone_missing gate behaves the same as the live routing path.
+    // caller_phone_missing gate behaves the same as the live routing path,
+    // AND the stored AV verdict — since the central address-trust gate
+    // (2026-08-01) every call without a verdict returns address_not_validated,
+    // so omitting it makes the audit report zero production-equivalent
+    // auto-routes and the readiness comparison meaningless (codex round-10 P1
+    // on PR #3119).
     const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
-    const routing = canAutoRoute(v2, { contactPhone });
+    const storedAv = parseJson(r.ai_address_validation);
+    const effectiveAv = recoveredCallIds.has(r.id)
+      ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
+      : storedAv;
+    const { knownCaller, options: failOpenOptions } = buildFailOpenRoutingContext({
+      call: r,
+      customer: r.customer_id ? customerById.get(r.customer_id) || null : null,
+      contactPhone,
+      failOpenEnabled: auditFailOpen,
+    });
+    const knownCustomer = failOpenOptions.knownCustomer;
+    let routing = canAutoRoute(v2, {
+      contactPhone,
+      addressValidation: effectiveAv,
+      ...failOpenOptions,
+    });
+    // The live path never stops at canAutoRoute: a fail-open allow whose V1
+    // address conflicts with the on-file one is a NEW address and is demoted
+    // back to review. Auditing without it counts those as auto-routes.
+    routing = demoteFailOpenOnV1AddressConflict(routing, parseJson(r.ai_extraction) || {}, knownCaller);
     const v2WouldCreate = routing.allowed;
     const v1DidCreate = v1CreatedSid.has(r.twilio_call_sid);
 
@@ -232,11 +326,45 @@ async function main() {
       // Use the SAME county normalization production uses (isInServiceAreaCounty),
       // so "Sarasota County"/"sarasota" aren't flagged as phantom risks when the
       // live gate would treat them as in-area.
+      //
+      // Judged on the address the call would actually DISPATCH to, not the raw
+      // model fields (codex final-round P1). Two production-safe routes are
+      // invisible to the raw view, and both were newly reachable once this
+      // audit started passing the effective AV + on-file context:
+      //   • a corrected in-area AV verdict SUPERSEDES a stale out-of-area
+      //     model county, and supplies the street AV resolved;
+      //   • an established customer dispatches to the on-file address, so no
+      //     newly-stated street is expected and the <0.7 fail-open is the
+      //     owner's deliberate ruling, not a phantom.
+      // Those are still COUNTED — into failOpenRoutes, printed separately —
+      // so widening the routing contract can never silently empty this
+      // backstop. Anything out-of-area stays a phantom risk regardless.
       const addr = v2.property?.service_address || {};
       const conf = v2.confidence || {};
-      const outOfArea = addr.county && !isInServiceAreaCounty(addr.county);
-      if (!addr.street_line_1 || (typeof conf.overall === 'number' && conf.overall < 0.7) || outOfArea) {
-        phantomRisks.push({ id: r.id, street: !!addr.street_line_1, overall: conf.overall, county: addr.county });
+      const avPositive = !!effectiveAv
+        && ['validated_accept', 'corrected'].includes(String(effectiveAv.status || ''))
+        && effectiveAv.inServiceArea === true;
+      const dispatchStreet = addr.street_line_1 || (avPositive ? effectiveAv.normalized?.street_line_1 : null);
+      // The SHARED predicate, not a local "has an address on file" test
+      // (codex round-19 P1): production's exemption also requires that the
+      // caller did NOT state an address on this call. Testing only for a
+      // customer address on file moved low-confidence and street-less
+      // NEW-address routes into the non-gating bucket too — hiding exactly
+      // the auto-routes criterion 5 exists to catch, and letting a promotion
+      // pass on them.
+      const onFileDispatch = dispatchesToOnFileAddress(v2, { failOpen: auditFailOpen, knownCustomer });
+      const outOfArea = !avPositive && addr.county && !isInServiceAreaCounty(addr.county);
+      const lowConfidence = typeof conf.overall === 'number' && conf.overall < 0.7;
+      if (!dispatchStreet || lowConfidence || outOfArea) {
+        const entry = {
+          id: r.id,
+          street: !!dispatchStreet,
+          overall: conf.overall,
+          county: addr.county,
+          av: effectiveAv?.status || null,
+        };
+        if (onFileDispatch && !outOfArea) failOpenRoutes.push(entry);
+        else phantomRisks.push(entry);
       }
     } else {
       const flags = mergeTriageFlags(v2.triage_flags, computeDeterministicTriageFlags(v2, { contactPhone }));
@@ -273,6 +401,12 @@ async function main() {
   console.log(`3. v1↔v2 agreement ≥ ${AGREEMENT_THRESHOLD * 100}%     : ${pass(agreementRate >= AGREEMENT_THRESHOLD)}  (${(agreementRate * 100).toFixed(1)}% — ${agree}/${agree + disagree})`);
   console.log(`4. 0 SMS-without-consent auto-routes : ${pass(smsWithoutConsent === 0)}  (${smsWithoutConsent})`);
   console.log(`5. 0 phantom-appointment risks      : ${pass(phantomRisks.length === 0)}  (${phantomRisks.length})`);
+  if (failOpenRoutes.length) {
+    console.log(`   ↳ ${failOpenRoutes.length} auto-route(s) excluded as on-file fail-open dispatches (not phantom — listed below).`);
+  }
+  if (unstampedRecoveryCards || staleRecoveryCards) {
+    console.log(`   ↳ address_recovered cards NOT used to reconstruct a verdict: ${unstampedRecoveryCards} unstamped (pre-2026-08-01 history), ${staleRecoveryCards} from a different extraction pass.`);
+  }
   console.log(`6. Disagreements reviewed           : ${disagreements.length === 0 ? 'none ✅' : disagreements.length + ' need manual review ⚠️'}`);
 
   console.log(`\nWould auto-route: ${wouldAutoRoute}   |   Would triage: ${wouldTriage}`);
@@ -292,7 +426,13 @@ async function main() {
   if (phantomRisks.length) {
     console.log(`\n── PHANTOM-APPOINTMENT RISKS (${phantomRisks.length} — should be empty) ──`);
     for (const p of phantomRisks) {
-      console.log(`  ${p.id}  hasStreet=${p.street} overall=${p.overall} county=${p.county}`);
+      console.log(`  ${p.id}  hasStreet=${p.street} overall=${p.overall} county=${p.county} av=${p.av}`);
+    }
+  }
+  if (failOpenRoutes.length) {
+    console.log(`\n── ON-FILE FAIL-OPEN DISPATCHES (${failOpenRoutes.length} — reviewed, not gating) ──`);
+    for (const p of failOpenRoutes) {
+      console.log(`  ${p.id}  hasStreet=${p.street} overall=${p.overall} county=${p.county} av=${p.av}`);
     }
   }
 

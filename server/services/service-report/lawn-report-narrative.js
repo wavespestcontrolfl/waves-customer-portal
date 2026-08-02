@@ -25,7 +25,7 @@ const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v3'; // v3: + HUMAN_PROSE_RULES (owner style block 07-30)
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v4'; // v4: rain window rule — weekly total, never "since the last visit" (owner audit 07-30)
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -45,7 +45,7 @@ function groundingFacts(v2, ctx) {
     overallStatus: v2.snapshot?.status ?? null,
     grassLabel: ctx.grassLabel || 'lawn',
     diagnosis: (v2.diagnosis || []).map((d) => ({ key: d.key, label: d.label, score: d.score, status: d.status })),
-    water: v2.water ? { status: v2.water.status, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence } : null,
+    water: v2.water ? { status: v2.water.status, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence, rainWindow: 'past 7 days ending on the visit date' } : null,
     mowing: v2.mowing && v2.mowing.measuredHeightInches != null ? { status: v2.mowing.status, measured: v2.mowing.measuredHeightInches, idealMin: v2.mowing.idealMinInches, idealMax: v2.mowing.idealMaxInches } : null,
     treatment: v2.treatment ? { focus: v2.treatment.focus, products: (v2.treatment.products || []).map((p) => ({ name: p.name, activeIngredient: p.activeIngredient, kind: p.kind, whatItDoes: p.whatItDoes, targets: p.targets })) } : null,
     trendDirection: trendDirection(v2.trends?.overall),
@@ -82,6 +82,7 @@ You rewrite the customer-facing copy for a post-service LAWN report for Waves Pe
 3. Photo AI shows PATTERNS, not confirmed diagnoses. Never assert a specific disease or insect as confirmed — say "signals"/"patterns we're watching" unless a fact marks it tech-confirmed.
 4. Never say the lawn is "improving"/"recovering"/"better" unless trendDirection is "up". If "down", be honest but calm; if "none", don't reference a trend.
 5. Water: if water.status is "balanced" or "high", do NOT tell the customer to water more — point to coverage or easing back. Only suggest more water when status is "low".
+5b. The rain number is a PAST-7-DAYS total ending on the visit date. Describe the window as "this week" or "the past week" — NEVER "since the last visit", "this cycle", "between visits", or any wording tied to the visit schedule (visits are not weekly), and never present it as a single day's rain.
 6. Mowing: Waves does NOT mow. Frame mowing as how the lawn is being kept and a suggestion to the customer; never say Waves will fix it.
 7. Use active-ingredient names or plain descriptions for products — never hype. Lead with the product's plain-language role and never make a bare chemical name the subject of an instruction to the homeowner ("water in the clothianidin" → "water in today's treatment").
 8. Plain text only. No markdown, no emojis, no headers inside values.
@@ -104,12 +105,70 @@ function buildUserMessage(facts) {
   return `STRUCTURED FACTS for this visit (rewrite the copy from these — do not copy these words):\n\n${JSON.stringify(facts, null, 2)}\n\nReturn the JSON now.`;
 }
 
-// Replace a deterministic string with the model's version only if it's a non-empty,
-// non-banned string. Otherwise keep the safe deterministic copy.
+// The rain figure is a past-7-days total — model output that reframes the
+// window as the visit interval ("since the last visit", "this cycle") or as
+// a single day's rain is factually wrong whenever visits aren't weekly, and
+// the prompt rule alone doesn't guarantee compliance (codex P1 #3093 r3:
+// exactly this framing shipped on a live report).
+const RAIN_WINDOW_PHRASES = new RegExp([
+  // visit-interval framings
+  '\\bsince\\s+(?:your|the|our)\\s+(?:last|previous)\\s+(?:visit|service|appointment|application|stop)\\b',
+  '\\bsince\\s+we\\s+(?:last\\s+)?(?:visited|serviced|were|came|stopped)\\b',
+  '\\bthis\\s+(?:service\\s+)?cycle\\b',
+  '\\bbetween\\s+(?:visits|services|appointments)\\b',
+  // single-day / sub-weekly framings — verb-first AND day-first orders
+  // ("rain yesterday", "yesterday's rain" — codex P2 r27)
+  '\\brain(?:fall)?\\s+(?:today|yesterday|overnight|last\\s+night)\\b',
+  // named-weekday allocations — "Monday brought 4.23 inches of rain"
+  // fabricates a daily measurement from the weekly total (codex P2 r41)
+  // gap admits decimals ("4.23") but still stops at sentence enders
+  '\\b(?:mon|tues|wednes|thurs|fri|satur|sun)day\\b(?:\\d\\.\\d|[^.!?]){0,30}\\b(?:rain(?:fall)?|inch(?:es)?|precipitation)\\b',
+  '\\b(?:rain(?:fall)?|inch(?:es)?|precipitation)\\b(?:\\d\\.\\d|[^.!?]){0,30}\\b(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day\\b',
+  // amount-first day framing — "4.23 inches yesterday" (codex P2 r36)
+  '\\binch(?:es)?\\b[^.!?]{0,25}\\b(?:today|yesterday|overnight|last\\s+night)\\b',
+  '\\b(?:today|yesterday|overnight|last\\s+night)\\b[^.!?]{0,25}\\binch(?:es)?\\b',
+  "\\b(?:today|yesterday|last\\s+night|overnight)[\u2019']s\\s+rain(?:fall)?\\b",
+  '\\b(?:last|past)\\s+(?:\\d+|one|two|three|four|five|six|couple\\s+of|few)\\s+(?:day|days|hour|hours|hrs)\\b',
+  '\\b(?:over|in|during)\\s+the\\s+(?:last|past)\\s+(?:day|\\d+\\s*hours)\\b',
+].join('|'), 'i');
+
+// Positive requirement for the water explanation (codex P1 r9: enumerating
+// every invalid phrasing is unwinnable): the copy must NAME the weekly
+// window, or it falls back to the deterministic sentence.
+const WEEKLY_PHRASE_SRC = "(?:this\\s+(?:past\\s+)?week|the\\s+past\\s+week|past\\s+week|over\\s+the\\s+(?:past\\s+)?week|(?:last|past)\\s+(?:7|seven)\\s+days|weekly|for\\s+the\\s+week|week[’']s\\s+(?:rain|water))";
+const RAIN_CLAIM_SRC = '(?:rain(?:fall)?|precipitation|inch(?:es)?|\\d+(?:\\.\\d+)?\\s*(?:in|\"))';
+// The weekly phrase must QUALIFY the rain claim itself — "keep your weekly
+// watering schedule" must not launder "4.23 inches yesterday" into a pass
+// (codex P2 r36). Bounded same-clause gap, both word orders.
+const WEEKLY_WINDOW_PHRASES = new RegExp(
+  `\\b${RAIN_CLAIM_SRC}[^.!?]{0,60}\\b${WEEKLY_PHRASE_SRC}\\b|\\b${WEEKLY_PHRASE_SRC}\\b[^.!?]{0,60}${RAIN_CLAIM_SRC}`,
+  'i',
+);
+const RAIN_TERMS = /\brain|\binch|\bprecipitation|\bwater/i;
+
+// Replace a deterministic string with the model's version only if it's a
+// non-empty, non-banned string that doesn't tie a rain/water amount to the
+// wrong window. The window check applies to EVERY merged field (mainWatch,
+// diagnosis explanations, insights — codex P1 r4), but only when the text
+// also talks about rain/water: a trend claim like "weeds are down since the
+// last visit" is legitimate (the prior visit IS the trend anchor).
 function safeText(modelValue, fallback) {
   const t = typeof modelValue === 'string' ? modelValue.trim() : '';
   if (!t) return fallback;
   if (findBannedCustomerCopy(t).length) return fallback;
+  if (RAIN_WINDOW_PHRASES.test(t) && RAIN_TERMS.test(t)) return fallback;
+  return t;
+}
+
+// The water explanation is ALWAYS about the rain window — reject window
+// phrases unconditionally there AND require the weekly window to be named
+// (deny + affirm: the denylist catches known-bad framings, the positive
+// check catches everything the list doesn't enumerate).
+function safeWaterText(modelValue, fallback) {
+  const t = safeText(modelValue, fallback);
+  if (t === fallback) return t;
+  if (RAIN_WINDOW_PHRASES.test(t)) return fallback;
+  if (!WEEKLY_WINDOW_PHRASES.test(t)) return fallback;
   return t;
 }
 
@@ -127,7 +186,7 @@ function mergeNarrative(v2, out) {
     const v = safeText(cats[d.key], d.explanation || d.customerExplanation);
     return { ...d, explanation: v, customerExplanation: v };
   });
-  if (next.water) next.water.explanation = safeText(out.water, next.water.explanation);
+  if (next.water) next.water.explanation = safeWaterText(out.water, next.water.explanation);
   // Photo-only rows have no measured height/status — don't let the model fill an
   // ungrounded mowing recommendation under the photo (Codex P1).
   if (next.mowing && next.mowing.measuredHeightInches != null) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
@@ -191,5 +250,5 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
 module.exports = {
   applyLawnReportNarrative,
   // exported for tests
-  _test: { groundingFacts, mergeNarrative, trendDirection, safeText, SYSTEM_PROMPT, buildUserMessage, PROMPT_VERSION },
+  _test: { groundingFacts, mergeNarrative, trendDirection, safeText, safeWaterText, SYSTEM_PROMPT, buildUserMessage, PROMPT_VERSION },
 };

@@ -682,7 +682,19 @@ function ConfidenceTag({ confidence }) {
 }
 
 // ── 4. Rain in your area — last 7 days ───────────────────────────────────────────
-export function RainLast7DaysChart({ days = [], confidence = null }) {
+// Attribution for a radar/gauge-measured week. Shown ONLY for an MRMS-sourced
+// series: NOAA's gauge-corrected radar resolves rain at the property rather
+// than at a city cell, but a summer cell can still drop an inch more on one
+// yard than the next — measured 2026-08-01 against a volunteer rain gauge a
+// few miles from one SWFL property, where the week's totals differed by ~2".
+// The customer is told where the number comes from and that their own yard can
+// differ, instead of a bare figure implying gauge-in-the-lawn precision.
+function measuredSourceNote(source) {
+  if (!source || !String(source).startsWith('mrms')) return null;
+  return 'Based on NOAA radar and rain-gauge data — local totals may vary.';
+}
+
+export function RainLast7DaysChart({ days = [], confidence = null, source = null }) {
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const data = (days || []).filter((d) => d && Number.isFinite(Number(d.in)));
@@ -727,6 +739,11 @@ export function RainLast7DaysChart({ days = [], confidence = null }) {
           be honest that this is an area estimate, not a precise per-address reading. */}
       {confidence === 'low' ? (
         <div style={{ marginTop: 10 }}><ConfidenceTag confidence="low" /></div>
+      ) : null}
+      {measuredSourceNote(source) ? (
+        <div style={{ marginTop: 10, fontSize: 12, color: MUTED, fontStyle: 'italic' }}>
+          {measuredSourceNote(source)}
+        </div>
       ) : null}
     </Card>
   );

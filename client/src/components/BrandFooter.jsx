@@ -111,7 +111,10 @@ function StoreBadges({ ctaColor }) {
   );
 }
 
-export default function BrandFooter({ borderColor, variant }) {
+// appBadges: service-report pages drop the app-download block (owner
+// 2026-07-30) — the report reader already got the report; the store badges
+// stay on receipts/pay/login surfaces.
+export default function BrandFooter({ borderColor, variant, appBadges = true }) {
   // Standalone pages (no WavesShell → no TrustFooter strip) still need the
   // copyright/license line; shell pages get it from TrustFooter and skip it
   // here (the owner removed the duplicate).
@@ -290,7 +293,7 @@ export default function BrandFooter({ borderColor, variant }) {
         ))}
         </div>
       </div>
-      <StoreBadges ctaColor={headingColor} />
+      {appBadges ? <StoreBadges ctaColor={headingColor} /> : null}
       {!inShell ? (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
           <div style={{ fontSize: 13, lineHeight: 1.5 }}>

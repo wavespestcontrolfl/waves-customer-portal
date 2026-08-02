@@ -425,7 +425,6 @@ router.get('/me', authenticate, async (req, res, next) => {
       serviceReminder24h: prefs.service_reminder_24h,
       techEnRoute: prefs.tech_en_route,
       serviceCompleted: prefs.service_completed,
-      billingReminder: prefs.billing_reminder,
       seasonalTips: prefs.seasonal_tips,
       smsEnabled: prefs.sms_enabled,
       emailEnabled: prefs.email_enabled,

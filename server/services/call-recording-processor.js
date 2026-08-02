@@ -84,7 +84,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -1101,6 +1101,36 @@ function summarizeKnownCaller(customer) {
 // exact match (customer-properties), so this guard can't disagree with the
 // stamp downstream. Returns the (possibly demoted) routing result; never
 // mutates.
+/**
+ * The EXACT fail-open routing context production hands canAutoRoute for a
+ * call. Exported so the three offline routing audits MIRROR production rather
+ * than approximating it (local pre-push audit P1; round-13 residual): a
+ * hand-rolled "linked customer with an address" test also granted the lane to
+ * OUTBOUND calls and to dormant/lost/duplicate accounts, whose stale on-file
+ * data must never clear a blocker — both directions of error land on the
+ * permissive side of a promotion gate.
+ *
+ * The caller must still run demoteFailOpenOnV1AddressConflict on the result,
+ * exactly as the live path does — the two are one contract.
+ */
+function buildFailOpenRoutingContext({
+  call = {}, customer = null, contactPhone = null, failOpenEnabled = false,
+} = {}) {
+  const knownCaller = customer ? summarizeKnownCaller(customer) : null;
+  return {
+    knownCaller,
+    options: {
+      // Fail-open is INBOUND-only: an outbound callback is our own dial, not
+      // a customer volunteering their identity by calling the office.
+      failOpen: !!failOpenEnabled && !isOutboundCall(call),
+      callerAni: contactPhone,
+      knownCustomer: (knownCaller && knownCaller.isExistingCustomer)
+        ? { hasAddress: knownCaller.hasAddress }
+        : null,
+    },
+  };
+}
+
 function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller) {
   if (!routingResult?.allowed
     || !(routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
@@ -2822,13 +2852,23 @@ function validatePhoneCallAppointmentCustomer(customer = {}, extracted = {}, cal
   if (!String(merged.firstName || '').trim()) missing.push('first_name');
   if (!String(merged.lastName || '').trim()) missing.push('last_name');
   if (!hasUsablePhone(merged.phone)) missing.push('phone');
-  if (!EMAIL_RE.test(String(merged.email || '').trim().toLowerCase())) missing.push('email');
   if (!String(merged.streetAddress || '').trim()) missing.push('street_address');
   if (!String(merged.city || '').trim()) missing.push('city');
   if (!String(merged.state || '').trim()) missing.push('state');
   if (!String(merged.zip || '').trim()) missing.push('zip');
 
-  return { ok: missing.length === 0, missing, details: merged };
+  // Email is ADVISORY, not required (owner ruling 2026-07-31): a caller who
+  // books but never gives an email must still book — most confirmations go
+  // by SMS, and the office collects the email via the advisory card the call
+  // site files. A stored/extracted email that fails EMAIL_RE also lands here
+  // (garbled capture ≈ no capture). PERSISTED-OR-REVIEW above still governs
+  // WHICH emails count when one exists.
+  const advisory = [];
+  if (!EMAIL_RE.test(String(merged.email || '').trim().toLowerCase())) {
+    advisory.push('email');
+  }
+
+  return { ok: missing.length === 0, missing, advisory, details: merged };
 }
 
 async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
@@ -2842,14 +2882,70 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   // wrong account before the office gets the review the advisory card
   // promises (codex P1). The rest of the backfill still runs.
   if (!customer.phone && (extracted.phone || callerPhone) && !suppressPhone) updates.phone = extracted.phone || callerPhone;
-  if (!customer.email && extracted.email) updates.email = extracted.email;
+  // A GARBLED stored email counts as absent (codex round-12 P2): the first
+  // call can persist an EMAIL_RE-failing capture; treating that truthy value
+  // as "has an email" would block the later call's VALID capture from ever
+  // replacing it — and the customer_email_missing card would sit open with
+  // no path to the fix. Only an invalid stored value is replaceable; a valid
+  // stored email is never overwritten by a call capture.
+  const storedEmailInvalid = customer.email && !EMAIL_RE.test(String(customer.email).trim().toLowerCase());
+  const extractedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
+  if ((!customer.email || storedEmailInvalid) && extractedEmailValid) updates.email = extracted.email;
   if (!customer.address_line1 && extracted.address_line1) updates.address_line1 = extracted.address_line1;
   if (!customer.city && extracted.city) updates.city = extracted.city;
   if (!customer.state && extracted.state) updates.state = extracted.state;
   if (!customer.zip && extracted.zip) updates.zip = extracted.zip;
   if (Object.keys(updates).length === 0) return customer;
   updates.updated_at = new Date();
+  // An empty→value email write has no old address to retarget, so the
+  // lightweight path (resolve the cards only) is right. REPLACING a garbled
+  // stored email is a different write: copies of that old address really are
+  // out there — leads, estimates, newsletter tokens, open sends — and
+  // AGENTS.md requires every email change to fan out. Skipping it left those
+  // bound to an address the customer cannot receive (local pre-push audit
+  // P1, and round-13 residual #1). Either way the read-back cards filed for
+  // THIS capture must not settle: the capture is unverified by design, so
+  // only customer_email_missing resolves (round-9 + round-10 P2).
+  //
+  // The replacement runs the customer write and the fan-out in ONE
+  // transaction (codex round-24 P1): writing the email first and swallowing a
+  // fan-out failure left the customer on the new address with snapshots
+  // half-migrated — and permanently, because the next call sees a VALID
+  // stored email and never retries. Rolling back keeps the malformed value,
+  // which is the retryable state. Best-effort at the call level either way:
+  // a failure leaves the record exactly as it was and the office still has
+  // the review card.
+  const replacingGarbledEmail = !!(updates.email && storedEmailInvalid);
+  const fanout = require('./customer-email-fanout');
+  if (replacingGarbledEmail) {
+    try {
+      await db.transaction(async (trx) => {
+        await trx('customers').where({ id: customerId }).update(updates);
+        await fanout.propagateCustomerEmailChange({
+          before: customer,
+          after: { id: customerId, email: updates.email },
+          source: 'call-captured email replacing a garbled address (appointment backfill)',
+          reviewReasonCodes: ['customer_email_missing'],
+        }, trx);
+      });
+    } catch (e) {
+      logger.warn(`[call-proc] email replacement rolled back for customer ${customerId}: ${e.message}`);
+      return customer;
+    }
+    return { ...customer, ...updates };
+  }
   await db('customers').where({ id: customerId }).update(updates);
+  if (updates.email) {
+    try {
+      await fanout.resolveOpenEmailReviewCards({
+        customerId, email: updates.email,
+        source: 'call-captured email (appointment backfill)',
+        reasonCodes: ['customer_email_missing'],
+      });
+    } catch (e) {
+      logger.warn(`[call-proc] email review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
+    }
+  }
   return { ...customer, ...updates };
 }
 
@@ -5293,6 +5389,45 @@ const CallRecordingProcessor = {
     const effectiveAddressValidation = (addressRecovery?.recovered && addressRecovery.avResult)
       ? addressRecovery.avResult
       : v2AddressValidation;
+    // Which extraction pass recovered (codex final-round P2). The offline
+    // audits reconstruct the routing verdict from the address_recovered card
+    // — the processor deliberately persists the ORIGINAL unresolvable verdict
+    // — so the card must say WHICH pass it speaks for. Without the stamp, a
+    // card left over from an earlier pass vouches for a later reprocess where
+    // recovery FAILED, turning an unverified address into a counted
+    // auto-route and skewing the promotion gate permissive. Stamped with the
+    // same provenance the row itself carries (call_log.ai_extraction_model /
+    // ai_extraction_prompt_version), so the audits can match exactly.
+    const recoveryPassStamp = {
+      extraction_model: v2Result?.extraction?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
+      extraction_prompt_version: v2PromptVersion,
+    };
+    // Model + prompt identifies an extractor COHORT, not an individual pass
+    // (codex round-18 P2): reprocess the same call on the same extractor with
+    // recovery failing this time and the pass-1 card — kept alive by the
+    // open-row onConflict-ignore — would still stamp-match the rewritten row
+    // and forge a 'corrected' verdict for all three audits. So the marker is
+    // reconciled with THIS pass before either filing site runs: a pass that
+    // recovered (re)stamps it, a pass that did NOT strips the stamp and
+    // records when it was superseded. An unstamped card reconstructs nothing,
+    // so the forged verdict is gone in the same write.
+    //
+    // The card itself is left OPEN either way. The office's read-back task is
+    // about the street now on the customer record, which the earlier pass DID
+    // persist — invalidating the audit marker must not silently delete a real
+    // piece of work. Best-effort: a failed reconcile leaves a stamp the
+    // audits may over-trust, which is why the pass stamp is belt-and-braces
+    // rather than the only check.
+    await db('triage_items')
+      .where({ call_log_id: call.id, reason_code: 'address_recovered' })
+      .update({
+        payload: addressRecovery?.recovered
+          ? db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(recoveryPassStamp)])
+          : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
+            [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]),
+        updated_at: new Date(),
+      })
+      .catch((e) => logger.warn(`[call-proc] recovery-marker reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
 
     // Explicit SMS consent is a property of the CALL, not of the routing mode:
     // the secondary-contact fan-out at the send site requires it even when V2
@@ -5419,9 +5554,12 @@ const CallRecordingProcessor = {
                 severity: 'advisory',
                 extraPayload: {
                   address_as_heard: rawStreetBeforeAdopt,
+                  // V1-flat key — recoverStreetAddress remaps its winner out
+                  // of the AV-normalized shape before returning.
                   address_recovered: addressRecovery.recovered.address_line1,
                   address_candidates: addressRecovery.candidates || [],
                   recovery_method: addressRecovery.method || null,
+                  ...recoveryPassStamp,
                   ...(contactDictation?.addresses?.[0]?.confirmation_question
                     ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
                 },
@@ -5719,6 +5857,10 @@ const CallRecordingProcessor = {
                     address_recovered: flag === 'address_recovered' ? extracted.address_line1 : null,
                     address_candidates: addressRecovery.candidates || [],
                     recovery_method: addressRecovery.method || null,
+                    // Same pass stamp the enforce site writes — this is the
+                    // site that files the card in SHADOW mode, which is
+                    // exactly the cohort the promotion gate audits.
+                    ...(flag === 'address_recovered' ? recoveryPassStamp : {}),
                     ...(contactDictation?.addresses?.[0]?.confirmation_question
                       ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
                   } : (isEmailFlag ? dictationEmailPayload : null),
@@ -5926,14 +6068,58 @@ const CallRecordingProcessor = {
         customerId = existing.id;
         // Update with any new info
         const updates = {};
-        if (!existing.email && extracted.email) updates.email = extracted.email;
+        // Same garbled-stored-email rule as the appointment backfill
+        // (codex round-12 P2): invalid stored value is replaceable by a
+        // VALID capture; a valid stored email is never overwritten.
+        const existingEmailInvalid = existing.email && !EMAIL_RE.test(String(existing.email).trim().toLowerCase());
+        const capturedEmailValid = extracted.email && EMAIL_RE.test(String(extracted.email).trim().toLowerCase());
+        if ((!existing.email || existingEmailInvalid) && capturedEmailValid) updates.email = extracted.email;
         if ((!existing.address_line1 || existing.address_line1 === '') && extracted.address_line1) {
           updates.address_line1 = extracted.address_line1;
           if (extracted.city) updates.city = extracted.city;
           if (extracted.zip) updates.zip = extracted.zip;
         }
         if (Object.keys(updates).length > 0) {
-          await db('customers').where({ id: customerId }).update(updates);
+          // Same contract as the appointment backfill above: a REPLACEMENT of
+          // a garbled stored email must fan out (copies of the old address
+          // exist) and does so in ONE transaction with the customer write, so
+          // a partial fan-out cannot strand snapshots on an address the
+          // record no longer holds (codex round-24 P1); an empty→value write
+          // only settles the missing-email card; neither settles the
+          // read-back cards filed for this unverified capture (round-9 +
+          // round-10 P2; fan-out gap from the local pre-push audit P1).
+          const fanout = require('./customer-email-fanout');
+          const replacingGarbled = !!(updates.email && existingEmailInvalid);
+          if (replacingGarbled) {
+            try {
+              await db.transaction(async (trx) => {
+                await trx('customers').where({ id: customerId }).update(updates);
+                await fanout.propagateCustomerEmailChange({
+                  before: existing,
+                  after: { id: customerId, email: updates.email },
+                  source: 'call-captured email replacing a garbled address (phone-match update)',
+                  reviewReasonCodes: ['customer_email_missing'],
+                }, trx);
+              });
+            } catch (e) {
+              // Rolled back: the malformed value stays, which is the state a
+              // later call can retry from.
+              logger.warn(`[call-proc] email replacement rolled back for customer ${customerId}: ${e.message}`);
+            }
+          } else {
+            await db('customers').where({ id: customerId }).update(updates);
+            if (updates.email) {
+              try {
+                await fanout.resolveOpenEmailReviewCards({
+                  customerId, email: updates.email,
+                  source: 'call-captured email (phone-match update)',
+                  reasonCodes: ['customer_email_missing'],
+                });
+              } catch (e) {
+                logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
+              }
+            }
+          }
         }
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
@@ -7328,18 +7514,128 @@ const CallRecordingProcessor = {
         if (customer) {
           customer = await backfillCustomerFromAppointmentContact(customerId, customer, extracted, contactPhone, { suppressPhone: callerPhoneUnverified });
           const customerValidation = validatePhoneCallAppointmentCustomer(customer, extracted, contactPhone);
-          if (!customerValidation.ok) {
+          // Email advisory (owner ruling 2026-07-31): file the "collect the
+          // email" card whenever the email is missing — INDEPENDENT of the
+          // other required fields (codex round-7 P2). A caller missing
+          // email+zip previously produced a card listing only the zip, so the
+          // office completing the booking manually was never told to collect
+          // the email. Card failure never changes the booking outcome.
+          if (customerValidation.advisory?.includes('email')) {
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'customer_email_missing',
+                extraction: v2ApprovedExtraction || undefined,
+                severity: 'advisory',
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore()
+              .catch((e) => logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`));
+          }
+          // Email-less bookings in SHADOW/LEGACY mode still require a
+          // positively validated address (codex round-7 P1). canAutoRoute's
+          // central address-trust gate only runs in enforce mode — and
+          // pre-PR, the email requirement was what (incidentally) held these
+          // bookings there. Without this, making email advisory would newly
+          // dispatch email-less callers to addresses nobody validated.
+          // Enforce mode is exempt: canAutoRoute already applied the full
+          // contract, including the known-customer on-file-address lane this
+          // site cannot evaluate.
+          const enforceModeActive = CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
+          // The verdict must validate the address actually being BOOKED
+          // (codex round-13, residual #2 closed pre-merge): AV runs on the
+          // V2 extraction's address, but this legacy/shadow branch books the
+          // V1 `extracted` address. When the two streets disagree,
+          // deriveCallReviewBridge deliberately refuses adoption — so a
+          // positive verdict for V2's street says NOTHING about the V1
+          // street the tech would drive to. Suffix-insensitive street key +
+          // city + zip against AV's normalized form; a missing normalized
+          // form or a mismatch keeps the hold. Enforce mode is untouched
+          // (canAutoRoute owns the contract there, and it books the same
+          // V2 address the verdict was computed for).
+          const avNormalized = effectiveAddressValidation?.normalized || null;
+          // The unit must match too (codex final-round P1): AV sends
+          // street_line_2 to Google but its normalized form omits the
+          // subpremise, so the unit is compared against the V2 extraction's
+          // OWN address — the exact input the verdict was computed on. V1
+          // Apt A with a verdict for V2 Apt B holds. No valid V2 extraction
+          // means AV never ran on anything, so the gate fails closed.
+          // v2ApprovedExtraction is assigned only in the ENFORCE branch — in
+          // shadow/legacy mode (where this gate actually applies) it is
+          // always null, which made the gate permanently closed (codex
+          // final-round P1: fail-closed, so safe, but it nullified the
+          // intended positive-AV liberalization). The SHADOW extraction is
+          // the address AV was computed on in those modes; only a VALID
+          // extraction counts — an invalid payload is untrusted output and,
+          // consistently, AV wouldn't have a meaningful verdict for it.
+          const v2ForAddressCheck = v2ApprovedExtraction
+            || ((v2Result?.status === 'valid' && isV2Extraction(v2Result?.extraction)) ? v2Result.extraction : null);
+          const v2StatedAddress = v2ForAddressCheck?.property?.service_address || null;
+          // A SUCCESSFUL recovery moves the verdict's input (codex
+          // final-round P2): the effective verdict was computed on the
+          // premise recovery confirmed, and deriveCallReviewBridge adopted
+          // that same premise into `extracted` — so the ORIGINAL V2 street
+          // (the garble recovery exists to fix) disagrees BY CONSTRUCTION
+          // and would hold exactly the bookings recovery just rescued. The
+          // recovered premise is the verdict input in that case; the V2
+          // extraction still supplies the stated UNIT, which recovery never
+          // re-hears (its Autocomplete input is street-only, and AV's
+          // normalized form carries no subpremise at all).
+          // recoverStreetAddress REMAPS its winner to the V1-flat shape
+          // (address_line1/city/state/zip) before returning — it is only
+          // AV-normalized inside confirmPrediction (codex round-18 P2).
+          // Reading street_line_1 off it yielded undefined, which failed the
+          // whole predicate closed and silently un-did the recovery fix.
+          const recoveredVerdictInput = (addressRecovery?.recovered && addressRecovery.avResult)
+            ? { street_line_1: addressRecovery.recovered.address_line1, city: addressRecovery.recovered.city }
+            : null;
+          const v2ValidatedAddress = recoveredVerdictInput || v2StatedAddress;
+          const unitKey = (v) => String(v || '').toLowerCase().replace(/[#.,]/g, ' ').replace(/\s+/g, ' ').trim();
+          // City included (codex final-round P1): ZIP almost always pins the
+          // city, but multi-city ZIPs exist and deriveCallReviewBridge
+          // refuses adoption on a city disagreement — the gate matches that
+          // bar. With street+city+zip+unit all matched against BOTH the
+          // AV-normalized form and the V2 input, the match is total.
+          const cityKey = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          // ...but only where the bridge itself demands it (codex round-18
+          // P2). For `validated_accept` Google changed NOTHING, so a city the
+          // caller's record does not share means V2 named a different place →
+          // hold. For `corrected` the difference IS Google's trusted
+          // correction, the shadow path writes the normalized city into
+          // `extracted`, and deriveCallReviewBridge deliberately does not
+          // reject on it — so demanding the ORIGINAL V2 city here would hold
+          // every city correction. The unconditional match against the
+          // verdict's own normalized city below is what keeps this safe:
+          // the booked city always has to be the validated one.
+          const requireStatedCityMatch = String(effectiveAddressValidation?.status || '') === 'validated_accept';
+          const avValidatesBookedAddress = !!avNormalized && !!v2ValidatedAddress && !!v2StatedAddress
+            && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(avNormalized.street_line_1 || ''))
+            && String(extracted.zip || '').trim() === String(avNormalized.postal_code || '').trim()
+            && cityKey(extracted.city) === cityKey(avNormalized.city)
+            && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(v2ValidatedAddress.street_line_1 || ''))
+            && (!requireStatedCityMatch || cityKey(extracted.city) === cityKey(v2ValidatedAddress.city))
+            && unitKey(extracted.address_line2) === unitKey(v2StatedAddress.street_line_2);
+          const avPositiveForBooking = !!effectiveAddressValidation
+            && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
+            && effectiveAddressValidation.inServiceArea === true
+            && avValidatesBookedAddress;
+          const emailAdvisoryHold = !enforceModeActive
+            && customerValidation.ok
+            && !!customerValidation.advisory?.includes('email')
+            && !avPositiveForBooking;
+          if (!customerValidation.ok || emailAdvisoryHold) {
+            const missingFields = customerValidation.ok ? ['email'] : customerValidation.missing;
             appointmentResult = {
               service: serviceResolution.service,
               dateTime: extracted.preferred_date_time,
               scheduleCreated: false,
               smsSent: false,
               skippedReason: 'missing_required_customer_fields',
-              missingFields: customerValidation.missing,
+              missingFields,
             };
             logger.warn(
               `[call-proc] Skipping appointment auto-create for ${callSid}: missing required customer fields ` +
-              customerValidation.missing.join(', ')
+              missingFields.join(', ') + (emailAdvisoryHold ? ' (email-less booking outside enforce mode requires a validated address)' : '')
             );
           } else {
             const firstName = customerValidation.details.firstName || '';
@@ -7392,34 +7688,10 @@ const CallRecordingProcessor = {
           // schedule row doesn't exist yet at render time, so the self-serve
           // reschedule link can't be minted — pass an empty clause; the
           // template renders clean without it.
-          smsBody = await renderSmsTemplate('appointment_confirmation', {
-            first_name: firstName,
-            service_type: serviceType,
-            date_time: extracted.preferred_date_time,
-            date: parsedDate,
-            time: parsedTime,
-            reschedule_line: '',
-          }, {
-            workflow: 'call_booking_confirmation',
-            entity_type: 'customer',
-            entity_id: customer.id,
-          });
-
-          // Content-level dedup: even if the concurrent-run guard above
-          // misses (e.g., admin reprocess inside the same minute), don't
-          // fire an identical confirmation that the customer just got.
+          // Rendering is DEFERRED until after the scheduled_services insert:
+          // the row (and its reschedule_token) must exist before a real
+          // appointment-page link can be minted for the v2 body (codex r4).
           let alreadySent = false;
-          try {
-            // Dedupe against the ACTUAL recipient (smsRecipient) — an
-            // implied-consent send redirected to the ANI must be found here
-            // on a reprocess/retry, or the caller gets the same text twice.
-            const existing = await db('sms_log')
-              .where({ to_phone: smsRecipient, message_type: 'confirmation' })
-              .where('message_body', smsBody)
-              .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
-              .first();
-            if (existing) alreadySent = true;
-          } catch { /* sms_log query issue — send anyway */ }
 
           // Create the scheduled_services record FIRST. Previously we sent
           // the SMS first and inserted the schedule row afterward — if the
@@ -7489,6 +7761,62 @@ const CallRecordingProcessor = {
                 smsSent: false,
                 skippedReason: 'unparseable_time',
               };
+              scheduledDate = null;
+            }
+
+            // Hourly-start rule enforced in the COMMON creation path (codex
+            // round-5 P1). window_start is always HH:00:00 (AGENTS.md, owner
+            // 2026-07-27) and this is the code that writes it — but
+            // canAutoRoute's central gate only runs inside the
+            // CALL_EXTRACTION_V2_DRIVES_ROUTING enforce branch, so in shadow
+            // or legacy mode nothing checked it. That gap became reachable
+            // when this PR made a missing email advisory: a 09:30 call with
+            // no email used to stop at missing_required_customer_fields and
+            // now gets this far. Guarding here covers enforce, shadow and
+            // legacy alike, at the single place window_start is derived.
+            // Seconds are checked on the ORIGINAL value, not the formatted
+            // one (codex round-10 P1): windowStart came through an Intl
+            // format that omits seconds, so "T09:00:30" reduces to "09:00"
+            // and would pass the minutes regex — booking a silently rounded
+            // start. A free-text preferred_date_time ("tomorrow at 2 pm")
+            // has no T-seconds group and is unaffected.
+            const rawStartSeconds = String(extracted.preferred_date_time || '').match(/T\d{2}:\d{2}:(\d{2})/);
+            const offHourStart = (windowStart && !/^\d{2}:00(:00)?$/.test(windowStart))
+              || (rawStartSeconds && rawStartSeconds[1] !== '00');
+            if (scheduledDate && windowStart && offHourStart) {
+              logger.warn(`[call-proc] Confirmed start ${windowStart} is not on the hour (or carries seconds); holding booking for the office to place on an hour boundary`);
+              appointmentResult = {
+                service: serviceType,
+                dateTime: extracted.preferred_date_time,
+                scheduleCreated: false,
+                smsSent: false,
+                skippedReason: 'off_hour_start',
+              };
+              // File the review card HERE, not just in the enforce-mode audit
+              // (codex round-6 P1): this hold also runs in shadow/legacy mode,
+              // where the approved-but-unbooked audit never executes — without
+              // this insert a clean 09:30 call was held with no appointment
+              // AND no card, and the office would never place the promised
+              // booking on an hour boundary. The payload carries the agreed
+              // date/time so the card is actionable without a re-listen (the
+              // V2 scheduling payload rides along when available; legacy calls
+              // still get the parsed values). onConflict dedups against the
+              // enforce-mode insert for the same reason code.
+              await db('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag: 'off_hour_start',
+                  extraction: v2ApprovedExtraction || undefined,
+                  extraPayload: {
+                    preferred_date_time: extracted.preferred_date_time || null,
+                    scheduled_date: scheduledDate,
+                    window_start: windowStart,
+                    service_type: serviceType,
+                  },
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore()
+                .catch((e) => logger.warn(`[call-proc] off-hour triage insert failed for ${maskSid(callSid)}: ${e.message}`));
               scheduledDate = null;
             }
 
@@ -8443,6 +8771,57 @@ const CallRecordingProcessor = {
             // booking, and starves the assessment pre-draft hook.
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
+            if (!scheduleWasReused) {
+              // The row landed, so the v2 factory can mint the REAL
+              // appointment-page link (lazy: only runs when the gate is on
+              // and the _v2 row is active). Legacy body unchanged.
+              const { renderAppointmentPageTemplate, confirmationArrivalWindow } = require('./appointment-reminders');
+              smsBody = await renderAppointmentPageTemplate('appointment_confirmation',
+                async () => {
+                  const { buildAppointmentLink } = require('./appointment-link');
+                  const apptLink = await buildAppointmentLink(scheduledServiceId, { customerId });
+                  // The v2 body quotes the 2-hour arrival window, resolved
+                  // from the BOOKED row — parsedTime is the caller's
+                  // extracted preference and can differ from what landed.
+                  const window = await confirmationArrivalWindow({ scheduledServiceId });
+                  return {
+                    first_name: firstName,
+                    service_type: serviceType,
+                    date: parsedDate,
+                    time: parsedTime,
+                    window,
+                    appointment_line: apptLink.line,
+                  };
+                },
+                {
+                  first_name: firstName,
+                  service_type: serviceType,
+                  date_time: extracted.preferred_date_time,
+                  date: parsedDate,
+                  time: parsedTime,
+                  reschedule_line: '',
+                }, {
+                workflow: 'call_booking_confirmation',
+                entity_type: 'customer',
+                entity_id: customer.id,
+              });
+
+              // Content-level dedup: even if the concurrent-run guard
+              // misses (e.g., admin reprocess inside the same minute),
+              // don't fire an identical confirmation the customer just got.
+              // Dedupe against the ACTUAL recipient (smsRecipient) — an
+              // implied-consent send redirected to the ANI must be found
+              // here on a reprocess/retry, or the caller texts twice.
+              try {
+                const existing = await db('sms_log')
+                  .where({ to_phone: smsRecipient, message_type: 'confirmation' })
+                  .where('message_body', smsBody)
+                  .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
+                  .first();
+                if (existing) alreadySent = true;
+              } catch { /* sms_log query issue — send anyway */ }
+            }
+
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
               appointmentResult = {
@@ -8545,14 +8924,36 @@ const CallRecordingProcessor = {
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
                         && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
-                        const contactBody = await renderSmsTemplate('appointment_confirmation', {
-                          first_name: String(contact.name || '').trim().split(/\s+/)[0] || firstName,
-                          service_type: serviceType,
-                          date_time: extracted.preferred_date_time,
-                          date: parsedDate,
-                          time: parsedTime,
-                          reschedule_line: '',
-                        }, {
+                        // Same ladder as the primary send; the schedule row
+                        // exists by this point, so the factory mints the
+                        // same appointment-page link.
+                        const {
+                          renderAppointmentPageTemplate: renderApptLadder,
+                          confirmationArrivalWindow: contactArrivalWindow,
+                        } = require('./appointment-reminders');
+                        const contactFirst = String(contact.name || '').trim().split(/\s+/)[0] || firstName;
+                        const contactBody = await renderApptLadder('appointment_confirmation',
+                          async () => {
+                            const { buildAppointmentLink } = require('./appointment-link');
+                            const apptLink = await buildAppointmentLink(scheduledServiceId, { customerId });
+                            const window = await contactArrivalWindow({ scheduledServiceId });
+                            return {
+                              first_name: contactFirst,
+                              service_type: serviceType,
+                              date: parsedDate,
+                              time: parsedTime,
+                              window,
+                              appointment_line: apptLink.line,
+                            };
+                          },
+                          {
+                            first_name: contactFirst,
+                            service_type: serviceType,
+                            date_time: extracted.preferred_date_time,
+                            date: parsedDate,
+                            time: parsedTime,
+                            reschedule_line: '',
+                          }, {
                           workflow: 'call_booking_confirmation',
                           entity_type: 'customer',
                           entity_id: customerId,
@@ -8673,6 +9074,48 @@ const CallRecordingProcessor = {
         // approved-but-unbooked audit would read a real booking as skipped
         // and the assessment pre-draft hook below would starve.
         appointmentResult = { error: err.message, ...(scheduledServiceId ? { scheduledServiceId, smsSent: false } : {}) };
+      }
+    }
+
+    // The "collect the email" card belongs to the CALL, not to the booking
+    // (codex round-20 P2, generalized in round-22 P2). EVERY branch above
+    // that ends without a schedule row short-circuits the customer-validation
+    // path — v2 routing blocked, an unsupported service, an unavailable
+    // generic fallback, an outbound call — and in each of them an email-less
+    // caller previously got only the OTHER card, leaving whoever completes
+    // the booking by hand unaware the email is missing. Filing it once here,
+    // after the chain and keyed on "no booking was created", covers all of
+    // them without a third copy of the rule; the creation branch keeps its
+    // own filing because it runs post-backfill, where a secondary-contact
+    // slot email may have satisfied the requirement in the meantime.
+    //
+    // Reads the stored row rather than backfilling: these paths must not
+    // write to the customer record, and the validator already merges the
+    // call's own captured email, so a caller who DID give one gets no card.
+    // The open-row conflict clause makes a second insert a no-op. Card
+    // failure never changes the call outcome.
+    // Keyed on "no schedule row was created", NOT on appointmentResult being
+    // truthy (codex round-24 P2): a confirmed email-less call with no
+    // preferred_date_time — or only a vague time — leaves every branch above
+    // unentered, so appointmentResult stays undefined and requiring it
+    // skipped exactly the held bookings the office has to finish by hand.
+    if (customerId && !appointmentResult?.scheduleCreated) {
+      try {
+        const unbookedCustomer = await db('customers').where({ id: customerId }).first();
+        if (unbookedCustomer
+          && validatePhoneCallAppointmentCustomer(unbookedCustomer, extracted, contactPhone).advisory?.includes('email')) {
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'customer_email_missing',
+              extraction: v2ApprovedExtraction || undefined,
+              severity: 'advisory',
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 
@@ -9373,6 +9816,7 @@ CallRecordingProcessor._test = {
   persistCallSecondaryContact,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
+  buildFailOpenRoutingContext,
   sameFirstName,
   firstNameVariants,
   v2IsoToEtWallClock,
@@ -9392,5 +9836,14 @@ CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
 CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;
 CallRecordingProcessor.withPanStamps = withPanStamps;
 CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
+
+// Routing contract shared with the OFFLINE AUDITS (NOT test-only): the
+// promotion-readiness gate, the replay variance report and the shadow
+// verifier must build the fail-open context and apply the V1-conflict
+// demotion exactly as the live path does, or their verdicts drift from
+// production — which is how a promotion gate goes permissive without anyone
+// changing the gate. Deliberately on the module surface, not `_test`.
+CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
+CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
 
 module.exports = CallRecordingProcessor;
