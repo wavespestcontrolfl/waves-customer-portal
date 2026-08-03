@@ -47,6 +47,7 @@ const {
   loadLinkedLawnAssessment,
   loadPinnedLawnAssessment,
   PIN_NO_ASSESSMENT,
+  LAWN_RENDER_STRATEGY,
 } = require('../services/service-report/report-data');
 
 describe('#3168 pinned assessment — authorization boundary', () => {
@@ -365,7 +366,24 @@ describe('#3172 — ordinary renders are pinned to CANONICAL and stay cacheable'
     // Lawn with no assessment: absence is an answer and must be pinned, with
     // its own key marker distinct from the legacy empty one.
     expect(await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex))
-      .toEqual({ pin: PIN_NO_ASSESSMENT, signature: '-la0' });
+      .toEqual({ pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0` });
+  });
+
+  // Objects cached by the previous UNPINNED path carry the same assessment
+  // hash, so without a strategy marker they would keep being served after
+  // deploy — including a PDF produced during the exact race this closes.
+  test('the key carries a render-strategy marker so pre-pinning PDFs regenerate', async () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const knex = makeKnex([
+      { id: 'assess-A', customer_id: 'cust-1', confirmed_by_tech: true, service_record_id: 'svc-1' },
+    ]);
+    const { signature } = await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex);
+    expect(signature.startsWith(`-la${LAWN_RENDER_STRATEGY}`)).toBe(true);
+    // The marker must sit BEFORE the content hash, so an unpinned-era key
+    // (-la<hash>) can never collide with a pinned-era one.
+    expect(signature).not.toMatch(/^-la[0-9a-f]{12}$/);
+    // Non-lawn stays empty — no fleet-wide cache bust.
+    expect((await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'pest' }, knex)).signature).toBe('');
   });
 
   test('resolveCanonicalLawnRender: pin and signature describe the SAME row', async () => {
@@ -375,7 +393,7 @@ describe('#3172 — ordinary renders are pinned to CANONICAL and stay cacheable'
     ]);
     const got = await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex);
     expect(got.pin).toBe('assess-A');
-    expect(got.signature).toMatch(/^-la[0-9a-f]{12}$/);
+    expect(got.signature).toMatch(new RegExp(`^-la${LAWN_RENDER_STRATEGY}[0-9a-f]{12}$`));
   });
 });
 

@@ -1856,12 +1856,25 @@ class PinnedAssessmentUnavailable extends Error {
 // THROWS on an unreadable lookup: a render that cannot determine the canonical
 // answer must not proceed as though there were none, and a cache key must not
 // be computed from a guess.
+// Render-strategy marker (#3172 r1). Objects cached by the PREVIOUS, unpinned
+// render path carry the same -la<hash> as a pinned render of the same
+// assessment, so without this they would keep being served after deploy —
+// including a PDF produced during the very A-to-B-to-A race this change closes,
+// accepted indefinitely because its key looks current.
+//
+// Bumping this orphans lawn PDFs rendered under an older strategy so they
+// regenerate once. Non-lawn records return '' and are untouched: no
+// fleet-wide bust. Bump it whenever the way a lawn render CHOOSES its
+// assessment changes, not when the assessment's content changes — content is
+// already covered by the hash.
+const LAWN_RENDER_STRATEGY = 'p1';
+
 async function resolveCanonicalLawnRender(service, knex = db) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
   if (line !== 'lawn') return { pin: null, signature: '' };
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
-  if (!assessment?.id) return { pin: PIN_NO_ASSESSMENT, signature: '-la0' };
+  if (!assessment?.id) return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0` };
 
   const recs = typeof assessment.recommendations === 'string'
     ? assessment.recommendations
@@ -1870,7 +1883,7 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}`)
     .digest('hex')
     .slice(0, 12);
-  return { pin: assessment.id, signature: `-la${stamp}` };
+  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}` };
 }
 
 // Signature-only entry point for CACHE-LOOKUP sites, which must never throw —
@@ -3831,6 +3844,7 @@ module.exports = {
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,
   resolveCanonicalLawnRender,
+  LAWN_RENDER_STRATEGY,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,
