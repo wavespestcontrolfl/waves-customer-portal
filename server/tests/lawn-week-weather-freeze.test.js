@@ -13,6 +13,8 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info
 const { freezeLawnWeekWeather } = require('../services/service-report/report-data');
 
 const WEEK = {
+  assessmentId: 'assess-A',
+  serviceDate: '2026-07-31',
   rainInches: 3.23,
   et0Inches: 1.4,
   dailyRain: [{ date: '2026-07-30', inches: 1.1 }],
@@ -103,11 +105,56 @@ describe('freezeLawnWeekWeather', () => {
     expect(require('../services/logger').warn).toHaveBeenCalled();
   });
 
+  // A snapshot the winner wrote for a DIFFERENT assessment is not ours to
+  // render — adopting it would judge this visit's turf against another visit's
+  // week, the same divergence one level down.
+  test('a winner answering a DIFFERENT assessment is not adopted', async () => {
+    const OTHER = { ...WEEK, assessmentId: 'assess-B', rainInches: 0.2 };
+    const { knex } = makeKnex({ matched: 0, stored: OTHER });
+    await expect(freezeLawnWeekWeather('svc-1', WEEK, knex)).resolves.toBeNull();
+  });
+
+  test('the predicate replaces a snapshot belonging to another assessment', async () => {
+    const { knex, state } = makeKnex();
+    await freezeLawnWeekWeather('svc-1', WEEK, knex);
+    // First-writer-wins holds WITHIN an assessment; a different assessment is a
+    // different question and legitimately overwrites.
+    expect(state.raws[0]).toMatch(/assessmentId/);
+    expect(state.raws[0]).toMatch(/IS DISTINCT FROM/);
+    expect(state.raws[0]).toMatch(/IS NULL/);
+  });
+
+  test('a snapshot with no assessment id is never written', async () => {
+    const { knex, state } = makeKnex();
+    const { assessmentId, ...unscoped } = WEEK;
+    await expect(freezeLawnWeekWeather('svc-1', unscoped, knex)).resolves.toBeNull();
+    expect(state.patches).toHaveLength(0);
+  });
+
   test('nothing to freeze is a no-op', async () => {
     const { knex, state } = makeKnex();
     await expect(freezeLawnWeekWeather(null, WEEK, knex)).resolves.toBeNull();
     await expect(freezeLawnWeekWeather('svc-1', null, knex)).resolves.toBeNull();
     expect(state.patches).toHaveLength(0);
+  });
+});
+
+describe('frozenWeekMatches', () => {
+  const { frozenWeekMatches } = require('../services/service-report/report-data');
+  const A = { id: 'assess-A', service_date: '2026-07-31' };
+
+  test('replays only for the same assessment AND date', () => {
+    expect(frozenWeekMatches(WEEK, A)).toBe(true);
+    expect(frozenWeekMatches({ ...WEEK, assessmentId: 'assess-B' }, A)).toBe(false);
+    expect(frozenWeekMatches({ ...WEEK, serviceDate: '2026-07-24' }, A)).toBe(false);
+    expect(frozenWeekMatches(null, A)).toBe(false);
+    expect(frozenWeekMatches(WEEK, null)).toBe(false);
+  });
+
+  test('a Date and its YYYY-MM-DD string are the same day', () => {
+    // service_date arrives as a string from some paths and a Date from others;
+    // a shape difference must not read as a different week and force a refetch.
+    expect(frozenWeekMatches(WEEK, { id: 'assess-A', service_date: new Date('2026-07-31T00:00:00Z') })).toBe(true);
   });
 });
 
@@ -120,7 +167,7 @@ describe('freeze contract in the render path', () => {
     // If the fetch still ran, the report would keep drifting with the provider
     // and the freeze would be decorative.
     expect(source).toMatch(/frozenWeekWeather[\s\S]{0,1200}?fetchServiceWeekWeather/);
-    expect(source).toMatch(/const frozenWeekWeather = parseJsonObject\(service\.structured_notes\)\.lawnWeekWeather/);
+    expect(source).toMatch(/const storedWeekWeather = parseJsonObject\(service\.structured_notes\)\.lawnWeekWeather/);
   });
 
   test('the render ADOPTS the canonical week, winner or loser', () => {
@@ -232,7 +279,7 @@ describe('freeze contract in the render path', () => {
   test('an UNCACHED render is not treated as a successful store', () => {
     const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
     // The render JOB retries instead of succeeding.
-    expect(pdfQueue).toMatch(/if \(result\?\.uncached\)[\s\S]{0,1400}?markPdfRenderJobFailed/);
+    expect(pdfQueue).toMatch(/if \(result\?\.uncached\)[\s\S]{0,2200}?markPdfRenderJobFailed/);
     // The correction marker is RETAINED — nothing was stored, so the canonical
     // cached PDF is still whatever it was.
     expect(pdfQueue).toMatch(/correctionPending && !rendered\.storageFailed && !rendered\.pinned && !rendered\.uncached/);
@@ -333,6 +380,24 @@ describe('freeze contract in the render path', () => {
     expect(source).toMatch(/\} catch \(e\) \{[\s\S]{0,300}?weekWeatherUnfrozen = true;/);
     expect(source).toMatch(/let weekWeatherUnfrozen = false;/);
     expect(source).toMatch(/let weekWeatherPendingReason = null;/);
+  });
+
+  test('the snapshot NAMES the assessment it answers', () => {
+    expect(source).toMatch(/assessmentId: assessment\.id,\s*\n\s*serviceDate: ymd\(assessment\.service_date\),/);
+    // And the replay is gated on that identity, not merely on the record.
+    expect(source).toMatch(/const frozenWeekWeather = frozenWeekMatches\(storedWeekWeather, assessment\) \? storedWeekWeather : null;/);
+  });
+
+  // Not every pending state resolves: the geocode backstop skips blank streets
+  // and ZERO_RESULTS addresses and only repairs `customers`, so a stamped
+  // service address with null coordinates is never swept. An unbounded free
+  // deferral would leave those jobs queued forever, re-deferring nightly.
+  test('deferral is BOUNDED, then falls through to the failure path', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    expect(pdfQueue).toMatch(/const PENDING_DEFER_GRACE_MS = /);
+    expect(pdfQueue).toMatch(/queuedSinceMs < PENDING_DEFER_GRACE_MS/);
+    // Past the grace window it retires loudly, with the reason in last_error.
+    expect(pdfQueue).toMatch(/render completed but was not cacheable \(\$\{result\.uncachedReason \|\| 'unfrozen'\}\)/);
   });
 
   test('only a RESOLVED week is frozen', () => {

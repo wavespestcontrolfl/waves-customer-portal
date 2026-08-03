@@ -2010,12 +2010,39 @@ const PIN_NO_ASSESSMENT = 'none';
 // second, different version of a report that is supposed to be permanent —
 // which is the drift this whole mechanism exists to stop, reappearing in the
 // mechanism itself.
+// A frozen week belongs to the ASSESSMENT it was fetched for, not merely to
+// the record. The week is fetched against assessment.service_date, and a record
+// can carry more than one confirmed assessment — a re-do captured days later
+// becomes canonical and legitimately has a different date. Scoping the snapshot
+// to the record alone would replay the first assessment's rainfall and ET₀
+// underneath the new assessment's scores while its PDF signature correctly
+// changed: the report would show one visit's turf judged against another
+// visit's week.
+function ymd(value) {
+  if (!value) return '';
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function frozenWeekMatches(frozen, assessment) {
+  return !!frozen && typeof frozen === 'object'
+    && frozen.assessmentId === assessment?.id
+    && ymd(frozen.serviceDate) === ymd(assessment?.service_date);
+}
+
 async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
-  if (!serviceRecordId || !weekWeather) return null;
+  if (!serviceRecordId || !weekWeather || !weekWeather.assessmentId) return null;
   try {
     const updated = await knex('service_records')
       .where({ id: serviceRecordId })
-      .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather' IS NULL")
+      // First writer wins WITHIN an assessment; a different assessment
+      // legitimately replaces the snapshot, because its week is a different
+      // question. Still one predicate, still no read-then-write.
+      .whereRaw(
+        "(COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather' IS NULL"
+        + " OR COALESCE(structured_notes::jsonb, '{}'::jsonb) #>> '{lawnWeekWeather,assessmentId}' IS DISTINCT FROM ?)",
+        [weekWeather.assessmentId],
+      )
       .update({
         structured_notes: knex.raw(
           "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
@@ -2024,11 +2051,15 @@ async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
       });
     if (updated > 0) return weekWeather;
 
-    // Lost the race: adopt whatever the winner stored, so both renders agree.
+    // Lost the race: adopt whatever the winner stored, so both renders agree —
+    // but only if the winner was answering the SAME question. A snapshot for a
+    // different assessment is not ours to render.
     const row = await knex('service_records')
       .where({ id: serviceRecordId })
       .first('structured_notes');
-    return parseJsonObject(row?.structured_notes).lawnWeekWeather || null;
+    const stored = parseJsonObject(row?.structured_notes).lawnWeekWeather || null;
+    if (!stored || stored.assessmentId !== weekWeather.assessmentId) return null;
+    return stored;
   } catch (err) {
     logger.warn(`[report-data] lawn week-weather freeze failed for ${serviceRecordId}: ${err.message}`);
     return null;
@@ -2227,8 +2258,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // on its own, so the queue waits for it rather than burning retries, and the
   // customer's report email is not held hostage to it. Carries WHY.
   let weekWeatherPendingReason = null;
-  const frozenWeekWeather = parseJsonObject(service.structured_notes).lawnWeekWeather || null;
-  if (frozenWeekWeather && typeof frozenWeekWeather === 'object') {
+  const storedWeekWeather = parseJsonObject(service.structured_notes).lawnWeekWeather || null;
+  // Replayed ONLY for the assessment it was frozen for — see frozenWeekMatches.
+  const frozenWeekWeather = frozenWeekMatches(storedWeekWeather, assessment) ? storedWeekWeather : null;
+  if (frozenWeekWeather) {
     completionRainfall7dInches = frozenWeekWeather.rainInches ?? null;
     completionEt0Inches = frozenWeekWeather.et0Inches ?? null;
     completionDailyRain = Array.isArray(frozenWeekWeather.dailyRain) ? frozenWeekWeather.dailyRain : null;
@@ -2262,7 +2295,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       completionRainConfidence = weekWeather.rainConfidence;
       // Which provider actually supplied it — drives the customer-facing Source row.
       completionRainSource = weekWeather.rainSource;
-      if (!weekWeather.windowClosed) {
+      if (!assessment?.id) {
+        // Nothing to scope the snapshot to, so it cannot be frozen safely.
+        weekWeatherPendingReason = 'no_assessment';
+      } else if (!weekWeather.windowClosed) {
         // The service-day window is still ACCUMULATING. Same-day weather is a
         // deliberately short-lived read (30-minute cache, full-day forecast for
         // the remainder) so afternoon convection can still land — freezing it
@@ -2279,6 +2315,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         weekWeatherPendingReason = 'open_window';
       } else if (completionRainfall7dInches != null) {
         const canonicalWeek = await freezeLawnWeekWeather(service.id, {
+          // The snapshot names the question it answers.
+          assessmentId: assessment.id,
+          serviceDate: ymd(assessment.service_date),
           rainInches: completionRainfall7dInches,
           et0Inches: completionEt0Inches,
           dailyRain: completionDailyRain,
@@ -4026,6 +4065,7 @@ module.exports = {
   lawnAssessmentPdfSignature,
   resolveCanonicalLawnRender,
   freezeLawnWeekWeather,
+  frozenWeekMatches,
   LAWN_RENDER_STRATEGY,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,

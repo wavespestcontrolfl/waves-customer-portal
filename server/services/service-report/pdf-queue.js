@@ -33,6 +33,12 @@ function isMissingQueueError(err) {
   return err?.code === '42P01' || err?.code === '42703';
 }
 
+// How long a job may keep waiting on a PENDING weather state before it is
+// treated as a failure. Three days clears an open window many times over and
+// gives the hourly geocode backstop ample room, while bounding the records it
+// can never repair.
+const PENDING_DEFER_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
+
 function nextPdfRenderAttemptAt(now = new Date(), attempts = 0) {
   const index = Math.min(Math.max(Number(attempts || 0), 0), RETRY_DELAYS_MINUTES.length - 1);
   return new Date(now.getTime() + RETRY_DELAYS_MINUTES[index] * 60 * 1000);
@@ -651,12 +657,20 @@ async function processPdfRenderJob(job, knex = db) {
       // Failing it would retire the job before the freeze it exists to perform
       // is even possible, and page someone about a terminal failure that was
       // really just "not yet". Wait instead, and give the attempt back.
-      if (result.uncachedReason && result.uncachedReason !== 'unfrozen') {
+      // BOUNDED, because not every pending state resolves. The geocode backstop
+      // deliberately excludes blank streets and addresses that returned
+      // ZERO_RESULTS, and it only repairs `customers` — a stamped service
+      // address with null coordinates is never swept. Deferring those on a free
+      // attempt each time would leave a job queued forever, re-deferring
+      // nightly and never surfacing. After the grace window it takes the normal
+      // failure path, so it retires loudly with the reason in last_error.
+      const queuedSinceMs = job.created_at ? Date.now() - new Date(job.created_at).getTime() : 0;
+      if (result.uncachedReason && result.uncachedReason !== 'unfrozen' && queuedSinceMs < PENDING_DEFER_GRACE_MS) {
         const until = nextEtMidnight();
         await deferPdfRenderJob(job, until, `weather not freezable yet (${result.uncachedReason}) — deferred`, knex);
         return { status: 'deferred', nextAttemptAt: until.toISOString() };
       }
-      const err = new Error('render completed but was not cacheable — retrying');
+      const err = new Error(`render completed but was not cacheable (${result.uncachedReason || 'unfrozen'})`);
       err.code = 'pdf_render_uncacheable';
       const status = await markPdfRenderJobFailed(job, err, knex);
       return { status, error: err.message };
