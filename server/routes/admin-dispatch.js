@@ -1430,6 +1430,7 @@ async function deductProductInventory(trx, {
   serviceProduct,
   serviceRecord,
   scheduledService,
+  allowNegative = false,
 }) {
   const lockedProduct = await trx('products_catalog')
     .where({ id: product.id })
@@ -1482,11 +1483,20 @@ async function deductProductInventory(trx, {
     };
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
-  // A shortfall no longer throws a waveguard_inventory_lockout: the lawn
-  // closeout treats inventory as advisory (owner directive 2026-08-03), so
-  // the deduction proceeds, inventory_on_hand goes negative, and the
-  // movement/snapshot below record the insufficient-stock state for audit.
   const insufficient = stockAfter < 0;
+  // allowNegative is passed ONLY for WaveGuard lawn completions, whose
+  // closeout treats inventory as advisory (owner directive 2026-08-03): the
+  // deduction proceeds, inventory_on_hand goes negative, and the
+  // movement/snapshot below record the insufficient-stock state for audit.
+  // Every other completion keeps the hard failure — this shared helper runs
+  // for pest/tree-shrub/nonmember visits too, which have no advisory lane to
+  // record the shortfall (codex P1 r1 on #3179).
+  if (insufficient && !allowNegative) {
+    const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
+    err.statusCode = 400;
+    err.code = 'waveguard_inventory_lockout';
+    throw err;
+  }
   const { unitCost, costUsed } = calculateInventoryCost({
     product: inventoryProduct,
     deductedAmount,
@@ -6086,6 +6096,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               serviceProduct,
               serviceRecord: record,
               scheduledService: svc,
+              // Advisory inventory posture is scoped to WaveGuard lawn — the
+              // only closeout that records the shortfall as an advisory.
+              allowNegative: isWaveGuardLawnCompletion(svc),
             });
             inventoryDeductions.push(deduction);
           }
@@ -6140,9 +6153,41 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
 
         if (inventoryDeductions.length) {
+          // Reconcile the advisory with what the FOR UPDATE deduction actually
+          // saw: two concurrent visits can both pass the unlocked preflight
+          // read with the stock intact, so the later one can go negative
+          // without the preflight having recorded an advisory (codex P2 r1 on
+          // #3179). The locked deduction result is authoritative.
+          if (isWaveGuardLawnCompletion(svc)) {
+            const advisoryProductIds = new Set(
+              (waveguardInventoryAdvisory?.blocks || [])
+                .map((block) => (block.productId != null ? String(block.productId) : null))
+                .filter(Boolean),
+            );
+            const shortfallBlocks = inventoryDeductions
+              .filter((deduction) => deduction.status === 'deducted_insufficient_stock'
+                && !advisoryProductIds.has(String(deduction.productId)))
+              .map((deduction) => ({
+                code: 'actual_inventory_insufficient_stock',
+                message: `${deduction.productName} went to ${deduction.stockAfter} ${deduction.inventoryUnit} on hand after deducting ${deduction.deductedAmount} ${deduction.inventoryUnit}.`,
+                productId: deduction.productId || null,
+                productName: deduction.productName || null,
+              }));
+            if (shortfallBlocks.length) {
+              waveguardInventoryAdvisory = {
+                advisory: true,
+                recordedByTechnicianId: req.technicianId,
+                recordedByRole: req.techRole || null,
+                recordedAt: new Date().toISOString(),
+                ...(waveguardInventoryAdvisory || {}),
+                blocks: [...(waveguardInventoryAdvisory?.blocks || []), ...shortfallBlocks],
+              };
+            }
+          }
           record.structured_notes = {
             ...(record.structured_notes || {}),
             inventoryDeductions,
+            ...(waveguardInventoryAdvisory ? { waveguardInventoryAdvisory } : {}),
           };
           await trx('service_records')
             .where({ id: record.id })
