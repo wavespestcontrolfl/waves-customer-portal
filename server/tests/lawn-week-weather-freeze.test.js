@@ -264,14 +264,44 @@ describe('freeze contract in the render path', () => {
     expect(source).toMatch(/weekWeatherOpenWindow = true;[\s\S]{0,200}?\} else if \(completionRainfall7dInches != null\) \{\s*\n\s*const canonicalWeek = await freezeLawnWeekWeather\(/);
   });
 
+  // The trap in the previous round's own fix: recomputing closure on the cached
+  // path meant an entry written at 11:50pm with partial days and a forecast tail
+  // was served after midnight labelled SETTLED — and frozen permanently. Rolling
+  // over the ET day does not turn a forecast into an observation.
+  test('a cache entry written on an OPEN window is never promoted to closed', () => {
+    const conditions = fs.readFileSync(path.join(__dirname, '../services/service-report/application-conditions.js'), 'utf8');
+    // The entry records the state it was written under…
+    expect(conditions).toMatch(/_rainCache\.set\(key, \{ at: Date\.now\(\), ttlMs: effectiveTtlMs, value, windowClosed \}\)/);
+    // …and open→closed invalidates rather than relabels.
+    expect(conditions).toMatch(/if \(cacheFresh && !\(windowClosed && cached\.windowClosed === false\)\)/);
+    expect(conditions).toMatch(/windowClosed: cached\.windowClosed \?\? windowClosed/);
+    // The discarded approach must not come back.
+    expect(conditions).not.toMatch(/return \{ \.\.\.cached\.value, windowClosed \}/);
+  });
+
+  // Number(null), Number(undefined) and Number('') are all 0, so an ungeocoded
+  // property read as a perfectly valid coordinate at the equator — and the week
+  // fetched for the Gulf of Guinea would now be FROZEN onto the record.
+  test('missing coordinates never coerce to 0,0', () => {
+    const { toCoordinate } = require('../services/service-report/application-conditions');
+    for (const empty of [null, undefined, '', 'abc', NaN]) expect(toCoordinate(empty)).toBeNull();
+    // A literal 0 from the database still parses — it is rejected as a PAIR.
+    expect(toCoordinate(0)).toBe(0);
+    expect(toCoordinate('27.4989')).toBeCloseTo(27.4989);
+    const conditions = fs.readFileSync(path.join(__dirname, '../services/service-report/application-conditions.js'), 'utf8');
+    expect(conditions).toMatch(/lat == null \|\| lon == null \|\| !range \|\| \(lat === 0 && lon === 0\)/);
+    // report-data classifies with the same rule, or its "settled blank" and
+    // "transient failure" branches split on a different definition than the
+    // fetch actually used.
+    expect(source).toMatch(/const hasCoordinates = latN != null && lonN != null && !\(latN === 0 && lonN === 0\)/);
+    expect(source).not.toMatch(/Number\.isFinite\(Number\(latitude\)\)/);
+  });
+
   test('the fetch reports whether the window has SETTLED, on every path', () => {
     const conditions = fs.readFileSync(path.join(__dirname, '../services/service-report/application-conditions.js'), 'utf8');
     expect(conditions).toMatch(/const windowClosed = !!range && range\.end < etTodayYmd\(\)/);
     // Early return (no coordinates / no range) carries it too.
     expect(conditions).toMatch(/return \{ \.\.\.empty, windowClosed \}/);
-    // Recomputed on the cached path — a week cached before ET midnight must not
-    // keep reporting an open window for the rest of its TTL.
-    expect(conditions).toMatch(/return \{ \.\.\.cached\.value, windowClosed \}/);
     expect(conditions).toMatch(/return \{ \.\.\.value, windowClosed \}/);
   });
 
@@ -279,7 +309,7 @@ describe('freeze contract in the render path', () => {
   // would make its every render permanently uncacheable and defer its report
   // email forever — fail-closed applied to a state that is not a failure.
   test('a blank week with NO COORDINATES is settled, not unfrozen', () => {
-    expect(source).toMatch(/const hasCoordinates = Number\.isFinite\(Number\(latitude\)\) && Number\.isFinite\(Number\(longitude\)\)/);
+    expect(source).toMatch(/const hasCoordinates = latN != null && lonN != null/);
     // The transient branch is guarded by hasCoordinates; without it, nothing is
     // flagged and the settled blank stays cacheable.
     expect(source).toMatch(/\} else if \(hasCoordinates\) \{[\s\S]{0,700}?weekWeatherUnfrozen = true;/);

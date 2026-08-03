@@ -251,6 +251,16 @@ function rainMrmsMode() {
   return 'off';
 }
 
+// Number(null), Number(undefined) and Number('') are 0 — so a missing geocode
+// coerced to a VALID coordinate at the equator. Reject the empty values before
+// converting; a literal 0 from the database still passes here and is caught by
+// the 0,0 check at the call site.
+function toCoordinate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function etTodayYmd() {
   // en-CA formats as YYYY-MM-DD; the ET calendar day decides whether the
   // window's last day is still accumulating.
@@ -335,15 +345,19 @@ function mergeMrmsIntoWeek({ om, mrms, todayYmd } = {}) {
 
 async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}) {
   const empty = { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null };
-  const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
-  const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
+  const lat = toCoordinate(latitude);
+  const lon = toCoordinate(longitude);
   const range = rainWindowEndingOn(serviceDate, 7);
   // Whether the 7-day window has SETTLED. A window ending today is still
   // accumulating, so its value is not yet a fact about the week — callers that
   // persist a week (the report freeze) must not pin a partial day. Unknown
   // range counts as unsettled: never freeze what we cannot date.
   const windowClosed = !!range && range.end < etTodayYmd();
-  if (lat == null || lon == null || !range) return { ...empty, windowClosed };
+  // 0,0 is the Gulf of Guinea — never a Waves property, only what a failed
+  // geocode looks like once it reaches this far. Now that a resolved week gets
+  // FROZEN onto the record, fetching it would make that garbage permanent
+  // rather than merely wrong until the next view.
+  if (lat == null || lon == null || !range || (lat === 0 && lon === 0)) return { ...empty, windowClosed };
   const mode = rainMrmsMode();
   // Mode participates in the key so a gate flip never serves the other
   // mode's cached week for up to 6h. A window ending TODAY is still
@@ -366,10 +380,15 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   // after midnight and pin the partial visit-day value (codex P2 #3096 r3).
   const ttlMs = windowUnclosed ? 30 * 60 * 1000 : RAIN_TTL_MS;
   const cached = _rainCache.get(key);
-  // windowClosed is recomputed, never replayed from the entry: a week cached
-  // just before ET midnight would otherwise keep reporting an open window for
-  // the rest of its TTL and delay the freeze by up to that long.
-  if (cached && Date.now() - cached.at < (cached.ttlMs ?? RAIN_TTL_MS)) return { ...cached.value, windowClosed };
+  // The entry carries the closure state it was WRITTEN under. An entry written
+  // while the window was still open holds partial days and a forecast tail;
+  // those numbers do not become settled just because the ET day rolled over, so
+  // reporting them as closed would freeze a forecast as the permanent record.
+  // The open→closed transition invalidates the entry instead.
+  const cacheFresh = cached && Date.now() - cached.at < (cached.ttlMs ?? RAIN_TTL_MS);
+  if (cacheFresh && !(windowClosed && cached.windowClosed === false)) {
+    return { ...cached.value, windowClosed: cached.windowClosed ?? windowClosed };
+  }
 
   // The two sources are independent — fetch concurrently so a slow pair
   // costs max(timeouts), not their sum (codex P2 #3096).
@@ -412,7 +431,7 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     const missingIndependentInput = value.et0Inches == null
       || (mode === 'live' && value.rainSource !== 'mrms');
     const effectiveTtlMs = missingIndependentInput ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
-    _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value });
+    _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value, windowClosed });
   }
   return { ...value, windowClosed };
 }
@@ -592,6 +611,7 @@ async function fetchRecentMinTempF({ latitude, longitude, pastDays = 7 } = {}) {
 }
 
 module.exports = {
+  toCoordinate,
   nextEtMidnight,
   fetchApplicationConditions,
   fetchOpenMeteoConditions,

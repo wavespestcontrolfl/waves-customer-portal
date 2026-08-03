@@ -20,7 +20,7 @@ const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
-const { fetchServiceWeekWeather } = require('./application-conditions');
+const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -2240,7 +2240,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // reproducible answer, so it stays cacheable. Treating it as unresolved
     // would make every render for a property with no geocode permanently
     // uncacheable and defer its report email forever.
-    const hasCoordinates = Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude));
+    // toCoordinate, not Number.isFinite(Number(x)): Number(null) and Number('')
+    // are 0, so an ungeocoded property would read as a valid coordinate at the
+    // equator and its blank week would be misfiled as a transient failure.
+    const latN = toCoordinate(latitude);
+    const lonN = toCoordinate(longitude);
+    const hasCoordinates = latN != null && lonN != null && !(latN === 0 && lonN === 0);
     try {
       const weekWeather = await fetchServiceWeekWeather({
         latitude,
