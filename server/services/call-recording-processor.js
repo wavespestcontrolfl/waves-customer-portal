@@ -10013,6 +10013,25 @@ const CallRecordingProcessor = {
           } else {
             try {
             const { buildTriageItem } = require('./call-routing-gates');
+            // The recovery card must SHOW the address it approves (Codex
+            // #3084 r53): resolving it releases the drip/DOI to the run's
+            // current extraction (the retarget below makes that the held
+            // target), and the Needs Review card renders email_as_heard /
+            // email_candidates / confirmation_question — a payload with
+            // only the call summary asks the operator to approve an
+            // address they never saw. Carry the dictation decoder's full
+            // evidence when it exists, and always surface the current
+            // extraction as a candidate so the release target is on the
+            // card verbatim.
+            const recoveryEmailEvidence = { ...(dictationEmailPayload || {}) };
+            if (extracted.email) {
+              const existingCandidates = Array.isArray(recoveryEmailEvidence.email_candidates)
+                ? recoveryEmailEvidence.email_candidates : [];
+              const heldLc = String(extracted.email).trim().toLowerCase();
+              if (!existingCandidates.some((c) => String(c?.value || '').trim().toLowerCase() === heldLc)) {
+                recoveryEmailEvidence.email_candidates = [{ value: extracted.email }, ...existingCandidates];
+              }
+            }
             // The WHOLE recovery — card insert, ledger retarget, claim
             // invalidation — rides ONE token-fenced transaction (Codex
             // #3084 r52, completing r51): a worker stalled past the
@@ -10051,7 +10070,12 @@ const CallRecordingProcessor = {
                   flag: 'email_unverified',
                   extraction: { meta: { call_summary: extracted.call_summary || null } },
                   severity: 'advisory',
-                  extraPayload: { hold_reason: 'review_card_insert_failed', held_drip: beehiivResult?.skipped === 'email_under_review', held_newsletter: newsletterResult?.skipped === 'email_under_review' },
+                  extraPayload: {
+                    ...recoveryEmailEvidence,
+                    hold_reason: 'review_card_insert_failed',
+                    held_drip: beehiivResult?.skipped === 'email_under_review',
+                    held_newsletter: newsletterResult?.skipped === 'email_under_review',
+                  },
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
