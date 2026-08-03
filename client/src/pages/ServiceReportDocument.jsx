@@ -200,7 +200,10 @@ export default function ServiceReportDocument({ data, token }) {
   // Lawn reports show the WEEK's rain — the figure the water card and the
   // assessment are built from — so every rain number on the page agrees; other
   // lines keep the trailing-24h capture (mirrors conditionRows).
-  const weeklyRainIn = data.reportV2?.water?.rainInches;
+  // LAWN ONLY. reportV2 also serves tree & shrub, whose landscape water
+  // snapshot has rainInches too — substituting there relabelled the visit's
+  // recorded 24-hour reading as weekly (regression from the r3 fix).
+  const weeklyRainIn = data.serviceLine === 'lawn' ? data.reportV2?.water?.rainInches : null;
   const usingWeeklyRain = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn));
   const rainLabel = usingWeeklyRain ? 'Rain this week' : 'Rain 24 hr';
   const rainValue = usingWeeklyRain ? weeklyRainIn : normalizedConditions?.rain_24h_in;
@@ -283,7 +286,13 @@ export default function ServiceReportDocument({ data, token }) {
 
   const summaryParagraphs = [];
   if (result?.headline) summaryParagraphs.push(String(result.headline).replace(/\.$/, '') + '.');
-  const summaryBody = result?.body || data.summary || data.dynamicContext?.aiSummary?.body || '';
+  // reports-public.js attaches reportV2.todaysResult (a STRING) specifically to
+  // replace legacy summary copy that contradicts the watch items — without it
+  // the PDF can claim nothing notable was found directly above those findings.
+  const reconciledResult = typeof data.reportV2?.todaysResult === 'string'
+    ? data.reportV2.todaysResult.trim() : '';
+  const summaryBody = reconciledResult
+    || result?.body || data.summary || data.dynamicContext?.aiSummary?.body || '';
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
 
   // V2 payloads carry the PRINCIPAL result for their service lines — the
@@ -362,6 +371,7 @@ export default function ServiceReportDocument({ data, token }) {
   // snapshot.customerAction and per-insight customerAction; omitting it drops
   // required actions (e.g. correcting irrigation) from the artifact.
   pushRec(v2?.snapshot?.customerAction);
+  pushRec(v2?.followUp?.customerAction);
   (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushRec(insight?.customerAction));
   pushRec(v2?.mowing?.recommendation);
 
@@ -395,6 +405,20 @@ export default function ServiceReportDocument({ data, token }) {
   const concern = data.customerConcernCard || v2Concern || null;
   const nextAppt = data.nextAppointment || null;
   const isWaveGuard = Boolean(data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard);
+  // The displayed arrival window is ALWAYS windowStart + 2 hours — window_end
+  // is the internal job block and never renders on a customer surface.
+  const arrivalWindow = (() => {
+    const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppt?.windowStart || ''));
+    if (!m) return '';
+    const startMin = Number(m[1]) * 60 + Number(m[2]);
+    const label = (mins) => {
+      const h24 = Math.floor((mins % 1440) / 60);
+      const mm = String(mins % 60).padStart(2, '0');
+      const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+      return `${h12}:${mm} ${h24 < 12 ? 'AM' : 'PM'}`;
+    };
+    return `${label(startMin)}–${label(startMin + 120)}`;
+  })();
 
   // Untyped visits record their findings at the top level; the typed
   // snapshot only covers typed reports. Both must reach the document or the
@@ -550,6 +574,17 @@ export default function ServiceReportDocument({ data, token }) {
             )}
             {(concern.acknowledgement || concern.response) && (
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{concern.acknowledgement || concern.response}</p>
+            )}
+          </div>
+        )}
+
+        {/* A promised revisit is a commitment — dropping it from the permanent
+            artifact leaves the customer with no record of it. */}
+        {v2?.followUp && (v2.followUp.headline || v2.followUp.reason) && (
+          <div className="doc-keep">
+            <SectionHeader>{v2.followUp.headline || 'Follow-up already planned'}</SectionHeader>
+            {v2.followUp.reason && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{v2.followUp.reason}</p>
             )}
           </div>
         )}
@@ -881,7 +916,7 @@ export default function ServiceReportDocument({ data, token }) {
         {/* Record footer */}
         <div className="doc-keep" style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
           <div style={{ fontSize: 10, color: MUTED, lineHeight: 1.6 }}>
-            {nextAppt?.scheduledDate ? <>Next service: {fmtServiceDate(nextAppt.scheduledDate)}{nextAppt.serviceType ? ` · ${nextAppt.serviceType}` : ''}.<br /></> : null}
+            {nextAppt?.scheduledDate ? <>Next service: {fmtServiceDate(nextAppt.scheduledDate)}{arrivalWindow ? ` · ${arrivalWindow}` : ''}{nextAppt.serviceType ? ` · ${nextAppt.serviceType}` : ''}.<br /></> : null}
             {isWaveGuard ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
             Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
             <br />

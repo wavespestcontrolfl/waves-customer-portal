@@ -402,11 +402,42 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/Avoid overhead watering/);
   });
 
-  it('shows the week\'s rain on lawn V2 reports', () => {
-    const data = { ...BASE_DATA, reportV2: { water: { rainInches: 2.43 } }, conditions: { rain_24h_in: 0 } };
-    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+  it('substitutes the week\'s rain on LAWN reports only', () => {
+    const water = { water: { rainInches: 2.43 } };
+    const lawn = render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'lawn', reportV2: water, conditions: { rain_24h_in: 0 } }} token="t" />);
     expect(screen.getByText('Rain this week')).toBeInTheDocument();
-    expect(container.textContent).toMatch(/2\.43 in/);
+    expect(lawn.container.textContent).toMatch(/2\.43 in/);
+    cleanup();
+
+    // tree & shrub shares the reportV2 slot and also has water.rainInches —
+    // it must keep the visit's recorded 24-hour reading
+    const ts = render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub', reportV2: water, conditions: { rain_24h_in: 0.12 } }} token="t" />);
+    expect(ts.container.textContent).not.toContain('Rain this week');
+    expect(ts.container.textContent).toMatch(/0\.12 in/);
+  });
+
+  it('prefers the reconciled V2 result over contradictory legacy summary copy', () => {
+    const data = {
+      ...BASE_DATA,
+      typedReport: null,
+      summary: 'No notable issues were found today.',
+      reportV2: { todaysResult: 'Routine service completed, and a follow-up is already planned.', insights: [{ headline: 'Fungus watch', whatWeSaw: 'Early thinning.' }] },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/a follow-up is already planned/);
+    expect(container.textContent).not.toContain('No notable issues were found today.');
+  });
+
+  it('keeps a promised follow-up and the next-service arrival window', () => {
+    const data = {
+      ...BASE_DATA,
+      reportV2: { followUp: { headline: 'Follow-up already planned', reason: 'We will recheck the flagged areas.', customerAction: 'No action needed before then.' } },
+      nextAppointment: { scheduledDate: '2026-09-01T00:00:00.000Z', windowStart: '09:00:00', serviceType: 'Lawn Care' },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText('Follow-up already planned')).toBeInTheDocument();
+    expect(screen.getByText(/We will recheck the flagged areas/)).toBeInTheDocument();
+    expect(container.textContent).toMatch(/9:00 AM–11:00 AM/);
   });
 
   it('keeps the typed cross-visit history', () => {
