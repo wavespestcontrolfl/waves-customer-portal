@@ -25,7 +25,10 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // mode, accordion "Details" chrome and the shell skip-link are print-hidden,
 // product cards keep together across page breaks; cached PDFs would keep the
 // old junk chrome without a re-render.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p2-print-clean-20260802';
+// 20260803: the PDF artifact is now the work-order document layout
+// (ServiceReportDocument) instead of a capture of the web report — every
+// cached PDF must re-render.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p3-document-20260803';
 
 const s3 = new S3Client({
   region: config.s3?.region,
