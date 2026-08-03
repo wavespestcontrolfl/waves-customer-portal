@@ -1879,6 +1879,12 @@ const RECHECK_VERB = new RegExp('^(?:'
   + 're-?set(?:ting|s)?'
   + '|(?:re-?)?check(?:ed|ing|s)?'
   + '|(?:re-?)?inspect(?:ed|ing|s)?'
+  // Plain synonyms of check/inspect (pre-push audit on 42406f3): a report
+  // saying the traps were examined or tested presupposes traps to examine,
+  // exactly as bare check/inspect do. Silent-e stem spelled out like
+  // `replace` above.
+  + '|(?:re-?)?examine[sd]?|(?:re-?)?examining'
+  + '|(?:re-?)?test(?:ed|ing|s)?'
   + '|re-?bait(?:ed|ing|s)?'
   + '|re-?fresh(?:ed|ing|es)?'
   + '|re-?position(?:ed|ing|s)?'
@@ -1898,6 +1904,8 @@ const RECHECK_PARTICIPLE = new RegExp('^(?:'
   + 're-?set'
   + '|(?:re-?)?checked'
   + '|(?:re-?)?inspected'
+  + '|(?:re-?)?examined'
+  + '|(?:re-?)?tested'
   + '|re-?baited'
   + '|re-?freshed'
   + '|re-?positioned'
@@ -2114,7 +2122,7 @@ const TRAP_PHRASE_TERMINATORS = [
   'will', 'would', 'did', 'do', 'does', 'can', 'could', 'should', 'may',
   'might', 'must',
   're-?checked', 're-?check', 're-?inspected', 're-?inspect', 'examined',
-  'serviced', 'completed', 'performed', 'documented', 'recorded',
+  'tested', 'serviced', 'completed', 'performed', 'documented', 'recorded',
   'observed', 'noted', 'counted', 'found', 'saw', 'removed', 'replaced',
   're-?set', 'swapped', 'moved',
 ];
@@ -2428,12 +2436,20 @@ function trapRosterClaims(text) {
     const trail = i + 1 < found.length
       ? ''
       : cueText.slice(m.end, m.end + 30).split(/[.!?]/)[0];
-    if (SUBSET_LEAD_RE.test(lead) || SUBSET_LEAD_RE.test(trail)) return;
+    // A count whose OWN predicate is a check verb is a roster assertion no
+    // matter what else shares its windows: in "Due to activity, we checked
+    // 8 traps" the cue is the REASON for the visit, not a status on the 8,
+    // and demoting the count let a stale roster publish (pre-push audit on
+    // 42406f3). The windows stay positional, but immunity binds to the verb
+    // governing the count — the same anchored check predicates the partitive
+    // branch uses, so there is no second list to drift — and "found activity
+    // at 2 traps" (no governing check verb) still reads as the subset it is.
+    const checkGoverned = CHECK_PREDICATE_LEAD_RE.test(lead) || CHECK_PREDICATE_TRAIL_RE.test(trail);
+    if (!checkGoverned && (SUBSET_LEAD_RE.test(lead) || SUBSET_LEAD_RE.test(trail))) return;
     // `N of M` + a check predicate: N is the checked count, and the
     // partitive rules below claim it. Reading M as the roster here would
     // reconcile the wrong number against traps_checked.
-    if (m.second != null
-      && (CHECK_PREDICATE_LEAD_RE.test(lead) || CHECK_PREDICATE_TRAIL_RE.test(trail))) return;
+    if (m.second != null && checkGoverned) return;
     claims.add(Number(m.second != null ? m.second : m.first));
   });
   for (const rx of [TRAP_PARTITIVE_ACTIVE_RE, TRAP_PARTITIVE_PASSIVE_RE]) {

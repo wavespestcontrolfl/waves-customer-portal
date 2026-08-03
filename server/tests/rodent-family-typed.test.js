@@ -1851,3 +1851,68 @@ describe('setup prose corpus — completed claims vs. promises', () => {
     expect(setupContradictions(text)).toEqual([]);
   });
 });
+
+// Pre-push audit on 42406f3: any status word inside the lead/trail window
+// demoted a trap count to a subset, even when the count's own predicate was
+// a check verb — "Due to activity, we checked 8 traps" read the visit's
+// REASON as a status on the 8 and let a stale roster publish. Immunity now
+// binds to the verb governing the count (the anchored check predicates),
+// not to the window being cue-free.
+describe('a cue is not a status on a count the check verb governs (audit on 42406f3)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a discourse-level cue no longer hides a stale checked count', () => {
+    for (const text of [
+      'Due to activity, we checked 8 traps.', // cue opens the sentence
+      'We checked 8 traps and noted fresh activity throughout.', // cue trails the predicate
+      'Because of the damage, we checked 8 traps.', // cue in a reason clause
+      '8 traps were checked due to activity.', // passive predicate, trailing cue
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('the same shapes pass when the roster agrees', () => {
+    expect(countContradictions('Due to activity, we checked 6 traps.', { traps_checked: 6 }))
+      .toEqual([]);
+    expect(countContradictions('We checked 6 traps and noted fresh activity throughout.', { traps_checked: 6 }))
+      .toEqual([]);
+  });
+
+  test('a cue still demotes a count no check verb governs', () => {
+    // reset is a distributive action on the traps that needed it, not a
+    // roster scan — the checked/inspected narrowness is deliberate (r14)
+    expect(countContradictions('After finding activity, we reset 4 traps.', { traps_checked: 6 }))
+      .toEqual([]);
+    expect(countContradictions('We found activity at 2 traps.', { traps_checked: 6 }))
+      .toEqual([]);
+  });
+});
+
+// Pre-push audit on 42406f3: examine and test are plain synonyms of
+// check/inspect — a report saying the traps were examined or tested
+// presupposes traps to examine, exactly as bare check/inspect do — but
+// neither was in the re-check verb lists, so those claims published on a
+// declared initial setup.
+describe('examine and test are re-check verbs (audit on 42406f3)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test.each([
+    'We examined the traps in the attic.',
+    'We tested each of the traps.',
+    'All traps were tested today.',
+    'The devices were re-examined.',
+    '8 traps examined today.',
+  ])('rejects: %s', (text) => {
+    expect(setupContradictions(text).length).toBeGreaterThan(0);
+  });
+
+  test.each([
+    'We will return to test the traps in one week.',
+    'We will come back next week to examine the traps.',
+    'We examined the attic and set eight traps today.',
+    'We tested the seal around the garage door.',
+  ])('allows: %s', (text) => {
+    expect(setupContradictions(text)).toEqual([]);
+  });
+});
