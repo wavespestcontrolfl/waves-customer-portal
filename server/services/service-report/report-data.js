@@ -464,13 +464,18 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
 function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
   // Admin re-entry correction (PATCH /admin/dispatch/:serviceId/reentry):
-  // the typed windows are authoritative. The admin chose them looking at the
-  // completed visit, so scope-derived zeroing must not second-guess the
-  // correction — a strict boolean gate only the correction endpoint writes.
-  if (normalized.reentry_adjusted === true) return normalized;
+  // a typed window is authoritative FOR ITS SIDE ONLY. The marker is
+  // per-side ({ exterior, interior } strict booleans; legacy plain `true`
+  // covers both) so a one-sided edit never resurrects the untouched side —
+  // e.g. correcting the interior window on an interior-only visit must not
+  // expose the stored exterior default that scope zeroing would have
+  // suppressed (codex P1 PR #3180). Only the correction endpoint writes it.
+  const adjustedMarker = normalized.reentry_adjusted;
+  const sideAdjusted = (side) => adjustedMarker === true
+    || (!!adjustedMarker && typeof adjustedMarker === 'object' && adjustedMarker[side] === true);
   const scope = treatmentScope({ service, applications, zones });
 
-  if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
+  if (!sideAdjusted('interior') && normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
   }
   // Owner rule 2026-07-27: the Exterior re-entry target exists ONLY when
@@ -485,7 +490,7 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // (trace-aware) makes the final display call, and stored zero would be
   // unrecoverable (codex P1 #3007 r11). Explicitly non-exterior scope
   // still zeroes at write.
-  if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
+  if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
     // WRITE path never zeroes exterior (codex P1 r17): a Treatment Zone
     // Mapper trace can be saved AFTER completion even when the visit
     // recorded interior locations, and a stored zero is unrecoverable.

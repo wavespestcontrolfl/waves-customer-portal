@@ -2712,16 +2712,26 @@ router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
     if (ambiguous || !record) {
       return res.json({ hasRecord: false, ...(ambiguous ? { recordAmbiguous: true } : {}), defaults });
     }
+    // Legacy (pre-service_report_v1) records render from the old dry-time
+    // fields, not the advisory — editing one would audit a correction the
+    // customer never sees (codex P2 PR #3180). Hide the editor for them.
+    if (serviceRecordCols.report_template_version
+      && String(record.report_template_version || '') !== 'service_report_v1') {
+      return res.json({ hasRecord: false, legacyRecord: true, defaults });
+    }
     const advisory = parseJsonObject(record.advisory);
     const minutesOrNull = (value) => {
       const n = Number(value);
       return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
     };
+    const adjustedMarker = advisory.reentry_adjusted;
     res.json({
       hasRecord: true,
       exteriorMinutes: minutesOrNull(advisory.exterior_reentry_min),
       interiorMinutes: minutesOrNull(advisory.interior_reentry_min),
-      adjusted: advisory.reentry_adjusted === true,
+      adjusted: adjustedMarker === true
+        || (!!adjustedMarker && typeof adjustedMarker === 'object'
+          && (adjustedMarker.exterior === true || adjustedMarker.interior === true)),
       defaults,
     });
   } catch (err) { next(err); }
@@ -2734,18 +2744,27 @@ router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
 // markComplete, and NO customer communications — the completion comms
 // already fired with the advisory as it stood.
 //
+// Gates (fail-closed, nothing half-lands): completed visits only; a
+// service_report_v1 record must exist (legacy records render from the old
+// dry-time fields — an "edit" there would audit a change the customer never
+// sees); an exterior correction may not undercut the most restrictive label
+// REI of the products applied on the visit (same maxProductReentryMinutes
+// floor the completion path applies).
+//
 // What it writes (single transaction):
-//  - service_records.advisory (the resolved record, required — the advisory
-//    lives nowhere else): the typed exterior/interior minutes plus a durable
-//    `reentry_adjusted: true` marker that (a) makes the typed windows
-//    authoritative over scope-derived zeroing in
-//    normalizeAdvisoryForTreatmentScope on every read surface, and (b) is
-//    stamped beside a first-edit-only `reentry_prior` snapshot of the
-//    pre-correction values. The merge is a single-statement jsonb expression
-//    against the column's CURRENT value (same clobber-avoidance posture as
-//    the time-on-site structured_notes merge).
-//  - pdf_storage_key → NULL so the cached report PDF re-renders with the
-//    corrected windows (its cache signature does not vary on advisory).
+//  - service_records.advisory: the typed exterior/interior minutes plus a
+//    durable PER-SIDE `reentry_adjusted: { exterior, interior }` marker that
+//    (a) makes a typed window authoritative over scope-derived zeroing in
+//    normalizeAdvisoryForTreatmentScope for ITS side only — a one-sided
+//    edit never resurrects the untouched side — and (b) is stamped beside a
+//    first-edit-only `reentry_prior` snapshot of the pre-correction values.
+//    The merge is a single-statement jsonb expression against the column's
+//    CURRENT value (same clobber-avoidance posture as the time-on-site
+//    structured_notes merge).
+//  - service_records.structured_notes: `reentryAdjusted: true` + a per-save
+//    `reentryRev` bump — the stale-render fence reentryAdjustedPdfSignature
+//    folds into every PDF-key composition site.
+//  - pdf_storage_key → NULL so the next view re-renders the report PDF.
 //  - FK-heal: a pre-FK record found through the legacy soft-join gets its
 //    scheduled_service_id stamped so later lookups are tuple-independent.
 // The audit rides the transaction (activity_log `reentry_adjusted`), and
@@ -2801,8 +2820,65 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
         };
         return;
       }
+      // Legacy (pre-service_report_v1) records render from the old dry-time
+      // fields, not the advisory — a "successful" edit here would audit a
+      // correction the customer never sees (codex P2 PR #3180).
+      if (serviceRecordCols.report_template_version
+        && String(record.report_template_version || '') !== 'service_report_v1') {
+        outcome = {
+          status: 409,
+          body: {
+            error: 'This visit predates the current report format — its re-entry guidance is not editable here',
+            code: 'record_legacy',
+          },
+        };
+        return;
+      }
+      // Manufacturer REI floor (codex P1 PR #3180): the completion path
+      // floors the exterior window against the most restrictive label REI of
+      // the products actually applied (maxProductReentryMinutes) — a
+      // correction must not undercut it, or the permanent report says an
+      // area is ready before the label permits. Interior is not floored,
+      // matching the completion path (rei_hours is the outdoor-treatment
+      // REI). The service_products read has no soft-catch on purpose: a
+      // lookup failure 500s and the admin retries, rather than skipping a
+      // safety floor.
+      if (plan.exterior !== undefined) {
+        const appliedProducts = await trx('service_products')
+          .where({ service_record_id: record.id })
+          .select('product_id');
+        const productFloor = await maxProductReentryMinutes(
+          trx,
+          appliedProducts.map((p) => ({ productId: p.product_id })),
+        );
+        if (productFloor != null && plan.exterior < productFloor) {
+          outcome = {
+            status: 400,
+            body: {
+              error: `Exterior re-entry can't be below ${productFloor} minutes — a product applied on this visit carries that label re-entry interval`,
+              code: 'reentry_below_product_rei',
+              productReiMinutes: productFloor,
+            },
+          };
+          return;
+        }
+      }
       const previousAdvisory = parseJsonObject(record.advisory);
-      const mergeKeys = { reentry_adjusted: true };
+      // Per-side authority marker (codex P1 PR #3180): a one-sided edit must
+      // not make the UNTOUCHED side authoritative — read-time scope zeroing
+      // keeps governing it (normalizeAdvisoryForTreatmentScope). The union
+      // with the prior marker is computed from the under-lock read; every
+      // advisory writer (completion, this PATCH) serializes on the
+      // scheduled_services row lock, so the shallow jsonb replace is safe.
+      const prevMarker = previousAdvisory.reentry_adjusted;
+      const prevSideAdjusted = (side) => prevMarker === true
+        || (!!prevMarker && typeof prevMarker === 'object' && prevMarker[side] === true);
+      const mergeKeys = {
+        reentry_adjusted: {
+          exterior: prevSideAdjusted('exterior') || plan.exterior !== undefined,
+          interior: prevSideAdjusted('interior') || plan.interior !== undefined,
+        },
+      };
       if (plan.exterior !== undefined) mergeKeys.exterior_reentry_min = plan.exterior;
       if (plan.interior !== undefined) mergeKeys.interior_reentry_min = plan.interior;
       const recordUpdate = {
@@ -2821,6 +2897,21 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
                   'interior_reentry_min', COALESCE(advisory::jsonb -> 'interior_reentry_min', 'null'::jsonb)))
               END)`,
           [JSON.stringify(mergeKeys)],
+        ),
+        // Stale-render fence (codex P1 PR #3180): nulling pdf_storage_key
+        // alone is not durable — a render already in flight with the
+        // pre-correction advisory would write the deterministic key back and
+        // serve the old guidance forever. reentryAdjustedPdfSignature folds
+        // this per-save rev into every PDF-key composition site, so the
+        // stale renderer's key no longer matches. Lives in structured_notes
+        // (not advisory) because every composition site already loads
+        // structured_notes; same atomic-merge shape as the time-on-site
+        // fence above.
+        structured_notes: trx.raw(
+          `(COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb)
+           || jsonb_build_object('reentryRev',
+                COALESCE(NULLIF(COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'reentryRev', ''), '0')::int + 1)`,
+          [JSON.stringify({ reentryAdjusted: true })],
         ),
       };
       if (serviceRecordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;

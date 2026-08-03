@@ -68,8 +68,11 @@ const { reentryEditPlan, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-d
 const { normalizeAdvisoryForTreatmentScope } = require('../services/service-report/report-data');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
 const { SERVICE_LINE_CONFIGS } = require('../services/service-report/service-line-configs');
+const { reentryAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
 
 const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
 
 // ---------------------------------------------------------------------------
 // Defaults (owner rule 2026-08-03)
@@ -168,12 +171,44 @@ describe('normalizeAdvisoryForTreatmentScope honors the admin correction', () =>
       .toMatchObject({ exterior_reentry_min: 45, interior_reentry_min: 60 });
   });
 
+  test('the marker is PER-SIDE — a one-sided edit never resurrects the untouched side (codex P1 PR #3180)', () => {
+    // Interior-only correction on an exterior-only-classified visit: the
+    // corrected interior survives, the untouched exterior keeps its
+    // scope-derived treatment.
+    const interiorOnly = {
+      exterior_reentry_min: 30,
+      interior_reentry_min: 60,
+      reentry_adjusted: { exterior: false, interior: true },
+    };
+    // Unknown scope: without the exterior marker, the exterior row still
+    // zeroes at read time (owner rule 2026-07-27) — the write path retained
+    // the raw default only for later trace evidence, never for display.
+    expect(normalizeAdvisoryForTreatmentScope(interiorOnly, UNKNOWN_SCOPE))
+      .toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 60 });
+    // Exterior-only scope: corrected interior survives the interior zeroing.
+    expect(normalizeAdvisoryForTreatmentScope(interiorOnly, EXTERIOR_ONLY_SCOPE))
+      .toMatchObject({ exterior_reentry_min: 30, interior_reentry_min: 60 });
+    // And the mirror: exterior-only correction leaves interior governed by
+    // scope (zeroed on an exterior-only visit).
+    const exteriorOnly = {
+      exterior_reentry_min: 45,
+      interior_reentry_min: 60,
+      reentry_adjusted: { exterior: true, interior: false },
+    };
+    expect(normalizeAdvisoryForTreatmentScope(exteriorOnly, EXTERIOR_ONLY_SCOPE))
+      .toMatchObject({ exterior_reentry_min: 45, interior_reentry_min: 0 });
+    expect(normalizeAdvisoryForTreatmentScope(exteriorOnly, UNKNOWN_SCOPE))
+      .toMatchObject({ exterior_reentry_min: 45, interior_reentry_min: 60 });
+  });
+
   test('marker is a strict boolean gate — truthy strings do not bypass', () => {
-    const normalized = normalizeAdvisoryForTreatmentScope(
-      { exterior_reentry_min: 45, interior_reentry_min: 60, reentry_adjusted: 'yes' },
-      EXTERIOR_ONLY_SCOPE,
-    );
-    expect(normalized).toMatchObject({ interior_reentry_min: 0 });
+    for (const marker of ['yes', 1, { exterior: 'yes', interior: 1 }]) {
+      const normalized = normalizeAdvisoryForTreatmentScope(
+        { exterior_reentry_min: 45, interior_reentry_min: 60, reentry_adjusted: marker },
+        EXTERIOR_ONLY_SCOPE,
+      );
+      expect(normalized).toMatchObject({ interior_reentry_min: 0 });
+    }
   });
 
   test('the re-entry context builds both targets from an adjusted advisory', () => {
@@ -248,6 +283,38 @@ describe('route wiring contracts', () => {
     expect(block).toMatch(/COALESCE\(advisory::jsonb, '\{\}'::jsonb\) \|\| \?::jsonb/);
     expect(block).toMatch(/CASE WHEN COALESCE\(advisory::jsonb, '\{\}'::jsonb\) -> 'reentry_prior' IS NOT NULL\s*\n\s*THEN '\{\}'::jsonb/);
     expect(block).toMatch(/jsonb_build_object\('reentry_prior', jsonb_build_object\(/);
+    // The stale-render fence bumps structured_notes.reentryRev in the same
+    // atomic-merge shape (codex P1 PR #3180).
+    expect(block).toMatch(/jsonb_build_object\('reentryRev',\s*\n\s*COALESCE\(NULLIF\(COALESCE\(structured_notes::jsonb, '\{\}'::jsonb\) ->> 'reentryRev', ''\), '0'\)::int \+ 1\)/);
+  });
+
+  test('the re-entry PDF signature rides EVERY storage-key composition site (codex P1 PR #3180)', () => {
+    // Same contract the time-on-site fence carries: pdf-queue renderAndStore
+    // + getOrRender, reports-public expected-key + store-key. A site missing
+    // the component lets a stale in-flight render re-occupy the key.
+    expect((pdfQueueSource.match(/reentryAdjustedPdfSignature\(service\)/g) || []).length).toBe(2);
+    expect((reportsPublicSource.match(/reentryAdjustedPdfSignature\(service\)/g) || []).length).toBe(2);
+    // And every site pairs it with the time-on-site component (same
+    // signature string, no site diverges).
+    for (const src of [pdfQueueSource, reportsPublicSource]) {
+      expect((src.match(/timeOnSiteAdjustedPdfSignature\(service\) \+ reentryAdjustedPdfSignature\(service\)/g) || []).length).toBe(2);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PDF signature component
+// ---------------------------------------------------------------------------
+
+describe('reentryAdjustedPdfSignature', () => {
+  test('empty for uncorrected records, rev-keyed for corrected ones', () => {
+    expect(reentryAdjustedPdfSignature({})).toBe('');
+    expect(reentryAdjustedPdfSignature({ structured_notes: JSON.stringify({ timeOnSiteAdjusted: true }) })).toBe('');
+    expect(reentryAdjustedPdfSignature({ structured_notes: JSON.stringify({ reentryAdjusted: true, reentryRev: 1 }) })).toBe('-rer1');
+    expect(reentryAdjustedPdfSignature({ structured_notes: { reentryAdjusted: true, reentryRev: 3 } })).toBe('-rer3');
+    // Strict marker + malformed notes fail soft to no component.
+    expect(reentryAdjustedPdfSignature({ structured_notes: JSON.stringify({ reentryAdjusted: 'yes', reentryRev: 2 }) })).toBe('');
+    expect(reentryAdjustedPdfSignature({ structured_notes: '{not json' })).toBe('');
   });
 });
 
@@ -255,16 +322,19 @@ describe('route wiring contracts', () => {
 // Behavioral: the PATCH handler against a scripted knex mock
 // ---------------------------------------------------------------------------
 
-function makeRecordingDb({ svc, record, recordCols, legacyRows = null }) {
+function makeRecordingDb({ svc, record, recordCols, legacyRows = null, serviceProducts = null, catalogRows = null }) {
   // `record` answers resolveServiceRecord's FK query (.first()); `legacyRows`
   // (when set) answers its awaited (customer, date, type) soft-join so the
-  // pre-FK shapes exercise the REAL legacy resolution path.
+  // pre-FK shapes exercise the REAL legacy resolution path. `serviceProducts`
+  // / `catalogRows` script the REI-floor lookups (applied products and their
+  // products_catalog rei_hours).
   const calls = [];
   const chainFor = (table) => {
     const op = { table };
     calls.push(op);
     const chain = {
       where(criteria) { op.whereCriteria = criteria; return chain; },
+      whereIn(col, vals) { op.whereInCriteria = [col, vals]; return chain; },
       orderBy(col, dir) { op.orderBy = [col, dir]; return chain; },
       limit(n) { op.limited = n; return chain; },
       count(spec) { op.counted = spec; return chain; },
@@ -280,7 +350,10 @@ function makeRecordingDb({ svc, record, recordCols, legacyRows = null }) {
       async insert(payload) { op.insertPayload = payload; return [1]; },
       async columnInfo() { return recordCols; },
       then(resolve, reject) {
-        const rows = table === 'service_records' && op.limited ? (legacyRows || []) : [];
+        let rows = [];
+        if (table === 'service_records' && op.limited) rows = legacyRows || [];
+        else if (table === 'service_products') rows = serviceProducts || [];
+        else if (table === 'products_catalog') rows = catalogRows || [];
         return Promise.resolve(rows).then(resolve, reject);
       },
     };
@@ -310,6 +383,7 @@ function patchHandler() {
 const RECORD_COLS = {
   id: {}, structured_notes: {}, advisory: {}, pdf_storage_key: {},
   scheduled_service_id: {}, ended_at: {}, completed_at: {},
+  report_template_version: {},
 };
 
 const COMPLETED_SVC = {
@@ -320,6 +394,7 @@ const COMPLETED_SVC = {
 };
 const RECORD = {
   id: 'rec-1',
+  report_template_version: 'service_report_v1',
   advisory: JSON.stringify({ exterior_reentry_min: 30, interior_reentry_min: 30, irrigation_hold_hr: 24 }),
 };
 
@@ -352,10 +427,16 @@ describe('PATCH /:serviceId/reentry — behavioral', () => {
     expect(advisoryRaw.sql).toMatch(/\|\| \?::jsonb/);
     expect(advisoryRaw.sql).toMatch(/COALESCE\(advisory::jsonb, '\{\}'::jsonb\)/);
     expect(JSON.parse(advisoryRaw.bindings[0])).toEqual({
-      reentry_adjusted: true,
+      reentry_adjusted: { exterior: true, interior: true },
       exterior_reentry_min: 20,
       interior_reentry_min: 45,
     });
+    // The stale-render fence rides the same update: reentryAdjusted marker +
+    // per-save rev bump in structured_notes (codex P1 PR #3180).
+    const notesRaw = recUpdate.updatePayload.structured_notes;
+    expect(notesRaw.__raw).toBe(true);
+    expect(notesRaw.sql).toMatch(/'reentryRev'/);
+    expect(JSON.parse(notesRaw.bindings[0])).toEqual({ reentryAdjusted: true });
     // An FK-linked record needs no heal — the linkage column stays untouched.
     expect(recUpdate.updatePayload.scheduled_service_id).toBeUndefined();
 
@@ -375,7 +456,7 @@ describe('PATCH /:serviceId/reentry — behavioral', () => {
     });
   });
 
-  test('one-sided edit sends only that key in the merge and the response', async () => {
+  test('one-sided edit: only that key travels, and the marker claims ONLY that side', async () => {
     const dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: RECORD, recordCols: RECORD_COLS });
     mockDbCurrent = dbMock;
     const res = makeRes();
@@ -388,9 +469,110 @@ describe('PATCH /:serviceId/reentry — behavioral', () => {
     expect(res.body).toEqual({ success: true, interiorMinutes: 0, recordUpdated: true });
     const recUpdate = dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload);
     expect(JSON.parse(recUpdate.updatePayload.advisory.bindings[0])).toEqual({
-      reentry_adjusted: true,
+      reentry_adjusted: { exterior: false, interior: true },
       interior_reentry_min: 0,
     });
+  });
+
+  test('a later one-sided edit UNIONS the marker with the prior sides — earlier corrections stay authoritative', async () => {
+    const priorAdjusted = {
+      ...RECORD,
+      advisory: JSON.stringify({
+        exterior_reentry_min: 20,
+        interior_reentry_min: 30,
+        reentry_adjusted: { exterior: true, interior: false },
+      }),
+    };
+    const dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: priorAdjusted, recordCols: RECORD_COLS });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { interiorMinutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+    const recUpdate = dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload);
+    expect(JSON.parse(recUpdate.updatePayload.advisory.bindings[0])).toEqual({
+      reentry_adjusted: { exterior: true, interior: true },
+      interior_reentry_min: 45,
+    });
+    // A legacy both-sides `true` marker unions the same way.
+    const legacyTrue = {
+      ...RECORD,
+      advisory: JSON.stringify({ exterior_reentry_min: 20, reentry_adjusted: true }),
+    };
+    const dbMock2 = makeRecordingDb({ svc: COMPLETED_SVC, record: legacyTrue, recordCols: RECORD_COLS });
+    mockDbCurrent = dbMock2;
+    const res2 = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 25 }, technicianId: 'admin-1', techRole: 'admin' },
+      res2,
+      (err) => { throw err; },
+    );
+    const recUpdate2 = dbMock2.calls.find((c) => c.table === 'service_records' && c.updatePayload);
+    expect(JSON.parse(recUpdate2.updatePayload.advisory.bindings[0])).toEqual({
+      reentry_adjusted: { exterior: true, interior: true },
+      exterior_reentry_min: 25,
+    });
+  });
+
+  test('an exterior correction below the applied products\' label REI is rejected, at-or-above passes (codex P1 PR #3180)', async () => {
+    const withRei = {
+      serviceProducts: [{ product_id: 'prod-1' }, { product_id: 'prod-2' }],
+      // Most restrictive wins: 4h → 240 min floor.
+      catalogRows: [{ rei_hours: 0.5 }, { rei_hours: 4 }],
+    };
+    let dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: RECORD, recordCols: RECORD_COLS, ...withRei });
+    mockDbCurrent = dbMock;
+    let res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 30 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(400);
+    expect(res.body.code).toBe('reentry_below_product_rei');
+    expect(res.body.productReiMinutes).toBe(240);
+    expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined();
+
+    // Exactly at the floor is legal.
+    dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: RECORD, recordCols: RECORD_COLS, ...withRei });
+    mockDbCurrent = dbMock;
+    res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 240 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+
+    // Interior-only corrections are not floored (rei_hours is the
+    // outdoor-treatment REI — mirrors the completion path).
+    dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: RECORD, recordCols: RECORD_COLS, ...withRei });
+    mockDbCurrent = dbMock;
+    res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { interiorMinutes: 10 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+  });
+
+  test('legacy (pre-v1) record → 409 record_legacy, nothing written (codex P2 PR #3180)', async () => {
+    const legacyRecord = { ...RECORD, report_template_version: null };
+    const dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: legacyRecord, recordCols: RECORD_COLS });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 20 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('record_legacy');
+    expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined();
   });
 
   test('legacy record found through the soft-join gets the FK heal stamped', async () => {
@@ -528,5 +710,45 @@ describe('GET /:serviceId/reentry — behavioral', () => {
       hasRecord: false,
       defaults: { exteriorMinutes: 30, interiorMinutes: 30 },
     });
+  });
+
+  test('legacy (pre-v1) record → hasRecord false so the editor stays hidden (codex P2 PR #3180)', async () => {
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: { ...RECORD, report_template_version: 'legacy' },
+      recordCols: RECORD_COLS,
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await getHandler()(
+      { params: { serviceId: 'svc-1' }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({
+      hasRecord: false,
+      legacyRecord: true,
+      defaults: { exteriorMinutes: 30, interiorMinutes: 30 },
+    });
+  });
+
+  test('a per-side marker reads back as adjusted', async () => {
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: {
+        ...RECORD,
+        advisory: JSON.stringify({ interior_reentry_min: 45, reentry_adjusted: { exterior: false, interior: true } }),
+      },
+      recordCols: RECORD_COLS,
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await getHandler()(
+      { params: { serviceId: 'svc-1' }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.body).toMatchObject({ hasRecord: true, interiorMinutes: 45, adjusted: true });
   });
 });
