@@ -232,7 +232,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // a later view may freeze different provider data while this cached object
     // kept these numbers forever, and no future PDF request would retry the
     // freeze. Serve the bytes, cache nothing.
-    if (renderedData?.lawnAssessment?.weekWeatherUnfrozen) {
+    // The CACHE gate takes the superset: a failed freeze AND a week that has
+    // not settled yet. Delivery above gates on the failure alone.
+    if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
       logger.warn(`[service-report-pdf] week weather unfrozen for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
     }

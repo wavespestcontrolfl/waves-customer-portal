@@ -2222,6 +2222,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // is not reproducible — the next one may freeze different provider data — so
   // it must never be durably cached (see weekWeatherUnfrozen on the payload).
   let weekWeatherUnfrozen = false;
+  // Distinct from unfrozen: nothing FAILED, the week simply has not settled yet.
+  // Suppresses caching without blocking delivery — see the open-window branch.
+  let weekWeatherOpenWindow = false;
   const frozenWeekWeather = parseJsonObject(service.structured_notes).lawnWeekWeather || null;
   if (frozenWeekWeather && typeof frozenWeekWeather === 'object') {
     completionRainfall7dInches = frozenWeekWeather.rainInches ?? null;
@@ -2230,10 +2233,18 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     completionRainConfidence = frozenWeekWeather.rainConfidence ?? null;
     completionRainSource = frozenWeekWeather.rainSource ?? null;
   } else {
+    const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
+    const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
+    // Whether a fetch was even POSSIBLE. Without coordinates there is nothing to
+    // fetch and nothing that will ever change — a blank week is the settled,
+    // reproducible answer, so it stays cacheable. Treating it as unresolved
+    // would make every render for a property with no geocode permanently
+    // uncacheable and defer its report email forever.
+    const hasCoordinates = Number.isFinite(Number(latitude)) && Number.isFinite(Number(longitude));
     try {
       const weekWeather = await fetchServiceWeekWeather({
-        latitude: service.customer_latitude ?? service.latitude ?? service.lat,
-        longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+        latitude,
+        longitude,
         serviceDate: assessment.service_date,
       });
       completionRainfall7dInches = weekWeather.rainInches;
@@ -2244,10 +2255,22 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       completionRainConfidence = weekWeather.rainConfidence;
       // Which provider actually supplied it — drives the customer-facing Source row.
       completionRainSource = weekWeather.rainSource;
-      // Freeze only a week we actually resolved. Persisting a null would lock in
-      // "no rainfall known" forever, turning a transient provider outage into a
-      // permanently blank water card.
-      if (completionRainfall7dInches != null) {
+      if (!weekWeather.windowClosed) {
+        // The service-day window is still ACCUMULATING. Same-day weather is a
+        // deliberately short-lived read (30-minute cache, full-day forecast for
+        // the remainder) so afternoon convection can still land — freezing it
+        // would pin a forecast as the permanent record of a week that has not
+        // happened yet. This also covers completion-time synthesis, which runs
+        // on the service day and would otherwise freeze before the customer's
+        // first view.
+        //
+        // Not "unfrozen": nothing failed, and blocking the day's report email
+        // over a window that is merely open would stop nearly every lawn
+        // delivery. It only suppresses durable CACHING, so tomorrow's first
+        // render freezes the settled week instead of a stale same-day object
+        // being served under a key that still matches.
+        weekWeatherOpenWindow = true;
+      } else if (completionRainfall7dInches != null) {
         const canonicalWeek = await freezeLawnWeekWeather(service.id, {
           rainInches: completionRainfall7dInches,
           et0Inches: completionEt0Inches,
@@ -2260,11 +2283,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         // carrying on with our own numbers would publish a second, different
         // version of a report that is meant to be permanent.
         if (canonicalWeek) {
-          completionRainfall7dInches = canonicalWeek.rainInches ?? completionRainfall7dInches;
-          completionEt0Inches = canonicalWeek.et0Inches ?? completionEt0Inches;
-          completionDailyRain = Array.isArray(canonicalWeek.dailyRain) ? canonicalWeek.dailyRain : completionDailyRain;
-          completionRainConfidence = canonicalWeek.rainConfidence ?? completionRainConfidence;
-          completionRainSource = canonicalWeek.rainSource ?? completionRainSource;
+          // Copied EXACTLY, nulls included. Falling back to this render's own
+          // values for a field the winner left null (MRMS supplied rain while an
+          // Open-Meteo outage left et0Inches null) would let the winner render a
+          // seasonal fallback target while the loser renders an ET₀-derived one
+          // — two different reports both claiming the same frozen week.
+          completionRainfall7dInches = canonicalWeek.rainInches ?? null;
+          completionEt0Inches = canonicalWeek.et0Inches ?? null;
+          completionDailyRain = Array.isArray(canonicalWeek.dailyRain) ? canonicalWeek.dailyRain : null;
+          completionRainConfidence = canonicalWeek.rainConfidence ?? null;
+          completionRainSource = canonicalWeek.rainSource ?? null;
         } else {
           // Neither wrote nor read back a canonical week. The live report still
           // renders (fail soft — a customer should see their report), but this
@@ -2273,8 +2301,20 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
           // forever, and no future PDF request would retry the freeze.
           weekWeatherUnfrozen = true;
         }
+      } else if (hasCoordinates) {
+        // A closed window we DID try to resolve and got nothing for: the
+        // providers were unreachable or incomplete. Persisting the null would
+        // lock in "no rainfall known" forever, so nothing is frozen — but the
+        // blank result is transient, and caching it would serve an empty water
+        // card under a key that still matches once a later view freezes the
+        // real week.
+        weekWeatherUnfrozen = true;
       }
-    } catch (e) { /* non-blocking */ }
+    } catch (e) {
+      // The fetch itself threw — transient by definition, and no week was
+      // resolved. Render soft, cache nothing.
+      weekWeatherUnfrozen = true;
+    }
   }
   const waterContext = buildLawnWaterContext({
     assessment,
@@ -2317,6 +2357,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // later render may show different numbers. Any caller that durably caches
     // a render must skip storing when this is true.
     weekWeatherUnfrozen,
+    // What CACHE sites gate on — the superset. Delivery gates on
+    // weekWeatherUnfrozen alone, so an open window never blocks a send.
+    weekWeatherUncacheable: weekWeatherUnfrozen || weekWeatherOpenWindow,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {

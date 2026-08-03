@@ -324,7 +324,12 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
   const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
   const range = rainWindowEndingOn(serviceDate, 7);
-  if (lat == null || lon == null || !range) return empty;
+  // Whether the 7-day window has SETTLED. A window ending today is still
+  // accumulating, so its value is not yet a fact about the week — callers that
+  // persist a week (the report freeze) must not pin a partial day. Unknown
+  // range counts as unsettled: never freeze what we cannot date.
+  const windowClosed = !!range && range.end < etTodayYmd();
+  if (lat == null || lon == null || !range) return { ...empty, windowClosed };
   const mode = rainMrmsMode();
   // Mode participates in the key so a gate flip never serves the other
   // mode's cached week for up to 6h. A window ending TODAY is still
@@ -347,7 +352,10 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   // after midnight and pin the partial visit-day value (codex P2 #3096 r3).
   const ttlMs = windowUnclosed ? 30 * 60 * 1000 : RAIN_TTL_MS;
   const cached = _rainCache.get(key);
-  if (cached && Date.now() - cached.at < (cached.ttlMs ?? RAIN_TTL_MS)) return cached.value;
+  // windowClosed is recomputed, never replayed from the entry: a week cached
+  // just before ET midnight would otherwise keep reporting an open window for
+  // the rest of its TTL and delay the freeze by up to that long.
+  if (cached && Date.now() - cached.at < (cached.ttlMs ?? RAIN_TTL_MS)) return { ...cached.value, windowClosed };
 
   // The two sources are independent — fetch concurrently so a slow pair
   // costs max(timeouts), not their sum (codex P2 #3096).
@@ -392,7 +400,7 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     const effectiveTtlMs = missingIndependentInput ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
     _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value });
   }
-  return value;
+  return { ...value, windowClosed };
 }
 
 // The pre-engine Open-Meteo week fetch, verbatim behavior (city-grid spike

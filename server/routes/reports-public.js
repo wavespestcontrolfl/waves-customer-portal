@@ -1392,7 +1392,7 @@ router.get('/:token', async (req, res, next) => {
         // Same rule as pdf-queue: a render whose week could not be FROZEN is
         // not reproducible, so serve it but cache nothing — otherwise a later
         // view freezes different data while this object keeps these numbers.
-        if (renderedData?.lawnAssessment?.weekWeatherUnfrozen) {
+        if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);

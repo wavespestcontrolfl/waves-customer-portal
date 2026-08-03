@@ -119,7 +119,7 @@ describe('freeze contract in the render path', () => {
   test('a frozen week SHORT-CIRCUITS the live weather fetch', () => {
     // If the fetch still ran, the report would keep drifting with the provider
     // and the freeze would be decorative.
-    expect(source).toMatch(/frozenWeekWeather[\s\S]{0,400}?fetchServiceWeekWeather/);
+    expect(source).toMatch(/frozenWeekWeather[\s\S]{0,1200}?fetchServiceWeekWeather/);
     expect(source).toMatch(/const frozenWeekWeather = parseJsonObject\(service\.structured_notes\)\.lawnWeekWeather/);
   });
 
@@ -168,12 +168,12 @@ describe('freeze contract in the render path', () => {
     const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
     const reportsPublic = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
     for (const src of [pdfQueue, reportsPublic]) {
-      expect(src).toMatch(/weekWeatherUnfrozen/);
+      expect(src).toMatch(/weekWeatherUncacheable/);
     }
     // pdf-queue returns the bytes with no key rather than storing.
-    expect(pdfQueue).toMatch(/weekWeatherUnfrozen[\s\S]{0,300}?uncached: true/);
+    expect(pdfQueue).toMatch(/weekWeatherUncacheable[\s\S]{0,300}?uncached: true/);
     // reports-public branches AROUND the putReportPdf call.
-    expect(reportsPublic).toMatch(/weekWeatherUnfrozen[\s\S]{0,400}?\} else if/);
+    expect(reportsPublic).toMatch(/weekWeatherUncacheable[\s\S]{0,400}?\} else if/);
   });
 
   // The worst case: an emailed attachment is the one copy that can never be
@@ -206,16 +206,73 @@ describe('freeze contract in the render path', () => {
     expect(pdfQueue).toMatch(/uncached: !!rendered\.uncached/);
   });
 
-  test('the flag is set ONLY when a fetched week could not be frozen', () => {
-    // Not when a frozen week was replayed, and not when nothing was fetched —
-    // either of those would make every such render permanently uncacheable.
-    expect(source).toMatch(/\} else \{\s*\n[\s\S]{0,500}?weekWeatherUnfrozen = true;/);
+  // The two suppressions are NOT the same thing, and conflating them breaks a
+  // different customer each way: gate delivery on an open window and nearly
+  // every same-day lawn email stops; gate caching on failure alone and a blank
+  // or partial PDF is served forever under a key a later freeze still matches.
+  test('DELIVERY blocks only on failure; CACHING blocks on the superset', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    expect(pdfQueue).toMatch(/weekWeatherUnfrozen && isDeliveryPin/);
+    // The delivery guard must NOT see the open-window state.
+    expect(pdfQueue).not.toMatch(/weekWeatherUncacheable && isDeliveryPin/);
+    expect(source).toMatch(/weekWeatherUncacheable: weekWeatherUnfrozen \|\| weekWeatherOpenWindow/);
+  });
+
+  // Freezing on the service day pins a FORECAST. The same-day read is
+  // deliberately short-lived (30-minute cache, full-day forecast for the
+  // remainder) so afternoon convection still lands; persisting it makes the
+  // permanent record of the week a guess about hours that had not happened.
+  // This is also what completion-time synthesis hits — it runs on the service
+  // day, through the same builder.
+  test('an OPEN window is never frozen, and is not treated as a failure', () => {
+    expect(source).toMatch(/if \(!weekWeather\.windowClosed\) \{[\s\S]{0,1200}?weekWeatherOpenWindow = true;/);
+    // The freeze sits in the else-branch, so it cannot run on an open window.
+    expect(source).toMatch(/weekWeatherOpenWindow = true;[\s\S]{0,200}?\} else if \(completionRainfall7dInches != null\) \{\s*\n\s*const canonicalWeek = await freezeLawnWeekWeather\(/);
+  });
+
+  test('the fetch reports whether the window has SETTLED, on every path', () => {
+    const conditions = fs.readFileSync(path.join(__dirname, '../services/service-report/application-conditions.js'), 'utf8');
+    expect(conditions).toMatch(/const windowClosed = !!range && range\.end < etTodayYmd\(\)/);
+    // Early return (no coordinates / no range) carries it too.
+    expect(conditions).toMatch(/return \{ \.\.\.empty, windowClosed \}/);
+    // Recomputed on the cached path — a week cached before ET midnight must not
+    // keep reporting an open window for the rest of its TTL.
+    expect(conditions).toMatch(/return \{ \.\.\.cached\.value, windowClosed \}/);
+    expect(conditions).toMatch(/return \{ \.\.\.value, windowClosed \}/);
+  });
+
+  // A property with no geocode can never resolve a week. Calling that a failure
+  // would make its every render permanently uncacheable and defer its report
+  // email forever — fail-closed applied to a state that is not a failure.
+  test('a blank week with NO COORDINATES is settled, not unfrozen', () => {
+    expect(source).toMatch(/const hasCoordinates = Number\.isFinite\(Number\(latitude\)\) && Number\.isFinite\(Number\(longitude\)\)/);
+    // The transient branch is guarded by hasCoordinates; without it, nothing is
+    // flagged and the settled blank stays cacheable.
+    expect(source).toMatch(/\} else if \(hasCoordinates\) \{[\s\S]{0,700}?weekWeatherUnfrozen = true;/);
+  });
+
+  test('a closed window we tried and FAILED to resolve is uncacheable', () => {
+    // Persisting the null would lock in "no rainfall known" forever; caching it
+    // would serve the empty water card after a later view froze the real week.
+    expect(source).toMatch(/\} catch \(e\) \{[\s\S]{0,300}?weekWeatherUnfrozen = true;/);
     expect(source).toMatch(/let weekWeatherUnfrozen = false;/);
+    expect(source).toMatch(/let weekWeatherOpenWindow = false;/);
   });
 
   test('only a RESOLVED week is frozen', () => {
-    // Persisting a null would lock in "no rainfall known" forever, turning a
-    // transient provider outage into a permanently blank water card.
-    expect(source).toMatch(/if \(completionRainfall7dInches != null\) \{\s*\n\s*const canonicalWeek = await freezeLawnWeekWeather\(/);
+    expect(source).toMatch(/\} else if \(completionRainfall7dInches != null\) \{\s*\n\s*const canonicalWeek = await freezeLawnWeekWeather\(/);
+  });
+
+  // Both renders claim to use the frozen snapshot, so they must hold the SAME
+  // snapshot — nulls included. A `??` fallback on a field the winner left null
+  // (MRMS supplied rain, an Open-Meteo outage left ET₀ null) lets the loser keep
+  // its own ET₀ and render a different watering target from the same week.
+  test('the winner\'s snapshot is copied EXACTLY, nulls included', () => {
+    expect(source).toMatch(/completionEt0Inches = canonicalWeek\.et0Inches \?\? null;/);
+    expect(source).toMatch(/completionRainConfidence = canonicalWeek\.rainConfidence \?\? null;/);
+    expect(source).toMatch(/completionRainSource = canonicalWeek\.rainSource \?\? null;/);
+    expect(source).toMatch(/completionDailyRain = Array\.isArray\(canonicalWeek\.dailyRain\) \? canonicalWeek\.dailyRain : null;/);
+    // No field may fall back to this render's independently fetched value.
+    expect(source).not.toMatch(/canonicalWeek\.\w+ \?\? completion/);
   });
 });
