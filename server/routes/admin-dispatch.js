@@ -11753,7 +11753,18 @@ function completionSavedCardFallbackPolicy({
 // outranks the base row entirely, so an armed, successfully-rendered text can
 // reach a customer with an open invoice and no way to pay it. Checking the
 // rendered output (not the stored template) is what makes that unreachable.
-function reportV1InvoiceBodyCarriesPayLink(body, payUrl) {
+// The comparison MUST be scheme-normalised: getTemplate strips https:// from
+// owned portal hosts before returning the body (admin-sms-templates.js
+// stripPortalUrlScheme), so a raw `body.includes(payUrl)` never matches a
+// portal pay link and would send EVERY billed visit to the fallback — leaving
+// the gated lane permanently unreachable. Both sides go through the renderer's
+// own function so this cannot drift as SCHEMELESS_SMS_HOSTS changes.
+function reportV1InvoiceBodyCarriesPayLink(body, payUrl, normalize) {
+  const strip = typeof normalize === 'function'
+    ? normalize
+    : (typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
+      ? smsTemplatesRouter.stripPortalUrlScheme
+      : (s) => s);
   const text = String(body || '');
   const url = String(payUrl || '').trim();
   if (!text) return false;
@@ -11761,7 +11772,7 @@ function reportV1InvoiceBodyCarriesPayLink(body, payUrl) {
   // only reaches this check with one, so treat a missing URL as unusable
   // rather than vacuously true.
   if (!url) return false;
-  return text.includes(url);
+  return String(strip(text)).includes(String(strip(url)));
 }
 
 function completionUsesReportLane({

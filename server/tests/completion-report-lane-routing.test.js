@@ -1,4 +1,5 @@
 const { completionUsesReportLane, reportV1InvoiceBodyCarriesPayLink } = require('../routes/admin-dispatch')._test;
+const smsTemplates = require('../routes/admin-sms-templates');
 const { serviceReportV1SmsType } = require('../services/service-report/delivery');
 
 // The defect this pins: buildServiceReportV1DeliveryContext has always
@@ -69,30 +70,58 @@ describe('completionUsesReportLane', () => {
     expect(serviceReportV1SmsType({ hasInvoiceLink: true })).toBe('service_report_v1_with_invoice');
   });
 
-  test('a customer with a bill never gets a text without the pay link', () => {
+  describe('a customer with a bill never gets a text without the pay link', () => {
+    // The fixtures below are what the RENDERER actually returns, not
+    // hand-written bodies: getTemplate runs stripPortalUrlScheme, which removes
+    // https:// from owned portal hosts. A test written against the full URL
+    // passes while production always falls back — the lane would have shipped
+    // permanently unreachable. Both the strings and the URL here are pushed
+    // through the same production function the route uses.
+    const strip = smsTemplates.stripPortalUrlScheme;
     const payUrl = 'https://portal.wavespestcontrol.com/l/invoice-xyz89';
-    // The arming probe (isOptInSmsTemplateEnabled) only proves the row exists
-    // and is active. These are the bodies it would happily arm.
-    const usable = `Hello Van! Your pest control report is ready: https://x/l/r\n\nInvoice for today's visit: ${payUrl}`;
-    expect(reportV1InvoiceBodyCarriesPayLink(usable, payUrl)).toBe(true);
+    const reportUrl = 'https://portal.wavespestcontrol.com/l/report-abc12';
+    const render = (body) => strip(body);
 
-    // Operator edited {pay_url} out of the template in /admin — renders fine,
-    // reads fine, and leaves the customer no way to pay.
-    expect(reportV1InvoiceBodyCarriesPayLink(
-      'Hello Van! Your pest control report is ready: https://x/l/r', payUrl,
-    )).toBe(false);
+    test('the renderer really does strip the scheme off a portal pay link', () => {
+      // If this ever stops being true the guard below is testing nothing.
+      expect(render(payUrl)).toBe('portal.wavespestcontrol.com/l/invoice-xyz89');
+      expect(render(payUrl)).not.toContain('https://');
+    });
 
-    // An active sms_template_variants row outranks the base row, so a good
-    // base template is no guarantee either.
-    expect(reportV1InvoiceBodyCarriesPayLink('Thanks! See your report: https://x/l/r', payUrl)).toBe(false);
+    test('a rendered body carrying the pay link is usable', () => {
+      const body = render(`Hello Van! Your pest control report is ready: ${reportUrl}\n\nInvoice for today's visit: ${payUrl}`);
+      expect(reportV1InvoiceBodyCarriesPayLink(body, payUrl)).toBe(true);
+    });
 
-    // Render failure / deactivated between probe and send.
-    expect(reportV1InvoiceBodyCarriesPayLink(null, payUrl)).toBe(false);
-    expect(reportV1InvoiceBodyCarriesPayLink('', payUrl)).toBe(false);
+    test('an operator editing {pay_url} out of the template falls back', () => {
+      // Renders fine, reads fine, leaves the customer no way to pay.
+      const body = render(`Hello Van! Your pest control report is ready: ${reportUrl}`);
+      expect(reportV1InvoiceBodyCarriesPayLink(body, payUrl)).toBe(false);
+    });
 
-    // A missing pay URL is unusable, never vacuously true.
-    expect(reportV1InvoiceBodyCarriesPayLink(usable, '')).toBe(false);
-    expect(reportV1InvoiceBodyCarriesPayLink(usable, null)).toBe(false);
+    test('an active sms_template_variants row outranking a good base row falls back', () => {
+      const body = render(`Thanks! See your report: ${reportUrl}`);
+      expect(reportV1InvoiceBodyCarriesPayLink(body, payUrl)).toBe(false);
+    });
+
+    test('a render failure or deactivation between probe and send falls back', () => {
+      expect(reportV1InvoiceBodyCarriesPayLink(null, payUrl)).toBe(false);
+      expect(reportV1InvoiceBodyCarriesPayLink('', payUrl)).toBe(false);
+    });
+
+    test('a missing pay URL is unusable, never vacuously true', () => {
+      const body = render(`Report: ${reportUrl}\n\nInvoice: ${payUrl}`);
+      expect(reportV1InvoiceBodyCarriesPayLink(body, '')).toBe(false);
+      expect(reportV1InvoiceBodyCarriesPayLink(body, null)).toBe(false);
+    });
+
+    test('a third-party link keeps its scheme and still matches', () => {
+      // stripPortalUrlScheme is host-allowlisted, so a non-portal pay URL is
+      // untouched on both sides.
+      const other = 'https://pay.example.com/i/abc';
+      const body = render(`Report: ${reportUrl}\n\nInvoice: ${other}`);
+      expect(reportV1InvoiceBodyCarriesPayLink(body, other)).toBe(true);
+    });
   });
 
   test('gate off leaves every un-billed path byte-identical to today', () => {

@@ -218,6 +218,12 @@ async function main() {
       if (outcome === undefined) {
         say(UNKNOWN, 'visitOutcome not recorded on the completion record',
           'cannot confirm an application was actually performed.');
+      } else if (String(outcome) === 'incomplete') {
+        // An incomplete visit returns from the route BEFORE any invoice or
+        // charge logic runs (admin-dispatch.js:7023) — earlier than every
+        // other check here, so nothing downstream is a meaningful cause.
+        say(BLOCK, 'visitOutcome=incomplete',
+          'the route returns before any invoice or completion-charge logic for an incomplete visit — no invoice is minted and nothing is charged, by design. Remedy: this visit needs a real completion before any billing question applies.');
       } else if (['inspection_only', 'customer_declined'].includes(String(outcome))) {
         say(BLOCK, `visitOutcome=${outcome}`, 'nothing was performed, so nothing auto-charges.');
       } else {
