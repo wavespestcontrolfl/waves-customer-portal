@@ -43,6 +43,16 @@ describe('CreateAppointmentModal won estimate helpers', () => {
       monthlyTotal: 24,
       lines: [{ cadence: 'quarterly', price: 24, derived: 'estimate_totals_fallback' }],
     })).toBe('$24.00/mo');
+    // A MIXED quote (per-app pest + genuinely-monthly legacy monitoring)
+    // must not silently drop the monthly line — legacy copy tells the whole
+    // truth until every recurring line is proven per-application.
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 64.33,
+      lines: [
+        { cadence: 'quarterly', price: 121 },
+        { cadence: 'monthly', price: 24, derived: 'estimate_totals_fallback' },
+      ],
+    })).toBe('$64.33/mo');
   });
 
   it('auto-selects exactly one unlinked accepted estimate for an empty schedule form', () => {

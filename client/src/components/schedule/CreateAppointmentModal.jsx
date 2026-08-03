@@ -318,12 +318,16 @@ export function formatScheduleEstimateAmount(estimate) {
   // 'estimate_totals_fallback'), whose price is a monthly figure that would
   // mislabel as per-application.
   const lines = Array.isArray(estimate?.lines) ? estimate.lines : [];
-  const perApp = lines
-    .filter((l) => l && l.cadence && l.cadence !== 'one_time'
-      && l.derived !== 'estimate_totals_fallback' && Number(l.price) > 0)
+  const recurringLines = lines.filter((l) => l && l.cadence && l.cadence !== 'one_time');
+  const perApp = recurringLines
+    .filter((l) => l.derived !== 'estimate_totals_fallback' && Number(l.price) > 0)
     .map((l) => Number(l.price));
   const onetime = Number(estimate?.onetimeTotal);
-  if (perApp.length) {
+  // EVERY recurring line must be proven per-application (Codex P1): a mixed
+  // quote (per-app pest + genuinely-monthly legacy monitoring) must not
+  // silently drop the monthly line from the label — legacy copy tells the
+  // whole truth there.
+  if (perApp.length && perApp.length === recurringLines.length) {
     const apps = perApp.map((p) => formatMoney(p)).join(' + ');
     return Number.isFinite(onetime) && onetime > 0
       ? `${apps}/application + ${formatMoney(onetime)} one-time`

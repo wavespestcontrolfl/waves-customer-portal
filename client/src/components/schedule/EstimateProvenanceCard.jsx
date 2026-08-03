@@ -351,7 +351,12 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   const perAppPrices = serviceLines.map((l) => l.perAppPrice).filter((p) => p != null);
   const perAppSum = perAppPrices.reduce((s, p) => s + p, 0);
   const oneTime = Number(onetimeTotal) || 0;
-  const quotedLabel = perAppPrices.length
+  // EVERY recurring line must be proven per-application (Codex P1) — a
+  // mixed quote with a genuinely-monthly legacy line keeps the legacy total
+  // rather than silently dropping that line from the label.
+  const recurringLineCount = serviceLines.filter((l) => l.recurring).length;
+  const allRecurringPerApp = perAppPrices.length > 0 && perAppPrices.length === recurringLineCount;
+  const quotedLabel = allRecurringPerApp
     ? `${perAppPrices.map((p) => money(p)).join(' + ')}/application${oneTime > 0 ? ` + ${money(oneTime)} one-time` : ''}`
     : money(quoted);
   const rows = paymentRows(payment);
@@ -375,9 +380,9 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   const oneTimeLineSum = serviceLines.reduce((s, l) => s + (l.oneTimePrice || 0), 0);
   const everyLinePriced = serviceLines.length > 0
     && serviceLines.every((l) => l.perAppPrice != null || l.oneTimePrice != null);
-  const quotedComparable = perAppPrices.length
+  const quotedComparable = allRecurringPerApp
     ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)
-    : quoted;
+    : (perAppPrices.length ? null : quoted);
   const showVsQuoted = price != null && quotedComparable != null && quotedComparable > 0
     && price > 0 && Math.abs(quotedComparable - price) > 0.01;
   const deltaPct = showVsQuoted ? Math.round(((price - quotedComparable) / quotedComparable) * 100) : 0;
