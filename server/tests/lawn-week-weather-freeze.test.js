@@ -200,9 +200,10 @@ describe('freeze contract in the render path', () => {
   // for, and pages someone about a terminal failure that was really "not yet".
   test('an OPEN-WINDOW job waits for ET midnight instead of burning retries', () => {
     const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
-    expect(pdfQueue).toMatch(/uncachedReason: openWindow \? 'open_window' : 'unfrozen'/);
+    expect(pdfQueue).toMatch(/uncachedReason: reason,/);
+    expect(pdfQueue).toMatch(/weekWeatherPendingReason \|\| 'unfrozen'/);
     // Deferred, not failed — and the branch precedes the failure path.
-    const deferAt = pdfQueue.indexOf("result.uncachedReason === 'open_window'");
+    const deferAt = pdfQueue.indexOf("result.uncachedReason && result.uncachedReason !== 'unfrozen'");
     const failAt = pdfQueue.indexOf('pdf_render_uncacheable');
     expect(deferAt).toBeGreaterThan(-1);
     expect(deferAt).toBeLessThan(failAt);
@@ -249,7 +250,7 @@ describe('freeze contract in the render path', () => {
     expect(pdfQueue).toMatch(/weekWeatherUnfrozen && isDeliveryPin/);
     // The delivery guard must NOT see the open-window state.
     expect(pdfQueue).not.toMatch(/weekWeatherUncacheable && isDeliveryPin/);
-    expect(source).toMatch(/weekWeatherUncacheable: weekWeatherUnfrozen \|\| weekWeatherOpenWindow/);
+    expect(source).toMatch(/weekWeatherUncacheable: weekWeatherUnfrozen \|\| !!weekWeatherPendingReason/);
   });
 
   // Freezing on the service day pins a FORECAST. The same-day read is
@@ -259,9 +260,9 @@ describe('freeze contract in the render path', () => {
   // This is also what completion-time synthesis hits — it runs on the service
   // day, through the same builder.
   test('an OPEN window is never frozen, and is not treated as a failure', () => {
-    expect(source).toMatch(/if \(!weekWeather\.windowClosed\) \{[\s\S]{0,1200}?weekWeatherOpenWindow = true;/);
+    expect(source).toMatch(/if \(!weekWeather\.windowClosed\) \{[\s\S]{0,1200}?weekWeatherPendingReason = 'open_window';/);
     // The freeze sits in the else-branch, so it cannot run on an open window.
-    expect(source).toMatch(/weekWeatherOpenWindow = true;[\s\S]{0,200}?\} else if \(completionRainfall7dInches != null\) \{\s*\n\s*const canonicalWeek = await freezeLawnWeekWeather\(/);
+    expect(source).toMatch(/weekWeatherPendingReason = 'open_window';[\s\S]{0,200}?\} else if \(completionRainfall7dInches != null\) \{\s*\n\s*const canonicalWeek = await freezeLawnWeekWeather\(/);
   });
 
   // The trap in the previous round's own fix: recomputing closure on the cached
@@ -305,14 +306,25 @@ describe('freeze contract in the render path', () => {
     expect(conditions).toMatch(/return \{ \.\.\.value, windowClosed \}/);
   });
 
-  // A property with no geocode can never resolve a week. Calling that a failure
-  // would make its every render permanently uncacheable and defer its report
-  // email forever — fail-closed applied to a state that is not a failure.
-  test('a blank week with NO COORDINATES is settled, not unfrozen', () => {
+  // "No geocode" is NOT a settled answer: the hourly backstop sweep retries
+  // coordinate-less customers and writes their coordinates later, after which
+  // /data freezes a real week. The PDF key encodes neither coordinates nor
+  // freeze state, so a blank PDF cached now would keep being downloaded long
+  // after the live report showed real rainfall.
+  test('a blank week with NO COORDINATES is PENDING — uncacheable, still deliverable', () => {
     expect(source).toMatch(/const hasCoordinates = latN != null && lonN != null/);
-    // The transient branch is guarded by hasCoordinates; without it, nothing is
-    // flagged and the settled blank stays cacheable.
-    expect(source).toMatch(/\} else if \(hasCoordinates\) \{[\s\S]{0,700}?weekWeatherUnfrozen = true;/);
+    expect(source).toMatch(/\} else if \(!hasCoordinates\) \{[\s\S]{0,900}?weekWeatherPendingReason = 'no_coordinates';/);
+    // Pending, never unfrozen — an address that never geocodes must not hold
+    // the report email forever.
+    expect(source).not.toMatch(/!hasCoordinates\) \{[\s\S]{0,900}?weekWeatherUnfrozen = true;/);
+  });
+
+  // Every pending reason waits; only a real failure spends the ladder.
+  test('the queue defers on ANY pending reason, not just an open window', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    expect(pdfQueue).toMatch(/result\.uncachedReason && result\.uncachedReason !== 'unfrozen'/);
+    // A new pending reason must not need a matching queue change to be honoured.
+    expect(pdfQueue).not.toMatch(/uncachedReason === 'open_window'/);
   });
 
   test('a closed window we tried and FAILED to resolve is uncacheable', () => {
@@ -320,7 +332,7 @@ describe('freeze contract in the render path', () => {
     // would serve the empty water card after a later view froze the real week.
     expect(source).toMatch(/\} catch \(e\) \{[\s\S]{0,300}?weekWeatherUnfrozen = true;/);
     expect(source).toMatch(/let weekWeatherUnfrozen = false;/);
-    expect(source).toMatch(/let weekWeatherOpenWindow = false;/);
+    expect(source).toMatch(/let weekWeatherPendingReason = null;/);
   });
 
   test('only a RESOLVED week is frozen', () => {

@@ -2222,9 +2222,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // is not reproducible — the next one may freeze different provider data — so
   // it must never be durably cached (see weekWeatherUnfrozen on the payload).
   let weekWeatherUnfrozen = false;
-  // Distinct from unfrozen: nothing FAILED, the week simply has not settled yet.
-  // Suppresses caching without blocking delivery — see the open-window branch.
-  let weekWeatherOpenWindow = false;
+  // Distinct from unfrozen: nothing FAILED, the week simply cannot be frozen
+  // YET. Suppresses caching without blocking delivery — a state time resolves
+  // on its own, so the queue waits for it rather than burning retries, and the
+  // customer's report email is not held hostage to it. Carries WHY.
+  let weekWeatherPendingReason = null;
   const frozenWeekWeather = parseJsonObject(service.structured_notes).lawnWeekWeather || null;
   if (frozenWeekWeather && typeof frozenWeekWeather === 'object') {
     completionRainfall7dInches = frozenWeekWeather.rainInches ?? null;
@@ -2274,7 +2276,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
         // delivery. It only suppresses durable CACHING, so tomorrow's first
         // render freezes the settled week instead of a stale same-day object
         // being served under a key that still matches.
-        weekWeatherOpenWindow = true;
+        weekWeatherPendingReason = 'open_window';
       } else if (completionRainfall7dInches != null) {
         const canonicalWeek = await freezeLawnWeekWeather(service.id, {
           rainInches: completionRainfall7dInches,
@@ -2306,7 +2308,18 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
           // forever, and no future PDF request would retry the freeze.
           weekWeatherUnfrozen = true;
         }
-      } else if (hasCoordinates) {
+      } else if (!hasCoordinates) {
+        // No geocode YET. This is not settled — the hourly backstop sweep
+        // (services/geocoder.js sweepUngeocodedCustomers) actively retries
+        // coordinate-less customers and writes their coordinates later, after
+        // which /data resolves and freezes a real week. The PDF key encodes
+        // neither coordinates nor freeze state, so a blank-weather PDF cached
+        // now would keep being downloaded long after the live report showed
+        // real rainfall. Uncacheable — but not delivery-blocking, because an
+        // address that never geocodes would otherwise hold the report email
+        // forever.
+        weekWeatherPendingReason = 'no_coordinates';
+      } else {
         // A closed window we DID try to resolve and got nothing for: the
         // providers were unreachable or incomplete. Persisting the null would
         // lock in "no rainfall known" forever, so nothing is frozen — but the
@@ -2362,9 +2375,11 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // later render may show different numbers. Any caller that durably caches
     // a render must skip storing when this is true.
     weekWeatherUnfrozen,
+    // Why the week could not be frozen yet, when nothing actually failed.
+    weekWeatherPendingReason,
     // What CACHE sites gate on — the superset. Delivery gates on
-    // weekWeatherUnfrozen alone, so an open window never blocks a send.
-    weekWeatherUncacheable: weekWeatherUnfrozen || weekWeatherOpenWindow,
+    // weekWeatherUnfrozen alone, so a merely-pending week never blocks a send.
+    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {

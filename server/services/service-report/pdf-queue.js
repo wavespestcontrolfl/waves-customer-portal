@@ -236,15 +236,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // The CACHE gate takes the superset: a failed freeze AND a week that has
     // not settled yet. Delivery above gates on the failure alone.
     if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
-      // WHY it was uncacheable decides what the queue does with it. An open
-      // window is not a failure and will resolve itself at ET midnight, so the
-      // job waits for that instead of burning retries against a condition no
-      // retry can change.
-      const openWindow = !renderedData.lawnAssessment.weekWeatherUnfrozen;
-      logger.warn(`[service-report-pdf] week weather ${openWindow ? 'window still open' : 'unfrozen'} for ${recordId} — not caching this render`);
+      // WHY it was uncacheable decides what the queue does with it. A merely
+      // PENDING week — the day still accumulating, or the property not geocoded
+      // yet — is not a failure, and no amount of retrying inside the ladder can
+      // resolve it; only elapsed time can. Those wait. A genuine failure keeps
+      // the ladder.
+      const reason = renderedData.lawnAssessment.weekWeatherPendingReason || 'unfrozen';
+      logger.warn(`[service-report-pdf] week weather not cacheable for ${recordId} (${reason}) — serving without storing`);
       return {
         key: null, pdf, rendered: true, token: reportToken, uncached: true,
-        uncachedReason: openWindow ? 'open_window' : 'unfrozen',
+        uncachedReason: reason,
       };
     }
     const laAfter = await lawnAssessmentPdfSignature(service, knex);
@@ -644,15 +645,15 @@ async function processPdfRenderJob(job, knex = db) {
     // unstorable (an unfrozen week, a selection that moved) never gets another
     // attempt. Fail it so the queue backs off and tries again.
     if (result?.uncached) {
-      // An OPEN weather window is not a failure and no amount of retrying
-      // inside the retry ladder can close it — the delays run out roughly half
-      // an hour in, hours before the ET day ends. Failing it would retire the
-      // job before the freeze it exists to perform is even possible, and page
-      // someone about a terminal failure that was really just "not yet". Wait
-      // for midnight instead, and give the attempt back.
-      if (result.uncachedReason === 'open_window') {
+      // A PENDING week is not a failure and no amount of retrying inside the
+      // ladder can resolve it — the delays run out roughly half an hour in,
+      // hours before the ET day ends or the geocode backstop next sweeps.
+      // Failing it would retire the job before the freeze it exists to perform
+      // is even possible, and page someone about a terminal failure that was
+      // really just "not yet". Wait instead, and give the attempt back.
+      if (result.uncachedReason && result.uncachedReason !== 'unfrozen') {
         const until = nextEtMidnight();
-        await deferPdfRenderJob(job, until, 'weather window still open — deferred until it closes', knex);
+        await deferPdfRenderJob(job, until, `weather not freezable yet (${result.uncachedReason}) — deferred`, knex);
         return { status: 'deferred', nextAttemptAt: until.toISOString() };
       }
       const err = new Error('render completed but was not cacheable — retrying');
