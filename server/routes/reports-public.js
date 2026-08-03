@@ -129,6 +129,7 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
@@ -1208,6 +1209,25 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Attachment filename the customer sees on download/share/email, e.g.
+// "Waves-Service-Report-123-Main-St-2026-08-02.pdf". service_date is a
+// hydrated pg DATE — naive template interpolation printed the entire
+// Date.toString() ("Sun Aug 02 2026 00:00:00 GMT+0000 (Coordinated
+// Universal Time)") into the filename (and, via the share sheet, into the
+// customer's email subject).
+function reportPdfFileName(service, { prefix = 'Waves-Service-Report' } = {}) {
+  const datePart = dateOnlyStamp(service.service_date);
+  const addressPart = String(service.address_line1 || '')
+    .normalize('NFKD')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/[\s_]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 60)
+    .replace(/^-+|-+$/g, '');
+  return `${[prefix, addressPart, datePart].filter(Boolean).join('-')}.pdf`;
+}
+
 // GET /api/reports/:token — public PDF access (no auth)
 router.get('/:token', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -1284,7 +1304,7 @@ router.get('/:token', async (req, res, next) => {
       if (storedPdf) {
         await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+        res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service)}"`);
         res.setHeader('Cache-Control', 'no-store');
         return res.send(storedPdf);
       }
@@ -1343,7 +1363,7 @@ router.get('/:token', async (req, res, next) => {
       }
       await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+      res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service)}"`);
       res.setHeader('Cache-Control', 'no-store');
       return res.send(pdf);
     }
@@ -1529,7 +1549,7 @@ router.get('/:token/data', async (req, res, next) => {
 function generateReportPDF(service, products, weather, dryTimes, irrigation, res) {
   const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service, { prefix: 'Waves-Report' })}"`);
   doc.pipe(res);
 
   // Header — logo (centered) with license + contact lines beneath. Falls
