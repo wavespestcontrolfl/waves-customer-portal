@@ -495,9 +495,14 @@ async function main() {
     //     even when superseded — a later success does not undo a Stripe charge
     //     whose DB write failed.
     const TERMINAL = /^(charge|retry|manual_charge)/;
+    const invStatus = String(inv?.status || '').toLowerCase();
+    const invSettled = ['paid', 'prepaid'].includes(invStatus);
     let chargeFailure = null;
     let chargeSuccess = null;
+    let achInFlight = null;
     let supersededFlags = [];
+    let otherInvoiceOutcomes = [];
+    let logUnreadable = false;
     try {
       const { rows: logRows } = await client.query(
         `SELECT id, event_type, amount_cents, created_at, details
@@ -513,20 +518,45 @@ async function main() {
       } else {
         for (const l of logRows) {
           const d = parseNotes(l.details);
-          console.log(`  ${l.created_at.toISOString()}  ${l.event_type}  source=${d.source || '?'}  ${d.error ? `error=${d.error}` : ''}`);
+          const tag = String(d.invoice_id || '') === String(inv?.id || '') ? '' : '  [OTHER INVOICE]';
+          console.log(`  ${l.created_at.toISOString()}  ${l.event_type}  invoice=${d.invoice_id || '?'}${d.ach_processing ? ' ach_processing' : ''}${tag}  ${d.error ? `error=${d.error}` : ''}`);
         }
-        const latest = logRows.find((l) => TERMINAL.test(String(l.event_type)));
-        if (latest && String(latest.event_type).includes('failed')) chargeFailure = latest;
-        else if (latest) chargeSuccess = latest;
-        supersededFlags = logRows
+        // Outcomes are PER-INVOICE (details.invoice_id). A success for a
+        // refunded/replaced invoice A is not evidence that the currently
+        // resolved invoice B was charged, so only rows bound to `inv` may
+        // drive the verdict.
+        const forThisInvoice = (l) => inv && String(parseNotes(l.details).invoice_id || '') === String(inv.id);
+        const mine = logRows.filter(forThisInvoice);
+        otherInvoiceOutcomes = logRows.filter((l) => !forThisInvoice(l) && TERMINAL.test(String(l.event_type)));
+
+        const latest = mine.find((l) => TERMINAL.test(String(l.event_type)));
+        if (latest && String(latest.event_type).includes('failed')) {
+          chargeFailure = latest;
+        } else if (latest) {
+          // An ACH debit logs charge_success the moment it is INITIATED, with
+          // ach_processing and the invoice left 'processing' — the debit can
+          // still fail asynchronously. That is money in flight, not a settled
+          // card charge, and must never be reported as one.
+          if (parseNotes(latest.details).ach_processing === true) achInFlight = latest;
+          else chargeSuccess = latest;
+        }
+        supersededFlags = mine
           .filter((l) => l !== latest && String(l.event_type).includes('failed'))
           .map((l) => ({ l, d: parseNotes(l.details) }))
           .filter(({ d }) => d.orphaned || d.reconciliation_required);
       }
     } catch (e) {
+      logUnreadable = true;
       say(UNKNOWN, `autopay_log not readable (${e.message})`,
         'a recorded charge failure cannot be ruled out.');
     }
+
+    // The charge_success insert is best-effort and its failure is swallowed
+    // (:8420-8424) AFTER the invoice has already become paid — so the absence
+    // of a success row is not evidence that no charge happened. Durable state
+    // on the invoice itself is the fallback: settled + a PaymentIntent.
+    const durableChargeEvidence = !chargeSuccess && !chargeFailure && !achInFlight && !logUnreadable
+      && invSettled && !!inv?.stripe_payment_intent_id;
     if (chargeFailure) {
       const d = parseNotes(chargeFailure.details);
       say(BLOCK, `charge ATTEMPTED and FAILED (${chargeFailure.event_type}, ${chargeFailure.created_at.toISOString()})`,
@@ -587,7 +617,7 @@ async function main() {
     // ledger integrity problem that a later success does not clear, so it must
     // never exit 0 no matter how healthy the rest of the replay looks.
     console.log('\n=== verdict ===');
-    const unresolvedLedger = [
+    const flaggedLedger = [
       ...supersededFlags,
       ...(chargeFailure
         ? [{ l: chargeFailure, d: parseNotes(chargeFailure.details) }].filter(
@@ -595,6 +625,24 @@ async function main() {
         )
         : []),
     ];
+    // An orphan flag is written even when the webhook WON the race and settled
+    // the invoice — production calls that the happy self-heal (:8481-8486) but
+    // still writes charge_failed with orphaned=true (:8505-8507). If the
+    // resolved invoice now reads paid/prepaid, money and records agree and
+    // there is nothing to reconcile; telling the operator otherwise sends them
+    // after a ledger that is already correct.
+    // Outcomes belonging to a different invoice on this visit (refunded,
+    // replaced, superseded) are deliberately NOT evidence about the resolved
+    // one — say so, or the tool looks like it ignored the log.
+    if (otherInvoiceOutcomes.length && !chargeSuccess && !chargeFailure && !achInFlight) {
+      console.log(`  (${otherInvoiceOutcomes.length} terminal outcome(s) on this visit belong to a DIFFERENT invoice`);
+      console.log(`   and are not evidence about ${inv ? inv.id : 'the resolved invoice'} — see [OTHER INVOICE] above.)`);
+    }
+    const unresolvedLedger = invSettled ? [] : flaggedLedger;
+    if (invSettled && flaggedLedger.length) {
+      console.log(`  (${flaggedLedger.length} orphan/reconciliation flag(s) on this visit SELF-HEALED —`);
+      console.log(`   the webhook settled invoice ${inv.id} to '${invStatus}', so money and records agree.)`);
+    }
     if (unresolvedLedger.length) {
       console.log('  RECONCILE — this visit has an unresolved ledger problem, which outranks');
       console.log('  every other finding: a charge left money and records disagreeing.');
@@ -615,8 +663,24 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    if (chargeSuccess) {
-      console.log(`  ANSWERED: the card WAS charged (${chargeSuccess.event_type}, ${chargeSuccess.created_at.toISOString()}).`);
+    if (achInFlight) {
+      console.log(`  ANSWERED: an ACH debit was INITIATED (${achInFlight.created_at.toISOString()}), not a card charge.`);
+      console.log(`  The invoice rides '${invStatus || 'processing'}' until the webhook settles it, and the debit`);
+      console.log('  can still fail asynchronously — no card was used and no payment has settled yet.');
+      console.log('  The pay link is suppressed by design; the receipt delivers on settlement.');
+      console.log('  Re-run after the webhook lands to confirm the final outcome.');
+      process.exitCode = 0;
+      return;
+    }
+    if (chargeSuccess || durableChargeEvidence) {
+      if (chargeSuccess) {
+        console.log(`  ANSWERED: the card WAS charged (${chargeSuccess.event_type}, ${chargeSuccess.created_at.toISOString()}).`);
+      } else {
+        console.log(`  ANSWERED: the invoice is ${invStatus} with PaymentIntent ${inv.stripe_payment_intent_id}.`);
+        console.log('  No charge_success audit row exists, but that insert is best-effort and its failure');
+        console.log('  is swallowed AFTER the invoice is already paid — durable invoice state is the');
+        console.log('  stronger evidence here, so this counts as charged.');
+      }
       console.log('  The premise of the question does not hold for this visit.');
       const stale = findings.filter((f) => f.level === BLOCK);
       if (stale.length) {
