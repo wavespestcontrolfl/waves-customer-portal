@@ -26,7 +26,7 @@ const mockChainCalls = [];
 jest.mock('../models/db', () => {
   const makeChain = () => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'select', 'onConflict', 'ignore', 'returning']) {
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'select', 'onConflict', 'ignore', 'returning']) {
       chain[m] = jest.fn(() => { mockChainCalls.push(m); return chain; });
     }
     // select()/the builder itself resolves to the open-offer list

@@ -355,10 +355,17 @@ async function inspectionCreditMemoForInvoice(invoice) {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('inspectionCredit')) return '';
     if (!invoice?.customer_id) return '';
+    // A payer-billed invoice goes to a third party's AP inbox — never
+    // announce the homeowner's credit there (Codex #3175 r4 P1).
+    if (invoice.payer_id) return '';
+    // Scoped to THIS invoice's visit, not "the customer's earliest open
+    // offer": an unrelated service receipt, an old resend, or a second
+    // inspection would otherwise announce another inspection's terms.
+    const visitId = invoice.scheduled_service_id || null;
+    if (!visitId) return '';
     const offer = await db('inspection_credit_offers')
-      .where({ customer_id: invoice.customer_id, status: 'offered' })
+      .where({ source_scheduled_service_id: visitId, status: 'offered' })
       .where('expires_at', '>=', new Date())
-      .orderBy('expires_at', 'asc')
       .first('amount', 'expires_at');
     if (!offer) return '';
     const { inspectionCreditReceiptMemo } = require('./inspection-credit');

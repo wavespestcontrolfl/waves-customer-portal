@@ -333,25 +333,20 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
     // #3175 P0). A booking made inside the window still earns its credit
     // even if the fast path failed, cron was down, or the gate was off
     // until after the expiry date.
-    // Reversals first: a redeemed offer whose booking has since gone
-    // non-live must give the money back. Handled HERE rather than wired
-    // into each cancel/reschedule/no-show site — visits leave 'live' from
-    // many surfaces, and the previous round proved that per-site wiring is
-    // how a path gets missed.
-    const stale = await db('inspection_credit_offers')
-      .where({ status: 'redeemed' })
-      .whereNotNull('redeemed_scheduled_service_id')
+    // Reversals first, targeted by JOIN so the working set is only offers
+    // whose booking is ALREADY non-live (Codex #3175 r4 P0). Scanning the
+    // redeemed set blindly meant >500 still-live historical rows could
+    // starve a later cancellation forever.
+    const stale = await db('inspection_credit_offers as o')
+      .join('scheduled_services as s', 's.id', 'o.redeemed_scheduled_service_id')
+      .where('o.status', 'redeemed')
+      .whereIn('s.status', NON_LIVE_APPOINTMENT_STATUSES)
       .limit(limit)
-      .select('id', 'redeemed_scheduled_service_id');
+      .select('o.id as id', 'o.redeemed_scheduled_service_id as booking_id');
     for (const row of stale) {
       try {
-        const stillLive = await db('scheduled_services')
-          .where({ id: row.redeemed_scheduled_service_id })
-          .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
-          .first('id');
-        if (stillLive) continue;
         const rev = await reverseInspectionCreditForBooking({
-          scheduledServiceId: row.redeemed_scheduled_service_id,
+          scheduledServiceId: row.booking_id,
           createdBy: 'system:inspection_credit_sweep_reversal',
           now,
         });
@@ -359,6 +354,40 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       } catch (err) {
         logger.error(`[inspection-credit] sweep reversal failed for offer ${row.id}: ${err.message}`);
       }
+    }
+
+    // Closeout recovery (Codex #3175 r4 P0): recordInspectionCreditOffer is
+    // best-effort by contract — it must never fail a completion — so a
+    // transient DB failure would otherwise lose the promise permanently
+    // while the UI told the tech it was made. The completed inspection
+    // record IS the durable evidence, so re-derive any missing offer here.
+    // Bounded to recent completions: an old inspection whose window has
+    // long passed has nothing left to promise.
+    try {
+      const lookbackDays = DEFAULT_CREDIT_WINDOW_DAYS;
+      const since = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
+      const missing = await db('scheduled_services as s')
+        .join('services as c', 'c.id', 's.service_id')
+        .leftJoin('inspection_credit_offers as o', 'o.source_scheduled_service_id', 's.id')
+        .where('c.category', 'inspection')
+        .where('s.status', 'completed')
+        .where('s.updated_at', '>=', since)
+        .whereNull('o.id')
+        .limit(limit)
+        .select('s.id as id', 's.customer_id as customer_id', 'c.service_key as service_key', 's.updated_at as completed_at');
+      for (const visit of missing) {
+        // Frozen from the COMPLETION moment, not from now — the customer's
+        // window started when the inspection happened.
+        await recordInspectionCreditOffer({
+          customerId: visit.customer_id,
+          scheduledServiceId: visit.id,
+          serviceKey: visit.service_key,
+          createdBy: 'system:inspection_credit_recovery',
+          now: new Date(visit.completed_at || now),
+        });
+      }
+    } catch (err) {
+      logger.error(`[inspection-credit] closeout recovery failed: ${err.message}`);
     }
 
     // ONLY offers where a real booking surface already attempted redemption
@@ -486,10 +515,26 @@ async function reverseInspectionCreditForBooking({
         logger.info(`[inspection-credit] offer ${offer.id} reversed — booking ${scheduledServiceId} went non-live`);
       } catch (err) {
         if (err?.inspectionCreditSkip === 'claim_lost') continue;
-        // A balance already spent below the reversal amount throws in
-        // postCreditMovement (it refuses to go negative) — surface it for
-        // the office rather than silently leaving the credit.
+        // The credit is fungible: once spent on an invoice the balance can
+        // be below the reversal amount, and postCreditMovement refuses to
+        // go negative. That money cannot be clawed back automatically, so
+        // it becomes an OFFICE decision (collect or write off) rather than
+        // a log line nobody reads — the same posture as every other
+        // unreversible money event in this codebase (Codex #3175 r4 P0).
         logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
+        try {
+          await require('./notification-service').notifyAdmin(
+            'billing',
+            'Inspection credit could not be reversed',
+            `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
+            {
+              link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
+              metadata: { offerId: offer.id, scheduledServiceId, reason: 'credit_already_spent' },
+            },
+          );
+        } catch (notifyErr) {
+          logger.error(`[inspection-credit] reversal alert failed for offer ${offer.id}: ${notifyErr.message}`);
+        }
       }
     }
     return { reversed };
