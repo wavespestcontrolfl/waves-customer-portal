@@ -140,16 +140,24 @@ function renderInline(text, payload, { html = true } = {}) {
   if (!html) {
     return substituted.replace(/\u0000L(\d+)\u0000/g, (_m, i) => {
       const l = links[Number(i)];
-      return l ? `${l.label} (${l.href})` : '';
+      if (!l) return '';
+      const label = String(l.label).replace(VARIABLE_RE, (_x, key) => textFor(payload, key));
+      return `${label} (${l.href})`;
     });
   }
   const escaped = escapeHtml(substituted);
 
-  // 3. Put the anchors back. Labels are escaped; hrefs came from the template.
+  // 3. Put the anchors back. The LABEL still needs {{variable}} substitution —
+  //    it was lifted out before step 2, so an authored `[Hi {{first_name}}](…)`
+  //    would otherwise ship the literal token to a customer (codex #3167 P1).
+  //    Substituting here is safe: the result is escaped and inserted as anchor
+  //    TEXT, so a payload value cannot introduce markup and cannot open a new
+  //    link — the href is still template-derived and already validated.
   return escaped.replace(/\u0000L(\d+)\u0000/g, (_m, i) => {
     const l = links[Number(i)];
     if (!l) return '';
-    return `<a class="dm-link" href="${escapeHtml(l.href)}" target="_blank" rel="noopener" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(l.label)}</a>`;
+    const label = escapeHtml(String(l.label).replace(VARIABLE_RE, (_x, key) => textFor(payload, key)));
+    return `<a class="dm-link" href="${escapeHtml(l.href)}" target="_blank" rel="noopener" style="color:#0A7EC2;text-decoration:underline;">${label}</a>`;
   });
 }
 

@@ -128,9 +128,39 @@ describe('inline markdown links in blocks', () => {
     expect(out.text).toContain('[x](https://evil.example.com/a)');
   });
 
-  test('a variable inside an AUTHORED link label still resolves', () => {
-    const body = markup(render('Read [the {{url}} guide](https://www.wavespestcontrol.com/a/).').html);
+  test('a variable inside an AUTHORED link label resolves in BOTH parts', () => {
+    // The first version of this test only asserted the href, so it passed
+    // while the label shipped a literal {{url}} to the customer. Assert the
+    // rendered label text, not just the destination.
+    const out = render('Read [the {{url}} guide](https://www.wavespestcontrol.com/a/).');
+    const body = markup(out.html);
     expect(body).toContain('href="https://www.wavespestcontrol.com/a/"');
+    expect(body).toContain('the https://www.wavespestcontrol.com/x/ guide</a>');
+    expect(body).not.toContain('{{url}}');
+    expect(out.text).not.toContain('{{url}}');
+  });
+
+  test('a payload value used INSIDE a link label cannot inject markup', () => {
+    // The label is substituted then escaped, so a payload cannot open a tag
+    // or a second anchor from inside an authored link.
+    const template = {
+      id: 't1', template_key: 'test.labelinject', mode: 'service',
+      allowed_variables: ['name'], required_variables: [],
+      from_name: 'Waves Pest Control', from_email: 'contact@wavespestcontrol.com',
+    };
+    const version = {
+      id: 'v1', subject: 'S', preview_text: 'P',
+      blocks: [{ type: 'paragraph', content: 'Hi [{{name}}](https://www.wavespestcontrol.com/a/).' }],
+      text_body: '',
+    };
+    const out = EmailTemplates.renderTemplate({
+      template, version, payload: { name: '</a><script>alert(1)</script>' },
+    });
+    const body = markup(out.html);
+    expect(body).not.toContain('<script>');
+    expect(body).toContain('&lt;script&gt;');
+    // Exactly one anchor came from this block.
+    expect((body.match(/<a class="dm-link"/g) || []).length).toBe(1);
   });
 
   test('content without link syntax produces no block anchor', () => {
