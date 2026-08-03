@@ -245,6 +245,25 @@ describe('stampPerServiceManualDiscountSlices guards (direct)', () => {
     expect(JSON.stringify(services)).toBe(before);
   });
 
+  test.each([
+    ['a cadence credit with a one-time portion', { oneTimeAmount: 12 }],
+    ['a cadence credit with zero recurring amount', { amount: 0, recurringAmount: 0 }],
+    ['a cadence with no credit at all', null],
+  ])('bails without mutating when a combined cadence carries %s', (_label, rowOverride) => {
+    const services = sections();
+    const md = baseMd();
+    const before = JSON.stringify(services);
+    const p = {
+      manualDiscount: md,
+      frequencies: [
+        { key: 'quarterly', manualDiscount: { ...md } },
+        { key: 'monthly', manualDiscount: rowOverride ? { ...md, ...rowOverride } : null },
+      ],
+    };
+    expect(stampPerServiceManualDiscountSlices(services, p)).toBe(false);
+    expect(JSON.stringify(services)).toBe(before);
+  });
+
   test('bails when a cadence suppresses or caps the credit', () => {
     const services = sections();
     const md = baseMd();

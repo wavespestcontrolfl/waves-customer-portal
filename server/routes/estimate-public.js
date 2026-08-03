@@ -16036,8 +16036,14 @@ function stampPerServiceManualDiscountSlices(services = [], payload = {}) {
   const combinedOk = combinedRows.every((frequency) => {
     if (frequency?.manualDiscountSuppressed === true) return false;
     const row = frequency?.manualDiscount;
+    // Each cadence must carry a POSITIVE, recurring-only credit of the same
+    // percentage — a cadence whose credit is empty or partly one-time would
+    // let section rows itemize a recurring slice that cadence doesn't grant
+    // (codex hardening on #3183).
     return row && row.type === 'PERCENT' && Number(row.value) === pct
-      && row.capped !== true && !row.capReason && !row.floorBreach;
+      && row.capped !== true && !row.capReason && !row.floorBreach
+      && Number(row.recurringAmount ?? row.amount) > 0
+      && !(Number(row.oneTimeAmount) > 0);
   });
   if (!combinedOk) return false;
 
