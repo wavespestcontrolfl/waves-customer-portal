@@ -2244,33 +2244,75 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
 
   let confirmationEmailSent = null;
   if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+    // The subscriber row is re-verified and LOCKED through the provider
+    // call (Codex #3084 r51 — the same pending/token lock-through-send
+    // discipline as resendPendingConfirmation): subscribeOrResubscribe
+    // pre-stamps confirmation_sent_at in its own committed statement, so a
+    // one-click/admin unsubscribe could otherwise commit in the gap and
+    // still be mailed the confirmation. Under the row lock the unsubscribe
+    // queues and lands strictly after the send decision. A refused
+    // re-verify skips the send: the row is no longer OUR pending payload
+    // (unsubscribed, or rotated — the rotation's own callback owns its
+    // delivery), and the conditional stamp-clear below no-ops for the same
+    // reason. A commit error AFTER a successful send is harmless — the
+    // transaction held only the row lock, and the pre-stamp is already
+    // durable.
+    let sendRefused = false;
     try {
-      await sendConfirmationEmail(result.subscriber);
-      confirmationEmailSent = true;
+      await db.transaction(async (trx) => {
+        const liveSubscriber = await trx('newsletter_subscribers')
+          .where({
+            id: result.subscriber.id,
+            confirmation_token: result.subscriber.confirmation_token,
+            status: 'pending',
+          })
+          .whereRaw('LOWER(email) = ?', [String(result.subscriber.email || emailLc).trim().toLowerCase()])
+          .forUpdate()
+          .first('id');
+        if (!liveSubscriber) {
+          sendRefused = true;
+          return;
+        }
+        await sendConfirmationEmail(result.subscriber);
+        confirmationEmailSent = true;
+      });
+      if (sendRefused) {
+        logger.info(`[call-proc] Newsletter confirmation skipped for customer ${customerId}: subscriber no longer pending at the locked re-verify`);
+        confirmationEmailSent = false;
+      }
     } catch (e) {
-      logger.warn(`[call-proc] Newsletter confirmation email failed for customer ${customerId}`);
-      confirmationEmailSent = false;
-      // subscribeOrResubscribe stamps confirmation_sent_at BEFORE the send —
-      // clear it on failure so retry paths (the first-touch-resume DOI
-      // dedupe guard, the stale-pending sweep) never read the pre-send
-      // stamp as delivery (Codex #3084 r13). Scoped to the ATTEMPTED
-      // email/token/status (Codex #3084 r27): a correction rotating the
-      // subscriber mid-send pre-stamps its OWN DOI, and an id-only clear
-      // would null the rotated token's timestamp — making the newer mailed
-      // token permanent (no expiry, purge-exempt). Zero rows = rotated →
-      // the rotation's own callback owns its stamp.
-      if (result.subscriber?.id) {
-        try {
-          await db('newsletter_subscribers')
-            .where({
-              id: result.subscriber.id,
-              confirmation_token: result.subscriber.confirmation_token,
-              status: 'pending',
-            })
-            .whereRaw('LOWER(email) = ?', [String(result.subscriber.email || emailLc).trim().toLowerCase()])
-            .update({ confirmation_sent_at: null, updated_at: new Date() });
-        } catch (clearErr) {
-          logger.warn(`[call-proc] confirmation_sent_at clear failed for subscriber ${result.subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
+      if (confirmationEmailSent === true) {
+        // The provider accepted the message and only the (write-free)
+        // transaction commit failed — the DOI is out and the pre-stamp is
+        // durable; do NOT clear it or the retry double-mails.
+        logger.warn(`[call-proc] newsletter send transaction commit errored after the send for customer ${customerId}: ${e.code || e.name || 'db_error'} — pre-stamp stands`);
+        e = null;
+      }
+      if (e) {
+        logger.warn(`[call-proc] Newsletter confirmation email failed for customer ${customerId}`);
+        confirmationEmailSent = false;
+        // subscribeOrResubscribe stamps confirmation_sent_at BEFORE the send —
+        // clear it on failure so retry paths (the first-touch-resume DOI
+        // dedupe guard, the stale-pending sweep) never read the pre-send
+        // stamp as delivery (Codex #3084 r13). Scoped to the ATTEMPTED
+        // email/token/status (Codex #3084 r27): a correction rotating the
+        // subscriber mid-send pre-stamps its OWN DOI, and an id-only clear
+        // would null the rotated token's timestamp — making the newer mailed
+        // token permanent (no expiry, purge-exempt). Zero rows = rotated →
+        // the rotation's own callback owns its stamp.
+        if (result.subscriber?.id) {
+          try {
+            await db('newsletter_subscribers')
+              .where({
+                id: result.subscriber.id,
+                confirmation_token: result.subscriber.confirmation_token,
+                status: 'pending',
+              })
+              .whereRaw('LOWER(email) = ?', [String(result.subscriber.email || emailLc).trim().toLowerCase()])
+              .update({ confirmation_sent_at: null, updated_at: new Date() });
+          } catch (clearErr) {
+            logger.warn(`[call-proc] confirmation_sent_at clear failed for subscriber ${result.subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
+          }
         }
       }
     }
@@ -9993,11 +10035,32 @@ const CallRecordingProcessor = {
             // correction (corrected_at, the r39 marker), and no updated_at
             // bump (the r12 rule — never extend a possibly-dead claimant's
             // stale window; the repen below owns lease invalidation).
-            await db('first_touch_holds')
-              .where({ call_log_id: call.id })
-              .whereIn('status', ['pending', 'releasing'])
-              .whereNull('corrected_at')
-              .update({ held_email: extracted.email || '' });
+            // Token-fenced like recordFirstTouchHoldOwned (Codex #3084
+            // r51): a worker stalled past the reclaim window must not
+            // overwrite the reclaiming peer's held target with its stale
+            // extraction. Same r46 lock order — hold rows first, then the
+            // token-conditioned call_log lock; a lost claim skips the
+            // retarget (the owner's own run records its target).
+            await db.transaction(async (trx) => {
+              await trx('first_touch_holds')
+                .where({ call_log_id: call.id })
+                .forUpdate()
+                .select('id');
+              const ownedForRetarget = await trx('call_log')
+                .where({ id: call.id })
+                .where('processing_token', procToken)
+                .forUpdate()
+                .first('id');
+              if (!ownedForRetarget) {
+                logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — skipping the recovery retarget (the owner records it)`);
+                return;
+              }
+              await trx('first_touch_holds')
+                .where({ call_log_id: call.id })
+                .whereIn('status', ['pending', 'releasing'])
+                .whereNull('corrected_at')
+                .update({ held_email: extracted.email || '' });
+            });
             // The recovery card is a live review too — invalidate any
             // in-flight release claim for the call (Codex #3084 r43). A
             // failure throws (r44) and the catch below fails the run.
