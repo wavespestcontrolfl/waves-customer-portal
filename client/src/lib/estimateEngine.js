@@ -1680,6 +1680,10 @@ export function calculateEstimate(inputs) {
     // resolution reads one shape everywhere.
     pestProgramFloorArmed: PEST_BASE.enforceFloorPostDiscount === true,
     pestProgramFloorPerVisit: PEST_BASE.floorPerVisit,
+    // The base this quote priced from (pest_base.base, DB-synced). The save
+    // gate fails closed on a mismatch — a stale bundle must not persist
+    // yesterday's base after a pricing change (codex #3182 r2 P1).
+    pestBasePerVisit: PEST_BASE.basePerVisit,
   };
   const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
   const addRoutingWarning = warning => {

@@ -71,7 +71,7 @@ exports.up = async function (knex) {
     if (!existing) {
       await knex('pricing_changelog').insert({
         ...CHANGELOG_IDENTITY,
-        affected_services: JSON.stringify(['pest_control']),
+        affected_services: JSON.stringify(['pest_control', 'one_time_pest', 'waveguard_bundle_totals']),
         before_value: JSON.stringify({ pest_base: OLD_BASE }),
         after_value: JSON.stringify({ pest_base: NEW_BASE }),
         rationale:

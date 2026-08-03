@@ -18,7 +18,10 @@ const {
   monthlyForRecurringParts,
   pestFloorMonthlyLift,
 } = require('../routes/estimate-public');
-const { normalizeClientPestFloorMetadata } = require('../services/admin-estimate-persistence');
+const {
+  normalizeClientPestFloorMetadata,
+  assertLivePestBaseForClientPayload,
+} = require('../services/admin-estimate-persistence');
 
 const ORIGINAL_PEST_BASE = constants.PEST.base;
 const ORIGINAL_PEST_FLOOR = constants.PEST.floor;
@@ -656,5 +659,71 @@ describe('normalizeClientPestFloorMetadata — legacy no-flag payloads stay unto
     expect(estData.result.recurring.savings).toBe(457.80);
     expect(estData.result.recurring.annualAfterDiscount).toBe(2187.20);
     expect(estData.result.recurring.pestProgramFloorApplied).toBe(true);
+  });
+});
+
+describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save (codex #3182 r2 P1)', () => {
+  // The client fallback stamps the base it priced from
+  // (pricingMetadata.pestBasePerVisit, DB-synced since #3182). A flagged
+  // client-engine pest payload whose stamp is absent or differs from the
+  // live PEST.base must fail the save closed — the fallback path has no
+  // server recompute to correct it.
+  function clientEnginePestPayload({ stamp, includePest = true } = {}) {
+    const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89 };
+    if (stamp !== undefined) pricingMetadata.pestBasePerVisit = stamp;
+    return {
+      result: {
+        recurring: { discount: 0, pestProgramFloorApplied: false },
+        pricingMetadata,
+        results: includePest
+          ? {
+            pestTiers: [{ pa: 112, apps: 4, ann: 448, mo: 37.33, label: 'Quarterly' }],
+            pest: { pa: 112, apps: 4, ann: 448, mo: 37.33, label: 'Quarterly' },
+          }
+          : { lawn: [{ v: 9, pa: 60 }] },
+      },
+    };
+  }
+
+  test('a stamp matching the live base saves cleanly', () => {
+    constants.PEST.base = 112;
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 }))).not.toThrow();
+  });
+
+  test('a stale-bundle stamp (old 117 base) fails the save closed with the regenerate 409', () => {
+    constants.PEST.base = 112;
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 117 })))
+      .toThrow(/regenerate the estimate/);
+  });
+
+  test('an ABSENT stamp is a stale pre-#3182 bundle — rejected, never waved through', () => {
+    constants.PEST.base = 112;
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({})))
+      .toThrow(/regenerate the estimate/);
+  });
+
+  test('an admin-tuned live base rejects the kill-value 112 from a client whose config fetch failed', () => {
+    constants.PEST.base = 120; // admin-tuned away from the in-code default
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 120 }))).not.toThrow();
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 })))
+      .toThrow(/regenerate the estimate/);
+  });
+
+  test('client payloads without pest rows are untouched (no stamp required)', () => {
+    constants.PEST.base = 112;
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ includePest: false }))).not.toThrow();
+  });
+
+  test('server-shaped payloads (no client-engine marker) are untouched', () => {
+    constants.PEST.base = 112;
+    const serverShaped = {
+      result: {
+        results: {
+          pestTiers: [{ pa: 117, apps: 4, ann: 468, mo: 39, label: 'Quarterly', pricingVersion: 'v2' }],
+          pest: { pa: 117, apps: 4, ann: 468, mo: 39, label: 'Quarterly', pricingVersion: 'v2' },
+        },
+      },
+    };
+    expect(() => assertLivePestBaseForClientPayload(serverShaped)).not.toThrow();
   });
 });

@@ -856,6 +856,40 @@ function assertLiveTermiteRentalRates(estimateData, { liveConfigVerified = false
   }
 }
 
+// A stale client bundle prices pest from its baked base (the mirror
+// hardcoded $117 until #3182, DB-synced since), and the fallback save path
+// has no replayable engineRequest — persistence would keep that price under
+// CLIENT_FALLBACK authority. The unconditional syncConstantsFromDB above has
+// refreshed the live constants; require a client-engine pest payload to have
+// priced from the live pest_base.base and fail the save closed otherwise.
+// An ABSENT stamp IS a stale bundle (pre-#3182 clients never stamped it),
+// never a pass (codex #3182 r2 P1). Server-shaped payloads are untouched
+// (their totals are server-recomputed); legacy pre-flag payloads keep the
+// floor machinery's untouched posture — they also predate the fallback flag
+// entirely.
+function assertLivePestBaseForClientPayload(estimateData) {
+  const root = estimateResultRoot(estimateData);
+  const results = root?.results;
+  if (!results || typeof results !== 'object') return;
+  const hasPestRows = (Array.isArray(results.pestTiers) && results.pestTiers.length > 0)
+    || (results.pest && typeof results.pest === 'object');
+  if (!hasPestRows) return;
+  const recurring = root.recurring && typeof root.recurring === 'object' ? root.recurring : null;
+  const isClientEngineResult = !!recurring
+    && Object.prototype.hasOwnProperty.call(recurring, 'pestProgramFloorApplied');
+  if (!isClientEngineResult) return;
+  const liveBase = Math.round(Number(pricingEngine.constants.PEST.base));
+  if (!(liveBase > 0)) {
+    // Same unverifiable-config posture as the rental assert: an unusable
+    // live base proves nothing about the stamp — never wave the save through.
+    throw errorWithStatus('Live pest pricing could not be verified — try the save again in a moment.', 422);
+  }
+  const stamped = Number(root?.pricingMetadata?.pestBasePerVisit);
+  if (!Number.isFinite(stamped) || Math.abs(stamped - liveBase) > 0.005) {
+    throw errorWithStatus('Pest pricing has changed since this quote was generated — regenerate the estimate to price at the live base.', 409);
+  }
+}
+
 // Client-priced saves can't server-recompute (the legacy builder ships no
 // replayable engineRequest), so a stale client bundle could persist
 // yesterday's bond rates after an admin edits pricing_config.termite_bond
@@ -944,6 +978,7 @@ async function resolveEstimateWritePayload({
     logger.warn(`[admin-estimate] pricing-config sync before floor normalize failed: ${err.message}`);
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
+  assertLivePestBaseForClientPayload(trustedEstimateData);
   assertNoDarkTermiteBondPayload(trustedEstimateData);
   assertNoDarkTermiteRentalPayload(trustedEstimateData);
   assertLiveTermiteBondRates(trustedEstimateData);
@@ -1456,6 +1491,7 @@ async function reviseAdminEstimate({
 }
 
 module.exports = {
+  assertLivePestBaseForClientPayload,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,
