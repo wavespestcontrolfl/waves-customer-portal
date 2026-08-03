@@ -67,8 +67,13 @@ function fmtPhone(phone) {
   return String(phone || '').trim();
 }
 
+// Canonical completion choices (completion-defaults-resolver.js
+// CUSTOMER_INTERACTION_CHOICES) plus the legacy values still on older records.
 const INTERACTION_LABELS = {
   tech_home_spoke_with_them: 'Spoke with someone at the home',
+  not_home_full_access: 'Not home — full access to the service areas',
+  not_home_partial_access: 'Not home — partial access to the service areas',
+  customer_specific_concern: 'Spoke with someone about a specific concern',
   tech_home_no_answer: 'Home — no answer at the door',
   tech_not_home: 'Customer not home during service',
   left_note: 'Left a note for the customer',
@@ -86,7 +91,9 @@ function zoneNames(app, zones) {
   const byId = new Map((zones || []).map((zone) => [String(zone.id), zone]));
   const ids = Array.isArray(app.zone_ids) ? app.zone_ids : [];
   const names = ids.map((id) => byId.get(String(id))?.label).filter(Boolean);
-  if (!names.length) return 'Treated service areas';
+  // A legacy/manual application can carry only applicationArea — it's then the
+  // ONLY record of where the product went, so it beats a generic phrase.
+  if (!names.length) return app.applicationArea || 'Treated area recorded';
   if (zones && zones.length > 1 && names.length === zones.length) return 'Whole property';
   return names.join(', ');
 }
@@ -134,14 +141,49 @@ export default function ServiceReportDocument({ data, token }) {
   const findings = Array.isArray(typed?.findings) ? typed.findings.filter((f) => (f.customerValueLabel ?? f.value) != null && String(f.customerValueLabel ?? f.value).trim() !== '') : [];
   const activity = data.activity || null;
   const reentry = data.dynamicContext?.reentry || null;
+  // Older records store the aliases the web report's conditionRows accepts
+  // (temp / humidity / wind / cloudCover) — normalize before deciding the
+  // visit recorded nothing.
   const rawConditions = data.conditions || null;
-  const conditions = rawConditions
-    && [rawConditions.temp_f, rawConditions.humidity_pct, rawConditions.wind_mph, rawConditions.rain_24h_in, rawConditions.sky]
-      .some((value) => value != null && value !== '')
-    ? rawConditions : null;
+  const normalizedConditions = rawConditions ? {
+    temp_f: rawConditions.temp_f ?? rawConditions.temp,
+    humidity_pct: rawConditions.humidity_pct ?? rawConditions.humidity,
+    wind_mph: rawConditions.wind_mph ?? rawConditions.wind,
+    rain_24h_in: rawConditions.rain_24h_in,
+    sky: rawConditions.sky ?? rawConditions.cloudCover,
+  } : null;
+  const conditions = normalizedConditions
+    && Object.values(normalizedConditions).some((value) => value != null && value !== '')
+    ? normalizedConditions : null;
   const applications = Array.isArray(data.applications) ? data.applications : [];
-  const photos = (data.photos || []).filter((photo) => photo && photo.url);
+  // Lawn-assessment photos fall back to raw per-photo vision `observations`
+  // as their caption (report-data.js). The lawn V2 path deliberately drops
+  // those blurbs — they over-diagnose — in favour of ONE consolidated,
+  // guarded summary, so the document must not print them either (codex P1).
+  const suppressPhotoCaption = (photo) => Boolean(data.reportV2) && String(photo.id || '').startsWith('lawn-');
+  const galleryPhotos = (data.photos || []).filter((photo) => photo && photo.url);
+  // Approved visual service moments live outside data.photos; the previous
+  // PDF rendered them as Service Highlights, so keep them in the artifact.
+  const momentPhotos = (data.proofMoments || data.visualServiceMoments || [])
+    .filter((moment) => moment && moment.mediaUrl && moment.mediaType !== 'video')
+    .map((moment) => ({
+      id: `moment-${moment.id}`,
+      url: moment.mediaUrl,
+      caption: moment.customerCaption || moment.tagLabel || 'Service highlight',
+      isMoment: true,
+    }));
+  // The turf-height gauge shot is pulled from data.photos only when lawn V2
+  // surfaced it in the mowing module — carry it back in with its own label.
+  const gaugePhoto = data.mowingHeight?.photoUrl
+    ? [{ id: 'mowing-gauge', url: data.mowingHeight.photoUrl, caption: 'Turf height measured at this visit', isMoment: true }]
+    : [];
+  const photos = [...galleryPhotos, ...momentPhotos, ...gaugePhoto];
   const tracedMapUrl = data.treatmentMap?.traced?.snapshotUrl || null;
+  // buildReportV1Data ALWAYS builds mapSvg, even for an inspection-only or
+  // station-check-only visit where the SVG carries no treatment layer.
+  // Heading it "Where we treated" would be a false treatment claim in a
+  // permanent record (codex P1), so the schematic renders only when
+  // something was actually applied. A traced map always implies treatment.
   // The generated map is a self-contained SVG (own <style> + xmlns), so it
   // renders identically as an <img> data URI — and an <img> cannot execute
   // script or fetch anything, so no markup from the payload is ever injected
@@ -164,6 +206,41 @@ export default function ServiceReportDocument({ data, token }) {
   const summaryBody = result?.body || data.summary || data.dynamicContext?.aiSummary?.body || '';
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
 
+  // V2 payloads carry the PRINCIPAL result for their service lines — the
+  // status/insights the live report leads with. Reading only typedReport
+  // dropped them from the PDF entirely (codex P1 ×3). These are governed,
+  // confidence-gated customer fields, so the document renders their text.
+  const pestV2 = data.pestReportV2 || null;
+  const mosquitoV2 = data.mosquitoReportV2 || null;
+  // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
+  const v2 = data.reportV2 || null;
+
+  const v2StatusLine = (() => {
+    if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
+    if (mosquitoV2?.status?.label) return { label: 'Yard usability', value: mosquitoV2.status.label, detail: mosquitoV2.statusSummary };
+    if (v2?.snapshot?.statusHeadline) {
+      return {
+        label: 'Overall',
+        value: v2.snapshot.statusHeadline,
+        detail: v2.snapshot.rootCause || v2.snapshot.scoreExplanation,
+        score: v2.snapshot.overallScore,
+      };
+    }
+    return null;
+  })();
+
+  // insights are already confidence-gated by the V2 builders; diagnosis rows
+  // carry the per-category customer explanation.
+  const v2Insights = (Array.isArray(v2?.insights) ? v2.insights : [])
+    .filter((insight) => insight && (insight.headline || insight.whatWeSaw));
+  const v2Diagnosis = (Array.isArray(v2?.diagnosis) ? v2.diagnosis : [])
+    .filter((row) => row && row.customerExplanation);
+  const pestBugFiles = (Array.isArray(pestV2?.bugFiles) ? pestV2.bugFiles : [])
+    .filter((bug) => bug && (bug.suspectLabel || bug.whatWeDid));
+  const v2NextMove = pestV2?.primaryMove?.customerText || pestV2?.primaryMove?.text
+    || mosquitoV2?.primaryMove?.customerText || mosquitoV2?.primaryMove?.text || null;
+
+
   const recommendations = [];
   const pushRec = (text) => {
     const t = String(text || '').trim();
@@ -174,14 +251,19 @@ export default function ServiceReportDocument({ data, token }) {
     // chips restate nextStep in shorthand — only add ones that say something new
     if (!recommendations.some((r) => r.toLowerCase().includes(String(chip).toLowerCase()))) pushRec(chip);
   });
-  (data.recommendations || []).forEach((rec) => pushRec(rec?.text || rec));
-  (data.protocol?.recommendations || []).forEach((rec) => pushRec(rec?.text || rec));
+  // ⛔ data.recommendations / data.protocol.recommendations are NOT rendered.
+  // buildProtocolPayload folds raw `[next]`-tagged technician_notes lines into
+  // both (report-data.js taggedNoteLines), and AGENTS.md is explicit: raw
+  // technician_notes never egress on any report path — parser-approved copy
+  // only. The web report renders neither array; the PDF must not either.
   // Lawn visits carry their guidance in the assessment + V2 aftercare
   // instead of typedReport — same section, same voice.
   const assessRecs = data.lawnAssessment?.recommendations?.recommendations;
   (Array.isArray(assessRecs) ? [...assessRecs].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)) : [])
     .forEach((rec) => pushRec(rec?.action || rec?.text || rec));
   pushRec(data.reportV2?.aftercare?.watering);
+  pushRec(v2NextMove);
+  pushRec(v2?.mowing?.recommendation);
 
   // "(3 of 5 — baseline recorded today)" / "(3 of 5)" / " — baseline
   // recorded today" / "" depending on what the visit actually recorded.
@@ -202,7 +284,12 @@ export default function ServiceReportDocument({ data, token }) {
   const companions = (Array.isArray(data.companionReports) ? data.companionReports : [])
     .filter((companion) => companion && !companion.internalOnly);
 
-  const lawnObservations = String(data.lawnAssessment?.observations || '').trim() || null;
+  // When reportV2 exists the live report renders LawnReportV2Section INSTEAD of
+  // LawnAssessmentCard, so the raw assessment paragraph would duplicate the
+  // governed diagnosis/insights above. Legacy (no V2) reports still show it.
+  const lawnObservations = data.reportV2
+    ? null
+    : (String(data.lawnAssessment?.observations || '').trim() || null);
   const mowing = data.mowingHeight || null;
   const interaction = INTERACTION_LABELS[data.customerInteraction] || null;
 
@@ -303,9 +390,32 @@ export default function ServiceReportDocument({ data, token }) {
         )}
 
         {/* Findings */}
-        {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations || mowing) && (
+        {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations
+          || mowing || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0) && (
           <div className="doc-keep">
             <SectionHeader>What we found</SectionHeader>
+            {v2StatusLine && (
+              <Bullet>
+                <strong>{v2StatusLine.label}:</strong> {v2StatusLine.value}
+                {v2StatusLine.score != null ? ` (${v2StatusLine.score}/100)` : ''}
+                {v2StatusLine.detail ? ` — ${v2StatusLine.detail}` : ''}
+              </Bullet>
+            )}
+            {v2Diagnosis.map((row) => (
+              <Bullet key={row.key || row.label}>
+                <strong>{row.label}{row.score != null ? ` (${row.score})` : ''}:</strong> {row.customerExplanation}
+              </Bullet>
+            ))}
+            {v2Insights.map((insight, i) => (
+              <Bullet key={insight.category ? `${insight.category}-${i}` : i}>
+                <strong>{insight.headline}{insight.headline ? ':' : ''}</strong> {[insight.whatWeSaw, insight.whyItMatters, insight.wavesAction].filter(Boolean).join(' ')}
+              </Bullet>
+            ))}
+            {pestBugFiles.map((bug, i) => (
+              <Bullet key={bug.pestKey || i}>
+                <strong>{bug.suspectLabel}{bug.suspectLabel ? ':' : ''}</strong> {[bug.whyItMatters, bug.whatWeDid].filter(Boolean).join(' ')}
+              </Bullet>
+            ))}
             {lawnObservations && <Bullet>{lawnObservations}</Bullet>}
             {mowing && mowing.heightIn != null && (
               <Bullet>
@@ -404,6 +514,12 @@ export default function ServiceReportDocument({ data, token }) {
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].filter(Boolean).join(' ')}</div>
                             )}
+                            {/* Legacy lawn reports (no reportV2) carry approved
+                                watering-in guidance ONLY here — dropping it
+                                loses a required instruction. */}
+                            {product.irrigation_notes && (
+                              <div><strong style={{ color: INK, fontWeight: 600 }}>Watering in:</strong> {product.irrigation_notes}</div>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -418,7 +534,7 @@ export default function ServiceReportDocument({ data, token }) {
             (Waves-stored image), else the generated zone schematic. The
             satellite basemap never prints (provider ToS — long-standing
             rule), which these two Waves-owned renderings don't involve. */}
-        {(tracedMapUrl || schematicSrc) && (
+        {(tracedMapUrl || (schematicSrc && applications.length > 0)) && (
           <div className="doc-keep">
             <SectionHeader>Where we treated</SectionHeader>
             <div className="doc-map-frame" style={{ border: `1px solid ${HAIR}`, borderRadius: 6, overflow: 'hidden' }}>
@@ -474,6 +590,12 @@ export default function ServiceReportDocument({ data, token }) {
         {photos.length > 0 && (
           <div>
             <SectionHeader>Service photos</SectionHeader>
+            {/* ONE consolidated, guarded summary — the V2 rule for photo copy. */}
+            {(data.reportV2?.photoSummary || data.typedReport?.photoSummary) && (
+              <p style={{ margin: '0 0 8px', fontSize: 11, lineHeight: 1.5, color: INK }}>
+                {data.reportV2?.photoSummary || data.typedReport?.photoSummary}
+              </p>
+            )}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
               {photos.map((photo) => (
                 <figure key={photo.id || photo.url} className="doc-keep" style={{ margin: 0 }}>
@@ -485,7 +607,7 @@ export default function ServiceReportDocument({ data, token }) {
                     alt={photo.caption || 'Service photo'}
                     style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 4, border: `1px solid ${HAIR}` }}
                   />
-                  {(photo.caption || photo.stateBadge) && (
+                  {!suppressPhotoCaption(photo) && (photo.caption || photo.stateBadge) && (
                     <figcaption style={{ fontSize: 9.5, color: MUTED, lineHeight: 1.45, marginTop: 3 }}>
                       {photo.caption || photo.stateBadge}
                     </figcaption>
@@ -535,6 +657,8 @@ export default function ServiceReportDocument({ data, token }) {
                 over only a hidden photo must not over-claim (the web
                 report's guard; dropping half of it was a codex P1). */}
             {data.photoChain?.valid === true && photos.length > 0 && photos.every((photo) => photo?.hashSha256)
+              /* moments + the gauge shot carry no hash, so displaying one
+                 correctly defeats the claim rather than over-claiming */
               ? ' Photos hash-chained and tamper-evident.' : ''}
             <br />
             Waves Pest Control, LLC · Family-owned pest control and lawn care in Southwest Florida · Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}

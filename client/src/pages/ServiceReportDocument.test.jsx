@@ -168,6 +168,89 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(none.container.textContent).not.toMatch(claim);
   });
 
+  it('never egresses raw technician notes via the recommendations arrays', () => {
+    // buildProtocolPayload folds raw [next]-tagged technician_notes into both
+    // arrays; AGENTS.md forbids raw notes on any report path.
+    const leak = 'Gate code 4417, bill the office not the tenant';
+    const data = { ...BASE_DATA, recommendations: [leak], protocol: { recommendations: [leak] } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain(leak);
+    expect(container.textContent).not.toContain('Gate code');
+  });
+
+  it('does not claim treatment areas on a visit with no applications', () => {
+    // the server always builds mapSvg, even for inspection-only visits
+    const data = { ...BASE_DATA, applications: [], mapSvg: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>' };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('Where we treated');
+    expect(container.querySelector('img[src^="data:image/svg+xml"]')).toBeNull();
+  });
+
+  it('renders the governed V2 result instead of dropping it', () => {
+    const data = {
+      ...BASE_DATA,
+      typedReport: null,
+      pestReportV2: {
+        status: { label: 'Protected' },
+        statusSummary: 'No activity found at the monitored points.',
+        bugFiles: [{ pestKey: 'german_roach', suspectLabel: 'German roach', whyItMatters: 'Tied to interior moisture.', whatWeDid: 'Placed monitors.' }],
+      },
+    };
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/Protected/)).toBeInTheDocument();
+    expect(screen.getByText(/Tied to interior moisture/)).toBeInTheDocument();
+  });
+
+  it('renders governed lawn V2 insights and never the raw per-photo blurbs', () => {
+    const rawBlurb = 'Possible take-all root rot with severe decline visible';
+    const data = {
+      ...BASE_DATA,
+      reportV2: {
+        snapshot: { overallScore: 86, statusHeadline: 'St. Augustine lawn looking strong' },
+        insights: [{ category: 'water', headline: 'A wet week to keep in mind', whatWeSaw: 'Rain totaled 2.43 inches.' }],
+        photoSummary: 'Turf is dense across the yard.',
+      },
+      photos: [{ id: 'lawn-9', url: 'https://cdn.example.com/lawn.jpg', caption: rawBlurb }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/St\. Augustine lawn looking strong/)).toBeInTheDocument();
+    expect(screen.getByText(/A wet week to keep in mind/)).toBeInTheDocument();
+    expect(screen.getByText(/Turf is dense across the yard/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain(rawBlurb);
+  });
+
+  it('keeps approved visual moments and the turf-height gauge photo', () => {
+    const data = {
+      ...BASE_DATA,
+      photos: [],
+      proofMoments: [{ id: 'm1', mediaUrl: 'https://cdn.example.com/moment.jpg', mediaType: 'image', customerCaption: 'Entry point sealed' }],
+      mowingHeight: { heightIn: 3.5, photoUrl: 'https://cdn.example.com/gauge.jpg' },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.querySelector('img[src="https://cdn.example.com/moment.jpg"]')).toBeTruthy();
+    expect(container.querySelector('img[src="https://cdn.example.com/gauge.jpg"]')).toBeTruthy();
+    // unchained media displayed -> the tamper-evidence claim must not appear
+    expect(container.textContent).not.toMatch(/hash-chained/);
+  });
+
+  it('reads legacy weather aliases and canonical interaction outcomes', () => {
+    const data = {
+      ...BASE_DATA,
+      conditions: { temp: 79, humidity: 64, wind: 4, cloudCover: 'Partly cloudy' },
+      customerInteraction: 'not_home_partial_access',
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('Not recorded for this visit.');
+    expect(screen.getByText('79 °F')).toBeInTheDocument();
+    expect(screen.getByText(/Not home — partial access/)).toBeInTheDocument();
+  });
+
+  it('keeps a recorded application area when the app has no zones', () => {
+    const app = { ...BASE_DATA.applications[0], zone_ids: [], applicationArea: 'Attic and soffit line' };
+    render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="tok123" />);
+    expect(screen.getByText('Attic and soffit line')).toBeInTheDocument();
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();
