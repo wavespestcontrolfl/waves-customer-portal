@@ -200,38 +200,44 @@ function interactionLabel(value) {
 // channels closed, so it is enforced at the render site rather than per
 // field: any string asserting a clock time or a duration is replaced with
 // the approved once-dry idiom instead of being printed.
-// Spelled-out numbers must be exhaustive, not a sample: "keep clear for five
-// hours" is exactly as much a fixed re-entry figure as "2 hours", and these
-// catalog fields are unconstrained free text (codex P1 — the earlier list
-// stopped at "four"). Covers digits, decimals, ones/teens/tens, hyphenated
-// compounds ("twenty-four"), and the indefinite/half forms.
+// What the rule bans is a fixed figure attached to a RE-ENTRY or DRYING
+// claim — not every number and not every duration. "Irrigate within 14 days"
+// and "water in with 0.25 inches" are label-required agronomic directions
+// that must survive, and they carry time units too. So the test is BOTH: a
+// time figure AND a re-entry/drying claim in the same sentence.
 const REENTRY_NUMBER_WORDS = 'a|an|one|two|three|four|five|six|seven|eight|nine|ten'
   + '|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen'
   + '|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|half|several';
-// ANY quantity — a digit anywhere, or a spelled-out number as its own word.
-const REENTRY_QUANTITY_RX = new RegExp(`\\d|\\b(${REENTRY_NUMBER_WORDS})\\b`, 'i');
+// a clock time (7 PM / 7:03 PM) or a quantity attached to a time unit
+const REENTRY_TIME_RX = new RegExp(
+  '\\b\\d{1,2}(:\\d{2})?\\s*(a\\.?m\\.?|p\\.?m\\.?)\\b'
+  + `|\\b(\\d+(\\.\\d+)?|(${REENTRY_NUMBER_WORDS})([\\s-](${REENTRY_NUMBER_WORDS}))?)`
+  + '[\\s-]*(second|sec|minute|min|hour|hr|day|week)s?\\b',
+  'i',
+);
+// ...and the sentence must actually make a re-entry / drying claim. This
+// vocabulary is exhaustive on purpose: two earlier attempts failed at the
+// extremes (a phrasing blocklist kept missing wordings; an any-quantity
+// allowlist erased agronomic instructions).
+const REENTRY_CLAIM_RX = new RegExp(
+  '\\b(re-?enter|re-?entry|reentry|entry|ready|dry|dries|dried|drying|safe'
+  + '|keep\\s+(\\w+\\s+){0,3}(off|out|away|clear)'
+  + '|stay\\s+(off|out|away)'
+  + '|off\\s+(the\\s+)?treated)\\b',
+  'i',
+);
 const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 
-// ALLOWLIST, not a blocklist. Three rounds of widening a pattern
-// ("about 1 hour" → "five hours" → "Dry time is 2 hours" / "Ready at 7 PM")
-// showed that matching every way free text can state a time is unwinnable,
-// and each miss publishes a fixed re-entry figure. So: in RE-ENTRY fields
-// specifically, a sentence survives only if it states no quantity at all.
-// Placement and handling copy ("Placed in cracks, voids... do not disturb",
-// "until sprays have dried") carries no number and passes through; anything
-// numeric is replaced by the governed once-dry line.
-//
-// Scope matters: this runs ONLY on re-entry fields. Agronomic guidance
-// ("wait twenty-four hours before mowing") lives in aftercare.watering and
-// the recommendations list, which are never sanitized — the ban is on fixed
-// re-entry/drying figures, not on mowing or watering windows.
+// Sanitizes per SENTENCE so one offending clause never costs the rest of a
+// label's instructions. Runs ONLY on re-entry fields; agronomic guidance in
+// aftercare.watering and the recommendations list is never touched.
 function sanitizeReentryCopy(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
   let replaced = false;
   const kept = sentences.filter((sentence) => {
-    if (REENTRY_QUANTITY_RX.test(sentence)) {
+    if (REENTRY_TIME_RX.test(sentence) && REENTRY_CLAIM_RX.test(sentence)) {
       replaced = true;
       return false;
     }
@@ -340,7 +346,14 @@ export default function ServiceReportDocument({ data, token }) {
   // LAWN ONLY. reportV2 also serves tree & shrub, whose landscape water
   // snapshot has rainInches too — substituting there relabelled the visit's
   // recorded 24-hour reading as weekly (regression from the r3 fix).
-  const weeklyRainIn = data.serviceLine === 'lawn' ? data.reportV2?.water?.rainInches : null;
+  // Legacy lawn reports (V2 absent or failed soft) carry the authoritative
+  // seven-day figure on the assessment — the web report uses
+  // `reportV2.water.rainInches ?? lawnAssessment.waterContext.rainfallInches7d`
+  // for ALL lawn reports, so falling back to the 24-hour reading would print a
+  // dry number beside guidance built from the week.
+  const weeklyRainIn = data.serviceLine === 'lawn'
+    ? (data.reportV2?.water?.rainInches ?? data.lawnAssessment?.waterContext?.rainfallInches7d)
+    : null;
   const usingWeeklyRain = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn));
   const rainLabel = usingWeeklyRain ? 'Rain this week' : 'Rain 24 hr';
   const rainValue = usingWeeklyRain ? weeklyRainIn : normalizedConditions?.rain_24h_in;
@@ -894,8 +907,11 @@ export default function ServiceReportDocument({ data, token }) {
             {(reentry?.targets || []).map((target) => (
               <Bullet key={target.key || target.label}>{reentryTargetLine(target)}</Bullet>
             ))}
-            {(reentry?.petAdvisory || (hasActualTreatment ? data.advisory?.pet_advisory : null)) && (
-              <Bullet>{reentry?.petAdvisory || data.advisory.pet_advisory}</Bullet>
+            {/* petAdvisory is persisted free text copied straight through by
+                buildReentryContextFromRecord, so it can carry "keep pets off
+                treated turf for 2 hours" and needs the same guard. */}
+            {sanitizeReentryCopy(reentry?.petAdvisory || (hasActualTreatment ? data.advisory?.pet_advisory : null)) && (
+              <Bullet>{sanitizeReentryCopy(reentry?.petAdvisory || data.advisory?.pet_advisory)}</Bullet>
             )}
             {reentry?.irrigationReadyAt && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>

@@ -768,11 +768,37 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/once dry/i);
   });
 
-  it('replaces ANY quantity in a re-entry field, not just matched phrasings', () => {
+  it('keeps label-required agronomic directions that carry time units', () => {
+    // "irrigate within 14 days" is a real catalog reentry_text (LESCO seed) —
+    // it has a time unit but makes no re-entry claim, so it must survive
+    const app = {
+      ...BASE_DATA.applications[0],
+      product: { ...BASE_DATA.applications[0].product, reentry_summary: 'Irrigate within 14 days of application. Water in with 0.25 inches of irrigation.' },
+    };
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="t" />);
+    expect(container.textContent).toContain('within 14 days');
+    expect(container.textContent).toContain('0.25 inches');
+  });
+
+  it('sanitizes a fixed pet restriction', () => {
+    const data = { ...BASE_DATA, dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated turf for 2 hours.', targets: [] } } };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toMatch(/for 2 hours/);
+    expect(container.textContent).toMatch(/once dry/i);
+  });
+
+  it('uses the legacy seven-day rainfall when V2 is absent', () => {
+    const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: null, lawnAssessment: { waterContext: { rainfallInches7d: 2.43 } }, conditions: { rain_24h_in: 0 } };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(screen.getByText('Rain this week')).toBeInTheDocument();
+    expect(container.textContent).toMatch(/2\.43 in/);
+  });
+
+  it('replaces a time figure only when the sentence makes a re-entry claim', () => {
     // allowlist: three rounds of widening a blocklist kept missing forms
     // ("Dry time is 2 hours", "Ready at 7 PM"), so a re-entry sentence
     // survives only when it states no quantity at all
-    const cases = ['Keep clear for five hours.', 'Re-enter after ninety minutes.', 'Dry time is 2 hours.', 'Ready at 7 PM.'];
+    const cases = ['Keep clear for five hours.', 'Re-enter after ninety minutes.', 'Dry time is 2 hours.', 'Ready at 7 PM.', 'Stay off the treated area for twenty-four hours.'];
     cases.forEach((text) => {
       const app = { ...BASE_DATA.applications[0], product: { ...BASE_DATA.applications[0].product, reentry_summary: text } };
       const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="t" />);
