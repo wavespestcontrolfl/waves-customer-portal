@@ -47,6 +47,7 @@ const {
   loadLinkedLawnAssessment,
   loadPinnedLawnAssessment,
   PIN_NO_ASSESSMENT,
+  LAWN_RENDER_STRATEGY,
 } = require('../services/service-report/report-data');
 
 describe('#3168 pinned assessment — authorization boundary', () => {
@@ -283,10 +284,15 @@ describe('#3168 — assessment identity is part of the PDF storage key', () => {
     // would either serve stale PDFs (the race this fences) or re-render on
     // every view. Two sites per module — renderAndStore + getOrRender in
     // pdf-queue, expected + store in reports-public.
-    expect((pdfQueueSource.match(/lawnAssessmentPdfSignature\(/g) || []).length)
-      .toBeGreaterThanOrEqual(2);
-    expect((reportsPublicSource.match(/lawnAssessmentPdfSignature\(/g) || []).length)
-      .toBeGreaterThanOrEqual(2);
+    // Every key composition carries the component, whether via the single
+    // canonical snapshot (laSignature) or the signature-only lookup.
+    for (const source of [pdfQueueSource, reportsPublicSource]) {
+      const keyLines = source.split('\n').filter((l) => l.includes('visibilitySignature:'));
+      expect(keyLines.length).toBeGreaterThanOrEqual(2);
+      for (const line of keyLines) {
+        expect(line).toMatch(/laSignature|laRenderSignature|lawnAssessmentPdfSignature\(/);
+      }
+    }
   });
 
   test('the component is awaited everywhere it is composed', () => {
@@ -301,6 +307,93 @@ describe('#3168 — assessment identity is part of the PDF storage key', () => {
       // Explicitly: no bare composition without await in a signature string.
       expect(source).not.toMatch(/\+ lawnAssessmentPdfSignature\(/);
     }
+  });
+});
+
+describe('#3172 — ordinary renders are pinned to CANONICAL and stay cacheable', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+  const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  // An UNPINNED render lets the browser resolve its own assessment, so a
+  // selection moving away and back defeats any pre/post check the server makes
+  // — the A-to-B-to-A limitation that created #3168, one level down. Pinning
+  // ordinary renders to the canonical answer removes that freedom.
+  test('renderAndStore falls back to the canonical pin when no delivery pin is given', () => {
+    expect(pdfQueueSource).toMatch(/effectivePin\s*=\s*pinnedLawnAssessmentId\s*\|\|\s*canonical\.pin/);
+    // …and the render uses it, not the raw delivery pin.
+    expect(pdfQueueSource).toMatch(/pinnedLawnAssessmentId:\s*effectivePin/);
+  });
+
+  test('the public PDF route pins its render to canonical too', () => {
+    expect(reportsPublicSource).toMatch(/canonicalPin\s*=\s*canonical\.pin/);
+    expect((reportsPublicSource.match(/pinnedLawnAssessmentId:\s*canonicalPin/g) || []).length)
+      .toBeGreaterThanOrEqual(2);
+  });
+
+  // The load-bearing distinction: gating cache-bypass on the DELIVERY pin, not
+  // on "is pinned at all". Every render carries a pin now, so gating on the
+  // latter would make every render fresh and unstored — silently destroying
+  // PDF caching for the whole fleet.
+  test('cache bypass and unstored-return key on the DELIVERY pin only', () => {
+    expect(pdfQueueSource).toMatch(/mustRenderFresh\s*=\s*forceFresh\s*\|\|\s*correctionPending\s*\|\|\s*!!pinnedLawnAssessmentId/);
+    expect(pdfQueueSource).toMatch(/if \(isDeliveryPin\) \{/);
+    // effectivePin must NOT be what decides caching.
+    expect(pdfQueueSource).not.toMatch(/mustRenderFresh[^\n]*effectivePin/);
+    expect(pdfQueueSource).not.toMatch(/if \(effectivePin\) \{/);
+  });
+
+  // The pin and the storage-key component MUST come from one lookup. Two can
+  // straddle a selection change: the render pins B while the object is cached
+  // under A's key — the race this closes, reintroduced by resolving twice.
+  test('pin and signature come from a SINGLE canonical lookup', () => {
+    for (const source of [pdfQueueSource, reportsPublicSource]) {
+      expect(source).toMatch(/const canonical = await resolveCanonicalLawnRender\(/);
+      expect(source).toMatch(/la(Render)?Signature = canonical\.signature/);
+    }
+    // No render site may resolve the pin independently of the signature.
+    expect(pdfQueueSource).not.toMatch(/await canonicalLawnPin\(/);
+    expect(reportsPublicSource).not.toMatch(/await canonicalLawnPin\(/);
+  });
+
+  test('resolveCanonicalLawnRender: non-lawn pins nothing, lawn absence pins the sentinel', async () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const knex = makeKnex([]);
+    // Non-lawn: nothing to pin, so ordinary caching is untouched.
+    expect(await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'pest' }, knex))
+      .toEqual({ pin: null, signature: '' });
+    // Lawn with no assessment: absence is an answer and must be pinned, with
+    // its own key marker distinct from the legacy empty one.
+    expect(await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex))
+      .toEqual({ pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0` });
+  });
+
+  // Objects cached by the previous UNPINNED path carry the same assessment
+  // hash, so without a strategy marker they would keep being served after
+  // deploy — including a PDF produced during the exact race this closes.
+  test('the key carries a render-strategy marker so pre-pinning PDFs regenerate', async () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const knex = makeKnex([
+      { id: 'assess-A', customer_id: 'cust-1', confirmed_by_tech: true, service_record_id: 'svc-1' },
+    ]);
+    const { signature } = await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex);
+    expect(signature.startsWith(`-la${LAWN_RENDER_STRATEGY}`)).toBe(true);
+    // The marker must sit BEFORE the content hash, so an unpinned-era key
+    // (-la<hash>) can never collide with a pinned-era one.
+    expect(signature).not.toMatch(/^-la[0-9a-f]{12}$/);
+    // Non-lawn stays empty — no fleet-wide cache bust.
+    expect((await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'pest' }, knex)).signature).toBe('');
+  });
+
+  test('resolveCanonicalLawnRender: pin and signature describe the SAME row', async () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const knex = makeKnex([
+      { id: 'assess-A', customer_id: 'cust-1', confirmed_by_tech: true, service_record_id: 'svc-1', ai_summary: 'x' },
+    ]);
+    const got = await resolveCanonicalLawnRender({ ...SERVICE, service_line: 'lawn' }, knex);
+    expect(got.pin).toBe('assess-A');
+    expect(got.signature).toMatch(new RegExp(`^-la${LAWN_RENDER_STRATEGY}[0-9a-f]{12}$`));
   });
 });
 

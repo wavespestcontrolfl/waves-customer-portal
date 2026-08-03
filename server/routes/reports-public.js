@@ -28,7 +28,7 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -1290,6 +1290,12 @@ router.get('/:token', async (req, res, next) => {
       // Assessment identity + copy version, computed ONCE before the render and
       // reused for both the expected-key check and the store, so the key always
       // describes the same assessment on both sides (#3168).
+      // CACHE-LOOKUP side uses the non-throwing entry point: deciding whether a
+      // stored object is current must never 500 a report view, and a
+      // non-matching value here only costs a re-render. The RENDER side takes
+      // the throwing canonical snapshot inside the try below, where a failure
+      // reaches the existing 503 + enqueue recovery path (#3172 r2) instead of
+      // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
         visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
@@ -1310,16 +1316,36 @@ router.get('/:token', async (req, res, next) => {
       // signature attached to the payload — the narrative state the PDF was
       // rendered FROM — never a DB re-read.
       let tnRenderedSignature = '-tn0';
+      // The canonical snapshot the render is pinned to. Declared out here so
+      // the storage block below keys the object by what was RENDERED, not by
+      // the cache-lookup value; assigned inside the try so an unreadable
+      // lookup fails closed through the retry path.
+      let laRenderSignature = null;
       try {
+        // ONE canonical lookup feeds BOTH the pin and the storage-key component
+        // (#3172 r1) — two lookups can straddle a selection change and cache a
+        // B-pinned PDF under A's key, which is the race this closes.
+        const canonical = await resolveCanonicalLawnRender(service, db);
+        const canonicalPin = canonical.pin;
+        laRenderSignature = canonical.signature;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
-          const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', pestPressureConfig });
+          const data = await buildServiceReportV1ResponseData(service, req.params.token, {
+            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin,
+          });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           pdf = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
             logger,
             serviceRecordId: service.id,
+            // Pinned to the CANONICAL answer (#3172). Unpinned, the browser
+            // resolves its own assessment, so a selection moving away and back
+            // during the render defeats the pre/post check below — the same
+            // A-to-B-to-A limitation that created #3168. Pinning removes the
+            // page's freedom to choose; the key already carries assessment
+            // identity, so this render stays cacheable.
+            pinnedLawnAssessmentId: canonicalPin,
           });
 
           const latestPestPressureConfig = await loadActiveConfig(db).catch(() => null);
@@ -1356,12 +1382,14 @@ router.get('/:token', async (req, res, next) => {
         // assessment A under B's key, where it reads as current forever. Same
         // shape as the Pest Pressure config re-check above: if it moved, skip
         // the store and let the next view render cleanly.
+        // Compare against what the render was PINNED to, not the cache-lookup
+        // value — the object must be keyed by the assessment it contains.
         const laAfter = await lawnAssessmentPdfSignature(service, db);
-        if (laAfter !== laSignature) {
+        if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laRenderSignature,
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

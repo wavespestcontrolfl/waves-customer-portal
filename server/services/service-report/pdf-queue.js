@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
 const { renderServiceReportV1Pdf } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
@@ -125,7 +125,23 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const tzSignature = await treatmentZonePdfSignature(service, knex);
   // Assessment identity + copy version in the key, so a stale in-flight render
   // cannot republish over a newer one (#3168).
-  const laSignature = await lawnAssessmentPdfSignature(service, knex);
+  // ONE canonical lookup feeds BOTH the pin and the storage-key component
+  // (#3172 r1). Two lookups can straddle a selection change, pinning the
+  // render to B while caching it under A's key — the race this closes,
+  // reintroduced by resolving twice.
+  const canonical = await resolveCanonicalLawnRender(service, knex);
+  const laSignature = canonical.signature;
+  // DELIVERY pin vs CANONICAL pin (#3172).
+  //
+  // `pinnedLawnAssessmentId` is a delivery's SEALED assessment — it may
+  // deliberately differ from the canonical answer, so that render is never
+  // cached. Every other render was previously UNPINNED, which left the page
+  // free to resolve its own assessment and reopened the A-to-B-to-A race in the
+  // cache path. Ordinary renders are now pinned to the canonical answer, which
+  // makes them deterministic AND still cacheable, because the pin and the key
+  // describe the same assessment.
+  const isDeliveryPin = !!pinnedLawnAssessmentId;
+  const effectivePin = pinnedLawnAssessmentId || canonical.pin;
   let pdf;
   // The signature of the narrative text actually rendered travels ON the
   // payload (attached by report-data at the moment the text was chosen) —
@@ -135,7 +151,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   let tnRenderedSignature = '-tn0';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
@@ -152,7 +168,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       req,
       logger,
       serviceRecordId: recordId,
-      pinnedLawnAssessmentId,
+      pinnedLawnAssessmentId: effectivePin,
     });
 
     const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
@@ -177,7 +193,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // there would mark the delivery sent while Download PDF kept serving the
   // known-stale object. A failed clear must fail the render so the delivery
   // defers and retries.
-  if (pinnedLawnAssessmentId) {
+  if (isDeliveryPin) {
     // The delivery forced a fresh render precisely because the cached object
     // may hold an older assessment or recommendation version, so leaving that
     // key in place would hand the recipient a document different from the
@@ -306,9 +322,12 @@ async function getOrRenderServiceReportPdf(recordId, {
       ? JSON.parse(service.structured_notes) : (service?.structured_notes || {});
     correctionPending = notes && notes.lawnPdfCorrectionPending === true;
   } catch { correctionPending = false; }
-  // A pinned render can never be served from storage: a cached object records
-  // nothing about which assessment it was built from, so returning one would
-  // silently answer a pinned request with unpinned content (#3168).
+  // A DELIVERY-pinned render can never be served from storage: a cached object
+  // may have been built for a different assessment than the one the delivery
+  // sealed (#3168). Ordinary renders are pinned to the CANONICAL answer now
+  // (#3172), and the storage key carries assessment identity, so those stay
+  // fully cacheable — gating on the delivery pin only is what keeps caching
+  // alive.
   const mustRenderFresh = forceFresh || correctionPending || !!pinnedLawnAssessmentId;
   // Version captured BEFORE the render: the marker may only be cleared when
   // the recommendation copy did not change during the render AND no
