@@ -37,13 +37,24 @@ function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessment
     // re-check that shipped in #3146, and keeps mail flowing.
     const { signAssessmentPin } = require('./assessment-pin');
     const signed = signAssessmentPin(token, pinnedLawnAssessmentId);
-    if (signed) {
-      params.push(`assessment=${encodeURIComponent(pinnedLawnAssessmentId)}`);
-      params.push(`asig=${encodeURIComponent(signed.signature)}`);
-      params.push(`aexp=${encodeURIComponent(signed.expiresAt)}`);
-    } else {
-      logger.warn('[service-report-pdf] no report-pin secret configured — rendering UNPINNED; set REPORT_PIN_SECRET or JWT_SECRET to restore the attachment guarantee');
+    if (!signed) {
+      // FAIL CLOSED. I previously degraded to an unpinned render here so a
+      // missing secret could not stop mail — wrong trade. The post-render
+      // fence cannot compensate: it compares the separately built `data`
+      // assessment, not what the browser fetched, so an unpinned render can
+      // still mail an attachment nothing verified. Stopping deliveries is
+      // visible and recoverable (set the secret); mailing an attachment that
+      // disagrees with the permanent report is silent and unrecallable. And a
+      // missing JWT_SECRET would already have broken auth app-wide, so this is
+      // not a realistic silent-degradation path.
+      const err = new Error('report pin cannot be signed — set REPORT_PIN_SECRET or JWT_SECRET');
+      err.code = 'report_pin_unsignable';
+      err.retryable = true;
+      throw err;
     }
+    params.push(`assessment=${encodeURIComponent(pinnedLawnAssessmentId)}`);
+    params.push(`asig=${encodeURIComponent(signed.signature)}`);
+    params.push(`aexp=${encodeURIComponent(signed.expiresAt)}`);
   }
   const query = params.length ? `?${params.join('&')}` : '';
   return `${base}/report/${encodeURIComponent(token)}${query}`;

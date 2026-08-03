@@ -189,6 +189,17 @@ async function renderAndStoreServiceReportPdf(recordId, {
     return { key: null, pdf, rendered: true, token: reportToken, pinned: true };
   }
   try {
+    // An UNPINNED cache render opens the report page without a pin, so the
+    // page's own fetch chooses the assessment — and a selection that moved
+    // away and back during the render would otherwise store that PDF under
+    // the pre-render signature, where it reads as current forever. Re-read and
+    // require stability before publishing; if it moved, skip the store and let
+    // the next view render cleanly. (Pinned renders never reach here.)
+    const laAfter = await lawnAssessmentPdfSignature(service, knex);
+    if (laAfter !== laSignature) {
+      logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
+      return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
+    }
     const key = await putReportPdf(recordId, pdf, {
       visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
     });

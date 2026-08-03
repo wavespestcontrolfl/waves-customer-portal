@@ -241,19 +241,23 @@ describe('#3168 pinned assessment — the pin must be SIGNED', () => {
     expect(url).toMatch(/aexp=\d+/);
   });
 
-  test('NO secret configured ⇒ NO pin on the URL, not an unsigned one', () => {
-    // Fail SAFE, not fail broken. An unsigned pin is refused by the route,
-    // which fails the render, which defers the delivery — so a missing secret
-    // would silently stop every lawn report email until retries exhausted.
+  test('NO secret configured ⇒ the render FAILS, never falls back to unpinned', () => {
+    // Fail CLOSED. Degrading to an unpinned render was my first instinct — it
+    // keeps mail flowing when the secret is missing — but the post-render
+    // fence compares the separately built data, not what the browser fetched,
+    // so an unpinned render can still mail an attachment nothing verified.
+    // A stopped queue is visible and recoverable; a wrong attachment is
+    // silent and unrecallable.
     const saved = process.env.REPORT_PIN_SECRET;
     const savedJwt = process.env.JWT_SECRET;
     delete process.env.REPORT_PIN_SECRET;
     delete process.env.JWT_SECRET;
     try {
       expect(signAssessmentPin('tok-1', 'assess-A')).toBeNull();
-      const url = serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: 'assess-A' });
-      expect(url).not.toContain('assessment=');
-      expect(url).not.toContain('asig=');
+      expect(() => serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: 'assess-A' }))
+        .toThrow(/cannot be signed/i);
+      // An UNPINNED render is unaffected — only a requested pin fails closed.
+      expect(serviceReportViewerUrl('tok-1', null, 'pdf')).toContain('/report/tok-1?mode=pdf');
     } finally {
       process.env.REPORT_PIN_SECRET = saved;
       if (savedJwt !== undefined) process.env.JWT_SECRET = savedJwt;
