@@ -452,8 +452,27 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     // Display copy keys off THIS field; `price` above keeps its historical
     // pre-fill semantics untouched. Absent = no provable per-application
     // charge, and clients keep legacy copy.
+    // Explicit MONTHLY provenance for recurring lines (mixed-unit labels):
+    // the engine's mo/monthly is the line's true normalized monthly, which
+    // genuinely monthly-billed plans display as their unit.
+    ...(kind === 'recurring' && moneyOrNull(line?.mo, line?.monthly) != null
+      ? { monthlyPrice: moneyOrNull(line?.mo, line?.monthly) } : {}),
     ...(kind === 'recurring' ? (() => {
       try {
+        // V1-legacy-mapper rows are PRE-discount by convention and carry no
+        // discounted fields — stamping their list perTreatment would
+        // overstate what a discounted customer accepted (Codex #3173 r2).
+        // Refuse per-application provenance for such lines; legacy totals
+        // (which ARE net) tell the truth until the mapper carries net
+        // per-service amounts.
+        const appliedPct = Number(line?.discount?.appliedDiscountPercent
+          ?? line?.discount?.effectiveDiscount ?? 0);
+        if (appliedPct > 0
+          && moneyOrNull(line?.priceAfterDiscount) == null
+          && !(Number(line?.annualAfterDiscount) > 0)
+          && !(Number(line?.finalAnnual) > 0)) {
+          return {};
+        }
         const { perApplicationForLine } = require('./public-quote')._internals;
         const cadenceFields = {
           visitsPerYear: line?.visitsPerYear,
@@ -518,7 +537,14 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
     lines[0].price = moneyOrNull(estimate.onetime_total, estimate.monthly_total);
     // Same provenance rule as the zero-line fallback below: this price came
     // from the estimate's bare totals, not a per-visit quote line.
-    if (lines[0].price != null) lines[0].derived = 'estimate_totals_fallback';
+    if (lines[0].price != null) {
+      lines[0].derived = 'estimate_totals_fallback';
+      // The recovered figure is monthly when it came from monthly_total —
+      // explicit monthly provenance keeps mixed-unit labels honest.
+      if (lines[0].source === 'recurring' && Number(estimate.monthly_total) > 0 && lines[0].monthlyPrice == null) {
+        lines[0].monthlyPrice = Number(estimate.monthly_total);
+      }
+    }
   }
 
   if (lines.length === 0 && !suppressFallback) {
@@ -549,6 +575,7 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
       // real per-visit quote line — client copy must not label it
       // "/application" (the per-month audit rule).
       derived: 'estimate_totals_fallback',
+      ...(fallbackIsRecurring && monthlyTotal > 0 ? { monthlyPrice: monthlyTotal } : {}),
     });
   }
 

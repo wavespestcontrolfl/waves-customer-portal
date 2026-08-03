@@ -607,6 +607,7 @@ export default function MobileAppointmentDetailSheet({
             // manufactures deltas.
             currentPrice={prepaidCovered || Number(estimateSource.linkedSeriesCount) > 1
               ? null : price}
+            compareScope="visit"
             deposit={estimateSource.deposit}
             payment={estimateSource.payment}
             lines={estimateSource.lines}

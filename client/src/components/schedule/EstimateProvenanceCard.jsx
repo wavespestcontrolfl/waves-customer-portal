@@ -324,7 +324,7 @@ function cardOnFileRow(cardsOnFile) {
   };
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onetimeTotal, deposit, payment, lines, estimateRef, cardsOnFile, style }) {
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onetimeTotal, deposit, payment, lines, estimateRef, cardsOnFile, style, compareScope = 'group' }) {
   const quoted = Number(quotedTotal) || 0;
   const refLabel = String(estimateRef || '').trim();
   const price = currentPrice != null ? Number(currentPrice) : null;
@@ -335,13 +335,17 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
       name: String(line?.estimateLabel || line?.name || '').trim(),
       cadence: cadenceLabel(line?.cadence, line?.intervalDays),
       recurring: !!line?.cadence && line.cadence !== 'one_time',
-      // perApplicationPrice is EXPLICIT provenance from the server's
-      // canonical (discount-aware) derivation — `price` can be a list rate
-      // or a synthesized monthly figure, so it is never trusted for
-      // per-application copy (per-month copy audit rule).
+      rawCadence: line?.cadence || null,
+      // perApplicationPrice / monthlyPrice are EXPLICIT provenance from the
+      // server (discount-aware canonical derivation; the engine's true
+      // normalized monthly) — `price` can be a list rate or a synthesized
+      // monthly figure, so it is never trusted for unit copy.
       perAppPrice: line?.cadence && line.cadence !== 'one_time'
         && Number(line?.perApplicationPrice) > 0
         ? Number(line.perApplicationPrice) : null,
+      monthlyPrice: line?.cadence && line.cadence !== 'one_time'
+        && !(Number(line?.perApplicationPrice) > 0) && Number(line?.monthlyPrice) > 0
+        ? Number(line.monthlyPrice) : null,
       oneTimePrice: line?.cadence === 'one_time' && Number(line?.price) > 0 ? Number(line.price) : null,
     }))
     .filter((line) => line.name);
@@ -351,14 +355,22 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   // "$121/application + $99 one-time"; otherwise it keeps the legacy total.
   const perAppPrices = serviceLines.map((l) => l.perAppPrice).filter((p) => p != null);
   const perAppSum = perAppPrices.reduce((s, p) => s + p, 0);
+  const monthlyPrices = serviceLines.map((l) => l.monthlyPrice).filter((p) => p != null);
   const oneTime = Number(onetimeTotal) || 0;
-  // EVERY recurring line must be proven per-application (Codex P1) — a
-  // mixed quote with a genuinely-monthly legacy line keeps the legacy total
-  // rather than silently dropping that line from the label.
+  // EVERY recurring line must carry a proven unit, and a mixed quote keeps
+  // EACH billing unit ("$121.00/application + $24.00/mo") — collapsing to
+  // one aggregate monthly is the exact flat-monthly copy this removes
+  // (Codex #3173 r2). Unprovable lines → legacy total tells the whole truth.
   const recurringLineCount = serviceLines.filter((l) => l.recurring).length;
   const allRecurringPerApp = perAppPrices.length > 0 && perAppPrices.length === recurringLineCount;
-  const quotedLabel = allRecurringPerApp
-    ? `${perAppPrices.map((p) => money(p)).join(' + ')}/application${oneTime > 0 ? ` + ${money(oneTime)} one-time` : ''}`
+  const allRecurringProven = perAppPrices.length > 0
+    && perAppPrices.length + monthlyPrices.length === recurringLineCount;
+  const quotedLabel = allRecurringProven
+    ? [
+      `${perAppPrices.map((p) => money(p)).join(' + ')}/application`,
+      ...monthlyPrices.map((m) => `${money(m)}/mo`),
+      ...(oneTime > 0 ? [`${money(oneTime)} one-time`] : []),
+    ].join(' + ')
     : money(quoted);
   const rows = paymentRows(payment);
   const dep = depositRow(deposit);
@@ -381,9 +393,21 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   const oneTimeLineSum = serviceLines.reduce((s, l) => s + (l.oneTimePrice || 0), 0);
   const everyLinePriced = serviceLines.length > 0
     && serviceLines.every((l) => l.perAppPrice != null || l.oneTimePrice != null);
-  const quotedComparable = allRecurringPerApp
+  // compareScope='group' (create modal): the price covers EVERY quoted line
+  // booked together, so the whole-quote sum is the right frame.
+  // compareScope='visit' (detail sheet / SchedulePage row): a child visit
+  // carries only the add-ons due on its date (Codex #3173 r2 — monthly lawn
+  // + quarterly pest children differ month to month), so the comparison
+  // stands only for a quote whose every visit IS the whole plan: all
+  // recurring lines per-application on ONE cadence, and no one-time lines.
+  const recurringCadences = new Set(serviceLines.filter((l) => l.recurring).map((l) => l.rawCadence));
+  const visitComparable = allRecurringPerApp && recurringCadences.size === 1 && oneTimeLineSum === 0
+    && serviceLines.every((l) => l.perAppPrice != null || l.oneTimePrice != null)
+    ? perAppSum : null;
+  const groupComparable = allRecurringPerApp
     ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)
-    : (perAppPrices.length ? null : quoted);
+    : (perAppPrices.length || monthlyPrices.length ? null : quoted);
+  const quotedComparable = compareScope === 'visit' ? visitComparable : groupComparable;
   const showVsQuoted = price != null && quotedComparable != null && quotedComparable > 0
     && price > 0 && Math.abs(quotedComparable - price) > 0.01;
   const deltaPct = showVsQuoted ? Math.round(((price - quotedComparable) / quotedComparable) * 100) : 0;
@@ -410,7 +434,10 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
             </span>
           )}
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
+          {/* Wrapping allowed (Codex #3173 r2 P2): a multi-service breakdown
+              is wider than a phone-width card — nowrap forced horizontal
+              page overflow on the exact surface this targets. */}
+          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>
             Quoted {quotedLabel}
           </span>
         </div>
@@ -455,9 +482,11 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
                   <div style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, whiteSpace: 'nowrap' }}>
                     {line.perAppPrice != null
                       ? `${money(line.perAppPrice)}/application${line.cadence ? ` · ${line.cadence}` : ''}`
-                      : line.oneTimePrice != null
-                        ? `${money(line.oneTimePrice)} one-time`
-                        : line.cadence}
+                      : line.monthlyPrice != null
+                        ? `${money(line.monthlyPrice)}/mo${line.cadence ? ` · ${line.cadence}` : ''}`
+                        : line.oneTimePrice != null
+                          ? `${money(line.oneTimePrice)} one-time`
+                          : line.cadence}
                   </div>
                 )}
               </div>

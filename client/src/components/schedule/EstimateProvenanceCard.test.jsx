@@ -30,12 +30,13 @@ describe('EstimateProvenanceCard quoted framing', () => {
     expect(screen.queryByText(/vs quoted/i)).toBeNull();
   });
 
-  it('mixed quotes compare against recurring + schedulable one-time (the booked visit charge)', () => {
+  it('group scope compares against recurring + schedulable one-time (the booked visit charge)', () => {
     render(
       <EstimateProvenanceCard
         quotedTotal={135.30}
         onetimeTotal={200}
         currentPrice={321}
+        compareScope="group"
         lines={[
           { name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
           { name: 'Bed Bug Treatment', cadence: 'one_time', price: 200 },
@@ -45,6 +46,41 @@ describe('EstimateProvenanceCard quoted framing', () => {
     );
     // $321 booked vs $121 + $200 quoted for the same visit — no phantom +165%.
     expect(screen.queryByText(/vs quoted/i)).toBeNull();
+  });
+
+  it('visit scope suppresses deltas for mixed-cadence quotes (children differ month to month)', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={129.50}
+        onetimeTotal={0}
+        currentPrice={85.50}
+        compareScope="visit"
+        lines={[
+          { name: 'Lawn Care', cadence: 'monthly', price: 114, perApplicationPrice: 114 },
+          { name: 'Pest Control', cadence: 'quarterly', price: 132, perApplicationPrice: 132 },
+        ]}
+        estimateRef="EST-2026-0005"
+      />,
+    );
+    // A lawn-only month must not read as a negative delta vs lawn + pest.
+    expect(screen.queryByText(/vs quoted/i)).toBeNull();
+  });
+
+  it('mixed billing units each render their own unit — never one aggregate monthly', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={64.33}
+        onetimeTotal={0}
+        currentPrice={null}
+        lines={[
+          { name: 'Pest Control', cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
+          { name: 'Rodent Bait Stations', cadence: 'quarterly', price: 117, monthlyPrice: 39 },
+        ]}
+        estimateRef="EST-2026-0006"
+      />,
+    );
+    expect(screen.getByText(/Quoted \$121\.00\/application \+ \$39\.00\/mo/)).toBeTruthy();
+    expect(screen.getByText(/\$39\.00\/mo · quarterly/i)).toBeTruthy();
   });
 
   it('suppresses the comparison when any line lacks a real price (no like-for-like total)', () => {

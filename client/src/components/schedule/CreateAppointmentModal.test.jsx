@@ -44,14 +44,22 @@ describe('CreateAppointmentModal won estimate helpers', () => {
       monthlyTotal: 24,
       lines: [{ cadence: 'quarterly', price: 24, derived: 'estimate_totals_fallback' }],
     })).toBe('$24.00/mo');
-    // A MIXED quote (per-app pest + genuinely-monthly legacy monitoring)
-    // must not silently drop the monthly line — legacy copy tells the whole
-    // truth until every recurring line is proven per-application.
+    // A MIXED quote keeps EACH billing unit — collapsing to one aggregate
+    // monthly is the exact flat-monthly copy this removes (Codex #3173 r2).
     expect(formatScheduleEstimateAmount({
       monthlyTotal: 64.33,
       lines: [
         { cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
-        { cadence: 'monthly', price: 24, derived: 'estimate_totals_fallback' },
+        { cadence: 'monthly', price: 24, monthlyPrice: 24, derived: 'estimate_totals_fallback' },
+      ],
+    })).toBe('$121.00/application + $24.00/mo');
+    // A mixed quote whose monthly line has NO proven unit at all falls back
+    // to the legacy aggregate — never a partial label.
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 64.33,
+      lines: [
+        { cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
+        { cadence: 'monthly', price: 24 },
       ],
     })).toBe('$64.33/mo');
   });

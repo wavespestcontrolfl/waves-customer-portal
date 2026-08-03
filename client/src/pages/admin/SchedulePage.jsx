@@ -2685,6 +2685,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   // suppresses it.
                   currentPrice={Number(estimateSource.linkedSeriesCount) > 1
                     ? null : appointmentTotal}
+                  compareScope="visit"
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
                   lines={estimateSource.lines}

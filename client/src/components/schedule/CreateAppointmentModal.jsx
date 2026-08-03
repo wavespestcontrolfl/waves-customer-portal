@@ -319,22 +319,26 @@ export function formatScheduleEstimateAmount(estimate) {
   // mislabel as per-application.
   const lines = Array.isArray(estimate?.lines) ? estimate.lines : [];
   const recurringLines = lines.filter((l) => l && l.cadence && l.cadence !== 'one_time');
-  // perApplicationPrice is EXPLICIT provenance from the server's canonical
-  // derivation (discount-aware; genuinely monthly-billed lines never carry
-  // it) — never inferred from `price`, whose fields can be list rate.
+  // perApplicationPrice / monthlyPrice are EXPLICIT provenance from the
+  // server (discount-aware canonical derivation; the engine's true
+  // normalized monthly) — never inferred from `price`, whose fields can be
+  // list rate. EVERY recurring line must carry a proven unit or the legacy
+  // total tells the whole truth; a mixed quote keeps EACH billing unit
+  // ("$121.00/application + $24.00/mo") — collapsing it to one aggregate
+  // monthly is the exact flat-monthly copy this removes (Codex #3173 r2).
   const perApp = recurringLines
     .filter((l) => Number(l.perApplicationPrice) > 0)
     .map((l) => Number(l.perApplicationPrice));
+  const monthlyOnly = recurringLines
+    .filter((l) => !(Number(l.perApplicationPrice) > 0) && Number(l.monthlyPrice) > 0)
+    .map((l) => Number(l.monthlyPrice));
   const onetime = Number(estimate?.onetimeTotal);
-  // EVERY recurring line must be proven per-application (Codex P1): a mixed
-  // quote (per-app pest + genuinely-monthly legacy monitoring) must not
-  // silently drop the monthly line from the label — legacy copy tells the
-  // whole truth there.
-  if (perApp.length && perApp.length === recurringLines.length) {
-    const apps = perApp.map((p) => formatMoney(p)).join(' + ');
-    return Number.isFinite(onetime) && onetime > 0
-      ? `${apps}/application + ${formatMoney(onetime)} one-time`
-      : `${apps}/application`;
+  if (perApp.length && perApp.length + monthlyOnly.length === recurringLines.length) {
+    const parts = [];
+    if (perApp.length) parts.push(`${perApp.map((p) => formatMoney(p)).join(' + ')}/application`);
+    for (const m of monthlyOnly) parts.push(`${formatMoney(m)}/mo`);
+    if (Number.isFinite(onetime) && onetime > 0) parts.push(`${formatMoney(onetime)} one-time`);
+    return parts.join(' + ');
   }
   if (Number.isFinite(onetime) && onetime > 0) return `${formatMoney(onetime)} one-time`;
   const monthly = Number(estimate?.monthlyTotal);
