@@ -2238,8 +2238,23 @@ const FUTURE_INTENT_RE = /\b(?:will|shall|going\s+to|plan(?:ning)?\s+to|expect\s
 // away is governing something else. Deliberately a small window — a wider
 // one is how the last three versions swallowed neighbouring claims.
 const FUTURE_GOVERNOR_RE = /\b(?:will|shall|going|plan|planning|expect|due|return|back|scheduled|upcoming)\b/i;
+// Tokens a future predicate may legitimately put between its marker and the
+// verb it governs: the infinitival head, motion verbs, and timing. "We will
+// COME BACK NEXT WEEK TO inspect the traps" is one promise, and a flat
+// three-token window classified it as a completed re-check (codex P1) —
+// natural setup copy, silently discarded.
+const FUTURE_CHAIN_TOKEN = /^(?:to|back|again|soon|later|then|next|coming|upcoming|week|weeks|month|months|day|days|visit|trip|monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|morning|afternoon|come|comes|coming|go|goes|going|return|returns|returning|be|been|stop|stopping|swing|head|by|out|on|in|for|our|the|a|an|[a-z]+ly)$/i;
+// The walk STOPS at anything else — and the load-bearing case is a subject
+// pronoun, which is what starts an embedded clause with its own verb: in
+// "the traps WE checked", `we` ends the reach of any earlier `will`, which
+// is exactly the distinction the positional versions of this test kept
+// getting wrong.
 function futureGovernsVerb(toks, verbAt) {
-  return FUTURE_GOVERNOR_RE.test(toks.slice(Math.max(0, verbAt - 3), verbAt).join(' '));
+  for (let i = verbAt - 1; i >= 0 && i >= verbAt - 8; i -= 1) {
+    if (FUTURE_GOVERNOR_RE.test(toks[i])) return true;
+    if (!FUTURE_CHAIN_TOKEN.test(toks[i])) return false;
+  }
+  return false;
 }
 // Same question for the noun-form patterns, asked of the text in front of
 // the match. A coordinator ends the reach — "Follow-up scheduled next week

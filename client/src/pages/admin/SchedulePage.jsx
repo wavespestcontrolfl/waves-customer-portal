@@ -11558,7 +11558,11 @@ export function CompletionPanel({
     // P1). Mirrors the server's rejection so the tech gets the inline
     // prompt instead of a 422. Checked across the primary AND companion
     // sections, since `trap_visit_type` can live in either.
-    if (stationFeatureOn && !isIncompleteVisit) {
+    // Trapping program only — a combined profile can resolve to the
+    // termite/rodent bait program while a trapping companion declares a
+    // setup, and a legitimate serviced BAIT-STATION pin must not be blocked
+    // (codex P1). Mirrors the server's scoping exactly.
+    if (stationFeatureOn && stationProgram === "trapping" && !isIncompleteVisit) {
       const declaresTrapSetup = [
         findingsValues,
         ...companionSchemas.map(

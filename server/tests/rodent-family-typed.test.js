@@ -1817,6 +1817,10 @@ describe('setup prose corpus — completed claims vs. promises', () => {
 
   const MUST_PASS = [
     'We will return to check the traps in one week.',
+    'We will come back next week to inspect the traps.',
+    'We are going to return next week to inspect the traps.',
+    'We will swing by on Monday to check the traps.',
+    'We will be back tomorrow to check the traps.',
     'We will return for the scheduled trap check.',
     'We plan to check the traps next week.',
     'We are going to inspect the traps on the follow-up.',

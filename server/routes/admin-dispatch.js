@@ -3518,19 +3518,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Bait station pins/statuses (station-map-v1) — reject malformed entries
     // here, not in the post-commit sync: the sync is fail-soft, so a silent
     // skip there would lose the tech's pins behind a successful completion.
-    // A declared trap SETUP cannot carry serviced pins (codex P1): the map
-    // relabels `ok` to "Set this visit" but leaves `serviced` saying
-    // "Serviced this visit", so the frozen report would contradict its own
-    // declared stage. `trap_visit_type` only exists on the rodent_trapping
-    // schema, so its presence in ANY submitted section — primary or
-    // companion — identifies the declaration without needing the profile.
-    const declaresTrapSetup = [
-      structuredFindings?.values,
-      ...(Array.isArray(companionFindings) ? companionFindings.map((entry) => entry?.values) : []),
-    ].some((values) => String(values?.trap_visit_type || '').trim() === 'Initial setup');
-    const stationEntriesError = TermiteStations.validateStationEntriesBody(termiteStations, {
-      rejectServiced: declaresTrapSetup,
-    });
+    const stationEntriesError = TermiteStations.validateStationEntriesBody(termiteStations);
     if (stationEntriesError) {
       return res.status(400).json({ error: stationEntriesError, code: 'termite_stations_invalid' });
     }
@@ -3781,6 +3769,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
         code: 'termite_stations_cap',
       });
+    }
+    // A declared trap SETUP cannot carry serviced pins: the map relabels
+    // `ok` to "Set this visit" but leaves `serviced` saying "Serviced this
+    // visit", so the frozen report would contradict its own declared stage.
+    //
+    // Scoped to the TRAPPING program, and therefore placed here rather than
+    // with the shape validation above — a combined profile can resolve to
+    // the termite/rodent bait program while a trapping companion declares a
+    // setup, and rejecting on the declaration alone blocked a legitimate
+    // serviced BAIT-STATION entry (codex P1 — a regression from the first
+    // version of this check). `trap_visit_type` only exists on the
+    // rodent_trapping schema, so its presence in any submitted section
+    // identifies the declaration.
+    if (stationProgram === 'trapping' && Array.isArray(termiteStations) && termiteStations.length) {
+      const declaresTrapSetup = [
+        structuredFindings?.values,
+        ...(Array.isArray(companionFindings) ? companionFindings.map((entry) => entry?.values) : []),
+      ].some((values) => String(values?.trap_visit_type || '').trim() === 'Initial setup');
+      const servicedError = TermiteStations.validateStationEntriesBody(termiteStations, {
+        rejectServiced: declaresTrapSetup,
+      });
+      if (servicedError) {
+        return res.status(400).json({ error: servicedError, code: 'termite_stations_invalid' });
+      }
     }
     // Rodent consumption consistency (codex r2): station checks recording
     // bait consumption must not ship beside an explicit "None" consumption
