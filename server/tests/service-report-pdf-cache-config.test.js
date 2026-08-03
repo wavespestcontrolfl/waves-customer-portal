@@ -99,7 +99,7 @@ describe('service report PDF Pest Pressure cache config', () => {
       expect.objectContaining({ id: 'service-1' }),
       'token-1',
       knex,
-      { pestPressureConfig: mockActivePestPressureConfig },
+      { pestPressureConfig: mockActivePestPressureConfig, pinnedLawnAssessmentId: null },
     );
     expect(mockBuildServiceReportDynamicContext).toHaveBeenCalledWith(expect.objectContaining({
       recordId: 'service-1',
@@ -134,7 +134,7 @@ describe('service report PDF Pest Pressure cache config', () => {
       expect.objectContaining({ id: 'service-1' }),
       'token-1',
       knex,
-      { pestPressureConfig: mockActivePestPressureConfig },
+      { pestPressureConfig: mockActivePestPressureConfig, pinnedLawnAssessmentId: null },
     );
     expect(mockGetHealthyStoredReportPdf).not.toHaveBeenCalled();
     expect(result.rendered).toBe(true);
@@ -154,8 +154,8 @@ describe('service report PDF Pest Pressure cache config', () => {
     });
 
     expect(mockRenderServiceReportV1Pdf).toHaveBeenCalledTimes(2);
-    expect(mockBuildReportV1Data.mock.calls[0][3]).toEqual({ pestPressureConfig: firstConfig });
-    expect(mockBuildReportV1Data.mock.calls[1][3]).toEqual({ pestPressureConfig: secondConfig });
+    expect(mockBuildReportV1Data.mock.calls[0][3]).toEqual({ pestPressureConfig: firstConfig, pinnedLawnAssessmentId: null });
+    expect(mockBuildReportV1Data.mock.calls[1][3]).toEqual({ pestPressureConfig: secondConfig, pinnedLawnAssessmentId: null });
     expect(mockPutReportPdf).toHaveBeenCalledWith(
       'service-1',
       Buffer.from('%PDF-1.4'),

@@ -260,7 +260,12 @@ async function recordServiceReportEvent(service, eventName, channel, req, metada
   });
 }
 
-async function buildServiceReportV1ResponseData(service, token, { mode = 'live', pestPressureConfig, staffViewer = false } = {}) {
+async function buildServiceReportV1ResponseData(service, token, {
+  mode = 'live',
+  pestPressureConfig,
+  staffViewer = false,
+  pinnedLawnAssessmentId = null,
+} = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
   // Only the /data route resolves it (staffCanViewSuppressed — the same
@@ -269,7 +274,9 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // mode rides into the builder so mode-sensitive copy (the pest Visit
   // Summary narrative) can exclude the live-only next appointment from
   // pdf/static text — the field-level strip below can't reach prose.
-  const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer, mode });
+  const data = await buildReportV1Data(service, token, db, {
+    pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId,
+  });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
   // nextAppointment + the V2 snapshot's nextVisit are LIVE-VIEW ONLY — the
@@ -1466,7 +1473,20 @@ router.get('/:token/data', async (req, res, next) => {
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer });
+      // ?assessment=<id> pins which lawn assessment this render shows (#3168).
+      // The headless PDF render passes it so the attachment provably carries
+      // the copy the send fence sealed — the renderer navigates to this page
+      // and the page fetches its own data, so pinning is the only way to make
+      // that deterministic. Validated in report-data against the assessments
+      // this token already exposes (same customer, confirmed, linked to this
+      // visit); an id outside that set throws rather than widening what the
+      // token can see. Ignored on non-lawn reports.
+      const pinnedLawnAssessmentId = typeof req.query.assessment === 'string' && req.query.assessment.trim()
+        ? req.query.assessment.trim()
+        : null;
+      const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
+        mode, staffViewer, pinnedLawnAssessmentId,
+      });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports
@@ -1523,7 +1543,19 @@ router.get('/:token/data', async (req, res, next) => {
       irrigation: service.irrigation_recommendation,
       pdfUrl: `/api/reports/${req.params.token}`,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // A pin this report cannot legitimately show FAILS the request — never a
+    // quiet fallback to normal resolution (#3168). The pin is how a pinned
+    // render proves the attachment carries the sealed copy; answering with a
+    // different assessment would produce exactly the divergence it prevents,
+    // and the caller could not tell. 409 so the render errors and the delivery
+    // defers retryably. The message names no ids — the caller supplied it.
+    if (err?.code === 'pinned_assessment_unavailable') {
+      logger.warn(`[reports-public] pinned assessment refused for token ${req.params.token}: ${err.message}`);
+      return res.status(409).json({ error: 'Requested assessment is not available for this report' });
+    }
+    return next(err);
+  }
 });
 
 function generateReportPDF(service, products, weather, dryTimes, irrigation, res) {

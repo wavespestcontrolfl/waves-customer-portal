@@ -1826,6 +1826,51 @@ async function lawnPhotoUrl(photo) {
   }
 }
 
+// Raised when a render pins an assessment that this report cannot legitimately
+// show. NEVER fall back to normal resolution on a bad pin: a pinned render is
+// how a send fence proves the attachment carries the copy it sealed, and a
+// silent fallback would hand back a plausible PDF containing something else —
+// the exact divergence the pin exists to rule out (#3168). Fail the render;
+// the delivery defers and retries.
+class PinnedAssessmentUnavailable extends Error {
+  constructor(assessmentId) {
+    super(`pinned lawn assessment ${assessmentId} is not linked to this report`);
+    this.code = 'pinned_assessment_unavailable';
+    this.assessmentId = assessmentId;
+  }
+}
+
+// A pinned render must resolve the EXACT assessment it was asked for, and only
+// if this report could legitimately show it (#3168).
+//
+// The authorization boundary: the pin may only select among assessments the
+// report token already exposes — same customer, confirmed, and linked to THIS
+// service record or its scheduled service. That is deliberately the same
+// candidate set loadLinkedLawnAssessment picks from, so a pin can never widen
+// what a token can see. An id belonging to another customer, another visit, or
+// an unconfirmed row is refused rather than rendered.
+//
+// Refusal THROWS. Returning null would render a lawn report with no lawn
+// section, which is divergence by omission — see PinnedAssessmentUnavailable.
+async function loadPinnedLawnAssessment(service, assessmentId, knex = db) {
+  if (!service?.customer_id) throw new PinnedAssessmentUnavailable(assessmentId);
+
+  const baseCriteria = { customer_id: service.customer_id, confirmed_by_tech: true, id: assessmentId };
+  const scheduledServiceId = service.scheduled_service_id || service.service_id;
+
+  const byRecord = service.id
+    ? await knex('lawn_assessments').where({ ...baseCriteria, service_record_id: service.id }).first()
+    : null;
+  if (byRecord) return byRecord;
+
+  const byService = scheduledServiceId
+    ? await knex('lawn_assessments').where({ ...baseCriteria, service_id: scheduledServiceId }).first()
+    : null;
+  if (byService) return byService;
+
+  throw new PinnedAssessmentUnavailable(assessmentId);
+}
+
 // failClosed (issue #3135): the RENDER path treats an unreadable assessment as
 // "no assessment" and degrades the card, which is right for a page. A caller
 // that fences a SEND cannot do that — swallowing a transient error there would
@@ -1868,9 +1913,11 @@ async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false
   return null;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null } = {}) {
   if (serviceLine !== 'lawn') return null;
-  const assessment = await loadLinkedLawnAssessment(service, knex);
+  const assessment = pinnedAssessmentId
+    ? await loadPinnedLawnAssessment(service, pinnedAssessmentId, knex)
+    : await loadLinkedLawnAssessment(service, knex);
   if (!assessment) return null;
 
   const allAssessments = await knex('lawn_assessments')
@@ -2276,7 +2323,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     });
   }
 
-  const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
+    pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
+  });
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
   // grounded regen or stored-copy sanitize lands, and nothing shown can be
@@ -3710,6 +3759,8 @@ module.exports = {
   treatmentScope,
   buildLawnAssessmentReportData,
   loadLinkedLawnAssessment,
+  PinnedAssessmentUnavailable,
+  loadPinnedLawnAssessment,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,
   defaultGeometry,

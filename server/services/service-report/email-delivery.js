@@ -410,7 +410,14 @@ async function loadServiceRecord(recordId) {
     .first();
 }
 
-async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, forceFreshPdf = false, verifyBeforeSend = null } = {}) {
+async function sendServiceReportV1Email(recordId, {
+  token, reportUrl, pdfUrl, forceFreshPdf = false, verifyBeforeSend = null,
+  // #3168: the assessment the caller's fence sealed. Pinning it on the render
+  // is what makes the attachment's content provable — the renderer navigates
+  // to the report page, which fetches its own data, so without a pin the file
+  // can contain a different assessment than the one that was sealed.
+  pinnedLawnAssessmentId = null,
+} = {}) {
   if (!sendgrid.isConfigured()) {
     return { ok: false, error: 'SendGrid not configured' };
   }
@@ -445,7 +452,9 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, fo
 
   let pdf = null;
   try {
-    const result = await getOrRenderServiceReportPdf(recordId, { token: reportToken, forceFresh: forceFreshPdf });
+    const result = await getOrRenderServiceReportPdf(recordId, {
+      token: reportToken, forceFresh: forceFreshPdf, pinnedLawnAssessmentId,
+    });
     pdf = result.pdf;
     if (result.storageFailed) {
       await enqueuePdfRenderRetry({

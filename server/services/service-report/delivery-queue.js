@@ -430,6 +430,14 @@ async function processServiceReportDelivery(delivery, knex = db) {
       // during THIS render, not that the cached object came from it. Cost is
       // one render per lawn delivery, which the held path already paid.
       forceFreshPdf: heldForGrounding || !!fencedAssessmentId,
+      // Pin the render to the assessment this delivery fences (#3168). The
+      // post-render selection re-check below catches the answer CHANGING
+      // across the render; the pin closes the case it cannot see — the
+      // selection moving away and back inside the window — by removing the
+      // page's freedom to choose. A pin the report cannot legitimately show
+      // fails the render, so the delivery defers rather than mailing an
+      // attachment whose contents nothing verified.
+      pinnedLawnAssessmentId: fencedAssessmentId,
       verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {

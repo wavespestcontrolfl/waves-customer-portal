@@ -14,10 +14,18 @@ function serviceReportPublicBase(req) {
   return `${req.protocol}://${req.get('host')}`;
 }
 
-function serviceReportViewerUrl(token, req, mode = 'pdf') {
+// pinnedLawnAssessmentId (#3168): the renderer navigates a headless browser to
+// this page and the page fetches its own report data, so the only way to make
+// the attachment's content deterministic is to tell the page which assessment
+// to show. The data route validates the pin against what this token already
+// exposes and refuses anything else.
+function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null } = {}) {
   const base = serviceReportPublicBase(req).replace(/\/+$/, '');
-  const modeParam = mode ? `?mode=${encodeURIComponent(mode)}` : '';
-  return `${base}/report/${encodeURIComponent(token)}${modeParam}`;
+  const params = [];
+  if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
+  if (pinnedLawnAssessmentId) params.push(`assessment=${encodeURIComponent(pinnedLawnAssessmentId)}`);
+  const query = params.length ? `?${params.join('&')}` : '';
+  return `${base}/report/${encodeURIComponent(token)}${query}`;
 }
 
 async function launchBrowser() {

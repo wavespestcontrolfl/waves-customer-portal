@@ -86,6 +86,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
   knex = db,
   allowUnstoredPdf = false,
   pestPressureConfig: providedPestPressureConfig,
+  // #3168: pin which lawn assessment this render shows, so a send fence can
+  // prove the attachment carries the copy it sealed. Rides to the page on the
+  // URL; also pinned on this function's own data build so the storage-key
+  // signature describes the same render.
+  pinnedLawnAssessmentId = null,
 } = {}) {
   const service = await loadServiceRecordForPdf(recordId, knex);
   if (!service) throw new Error('Service record not found');
@@ -127,7 +132,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   let tnRenderedSignature = '-tn0';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
@@ -144,6 +149,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       req,
       logger,
       serviceRecordId: recordId,
+      pinnedLawnAssessmentId,
     });
 
     const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
@@ -238,7 +244,9 @@ async function clearLawnPdfCorrectionMarker(recordId, knex = db) {
 // deliveries must attach a render produced AFTER final copy settled, and no
 // fence can cover every render path (the public report route renders
 // synchronously without a job row — codex P1 #3093 r23).
-async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, forceFresh = false } = {}) {
+async function getOrRenderServiceReportPdf(recordId, {
+  token, req, knex = db, forceFresh = false, pinnedLawnAssessmentId = null,
+} = {}) {
   // technician_notes + service_data ride along for the summary-copy key
   // component, service_type/service_line for the mosquito-V2 component —
   // the expected key must match what renderAndStore writes.
@@ -257,7 +265,10 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
       ? JSON.parse(service.structured_notes) : (service?.structured_notes || {});
     correctionPending = notes && notes.lawnPdfCorrectionPending === true;
   } catch { correctionPending = false; }
-  const mustRenderFresh = forceFresh || correctionPending;
+  // A pinned render can never be served from storage: a cached object records
+  // nothing about which assessment it was built from, so returning one would
+  // silently answer a pinned request with unpinned content (#3168).
+  const mustRenderFresh = forceFresh || correctionPending || !!pinnedLawnAssessmentId;
   // Version captured BEFORE the render: the marker may only be cleared when
   // the recommendation copy did not change during the render AND no
   // generation is in flight afterwards — otherwise this render may have
@@ -292,6 +303,7 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     knex,
     allowUnstoredPdf: true,
     pestPressureConfig,
+    pinnedLawnAssessmentId,
   });
   // A completed fresh render satisfies the pending correction — but only
   // once the copy can no longer change (no generation in flight).
