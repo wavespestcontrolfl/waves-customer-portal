@@ -6450,6 +6450,29 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
 
+    // Inspection credit promise (dark behind GATE_INSPECTION_CREDIT).
+    // Keyed ONLY to a successful inspection closeout plus the explicit
+    // opt-out — deliberately NOT inside the invoice-mint branch (Codex
+    // #3175 P0): paid, prepaid, pre-minted, existing-invoice and
+    // no-invoice inspections are all still inspections the customer was
+    // promised a credit for. Records the PROMISE only; no money moves
+    // until they book. Never throws — a credit hiccup must not fail a
+    // completion the tech already performed.
+    if (offerInspectionCredit && String(completionProfile?.category || '') === 'inspection') {
+      try {
+        const InspectionCredit = require('../services/inspection-credit');
+        inspectionCreditOffer = await InspectionCredit.recordInspectionCreditOffer({
+          customerId: svc.customer_id,
+          scheduledServiceId: svc.id,
+          serviceRecordId: record.id,
+          serviceKey: completionProfile?.serviceKey || null,
+          createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,
+        });
+      } catch (creditErr) {
+        logger.error(`[dispatch] inspection credit offer failed for ${svc.id}: ${creditErr.message}`);
+      }
+    }
+
     if (!completionPhotosUploadedBeforeCommit && Array.isArray(completionPhotos) && completionPhotos.length) {
       completionPhotoUploadResult = await uploadServicePhotoDataUrls({
         serviceRecordId: record.id,
@@ -7861,25 +7884,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           adoptedConcurrentInvoice = minted.reused === true;
         } else {
           invoice = await InvoiceService.createFromService(record.id, mintOptions);
-        }
-        // Inspection credit promise (dark behind GATE_INSPECTION_CREDIT).
-        // Recorded here, beside the invoice that carries its receipt copy —
-        // and it records the PROMISE only: no money moves until the customer
-        // actually books. Best-effort by contract: the service never throws,
-        // so a credit hiccup can't fail a completion the tech already did.
-        if (offerInspectionCredit && String(completionProfile?.category || '') === 'inspection') {
-          try {
-            const InspectionCredit = require('../services/inspection-credit');
-            inspectionCreditOffer = await InspectionCredit.recordInspectionCreditOffer({
-              customerId: svc.customer_id,
-              scheduledServiceId: svc.id,
-              serviceRecordId: record.id,
-              serviceKey: completionProfile?.serviceKey || null,
-              createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,
-            });
-          } catch (creditErr) {
-            logger.error(`[dispatch] inspection credit offer failed for ${svc.id}: ${creditErr.message}`);
-          }
         }
         // An adopted concurrent invoice was minted by another writer — the
         // claimed setup fee did NOT ride it; restore the claim (guarded on

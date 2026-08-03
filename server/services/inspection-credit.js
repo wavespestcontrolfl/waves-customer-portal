@@ -258,6 +258,78 @@ async function redeemInspectionCreditForBooking({
 }
 
 /**
+ * Recovery sweep — the DURABLE half of redemption (Codex #3175 P0 ×2).
+ *
+ * The at-booking call is only a fast path. It cannot be the guarantee,
+ * because (a) scheduled_services is written from a dozen surfaces (public
+ * self-booking, leads, estimate conversion, seeders) and wiring each one is
+ * a standing invitation to miss the next one, and (b) a transient claim or
+ * ledger failure there would otherwise lose a promise permanently.
+ *
+ * The offer row is the durable record: it stays 'offered' until a mint
+ * succeeds. This sweep re-derives redemption from persisted state — any open
+ * offer whose customer has a LIVE booking created after it — so a missed
+ * surface or a failed attempt simply redeems on the next run. Idempotent by
+ * construction: it reuses the same status-guarded claim, so a booking that
+ * already redeemed is a no-op.
+ *
+ * Also closes out genuinely lapsed offers so the working set stays small.
+ * Returns counts; never throws.
+ */
+async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 } = {}) {
+  if (!gateOn()) return { redeemed: 0, expired: 0, reason: 'feature_disabled' };
+  let redeemed = 0;
+  let expired = 0;
+  try {
+    // Lapsed offers: terminal, and never redeemable again.
+    expired = await db('inspection_credit_offers')
+      .where({ status: 'offered' })
+      .where('expires_at', '<', now)
+      .update({ status: 'expired', updated_at: db.fn.now() });
+
+    const open = await db('inspection_credit_offers')
+      .where({ status: 'offered' })
+      .where('expires_at', '>=', now)
+      .orderBy('created_at', 'asc')
+      .limit(limit)
+      .select('id', 'customer_id', 'created_at', 'source_scheduled_service_id');
+
+    for (const offer of open) {
+      try {
+        // A live booking made AFTER the promise, and not the inspection
+        // itself — the same test the at-booking path applies, re-derived
+        // from persisted state so it holds for every booking surface.
+        const booking = await db('scheduled_services')
+          .where({ customer_id: offer.customer_id })
+          .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+          .where('created_at', '>=', offer.created_at)
+          .whereNot({ id: offer.source_scheduled_service_id || '00000000-0000-0000-0000-000000000000' })
+          .orderBy('created_at', 'asc')
+          .first('id');
+        if (!booking) continue;
+        const res = await redeemInspectionCreditForBooking({
+          customerId: offer.customer_id,
+          scheduledServiceId: booking.id,
+          createdBy: 'system:inspection_credit_sweep',
+          now,
+        });
+        redeemed += Number(res?.redeemed) || 0;
+      } catch (err) {
+        // One bad offer must not stop the sweep — it retries next run.
+        logger.error(`[inspection-credit] sweep failed for offer ${offer.id}: ${err.message}`);
+      }
+    }
+    if (redeemed || expired) {
+      logger.info(`[inspection-credit] sweep: ${redeemed} redeemed, ${expired} expired`);
+    }
+    return { redeemed, expired };
+  } catch (err) {
+    logger.error(`[inspection-credit] sweep FAILED: ${err.message}`);
+    return { redeemed, expired, reason: 'error', error: err.message };
+  }
+}
+
+/**
  * Receipt copy for a recorded offer — the exact promise the customer is
  * being shown. Returns null when there is nothing to say, so callers can
  * spread it into an optional memo slot.
@@ -271,6 +343,7 @@ function inspectionCreditReceiptMemo({ amount, windowDays } = {}) {
 
 module.exports = {
   recordInspectionCreditOffer,
+  sweepInspectionCreditRedemptions,
   configuredCreditAmount,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,

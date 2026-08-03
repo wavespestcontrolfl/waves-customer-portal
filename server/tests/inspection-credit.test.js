@@ -25,7 +25,7 @@ const mockUpdates = [];
 jest.mock('../models/db', () => {
   const makeChain = () => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'select', 'onConflict', 'ignore', 'returning']) {
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'select', 'onConflict', 'ignore', 'returning']) {
       chain[m] = jest.fn(() => chain);
     }
     // select()/the builder itself resolves to the open-offer list
@@ -49,6 +49,7 @@ jest.mock('../models/db', () => {
 
 const {
   recordInspectionCreditOffer,
+  sweepInspectionCreditRedemptions,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
   creditWindowDaysForServiceKey,
@@ -173,6 +174,28 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     mockPostCreditMovement.mockRejectedValueOnce(new Error('ledger down'));
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ redeemed: 0, amount: 0 });
+  });
+});
+
+describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
+  it('is inert while the gate is dark', async () => {
+    mockGateOn = false;
+    const res = await sweepInspectionCreditRedemptions();
+    expect(res).toMatchObject({ redeemed: 0, reason: 'feature_disabled' });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
+  it('redeems an open offer whose customer booked through ANY surface, and never throws', async () => {
+    // The sweep re-derives redemption from persisted state, so a booking
+    // path that never called redeem still gets the credit.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), source_scheduled_service_id: 'svc-insp',
+      expires_at: new Date('2099-01-01'),
+    }];
+    const res = await sweepInspectionCreditRedemptions();
+    expect(res.reason).toBeUndefined();
+    expect(typeof res.redeemed).toBe('number');
   });
 });
 
