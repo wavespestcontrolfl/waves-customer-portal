@@ -651,6 +651,14 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           now: visit.closed_out_at ? new Date(visit.closed_out_at) : now,
           windowAnchor: etDateOnlyToDate(visit.service_date) || now,
         });
+        // This recovery insert can be the FIRST successful creation of the
+        // promise (the closeout-time insert failed), so the prepaid
+        // receipt-resend must ride it too (PR #3178 r17 P2) — otherwise an
+        // already-paid, non-payer inspection in exactly the transient-
+        // failure case this recovery exists for never sees its deadline.
+        if (created?.recorded && created.offerId) {
+          queueCreditReceiptResend({ scheduledServiceId: visit.id, offerId: created.offerId });
+        }
         // The offer arrived LATE, so a qualifying booking may already have
         // happened while it was missing (Codex #3178 r3 P1). Adopt the
         // earliest PROVEN booking inside the window — proven meaning
@@ -679,77 +687,33 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       logger.error(`[inspection-credit] closeout recovery failed: ${err.message}`);
     }
 
-    // Every still-open offer; the PROVEN-booking test below decides which
-    // ones earn money. Judged by when the customer BOOKED, not when this
-    // sweep runs, so a booking made inside the window still credits even if
-    // the fast path failed, cron was down, or the gate was off until after
-    // the expiry date.
-    const open = await db('inspection_credit_offers')
-      .where({ status: 'offered' })
-      .orderBy('created_at', 'asc')
-      .limit(limit)
-      .select('id', 'customer_id', 'amount', 'created_at', 'expires_at', 'source_scheduled_service_id');
-
-    for (const offer of open) {
-      try {
-        // Booking EVENTS are the evidence — written in-transaction by real
-        // booking surfaces only, so seeders, imports and bulk rebooks
-        // (which prod data shows are indistinguishable by provenance
-        // columns) never credit.
-        const booking = await provenBookingInWindow({
-          customerId: offer.customer_id,
-          from: offer.created_at,
-          to: offer.expires_at,
-          excludeIds: [offer.source_scheduled_service_id],
-        });
-
-        if (booking) {
-          const ok = await redeemSpecificOffer({
-            offerId: offer.id,
-            customerId: offer.customer_id,
-            amount: offer.amount,
-            bookingId: booking.id,
-            bookingCreatedAt: booking.created_at,
-            createdBy: 'system:inspection_credit_sweep',
-            now,
-          });
-          if (ok) redeemed += 1;
-          continue;
-        }
-
-        // No qualifying booking: expire only once the window has genuinely
-        // passed. Status-guarded so it can't stomp a concurrent redemption.
-        if (new Date(offer.expires_at) < now) {
-          const closed = await db('inspection_credit_offers')
-            .where({ id: offer.id, status: 'offered' })
-            .update({ status: 'expired', updated_at: db.fn.now() });
-          expired += Number(closed) || 0;
-        }
-      } catch (err) {
-        logger.error(`[inspection-credit] sweep failed for offer ${offer.id}: ${err.message}`);
-      }
-    }
-
-    // Expiry-race rescue (pre-push P0): a booking transaction can commit
-    // its event between the evidence check above and the expire UPDATE, so
-    // the offer lands 'expired' holding a qualifying booking nobody scans
-    // again. Targeted JOIN (same bounded-working-set posture as the
-    // reversal query): only expired, never-minted offers with an in-window
-    // live proven booking; the claim's ordering guard re-validates.
+    // Redemption is EVIDENCE-FIRST (PR #3178 r17 P2): the working set is
+    // the join of booking events to the offers they can prove — never a
+    // plain oldest-N scan of open offers, which lets unbooked offers
+    // sitting out their 14/30-day window monopolize every sweep and starve
+    // a newer offer whose fast-path redemption failed. Judged by when the
+    // customer BOOKED (e.created_at inside the offer's window), not when
+    // this sweep runs. Includes 'expired' rows on purpose — expiry is
+    // provisional, and this same join is the expiry-race rescue: a booking
+    // event that commits between an evidence check and an expire UPDATE is
+    // picked up here next run. The claim's ordering guard re-validates
+    // everything under the lock; redeemed rows leave the working set, so
+    // it cannot starve.
     try {
-      const raceExpired = await db('inspection_credit_booking_events as e')
+      const provable = await db('inspection_credit_booking_events as e')
         .join('inspection_credit_offers as o', 'o.customer_id', 'e.customer_id')
         .join('scheduled_services as s', 's.id', 'e.scheduled_service_id')
-        .where('o.status', 'expired')
+        .whereIn('o.status', ['offered', 'expired'])
         .whereNull('o.credit_ledger_id')
         .whereRaw('e.created_at >= o.created_at')
         .whereRaw('e.created_at <= o.expires_at')
         .whereRaw('e.scheduled_service_id IS DISTINCT FROM o.source_scheduled_service_id')
         .whereNotIn('s.status', NON_LIVE_APPOINTMENT_STATUSES)
+        .orderBy('e.created_at', 'asc')
         .limit(limit)
         .select('o.id as offer_id', 'o.customer_id as customer_id', 'o.amount as amount',
           'e.scheduled_service_id as booking_id', 'e.created_at as booked_at');
-      for (const row of raceExpired) {
+      for (const row of provable) {
         if (!row.offer_id || !row.booking_id) continue;
         const ok = await redeemSpecificOffer({
           offerId: row.offer_id,
@@ -757,13 +721,39 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           amount: row.amount,
           bookingId: row.booking_id,
           bookingCreatedAt: new Date(row.booked_at),
-          createdBy: 'system:inspection_credit_sweep_expiry_rescue',
+          createdBy: 'system:inspection_credit_sweep',
           now,
         });
         if (ok) redeemed += 1;
       }
-    } catch (rescueErr) {
-      logger.error(`[inspection-credit] expiry rescue failed: ${rescueErr.message}`);
+    } catch (redeemErr) {
+      logger.error(`[inspection-credit] evidence-first redemption failed: ${redeemErr.message}`);
+    }
+
+    // Expiry pass, equally starvation-proof: only offers whose window has
+    // genuinely lapsed, oldest deadline first — each row processed once
+    // transitions out of this working set. Status-guarded so it can't
+    // stomp a concurrent redemption, and 'expired' stays provisional (the
+    // evidence-first join above reclaims a raced one next run).
+    try {
+      const lapsed = await db('inspection_credit_offers')
+        .where({ status: 'offered' })
+        .where('expires_at', '<', now)
+        .orderBy('expires_at', 'asc')
+        .limit(limit)
+        .select('id');
+      for (const offer of lapsed) {
+        try {
+          const closed = await db('inspection_credit_offers')
+            .where({ id: offer.id, status: 'offered' })
+            .update({ status: 'expired', updated_at: db.fn.now() });
+          expired += Number(closed) || 0;
+        } catch (err) {
+          logger.error(`[inspection-credit] expiry failed for offer ${offer.id}: ${err.message}`);
+        }
+      }
+    } catch (expireErr) {
+      logger.error(`[inspection-credit] expiry pass failed: ${expireErr.message}`);
     }
 
     if (redeemed || expired || reversed) {
@@ -852,6 +842,33 @@ async function reverseInspectionCreditForBooking({
     let reversed = 0;
     for (const offer of redeemedOffers) {
       try {
+        // FIRST (PR #3178 r17 P1): an invoice for this cancelled booking
+        // still holding money — paid, processing, unverifiable PI,
+        // anything outside the resolved set — may have the credit
+        // EMBEDDED in it. Neither reversing NOR rebinding is safe then: a
+        // blind negative movement would consume UNRELATED balance, and a
+        // rebind would claim the credit belongs to another booking while
+        // it sits in this one's invoice. Flag the office once and leave
+        // the offer bound; when the office resolves the invoice, the
+        // hourly sweep retries and rebind/reversal proceeds normally.
+        // Fail CLOSED on a failed check — never move money blind.
+        try {
+          const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+          const unresolved = await db('invoices')
+            .where({ scheduled_service_id: scheduledServiceId })
+            .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+            .first('id');
+          if (unresolved) {
+            await alertReversalNeedsOffice(offer, scheduledServiceId, {
+              reason: 'invoice_unresolved',
+              body: `A $${round2(offer.amount).toFixed(2)} inspection credit is tied to a cancelled booking whose invoice still holds money. Reversing automatically could take unrelated balance — resolve the invoice, then collect or write off the credit.`,
+            });
+            continue;
+          }
+        } catch (checkErr) {
+          logger.error(`[inspection-credit] invoice-state check failed for offer ${offer.id} — reversal deferred: ${checkErr.message}`);
+          continue;
+        }
         // The credit was earned by BOOKING inside the window. If another
         // live booking still stands in that window, the customer is still
         // entitled to it — rebind rather than claw it back (Codex #3178
@@ -872,29 +889,33 @@ async function reverseInspectionCreditForBooking({
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
           continue;
         }
-        // An invoice for this cancelled booking still holding money — paid,
-        // processing, unverifiable PI, anything outside the resolved set —
-        // may have the credit EMBEDDED in it (pre-push P0): a blind
-        // negative movement would consume UNRELATED balance while the
-        // invoice keeps the discount. Flag the office once and leave the
-        // offer bound; when the office resolves the invoice, the hourly
-        // sweep retries this reversal and it proceeds normally. Fail
-        // CLOSED on a failed check — never reverse blind.
+        // A recurring anchor's seeded children carry no events of their own
+        // — only the anchor was BOOKED, and the children were seeded inside
+        // that same proven transaction. Cancelling just the anchor while
+        // the series stays live must not claw the credit back (PR #3178
+        // r17 P1): rebind to the earliest live child OF THE PROVEN ANCHOR.
+        // Descendants of proven bookings only — an unrelated seeder row
+        // still never qualifies.
+        let seriesChild = null;
         try {
-          const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
-          const unresolved = await db('invoices')
+          const anchorProven = await db('inspection_credit_booking_events')
             .where({ scheduled_service_id: scheduledServiceId })
-            .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
             .first('id');
-          if (unresolved) {
-            await alertReversalNeedsOffice(offer, scheduledServiceId, {
-              reason: 'invoice_unresolved',
-              body: `A $${round2(offer.amount).toFixed(2)} inspection credit is tied to a cancelled booking whose invoice still holds money. Reversing automatically could take unrelated balance — resolve the invoice, then collect or write off the credit.`,
-            });
-            continue;
+          if (anchorProven) {
+            seriesChild = await db('scheduled_services')
+              .where({ recurring_parent_id: scheduledServiceId })
+              .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+              .orderBy('scheduled_date', 'asc')
+              .first('id');
           }
-        } catch (checkErr) {
-          logger.error(`[inspection-credit] invoice-state check failed for offer ${offer.id} — reversal deferred: ${checkErr.message}`);
+        } catch (childErr) {
+          logger.warn(`[inspection-credit] series-child probe failed for ${scheduledServiceId}: ${childErr.message}`);
+        }
+        if (seriesChild) {
+          await db('inspection_credit_offers')
+            .where({ id: offer.id, status: 'redeemed' })
+            .update({ redeemed_scheduled_service_id: seriesChild.id, updated_at: db.fn.now() });
+          logger.info(`[inspection-credit] offer ${offer.id} rebound to live series child ${seriesChild.id} — anchor cancelled, series continues`);
           continue;
         }
         await db.transaction(async (trx) => {
@@ -954,6 +975,37 @@ async function reverseInspectionCreditForBooking({
 }
 
 /**
+ * Resend the paid receipt so it carries the frozen credit memo — for
+ * inspections that settled BEFORE the offer existed: prepaid at booking
+ * (closeout path) or the offer insert failed and recovery created it later
+ * (PR #3178 r17 P2). First record only (callers gate on recorded:true);
+ * already-paid, non-payer-billed invoices only; sendReceiptEmail's
+ * idempotency key makes replays safe. Fire-and-forget by contract — a
+ * completion or sweep never waits on an email.
+ */
+function queueCreditReceiptResend({ scheduledServiceId, offerId }) {
+  if (!scheduledServiceId || !offerId) return;
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const paidInvoice = await db('invoices')
+          .where({ scheduled_service_id: scheduledServiceId, status: 'paid' })
+          .whereNull('payer_id')
+          .orderBy('created_at', 'desc')
+          .first('id');
+        if (!paidInvoice) return;
+        const { sendReceiptEmail } = require('./invoice-email');
+        await sendReceiptEmail(paidInvoice.id, {
+          idempotencyKey: `inspection-credit-offer-${offerId}`,
+        });
+      } catch (resendErr) {
+        logger.warn(`[inspection-credit] credit receipt resend failed for ${scheduledServiceId}: ${resendErr.message}`);
+      }
+    })();
+  });
+}
+
+/**
  * Receipt copy for a recorded offer — the exact promise the customer is
  * being shown. Returns null when there is nothing to say, so callers can
  * spread it into an optional memo slot.
@@ -983,6 +1035,7 @@ module.exports = {
   configuredCreditAmount,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
+  queueCreditReceiptResend,
   creditWindowDaysForServiceKey,
   DEFAULT_CREDIT_WINDOW_DAYS,
   NON_LIVE_APPOINTMENT_STATUSES,

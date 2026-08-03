@@ -155,6 +155,18 @@ router.post('/:id/cancel', async (req, res, next) => {
       return res.status(status).json({ error: result.reason });
     }
 
+    // Shared cancellation money seam (PR #3178 r17 P1): voids still-open
+    // invoices for the cancelled visit and — in its finally — reverses or
+    // defers any inspection credit, same as every other cancel surface.
+    // This v1 route previously skipped both, leaving dunning chasing a
+    // cancelled job and unearned credit spendable until the hourly sweep.
+    // Best-effort: never fail the committed cancel.
+    try {
+      await require('../services/invoice').voidOpenInvoicesForCancelledService(req.params.id);
+    } catch (seamErr) {
+      require('../services/logger').error(`[admin-services] cancel void/reversal seam failed for ${req.params.id}: ${seamErr.message}`);
+    }
+
     res.json({
       state: result.state,
       cancelledAt: result.cancelledAt,

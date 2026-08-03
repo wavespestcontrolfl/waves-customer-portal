@@ -29,26 +29,35 @@ let mockClaimResult = 1;
 let mockBookings = [];
 let mockAlternates = [];
 let mockInvoices = [];
+let mockEvents = [];
 const mockUpdates = [];
 const mockChainCalls = [];
 jest.mock('../models/db', () => {
   const makeChain = (table) => {
     const chain = {};
+    let joined = false;
     for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning', 'forUpdate']) {
-      chain[m] = jest.fn((...args) => { mockChainCalls.push({ m, args }); return chain; });
+      chain[m] = jest.fn((...args) => {
+        mockChainCalls.push({ m, args });
+        if (m === 'join' || m === 'leftJoin') joined = true;
+        return chain;
+      });
     }
     // select()/the builder itself resolves to the open-offer list
     // Table-aware: a scheduled_services lookup is a BOOKING probe, not an
     // offer read — conflating them made the reversal path think another
-    // live booking existed.
+    // live booking existed. An events read is TWO different probes: joined
+    // = the evidence/redemption join (mockAlternates); plain = a direct
+    // event lookup (mockEvents) — the fast path's booking-moment read and
+    // the reversal path's anchor-proven check.
     const t = String(table || '');
-    const isAlternateProbe = t.includes('inspection_credit_booking_events');
-    const isBookings = t.includes('scheduled_services') && !isAlternateProbe;
+    const isEventsTable = t.includes('inspection_credit_booking_events');
+    const isBookings = t.includes('scheduled_services') && !isEventsTable;
     const isInvoices = t === 'invoices' || t.startsWith('invoices ');
-    const rows = isAlternateProbe ? mockAlternates
-      : (isBookings ? mockBookings : (isInvoices ? mockInvoices : mockOffers));
-    chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
-    chain.first = jest.fn(async () => rows[0] || null);
+    const pickRows = () => (isEventsTable ? (joined ? mockAlternates : mockEvents)
+      : (isBookings ? mockBookings : (isInvoices ? mockInvoices : mockOffers)));
+    chain.then = (res, rej) => Promise.resolve(pickRows()).then(res, rej);
+    chain.first = jest.fn(async () => pickRows()[0] || null);
     chain.insert = jest.fn(() => {
       const ins = {};
       ins.onConflict = jest.fn(() => ins);
@@ -90,6 +99,7 @@ beforeEach(() => {
   mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-10'), status: 'confirmed' }];
   mockAlternates = [];
   mockInvoices = [];
+  mockEvents = [];
   mockUpdates.length = 0;
   mockChainCalls.length = 0;
 });
@@ -223,7 +233,7 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     // find no offer and the invoice would deliver unreduced. The booking
     // EVENT (written at graduation) carries the real moment.
     mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-01'), status: 'confirmed' }];
-    mockAlternates = [{ created_at: new Date('2026-08-10') }];
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
     mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ redeemed: 1, amount: 75 });
@@ -260,13 +270,15 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
   it('credits an open offer ONLY when a proven booking event exists in its window', async () => {
     // Deliberately NOT "any later scheduled_services row": seeders, bulk
     // rebooks and imports create rows nobody booked, and prod data shows
-    // no provenance column separates them. The booking EVENT is the proof.
-    mockOffers = [{
-      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
-      created_at: new Date('2026-08-01'), source_scheduled_service_id: 'svc-insp',
-      expires_at: new Date('2099-01-01'),
+    // no provenance column separates them. The booking EVENT is the proof —
+    // and the working set IS the evidence join (evidence-first, so unbooked
+    // offers sitting out their window can't starve provable ones).
+    mockOffers = [];
+    mockAlternates = [{
+      offer_id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      booking_id: 'svc-booked', booked_at: new Date('2026-08-05'),
     }];
-    mockAlternates = [{ id: 'svc-booked', created_at: new Date('2026-08-05') }];
+    mockBookings = [{ id: 'svc-booked', created_at: new Date('2026-08-05'), status: 'confirmed' }];
     const res = await sweepInspectionCreditRedemptions();
     expect(res.redeemed).toBe(1);
     expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
@@ -284,12 +296,11 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
     // starts; a cancellation can commit in between and its reversal finds
     // no redeemed offer yet. The in-transaction re-read (FOR UPDATE) is
     // what stops $75 landing against a cancelled booking.
-    mockOffers = [{
-      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
-      created_at: new Date('2026-08-03'), expires_at: new Date('2099-01-01'),
-      source_scheduled_service_id: 'svc-insp',
+    mockOffers = [];
+    mockAlternates = [{
+      offer_id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      booking_id: 'svc-booked', booked_at: new Date('2026-08-05'),
     }];
-    mockAlternates = [{ id: 'svc-booked', created_at: new Date('2026-08-05') }];
     mockBookings = [{ id: 'svc-booked', created_at: new Date('2026-08-05'), status: 'cancelled' }];
     const res = await sweepInspectionCreditRedemptions();
     expect(res.redeemed).toBe(0);
@@ -375,6 +386,61 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     }];
     await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
     expect(mockUpdates[0]).toMatchObject({ status: 'expired' });
+  });
+
+  it('cancelling only the ANCHOR of a live series rebinds to a child, never claws back', async () => {
+    // Seeded children carry no events of their own — only the anchor was
+    // booked. If the series continues, the customer still earned the credit.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = []; // no standalone proven alternate
+    mockEvents = [{ id: 'evt-anchor' }]; // the cancelled anchor IS proven
+    mockBookings = [{ id: 'svc-child', status: 'confirmed' }]; // live child
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-anchor' });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-child' });
+  });
+
+  it('an UNPROVEN cancelled row never rebinds through its children', async () => {
+    // Descendants qualify only under a PROVEN anchor — a seeder parent's
+    // children must not hold a credit alive.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = [];
+    mockEvents = []; // anchor has NO booking event
+    mockBookings = [{ id: 'svc-child', status: 'confirmed' }];
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-seeded' });
+    // Falls through to a full reversal — the money goes back.
+    expect(res).toEqual({ reversed: 1 });
+    expect(mockPostCreditMovement).toHaveBeenCalledWith(
+      expect.objectContaining({ delta: -75 }), expect.anything(),
+    );
+  });
+
+  it('an unresolved invoice blocks REBINDING too, not just reversal', async () => {
+    // Rebinding while the cancelled booking's paid invoice still embeds the
+    // credit would claim it belongs to another booking — office alert
+    // instead; the sweep retries after the invoice resolves.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = [{ id: 'svc-other' }]; // a rebind target exists...
+    mockInvoices = [{ id: 'inv-9', status: 'paid' }]; // ...but money is unresolved
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    // No rebind happened — the only update is the alert-marker claim.
+    expect(mockUpdates.some((p) => 'redeemed_scheduled_service_id' in p && p.redeemed_scheduled_service_id === 'svc-other')).toBe(false);
   });
 
   it('never reverses blind while an invoice for the booking still holds money', async () => {
