@@ -31,6 +31,49 @@ const REWRITES = [
     ['first_name', 'service_type', 'report_url', 'pay_url']],
 ];
 
+// getTemplate prefers an active variant body over the base row
+// (server/routes/admin-sms-templates.js — `variant?.body || t.body`), so a
+// migration that rewrites sms_templates alone leaves variant recipients on the
+// old copy. Same guarded swap the billing-copy migration uses.
+//
+// Two generations are swept on the way forward: the body this migration
+// expects, and the pre-house-voice body a variant created before that sweep
+// would still carry (20260801000001 rewrote sms_templates only). Rollback
+// restores one body — `expected` — so a corrected variant stays consistent
+// with the base row rather than resurrecting copy two generations old.
+//
+// Prod carries ZERO variant rows for any key (verified read-only 2026-08-03),
+// so this is defensive: it covers a variant authored in /admin between now and
+// the deploy, and any created later against the old copy.
+const LEGACY_VARIANT_BODIES = {
+  service_report_v1: [
+    'Hello {first_name}! Your Waves service report is ready: {report_url}{reentry_line}\n\nQuestions or requests? Reply here.',
+  ],
+  service_report_v1_with_invoice: [
+    "Hello {first_name}! Your Waves service report is ready: {report_url}{reentry_line}\n\nInvoice for today's visit: {pay_url}\n\nQuestions or requests? Reply here.",
+  ],
+};
+
+async function rewriteVariants(knex, reverse = false) {
+  if (!(await knex.schema.hasTable('sms_template_variants'))) return 0;
+  const cols = await knex('sms_template_variants').columnInfo();
+  if (!cols.body) return 0;
+
+  let changed = 0;
+  for (const [templateKey, expected, next] of REWRITES) {
+    const froms = reverse ? [next] : [expected, ...(LEGACY_VARIANT_BODIES[templateKey] || [])];
+    const to = reverse ? expected : next;
+    for (const from of froms) {
+      const patch = { body: to };
+      if (cols.updated_at) patch.updated_at = new Date();
+      changed += await knex('sms_template_variants')
+        .where({ template_key: templateKey, body: from })
+        .update(patch);
+    }
+  }
+  return changed;
+}
+
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
   const cols = await knex('sms_templates').columnInfo();
@@ -49,7 +92,8 @@ exports.up = async function up(knex) {
     else skipped.push(templateKey);
   }
 
-  console.log(`[service-report-sms] named the service on ${updated}; skipped ${skipped.length}${skipped.length ? ` (edited since, or missing): ${skipped.join(', ')}` : ''}`);
+  const variants = await rewriteVariants(knex);
+  console.log(`[service-report-sms] named the service on ${updated} base row(s) + ${variants} variant(s); skipped ${skipped.length}${skipped.length ? ` (edited since, or missing): ${skipped.join(', ')}` : ''}`);
 };
 
 exports.down = async function down(knex) {
@@ -73,6 +117,8 @@ exports.down = async function down(knex) {
       .where({ template_key: templateKey, body: next })
       .update(patch);
   }
+
+  await rewriteVariants(knex, true);
 };
 
 exports.REWRITES = REWRITES;
