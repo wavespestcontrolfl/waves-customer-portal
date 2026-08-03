@@ -2084,7 +2084,21 @@ const TRAP_PHRASE_TERMINATORS = [
   're-?set', 'swapped', 'moved',
 ];
 const TRAP_MODIFIER_RUN = `(?:\\s+(?!(?:${TRAP_PHRASE_TERMINATORS.join('|')})\\b)[a-z-]+)*?`;
-const TRAP_PARTITIVE_DET = '(?:the|our|these|those|all|its)';
+// A bare number is a determiner here too, so "checked 6 of 8 traps" and "6
+// of 8 traps were checked" route through the partitive rules — see
+// CHECK_PREDICATE_* below for why that matters.
+const TRAP_PARTITIVE_DET = '(?:the|our|these|those|all|its|\\d+)';
+// A CHECK predicate bound to an `N of M` claim changes which number the
+// claim is about. Without one, M is the roster ("6 of 8 traps were empty"
+// says 8 exist). With one, N is the count that was checked ("6 of 8 traps
+// were checked" says 6 were), and reconciling M against `traps_checked`
+// flagged a contradiction on prose that was exactly right — discarding the
+// technician's reviewed copy, the failure this whole stack exists to
+// prevent. Found by self-audit after round 15, not by review: the round-14
+// partitive rule reads "checked 8 of the traps" as 8 CHECKED, so the two
+// readings of one construction had drifted apart.
+const CHECK_PREDICATE_LEAD_RE = /\b(?:re-?)?(?:checked|inspected)(?:\s+(?:[a-z]+ly|all|both|just|now))*\s*$/i;
+const CHECK_PREDICATE_TRAIL_RE = /^(?:\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*\s+(?:re-?)?(?:checked|inspected)\b/i;
 
 const SETUP_EMPTY_CAPTURE_RES = [
   /\bno\s+(?:new\s+)?captures?\b/i,
@@ -2287,6 +2301,11 @@ function trapRosterClaims(text) {
       ? ''
       : cueText.slice(m.end, m.end + 30).split(/[.!?]/)[0];
     if (SUBSET_LEAD_RE.test(lead) || SUBSET_LEAD_RE.test(trail)) return;
+    // `N of M` + a check predicate: N is the checked count, and the
+    // partitive rules below claim it. Reading M as the roster here would
+    // reconcile the wrong number against traps_checked.
+    if (m.second != null
+      && (CHECK_PREDICATE_LEAD_RE.test(lead) || CHECK_PREDICATE_TRAIL_RE.test(trail))) return;
     claims.add(Number(m.second != null ? m.second : m.first));
   });
   for (const rx of [TRAP_PARTITIVE_ACTIVE_RE, TRAP_PARTITIVE_PASSIVE_RE]) {

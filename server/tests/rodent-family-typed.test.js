@@ -1451,3 +1451,43 @@ describe('noun-form trap inspection claims contradict a setup (round 15)', () =>
     }
   });
 });
+
+// Self-audit after round 15 (not a review finding): the round-14 partitive
+// rule reads "checked 8 of the traps" as 8 CHECKED, while the round-8 rule
+// reads "6 of 8 traps" as a roster of 8 — two readings of one construction.
+// Where a CHECK predicate binds, the roster reading reconciled the wrong
+// number and flagged prose that was exactly right, discarding reviewed copy.
+describe('`N of M` + a check predicate claims the CHECKED count', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a correctly recorded checked subset is clean', () => {
+    for (const text of [
+      '6 of 8 traps were checked today.',
+      'We inspected 6 of 8 traps.',
+      'We checked 6 of 8 traps on the north side.',
+      '6 of 8 traps have now been re-checked.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 })).toEqual([]);
+    }
+  });
+
+  test('…and a genuinely stale one still reconciles', () => {
+    expect(countContradictions('6 of 8 traps were checked today.', { traps_checked: 8 }).length)
+      .toBeGreaterThan(0);
+  });
+
+  test('without a check predicate the M stays the roster claim (round 8)', () => {
+    // "6 of 8 traps were empty" is a status subset and claims nothing; a
+    // plain roster mention still reconciles against the recorded count.
+    expect(countContradictions('6 of 8 traps were empty.', { traps_checked: 8 })).toEqual([]);
+    expect(countContradictions('We set 6 of 8 traps in the attic.', { traps_checked: 8 }))
+      .toEqual([]);
+  });
+
+  test('the round-14/15 partitive readings are unchanged', () => {
+    expect(countContradictions('We checked 8 of the traps today.', { traps_checked: 8 }))
+      .toEqual([]);
+    expect(countContradictions('8 of the traps were checked.', { traps_checked: 6 }).length)
+      .toBeGreaterThan(0);
+  });
+});
