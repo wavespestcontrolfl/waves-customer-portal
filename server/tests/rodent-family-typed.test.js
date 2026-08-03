@@ -1491,3 +1491,69 @@ describe('`N of M` + a check predicate claims the CHECKED count', () => {
       .toBeGreaterThan(0);
   });
 });
+
+// Second self-audit pass (adversarial, post-round-15). Every case here is
+// prose a technician would plausibly write that the guards REJECTED while
+// being factually correct — the copy-discarding direction. F1 was created
+// by the `N of M` + check-predicate fix itself, minutes earlier.
+describe('self-audit II — false positives on correct setup prose', () => {
+  const {
+    countContradictions,
+    setupContradictions,
+  } = require('../services/service-report/activity-indicators');
+
+  test('an article before the M keeps the checked-count reading', () => {
+    // "6 of THE 8 traps" matched neither partitive rule nor the N-of-M
+    // group, so the leftover "8 traps" tail became a bare roster claim.
+    for (const text of [
+      'We checked 6 of the 8 traps today.',
+      '6 of the 8 traps were checked today.',
+      'Six of the eight traps were checked today.',
+      'We inspected 6 out of the 8 traps.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 })).toEqual([]);
+    }
+    expect(countContradictions('6 of the 8 traps were checked today.', { traps_checked: 8 }).length)
+      .toBeGreaterThan(0);
+  });
+
+  test('a coordinated second verb keeps the predicate bound', () => {
+    expect(countContradictions('We checked and rebaited 6 of 8 traps today.', { traps_checked: 6 }))
+      .toEqual([]);
+  });
+
+  test('a completion word in a NEIGHBOURING clause is not a trap-check claim', () => {
+    // The completion word describes the setup; the trap check is scheduled.
+    for (const text of [
+      'Initial setup complete, trap check scheduled for next week.',
+      'Initial setup is complete; the first trap check is next week.',
+      'Trap placement completed - trap check in 7 days.',
+      'The trap check will be completed on our next visit.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+
+  test('a stated INTENTION to check is not a claim that checking happened', () => {
+    // The setup prompt asks the model to say we return to check them; the
+    // escape hatch used to be the pronoun, so naming the traps flagged.
+    for (const text of [
+      'We will return to check the traps in one week.',
+      'Traps are set and we will inspect the traps on the follow-up visit.',
+      'Set eight snap traps in the attic. We will be back to check them.',
+      'The next trap check is scheduled for next week.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+
+  test('…and a real claim beside a future clause still rejects', () => {
+    // The future marker excuses its OWN clause only — an explicit new
+    // subject after `and` splits, so the first clause is still judged.
+    expect(setupContradictions('Traps were checked and we will return next week.').length)
+      .toBeGreaterThan(0);
+    expect(setupContradictions('The traps were set and were checked later.').length)
+      .toBeGreaterThan(0);
+    expect(setupContradictions('Trap inspection completed today.').length).toBeGreaterThan(0);
+  });
+});

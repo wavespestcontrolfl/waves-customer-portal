@@ -2015,17 +2015,23 @@ function splitOnPredicateAnd(piece) {
     if (!/^and$/i.test(toks[i])) continue;
     let j = i + 1;
     while (j < toks.length && ADVERBIAL.test(toks[j])) j += 1;
+    let sawPronoun = false;
     if (SUBJECT_PRONOUN.test(toks[j] || '')) {
+      sawPronoun = true;
       j += 1;
       while (j < toks.length && ADVERBIAL.test(toks[j])) j += 1;
     }
     const next = toks[j];
     if (!next) continue;
     let splits = RECHECK_VERB.test(next) || PREDICATE_VERB.test(next);
-    // An auxiliary IMMEDIATELY after `and` is a shared-subject verb phrase
-    // ("were set and were checked later") — that window must stay joined so
-    // the participle still binds to its trap subject. The new-subject scan
-    // starts one token later.
+    // An auxiliary after an explicit new SUBJECT is that subject's verb, so
+    // it splits: "traps were checked and WE WILL return" must not let the
+    // second clause's future marker excuse the first clause's claim.
+    if (!splits && sawPronoun && CLAUSE_AUX.test(next)) splits = true;
+    // With no pronoun, an auxiliary IMMEDIATELY after `and` is a
+    // shared-subject verb phrase ("were set and were checked later") — that
+    // window must stay joined so the participle still binds to its trap
+    // subject. The new-subject scan starts one token later.
     if (!splits && !CLAUSE_AUX.test(next)) {
       for (let k = j + 1; k < Math.min(j + 1 + NEW_SUBJECT_LOOKAHEAD, toks.length); k += 1) {
         if (RECHECK_VERB.test(toks[k]) || PREDICATE_VERB.test(toks[k])) break;
@@ -2087,7 +2093,15 @@ const TRAP_MODIFIER_RUN = `(?:\\s+(?!(?:${TRAP_PHRASE_TERMINATORS.join('|')})\\b
 // A bare number is a determiner here too, so "checked 6 of 8 traps" and "6
 // of 8 traps were checked" route through the partitive rules — see
 // CHECK_PREDICATE_* below for why that matters.
-const TRAP_PARTITIVE_DET = '(?:the|our|these|those|all|its|\\d+)';
+// An article may sit in FRONT of the M ("6 of the 8 traps"), which is at
+// least as natural as the bare form. Without it here the partitive rules
+// missed the phrase entirely, TRAP_COUNT_CLAIM_RE's own `of M` group
+// (which requires the digits adjacent) also missed it, and the leftover
+// tail "8 traps" matched as a bare roster claim — reconciling 8 against a
+// correctly recorded 6 and discarding the copy. Word-form numbers
+// normalize into the same shape, so "Six of the eight traps" went the same
+// way. Self-audit finding, immediately after the fix it defeats.
+const TRAP_PARTITIVE_DET = '(?:(?:the|our|these|those|all|its)(?:\\s+\\d+)?|\\d+)';
 // A CHECK predicate bound to an `N of M` claim changes which number the
 // claim is about. Without one, M is the roster ("6 of 8 traps were empty"
 // says 8 exist). With one, N is the count that was checked ("6 of 8 traps
@@ -2097,7 +2111,9 @@ const TRAP_PARTITIVE_DET = '(?:the|our|these|those|all|its|\\d+)';
 // prevent. Found by self-audit after round 15, not by review: the round-14
 // partitive rule reads "checked 8 of the traps" as 8 CHECKED, so the two
 // readings of one construction had drifted apart.
-const CHECK_PREDICATE_LEAD_RE = /\b(?:re-?)?(?:checked|inspected)(?:\s+(?:[a-z]+ly|all|both|just|now))*\s*$/i;
+// A coordinated second verb keeps the check predicate bound to its count:
+// "We checked AND REBAITED 6 of 8 traps" is still a check claim about 6.
+const CHECK_PREDICATE_LEAD_RE = /\b(?:re-?)?(?:checked|inspected)(?:\s+(?:and|or)\s+[a-z-]+)*(?:\s+(?:[a-z]+ly|all|both|just|now))*\s*$/i;
 const CHECK_PREDICATE_TRAIL_RE = /^(?:\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*\s+(?:re-?)?(?:checked|inspected)\b/i;
 
 const SETUP_EMPTY_CAPTURE_RES = [
@@ -2138,11 +2154,31 @@ const SETUP_EMPTY_CAPTURE_RES = [
 // "exterior inspection completed" and "attic inspection" stay legal.
 const RECHECK_NOUN = '(?:re-?)?(?:inspections?|checks?|checkups?)';
 const COMPLETION_WORD = '(?:completed|complete|performed|done|finished|conducted)';
+// The gap between the trap-check noun and its completion word must stay
+// inside ONE clause and carry no future marker. Allowing it to cross a
+// comma, semicolon, or dash bound a completion word describing the SETUP
+// to a check that is merely scheduled — "Initial setup complete, trap
+// check scheduled for next week" was rejected — and with no tense test
+// "The trap check will be completed on our next visit" was too. Both are
+// ordinary setup prose; rejecting them discards the technician's copy.
+// The round-15 pass only pinned examples that happened to use a period.
+const NOT_FUTURE = '(?!\\b(?:will|shall|scheduled|upcoming|next|when|once|planned)\\b)';
+// Dashes separate clauses as readily as commas in field prose ("Trap
+// placement completed - trap check in 7 days"). A hyphen inside a word
+// ends the gap too, which only ever costs a match — the safe direction.
+const CLAUSE_GAP = (n) => `(?:${NOT_FUTURE}[^.!?,;:\\-\\u2013\\u2014])${n}`;
 const SETUP_RECHECK_NOUN_RES = [
-  new RegExp(`\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b[^.!?]{0,20}?\\b${COMPLETION_WORD}\\b`, 'i'),
-  new RegExp(`\\b${COMPLETION_WORD}\\b[^.!?]{0,30}?\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b`, 'i'),
-  new RegExp(`\\b${RECHECK_NOUN}\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b[^.!?]{0,20}?\\b${COMPLETION_WORD}\\b`, 'i'),
+  new RegExp(`\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b${CLAUSE_GAP('{0,20}?')}\\b${COMPLETION_WORD}\\b`, 'i'),
+  new RegExp(`\\b${COMPLETION_WORD}\\b${CLAUSE_GAP('{0,30}?')}\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b`, 'i'),
+  new RegExp(`\\b${RECHECK_NOUN}\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b${CLAUSE_GAP('{0,20}?')}\\b${COMPLETION_WORD}\\b`, 'i'),
 ];
+// A stated INTENTION to check is not a claim that checking happened — and
+// "we will return to check the traps" is exactly what the setup prompt
+// asks the model to write. The verb scans have no tense of their own, so
+// the escape hatch was the pronoun in "check THEM"; a tech writing the
+// noun instead had the body discarded. Applied per clause, ahead of the
+// verb scans, so a real claim in a neighbouring clause still rejects.
+const FUTURE_INTENT_RE = /\b(?:will|shall|going\s+to|plan(?:ning)?\s+to|expect\s+to|due\s+to|scheduled|upcoming|return\s+to|be\s+back\s+to|next\s+(?:visit|week|month|trip))\b/i;
 
 // Word-form numbers normalized to numerals before any count check, so
 // "eight traps" is validated exactly like "8 traps". Shared with the
@@ -2197,7 +2233,10 @@ function normalizeWordNumbers(text) {
 // pre-nominal adjectives are the ambiguous middle; they resolve toward
 // terminating, which loses a claim rather than inventing one — the bias
 // this whole guard stack is built on.
-const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:of|out\\s+of)\\s+(\\d+))?(${TRAP_MODIFIER_RUN})\\s+(?:traps?|devices?)\\b`, 'gi');
+// The `of M` group tolerates an article too, so "6 of the 8 traps" is read
+// as ONE N-of-M claim rather than leaving a bare "8 traps" tail behind —
+// which is what let the check-predicate suppression below be bypassed.
+const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:out\\s+of|of)\\s+(?:the|our|these|those|all|its)?\\s*(\\d+))?(${TRAP_MODIFIER_RUN})\\s+(?:traps?|devices?)\\b`, 'gi');
 // Numeric partitives WITH a check predicate claim the checked count even
 // though they never name a roster: "We checked 8 of the traps" puts 8
 // against the structured count, where a bare "one of the traps held a
@@ -2389,6 +2428,7 @@ function setupContradictions(text) {
   const str = String(text || '');
   const found = [];
   for (const clause of clauses(str)) {
+    if (FUTURE_INTENT_RE.test(clause)) continue; // an intention, not a claim
     const hit = activeRecheckOnTrap(clause) || passiveRecheckOnTrap(clause);
     if (hit) found.push(`setup_recheck_claim:${hit.toLowerCase()}`);
   }
