@@ -675,8 +675,16 @@ async function propagateCustomerEmailChange({
     // release behind the full stale-claim timeout. Flip exactly those rows
     // back to 'pending' with the retarget, so this correction's own resume
     // (below) claims and releases them immediately.
-    await conn('first_touch_holds')
-      .where({ customer_id: customerId, status: 'releasing' })
+    // Snapshot-fenced like every other hold lock in this transaction
+    // (Codex #3084 r50): a hold committed after the advisory snapshot must
+    // not be retargeted, claimed, or released here — its call's advisory
+    // lock was never acquired and its cards were outside the restricted
+    // resolve. Non-transactional callers carry no snapshot (no locks
+    // persist there anyway).
+    let releasingRetarget = conn('first_touch_holds')
+      .where({ customer_id: customerId, status: 'releasing' });
+    if (snapshotCallIds) releasingRetarget = releasingRetarget.whereIn('call_log_id', snapshotCallIds);
+    await releasingRetarget
       .update({
         held_email: newEmail,
         // The EXPLICIT correction marker (Codex #3084 r39): only these
@@ -695,8 +703,10 @@ async function propagateCustomerEmailChange({
     // override in sight. The correction is an explicit operator approval of
     // the new address, so it also lifts a deny stamp: a sweep release of
     // the retargeted row sends exactly what this fanout release would have.
-    await conn('first_touch_holds')
-      .where({ customer_id: customerId, status: 'pending' })
+    let pendingRetarget = conn('first_touch_holds')
+      .where({ customer_id: customerId, status: 'pending' });
+    if (snapshotCallIds) pendingRetarget = pendingRetarget.whereIn('call_log_id', snapshotCallIds);
+    await pendingRetarget
       .update({
         held_email: newEmail,
         corrected_at: now,
@@ -729,10 +739,13 @@ async function propagateCustomerEmailChange({
         }
       })
       .update({ email: newEmail, updated_at: now });
-    const reviewedCalls = await conn('triage_items')
+    let reviewedCallsQuery = conn('triage_items')
       .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-      .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
-      .distinct('call_log_id');
+      .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }));
+    // Same snapshot fence (r50): the zero-work markers this set drives are
+    // hold-row upserts, and the r34 evidence writes are card writes.
+    if (snapshotCallIds) reviewedCallsQuery = reviewedCallsQuery.whereIn('call_log_id', snapshotCallIds);
+    const reviewedCalls = await reviewedCallsQuery.distinct('call_log_id');
     // Zero-work released markers RETARGET on conflict (Codex #3084 r17):
     // two corrections before the processor's Step-6 write means marker A
     // already exists when correction B arrives — B's address must win, or
@@ -870,7 +883,10 @@ async function propagateCustomerEmailChange({
       // deferNewsletter: this runs inside the caller's edit transaction — the
       // DOI (an unrollbackable send) executes post-commit via
       // resumeHeldNewsletterPostCommit, same contract as pendingConfirmation.
-      const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected', deferNewsletter: true });
+      // restrictToCallLogIds (r50): the resume claims and releases hold
+      // rows — inside this transaction it must stay within the
+      // advisory-locked snapshot like every other hold operation.
+      const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected', deferNewsletter: true, restrictToCallLogIds: snapshotCallIds });
       if (resume?.enrolled) counts.heldDripResumed = 1;
       if (resume?.newsletterResume) heldNewsletterResume = resume.newsletterResume;
     } catch (resumeErr) {
@@ -1164,6 +1180,31 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
           }
           gatedStamps[holdId] = gated;
         }
+        // The SUBSCRIBER row rides the same transaction as the send
+        // (Codex #3084 r50): the pre-stamp above was a separate committed
+        // statement, so a one-click/admin unsubscribe committing between
+        // it and the provider call would deliver a confirmation AFTER the
+        // opt-out — and this path deliberately bypasses SendGrid
+        // suppressions, so nothing downstream catches it. Re-verify
+        // pending+token UNDER a row lock held through the send: an
+        // unsubscribe queues behind it and lands strictly after, which is
+        // a legitimate ordering. Lock order: holds (gates above) →
+        // newsletter_subscribers — same relative order as the retarget
+        // passes earlier in this file.
+        const liveSubscriber = await trx('newsletter_subscribers')
+          .where({
+            id: pendingConfirmation.id,
+            confirmation_token: pendingConfirmation.confirmation_token,
+            status: 'pending',
+          })
+          .whereRaw('LOWER(email) = ?', [sentEmailLc])
+          .forUpdate()
+          .first('id');
+        if (!liveSubscriber) {
+          const lost = new Error(`subscriber ${pendingConfirmation.id} no longer pending — not sending`);
+          lost.code = 'send_gate_lost';
+          throw lost;
+        }
         // All gates landed — the transaction always commits from here
         // (the send below never rethrows), so the fresh stamps are safe
         // to adopt; a gate abort above leaves holdClaims on the OLD
@@ -1225,12 +1266,43 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       }
     }
   } else {
-    // No deduped holds — nothing to lock; plain re-send.
+    // No deduped holds — but the subscriber row still needs the r50
+    // serialization: lock it, re-verify pending+token, and hold the lock
+    // through the provider call so an unsubscribe cannot slip between the
+    // pre-stamp and the send. A refused re-verify aborts without sending
+    // (the gateFailed path lifts the pre-stamp). A commit failure after a
+    // successful send is harmless here — the transaction held only a
+    // read lock, and the pre-stamp is already durable.
     try {
-      await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
-      sentOk = true;
-    } catch (e) {
-      sendErr = e;
+      await conn.transaction(async (trx) => {
+        const liveSubscriber = await trx('newsletter_subscribers')
+          .where({
+            id: pendingConfirmation.id,
+            confirmation_token: pendingConfirmation.confirmation_token,
+            status: 'pending',
+          })
+          .whereRaw('LOWER(email) = ?', [sentEmailLc])
+          .forUpdate()
+          .first('id');
+        if (!liveSubscriber) {
+          const lost = new Error(`subscriber ${pendingConfirmation.id} no longer pending — not sending`);
+          lost.code = 'send_gate_lost';
+          throw lost;
+        }
+        try {
+          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+          sentOk = true;
+        } catch (e) {
+          sendErr = e;
+        }
+      });
+    } catch (gateErr) {
+      if (!sentOk) {
+        gateFailed = true;
+        logger.warn(`[email-fanout] subscriber gate ${gateErr.code === 'send_gate_lost' ? 'refused' : 'failed'} for ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'}`);
+      } else {
+        logger.warn(`[email-fanout] no-holds send transaction commit errored after the send for subscriber ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'} — pre-stamp already durable, continuing`);
+      }
     }
   }
   if (gateFailed) {

@@ -869,7 +869,9 @@ describe('resendPendingConfirmation', () => {
   // must still match or the send/settle is skipped as superseded.
   const matchRow = (payload) => {
     const row = { email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' };
-    return { newsletter_subscribers: { firstQueue: [row, { ...row }] } };
+    // Three reads: the pre-stamp verify, the r50 in-transaction locked
+    // re-verify (held through the send), and the post-send rotation check.
+    return { newsletter_subscribers: { firstQueue: [row, { ...row }, { ...row }] } };
   };
 
   test('sends to the corrected address and stamps confirmation_sent_at', async () => {
@@ -1017,7 +1019,13 @@ describe('resendPendingConfirmation', () => {
     const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
     const conn = makeConn({
       newsletter_subscribers: {
-        firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' }, null],
+        // pre-stamp verify + r50 locked re-verify both see pending; the
+        // post-send rotation check reads null.
+        firstQueue: [
+          { email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' },
+          { email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' },
+          null,
+        ],
       },
     });
     const ok = await resendPendingConfirmation(payload, conn);
@@ -1459,5 +1467,54 @@ describe('r49 — review scope authority and lock-set symmetry', () => {
       && c.arg.col === 'call_log_id' && Array.isArray(c.arg.vals) && c.arg.vals.length === 2);
     expect(cardRestrict).toBeDefined();
     expect(cardRestrict.arg.vals).toEqual(['call-1', 'call-2']);
+    // The snapshot carries through to the resume too (r50): claims and
+    // releases stay inside the advisory-locked set.
+    expect(mockResume).toHaveBeenCalledWith(expect.objectContaining({
+      restrictToCallLogIds: ['call-1', 'call-2'],
+    }));
+  });
+
+  const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+
+  test('an unsubscribe landing between the pre-stamp and the send blocks the DOI (r50)', async () => {
+    // The locked in-transaction re-verify sees the subscriber no longer
+    // pending and refuses — nothing sends, the pre-stamp lifts, the hold
+    // re-pends retryably.
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      newsletter_subscribers: {
+        // pre-stamp verify passes; the r50 locked re-verify finds the row
+        // no longer pending (the unsubscribe committed in the gap).
+        firstQueue: [
+          { email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' },
+          null,
+        ],
+      },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    // The unsent pre-stamp is lifted so a retry path never trusts it.
+    expect(conn.__updates('newsletter_subscribers').some((u) => u.arg.confirmation_sent_at === null)).toBe(true);
+    // The hold re-pends without a send-failed marker (nothing was attempted).
+    expect(conn.__updates('first_touch_holds').some((u) => u.arg.status === 'pending')).toBe(true);
+  });
+
+  test('the no-holds re-send path also refuses when the subscriber is no longer pending (r50)', async () => {
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 812, email: 'samtypo@example.com', confirmation_token: 'tok-9' };
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [
+          { email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' },
+          null,
+        ],
+      },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    expect(conn.__updates('newsletter_subscribers').some((u) => u.arg.confirmation_sent_at === null)).toBe(true);
   });
 });

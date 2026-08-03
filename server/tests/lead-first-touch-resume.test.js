@@ -773,6 +773,25 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(mockHoldUpdates).toHaveLength(1); // the claim only — the stamp survives untouched
   });
 
+  test('a deny landing in the SAME millisecond as the claim is still refused (r50)', async () => {
+    // Fence stamps are JavaScript Dates with millisecond precision: a deny
+    // whose updated_at bump collides with the claim stamp leaves the
+    // timestamps equal, so the fence alone cannot see it — the enroll lock
+    // must test the deny marker independently (Codex #3084 r50).
+    mockEnroll.mockResolvedValueOnce({ enrolled: true, enrollmentId: 'enr-new' });
+    mockHold = baseHold({ held_newsletter: false });
+    mockHoldFirstQueue = [
+      { held_email: 'confirmed@example.com', last_error: null }, // pre-send re-read
+      // locked validation: fence INTACT (the mock supplies the claim's own
+      // stamp), deny marker present — only the marker betrays the denial.
+      { held_email: 'confirmed@example.com', last_error: 'email_denied_await_correction' },
+    ];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('email_denied');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockEnrollmentUpdates).toHaveLength(0);
+  });
+
   test('a mid-loop failure re-pends EVERY outstanding deferred claim, not just the in-flight one', async () => {
     // Hold-1 defers its newsletter (claim stays 'releasing', payload
     // accumulated); the customer lookup for hold-2 then throws. The error

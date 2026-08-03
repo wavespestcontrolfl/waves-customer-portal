@@ -62,7 +62,7 @@ async function emailSuppressedForNewLead(email, dbh) {
 // reclaimable.
 const STALE_CLAIM_MS = 10 * 60 * 1000;
 
-async function findPendingHolds({ callLogId = null, customerId = null, dbh }) {
+async function findPendingHolds({ callLogId = null, customerId = null, restrictToCallLogIds = null, dbh }) {
   if (!(await dbh.schema.hasTable('first_touch_holds'))) return [];
   let q = dbh('first_touch_holds').where(function scope() {
     this.where({ status: 'pending' })
@@ -74,6 +74,13 @@ async function findPendingHolds({ callLogId = null, customerId = null, dbh }) {
   if (callLogId) q = q.where({ call_log_id: callLogId });
   else if (customerId) q = q.where({ customer_id: customerId });
   else return [];
+  // Advisory-snapshot fence (Codex #3084 r50): a transactional caller that
+  // pre-locked a call set (the email-correction fanout) must not claim or
+  // release a hold belonging to a call outside it — that call's advisory
+  // lock was never acquired, and its cards were excluded from the
+  // restricted resolve, so releasing its hold would act on a review state
+  // this transaction deliberately cannot see.
+  if (restrictToCallLogIds) q = q.whereIn('call_log_id', restrictToCallLogIds);
   return q.orderBy('created_at', 'asc').select('*');
 }
 
@@ -603,6 +610,7 @@ async function resumeHeldFirstTouch({
   dbh = db,
   source = 'email_review_resolved',
   deferNewsletter = false,
+  restrictToCallLogIds = null,
 } = {}) {
   const result = { resumed: false, enrolled: false, newsletter: null, newsletterResume: [], skipped: null };
   // The hold currently claimed by this loop iteration — the outer catch
@@ -613,7 +621,7 @@ async function resumeHeldFirstTouch({
   // outer catch re-pends only rows this run still OWNS.
   const claimStamps = new Map();
   try {
-    const holds = await findPendingHolds({ callLogId, customerId, dbh });
+    const holds = await findPendingHolds({ callLogId, customerId, restrictToCallLogIds, dbh });
     if (!holds.length) return { ...result, newsletterResume: null, skipped: 'no_pending_hold' };
 
     for (const hold of holds) {
@@ -802,8 +810,18 @@ async function resumeHeldFirstTouch({
               .where({ id: hold.id })
               .forUpdate()
               .first('held_email', 'last_error', 'status', 'updated_at');
+            // The deny marker is checked INDEPENDENTLY of the timestamp
+            // fence (Codex #3084 r50): fence stamps are JavaScript Dates
+            // with millisecond precision, so a deny whose updated_at bump
+            // lands in the SAME millisecond as the claim leaves the
+            // timestamps equal — the fence alone cannot see it, and the
+            // marker is the ground truth. Skipped for an explicit
+            // correction (`email` set), which IS the operator's approval
+            // of the new address and supersedes a deny by contract (r22)
+            // — same shape as the r48 card re-ask below.
             if (!locked || String(locked.status) !== 'releasing'
-                || +new Date(locked.updated_at) !== +claimStamp) {
+                || +new Date(locked.updated_at) !== +claimStamp
+                || (!email && locked.last_error === 'email_denied_await_correction')) {
               // A deny bump intentionally invalidates the lease (r28); a
               // reclaim means the sweep's release owns the row. Either
               // way: no enrollment, no writes, stamp untouched.

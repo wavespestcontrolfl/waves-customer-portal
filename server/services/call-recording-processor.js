@@ -9981,6 +9981,23 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
+            // The replacement card describes THIS run's extraction, so the
+            // ledger is retargeted with it (Codex #3084 r50): Step 6
+            // preserved a prior cycle's address while that cycle's card was
+            // still live (recordFirstTouchHold's earlier-card branch), and
+            // with the old card resolved mid-run, resolving the replacement
+            // card would otherwise release the OLD — still unverified,
+            // possibly hard-bounced — target. Pending/releasing rows only:
+            // a released row's held_email is delivery evidence (the r19
+            // adoption reads it). Never over an operator's explicit
+            // correction (corrected_at, the r39 marker), and no updated_at
+            // bump (the r12 rule — never extend a possibly-dead claimant's
+            // stale window; the repen below owns lease invalidation).
+            await db('first_touch_holds')
+              .where({ call_log_id: call.id })
+              .whereIn('status', ['pending', 'releasing'])
+              .whereNull('corrected_at')
+              .update({ held_email: extracted.email || '' });
             // The recovery card is a live review too — invalidate any
             // in-flight release claim for the call (Codex #3084 r43). A
             // failure throws (r44) and the catch below fails the run.
