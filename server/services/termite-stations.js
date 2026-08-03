@@ -820,7 +820,35 @@ function buildStationMapCurrentContext({
   };
 }
 
+// PDF cache-key component (same pattern as treatmentZonePdfSignature).
+// buildStationMapReportContext deliberately reads CURRENT station geometry
+// even for historical visits, and the report document now prints those pins
+// into the cached artifact — so moving, adding or retiring a station must
+// change the key, or a stale PDF keeps showing pins that have since moved.
+// Returns '' when the visit has no stations, so non-station records keep
+// their existing keys (no mass cache bust). Fail-soft: a lookup error must
+// never block PDF serving.
+// knex is REQUIRED — this module has no module-level db binding.
+async function stationMapPdfSignature(service, knex) {
+  try {
+    const customerId = service?.customer_id;
+    if (!customerId || !knex) return '';
+    const row = await knex('termite_stations')
+      .where({ customer_id: customerId })
+      .max({ updated: 'updated_at' })
+      .count({ n: '*' })
+      .first();
+    const count = Number(row?.n || 0);
+    if (!count) return '';
+    const stamp = new Date(row?.updated || 0).getTime();
+    return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}`;
+  } catch {
+    return '';
+  }
+}
+
 module.exports = {
+  stationMapPdfSignature,
   STATION_STATUSES,
   STATION_OWNERS,
   STATION_PROGRAMS,

@@ -154,7 +154,12 @@ function interactionLabel(value) {
   const raw = String(value || '').trim();
   if (!raw) return null;
   const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  return INTERACTION_LABELS[key] || null;
+  if (INTERACTION_LABELS[key]) return INTERACTION_LABELS[key];
+  // An unlisted historical value (documents.js still recognises 'interior')
+  // must not drop the Contact row from the record — humanize it, the way
+  // customerInteractionCopy falls back to formatEnumLabel.
+  const words = key.replace(/_/g, ' ').trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : null;
 }
 
 // COMPLIANCE (AGENTS.md): never print a fixed re-entry/drying figure — the
@@ -831,10 +836,13 @@ export default function ServiceReportDocument({ data, token }) {
                         <td style={{ padding: '6px 6px 1px 0', fontWeight: 700, color: INK }}>{name}</td>
                         <td style={{ padding: '6px 0 1px', textAlign: 'right', whiteSpace: 'nowrap' }}>{epaReg(app) || '—'}</td>
                         <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          {app.rate ? `${fmtAmount(app.rate)}${app.rateUnit ? ` ${fmtUnit(app.rateUnit)}` : ''}` : '—'}
+                          {/* both halves or neither: a bare "5" can't be read
+                              as ounces, gallons or grams in a pesticide
+                              record, which is worse than showing nothing. */}
+                          {app.rate && app.rateUnit ? `${fmtAmount(app.rate)} ${fmtUnit(app.rateUnit)}` : '—'}
                         </td>
                         <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                          {app.totalAmount ? `${fmtAmount(app.totalAmount)}${app.amountUnit ? ` ${fmtUnit(app.amountUnit)}` : ''}` : '—'}
+                          {app.totalAmount && app.amountUnit ? `${fmtAmount(app.totalAmount)} ${fmtUnit(app.amountUnit)}` : '—'}
                         </td>
                       </tr>
                       <tr>

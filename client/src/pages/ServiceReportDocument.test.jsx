@@ -691,6 +691,19 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/Not accessible/);
   });
 
+  it('humanizes an unlisted historical contact value instead of dropping the row', () => {
+    render(<ServiceReportDocument data={{ ...BASE_DATA, customerInteraction: 'interior' }} token="t" />);
+    expect(screen.getByText('Interior')).toBeInTheDocument();
+  });
+
+  it('hides a quantity that has no unit', () => {
+    const app = { ...BASE_DATA.applications[0], rate: '5', rateUnit: null, totalAmount: '2', amountUnit: null };
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="t" />);
+    // a bare number in a pesticide record can't be read as oz/gal/g
+    expect(container.textContent).not.toMatch(/\b5\b/);
+    expect(container.textContent).toContain('—');
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();
