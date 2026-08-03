@@ -363,6 +363,75 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText(/We treated that run and placed bait/)).toBeInTheDocument();
   });
 
+  it('hides an N/A EPA number and keeps lawn applications scoped to the lawn', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      zones: [{ id: 'z1', label: 'Front yard' }, { id: 'z2', label: 'Back yard' }],
+      applications: [{ id: 'a1', product: { name: 'LESCO 0-0-26', epa_reg: 'N/A' }, zone_ids: ['z1', 'z2'] }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('N/A');
+    expect(screen.getByText('Your whole lawn')).toBeInTheDocument();
+  });
+
+  it('does not claim treated areas when applications carry no zone ids', () => {
+    // treatment-map.js:184 requires isRenderableApplication AND zoneIds.length
+    const data = {
+      ...BASE_DATA,
+      mapSvg: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+      applications: [{ id: 'a1', method: 'perimeter_spray', zone_ids: [], applicationArea: 'Side yard', product: { name: 'X' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
+  it('renders tree/shrub assessment photos and the V2 customer next step', () => {
+    const data = {
+      ...BASE_DATA,
+      photos: [],
+      reportV2: {
+        snapshot: { statusHeadline: 'Shrubs holding steady', customerAction: 'Move the sprinkler head off the hedge line.' },
+        insights: [{ headline: 'Leaf spot watch', whatWeSaw: 'Spotting on the viburnum.', customerAction: 'Avoid overhead watering.' }],
+        photos: [{ id: 'ts1', url: 'https://cdn.example.com/shrub.jpg', caption: 'Viburnum leaf spot' }],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.querySelector('img[src="https://cdn.example.com/shrub.jpg"]')).toBeTruthy();
+    expect(container.textContent).toMatch(/Move the sprinkler head off the hedge line/);
+    expect(container.textContent).toMatch(/Avoid overhead watering/);
+  });
+
+  it('shows the week\'s rain on lawn V2 reports', () => {
+    const data = { ...BASE_DATA, reportV2: { water: { rainInches: 2.43 } }, conditions: { rain_24h_in: 0 } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText('Rain this week')).toBeInTheDocument();
+    expect(container.textContent).toMatch(/2\.43 in/);
+  });
+
+  it('keeps the typed cross-visit history', () => {
+    const data = {
+      ...BASE_DATA,
+      typedVisitTimeline: {
+        label: 'Rodent Activity',
+        visits: [
+          { serviceRecordId: 'v1', serviceDate: '2026-07-27T00:00:00.000Z', headline: 'Rodent activity was moderate', isCurrent: false },
+          { serviceRecordId: 'v2', serviceDate: '2026-08-02T00:00:00.000Z', headline: 'Activity trending down', isCurrent: true },
+        ],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/Rodent Activity — visit history/)).toBeInTheDocument();
+    expect(container.textContent).toMatch(/July 27, 2026/);
+    expect(container.textContent).toMatch(/August 2, 2026 \(today\)/);
+  });
+
+  it('links to the environment that rendered the PDF, not always production', () => {
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    // jsdom origin is localhost — a preview-rendered PDF must not hardcode prod
+    expect(container.textContent).toContain(`${window.location.origin}/report/tok123`);
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();

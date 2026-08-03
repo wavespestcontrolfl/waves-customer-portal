@@ -18,7 +18,14 @@ const MUTED = '#5B6A77';
 const LINE = '#C9CED4';
 const HAIR = '#E2E6EA';
 const TZ = 'America/New_York';
-const PORTAL_BASE = 'https://portal.wavespestcontrol.com';
+// A PDF rendered from a preview/dev deployment carries a token that only
+// resolves on THAT environment — hardcoding production made those artifacts'
+// links dead. The renderer itself uses the configured base (pdf-puppeteer.js).
+const PORTAL_FALLBACK = 'https://portal.wavespestcontrol.com';
+function portalBase() {
+  if (typeof window !== 'undefined' && window.location?.origin) return window.location.origin;
+  return PORTAL_FALLBACK;
+}
 
 const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 
@@ -43,6 +50,15 @@ function fmtTime(value) {
 
 // "10.000" -> "10", "0.49" -> "0.49"; units come through as snake_case
 // ("fl_oz") from the application record.
+// Catalog rows for unregistered products (fertilizers, wetting agents,
+// mechanical devices) store the literal "N/A" — printing it under EPA Reg.
+// No. reads like missing paperwork. Mirrors applicationEpaReg.
+function epaReg(app) {
+  const raw = String(app.product?.epa_reg || app.epaReg || '').trim();
+  if (/^n\/?a$/i.test(raw) || /^none$/i.test(raw)) return '';
+  return raw;
+}
+
 function fmtAmount(value) {
   const num = Number(value);
   if (!Number.isFinite(num)) return String(value || '').trim();
@@ -100,14 +116,18 @@ function reentryTargetLine(target) {
   return `${target.label}: ${ready ? `ready after ${ready}` : 'ready once dry'}`;
 }
 
-function zoneNames(app, zones) {
+function zoneNames(app, zones, serviceLine = 'pest') {
   const byId = new Map((zones || []).map((zone) => [String(zone.id), zone]));
   const ids = Array.isArray(app.zone_ids) ? app.zone_ids : [];
   const names = ids.map((id) => byId.get(String(id))?.label).filter(Boolean);
   // A legacy/manual application can carry only applicationArea — it's then the
   // ONLY record of where the product went, so it beats a generic phrase.
   if (!names.length) return app.applicationArea || 'Treated area recorded';
-  if (zones && zones.length > 1 && names.length === zones.length) return 'Whole property';
+  // "Whole property" would broaden a turf treatment to structures and paving
+  // where it was never applied — applicationZoneText keeps lawn scoped.
+  if (zones && zones.length > 1 && names.length === zones.length) {
+    return serviceLine === 'lawn' ? 'Your whole lawn' : 'Whole property';
+  }
   return names.join(', ');
 }
 
@@ -177,8 +197,15 @@ export default function ServiceReportDocument({ data, token }) {
     rain_24h_in: rawConditions.rain_24h_in,
     sky: rawConditions.sky ?? rawConditions.cloudCover,
   } : null;
+  // Lawn reports show the WEEK's rain — the figure the water card and the
+  // assessment are built from — so every rain number on the page agrees; other
+  // lines keep the trailing-24h capture (mirrors conditionRows).
+  const weeklyRainIn = data.reportV2?.water?.rainInches;
+  const usingWeeklyRain = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn));
+  const rainLabel = usingWeeklyRain ? 'Rain this week' : 'Rain 24 hr';
+  const rainValue = usingWeeklyRain ? weeklyRainIn : normalizedConditions?.rain_24h_in;
   const conditions = normalizedConditions
-    && Object.values(normalizedConditions).some((value) => value != null && value !== '')
+    && (Object.values(normalizedConditions).some((value) => value != null && value !== '') || usingWeeklyRain)
     ? normalizedConditions : null;
   const applications = Array.isArray(data.applications) ? data.applications : [];
   // Lawn-assessment photos fall back to raw per-photo vision `observations`
@@ -187,6 +214,17 @@ export default function ServiceReportDocument({ data, token }) {
   // guarded summary, so the document must not print them either (codex P1).
   const suppressPhotoCaption = (photo) => Boolean(data.reportV2) && String(photo.id || '').startsWith('lawn-');
   const galleryPhotos = (data.photos || []).filter((photo) => photo && photo.url);
+  // Tree/shrub evidence is captured in tree_shrub_assessment_photos, exposed
+  // as reportV2.photos — never in data.photos — so the gallery was empty on
+  // those visits (codex P1 r3). De-duped by url against the main gallery.
+  const v2AssessmentPhotos = (Array.isArray(data.reportV2?.photos) ? data.reportV2.photos : [])
+    .filter((photo) => photo && (photo.url || photo.imageUrl))
+    .map((photo) => ({
+      id: photo.id ? `v2-${photo.id}` : `v2-${photo.url || photo.imageUrl}`,
+      url: photo.url || photo.imageUrl,
+      caption: photo.caption || photo.label || '',
+      isMoment: true,
+    }));
   // Approved visual service moments live outside data.photos; the previous
   // PDF rendered them as Service Highlights, so keep them in the artifact.
   const momentPhotos = (data.proofMoments || data.visualServiceMoments || [])
@@ -202,8 +240,9 @@ export default function ServiceReportDocument({ data, token }) {
   const gaugePhoto = data.mowingHeight?.photoUrl
     ? [{ id: 'mowing-gauge', url: data.mowingHeight.photoUrl, caption: 'Turf height measured at this visit', isMoment: true }]
     : [];
-  const photos = [...galleryPhotos, ...momentPhotos, ...gaugePhoto]
-    .filter((photo) => !failedImages.has(photo.url));
+  const photos = [...galleryPhotos, ...v2AssessmentPhotos, ...momentPhotos, ...gaugePhoto]
+    .filter((photo) => !failedImages.has(photo.url))
+    .filter((photo, i, all) => all.findIndex((other) => other.url === photo.url) === i);
   const tracedMapRaw = data.treatmentMap?.traced?.snapshotUrl || null;
   const tracedMapUrl = tracedMapRaw && !failedImages.has(tracedMapRaw) ? tracedMapRaw : null;
   // buildReportV1Data ALWAYS builds mapSvg, even for an inspection-only or
@@ -227,12 +266,19 @@ export default function ServiceReportDocument({ data, token }) {
   // so a station-check-only visit produces a schematic with no treatment
   // layer — a bare applications.length check still printed the false
   // "Where we treated" claim (codex P1 r2). Mirror the renderer's predicate.
-  const hasRenderableTreatment = applications
-    .some((app) => (app.method || 'perimeter_spray') !== 'station_check');
+  // treatment-map.js:184 filters on isRenderableApplication(app) AND
+  // zoneIds.length — a legacy/manual row carrying only applicationArea is
+  // dropped from the SVG, so requiring only the method still labelled an
+  // unmarked base schematic "Where we treated" (codex P1 r3).
+  const hasRenderableTreatment = applications.some((app) => {
+    const method = app.method || 'perimeter_spray';
+    const zoneIds = Array.isArray(app.zone_ids) ? app.zone_ids : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
+    return method !== 'station_check' && zoneIds.length > 0;
+  });
 
   const stationMap = data.stationMap?.available && Array.isArray(data.stationMap.stations) && data.stationMap.stations.length
     ? data.stationMap : null;
-  const reportUrl = `${PORTAL_BASE}/report/${encodeURIComponent(token)}`;
+  const reportUrl = `${portalBase()}/report/${encodeURIComponent(token)}`;
   const reportNumber = String(data.serviceRecordId || token || '').replace(/-/g, '').slice(0, 10).toUpperCase();
 
   const summaryParagraphs = [];
@@ -312,6 +358,11 @@ export default function ServiceReportDocument({ data, token }) {
     .forEach((rec) => pushRec(rec?.action || rec?.text || rec));
   pushRec(data.reportV2?.aftercare?.watering);
   pushRec(v2NextMove);
+  // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
+  // snapshot.customerAction and per-insight customerAction; omitting it drops
+  // required actions (e.g. correcting irrigation) from the artifact.
+  pushRec(v2?.snapshot?.customerAction);
+  (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushRec(insight?.customerAction));
   pushRec(v2?.mowing?.recommendation);
 
   // "(3 of 5 — baseline recorded today)" / "(3 of 5)" / " — baseline
@@ -355,6 +406,12 @@ export default function ServiceReportDocument({ data, token }) {
   // stylesheet enforces via .companion-internal.
   const companions = (Array.isArray(data.companionReports) ? data.companionReports : [])
     .filter((companion) => companion && !companion.internalOnly);
+  // Trend programs (trap checks, bait stations, roach knockdown) carry the
+  // cross-visit history the old PDF rendered: buildTypedVisitTimeline returns
+  // { indicatorKey, label, visits:[{serviceDate, headline, levelWord,
+  // isCurrent}] } and only exists once there are 2+ visits.
+  const visitHistory = (Array.isArray(data.typedVisitTimeline?.visits) ? data.typedVisitTimeline.visits : [])
+    .filter((visit) => visit && (visit.serviceDate || visit.headline));
 
   // When reportV2 exists the live report renders LawnReportV2Section INSTEAD of
   // LawnAssessmentCard, so the raw assessment paragraph would duplicate the
@@ -462,7 +519,7 @@ export default function ServiceReportDocument({ data, token }) {
                 <InfoRow label="Temp">{conditions.temp_f != null ? `${conditions.temp_f} °F` : null}</InfoRow>
                 <InfoRow label="Humidity">{conditions.humidity_pct != null ? `${conditions.humidity_pct}%` : null}</InfoRow>
                 <InfoRow label="Wind">{conditions.wind_mph != null ? `${conditions.wind_mph} mph` : null}</InfoRow>
-                <InfoRow label="Rain 24 hr">{conditions.rain_24h_in != null ? `${conditions.rain_24h_in} in` : null}</InfoRow>
+                <InfoRow label={rainLabel}>{rainValue != null ? `${rainValue} in` : null}</InfoRow>
                 <InfoRow label="Sky">{conditions.sky}</InfoRow>
               </>
             ) : (
@@ -623,7 +680,7 @@ export default function ServiceReportDocument({ data, token }) {
                     <tbody className="doc-product-row" key={app.id || `${name}-${index}`}>
                       <tr>
                         <td style={{ padding: '6px 6px 1px 0', fontWeight: 700, color: INK }}>{name}</td>
-                        <td style={{ padding: '6px 0 1px', textAlign: 'right', whiteSpace: 'nowrap' }}>{product.epa_reg || '—'}</td>
+                        <td style={{ padding: '6px 0 1px', textAlign: 'right', whiteSpace: 'nowrap' }}>{epaReg(app) || '—'}</td>
                         <td style={{ padding: '6px 0 1px 10px', textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {app.rate ? `${fmtAmount(app.rate)}${app.rateUnit ? ` ${fmtUnit(app.rateUnit)}` : ''}` : '—'}
                         </td>
@@ -639,7 +696,7 @@ export default function ServiceReportDocument({ data, token }) {
                             {Array.isArray(app.targets) && app.targets.length > 0 && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Target:</strong> {app.targets.join(', ')}</div>
                             )}
-                            <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones)}</div>
+                            <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].filter(Boolean).join(' ')}</div>
                             )}
@@ -776,6 +833,18 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {visitHistory.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>{data.typedVisitTimeline.label ? `${data.typedVisitTimeline.label} — visit history` : 'Visit history'}</SectionHeader>
+            {visitHistory.map((visit) => (
+              <Bullet key={visit.serviceRecordId || visit.serviceDate}>
+                <strong>{fmtServiceDate(visit.serviceDate)}{visit.isCurrent ? ' (today)' : ''}:</strong>{' '}
+                {visit.headline || visit.levelWord}
+              </Bullet>
+            ))}
+          </div>
+        )}
+
         {/* Combined-service companions — the second service on the same
             visit gets its own findings block (staff-only ones filtered out
             above, never printed). */}
@@ -798,6 +867,14 @@ export default function ServiceReportDocument({ data, token }) {
             {companion.activity?.levelWord && (
               <Bullet><strong>{companion.activity.label}:</strong> {companion.activity.levelWord}</Bullet>
             )}
+            {(companion.visitTimeline?.visits || [])
+              .filter((visit) => visit && (visit.serviceDate || visit.headline))
+              .map((visit) => (
+                <Bullet key={visit.serviceRecordId || visit.serviceDate}>
+                  <strong>{fmtServiceDate(visit.serviceDate)}{visit.isCurrent ? ' (today)' : ''}:</strong>{' '}
+                  {visit.headline || visit.levelWord}
+                </Bullet>
+              ))}
           </div>
         ))}
 
