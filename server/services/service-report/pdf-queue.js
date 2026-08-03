@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature } = require('./report-data');
 const { renderServiceReportV1Pdf } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
@@ -123,6 +123,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // PDF, so a gate flip or re-trace must change the key (re-trace also
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
+  // Assessment identity + copy version in the key, so a stale in-flight render
+  // cannot republish over a newer one (#3168).
+  const laSignature = await lawnAssessmentPdfSignature(service, knex);
   let pdf;
   // The signature of the narrative text actually rendered travels ON the
   // payload (attached by report-data at the moment the text was chosen) —
@@ -187,7 +190,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   }
   try {
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -310,7 +313,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

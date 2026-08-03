@@ -261,6 +261,45 @@ describe('#3168 pinned assessment — the pin must be SIGNED', () => {
   });
 });
 
+describe('#3168 — assessment identity is part of the PDF storage key', () => {
+  // Nulling pdf_storage_key is not a durable invalidation: a render already in
+  // flight with the OLD assessment finishes afterward and writes the
+  // deterministic key back, so a pinned delivery could email assessment A while
+  // Download PDF served a raced render of B. Folding assessment identity into
+  // the key fences it — the stale renderer's key no longer matches what the
+  // next view expects, so that view re-renders. Same fix the time-on-site
+  // correction uses (pdf-storage.js).
+  const fs = require('fs');
+  const path = require('path');
+  const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+  const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  test('every storage-key composition site carries the component', () => {
+    // A missing site desynchronizes written vs expected keys: lawn records
+    // would either serve stale PDFs (the race this fences) or re-render on
+    // every view. Two sites per module — renderAndStore + getOrRender in
+    // pdf-queue, expected + store in reports-public.
+    expect((pdfQueueSource.match(/lawnAssessmentPdfSignature\(/g) || []).length)
+      .toBeGreaterThanOrEqual(2);
+    expect((reportsPublicSource.match(/lawnAssessmentPdfSignature\(/g) || []).length)
+      .toBeGreaterThanOrEqual(2);
+  });
+
+  test('the component is awaited everywhere it is composed', () => {
+    // It is async (it resolves the assessment). A forgotten await composes
+    // "[object Promise]" into the key — every render would miss cache silently.
+    for (const source of [pdfQueueSource, reportsPublicSource]) {
+      const composed = source.match(/[^\s(]*lawnAssessmentPdfSignature\(/g) || [];
+      for (const hit of composed) {
+        if (hit.startsWith('await') || hit === 'lawnAssessmentPdfSignature(') continue;
+        expect(hit).toContain('await');
+      }
+      // Explicitly: no bare composition without await in a signature string.
+      expect(source).not.toMatch(/\+ lawnAssessmentPdfSignature\(/);
+    }
+  });
+});
+
 describe('#3168 pinned assessment — fail-closed contract', () => {
   test('PinnedAssessmentUnavailable carries the code the route maps to 409', () => {
     const err = new PinnedAssessmentUnavailable('assess-X');

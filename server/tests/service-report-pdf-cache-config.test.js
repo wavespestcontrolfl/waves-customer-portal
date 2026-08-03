@@ -17,6 +17,11 @@ jest.mock('../services/service-report/report-data', () => ({
   // Real implementation: pure, synchronous, and part of the render path
   // (queued PDFs must never fossilize live-only schedule fields).
   stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
+  // Storage-key component (#3168). Stubbed empty here the same way
+  // timeOnSiteAdjustedPdfSignature is: this suite asserts the Pest Pressure
+  // config threading, and a non-empty component would only add noise to the
+  // expected key.
+  lawnAssessmentPdfSignature: async () => '',
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: mockBuildServiceReportDynamicContext,

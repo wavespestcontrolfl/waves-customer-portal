@@ -28,7 +28,7 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -1288,7 +1288,7 @@ router.get('/:token', async (req, res, next) => {
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
       const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, db),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1347,7 +1347,7 @@ router.get('/:token', async (req, res, next) => {
       }
       try {
         const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service),
+          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, db),
         });
         await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
       } catch (storageErr) {

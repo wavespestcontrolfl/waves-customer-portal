@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../../models/db');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
@@ -1837,6 +1838,45 @@ class PinnedAssessmentUnavailable extends Error {
     super(`pinned lawn assessment ${assessmentId} is not linked to this report`);
     this.code = 'pinned_assessment_unavailable';
     this.assessmentId = assessmentId;
+  }
+}
+
+// Lawn-assessment component of the PDF storage key (#3168).
+//
+// Nulling pdf_storage_key is NOT a durable invalidation — the same lesson
+// `timeOnSiteAdjustedPdfSignature` records for the time-on-site correction: a
+// render already in flight with the OLD assessment finishes afterward, writes
+// the deterministic key back, and with no assessment identity in the key that
+// stale PDF reads as current forever. So a pinned delivery could email
+// assessment A while the recipient's Download PDF served a raced render of B.
+//
+// Folding assessment identity + copy version into the key fences it: the stale
+// renderer computed its key from the OLD assessment, so its write-back no
+// longer matches the key the next view expects, and that view re-renders.
+//
+// Empty for every non-lawn record and every lawn visit without an assessment —
+// no fleet-wide cache bust. Best-effort: an unreadable assessment yields '',
+// which can only cause an extra re-render, never a stale serve.
+//
+// MUST ride in EVERY composition site that builds the storage-key signature
+// (pdf-queue renderAndStore + getOrRender, reports-public expected + store),
+// exactly like the time-on-site component.
+async function lawnAssessmentPdfSignature(service, knex = db) {
+  try {
+    const line = service?.service_line || detectServiceLine(service?.service_type);
+    if (line !== 'lawn') return '';
+    const assessment = await loadLinkedLawnAssessment(service, knex);
+    if (!assessment?.id) return '';
+    const recs = typeof assessment.recommendations === 'string'
+      ? assessment.recommendations
+      : JSON.stringify(assessment.recommendations || '');
+    const stamp = crypto.createHash('sha1')
+      .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}`)
+      .digest('hex')
+      .slice(0, 12);
+    return `-la${stamp}`;
+  } catch {
+    return '';
   }
 }
 
@@ -3784,6 +3824,7 @@ module.exports = {
   loadLinkedLawnAssessment,
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,
+  lawnAssessmentPdfSignature,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,
