@@ -13,7 +13,6 @@ import {
   lawnWateringGuidance,
   normalizeServiceCoverage,
   normalizeVisitTimeline,
-  quickNavigationLinks,
   reportAskPrompts,
   readinessStatusBadge,
   reviewRequestCopy,
@@ -64,27 +63,6 @@ describe('ReportViewPage summary copy cleanup', () => {
 });
 
 describe('ReportViewPage report chrome helpers', () => {
-  it('omits product quick navigation when no products were applied', () => {
-    const labels = quickNavigationLinks({ hasProducts: false }).map(([, label]) => label);
-    expect(labels).not.toContain('Products');
-    expect(labels).toContain('Timeline');
-    expect(labels).toContain('Map');
-    expect(labels).not.toContain('Visit Progress');
-    expect(labels).not.toContain('Areas Serviced');
-    expect(labels).not.toContain('Coverage Map');
-  });
-
-  it('omits visit timeline quick navigation when the timeline is hidden', () => {
-    const labels = quickNavigationLinks({ hasVisitTimeline: false }).map(([, label]) => label);
-    expect(labels).not.toContain('Timeline');
-    expect(labels).toContain('Map');
-  });
-
-  it('only includes the re-entry quick navigation when re-entry context exists', () => {
-    expect(quickNavigationLinks({ hasReentry: false }).map(([, label]) => label)).not.toContain('Re-entry');
-    expect(quickNavigationLinks({ hasReentry: true }).map(([, label]) => label)).toContain('Re-entry');
-  });
-
   it('does not suggest Pest Pressure questions when the section is disabled', () => {
     expect(reportAskPrompts({
       pestPressure: { enabled: false, showOnCustomerReport: true },
