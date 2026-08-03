@@ -105,10 +105,15 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
     expect(res.windowDays).toBe(DEFAULT_CREDIT_WINDOW_DAYS);
     // The deadline is the END of the ET day 30 days out — the receipt
     // prints a calendar date, so that whole day must remain bookable.
-    const lastMoment = new Date(res.expiresAt.getTime() - 1000)
-      .toLocaleString('en-US', { timeZone: 'America/New_York' });
-    expect(lastMoment).toContain('9/2/2026');
-    expect(lastMoment).toContain('11:59:59 PM');
+    // Asserted on the ET DATE (en-CA is ISO and stable across ICU builds),
+    // never on a formatted clock string: the bug this pins was masked
+    // locally because en-US renders midnight as "00:00" here and "24:00"
+    // on CI.
+    const etDay = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    // The last bookable second is still the named day...
+    expect(etDay(new Date(res.expiresAt.getTime() - 1000))).toBe('2026-09-02');
+    // ...and the expiry instant itself has rolled over to the next.
+    expect(etDay(res.expiresAt)).toBe('2026-09-03');
     // The whole point: no ledger movement happens at closeout.
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });

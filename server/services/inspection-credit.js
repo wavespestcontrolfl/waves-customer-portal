@@ -98,15 +98,20 @@ function etEndOfDayAfterDays(from, days) {
   const dayAfter = new Date(`${etDate}T12:00:00Z`);
   dayAfter.setUTCDate(dayAfter.getUTCDate() + 1);
   const nextEtDate = dayAfter.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // Identify midnight by DATE BOUNDARY, not by formatting the hour: with
+  // hour12:false some ICU builds render midnight as "24:00", so a
+  // string check for "00:00" silently fell through to the fallback on CI
+  // and expired the promise an hour into the named day.
+  const etDayOf = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
   for (const offset of ['04:00:00', '05:00:00']) {
     const candidate = new Date(`${nextEtDate}T${offset}Z`);
-    const parts = candidate.toLocaleString('en-US', {
-      timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit',
-    });
-    if (parts.startsWith('00:00')) return candidate;
+    // Midnight is the first instant of nextEtDate: the instant itself is
+    // on that day, and one second earlier is still the previous day.
+    if (etDayOf(candidate) === nextEtDate
+      && etDayOf(new Date(candidate.getTime() - 1000)) === etDate) {
+      return candidate;
+    }
   }
-  // Unreachable in practice; the later boundary is the customer-favorable
-  // direction if a locale ever surprises us.
   return new Date(`${nextEtDate}T05:00:00Z`);
 }
 
