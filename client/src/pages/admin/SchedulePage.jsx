@@ -11552,6 +11552,35 @@ export function CompletionPanel({
         return;
       }
     }
+    // A declared trap SETUP cannot carry serviced pins — the map relabels
+    // `ok` to "Set this visit" but leaves `serviced` saying "Serviced this
+    // visit", so the frozen report would contradict its own stage (codex
+    // P1). Mirrors the server's rejection so the tech gets the inline
+    // prompt instead of a 422. Checked across the primary AND companion
+    // sections, since `trap_visit_type` can live in either.
+    if (stationFeatureOn && !isIncompleteVisit) {
+      const declaresTrapSetup = [
+        findingsValues,
+        ...companionSchemas.map(
+          (schema) => (companionState[schema.type] || EMPTY_COMPANION_ENTRY).values,
+        ),
+      ].some(
+        (values) =>
+          String(values?.trap_visit_type ?? "").trim() === "Initial setup",
+      );
+      if (
+        declaresTrapSetup &&
+        stationDisplay.some(
+          (station) => (stationStatuses[station.key] || "ok") === "serviced",
+        )
+      ) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(
+          'A trap marked "Serviced" contradicts an initial setup — the traps went out on this visit. Clear the serviced mark, or set this visit to "Follow-up check".',
+        );
+        return;
+      }
+    }
     // Companion sections mirror every primary typed pre-submit gate PER
     // COMPANION (server-side conditional checks without client mirrors are
     // a known Codex flag). Messages prefix the companion's label so the

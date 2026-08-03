@@ -3518,7 +3518,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Bait station pins/statuses (station-map-v1) — reject malformed entries
     // here, not in the post-commit sync: the sync is fail-soft, so a silent
     // skip there would lose the tech's pins behind a successful completion.
-    const stationEntriesError = TermiteStations.validateStationEntriesBody(termiteStations);
+    // A declared trap SETUP cannot carry serviced pins (codex P1): the map
+    // relabels `ok` to "Set this visit" but leaves `serviced` saying
+    // "Serviced this visit", so the frozen report would contradict its own
+    // declared stage. `trap_visit_type` only exists on the rodent_trapping
+    // schema, so its presence in ANY submitted section — primary or
+    // companion — identifies the declaration without needing the profile.
+    const declaresTrapSetup = [
+      structuredFindings?.values,
+      ...(Array.isArray(companionFindings) ? companionFindings.map((entry) => entry?.values) : []),
+    ].some((values) => String(values?.trap_visit_type || '').trim() === 'Initial setup');
+    const stationEntriesError = TermiteStations.validateStationEntriesBody(termiteStations, {
+      rejectServiced: declaresTrapSetup,
+    });
     if (stationEntriesError) {
       return res.status(400).json({ error: stationEntriesError, code: 'termite_stations_invalid' });
     }

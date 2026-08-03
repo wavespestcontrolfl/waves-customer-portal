@@ -1132,3 +1132,35 @@ test('a setup with no per-visit checks does not claim the setup stage', () => {
   ]);
   expect(synced.initialSetup).toBe(true);
 });
+
+// Pre-push audit P1 (PR #3159): the map relabels an `ok` pin to "Set this
+// visit" on a declared setup, but `serviced` keeps its own label and its
+// own summary line — so the frozen report could read "Traps set" beside
+// "Serviced this visit" and "N serviced". Servicing presupposes the trap
+// was already out, the same reason the prose guard treats it as a re-check
+// verb, so this is inconsistent DATA rather than a labelling problem.
+describe('serviced pins on a declared initial trap setup', () => {
+  const { validateStationEntriesBody } = require('../services/termite-stations');
+
+  it('rejects a serviced status when the visit declares a setup', () => {
+    const error = validateStationEntriesBody([{ id: 'station-1', status: 'serviced' }], {
+      rejectServiced: true,
+    });
+    expect(error).toMatch(/contradicts an initial setup/i);
+  });
+
+  it('allows every other status on a setup', () => {
+    for (const status of ['ok', 'activity', 'inaccessible']) {
+      expect(validateStationEntriesBody([{ id: 'station-1', status }], { rejectServiced: true }))
+        .toBeNull();
+    }
+  });
+
+  it('leaves follow-up visits untouched', () => {
+    expect(validateStationEntriesBody([{ id: 'station-1', status: 'serviced' }], {
+      rejectServiced: false,
+    })).toBeNull();
+    // default is off, so every existing caller keeps its behavior
+    expect(validateStationEntriesBody([{ id: 'station-1', status: 'serviced' }])).toBeNull();
+  });
+});

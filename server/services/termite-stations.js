@@ -173,7 +173,15 @@ function sanitizeActions(value) {
 // string (400 material) or null when acceptable. `allowStatus: false` is the
 // office desk flow — there is no visit to hang a check on, so a status there
 // would silently vanish; reject it instead.
-function validateStationEntriesBody(entries, { allowStatus = true, program = null } = {}) {
+// `rejectServiced` is set when the visit DECLARES an initial trap setup.
+// The map relabels an `ok` pin to "Set this visit", but `serviced` keeps
+// its own label and its own summary line, so a setup could publish an
+// immutable report reading "Traps set" beside "Serviced this visit" and
+// "N serviced" (codex P1). Servicing presupposes the trap was already out
+// — the same reason the prose guard treats "serviced" as a re-check verb —
+// so the two are inconsistent DATA, resolved by the tech correcting
+// whichever field is wrong rather than by relabelling the pin.
+function validateStationEntriesBody(entries, { allowStatus = true, program = null, rejectServiced = false } = {}) {
   if (entries == null) return null;
   if (!Array.isArray(entries)) return 'termiteStations must be an array';
   if (entries.length > MAX_STATION_ENTRIES) {
@@ -221,6 +229,9 @@ function validateStationEntriesBody(entries, { allowStatus = true, program = nul
         if (!allowStatus) return 'station status only applies during a completion — the office save takes positions only';
         if (!STATION_STATUSES.includes(entry.status)) {
           return `station status must be one of: ${STATION_STATUSES.join(', ')}`;
+        }
+        if (rejectServiced && entry.status === 'serviced') {
+          return 'a trap marked "Serviced" contradicts an initial setup — the traps went out on this visit; clear the serviced mark or set this visit to "Follow-up check"';
         }
       }
       if (entry.actions != null && !Array.isArray(entry.actions)) {
