@@ -99,6 +99,15 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.innerHTML).not.toContain('maps.googleapis.com');
   });
 
+  it('renders the generated map without injecting payload markup', () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 340"><style>.z{fill:red}</style><rect class="z"/></svg>';
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, mapSvg: svg }} token="tok123" />);
+    // the map arrives as an <img> data URI — an <img> cannot execute script
+    // or fetch, so payload markup never becomes live DOM in this document
+    expect(container.querySelector('img[src^="data:image/svg+xml"]')).toBeTruthy();
+    expect(container.querySelector('svg')).toBeNull();
+  });
+
   it('embeds the technician-traced treatment map when one exists', () => {
     const data = { ...BASE_DATA, treatmentMap: { traced: { snapshotUrl: 'https://cdn.example.com/trace.png' }, footer: 'Technician-reported service zones.' } };
     render(<ServiceReportDocument data={data} token="tok123" />);

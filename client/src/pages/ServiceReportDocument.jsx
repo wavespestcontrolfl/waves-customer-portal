@@ -140,7 +140,15 @@ export default function ServiceReportDocument({ data, token }) {
   const applications = Array.isArray(data.applications) ? data.applications : [];
   const photos = (data.photos || []).filter((photo) => photo && photo.url);
   const tracedMapUrl = data.treatmentMap?.traced?.snapshotUrl || null;
+  // The generated map is a self-contained SVG (own <style> + xmlns), so it
+  // renders identically as an <img> data URI — and an <img> cannot execute
+  // script or fetch anything, so no markup from the payload is ever injected
+  // into this document. Inline over the /map.svg endpoint: no network fetch
+  // to race the PDF capture.
   const schematicSvg = data.treatmentMap?.schematic?.svg || data.mapSvg || null;
+  const schematicSrc = schematicSvg
+    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(schematicSvg)}`
+    : null;
   const zoneLegend = (data.zones || [])
     .map((zone) => ({ letter: zone.letter, label: zone.label }))
     .filter((zone) => zone.label);
@@ -172,6 +180,14 @@ export default function ServiceReportDocument({ data, token }) {
   (Array.isArray(assessRecs) ? [...assessRecs].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)) : [])
     .forEach((rec) => pushRec(rec?.action || rec?.text || rec));
   pushRec(data.reportV2?.aftercare?.watering);
+
+  // "(3 of 5 — baseline recorded today)" / "(3 of 5)" / " — baseline
+  // recorded today" / "" depending on what the visit actually recorded.
+  const activityScored = activity && activity.score != null && activity.maxScore != null;
+  const activityBaselineNote = activity?.isBaseline ? ' — baseline recorded today' : '';
+  const activityDetail = activityScored
+    ? ` (${activity.score} of ${activity.maxScore}${activityBaselineNote})`
+    : activityBaselineNote;
 
   const lawnObservations = String(data.lawnAssessment?.observations || '').trim() || null;
   const mowing = data.mowingHeight || null;
@@ -292,9 +308,7 @@ export default function ServiceReportDocument({ data, token }) {
             ))}
             {activity && activity.levelWord && (
               <Bullet>
-                <strong>{activity.label}:</strong> {activity.levelWord}
-                {activity.score != null && activity.maxScore != null ? ` (${activity.score} of ${activity.maxScore}` : ''}
-                {activity.score != null && activity.maxScore != null ? `${activity.isBaseline ? ' — baseline recorded today' : ''})` : (activity.isBaseline ? ' — baseline recorded today' : '')}
+                <strong>{activity.label}:</strong> {activity.levelWord}{activityDetail}
               </Bullet>
             )}
           </div>
@@ -385,13 +399,13 @@ export default function ServiceReportDocument({ data, token }) {
             (Waves-stored image), else the generated zone schematic. The
             satellite basemap never prints (provider ToS — long-standing
             rule), which these two Waves-owned renderings don't involve. */}
-        {(tracedMapUrl || schematicSvg) && (
+        {(tracedMapUrl || schematicSrc) && (
           <div className="doc-keep">
             <SectionHeader>Where we treated</SectionHeader>
             <div className="doc-map-frame" style={{ border: `1px solid ${HAIR}`, borderRadius: 6, overflow: 'hidden' }}>
               {tracedMapUrl
                 ? <img src={tracedMapUrl} alt="Technician-traced treatment map" style={{ display: 'block', width: '100%' }} />
-                : <div dangerouslySetInnerHTML={{ __html: schematicSvg }} />}
+                : <img src={schematicSrc} alt="Treatment map of the serviced areas" style={{ display: 'block', width: '100%' }} />}
             </div>
             {!tracedMapUrl && zoneLegend.length > 0 && (
               <div style={{ marginTop: 5, fontSize: 10.5, color: MUTED, lineHeight: 1.5 }}>
