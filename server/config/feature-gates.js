@@ -1096,6 +1096,18 @@ const gates = {
   // booking flows and the nightly job revert to the old members-only
   // re-alignment.
   autoWaveguardTierEnroll: process.env.GATE_AUTO_WAVEGUARD_TIER === 'true',
+
+  // Inspection fee credited toward a service booked within the promised
+  // window (owner-approved 2026-08-02). Two halves, one gate: the tech
+  // closeout checkbox that RECORDS the promise, and the redemption that
+  // MINTS it into account credit when the customer books. Money surface —
+  // fail-closed ==='true' in EVERY environment. Gate off: no offer row is
+  // written, the receipt carries no credit line, and any offer recorded
+  // while the gate was on stays dormant (redemption checks the gate too),
+  // so flipping it off mid-window strands nothing — it only stops new
+  // promises and pauses redemption. Kill switch: unset or any non-'true'
+  // value.
+  inspectionCredit: process.env.GATE_INSPECTION_CREDIT === 'true',
 };
 
 function isEnabled(gate) {

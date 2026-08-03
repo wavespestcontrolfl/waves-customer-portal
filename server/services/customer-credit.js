@@ -14,6 +14,10 @@ const logger = require('./logger');
 
 const VALID_SOURCES = Object.freeze([
   'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
+  // Inspection fee credited toward a service booked within the promised
+  // window — minted at REDEMPTION (the booking), never at the inspection,
+  // so an unredeemed promise never inflates a balance.
+  'inspection_credit',
 ]);
 
 function round2(n) {
