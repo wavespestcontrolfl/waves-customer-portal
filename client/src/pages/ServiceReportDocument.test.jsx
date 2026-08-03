@@ -768,8 +768,8 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/once dry/i);
   });
 
-  it('sanitizes spelled-out durations, not just digits', () => {
-    const cases = ['Keep clear for five hours.', 'Re-enter after ninety minutes.', 'Wait twenty-four hours before mowing.', 'Give it half an hour.'];
+  it('sanitizes spelled-out re-entry durations, not just digits', () => {
+    const cases = ['Keep clear for five hours.', 'Re-enter after ninety minutes.', 'Stay off the treated area for twenty-four hours.'];
     cases.forEach((text) => {
       const app = { ...BASE_DATA.applications[0], product: { ...BASE_DATA.applications[0].product, reentry_summary: text } };
       const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="t" />);
@@ -777,6 +777,32 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       expect(container.textContent).toMatch(/once dry/i);
       cleanup();
     });
+  });
+
+  it('keeps agronomic timing — the ban is on re-entry figures, not mowing windows', () => {
+    const agronomic = 'Wait twenty-four hours before mowing. Water in within an hour of application.';
+    const app = { ...BASE_DATA.applications[0], product: { ...BASE_DATA.applications[0].product, reentry_summary: agronomic } };
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="t" />);
+    expect(container.textContent).toContain('before mowing');
+    expect(container.textContent).toContain('Water in within an hour');
+  });
+
+  it('keeps the non-re-entry sentences when it sanitizes one', () => {
+    const mixed = 'Keep people and pets off treated areas for about 1 hour. Wait twenty-four hours before mowing.';
+    const app = { ...BASE_DATA.applications[0], product: { ...BASE_DATA.applications[0].product, reentry_summary: mixed } };
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="t" />);
+    expect(container.textContent).not.toContain('about 1 hour');
+    expect(container.textContent).toContain('before mowing');
+    expect(container.textContent).toMatch(/once dry/i);
+  });
+
+  it('marks the document incomplete when an image fails, so the render is not cached', () => {
+    const data = { ...BASE_DATA, photos: [{ id: 'p1', url: 'https://cdn.example.com/dead.jpg', caption: 'Entry point' }] };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const root = container.querySelector('.service-report-document');
+    expect(root.getAttribute('data-render-incomplete')).toBeNull();
+    fireEvent.error(container.querySelector('img[src="https://cdn.example.com/dead.jpg"]'));
+    expect(container.querySelector('.service-report-document').getAttribute('data-render-incomplete')).toBe('images');
   });
 
   it('keeps label copy that asserts no timing', () => {

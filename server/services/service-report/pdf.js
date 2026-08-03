@@ -67,7 +67,12 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
         url,
         viewport: { width: 816, height: 1056 },
         gotoOptions: { waitUntil: 'networkidle0', timeout: 30000 },
-        waitForSelector: { selector: '.service-report-v1', visible: true, timeout: 10000 },
+        // :not([data-render-incomplete]) — the document sets that attribute
+        // when a required image failed, so an incomplete render times out
+        // here and the caller's retry path runs rather than caching a
+        // permanently photo-less artifact. gotoOptions waits for
+        // networkidle0 first, so image errors have already fired.
+        waitForSelector: { selector: '.service-report-v1:not([data-render-incomplete])', visible: true, timeout: 10000 },
         emulateMediaType: 'print',
         pdfOptions: {
           format: 'letter',

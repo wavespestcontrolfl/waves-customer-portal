@@ -218,10 +218,27 @@ const REENTRY_TIME_RX = new RegExp(
 );
 const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 
+// The ban is on fixed RE-ENTRY/DRYING figures — not on agronomic windows.
+// "Wait twenty-four hours before mowing" and "water in within an hour" are
+// label-required aftercare and must survive; erasing them would strip real
+// instructions from the permanent record. So sanitize per SENTENCE, and only
+// where the timing is attached to a re-entry/drying claim.
+const REENTRY_CLAIM_RX = /\b(re-?enter|re-?entry|entry|ready|keep (people|pets|children|kids|everyone)?\s*(off|out|away|clear)|stay (off|out|away)|off (the )?treated|until (it|they|sprays?|surfaces?)? ?(is|are)? ?dry|dries|drying|safe)\b/i;
+
 function sanitizeReentryCopy(value) {
   const text = String(value || '').trim();
   if (!text) return '';
-  return REENTRY_TIME_RX.test(text) ? REENTRY_SAFE_COPY : text;
+  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
+  let replaced = false;
+  const kept = sentences.filter((sentence) => {
+    if (REENTRY_TIME_RX.test(sentence) && REENTRY_CLAIM_RX.test(sentence)) {
+      replaced = true;
+      return false;
+    }
+    return true;
+  });
+  if (!replaced) return text;
+  return [REENTRY_SAFE_COPY, ...kept].join(' ').trim();
 }
 
 // COMPLIANCE (AGENTS.md): never publish a fixed re-entry/drying figure on a
@@ -635,7 +652,16 @@ export default function ServiceReportDocument({ data, token }) {
   const interaction = interactionLabel(data.customerInteraction);
 
   return (
-    <div className="service-report-v1 service-report-document" style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}>
+    <div
+      className="service-report-v1 service-report-document"
+      /* A failed image is dropped so the document never shows a broken
+         frame — but silently omitting evidence from a PERMANENT record and
+         then caching it is worse than not rendering at all. This marker lets
+         the renderer refuse the capture so the existing PDF retry path runs
+         instead of storing an incomplete artifact (codex P1). */
+      {...(failedImages.size > 0 ? { 'data-render-incomplete': 'images' } : {})}
+      style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
+    >
       <style>{`
         .service-report-document { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
         .service-report-document .doc-page { max-width: 760px; margin: 0 auto; padding: 20px 16px 28px; }
