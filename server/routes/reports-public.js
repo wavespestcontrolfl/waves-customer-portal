@@ -1512,7 +1512,7 @@ router.get('/:token/data', async (req, res, next) => {
       // removed. Only the renderer can sign, so only the renderer can pin.
       // Refused exactly like an unauthorized pin: same status, same fixed copy.
       if (requestedAssessment
-        && !verifyAssessmentPin(req.params.token, requestedAssessment, req.query.asig)) {
+        && !verifyAssessmentPin(req.params.token, requestedAssessment, req.query.asig, req.query.aexp)) {
         logger.warn(`[reports-public] unsigned assessment pin refused for service_record ${serviceRecordId || 'unknown'}`);
         return res.status(409).json({ error: 'Requested assessment is not available for this report' });
       }

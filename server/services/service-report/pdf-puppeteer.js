@@ -1,4 +1,5 @@
 const config = require('../../config');
+const logger = require('../logger');
 
 let chromium = null;
 try {
@@ -24,13 +25,25 @@ function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessment
   const params = [];
   if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
   if (pinnedLawnAssessmentId) {
-    // The signature is what makes the pin trustworthy. Without it the route
-    // refuses, which is the point: only this server can ask a report to render
-    // a specific assessment — or none at all.
+    // The signature is what makes the pin trustworthy: the route refuses an
+    // unsigned pin, because only this server may ask a report to render a
+    // specific assessment — or none at all.
+    //
+    // If we CANNOT sign (no secret configured), emit no pin at all rather than
+    // an unsigned one. An unsigned pin is refused, which fails the render,
+    // which defers the delivery — so a missing secret would silently stop every
+    // lawn report email until its retries exhausted. Degrading to an unpinned
+    // render loses the pin's guarantee but keeps the post-render selection
+    // re-check that shipped in #3146, and keeps mail flowing.
     const { signAssessmentPin } = require('./assessment-pin');
-    const signature = signAssessmentPin(token, pinnedLawnAssessmentId);
-    params.push(`assessment=${encodeURIComponent(pinnedLawnAssessmentId)}`);
-    if (signature) params.push(`asig=${encodeURIComponent(signature)}`);
+    const signed = signAssessmentPin(token, pinnedLawnAssessmentId);
+    if (signed) {
+      params.push(`assessment=${encodeURIComponent(pinnedLawnAssessmentId)}`);
+      params.push(`asig=${encodeURIComponent(signed.signature)}`);
+      params.push(`aexp=${encodeURIComponent(signed.expiresAt)}`);
+    } else {
+      logger.warn('[service-report-pdf] no report-pin secret configured — rendering UNPINNED; set REPORT_PIN_SECRET or JWT_SECRET to restore the attachment guarantee');
+    }
   }
   const query = params.length ? `?${params.join('&')}` : '';
   return `${base}/report/${encodeURIComponent(token)}${query}`;

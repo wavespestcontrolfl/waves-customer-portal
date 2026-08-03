@@ -13,33 +13,54 @@ const crypto = require('crypto');
 // So a pin is only honoured when it carries a signature this server produced.
 // The renderer signs; nobody else can.
 //
-// Bound to the report token as well as the assessment id, so a signature
-// harvested from one report cannot be replayed onto another.
-const PIN_SECRET_ENV = ['REPORT_PIN_SECRET', 'JWT_SECRET'];
+// Bound to the report token AND an expiry, so a signature harvested from one
+// report cannot be replayed onto another, and one that leaks (the signed URL is
+// handed to an external browser-rendering service) stops working quickly.
+const PIN_TTL_SECONDS = 15 * 60;
 
-function pinSecret() {
-  for (const key of PIN_SECRET_ENV) {
-    const value = process.env[key];
-    if (value && String(value).trim()) return String(value);
-  }
-  return null;
+// Domain separation. JWT_SECRET is the deployment-wide auth secret; using it
+// directly as an HMAC key for a second purpose means one construction's
+// weakness becomes the other's. Deriving a purpose-bound key costs nothing and
+// keeps the two uses independent. REPORT_PIN_SECRET, when set, is dedicated
+// already but is derived the same way so both paths behave identically.
+const PIN_KEY_INFO = 'waves:report-assessment-pin:v1';
+
+function pinKey() {
+  const base = process.env.REPORT_PIN_SECRET || process.env.JWT_SECRET;
+  if (!base || !String(base).trim()) return null;
+  return crypto.createHmac('sha256', String(base)).update(PIN_KEY_INFO).digest();
 }
 
-function signAssessmentPin(token, assessmentId) {
-  const secret = pinSecret();
-  if (!secret || !token || !assessmentId) return null;
-  return crypto.createHmac('sha256', secret)
-    .update(`${token}:${assessmentId}`)
+function computeSignature(key, token, assessmentId, expiresAt) {
+  return crypto.createHmac('sha256', key)
+    .update(`${token}:${assessmentId}:${expiresAt}`)
     .digest('hex');
 }
 
+// Returns { signature, expiresAt } or null when this server cannot sign.
+// A null return is NOT an error the caller should surface — see the renderer:
+// unable to sign means render UNPINNED rather than emit a pin that will be
+// refused, which would fail every lawn delivery until retry exhaustion.
+function signAssessmentPin(token, assessmentId, { nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+  const key = pinKey();
+  if (!key || !token || !assessmentId) return null;
+  const expiresAt = nowSeconds + PIN_TTL_SECONDS;
+  return { signature: computeSignature(key, token, assessmentId, expiresAt), expiresAt };
+}
+
 // Constant-time verification. Returns false rather than throwing so a caller
-// can answer with the same fixed refusal it uses for an unauthorized pin —
-// a timing-distinguishable or differently-worded rejection would leak whether
-// a given assessment exists.
-function verifyAssessmentPin(token, assessmentId, signature) {
-  const expected = signAssessmentPin(token, assessmentId);
-  if (!expected || typeof signature !== 'string' || signature.length !== expected.length) return false;
+// can answer with the same fixed refusal it uses for an unauthorized pin — a
+// timing-distinguishable or differently-worded rejection would leak whether a
+// given assessment exists.
+function verifyAssessmentPin(token, assessmentId, signature, expiresAt, { nowSeconds = Math.floor(Date.now() / 1000) } = {}) {
+  const key = pinKey();
+  if (!key || typeof signature !== 'string') return false;
+
+  const exp = Number(expiresAt);
+  if (!Number.isFinite(exp) || exp <= nowSeconds) return false;
+
+  const expected = computeSignature(key, token, assessmentId, String(expiresAt));
+  if (signature.length !== expected.length) return false;
   try {
     return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(signature, 'hex'));
   } catch {
@@ -47,4 +68,4 @@ function verifyAssessmentPin(token, assessmentId, signature) {
   }
 }
 
-module.exports = { signAssessmentPin, verifyAssessmentPin };
+module.exports = { signAssessmentPin, verifyAssessmentPin, PIN_TTL_SECONDS };

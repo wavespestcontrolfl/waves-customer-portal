@@ -8736,7 +8736,11 @@ export default function ReportViewPage() {
     // The signature travels with the id — the server refuses an unsigned pin,
     // since pinning narrows what the report says and only this server may ask
     // for that.
-    return { id: id.trim(), sig: (params.get('asig') || '').trim() };
+    return {
+      id: id.trim(),
+      sig: (params.get('asig') || '').trim(),
+      exp: (params.get('aexp') || '').trim(),
+    };
   }, []);
 
   // Liquid-glass theme — live view only, mounted at the PAGE level so the
@@ -8754,7 +8758,9 @@ export default function ReportViewPage() {
     setLoadError(false);
     const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
       + (pinnedAssessment
-        ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}&asig=${encodeURIComponent(pinnedAssessment.sig)}`
+        ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
+          + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
+          + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
         : '');
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports

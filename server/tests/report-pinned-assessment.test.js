@@ -17,7 +17,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const { PinnedAssessmentUnavailable } = require('../services/service-report/report-data');
 const { serviceReportViewerUrl } = require('../services/service-report/pdf-puppeteer');
-const { signAssessmentPin, verifyAssessmentPin } = require('../services/service-report/assessment-pin');
+const { signAssessmentPin, verifyAssessmentPin, PIN_TTL_SECONDS } = require('../services/service-report/assessment-pin');
 
 const SERVICE = {
   id: 'svc-1',
@@ -141,8 +141,16 @@ describe('#3168 pinned assessment — the pin itself', () => {
 
 describe('#3168 pinned assessment — pinning ABSENCE', () => {
   const OLD_CLIENT_URL = process.env.CLIENT_URL;
-  beforeAll(() => { process.env.CLIENT_URL = 'https://portal.example'; });
-  afterAll(() => { process.env.CLIENT_URL = OLD_CLIENT_URL; });
+  const OLD_SECRET = process.env.REPORT_PIN_SECRET;
+  beforeAll(() => {
+    process.env.CLIENT_URL = 'https://portal.example';
+    // A pin only reaches the URL when it can be signed.
+    process.env.REPORT_PIN_SECRET = 'test-pin-secret';
+  });
+  afterAll(() => {
+    process.env.CLIENT_URL = OLD_CLIENT_URL;
+    process.env.REPORT_PIN_SECRET = OLD_SECRET;
+  });
 
   // An absent pin is not a pin of absence. A fence that sealed "no assessment"
   // has to say so, or the render is simply unpinned and a row that becomes
@@ -181,39 +189,75 @@ describe('#3168 pinned assessment — the pin must be SIGNED', () => {
   afterAll(() => { process.env.REPORT_PIN_SECRET = OLD_SECRET; });
 
   test('a signature this server produced verifies', () => {
-    const sig = signAssessmentPin('tok-1', 'assess-A');
-    expect(typeof sig).toBe('string');
-    expect(verifyAssessmentPin('tok-1', 'assess-A', sig)).toBe(true);
+    const signed = signAssessmentPin('tok-1', 'assess-A');
+    expect(typeof signed.signature).toBe('string');
+    expect(verifyAssessmentPin('tok-1', 'assess-A', signed.signature, signed.expiresAt)).toBe(true);
   });
 
   test('an absent or guessed signature is refused', () => {
-    expect(verifyAssessmentPin('tok-1', 'assess-A', undefined)).toBe(false);
-    expect(verifyAssessmentPin('tok-1', 'assess-A', '')).toBe(false);
-    expect(verifyAssessmentPin('tok-1', 'assess-A', 'deadbeef')).toBe(false);
+    const { expiresAt } = signAssessmentPin('tok-1', 'assess-A');
+    expect(verifyAssessmentPin('tok-1', 'assess-A', undefined, expiresAt)).toBe(false);
+    expect(verifyAssessmentPin('tok-1', 'assess-A', '', expiresAt)).toBe(false);
+    expect(verifyAssessmentPin('tok-1', 'assess-A', 'deadbeef', expiresAt)).toBe(false);
   });
 
   // The abuse this closes: a customer opening their own report with
   // ?assessment=none to hide an unfavourable assessment.
   test('the sentinel cannot be pinned without a signature either', () => {
-    expect(verifyAssessmentPin('tok-1', PIN_NO_ASSESSMENT, undefined)).toBe(false);
-    const sig = signAssessmentPin('tok-1', PIN_NO_ASSESSMENT);
-    expect(verifyAssessmentPin('tok-1', PIN_NO_ASSESSMENT, sig)).toBe(true);
+    expect(verifyAssessmentPin('tok-1', PIN_NO_ASSESSMENT, undefined, 9e9)).toBe(false);
+    const signed = signAssessmentPin('tok-1', PIN_NO_ASSESSMENT);
+    expect(verifyAssessmentPin('tok-1', PIN_NO_ASSESSMENT, signed.signature, signed.expiresAt)).toBe(true);
   });
 
   test('a signature is bound to its report token — no replay onto another', () => {
-    const sig = signAssessmentPin('tok-1', 'assess-A');
-    expect(verifyAssessmentPin('tok-2', 'assess-A', sig)).toBe(false);
+    const signed = signAssessmentPin('tok-1', 'assess-A');
+    expect(verifyAssessmentPin('tok-2', 'assess-A', signed.signature, signed.expiresAt)).toBe(false);
   });
 
   test('a signature is bound to its assessment — no swapping the id', () => {
-    const sig = signAssessmentPin('tok-1', 'assess-A');
-    expect(verifyAssessmentPin('tok-1', 'assess-B', sig)).toBe(false);
+    const signed = signAssessmentPin('tok-1', 'assess-A');
+    expect(verifyAssessmentPin('tok-1', 'assess-B', signed.signature, signed.expiresAt)).toBe(false);
   });
 
-  test('the render URL carries the signature alongside the pin', () => {
+  test('a signature is bound to its expiry — no extending it', () => {
+    const signed = signAssessmentPin('tok-1', 'assess-A');
+    // Pushing the expiry out invalidates the signature: exp is signed, not
+    // merely carried alongside.
+    expect(verifyAssessmentPin('tok-1', 'assess-A', signed.signature, signed.expiresAt + 3600)).toBe(false);
+  });
+
+  test('an EXPIRED signature is refused — a leaked URL stops working', () => {
+    // The signed URL is handed to an external browser-rendering service, so it
+    // must not stay valid forever.
+    const past = Math.floor(Date.now() / 1000) - 10;
+    const signed = signAssessmentPin('tok-1', 'assess-A', { nowSeconds: past - PIN_TTL_SECONDS });
+    expect(verifyAssessmentPin('tok-1', 'assess-A', signed.signature, signed.expiresAt)).toBe(false);
+  });
+
+  test('the render URL carries signature and expiry alongside the pin', () => {
     const url = serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: 'assess-A' });
     expect(url).toContain('assessment=assess-A');
-    expect(url).toContain(`asig=${signAssessmentPin('tok-1', 'assess-A')}`);
+    expect(url).toMatch(/asig=[0-9a-f]{64}/);
+    expect(url).toMatch(/aexp=\d+/);
+  });
+
+  test('NO secret configured ⇒ NO pin on the URL, not an unsigned one', () => {
+    // Fail SAFE, not fail broken. An unsigned pin is refused by the route,
+    // which fails the render, which defers the delivery — so a missing secret
+    // would silently stop every lawn report email until retries exhausted.
+    const saved = process.env.REPORT_PIN_SECRET;
+    const savedJwt = process.env.JWT_SECRET;
+    delete process.env.REPORT_PIN_SECRET;
+    delete process.env.JWT_SECRET;
+    try {
+      expect(signAssessmentPin('tok-1', 'assess-A')).toBeNull();
+      const url = serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: 'assess-A' });
+      expect(url).not.toContain('assessment=');
+      expect(url).not.toContain('asig=');
+    } finally {
+      process.env.REPORT_PIN_SECRET = saved;
+      if (savedJwt !== undefined) process.env.JWT_SECRET = savedJwt;
+    }
   });
 });
 
@@ -231,8 +275,15 @@ describe('#3168 pinned assessment — fail-closed contract', () => {
 
 describe('#3168 pinned assessment — the render URL carries the pin', () => {
   const OLD_CLIENT_URL = process.env.CLIENT_URL;
-  beforeAll(() => { process.env.CLIENT_URL = 'https://portal.example'; });
-  afterAll(() => { process.env.CLIENT_URL = OLD_CLIENT_URL; });
+  const OLD_SECRET = process.env.REPORT_PIN_SECRET;
+  beforeAll(() => {
+    process.env.CLIENT_URL = 'https://portal.example';
+    process.env.REPORT_PIN_SECRET = 'test-pin-secret';
+  });
+  afterAll(() => {
+    process.env.CLIENT_URL = OLD_CLIENT_URL;
+    process.env.REPORT_PIN_SECRET = OLD_SECRET;
+  });
 
   test('no pin renders the URL unchanged', () => {
     expect(serviceReportViewerUrl('tok-1')).toBe('https://portal.example/report/tok-1?mode=pdf');
