@@ -446,6 +446,13 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
     source: kind,
     estimateId: estimate.id,
     ...(monthlyFallbackPrice != null ? { derived: 'estimate_totals_fallback' } : {}),
+    // Accepted NET one-time price (Codex #3173 r4): a manual discount
+    // allocated to one-time work leaves the row's price/priceAfterDiscount
+    // GROSS and stores the accepted net in manualFinalOneTime — display
+    // copy and comparisons must use the net; `price` keeps its pre-fill
+    // semantics.
+    ...(kind !== 'recurring' && moneyOrNull(line?.manualFinalOneTime) != null
+      ? { acceptedOneTimePrice: moneyOrNull(line?.manualFinalOneTime) } : {}),
     // EXPLICIT per-application provenance (Codex P1): the canonical
     // public-quote derivation owns the rules — explicit per-app signal +
     // visit count, DISCOUNTED annual preferred over the list rate, and
@@ -495,6 +502,7 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // on the row: refuse provenance rather than overstate.
         if ((appliedPct > 0 || parentRecurringDiscounted)
           && moneyOrNull(line?.priceAfterDiscount) == null
+          && !(Number(line?.manualFinalAnnual) > 0)
           && !(Number(line?.annualAfterDiscount) > 0)
           && !(Number(line?.finalAnnual) > 0)) {
           return {};
@@ -511,19 +519,25 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // canonical fn would otherwise prefer annual/visits and resurrect
         // the undiscounted rate).
         const discountedPerApp = moneyOrNull(line?.priceAfterDiscount);
+        // manualFinalAnnual is the accepted POST-manual-discount annual —
+        // annualAfterDiscount is only pre-manual/WaveGuard (Codex #3173
+        // r4). It outranks every other annual in both branches.
+        const acceptedAnnual = Number(line?.manualFinalAnnual) > 0
+          ? Number(line.manualFinalAnnual)
+          : (Number(line?.annualAfterDiscount) > 0 ? Number(line.annualAfterDiscount) : undefined);
         const pa = perApplicationForLine(discountedPerApp != null
           ? {
             service: resolvedServiceKey,
             perApp: discountedPerApp,
             ...cadenceFields,
-            annualAfterDiscount: line?.annualAfterDiscount,
+            annualAfterDiscount: acceptedAnnual,
           }
           : {
             service: resolvedServiceKey,
             perApp: moneyOrNull(line?.perApp, line?.perTreatment) || undefined,
             perVisit: line?.perVisit,
             ...cadenceFields,
-            annualAfterDiscount: line?.annualAfterDiscount,
+            annualAfterDiscount: acceptedAnnual,
             finalAnnual: line?.finalAnnual,
             annual: line?.annual ?? line?.ann,
           });

@@ -346,7 +346,13 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
       monthlyPrice: line?.cadence && line.cadence !== 'one_time'
         && !(Number(line?.perApplicationPrice) > 0) && Number(line?.monthlyPrice) > 0
         ? Number(line.monthlyPrice) : null,
-      oneTimePrice: line?.cadence === 'one_time' && Number(line?.price) > 0 ? Number(line.price) : null,
+      // acceptedOneTimePrice is the NET after a manual discount allocated
+      // to one-time work — the row's price stays gross (Codex #3173 r4).
+      oneTimePrice: line?.cadence === 'one_time'
+        ? (Number(line?.acceptedOneTimePrice) > 0
+          ? Number(line.acceptedOneTimePrice)
+          : (Number(line?.price) > 0 ? Number(line.price) : null))
+        : null,
     }))
     .filter((line) => line.name);
   // Honest quoted framing (owner ruling 2026-08-02): a blended

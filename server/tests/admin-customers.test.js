@@ -881,6 +881,41 @@ describe('admin customers route helpers', () => {
     const [rentalLine] = scheduleLinesFromEstimate(nameOnlyRental, rentalIndex);
     expect(rentalLine.perApplicationPrice).toBeUndefined();
     expect(rentalLine.monthlyPrice).toBe(10.33);
+    // manualFinalAnnual (POST-manual-discount) outranks the pre-manual
+    // annualAfterDiscount: $400 accepted year / 4 visits = $100/application
+    // (codex r4).
+    const manualRecurring = {
+      id: 'est-pa-9',
+      monthly_total: 33.33,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', amount: 84, recurringAmount: 84 },
+          recurring: { services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 121, priceAfterDiscount: 121, annualAfterDiscount: 484, manualFinalAnnual: 400, visitsPerYear: 4, mo: 40.33 },
+          ] },
+        },
+      },
+    };
+    const [mfLine] = scheduleLinesFromEstimate(manualRecurring, index);
+    expect(mfLine.perApplicationPrice).toBe(100);
+
+    // One-time rows keep price GROSS but carry the accepted net separately.
+    const manualOneTime = {
+      id: 'est-pa-10',
+      onetime_total: 220,
+      estimate_data: {
+        result: {
+          oneTime: { items: [
+            { service: 'bed_bug', name: 'Bed Bug Treatment', price: 300, manualFinalOneTime: 220 },
+          ] },
+        },
+      },
+    };
+    const otLines = scheduleLinesFromEstimate(manualOneTime, index);
+    const bb = otLines.find((l) => /bed bug/i.test(l.name));
+    expect(bb.acceptedOneTimePrice).toBe(220);
+    expect(bb.price).toBe(300);
+
 
 
 
