@@ -365,11 +365,25 @@ export default function ServiceReportDocument({ data, token }) {
     && (Object.values(normalizedConditions).some((value) => value != null && value !== '') || usingWeeklyRain)
     ? normalizedConditions : null;
   const applications = Array.isArray(data.applications) ? data.applications : [];
-  // A station check is a device inspection, not an application — listing a
-  // snap trap under "Products applied" with a Total applied contradicts the
-  // record on a station-check-only visit. The placement section covers them.
-  const appliedProducts = applications
-    .filter((app) => (app.method || 'perimeter_spray') !== 'station_check');
+  // A station check is a device inspection, not an application. But `method`
+  // can't be trusted alone: methodFromProduct INFERS 'station_check' for any
+  // termite or rodent product with a null application_method (a supported
+  // state — the column was added nullable), so a historical liquid or
+  // pre-treatment termiticide is classified as a device check. Filtering on
+  // method alone therefore deleted the actual pesticide from the record and
+  // suppressed its precautions.
+  //
+  // Identity decides, and the signal is PESTICIDE identity — an EPA
+  // registration or a pesticide product type. Not the recorded amount: a
+  // snap trap check legitimately records "1 ea" and still isn't a product
+  // application, which is the case that made this filter necessary.
+  const isProductApplication = (app) => {
+    if ((app.method || 'perimeter_spray') !== 'station_check') return true;
+    if (epaReg(app)) return true;
+    const kind = `${app.product?.product_type || ''} ${app.product?.category || ''}`.toLowerCase();
+    return /pestic|termitic|insectic|herbic|fungic|rodentic/.test(kind);
+  };
+  const appliedProducts = applications.filter(isProductApplication);
   // Lawn-assessment photos fall back to raw per-photo vision `observations`
   // as their caption (report-data.js). The lawn V2 path deliberately drops
   // those blurbs — they over-diagnose — in favour of ONE consolidated,
@@ -450,8 +464,7 @@ export default function ServiceReportDocument({ data, token }) {
   // "Can the schematic draw it?" additionally needs zone IDs, because that is
   // what treatment-map.js filters on. Reusing the map predicate for aftercare
   // silently stripped watering and re-entry instructions from those visits.
-  const hasActualTreatment = applications
-    .some((app) => (app.method || 'perimeter_spray') !== 'station_check');
+  const hasActualTreatment = applications.some(isProductApplication);
 
   const hasRenderableTreatment = applications.some((app) => {
     const method = app.method || 'perimeter_spray';
@@ -1216,7 +1229,10 @@ export default function ServiceReportDocument({ data, token }) {
                 are appended outside the service_photos chain, and a chain
                 over only a hidden photo must not over-claim (the web
                 report's guard; dropping half of it was a codex P1). */}
-            {data.photoChain?.valid === true && photos.length > 0 && photos.every((photo) => photo?.hashSha256)
+            {/* a photo that failed to load is shown as a placeholder, so its
+                hash backs nothing the reader can see — the claim must fail. */}
+            {data.photoChain?.valid === true && photos.length > 0
+              && photos.every((photo) => photo?.hashSha256 && !photo.unavailable)
               /* moments + the gauge shot carry no hash, so displaying one
                  correctly defeats the claim rather than over-claiming */
               ? ' Photos hash-chained and tamper-evident.' : ''}

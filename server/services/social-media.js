@@ -466,7 +466,11 @@ function stripFixedReentryTiming(value, replacement = '') {
   if (!raw) return { text: '', changed: false };
   let changed = false;
   const keptSentences = [];
-  for (const sentence of raw.split(/(?<=[.!?])\s+/)) {
+  // Split on line breaks as well as sentence punctuation: label copy often
+  // separates directions with an unpunctuated newline, and treating
+  // "Keep pets off treated areas for 30 minutes\nAvoid watering for 24 hours"
+  // as ONE clause let AGRONOMIC_EXEMPT_RE exempt the re-entry claim.
+  for (const sentence of raw.split(/(?<=[.!?])\s+|\r?\n+/)) {
     if (!sentence.trim()) continue;
     const parts = sentence.split(/([,;]+|\s+(?:and|but|while|then)\s+)/i);
     const keptClauses = [];

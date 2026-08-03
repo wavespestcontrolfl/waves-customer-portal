@@ -619,6 +619,32 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Where we treated');
   });
 
+  it('keeps a legacy termite application whose method was only inferred', () => {
+    // methodFromProduct infers 'station_check' for ANY termite/rodent product
+    // with a null application_method — a real termiticide must survive that
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      applications: [{ id: 'a1', method: 'station_check', totalAmount: '4', amountUnit: 'gal', product: { name: 'Taurus SC', epa_reg: '53883-279', active_ingredient: 'Fipronil' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Products applied');
+    expect(container.textContent).toContain('Taurus SC');
+    expect(container.textContent).toContain('53883-279');
+  });
+
+  it('does not claim tamper-evidence for a photo that failed to load', () => {
+    const data = {
+      ...BASE_DATA,
+      photoChain: { valid: true },
+      photos: [{ id: 'p1', url: 'https://cdn.example.com/dead.jpg', hashSha256: 'abc', caption: 'Entry point' }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/hash-chained and tamper-evident/);
+    fireEvent.error(container.querySelector('img[src="https://cdn.example.com/dead.jpg"]'));
+    expect(container.textContent).not.toMatch(/hash-chained and tamper-evident/);
+  });
+
   it('does not list a station check under products applied', () => {
     const data = {
       ...BASE_DATA,
