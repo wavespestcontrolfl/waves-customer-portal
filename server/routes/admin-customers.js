@@ -382,10 +382,14 @@ function isSchedulableOneTimeEstimateLine(line) {
   return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
 }
 
-function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
+function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurringDiscounted = false }) {
   const name = String(line?.displayName || line?.label || line?.name || line?.serviceName || line?.service || '').trim();
   if (!name) return null;
-  const price = kind === 'recurring'
+  // Per-VISIT fields first; the monthly fields are a last resort and carry
+  // provenance (Codex P1): a price recovered from `mo`/`monthly` is a
+  // normalized monthly figure, and client copy labeling it "/application"
+  // would misstate the charge (per-month copy audit rule).
+  const perVisitPrice = kind === 'recurring'
     ? moneyOrNull(
         line?.perTreatment,
         line?.perApp,
@@ -397,10 +401,12 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
         line?.price,
         line?.amount,
         line?.total,
-        line?.mo,
-        line?.monthly,
       )
     : moneyOrNull(line?.priceAfterDiscount, line?.amountAfterDiscount, line?.totalAfterDiscount, line?.price, line?.amount, line?.total);
+  const monthlyFallbackPrice = kind === 'recurring' && perVisitPrice == null
+    ? moneyOrNull(line?.mo, line?.monthly)
+    : null;
+  const price = perVisitPrice != null ? perVisitPrice : monthlyFallbackPrice;
   if (kind !== 'recurring' && price == null) return null;
 
   const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
@@ -419,6 +425,24 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
   // carried on the line because the modal's own inference can't recover it
   // once the catalog match rewrites `frequency`.
   const schedulerCadence = cadence === 'every_6_weeks' ? 'custom' : cadence;
+  // Canonical service identity for the billing-unit gates (Codex #3173 r3):
+  // legacy/name-only rows carry no `service` key, but the catalog match
+  // resolves one — a name-only "Termite Station Rental" must still hit the
+  // monthly-billed exemption, never stamp $31/application.
+  // Engine key wins; the catalog key is the fallback for name-only legacy
+  // rows — but catalog keys are ALIASES of engine keys (a rodent-bait line
+  // matches the catalog's `rodent_bait_quarterly`, Codex #3173 r5), so they
+  // are normalized back before any billing-unit decision. Unknown catalog
+  // keys pass through unchanged.
+  const CATALOG_TO_ENGINE_KEY = {
+    rodent_bait_quarterly: 'rodent_bait',
+    rodent_bait_monthly: 'rodent_bait',
+    commercial_rodent_bait_quarterly: 'commercial_rodent_bait',
+    termite_station_rental_quarterly: 'termite_station_rental',
+    commercial_termite_bait_quarterly: 'commercial_termite_bait',
+  };
+  const rawServiceKey = String(line?.service || matched?.service_key || '').trim();
+  const resolvedServiceKey = CATALOG_TO_ENGINE_KEY[rawServiceKey] || rawServiceKey;
   return {
     serviceId: matched?.id || null,
     serviceKey: matched?.service_key || line?.service || null,
@@ -434,6 +458,115 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     intervalDays: cadence === 'every_6_weeks' ? 42 : null,
     source: kind,
     estimateId: estimate.id,
+    ...(monthlyFallbackPrice != null ? { derived: 'estimate_totals_fallback' } : {}),
+    // Accepted NET one-time price (Codex #3173 r4): a manual discount
+    // allocated to one-time work leaves the row's price/priceAfterDiscount
+    // GROSS and stores the accepted net in manualFinalOneTime — display
+    // copy and comparisons must use the net; `price` keeps its pre-fill
+    // semantics.
+    ...(kind !== 'recurring' && moneyOrNull(line?.manualFinalOneTime) != null
+      ? { acceptedOneTimePrice: moneyOrNull(line?.manualFinalOneTime) } : {}),
+    // EXPLICIT per-application provenance (Codex P1): the canonical
+    // public-quote derivation owns the rules — explicit per-app signal +
+    // visit count, DISCOUNTED annual preferred over the list rate, and
+    // genuinely monthly-billed keys (rodent bait, station rental) excluded
+    // by design. These are ENGINE result rows, not wizard lineItems, so a
+    // thin field adapter feeds the one shared derivation (never a second
+    // parser): perTreatment is the engine's explicit per-application
+    // signal, and priceAfterDiscount is its per-treatment-after-discount.
+    // Display copy keys off THIS field; `price` above keeps its historical
+    // pre-fill semantics untouched. Absent = no provable per-application
+    // charge, and clients keep legacy copy.
+    // Explicit MONTHLY provenance ONLY for genuinely monthly-billed service
+    // keys (Codex #3173 r4): every per-application row also carries `mo` as
+    // a normalized list figure — stamping it would let a discount-suppressed
+    // pest row fall through to an undiscounted "$X/mo". The canonical key
+    // set is public-quote's (the same one that refuses per-app for them).
+    ...(kind === 'recurring' && moneyOrNull(line?.mo, line?.monthly) != null && (() => {
+      try {
+        // Commercial recurring bills MONTHLY by rule (AGENTS.md: commercial
+        // is exempt from the per-application unit — Codex #3173 r2), on top
+        // of the canonical monthly-billed key set. Resolved key covers
+        // name-only legacy rows (r3).
+        if (resolvedServiceKey.startsWith('commercial_')) return true;
+        const { MONTHLY_BILLED_SERVICE_KEYS } = require('./public-quote')._internals;
+        return MONTHLY_BILLED_SERVICE_KEYS.has(resolvedServiceKey);
+      } catch { return false; }
+    })()
+      ? { monthlyPrice: moneyOrNull(line?.mo, line?.monthly) } : {}),
+    ...(kind === 'recurring' ? (() => {
+      try {
+        // V1-legacy-mapper rows are PRE-discount by convention and carry no
+        // discounted fields — stamping their list perTreatment would
+        // overstate what a discounted customer accepted (Codex #3173 r2).
+        // Refuse per-application provenance for such lines; legacy totals
+        // (which ARE net) tell the truth until the mapper carries net
+        // per-service amounts.
+        // Commercial recurring is EXEMPT from the per-application unit rule
+        // (AGENTS.md; the public quote path gates on commercialDetected the
+        // same way — Codex #3173 r2): it bills monthly, so its perTreatment
+        // must never stamp per-application provenance. Resolved key covers
+        // name-only legacy rows (r3).
+        if (resolvedServiceKey.startsWith('commercial_')) return {};
+        const appliedPct = Number(line?.discount?.appliedDiscountPercent
+          ?? line?.discount?.effectiveDiscount ?? 0);
+        // Line-level OR parent-level (result.recurring.discount /
+        // manualDiscount — Codex #3173 r3) discount with only list figures
+        // on the row: refuse provenance rather than overstate.
+        if ((appliedPct > 0 || parentRecurringDiscounted)
+          && moneyOrNull(line?.priceAfterDiscount) == null
+          && !(Number.isFinite(Number(line?.manualFinalAnnual)) && Number(line.manualFinalAnnual) >= 0)
+          && !(Number(line?.annualAfterDiscount) > 0)
+          && !(Number(line?.finalAnnual) > 0)) {
+          return {};
+        }
+        const { perApplicationForLine } = require('./public-quote')._internals;
+        const cadenceFields = {
+          visitsPerYear: line?.visitsPerYear,
+          visits: line?.visits,
+          appsPerYear: line?.appsPerYear,
+          frequency: line?.frequency,
+        };
+        // priceAfterDiscount IS per-treatment-after-discount — when present
+        // it must win outright, so the LIST annual is withheld (the
+        // canonical fn would otherwise prefer annual/visits and resurrect
+        // the undiscounted rate).
+        const discountedPerApp = moneyOrNull(line?.priceAfterDiscount);
+        // manualFinalAnnual is the accepted POST-manual-discount annual —
+        // annualAfterDiscount is only pre-manual/WaveGuard (Codex #3173
+        // r4). It outranks every other annual in both branches.
+        // PRESENCE, not positivity (Codex #3173 r5): a fixed/100% manual
+        // discount that consumes the whole base stamps manualFinalAnnual: 0
+        // — an accepted ZERO must win over the pre-manual annual, not be
+        // rejected into it.
+        const acceptedAnnual = Number.isFinite(Number(line?.manualFinalAnnual))
+          && Number(line.manualFinalAnnual) >= 0
+          ? Number(line.manualFinalAnnual)
+          : (Number(line?.annualAfterDiscount) > 0 ? Number(line.annualAfterDiscount) : undefined);
+        // An accepted annual of ZERO means the discount consumed the whole
+        // base — there is no per-application CHARGE to quote, and the
+        // canonical helper would fall back to the LIST rate here (its
+        // discountedAnnual > 0 test). Refuse: the net totals tell the truth.
+        if (acceptedAnnual === 0) return {};
+        const pa = perApplicationForLine(discountedPerApp != null
+          ? {
+            service: resolvedServiceKey,
+            perApp: discountedPerApp,
+            ...cadenceFields,
+            annualAfterDiscount: acceptedAnnual,
+          }
+          : {
+            service: resolvedServiceKey,
+            perApp: moneyOrNull(line?.perApp, line?.perTreatment) || undefined,
+            perVisit: line?.perVisit,
+            ...cadenceFields,
+            annualAfterDiscount: acceptedAnnual,
+            finalAnnual: line?.finalAnnual,
+            annual: line?.annual ?? line?.ann,
+          });
+        return pa?.amount > 0 ? { perApplicationPrice: pa.amount } : {};
+      } catch { return {}; }
+    })() : {}),
   };
 }
 
@@ -449,6 +582,33 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
     recurringSvcList = [];
     oneTimeList = [];
   }
+  // Parent-level recurring discount (Codex #3173 r3): persisted engine
+  // estimates commonly store the WaveGuard/manual discount at
+  // result.recurring.discount while service rows keep LIST perTreatment
+  // values — per-application provenance must be refused for those rows or
+  // the UI would present undiscounted figures as the accepted price.
+  let parentRecurringDiscounted = false;
+  try {
+    const rec = estData?.result?.recurring || estData?.recurring || {};
+    // Manual discounts persist at result.manualDiscount /
+    // result.totals.manualDiscount / summary.manualDiscount (Codex #3173
+    // r4) — resolve them through the SAME normalizer the estimate page
+    // uses, plus the recurring-scoped legacy spots.
+    const { normalizeManualDiscountSummary } = require('./estimate-public');
+    const recManual = rec?.manualDiscount || null;
+    // Only the discount's RECURRING slice suppresses recurring provenance
+    // (Codex #3173 r3): a fixed discount redirected entirely to one-time
+    // work persists amount > 0 with recurringAmount: 0, and the recurring
+    // lines' charges are unchanged. Same fallback rule as
+    // manualDiscountMonthlyAmount: recurringAmount ?? amount.
+    const manual = normalizeManualDiscountSummary(estData);
+    const manualHitsRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
+    const recManualHitsRecurring = !!recManual
+      && Number(recManual.recurringAmount ?? recManual.amount ?? recManual.value) > 0;
+    parentRecurringDiscounted = Number(rec?.discount) > 0
+      || manualHitsRecurring
+      || recManualHitsRecurring;
+  } catch { parentRecurringDiscounted = false; }
   const schedulableOneTimeList = oneTimeList.filter(isSchedulableOneTimeEstimateLine);
   const monthlyTotal = Number(estimate.monthly_total || 0);
   const annualTotal = Number(estimate.annual_total || 0);
@@ -459,12 +619,22 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
   const suppressFallback = onlyFilteredBillingRows && !hasRecurringEstimateTotal;
 
   const lines = [
-    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex })),
+    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex, parentRecurringDiscounted })),
     ...schedulableOneTimeList.map((line) => formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex })),
   ].filter(Boolean);
 
   if (lines.length === 1 && lines[0].price == null) {
     lines[0].price = moneyOrNull(estimate.onetime_total, estimate.monthly_total);
+    // Same provenance rule as the zero-line fallback below: this price came
+    // from the estimate's bare totals, not a per-visit quote line.
+    if (lines[0].price != null) {
+      lines[0].derived = 'estimate_totals_fallback';
+      // The recovered figure is monthly when it came from monthly_total —
+      // explicit monthly provenance keeps mixed-unit labels honest.
+      if (lines[0].source === 'recurring' && Number(estimate.monthly_total) > 0 && lines[0].monthlyPrice == null) {
+        lines[0].monthlyPrice = Number(estimate.monthly_total);
+      }
+    }
   }
 
   if (lines.length === 0 && !suppressFallback) {
@@ -491,6 +661,11 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
       cadence: fallbackIsRecurring ? 'quarterly' : 'one_time',
       source: fallbackIsRecurring ? 'recurring' : 'one_time',
       estimateId: estimate.id,
+      // This price came from the estimate's MONTHLY/one-time totals, not a
+      // real per-visit quote line — client copy must not label it
+      // "/application" (the per-month audit rule).
+      derived: 'estimate_totals_fallback',
+      ...(fallbackIsRecurring && monthlyTotal > 0 ? { monthlyPrice: monthlyTotal } : {}),
     });
   }
 

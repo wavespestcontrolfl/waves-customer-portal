@@ -749,4 +749,233 @@ describe('admin customers route helpers', () => {
       service_report_notify_primary: false,
     });
   });
+
+  test('perApplicationPrice: canonical discount-aware provenance on engine rows (codex #3167 audit)', () => {
+    const index = indexServicesForSchedule([]);
+    // Engine pest row: perTreatment is the explicit per-application signal.
+    const listOnly = {
+      id: 'est-pa-1',
+      monthly_total: 40.33,
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'pest_control', name: 'Pest Control', perTreatment: 121, visitsPerYear: 4, mo: 40.33, monthly: 40.33 },
+        ] } },
+      },
+    };
+    const [listLine] = scheduleLinesFromEstimate(listOnly, index);
+    expect(listLine.perApplicationPrice).toBe(121);
+    expect(listLine.price).toBe(121); // pre-fill semantics untouched
+    // Per-application rows carry `mo` only as a normalized list figure —
+    // never monthly provenance (codex r4).
+    expect(listLine.monthlyPrice).toBeUndefined();
+
+    // Discounted row: priceAfterDiscount (per-treatment-after-discount) wins
+    // over the list perTreatment AND over the list annual.
+    const discounted = {
+      id: 'est-pa-2',
+      monthly_total: 36.30,
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'pest_control', name: 'Pest Control', perTreatment: 121, priceAfterDiscount: 108.90, visitsPerYear: 4, annual: 484, mo: 40.33 },
+        ] } },
+      },
+    };
+    const [discLine] = scheduleLinesFromEstimate(discounted, index);
+    expect(discLine.perApplicationPrice).toBe(108.90);
+
+    // Genuinely monthly-billed keys never carry per-application provenance.
+    const monthlyBilled = {
+      id: 'est-pa-3',
+      monthly_total: 39,
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'rodent_bait', name: 'Rodent Bait Stations', perTreatment: 117, visitsPerYear: 4, mo: 39 },
+        ] } },
+      },
+    };
+    const [rodentLine] = scheduleLinesFromEstimate(monthlyBilled, index);
+    expect(rodentLine.perApplicationPrice).toBeUndefined();
+    // ...but DOES carry explicit monthly provenance (its true billing unit).
+    expect(rodentLine.monthlyPrice).toBe(39);
+    // Parent-level WaveGuard/manual discount with LIST-only rows (Codex
+    // #3173 r3): provenance is REFUSED — the accepted price is discounted
+    // and the rows can't prove the net figure.
+    const parentDiscounted = {
+      id: 'est-pa-4',
+      monthly_total: 174.08,
+      estimate_data: {
+        result: { recurring: {
+          discount: 0.15,
+          services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 180, visitsPerYear: 4, mo: 60 },
+            { service: 'lawn_care', name: 'Lawn Care', perTreatment: 89, visitsPerYear: 9, mo: 66.75 },
+          ],
+        } },
+      },
+    };
+    const discountedLines = scheduleLinesFromEstimate(parentDiscounted, index);
+    for (const l of discountedLines) expect(l.perApplicationPrice).toBeUndefined();
+    // Aggregate manual discount at result.manualDiscount (the persisted
+    // engine location, codex r4) with list-only rows: provenance refused.
+    const manualDiscounted = {
+      id: 'est-pa-5',
+      monthly_total: 90,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', amount: 780 },
+          recurring: { services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 180, visitsPerYear: 4, mo: 60 },
+          ] },
+        },
+      },
+    };
+    const manualLines = scheduleLinesFromEstimate(manualDiscounted, index);
+    for (const l of manualLines) expect(l.perApplicationPrice).toBeUndefined();
+    // Commercial recurring is EXEMPT from the per-application unit rule
+    // (bills monthly): perTreatment never stamps per-app provenance, and
+    // the true monthly rides as monthlyPrice (codex #3173 r2-2).
+    const commercial = {
+      id: 'est-pa-6',
+      monthly_total: 250,
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'commercial_pest', name: 'Commercial Pest Control', perTreatment: 750, visitsPerYear: 4, mo: 250 },
+        ] } },
+      },
+    };
+    const [commercialLine] = scheduleLinesFromEstimate(commercial, index);
+    expect(commercialLine.perApplicationPrice).toBeUndefined();
+    expect(commercialLine.monthlyPrice).toBe(250);
+    // A manual discount whose RECURRING slice is zero (redirected entirely
+    // to one-time work) leaves recurring provenance intact (codex r3).
+    const oneTimeOnlyDiscount = {
+      id: 'est-pa-7',
+      monthly_total: 40.33,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', amount: 780, recurringAmount: 0, oneTimeAmount: 780 },
+          recurring: { services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 121, visitsPerYear: 4, mo: 40.33 },
+          ] },
+        },
+      },
+    };
+    const [otdLine] = scheduleLinesFromEstimate(oneTimeOnlyDiscount, index);
+    expect(otdLine.perApplicationPrice).toBe(121);
+
+    // Name-only legacy rows resolve their service key through the catalog
+    // match — a station rental must hit the monthly-billed exemption, never
+    // stamp $31/application (codex r3).
+    const rentalIndex = indexServicesForSchedule([
+      { id: 21, service_key: 'termite_station_rental', name: 'Termite Station Rental', category: 'termite', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 },
+    ]);
+    const nameOnlyRental = {
+      id: 'est-pa-8',
+      monthly_total: 10.33,
+      estimate_data: {
+        result: { recurring: { services: [
+          { name: 'Termite Station Rental', perTreatment: 31, visitsPerYear: 4, mo: 10.33 },
+        ] } },
+      },
+    };
+    const [rentalLine] = scheduleLinesFromEstimate(nameOnlyRental, rentalIndex);
+    expect(rentalLine.perApplicationPrice).toBeUndefined();
+    expect(rentalLine.monthlyPrice).toBe(10.33);
+    // manualFinalAnnual (POST-manual-discount) outranks the pre-manual
+    // annualAfterDiscount: $400 accepted year / 4 visits = $100/application
+    // (codex r4).
+    const manualRecurring = {
+      id: 'est-pa-9',
+      monthly_total: 33.33,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', amount: 84, recurringAmount: 84 },
+          recurring: { services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 121, priceAfterDiscount: 121, annualAfterDiscount: 484, manualFinalAnnual: 400, visitsPerYear: 4, mo: 40.33 },
+          ] },
+        },
+      },
+    };
+    const [mfLine] = scheduleLinesFromEstimate(manualRecurring, index);
+    expect(mfLine.perApplicationPrice).toBe(100);
+
+    // One-time rows keep price GROSS but carry the accepted net separately.
+    const manualOneTime = {
+      id: 'est-pa-10',
+      onetime_total: 220,
+      estimate_data: {
+        result: {
+          oneTime: { items: [
+            { service: 'bed_bug', name: 'Bed Bug Treatment', price: 300, manualFinalOneTime: 220 },
+          ] },
+        },
+      },
+    };
+    const otLines = scheduleLinesFromEstimate(manualOneTime, index);
+    const bb = otLines.find((l) => /bed bug/i.test(l.name));
+    expect(bb.acceptedOneTimePrice).toBe(220);
+    expect(bb.price).toBe(300);
+    // Accepted ZERO recurring (fixed/100% manual discount consuming the
+    // base) wins over the pre-manual annual — presence, not positivity
+    // (codex r5).
+    const fullyDiscounted = {
+      id: 'est-pa-11',
+      monthly_total: 0,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', amount: 484, recurringAmount: 484 },
+          recurring: { services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 121, annualAfterDiscount: 484, manualFinalAnnual: 0, visitsPerYear: 4, mo: 40.33 },
+          ] },
+        },
+      },
+    };
+    const [fdLine] = scheduleLinesFromEstimate(fullyDiscounted, index);
+    expect(fdLine.perApplicationPrice).toBeUndefined(); // $0/visit is not a per-application CHARGE
+
+    // Catalog aliases normalize to engine keys before the billing-unit
+    // decision: a name-only rodent-bait row matches rodent_bait_quarterly
+    // in the catalog but must still take the monthly-billed exemption
+    // (codex r5).
+    const rodentIndex = indexServicesForSchedule([
+      { id: 31, service_key: 'rodent_bait_quarterly', name: 'Quarterly Rodent Bait Station Service', short_name: 'Rodent Bait', category: 'rodent', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 },
+    ]);
+    const nameOnlyRodent = {
+      id: 'est-pa-12',
+      monthly_total: 39,
+      estimate_data: {
+        result: { recurring: { services: [
+          { name: 'Rodent Bait Stations', perTreatment: 117, visitsPerYear: 4, mo: 39 },
+        ] } },
+      },
+    };
+    const [rodentAliasLine] = scheduleLinesFromEstimate(nameOnlyRodent, rodentIndex);
+    expect(rodentAliasLine.perApplicationPrice).toBeUndefined();
+    expect(rodentAliasLine.monthlyPrice).toBe(39);
+    // Specialty one-time rows (exclusion et al.) travel the specItems
+    // branch — they carry the accepted net too (codex r6).
+    const specialtyDiscounted = {
+      id: 'est-pa-13',
+      onetime_total: 400,
+      estimate_data: {
+        result: {
+          oneTime: { specItems: [
+            { service: 'exclusion', name: 'Exclusion Work', price: 500, manualFinalOneTime: 400 },
+          ] },
+        },
+      },
+    };
+    const specLines = scheduleLinesFromEstimate(specialtyDiscounted, index);
+    const exclusion = specLines.find((l) => /exclusion/i.test(l.name));
+    expect(exclusion.acceptedOneTimePrice).toBe(400);
+    expect(exclusion.price).toBe(500);
+
+
+
+
+
+
+
+  });
+
 });

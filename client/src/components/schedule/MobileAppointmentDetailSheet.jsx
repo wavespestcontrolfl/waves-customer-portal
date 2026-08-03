@@ -598,7 +598,16 @@ export default function MobileAppointmentDetailSheet({
         {estimateSource && (
           <EstimateProvenanceCard
             quotedTotal={estimateSource.quotedTotal}
-            currentPrice={prepaidCovered ? null : price}
+            onetimeTotal={estimateSource.onetimeTotal}
+            // Most quotes book every line as ONE appointment (primary +
+            // add-ons) whose price IS the whole-visit charge — the
+            // comparison stands. Only a genuinely split booking (seasonal +
+            // year-round → multiple series anchors, counted server-side)
+            // suppresses it: comparing one row against the whole quote
+            // manufactures deltas.
+            currentPrice={prepaidCovered || Number(estimateSource.linkedSeriesCount) > 1
+              ? null : price}
+            compareScope="visit"
             deposit={estimateSource.deposit}
             payment={estimateSource.payment}
             lines={estimateSource.lines}
