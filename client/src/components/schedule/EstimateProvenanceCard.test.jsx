@@ -30,6 +30,39 @@ describe('EstimateProvenanceCard quoted framing', () => {
     expect(screen.queryByText(/vs quoted/i)).toBeNull();
   });
 
+  it('mixed quotes compare against recurring + schedulable one-time (the booked visit charge)', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={135.30}
+        onetimeTotal={200}
+        currentPrice={321}
+        lines={[
+          { name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121 },
+          { name: 'Bed Bug Treatment', cadence: 'one_time', price: 200 },
+        ]}
+        estimateRef="EST-2026-0003"
+      />,
+    );
+    // $321 booked vs $121 + $200 quoted for the same visit — no phantom +165%.
+    expect(screen.queryByText(/vs quoted/i)).toBeNull();
+  });
+
+  it('suppresses the comparison when any line lacks a real price (no like-for-like total)', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={135.30}
+        onetimeTotal={0}
+        currentPrice={321}
+        lines={[
+          { name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121 },
+          { name: 'Mystery Add-on', cadence: 'quarterly', price: null },
+        ]}
+        estimateRef="EST-2026-0004"
+      />,
+    );
+    expect(screen.queryByText(/vs quoted/i)).toBeNull();
+  });
+
   it('keeps the legacy blended total when only synthesized fallback lines exist', () => {
     render(
       <EstimateProvenanceCard

@@ -364,12 +364,22 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   // Backed by summary.payerBilled (always resolved, gate-independent); fall back
   // to the deposit exemptReason for older payloads.
   const payerBilled = !!(deposit && (deposit.payerBilled || deposit.exemptReason === 'payer_billed'));
-  // Compare the visit's charge against the QUOTED PER-APPLICATION amount when
-  // one exists — measuring a per-visit price against the blended
+  // Compare the visit's charge against the quoted VISIT total when one can
+  // be established — measuring a per-visit price against the blended
   // monthly+one-time total manufactured phantom deltas (a $121/application
-  // booking read as "-11% vs quoted $135.30").
-  const quotedComparable = perAppPrices.length ? perAppSum : quoted;
-  const showVsQuoted = price != null && quotedComparable > 0 && price > 0 && Math.abs(quotedComparable - price) > 0.01;
+  // booking read as "-11% vs quoted $135.30"). The booked visit carries the
+  // recurring lines PLUS any schedulable one-time lines (the modal books
+  // them together), so both sides must count both — and if any line lacks a
+  // real price, no like-for-like total exists, so the comparison is
+  // suppressed rather than guessed (Codex P1).
+  const oneTimeLineSum = serviceLines.reduce((s, l) => s + (l.oneTimePrice || 0), 0);
+  const everyLinePriced = serviceLines.length > 0
+    && serviceLines.every((l) => l.perAppPrice != null || l.oneTimePrice != null);
+  const quotedComparable = perAppPrices.length
+    ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)
+    : quoted;
+  const showVsQuoted = price != null && quotedComparable != null && quotedComparable > 0
+    && price > 0 && Math.abs(quotedComparable - price) > 0.01;
   const deltaPct = showVsQuoted ? Math.round(((price - quotedComparable) / quotedComparable) * 100) : 0;
 
   const lineStyle = {

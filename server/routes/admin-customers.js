@@ -385,7 +385,11 @@ function isSchedulableOneTimeEstimateLine(line) {
 function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
   const name = String(line?.displayName || line?.label || line?.name || line?.serviceName || line?.service || '').trim();
   if (!name) return null;
-  const price = kind === 'recurring'
+  // Per-VISIT fields first; the monthly fields are a last resort and carry
+  // provenance (Codex P1): a price recovered from `mo`/`monthly` is a
+  // normalized monthly figure, and client copy labeling it "/application"
+  // would misstate the charge (per-month copy audit rule).
+  const perVisitPrice = kind === 'recurring'
     ? moneyOrNull(
         line?.perTreatment,
         line?.perApp,
@@ -397,10 +401,12 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
         line?.price,
         line?.amount,
         line?.total,
-        line?.mo,
-        line?.monthly,
       )
     : moneyOrNull(line?.priceAfterDiscount, line?.amountAfterDiscount, line?.totalAfterDiscount, line?.price, line?.amount, line?.total);
+  const monthlyFallbackPrice = kind === 'recurring' && perVisitPrice == null
+    ? moneyOrNull(line?.mo, line?.monthly)
+    : null;
+  const price = perVisitPrice != null ? perVisitPrice : monthlyFallbackPrice;
   if (kind !== 'recurring' && price == null) return null;
 
   const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
@@ -434,6 +440,7 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     intervalDays: cadence === 'every_6_weeks' ? 42 : null,
     source: kind,
     estimateId: estimate.id,
+    ...(monthlyFallbackPrice != null ? { derived: 'estimate_totals_fallback' } : {}),
   };
 }
 
@@ -465,6 +472,9 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
 
   if (lines.length === 1 && lines[0].price == null) {
     lines[0].price = moneyOrNull(estimate.onetime_total, estimate.monthly_total);
+    // Same provenance rule as the zero-line fallback below: this price came
+    // from the estimate's bare totals, not a per-visit quote line.
+    if (lines[0].price != null) lines[0].derived = 'estimate_totals_fallback';
   }
 
   if (lines.length === 0 && !suppressFallback) {

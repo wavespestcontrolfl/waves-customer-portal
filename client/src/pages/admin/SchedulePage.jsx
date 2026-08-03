@@ -2678,6 +2678,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               {estimateSource && (
                 <EstimateProvenanceCard
                   quotedTotal={estimateSource.quotedTotal}
+                  onetimeTotal={estimateSource.onetimeTotal}
                   currentPrice={appointmentTotal}
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
