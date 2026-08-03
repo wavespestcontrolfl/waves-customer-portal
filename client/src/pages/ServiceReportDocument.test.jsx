@@ -678,6 +678,13 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/We will recheck the shaded areas/);
   });
 
+  it('falls back to its own origin when no canonical origin is configured', () => {
+    // a preview deployment must not bake a preview-only token into a
+    // production URL — the server sends '' when nothing is configured
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, publicOrigin: '' }} token="tok123" />);
+    expect(container.querySelector(`a[href="${window.location.origin}/report/tok123"]`)).toBeTruthy();
+  });
+
   it('prefers the server\'s canonical public origin over the rendering host', () => {
     // prod renders open through CLIENT_URL = the raw Railway hostname
     const data = { ...BASE_DATA, publicOrigin: 'https://portal.wavespestcontrol.com' };
@@ -759,6 +766,17 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toMatch(/45 minutes/i);
     expect(container.textContent).not.toMatch(/in 2 hours/i);
     expect(container.textContent).toMatch(/once dry/i);
+  });
+
+  it('sanitizes spelled-out durations, not just digits', () => {
+    const cases = ['Keep clear for five hours.', 'Re-enter after ninety minutes.', 'Wait twenty-four hours before mowing.', 'Give it half an hour.'];
+    cases.forEach((text) => {
+      const app = { ...BASE_DATA.applications[0], product: { ...BASE_DATA.applications[0].product, reentry_summary: text } };
+      const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="t" />);
+      expect(container.textContent).not.toContain(text);
+      expect(container.textContent).toMatch(/once dry/i);
+      cleanup();
+    });
   });
 
   it('keeps label copy that asserts no timing', () => {

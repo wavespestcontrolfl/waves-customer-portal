@@ -200,7 +200,22 @@ function interactionLabel(value) {
 // channels closed, so it is enforced at the render site rather than per
 // field: any string asserting a clock time or a duration is replaced with
 // the approved once-dry idiom instead of being printed.
-const REENTRY_TIME_RX = /\d{1,2}:\d{2}\s*(am|pm)|\b(\d+(\.\d+)?|an?|one|two|three|four|half)\s*(-|\s)?\s*(minute|min|hour|hr)s?\b/i;
+// Spelled-out numbers must be exhaustive, not a sample: "keep clear for five
+// hours" is exactly as much a fixed re-entry figure as "2 hours", and these
+// catalog fields are unconstrained free text (codex P1 — the earlier list
+// stopped at "four"). Covers digits, decimals, ones/teens/tens, hyphenated
+// compounds ("twenty-four"), and the indefinite/half forms.
+const REENTRY_NUMBER_WORDS = 'a|an|one|two|three|four|five|six|seven|eight|nine|ten'
+  + '|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen'
+  + '|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|half|several|a few';
+const REENTRY_TIME_RX = new RegExp(
+  // a clock time
+  '\\d{1,2}:\\d{2}\\s*(am|pm)'
+  // or a quantity (digits or words, optionally hyphen-compounded) + a unit
+  + `|\\b(\\d+(\\.\\d+)?|(${REENTRY_NUMBER_WORDS})([\\s-](${REENTRY_NUMBER_WORDS}))?)`
+  + '[\\s-]*(minute|min|hour|hr|day)s?\\b',
+  'i',
+);
 const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 
 function sanitizeReentryCopy(value) {

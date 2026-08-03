@@ -68,4 +68,22 @@ function portalUrl(path) {
   return `${base}${p.startsWith('/') ? '' : '/'}${p}`;
 }
 
-module.exports = { publicPortalUrl, portalUrl };
+/**
+ * The canonical public origin ONLY when it has been explicitly configured —
+ * '' otherwise. publicPortalUrl() always resolves to something (it falls back
+ * to CLIENT_URL and then to the production default), which is right for
+ * server-side link building but wrong for deciding whether a rendered
+ * artifact should trust it: a preview deployment configured only through
+ * CLIENT_URL / SERVICE_REPORT_PDF_BASE_URL would otherwise be handed the
+ * production origin and bake a preview-only token into a link that cannot
+ * resolve. CLIENT_URL is deliberately excluded — on prod it is the raw
+ * Railway hostname, which is what made this distinction necessary.
+ */
+function configuredPublicPortalOrigin() {
+  const explicit = process.env.PUBLIC_PORTAL_URL
+    || process.env.PORTAL_URL
+    || process.env.PORTAL_DOMAIN;
+  return explicit ? normalize(explicit) : '';
+}
+
+module.exports = { publicPortalUrl, portalUrl, configuredPublicPortalOrigin };
