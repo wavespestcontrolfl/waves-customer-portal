@@ -541,3 +541,36 @@ test('a compliant setup narrative survives end to end', async () => {
   // i.e. it did NOT bounce to the deterministic fallback
   expect(out).not.toContain('7 of 7 traps were set');
 });
+
+// Round 10: when rodent_trapping is a COMPANION to a non-trapping primary,
+// `typedReport` is the primary — so deriving the stage from it alone returned
+// null and neither the prompt rule nor the setup guards engaged, even though
+// the companion-selected trap map was on the page. report-data now resolves
+// the stage across primary + companions and passes it explicitly.
+test('an explicitly passed visitStage engages the setup lane on a companion trapping visit', () => {
+  // A one-time pest PRIMARY: on its own this resolves to no stage at all.
+  const primaryOnly = input({
+    typedReport: {
+      type: 'one_time_pest',
+      visitSequence: 1,
+      values: { target_pest: 'Ants' },
+      findings: [],
+    },
+  });
+  expect(groundingFacts(primaryOnly).visitStage).toBeNull();
+
+  // Same primary, with the caller supplying the companion's declared stage.
+  const facts = groundingFacts({ ...primaryOnly, visitStage: 'initial_trap_setup' });
+  expect(facts.visitStage).toBe('initial_trap_setup');
+  // …and the setup guards are live, so re-check copy is refused.
+  expect(ungroundedClaims('We checked the traps and found no captures today.', facts)
+    .filter((p) => p.startsWith('setup_')).length).toBeGreaterThan(0);
+});
+
+test('an explicit stage never overrides a snapshot that declares one itself', () => {
+  // Passing nothing leaves the existing derivation untouched.
+  const derived = groundingFacts(setupInput());
+  expect(derived.visitStage).toBe('initial_trap_setup');
+  // A follow-up snapshot with no explicit stage stays a follow-up.
+  expect(groundingFacts({ ...input(), visitStage: null }).visitStage).toBeNull();
+});

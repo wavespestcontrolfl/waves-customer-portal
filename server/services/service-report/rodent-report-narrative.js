@@ -194,6 +194,7 @@ function groundingFacts({
   serviceTypeDisplay,
   reportTypeLabel = null,
   typedReport = null,
+  visitStage = null,
   activity = null,
   stationSummary = null,
   stationProgram = null,
@@ -222,13 +223,21 @@ function groundingFacts({
     // tech's own trap_visit_type off the frozen snapshot values, so the
     // narrative can never disagree with the ratified Today's Result. Null on
     // every other visit/type, so those prompts are unchanged.
-    visitStage: isInitialRodentTrapSetup(
+    //
+    // The caller may pass this EXPLICITLY, and does so whenever it resolved
+    // the stage itself. That matters when rodent_trapping is a COMPANION to
+    // a non-trapping primary: `typedReport` is the primary, so deriving the
+    // stage from it alone returned null and the setup rules and guards never
+    // engaged, even though the companion-selected trap map was on the page
+    // (codex P1 round 10). Falls back to deriving it from typedReport for
+    // callers that don't resolve it.
+    visitStage: visitStage || (isInitialRodentTrapSetup(
       typedReport?.type,
       typedReport?.visitSequence,
       typedReport?.values,
     )
       ? 'initial_trap_setup'
-      : null,
+      : null),
     todaysResult: typedReport?.todaysResult
       ? {
         headline: cleanText(typedReport.todaysResult.headline) || null,

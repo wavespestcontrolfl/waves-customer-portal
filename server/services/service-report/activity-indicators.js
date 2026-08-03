@@ -1909,7 +1909,9 @@ const RECHECK_PARTICIPLE = new RegExp('^(?:'
 // Deliberately excluded: `of` (partitive — "two of the traps" is still one
 // object phrase) and particles like `out`/`up` ("swapped out the old traps").
 const OBJECT_PHRASE_END = /^(?:in|on|at|for|before|after|with|without|from|to|along|near|around|under|over|behind|beside|by|into|onto|across|through|during|against|where|which|that|when|while|who|whose|because|since|until)$/i;
-const PASSIVE_AUX = /\b(?:was|were|has\s+been|have\s+been|had\s+been|is\s+being|are\s+being)\b/i;
+// (No PASSIVE_AUX constant: the passive scan no longer tests for an
+// auxiliary at all — see passiveRecheckOnTrap. Enumerating auxiliaries was
+// what made the reduced passive "8 traps checked today" invisible.)
 
 function words(text) {
   return String(text).split(/[^A-Za-z0-9-]+/).filter(Boolean);
@@ -1932,9 +1934,9 @@ function activeRecheckOnTrap(clause) {
   return null;
 }
 
-// "<trap noun> … <auxiliary> … <participle>", any number and any tense:
-// "one trap was reset", "eight traps have been checked", "the devices had
-// been inspected".
+// "<trap noun> … <participle>" — the trap is what the participle happened
+// to, in any number and any tense: "one trap was reset", "eight traps have
+// been checked", "the devices had been inspected".
 //
 // The participle is SEARCHED FOR, not assumed to sit immediately after the
 // auxiliary: reading only the first following token saw the adverb in "all
@@ -1943,15 +1945,24 @@ function activeRecheckOnTrap(clause) {
 // learned this lesson in round 7 — an allowlist of intervening words is
 // always one unlisted adverb from failing — so the scan stops at the same
 // closed OBJECT_PHRASE_END set instead of guessing which modifiers are legal.
+//
+// The AUXILIARY is not required at all (codex P1 round 10). Requiring one
+// missed the reduced passive that field shorthand actually uses — "all 8
+// traps checked today" — which the active scan cannot recover either,
+// because there the trap noun PRECEDES its verb. Dropping the requirement
+// subsumes both forms in one scan; `was`/`were`/`have been` simply become
+// unremarkable tokens on the way to the participle.
+//
+// Setup verbs stay legal because RECHECK_PARTICIPLE excludes them: "8 traps
+// set today" and "the traps were set before the attic was inspected" both
+// pass (the latter stops at `before`, so the later `inspected` is never
+// bound to the traps).
 function passiveRecheckOnTrap(clause) {
   const toks = words(clause);
   const trapAt = toks.findIndex((t) => TRAP_NOUNS.test(t));
   if (trapAt === -1) return null;
-  const tail = toks.slice(trapAt + 1).join(' ');
-  if (!PASSIVE_AUX.test(tail)) return null;
-  const after = words(tail.replace(new RegExp(`^.*?${PASSIVE_AUX.source}\\s*`, 'i'), ''));
-  for (let i = 0; i < after.length && !OBJECT_PHRASE_END.test(after[i]); i += 1) {
-    if (RECHECK_PARTICIPLE.test(after[i])) return `${toks[trapAt]} … ${after[i]}`;
+  for (let i = trapAt + 1; i < toks.length && !OBJECT_PHRASE_END.test(toks[i]); i += 1) {
+    if (RECHECK_PARTICIPLE.test(toks[i])) return `${toks[trapAt]} … ${toks[i]}`;
   }
   return null;
 }
@@ -2048,6 +2059,12 @@ function normalizeWordNumbers(text) {
 const TRAP_COUNT_CLAIM_RE = /\b(\d+)(?:\s+(?:of|out\s+of)\s+(\d+))?((?:\s+[a-z-]+){0,2}?)\s+(?:traps?|devices?)\b/gi;
 const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
 const CAUGHT_CLAIM_RE = /\b(?:caught|captured|removed)\s+(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b/gi;
+// The PASSIVE capture claim, where the animal precedes its verb: "two mice
+// were caught", "3 rats have been removed". Neither pattern above sees it —
+// one needs the noun `captures`, the other needs the verb before the number
+// (codex P1 round 10). Same mistake as the reduced-passive trap claim: the
+// count guard was only looking at one word order.
+const CAUGHT_PASSIVE_CLAIM_RE = /\b(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed)\b/gi;
 
 function claimedCounts(text, patterns) {
   const claims = new Set();
@@ -2099,7 +2116,11 @@ function countContradictions(text, values = {}) {
     if (claimed !== actual) found.push(`${kind}:claimed_${claimed}_recorded_${actual}`);
   };
   check(claimedCounts(str, [TRAP_COUNT_CLAIM_RE]), values.traps_checked, 'trap_count_mismatch');
-  check(claimedCounts(str, [CAPTURE_CLAIM_RE, CAUGHT_CLAIM_RE]), values.captures, 'capture_count_mismatch');
+  check(
+    claimedCounts(str, [CAPTURE_CLAIM_RE, CAUGHT_CLAIM_RE, CAUGHT_PASSIVE_CLAIM_RE]),
+    values.captures,
+    'capture_count_mismatch',
+  );
   return found;
 }
 

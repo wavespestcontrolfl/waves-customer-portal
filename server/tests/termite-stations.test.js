@@ -1097,3 +1097,38 @@ test('a disputed trap count suppresses the map count, not the setup stage', () =
   expect(unknown.initialSetup).toBe(true);
   expect(unknown.setupCountVerified).toBe(true);
 });
+
+// The post-completion station sync is fail-soft, so a declared setup can
+// persist its typed snapshot while writing no check rows. Selection then
+// falls back to the standing registry and every pin carries a null status —
+// the setup intro would claim "the traps went out on this visit" over pins
+// reading "On file (not checked this visit)" (codex P2 round 10).
+test('a setup with no per-visit checks does not claim the setup stage', () => {
+  const rows = [
+    stationRow('st-r1', 1, pin(0.2, 0.3), { program: 'trapping' }),
+    stationRow('st-r2', 2, pin(0.4, 0.5), { program: 'trapping' }),
+  ];
+  const build = (checkRows) => buildStationMapReportContext({
+    stationRows: rows,
+    checkRows,
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_trapping'],
+    serviceDate: '2026-07-13',
+    initialSetup: true,
+    typedTrapCount: 2,
+  });
+
+  // sync wrote nothing — nothing records which pins participated
+  const unsynced = build([]);
+  expect(unsynced.available).toBe(true);          // the map itself still renders
+  expect(unsynced.initialSetup).toBeUndefined();  // but claims no stage
+  expect(unsynced.summary.checked).toBe(0);
+
+  // one check row is enough to prove the visit touched the map
+  const synced = build([
+    { station_id: 'st-r1', status: 'ok' },
+    { station_id: 'st-r2', status: 'ok' },
+  ]);
+  expect(synced.initialSetup).toBe(true);
+});

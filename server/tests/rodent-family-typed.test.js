@@ -983,6 +983,39 @@ describe('setup matcher scans past adverbs in the passive (round 8)', () => {
   });
 });
 
+// Round 10: the passive scan required an auxiliary, so field shorthand with
+// no `was`/`were` was invisible — and the active scan cannot recover it,
+// because there the trap noun precedes its verb.
+describe('reduced passives are re-check claims too (round 10)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a trap phrase followed by a re-check participle needs no auxiliary', () => {
+    for (const text of [
+      'All 8 traps checked today.',
+      'Traps inspected this morning.',
+      'All traps rebaited.',
+      'The snap traps reset this afternoon.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('setup participles stay legal without an auxiliary', () => {
+    for (const text of [
+      '8 traps set today.',
+      'Traps placed along the documented runways.',
+      'All traps baited and set.',
+      // the participle sits past a phrase boundary, so it is not bound to
+      // the traps
+      'The traps were set before the attic was inspected.',
+      'We inspected the attic where the traps will sit.',
+      'We inspected the exterior before placing the traps.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});
+
 describe('coordinated trap objects stay in one clause (round 9)', () => {
   const { setupContradictions } = require('../services/service-report/activity-indicators');
 
@@ -1037,6 +1070,21 @@ describe('technician body count claims reconcile against the typed values (round
     // nothing structured to reconcile against is unverifiable, not wrong
     expect(countContradictions('We checked 8 traps today.', {})).toEqual([]);
     expect(countContradictions('We checked the traps today.', { traps_checked: 6 })).toEqual([]);
+  });
+
+  // Round 10: the animal can precede its verb. CAPTURE_CLAIM_RE needs the
+  // noun `captures`; CAUGHT_CLAIM_RE needs the verb before the number — so
+  // "two mice were caught" was extracted by neither.
+  test('passive capture claims reconcile against the typed captures', () => {
+    expect(countContradictions('Two mice were caught.', { captures: 1 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('3 rats have been removed.', { captures: 1 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('Two roof rats were captured today.', { captures: 1 }).length)
+      .toBeGreaterThan(0);
+    // agreeing, and unverifiable, still pass
+    expect(countContradictions('Two mice were caught.', { captures: 2 })).toEqual([]);
+    expect(countContradictions('Two mice were caught.', { captures: '' })).toEqual([]);
   });
 
   // Round 9: a CLEARED field is missing, not zero — Number('') is 0, which

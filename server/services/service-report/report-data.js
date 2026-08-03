@@ -2772,6 +2772,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // the VIEWER-VISIBLE snapshot types, so an internal_only companion's
   // station data never reaches the customer copy and pins never leak onto
   // unrelated (lawn / pest-only) reports for the same property.
+  // Resolved ONCE for every consumer of the trap stage. The station map and
+  // the narrative both describe the same traps, so deriving this separately
+  // in each place is how they came to disagree: the map read the companion
+  // snapshots while the narrative saw only the primary, leaving `visitStage`
+  // null on a trapping companion — so the deterministic fallback said the
+  // mapped traps "were inspected" and the model's copy was never screened by
+  // the setup guards, beside a companion finding reading "Traps set" (codex
+  // P1 round 10).
+  const trapSetupSnapshot = [typedSnapshot, ...companionSnapshots]
+    .find((snap) => require('./activity-indicators')
+      .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)) || null;
+
   const stationMap = buildStationMapReportContext({
     stationRows,
     checkRows: stationCheckRows,
@@ -2799,8 +2811,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // array is also unfiltered by delivery, which is correct here: whether
     // the traps went out today is a fact about the visit, not about which
     // companion sections this viewer is allowed to see.
-    initialSetup: [typedSnapshot, ...companionSnapshots].some((snap) => require('./activity-indicators')
-      .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)),
+    initialSetup: trapSetupSnapshot != null,
     // The trapping snapshot's own count, so the map can confirm it agrees
     // before restating it (the tech may have hand-edited it away from the
     // autofilled pin count). Same sourcing fix as above.
@@ -3475,6 +3486,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       recap: visitSummary,
       serviceTypeDisplay: linkedServiceName,
       typedReport: typedSnapshot,
+      // Explicit, because the trapping snapshot may be a COMPANION while
+      // typedReport is the primary — the narrative cannot derive the stage
+      // from a snapshot it was never handed (codex P1 round 10).
+      visitStage: trapSetupSnapshot ? 'initial_trap_setup' : null,
       activity,
       stationSummary: stationMap?.summary || null,
       // summary.activity semantics differ by program (traps with a capture
@@ -3534,6 +3549,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       serviceTypeDisplay: linkedServiceName,
       reportTypeLabel: typedSnapshot.reportTypeLabel || typedSnapshot.typeLabel || null,
       typedReport: typedSnapshot,
+      // Same reason as the rodent lane above: a non-rodent primary can carry
+      // a rodent_trapping companion that selects the station map.
+      visitStage: trapSetupSnapshot ? 'initial_trap_setup' : null,
       activity,
       stationSummary: stationMap?.summary || null,
       stationProgram: stationMap?.program || null,

@@ -765,7 +765,21 @@ function buildStationMapReportContext({
     // the field once the tech hand-edits it, so the two can legitimately
     // diverge. So: keep the setup labels, and let the card drop the summary
     // line that would restate the disputed number.
-    ...(initialSetup && program === 'trapping'
+    // Requires at least one PER-VISIT status. The post-completion station
+    // sync is deliberately fail-soft, so a declared setup on a property that
+    // already had mapped traps can persist its typed snapshot while writing
+    // no check rows at all; selection then falls back to the standing
+    // registry and every pin carries a null status. The setup intro would
+    // say "the traps went out on this visit" over pins reading "On file (not
+    // checked this visit)" (codex P2 round 10).
+    //
+    // This is NOT the round-9 mistake in reverse. There, withholding the
+    // flag produced ACTIVE re-check wording ("Checked — no capture") because
+    // the pins carried 'ok' statuses. Here they carry none, so the fallback
+    // is genuinely neutral — "N stations on file" — and claims no
+    // inspection. Dropping the setup treatment is the honest reading when
+    // nothing records which pins participated.
+    ...(initialSetup && program === 'trapping' && pins.some((pin) => pin.status)
       ? {
         initialSetup: true,
         setupCountVerified: typedTrapCount == null || typedTrapCount === summary.checked,
