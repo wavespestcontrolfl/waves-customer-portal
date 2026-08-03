@@ -831,6 +831,10 @@ function buildStationMapCurrentContext({
 // knex is REQUIRED — this module has no module-level db binding.
 async function stationMapPdfSignature(service, knex) {
   try {
+    // Gate state is part of the key: flipping SERVICE_REPORT_STATION_MAP_ENABLED
+    // either way changes whether pins render, so a gate flip must invalidate
+    // (mirrors treatmentZonePdfSignature returning '' while disabled).
+    if (!isStationMapReportEnabled()) return '';
     const customerId = service?.customer_id;
     if (!customerId || !knex) return '';
     const row = await knex('termite_stations')

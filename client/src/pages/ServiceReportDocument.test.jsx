@@ -120,11 +120,15 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText('Front perimeter')).toBeInTheDocument();
   });
 
-  it('never prints a fixed re-entry duration (AGENTS.md compliance)', () => {
+  it('never publishes a fixed re-entry figure — duration OR computed clock time', () => {
+    // AGENTS.md: no fixed re-entry/drying figure on a customer surface. A
+    // readyAt clock time asserts the same thing as the duration it came from.
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
-    expect(container.textContent).toMatch(/Interior: ready after/);
+    expect(container.textContent).toMatch(/Interior: ready once dry/);
+    expect(container.textContent).toMatch(/technician confirms timing/);
     expect(container.textContent).not.toMatch(/keep clear for/i);
     expect(container.textContent).not.toMatch(/\b\d+\s*(hours?|minutes?)\s*after treatment/i);
+    expect(container.textContent).not.toMatch(/ready after \d/i);
   });
 
   it('renders top-level record findings, not just typed ones', () => {

@@ -162,12 +162,16 @@ function interactionLabel(value) {
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : null;
 }
 
-// COMPLIANCE (AGENTS.md): never print a fixed re-entry/drying figure — the
-// idiom is "ready once dry" plus the technician-anchored ready-at time. This
-// deliberately does NOT surface target.durationMin.
+// COMPLIANCE (AGENTS.md): never publish a fixed re-entry/drying figure on a
+// customer surface — not as a duration ("keep clear for 2 hours") and not as
+// the clock time computed from it ("ready after 7:03 PM"), which asserts the
+// same thing. The approved idiom is once-dry with the technician confirming
+// timing. This document is a NEW surface, so printing readyAt here would ADD
+// such copy (AGENTS.md flags diffs that add or extend it) even though the
+// live report still renders ready-at chips — that's a remediation item for
+// the interactive report, not a licence to repeat it in the record.
 function reentryTargetLine(target) {
-  const ready = Number(target.durationMin) > 0 ? fmtTime(target.readyAt) : '';
-  return `${target.label}: ${ready ? `ready after ${ready}` : 'ready once dry'}`;
+  return `${target.label}: ready once dry — your technician confirms timing`;
 }
 
 function zoneNames(app, zones, serviceLine = 'pest') {
