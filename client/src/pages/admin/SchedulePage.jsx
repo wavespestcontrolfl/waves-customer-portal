@@ -16478,8 +16478,8 @@ const MONTH_NAMES = [
 const PRODUCT_DESCRIPTIONS = {
   "acelepryn xtra": "prevents chinch bugs, webworms, and grubs for 2-3 months",
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
-  "speedzone southern": "kills broadleaf weeds without harming St. Augustine",
-  speedzone: "kills broadleaf weeds without harming St. Augustine",
+  "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
+  speedzone: "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
   "celsius wg": "selective weed killer for warm-season grass (max 3x/year)",
   celsius: "selective weed killer for warm-season grass (max 3x/year)",
   "k-flow 0-0-25":

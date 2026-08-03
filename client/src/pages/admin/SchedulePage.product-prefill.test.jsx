@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  PRODUCT_DESCRIPTIONS,
   TRACK_SAFETY_RULES,
   allowedTargetLinesForServiceType,
   allowedTargetLinesForVisit,
@@ -208,6 +209,34 @@ describe("allowedTargetLinesForVisit", () => {
     expect(allowedTargetLinesForVisit({})).toEqual(
       allowedTargetLinesForServiceType(undefined),
     );
+  });
+});
+
+describe("PRODUCT_DESCRIPTIONS — SpeedZone", () => {
+  // This description is shown to whoever is choosing the product. It read
+  // "kills broadleaf weeds without harming St. Augustine", which the label
+  // flatly contradicts: it is prohibited on Floratam and Bitterblue, the
+  // dominant cultivars in this service area. A reassuring description at the
+  // point of selection outranks a warning somewhere else in the UI.
+  const speedzone = Object.entries(PRODUCT_DESCRIPTIONS)
+    .filter(([k]) => /speedzone/i.test(k))
+    .map(([, v]) => v);
+
+  it("has a description for every SpeedZone key", () => {
+    expect(speedzone.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("never claims SpeedZone is harmless to St. Augustine", () => {
+    const reassuring = speedzone.filter((d) => /without harming/i.test(d));
+    expect(reassuring).toEqual([]);
+  });
+
+  it("names the prohibited cultivars and the temperature window", () => {
+    speedzone.forEach((d) => {
+      expect(d).toMatch(/Floratam/i);
+      expect(d).toMatch(/Bitterblue/i);
+      expect(d.replace(/\\u00b0/g, "°")).toMatch(/50-85\s*°?F/);
+    });
   });
 });
 
