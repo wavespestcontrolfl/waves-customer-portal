@@ -1353,6 +1353,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
         customerId,
         scheduledServiceId: appt.id,
+        source: 'lead',
       });
 
       // Mark the lead converted (mirrors leadAttribution.markConverted, but on the

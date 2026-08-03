@@ -2245,6 +2245,7 @@ async function createSelfBooking(payload = {}) {
       await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
         customerId: custId,
         scheduledServiceId: scheduledRow.id,
+        source: 'self_book',
       });
 
       return { booking: bookingRow, serviceRow: scheduledRow };

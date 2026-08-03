@@ -36,7 +36,7 @@ jest.mock('../models/db', () => {
     // offer read — conflating them made the reversal path think another
     // live booking existed.
     const t = String(table || '');
-    const isAlternateProbe = t.includes('as o2');
+    const isAlternateProbe = t.includes('inspection_credit_booking_events');
     const isBookings = t.includes('scheduled_services') && !isAlternateProbe;
     const rows = isAlternateProbe ? mockAlternates : (isBookings ? mockBookings : mockOffers);
     chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
@@ -54,6 +54,8 @@ jest.mock('../models/db', () => {
   const db = jest.fn((table) => makeChain(table));
   db.fn = { now: () => 'NOW' };
   db.transaction = jest.fn(async (cb) => cb(db));
+  // Savepoint support: a nested transaction on the same handle.
+  db.transaction.bind = db.transaction.bind;
   return db;
 });
 
@@ -180,13 +182,10 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
     const [args] = mockPostCreditMovement.mock.calls[0];
     expect(args).toMatchObject({ customerId: 'cust-1', delta: 75, source: 'inspection_credit' });
-    // The ATTEMPT is recorded first (so the sweep can retry only real
-    // booking attempts)...
-    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-2' });
-    // ...then the claim moves the row terminal BEFORE money posts...
-    expect(mockUpdates[1]).toMatchObject({ status: 'redeemed', redeemed_scheduled_service_id: 'svc-2' });
+    // The claim moves the row terminal BEFORE money posts...
+    expect(mockUpdates[0]).toMatchObject({ status: 'redeemed', redeemed_scheduled_service_id: 'svc-2' });
     // ...and the mint is bound back as the exactly-once proof.
-    expect(mockUpdates[2]).toMatchObject({ credit_ledger_id: 'ledger-1' });
+    expect(mockUpdates[1]).toMatchObject({ credit_ledger_id: 'ledger-1' });
   });
 
   it('a lost claim race mints NOTHING (the other booking won)', async () => {
@@ -224,22 +223,26 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
     expect(raw.length).toBeGreaterThan(0);
   });
 
-  it('retries only offers where a real booking surface already attempted redemption', async () => {
+  it('credits an open offer ONLY when a proven booking event exists in its window', async () => {
     // Deliberately NOT "any later scheduled_services row": seeders, bulk
-    // rebooks and imports create rows nobody booked, and crediting those
-    // would hand out money for nothing. The attempt marker is the evidence.
+    // rebooks and imports create rows nobody booked, and prod data shows
+    // no provenance column separates them. The booking EVENT is the proof.
     mockOffers = [{
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
       created_at: new Date('2026-08-01'), source_scheduled_service_id: 'svc-insp',
-      redeemed_scheduled_service_id: 'svc-booked',
       expires_at: new Date('2099-01-01'),
     }];
+    mockAlternates = [{ id: 'svc-booked', created_at: new Date('2026-08-05') }];
     const res = await sweepInspectionCreditRedemptions();
-    expect(res.reason).toBeUndefined();
-    expect(typeof res.redeemed).toBe('number');
-    // The sweep must filter on the attempt marker — an offer with no
-    // recorded attempt is never swept.
-    expect(mockChainCalls.some((c) => c === 'whereNotNull')).toBe(true);
+    expect(res.redeemed).toBe(1);
+    expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
+
+    // With NO booking event the same offer earns nothing.
+    jest.clearAllMocks();
+    mockAlternates = [];
+    const none = await sweepInspectionCreditRedemptions();
+    expect(none.redeemed).toBe(0);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 });
 

@@ -3320,6 +3320,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
         customerId,
         scheduledServiceId: svc.id,
+        source: 'admin_schedule',
       });
 
       // Track all scheduled_date strings created for this parent series

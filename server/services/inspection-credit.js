@@ -253,33 +253,57 @@ async function recordInspectionCreditOffer({
  * failed) — returns a summary, never throws.
  */
 /**
- * Mark open offers as "this booking is the qualifying one", INSIDE the
- * caller's booking transaction (Codex #3178 P1).
+ * Record that a REAL customer booking happened, inside the caller's booking
+ * transaction (Codex #3178 r4).
  *
- * Durability matters here: a post-commit marker write can be lost to a
- * crash between the booking commit and the write, leaving a real booking
- * that the sweep can never recover. Written in-transaction, the marker
- * commits with the booking or not at all — and the hourly sweep turns it
- * into money, so the mint itself never has to succeed inline.
+ * Written to its own table rather than onto an offer row: marking offers was
+ * circular — once an offer redeems it stops being markable, so a later
+ * booking left no trace and reversal couldn't tell whether the customer
+ * still had a qualifying booking.
  *
- * Safe to call from any booking surface; it only touches offers already
- * open and in-window, and never throws.
+ * Runs in a SAVEPOINT (Codex #3178 r4 P1). Postgres aborts a transaction
+ * after any failed statement, so catching the error and returning would NOT
+ * leave the caller's transaction usable — a credit-marker hiccup would take
+ * down the booking or estimate conversion that hosts it. The savepoint
+ * confines a failure to this write.
  */
-async function markBookingForInspectionCredit(trx, { customerId, scheduledServiceId, bookingCreatedAt = new Date() }) {
+async function markBookingForInspectionCredit(trx, { customerId, scheduledServiceId, source = null }) {
   if (!gateOn()) return 0;
   if (!customerId || !scheduledServiceId || !trx) return 0;
   try {
-    return await trx('inspection_credit_offers')
-      .where({ customer_id: customerId, status: 'offered' })
-      .whereNull('redeemed_scheduled_service_id')
-      .where('created_at', '<=', bookingCreatedAt)
-      .where('expires_at', '>=', bookingCreatedAt)
-      .whereNot({ source_scheduled_service_id: scheduledServiceId })
-      .update({ redeemed_scheduled_service_id: scheduledServiceId, updated_at: trx.fn.now() });
+    await trx.transaction(async (sp) => {
+      await sp('inspection_credit_booking_events')
+        .insert({
+          customer_id: customerId,
+          scheduled_service_id: scheduledServiceId,
+          source: source ? String(source).slice(0, 40) : null,
+        })
+        .onConflict('scheduled_service_id')
+        .ignore();
+    });
+    return 1;
   } catch (err) {
-    logger.warn(`[inspection-credit] booking marker failed for ${scheduledServiceId}: ${err.message}`);
+    // The savepoint rolled back; the caller's transaction is still healthy.
+    logger.warn(`[inspection-credit] booking event failed for ${scheduledServiceId}: ${err.message}`);
     return 0;
   }
+}
+
+/**
+ * The earliest PROVEN customer booking inside a window — the shared
+ * evidence test for redemption, rebinding and late-offer adoption.
+ */
+async function provenBookingInWindow({ customerId, from, to, excludeIds = [] }) {
+  const skip = excludeIds.filter(Boolean);
+  const q = db('inspection_credit_booking_events as e')
+    .join('scheduled_services as s', 's.id', 'e.scheduled_service_id')
+    .where('e.customer_id', customerId)
+    .whereNotIn('s.status', NON_LIVE_APPOINTMENT_STATUSES)
+    .where('e.created_at', '>=', from)
+    .where('e.created_at', '<=', to)
+    .orderBy('e.created_at', 'asc');
+  if (skip.length) q.whereNotIn('s.id', skip);
+  return q.first('s.id as id', 'e.created_at as created_at');
 }
 
 /**
@@ -372,17 +396,6 @@ async function redeemInspectionCreditForBooking({
     let redeemed = 0;
     let total = 0;
     for (const offer of open) {
-      // Record the ATTEMPT before minting. The sweep retries only offers
-      // carrying this marker (Codex #3175 r3 P0): a credit must follow a
-      // real customer booking, and scheduled_services rows are also created
-      // by seeders, bulk rebooks and imports that nobody "booked".
-      try {
-        await db('inspection_credit_offers')
-          .where({ id: offer.id, status: 'offered' })
-          .update({ redeemed_scheduled_service_id: scheduledServiceId, updated_at: db.fn.now() });
-      } catch (markErr) {
-        logger.warn(`[inspection-credit] attempt marker failed for offer ${offer.id}: ${markErr.message}`);
-      }
       const ok = await redeemSpecificOffer({
         offerId: offer.id,
         customerId,
@@ -497,15 +510,12 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         // redemption uses; a bare scheduled_services row could be a seeder.
         if (created?.recorded && created.offerId) {
           try {
-            const priorBooking = await db('inspection_credit_offers as o2')
-              .join('scheduled_services as s2', 's2.id', 'o2.redeemed_scheduled_service_id')
-              .where('o2.customer_id', visit.customer_id)
-              .whereNotIn('s2.status', NON_LIVE_APPOINTMENT_STATUSES)
-              .where('s2.created_at', '>=', created.expiresAt ? new Date(created.expiresAt.getTime() - windowMs(created.windowDays)) : now)
-              .where('s2.created_at', '<=', created.expiresAt || now)
-              .whereNot('s2.id', visit.id)
-              .orderBy('s2.created_at', 'asc')
-              .first('s2.id as id');
+            const priorBooking = await provenBookingInWindow({
+              customerId: visit.customer_id,
+              from: new Date(created.expiresAt.getTime() - windowMs(created.windowDays)),
+              to: created.expiresAt,
+              excludeIds: [visit.id],
+            });
             if (priorBooking) {
               await db('inspection_credit_offers')
                 .where({ id: created.offerId, status: 'offered' })
@@ -521,35 +531,31 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       logger.error(`[inspection-credit] closeout recovery failed: ${err.message}`);
     }
 
-    // ONLY offers where a real booking surface already attempted redemption
-    // and the mint didn't land (Codex #3175 r3 P0). Inferring a booking from
-    // "a scheduled_services row appeared" credited seeded series children,
-    // bulk rebooks and imports — money for something nobody booked.
+    // Every still-open offer; the PROVEN-booking test below decides which
+    // ones earn money. Judged by when the customer BOOKED, not when this
+    // sweep runs, so a booking made inside the window still credits even if
+    // the fast path failed, cron was down, or the gate was off until after
+    // the expiry date.
     const open = await db('inspection_credit_offers')
       .where({ status: 'offered' })
-      .whereNotNull('redeemed_scheduled_service_id')
       .orderBy('created_at', 'asc')
       .limit(limit)
-      .select('id', 'customer_id', 'amount', 'created_at', 'expires_at',
-        'source_scheduled_service_id', 'redeemed_scheduled_service_id');
+      .select('id', 'customer_id', 'amount', 'created_at', 'expires_at', 'source_scheduled_service_id');
 
     for (const offer of open) {
       try {
-        // A live booking made inside THIS offer's window, and not the
-        // inspection itself. Re-derived from persisted state, so it holds
-        // for every booking surface.
-        // The booking that was actually attempted — still live, still
-        // inside this offer's window.
-        const booking = await db('scheduled_services')
-          .where({ id: offer.redeemed_scheduled_service_id })
-          .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
-          .where('created_at', '>=', offer.created_at)
-          .where('created_at', '<=', offer.expires_at)
-          .first('id', 'created_at');
+        // Booking EVENTS are the evidence — written in-transaction by real
+        // booking surfaces only, so seeders, imports and bulk rebooks
+        // (which prod data shows are indistinguishable by provenance
+        // columns) never credit.
+        const booking = await provenBookingInWindow({
+          customerId: offer.customer_id,
+          from: offer.created_at,
+          to: offer.expires_at,
+          excludeIds: [offer.source_scheduled_service_id],
+        });
 
         if (booking) {
-          // Redeem THIS offer only — never a customer-wide sweep, which
-          // would mint offers no booking followed.
           const ok = await redeemSpecificOffer({
             offerId: offer.id,
             customerId: offer.customer_id,
@@ -572,10 +578,10 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           expired += Number(closed) || 0;
         }
       } catch (err) {
-        // One bad offer must not stop the sweep — it retries next run.
         logger.error(`[inspection-credit] sweep failed for offer ${offer.id}: ${err.message}`);
       }
     }
+
     if (redeemed || expired || reversed) {
       logger.info(`[inspection-credit] sweep: ${redeemed} redeemed, ${reversed} reversed, ${expired} expired`);
     }
@@ -623,20 +629,15 @@ async function reverseInspectionCreditForBooking({
         // live booking still stands in that window, the customer is still
         // entitled to it — rebind rather than claw it back (Codex #3178
         // P1): cancelling one of two bookings must not cost them the credit.
-        // A PROVEN customer booking only (Codex #3178 r3 P1): another
-        // offer for this customer whose marker points at a live visit is
-        // evidence a booking surface ran. Any live scheduled_services row
-        // would have counted seeded series children and bulk rebooks.
-        const alternate = await db('inspection_credit_offers as o2')
-          .join('scheduled_services as s2', 's2.id', 'o2.redeemed_scheduled_service_id')
-          .where('o2.customer_id', offer.customer_id)
-          .whereNotIn('s2.status', NON_LIVE_APPOINTMENT_STATUSES)
-          .where('s2.created_at', '>=', offer.created_at)
-          .where('s2.created_at', '<=', offer.expires_at)
-          .whereNot('s2.id', scheduledServiceId)
-          .whereNot('s2.id', offer.source_scheduled_service_id || '00000000-0000-0000-0000-000000000000')
-          .orderBy('s2.created_at', 'asc')
-          .first('s2.id as id');
+        // A PROVEN customer booking only — read from the booking-event
+        // table so it stays true after this offer has redeemed (marking
+        // offers was circular, Codex #3178 r4 P0).
+        const alternate = await provenBookingInWindow({
+          customerId: offer.customer_id,
+          from: offer.created_at,
+          to: offer.expires_at,
+          excludeIds: [scheduledServiceId, offer.source_scheduled_service_id],
+        });
         if (alternate) {
           await db('inspection_credit_offers')
             .where({ id: offer.id, status: 'redeemed' })

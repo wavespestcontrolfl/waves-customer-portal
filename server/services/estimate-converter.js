@@ -2300,6 +2300,7 @@ const EstimateConverter = {
                 await require('./inspection-credit').markBookingForInspectionCredit(trx, {
                   customerId: standaloneRow.customer_id,
                   scheduledServiceId: parentRow.id,
+                  source: 'estimate_accept',
                 });
               } catch { /* never blocks a conversion */ }
               let seedResult = null;
@@ -2622,6 +2623,7 @@ const EstimateConverter = {
               await require('./inspection-credit').markBookingForInspectionCredit(trx, {
                 customerId: row.customer_id,
                 scheduledServiceId: insertedId,
+                source: 'estimate_accept',
               });
             } catch { /* never blocks a conversion */ }
             const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
