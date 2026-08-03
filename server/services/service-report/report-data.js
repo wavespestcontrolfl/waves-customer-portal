@@ -3497,10 +3497,28 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // gated rodent narrative below rebuilds a grounded summary instead.
     // Uses narrativeTrapSetupSnapshot so viewer visibility matches the
     // narrative's stage rules exactly (round 12).
-    const trapSetupScreened = !narrativeTrapSetupSnapshot
-      || !technicianReport?.body
-      // Scoped require matches this file's pattern for report-time helpers.
-      || require('./activity-indicators').setupContradictions(technicianReport.body).length === 0;
+    // The COUNT screen runs from the same viewer-visible trapping snapshot
+    // regardless of stage (pre-push P1 on 256c1f9): a follow-up companion
+    // whose traps_checked or captures was corrected after the body was
+    // generated would otherwise publish the stale number in the summary.
+    // Unverifiable values (blank/missing) screen nothing, by
+    // countContradictions' own rules.
+    const visibleTrapSnapshot = [
+      typedSnapshot,
+      ...companionSnapshots.filter((snap) => staffViewer || snap.delivery === 'auto_send'),
+    ].find((snap) => snap?.type === 'rodent_trapping') || null;
+    // Scoped require matches this file's pattern for report-time helpers.
+    const indicators = require('./activity-indicators');
+    const trapSetupScreened = !technicianReport?.body
+      || (
+        (!narrativeTrapSetupSnapshot
+          || indicators.setupContradictions(technicianReport.body).length === 0)
+        && (!visibleTrapSnapshot
+          || indicators.countContradictions(technicianReport.body, {
+            traps_checked: visibleTrapSnapshot.values?.traps_checked,
+            captures: visibleTrapSnapshot.values?.captures,
+          }).length === 0)
+      );
     const drivesSummary = technicianReport?.body && trapSetupScreened
       && (!typedSnapshot || typedSnapshot.todaysResult?.bodySource === 'technician_report');
     if (drivesSummary) {

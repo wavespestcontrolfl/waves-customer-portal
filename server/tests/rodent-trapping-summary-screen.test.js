@@ -144,6 +144,35 @@ describe('technician summaries screen against visible companion setup stages (ro
     expect(source).toBe('technician_report');
   });
 
+  // Pre-push P1 on 256c1f9: the screen must also catch a STALE COUNT on
+  // any visible trapping snapshot, not just setup wording — a follow-up
+  // whose traps_checked was corrected after the body was generated would
+  // otherwise publish the old number in the summary.
+  const STALE_COUNT_NOTES = [
+    'WHAT WE DID',
+    'We checked 8 traps and refreshed the bait at each one.',
+    'WHAT WE FOUND',
+    'Rodent droppings were present along the north runway.',
+  ].join('\n');
+
+  test('a follow-up companion with a corrected count rejects the stale body', async () => {
+    const { source } = await summaryFor(
+      trappingCompanion('auto_send', { trap_visit_type: 'Follow-up check', traps_checked: 6 }),
+      STALE_COUNT_NOTES,
+      'token-screen-stalecount',
+    );
+    expect(source).not.toBe('technician_report');
+  });
+
+  test('the same body wins the summary when the count agrees', async () => {
+    const { source } = await summaryFor(
+      trappingCompanion('auto_send', { trap_visit_type: 'Follow-up check', traps_checked: 8 }),
+      STALE_COUNT_NOTES,
+      'token-screen-agreecount',
+    );
+    expect(source).toBe('technician_report');
+  });
+
   test('an internal-only companion does not screen a customer view (round-12 visibility)', async () => {
     const { source } = await summaryFor(
       trappingCompanion('internal_only'), CONTRADICTING_NOTES, 'token-screen-internal',

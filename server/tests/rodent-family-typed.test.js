@@ -1936,6 +1936,13 @@ describe('examine and test govern counts like check and inspect (round 17)', () 
     }
   });
 
+  test('a total-of wrapper between the verb and numeral is still check-governed (round 18)', () => {
+    expect(countContradictions('Due to activity, we checked a total of 8 traps.', { traps_checked: 6 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('Due to activity, we checked a total of 6 traps.', { traps_checked: 6 }))
+      .toEqual([]);
+  });
+
   test('examined and tested partitives claim the CHECKED count, not the roster', () => {
     expect(countContradictions('We examined 6 of the 8 traps.', { traps_checked: 6 }))
       .toEqual([]);

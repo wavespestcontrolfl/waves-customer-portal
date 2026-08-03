@@ -2159,8 +2159,13 @@ const TRAP_PARTITIVE_DET = '(?:(?:the|our|these|those|all|its)(?:\\s+\\d+)?|\\d+
 // design — rebaited/moved/serviced/reset are setup-incompatible ACTIONS,
 // not roster scans, and must not govern counts (r14).
 const CHECK_VERB_PAST = '(?:re-?)?(?:checked|inspected|examined|tested)';
+// The optional `a total of` / `the count of` tail: ordinary wrappers
+// between the check verb and its numeral. Without it "we checked a total
+// of 8 traps" failed the anchor, and a cue elsewhere in the window then
+// demoted the only roster claim — the stale count published (codex P1
+// r18).
 const CHECK_PREDICATE_LEAD_RE = new RegExp(
-  `\\b${CHECK_VERB_PAST}(?:\\s+(?:and|or)\\s+[a-z-]+)*(?:\\s+(?:[a-z]+ly|all|both|just|now))*\\s*$`,
+  `\\b${CHECK_VERB_PAST}(?:\\s+(?:and|or)\\s+[a-z-]+)*(?:\\s+(?:[a-z]+ly|all|both|just|now))*(?:\\s+(?:a|the)\\s+(?:total|count)\\s+of)?\\s*$`,
   'i',
 );
 const CHECK_PREDICATE_TRAIL_RE = new RegExp(
