@@ -288,8 +288,14 @@ async function processServiceReportDelivery(delivery, knex = db) {
   try {
     const serviceRow = await knex('service_records')
       .where({ id: delivery.service_record_id })
-      .first('id', 'customer_id', 'scheduled_service_id', 'service_id', 'service_line');
-    isLawnDelivery = String(serviceRow?.service_line || '') === 'lawn';
+      .first('id', 'customer_id', 'scheduled_service_id', 'service_id', 'service_line', 'service_type');
+    // Classify EXACTLY as the report builder does (report-data.js:
+    // `service.service_line || detectServiceLine(service.service_type)`).
+    // Trusting service_line alone missed legacy rows that carry a null line
+    // but still render a lawn assessment — those would render unpinned, which
+    // is the case the pin exists for.
+    const { detectServiceLine } = require('./service-line-configs');
+    isLawnDelivery = (serviceRow?.service_line || detectServiceLine(serviceRow?.service_type)) === 'lawn';
     const linked = serviceRow
       ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true })
       : null;

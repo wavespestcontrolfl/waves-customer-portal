@@ -2888,9 +2888,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // render, producing a report whose copy and photos come from different
     // assessments — and a fence comparing only the selection would still pass
     // it. The scorecard already honoured any pin, so this inherits it.
-    const linkedAssessment = lawnAssessment?.assessmentId
-      ? { id: lawnAssessment.assessmentId }
-      : await loadLinkedLawnAssessment(service, knex);
+    // Pinned ABSENCE means the render must carry no assessment content at all —
+    // including its turf photos. Falling through to the unpinned resolver here
+    // would append photos from whatever assessment is current and put unfenced
+    // content in a PDF that is supposed to have none.
+    const linkedAssessment = opts.pinnedLawnAssessmentId === PIN_NO_ASSESSMENT
+      ? null
+      : (lawnAssessment?.assessmentId
+        ? { id: lawnAssessment.assessmentId }
+        : await loadLinkedLawnAssessment(service, knex));
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must
