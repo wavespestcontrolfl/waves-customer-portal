@@ -481,7 +481,10 @@ function initScheduledJobs() {
   // Hourly, not nightly: the credit should be on the account before the
   // invoice for that booking goes out.
   cron.schedule('12 * * * *', async () => {
-    if (!isEnabled('inspectionCredit')) return;
+    // NOT gated here (Codex #3178 r5 P0): the sweep's reversal half must
+    // keep running through a kill-switch period so a credit whose booking
+    // was cancelled while dark can't stay spendable. The service gates its
+    // own crediting half internally.
     try {
       await runExclusive('inspection-credit-sweep', async () => {
         await require('./inspection-credit').sweepInspectionCreditRedemptions();

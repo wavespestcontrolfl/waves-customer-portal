@@ -207,6 +207,11 @@ async function recordInspectionCreditOffer({
         source_service_record_id: serviceRecordId,
         amount: frozenAmount,
         status: 'offered',
+        // Stamped from the INSPECTION moment, not the insert (Codex #3178
+        // r5 P0): a recovered offer written days later would otherwise sort
+        // after the very booking it should credit, and every ordering guard
+        // (redemption, adoption) would reject it forever.
+        created_at: now,
         expires_at: expiresAt,
         created_by: createdBy,
         note: `Inspection fee credited toward any service booked within ${windowDays} days`,
@@ -268,7 +273,11 @@ async function recordInspectionCreditOffer({
  * confines a failure to this write.
  */
 async function markBookingForInspectionCredit(trx, { customerId, scheduledServiceId, source = null }) {
-  if (!gateOn()) return 0;
+  // Deliberately UNGATED (Codex #3178 r5 P0): the event is just a fact
+  // ("this customer booked"), costs nothing, and grants no money on its
+  // own. Skipping it while dark would mean an offer promised before a
+  // kill-switch period could never prove its booking afterwards, and would
+  // silently expire.
   if (!customerId || !scheduledServiceId || !trx) return 0;
   try {
     await trx.transaction(async (sp) => {
@@ -437,7 +446,11 @@ async function redeemInspectionCreditForBooking({
  * Returns counts; never throws.
  */
 async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 } = {}) {
-  if (!gateOn()) return { redeemed: 0, expired: 0, reason: 'feature_disabled' };
+  // NOT an early return on the gate (Codex #3178 r5 P0): reversal cleanup
+  // must keep running through a kill-switch period, or a credit whose
+  // booking is cancelled while dark stays spendable forever. Only the
+  // offer/redemption half below is gated.
+  const creditingOn = gateOn();
   let redeemed = 0;
   let expired = 0;
   let reversed = 0;
@@ -468,6 +481,11 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       } catch (err) {
         logger.error(`[inspection-credit] sweep reversal failed for offer ${row.id}: ${err.message}`);
       }
+    }
+
+    if (!creditingOn) {
+      if (reversed) logger.info(`[inspection-credit] sweep (gate off): ${reversed} reversed`);
+      return { redeemed: 0, expired: 0, reversed, reason: 'feature_disabled' };
     }
 
     // Closeout recovery, driven ONLY by the durable opt-in marker the

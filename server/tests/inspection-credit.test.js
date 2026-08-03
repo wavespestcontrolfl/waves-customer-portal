@@ -61,6 +61,7 @@ jest.mock('../models/db', () => {
 
 const {
   recordInspectionCreditOffer,
+  markBookingForInspectionCredit,
   reverseInspectionCreditForBooking,
   sweepInspectionCreditRedemptions,
   redeemInspectionCreditForBooking,
@@ -301,6 +302,31 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     }];
     await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
     expect(mockUpdates[0]).toMatchObject({ status: 'expired' });
+  });
+});
+
+describe('kill-switch posture — what must keep working while dark', () => {
+  it('records booking EVIDENCE while dark, so a later gate-on can honor it', async () => {
+    mockGateOn = false;
+    const db = require('../models/db');
+    const n = await markBookingForInspectionCredit(db, {
+      customerId: 'cust-1', scheduledServiceId: 'svc-2', source: 'self_book',
+    });
+    // The event is a fact, not money — skipping it while dark would make an
+    // offer promised beforehand unprovable and silently expire it.
+    expect(n).toBe(1);
+  });
+
+  it('sweeps REVERSALS while dark but credits nothing', async () => {
+    mockGateOn = false;
+    const res = await sweepInspectionCreditRedemptions();
+    // Crediting is paused...
+    expect(res.redeemed).toBe(0);
+    expect(res.reason).toBe('feature_disabled');
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    // ...but the reversal half still ran (a cancelled booking's credit must
+    // not stay spendable through a kill-switch period).
+    expect(res).toHaveProperty('reversed');
   });
 });
 

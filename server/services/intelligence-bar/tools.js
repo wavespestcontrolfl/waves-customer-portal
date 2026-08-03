@@ -1375,6 +1375,18 @@ async function createAppointment(input) {
     updated_at: new Date(),
   }).returning('*');
 
+  // Inspection credit: an operator booking through the Intelligence Bar is
+  // a REAL customer booking (Codex #3178 r5 P0). Recorded as durable
+  // evidence — this insert isn't transactional, so the event is written
+  // right after and the hourly sweep mints from it. Never blocks a booking.
+  try {
+    await require('../inspection-credit').markBookingForInspectionCredit(db, {
+      customerId: customer_id,
+      scheduledServiceId: appointment.id,
+      source: 'intelligence_bar',
+    });
+  } catch { /* evidence is best-effort; the booking stands */ }
+
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —
   // without it the 72h/24h reminder cron never sees the visit. Registration
