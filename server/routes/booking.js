@@ -2237,6 +2237,16 @@ async function createSelfBooking(payload = {}) {
           .update({ converted_at: trx.fn.now(), converted_booking_id: bookingRow.id, updated_at: trx.fn.now() });
       }
 
+      // Inspection credit: mark the qualifying booking INSIDE this
+      // transaction (Codex #3178 P1). A post-commit marker can be lost to a
+      // crash between commit and write, leaving a real booking the sweep
+      // can never recover; committed with the booking, the hourly sweep
+      // turns it into credit. Dark behind GATE_INSPECTION_CREDIT.
+      await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId: custId,
+        scheduledServiceId: scheduledRow.id,
+      });
+
       return { booking: bookingRow, serviceRow: scheduledRow };
       });
     } catch (txErr) {
@@ -2596,10 +2606,8 @@ async function createSelfBooking(payload = {}) {
       logger.warn(`[booking:confirm] card-request funnel failed for visit ${serviceRow.id}: ${err.message}`);
     }
 
-    // Inspection credit: a public self-booking is a REAL customer booking,
-    // so it redeems an open promise (dark behind GATE_INSPECTION_CREDIT).
-    // Redemption is deliberately explicit per surface — seeders, imports
-    // and bulk rebooks create rows nobody booked and must never credit.
+    // Fast path only — the durable evidence was written in-transaction
+    // above, so a crash here costs at most an hour (the sweep mints it).
     try {
       await require('../services/inspection-credit').redeemInspectionCreditForBooking({
         customerId: serviceRow.customer_id,

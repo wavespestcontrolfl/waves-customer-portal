@@ -3314,6 +3314,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
       createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
+      // Inspection credit: durable in-transaction marker on the series
+      // ANCHOR (Codex #3178 P1) — a recurring series is one booking, so
+      // children must not each claim the promise. Dark behind the gate.
+      await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId,
+        scheduledServiceId: svc.id,
+      });
 
       // Track all scheduled_date strings created for this parent series
       // (parent itself, recurring children, AND boosters). Hoisted so the
@@ -3683,13 +3690,12 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
 
-    // Inspection credit redemption (dark behind GATE_INSPECTION_CREDIT).
-    // This is the "booked within N days" half of the promise: an open,
-    // unexpired offer mints account credit now, which the normal auto-apply
-    // machinery puts against this booking's invoice. Runs on the FIRST
-    // created appointment only — a recurring series is one booking, not one
-    // redemption per visit. Best-effort: a booking must never fail because
-    // crediting failed, and the service never throws.
+    // Inspection credit (dark behind GATE_INSPECTION_CREDIT). The durable
+    // marker is written in-transaction with the appointment inserts; this
+    // is the fast path that mints immediately when it can. Runs on the
+    // FIRST created appointment only — a recurring series is one booking,
+    // not one redemption per visit. Best-effort: a booking must never fail
+    // because crediting failed, and the service never throws.
     if (createdAppointments.length) {
       try {
         const InspectionCredit = require('../services/inspection-credit');

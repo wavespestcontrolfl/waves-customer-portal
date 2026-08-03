@@ -1347,6 +1347,14 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (cols.urgency) insertData.urgency = 'routine';
       const [appt] = await trx('scheduled_services').insert(insertData).returning('*');
 
+      // Inspection credit: mark the qualifying booking IN-TRANSACTION so
+      // the evidence commits with the booking (Codex #3178 P1). Dark behind
+      // GATE_INSPECTION_CREDIT; the hourly sweep does the minting.
+      await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId,
+        scheduledServiceId: appt.id,
+      });
+
       // Mark the lead converted (mirrors leadAttribution.markConverted, but on the
       // same transaction so the conversion can't commit without the appointment).
       // Re-gated on deleted_at inside the transaction: the pre-transaction read
@@ -1396,10 +1404,7 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
     logger.info(`[leads] Lead ${req.params.id} booked appointment ${appt.id} (customer ${customerId})`);
 
-    // Inspection credit: a lead converted into a booking is a REAL customer
-    // booking, so it redeems an open promise (dark behind
-    // GATE_INSPECTION_CREDIT). Explicit per surface by design — seeders,
-    // imports and bulk rebooks create rows nobody booked.
+    // Fast path only — durable evidence was written in-transaction above.
     try {
       await require('../services/inspection-credit').redeemInspectionCreditForBooking({
         customerId,
