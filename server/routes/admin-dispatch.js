@@ -534,8 +534,8 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration }) {
-  return [blackout, nLimit, manager, calibration]
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory }) {
+  return [blackout, nLimit, manager, calibration, inventory]
     .filter((record) => record && record.advisory)
     .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
     .map((block) => block && block.message)
@@ -565,15 +565,6 @@ function blackoutLockoutBlocks(plan) {
 function annualNLockoutBlocks(plan) {
   return (plan?.propertyGate?.blocks || [])
     .filter((block) => block.code === 'annual_n_budget_exceeded');
-}
-
-function inventoryPlanLockoutBlocks(plan) {
-  return (plan?.inventory?.blocks || [])
-    .filter((block) => [
-      'inventory_product_inactive',
-      'inventory_depleted',
-      'inventory_insufficient_stock',
-    ].includes(block.code));
 }
 
 function toETNoonServiceDate(value) {
@@ -1430,6 +1421,7 @@ async function deductProductInventory(trx, {
   serviceProduct,
   serviceRecord,
   scheduledService,
+  allowNegative = false,
 }) {
   const lockedProduct = await trx('products_catalog')
     .where({ id: product.id })
@@ -1483,7 +1475,14 @@ async function deductProductInventory(trx, {
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
-  if (insufficient) {
+  // allowNegative is passed ONLY for WaveGuard lawn completions, whose
+  // closeout treats inventory as advisory (owner directive 2026-08-03): the
+  // deduction proceeds, inventory_on_hand goes negative, and the
+  // movement/snapshot below record the insufficient-stock state for audit.
+  // Every other completion keeps the hard failure — this shared helper runs
+  // for pest/tree-shrub/nonmember visits too, which have no advisory lane to
+  // record the shortfall (codex P1 r1 on #3179).
+  if (insufficient && !allowNegative) {
     const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
     err.statusCode = 400;
     err.code = 'waveguard_inventory_lockout';
@@ -3658,6 +3657,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardNLimitApproval = null;
     let waveguardManagerApproval = null;
     let waveguardCalibrationAdvisory = null;
+    let waveguardInventoryAdvisory = null;
     let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
@@ -4859,19 +4859,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             blocks: mappedNBlocks,
           };
       }
-      const inventoryBlocks = [
-        ...inventoryPlanLockoutBlocks(plan),
-        ...await actualProductInventoryBlocks(products),
-      ];
+      // Actuals only — the plan's inventory blocks describe PLANNED products,
+      // so a depleted planned product the tech removed, substituted, or
+      // under-applied would persist a shortfall advisory for a product that
+      // was never overdrawn (codex P2 r2 on #3179). What was actually
+      // submitted (here) plus what was actually deducted (the FOR UPDATE
+      // reconcile after the deduction loop) covers every applied product.
+      const inventoryBlocks = await actualProductInventoryBlocks(products);
+      // Advisory, not a lockout (owner directive 2026-08-03: the inventory
+      // gate came off the lawn closeout with the other approval ceremonies —
+      // a stale stock count must not trap the tech on the screen). The
+      // shortfall is recorded for audit and the deduction path lets
+      // inventory_on_hand go negative so the count self-reports the drift.
       if (inventoryBlocks.length) {
-        const validationErr = new Error('WaveGuard inventory lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Inventory lockout',
-          code: 'waveguard_inventory_lockout',
-          details: inventoryBlocks.map((block) => block.message),
-          blocks: inventoryBlocks,
-        });
+        waveguardInventoryAdvisory = {
+          advisory: true,
+          recordedByTechnicianId: req.technicianId,
+          recordedByRole: req.techRole || null,
+          recordedAt: new Date().toISOString(),
+          blocks: inventoryBlocks.map((block) => ({
+            code: block.code,
+            message: block.message,
+            productId: block.productId || null,
+            productName: block.productName || null,
+          })),
+        };
       }
       const managerApprovalCheck = await evaluateWaveGuardManagerApprovals(db, {
         customerId: svc.customer_id,
@@ -5062,7 +5074,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           code: 'completion_resume_missing_record',
         });
       }
-      linkedLawnAssessmentId = parseJsonObject(record.structured_notes).lawnAssessmentId || null;
+      const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      linkedLawnAssessmentId = resumedStructuredNotes.lawnAssessmentId || null;
+      // The WaveGuard advisory records were committed with the record, but
+      // the resume path skips the preflight and the deduction transaction —
+      // without this rehydrate, completionAdvisoryMessages would read the
+      // null initializers and the success UI would omit a recorded shortfall
+      // on a resumed retry (codex P2 r2 on #3179).
+      waveguardBlackoutApproval = resumedStructuredNotes.waveguardBlackoutApproval || null;
+      waveguardNLimitApproval = resumedStructuredNotes.waveguardNLimitApproval || null;
+      waveguardManagerApproval = resumedStructuredNotes.waveguardManagerApproval || null;
+      waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
+      waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
       durableCompletionCommitted = true;
     } else {
       try {
@@ -5393,6 +5416,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardNLimitApproval,
             waveguardManagerApproval,
             waveguardCalibrationAdvisory,
+            waveguardInventoryAdvisory,
             waveguardTankCleanout,
             ...(treeShrubCloseoutSummary ? {
               treeShrubCloseout: treeShrubCloseoutSummary,
@@ -6077,6 +6101,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               serviceProduct,
               serviceRecord: record,
               scheduledService: svc,
+              // Advisory inventory posture is scoped to WaveGuard lawn — the
+              // only closeout that records the shortfall as an advisory.
+              allowNegative: isWaveGuardLawnCompletion(svc),
             });
             inventoryDeductions.push(deduction);
           }
@@ -6131,9 +6158,68 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
 
         if (inventoryDeductions.length) {
+          // Reconcile the advisory with what the FOR UPDATE deduction actually
+          // saw: two concurrent visits can both pass the unlocked preflight
+          // read with the stock intact, so the later one can go negative
+          // without the preflight having recorded an advisory (codex P2 r1 on
+          // #3179). The locked deduction result is authoritative.
+          if (isWaveGuardLawnCompletion(svc)) {
+            const deductionStatusByProductId = new Map(
+              inventoryDeductions
+                .filter((deduction) => deduction.productId != null)
+                .map((deduction) => [String(deduction.productId), deduction.status]),
+            );
+            // Any preflight stock block whose product reached the locked
+            // deduction is superseded by that deduction's outcome: sufficient
+            // stock refutes it, and a locked shortfall replaces it with the
+            // authoritative counts — stock can move between the unlocked read
+            // and the lock in either direction, so preflight numbers must
+            // never survive a locked result (codex P2 r3+r4 on #3179).
+            // Non-stock blocks (inactive product) and preflight blocks for
+            // products the deduction never quantified are kept.
+            const keptBlocks = (waveguardInventoryAdvisory?.blocks || []).filter(
+              (block) => !(
+                block.code === 'actual_inventory_insufficient_stock'
+                && block.productId != null
+                && ['deducted', 'deducted_insufficient_stock'].includes(
+                  deductionStatusByProductId.get(String(block.productId)),
+                )
+              ),
+            );
+            const keptShortfallProductIds = new Set(
+              keptBlocks
+                .filter((block) => block.code === 'actual_inventory_insufficient_stock')
+                .map((block) => (block.productId != null ? String(block.productId) : null))
+                .filter(Boolean),
+            );
+            const shortfallBlocks = inventoryDeductions
+              .filter((deduction) => deduction.status === 'deducted_insufficient_stock'
+                && !keptShortfallProductIds.has(String(deduction.productId)))
+              .map((deduction) => ({
+                code: 'actual_inventory_insufficient_stock',
+                message: `${deduction.productName} went to ${deduction.stockAfter} ${deduction.inventoryUnit} on hand after deducting ${deduction.deductedAmount} ${deduction.inventoryUnit}.`,
+                productId: deduction.productId || null,
+                productName: deduction.productName || null,
+              }));
+            const reconciledBlocks = [...keptBlocks, ...shortfallBlocks];
+            waveguardInventoryAdvisory = reconciledBlocks.length
+              ? {
+                advisory: true,
+                recordedByTechnicianId: req.technicianId,
+                recordedByRole: req.techRole || null,
+                recordedAt: new Date().toISOString(),
+                ...(waveguardInventoryAdvisory || {}),
+                blocks: reconciledBlocks,
+              }
+              : null;
+          }
           record.structured_notes = {
             ...(record.structured_notes || {}),
             inventoryDeductions,
+            // Explicit even when null: the initial insert may have committed
+            // a preflight advisory this reconcile just refuted — a
+            // conditional spread would leave the stale record in the notes.
+            ...(isWaveGuardLawnCompletion(svc) ? { waveguardInventoryAdvisory } : {}),
           };
           await trx('service_records')
             .where({ id: record.id })
@@ -7045,6 +7131,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           nLimit: waveguardNLimitApproval,
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
+          inventory: waveguardInventoryAdvisory,
         }),
         ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
         ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -9735,6 +9822,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         nLimit: waveguardNLimitApproval,
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
+        inventory: waveguardInventoryAdvisory,
       }),
       ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
       ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
