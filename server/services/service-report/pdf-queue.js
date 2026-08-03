@@ -172,6 +172,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // selection disagree. The delivery gets its bytes in-hand; nothing is
     // written, and pdf_storage_key keeps pointing at the canonical render.
     if (pinnedLawnAssessmentId) {
+      // The delivery forced a fresh render precisely because the cached object
+      // may hold an older assessment or recommendation version. Leaving that
+      // known-stale key in place means the recipient's "Download PDF" serves a
+      // document different from the attachment they were just emailed — so
+      // clear it. The next unpinned request re-renders canonically; nothing
+      // reads a null key as an error.
+      await knex('service_records')
+        .where({ id: recordId })
+        .update({ pdf_storage_key: null })
+        .catch((clearErr) => logger.warn(`[service-report-pdf] stale key clear failed for ${recordId}: ${clearErr.message}`));
       return { key: null, pdf, rendered: true, token: reportToken, pinned: true };
     }
     const key = await putReportPdf(recordId, pdf, {

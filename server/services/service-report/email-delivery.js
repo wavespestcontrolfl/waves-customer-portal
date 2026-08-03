@@ -444,7 +444,13 @@ async function sendServiceReportV1Email(recordId, {
   const base = portalBaseUrl();
   const fullReportUrl = reportUrl || `${base}/report/${encodeURIComponent(reportToken)}`;
   const fullPdfUrl = pdfUrl || `${base}/api/reports/${encodeURIComponent(reportToken)}`;
-  const data = await buildReportV1Data(service, reportToken);
+  // Pinned to the SAME assessment as the attachment (#3168). Left unpinned,
+  // this build could resolve a different assessment than the PDF: the body
+  // would describe one visit's lawn while the attachment showed another's, and
+  // because data.lawnAssessment.assessmentId is what the fence receives as the
+  // render's answer, a correctly-pinned attachment would be deferred as a
+  // mismatch. One pin, one answer, both surfaces.
+  const data = await buildReportV1Data(service, reportToken, undefined, { pinnedLawnAssessmentId });
   data.dynamicContext = await buildServiceReportDynamicContext({
     recordId,
     mode: 'static',

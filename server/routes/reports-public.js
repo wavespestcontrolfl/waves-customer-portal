@@ -33,6 +33,7 @@ const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT } = re
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
 const ASSESSMENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const { verifyAssessmentPin } = require('../services/service-report/assessment-pin');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
@@ -1502,6 +1503,17 @@ router.get('/:token/data', async (req, res, next) => {
         && requestedAssessment !== PIN_NO_ASSESSMENT
         && !ASSESSMENT_UUID_RE.test(requestedAssessment)) {
         logger.warn(`[reports-public] malformed assessment pin refused for service_record ${serviceRecordId || 'unknown'}`);
+        return res.status(409).json({ error: 'Requested assessment is not available for this report' });
+      }
+      // A pin must be SIGNED by this server. The pin narrows what the report
+      // says — `assessment=none` suppresses the lawn section outright — so an
+      // unsigned one would let anyone holding a report token produce an
+      // official, share-able portal report with an unfavourable assessment
+      // removed. Only the renderer can sign, so only the renderer can pin.
+      // Refused exactly like an unauthorized pin: same status, same fixed copy.
+      if (requestedAssessment
+        && !verifyAssessmentPin(req.params.token, requestedAssessment, req.query.asig)) {
+        logger.warn(`[reports-public] unsigned assessment pin refused for service_record ${serviceRecordId || 'unknown'}`);
         return res.status(409).json({ error: 'Requested assessment is not available for this report' });
       }
       const pinnedLawnAssessmentId = requestedAssessment;

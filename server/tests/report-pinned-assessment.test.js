@@ -17,6 +17,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const { PinnedAssessmentUnavailable } = require('../services/service-report/report-data');
 const { serviceReportViewerUrl } = require('../services/service-report/pdf-puppeteer');
+const { signAssessmentPin, verifyAssessmentPin } = require('../services/service-report/assessment-pin');
 
 const SERVICE = {
   id: 'svc-1',
@@ -151,7 +152,7 @@ describe('#3168 pinned assessment — pinning ABSENCE', () => {
     expect(typeof PIN_NO_ASSESSMENT).toBe('string');
     expect(PIN_NO_ASSESSMENT.length).toBeGreaterThan(0);
     expect(serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: PIN_NO_ASSESSMENT }))
-      .toBe(`https://portal.example/report/tok-1?mode=pdf&assessment=${PIN_NO_ASSESSMENT}`);
+      .toContain(`assessment=${PIN_NO_ASSESSMENT}`);
   });
 
   test('the sentinel is not a uuid, so the route guard must special-case it', () => {
@@ -166,6 +167,53 @@ describe('#3168 pinned assessment — pinning ABSENCE', () => {
     // Ids are uuids; the sentinel deliberately is not one, so a row could
     // never be named 'none' and be resolved by accident.
     expect(PIN_NO_ASSESSMENT).not.toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/i);
+  });
+});
+
+describe('#3168 pinned assessment — the pin must be SIGNED', () => {
+  // Pinning narrows what a report says: `assessment=none` suppresses the lawn
+  // section outright. An unsigned pin would therefore let anyone holding a
+  // report token produce an official, share-able portal report with an
+  // unfavourable assessment removed — forgery by omission, even though a pin
+  // can never widen what the token can see. Only this server may sign.
+  const OLD_SECRET = process.env.REPORT_PIN_SECRET;
+  beforeAll(() => { process.env.REPORT_PIN_SECRET = 'test-pin-secret'; });
+  afterAll(() => { process.env.REPORT_PIN_SECRET = OLD_SECRET; });
+
+  test('a signature this server produced verifies', () => {
+    const sig = signAssessmentPin('tok-1', 'assess-A');
+    expect(typeof sig).toBe('string');
+    expect(verifyAssessmentPin('tok-1', 'assess-A', sig)).toBe(true);
+  });
+
+  test('an absent or guessed signature is refused', () => {
+    expect(verifyAssessmentPin('tok-1', 'assess-A', undefined)).toBe(false);
+    expect(verifyAssessmentPin('tok-1', 'assess-A', '')).toBe(false);
+    expect(verifyAssessmentPin('tok-1', 'assess-A', 'deadbeef')).toBe(false);
+  });
+
+  // The abuse this closes: a customer opening their own report with
+  // ?assessment=none to hide an unfavourable assessment.
+  test('the sentinel cannot be pinned without a signature either', () => {
+    expect(verifyAssessmentPin('tok-1', PIN_NO_ASSESSMENT, undefined)).toBe(false);
+    const sig = signAssessmentPin('tok-1', PIN_NO_ASSESSMENT);
+    expect(verifyAssessmentPin('tok-1', PIN_NO_ASSESSMENT, sig)).toBe(true);
+  });
+
+  test('a signature is bound to its report token — no replay onto another', () => {
+    const sig = signAssessmentPin('tok-1', 'assess-A');
+    expect(verifyAssessmentPin('tok-2', 'assess-A', sig)).toBe(false);
+  });
+
+  test('a signature is bound to its assessment — no swapping the id', () => {
+    const sig = signAssessmentPin('tok-1', 'assess-A');
+    expect(verifyAssessmentPin('tok-1', 'assess-B', sig)).toBe(false);
+  });
+
+  test('the render URL carries the signature alongside the pin', () => {
+    const url = serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: 'assess-A' });
+    expect(url).toContain('assessment=assess-A');
+    expect(url).toContain(`asig=${signAssessmentPin('tok-1', 'assess-A')}`);
   });
 });
 
@@ -191,15 +239,15 @@ describe('#3168 pinned assessment — the render URL carries the pin', () => {
   });
 
   test('a pin is appended and URL-encoded', () => {
-    expect(serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: 'assess-A' }))
-      .toBe('https://portal.example/report/tok-1?mode=pdf&assessment=assess-A');
+    const url = serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: 'assess-A' });
+    expect(url).toContain('https://portal.example/report/tok-1?mode=pdf&assessment=assess-A');
   });
 
   test('a hostile pin value cannot break out of the query string', () => {
     const url = serviceReportViewerUrl('tok-1', null, 'pdf', {
       pinnedLawnAssessmentId: 'a&mode=live#x',
     });
-    expect(url).toBe('https://portal.example/report/tok-1?mode=pdf&assessment=a%26mode%3Dlive%23x');
+    expect(url).toContain('assessment=a%26mode%3Dlive%23x');
     // One mode param only — the injected one is encoded into the value.
     expect(url.match(/mode=/g)).toHaveLength(1);
   });

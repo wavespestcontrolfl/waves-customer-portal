@@ -23,7 +23,15 @@ function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessment
   const base = serviceReportPublicBase(req).replace(/\/+$/, '');
   const params = [];
   if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
-  if (pinnedLawnAssessmentId) params.push(`assessment=${encodeURIComponent(pinnedLawnAssessmentId)}`);
+  if (pinnedLawnAssessmentId) {
+    // The signature is what makes the pin trustworthy. Without it the route
+    // refuses, which is the point: only this server can ask a report to render
+    // a specific assessment — or none at all.
+    const { signAssessmentPin } = require('./assessment-pin');
+    const signature = signAssessmentPin(token, pinnedLawnAssessmentId);
+    params.push(`assessment=${encodeURIComponent(pinnedLawnAssessmentId)}`);
+    if (signature) params.push(`asig=${encodeURIComponent(signature)}`);
+  }
   const query = params.length ? `?${params.join('&')}` : '';
   return `${base}/report/${encodeURIComponent(token)}${query}`;
 }
