@@ -185,6 +185,22 @@ function interactionLabel(value) {
   return words ? words.charAt(0).toUpperCase() + words.slice(1) : null;
 }
 
+// ONE compliance sanitizer for EVERY channel that can carry re-entry copy:
+// the dynamic context, the V2 aftercare, and the product catalog's
+// label-derived precaution/re-entry text (unconstrained free text — the repo
+// has fixtures like "...about 1 hour"). This rule has now needed four
+// channels closed, so it is enforced at the render site rather than per
+// field: any string asserting a clock time or a duration is replaced with
+// the approved once-dry idiom instead of being printed.
+const REENTRY_TIME_RX = /\d{1,2}:\d{2}\s*(am|pm)|\b(\d+(\.\d+)?|an?|one|two|three|four|half)\s*(-|\s)?\s*(minute|min|hour|hr)s?\b/i;
+const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
+
+function sanitizeReentryCopy(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return REENTRY_TIME_RX.test(text) ? REENTRY_SAFE_COPY : text;
+}
+
 // COMPLIANCE (AGENTS.md): never publish a fixed re-entry/drying figure on a
 // customer surface — not as a duration ("keep clear for 2 hours") and not as
 // the clock time computed from it ("ready after 7:03 PM"), which asserts the
@@ -526,9 +542,7 @@ export default function ServiceReportDocument({ data, token }) {
   // COMPLIANCE: never let a computed ready-at clock time through, whatever
   // field carries it (see reentryTargetLine).
   const rawReentrySummary = String(reentry?.customerSummary || '').trim();
-  const reentrySummary = rawReentrySummary && !/\d{1,2}:\d{2}\s*(am|pm)/i.test(rawReentrySummary)
-    ? rawReentrySummary
-    : (rawReentrySummary ? 'Treated areas are ready once dry — your technician confirms timing.' : '');
+  const reentrySummary = sanitizeReentryCopy(rawReentrySummary);
 
   const concern = data.customerConcernCard || v2Concern || null;
   const isWaveGuard = Boolean(data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard);
@@ -837,8 +851,8 @@ export default function ServiceReportDocument({ data, token }) {
             {reentry?.irrigationReadyAt && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
-            {hasActualTreatment && data.reportV2?.aftercare?.reentry && (
-              <Bullet>{data.reportV2.aftercare.reentry}</Bullet>
+            {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) && (
+              <Bullet>{sanitizeReentryCopy(data.reportV2.aftercare.reentry)}</Bullet>
             )}
           </div>
         )}
@@ -895,7 +909,7 @@ export default function ServiceReportDocument({ data, token }) {
                             )}
                             <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
                             {(product.precaution_summary || product.reentry_summary) && (
-                              <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].filter(Boolean).join(' ')}</div>
+                              <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}
                             {/* Legacy lawn reports (no reportV2) carry approved
                                 watering-in guidance ONLY here — dropping it

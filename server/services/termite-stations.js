@@ -872,8 +872,18 @@ async function stationMapPdfSignature(service, knex) {
       .orderBy('version', 'desc')
       .first('zoom', 'version')
       .catch(() => null);
-    const lat = service?.customer_latitude ?? service?.latitude ?? null;
-    const lng = service?.customer_longitude ?? service?.longitude ?? null;
+    // Read coordinates HERE rather than off the caller's row. The two paths
+    // that compose this key load different column sets (the queue path uses a
+    // lightweight explicit select; renderAndStore joins customers), so any
+    // signature input taken from `service` silently differs between them and
+    // the expected key can never match the stored one — a permanent cache
+    // miss that re-renders every emailed report. Same input, every caller.
+    const customer = await knex('customers')
+      .where({ id: customerId })
+      .first('latitude', 'longitude')
+      .catch(() => null);
+    const lat = customer?.latitude ?? null;
+    const lng = customer?.longitude ?? null;
     const centerPart = lat != null && lng != null
       ? `g${Number(lat).toFixed(5)},${Number(lng).toFixed(5)}`
       : '';

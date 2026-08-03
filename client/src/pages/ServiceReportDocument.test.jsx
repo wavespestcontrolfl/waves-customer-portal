@@ -735,6 +735,29 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(done.container.textContent).toMatch(/ready for normal use/);
   });
 
+  it('sanitizes fixed timing out of label-derived re-entry copy too', () => {
+    // catalog precaution/reentry text is unconstrained free text
+    const app = {
+      ...BASE_DATA.applications[0],
+      product: { ...BASE_DATA.applications[0].product, precaution_summary: 'Keep people and pets off treated areas for about 1 hour.', reentry_summary: 'Re-enter after 45 minutes.' },
+    };
+    const data = { ...BASE_DATA, applications: [app], reportV2: { aftercare: { reentry: 'Safe to re-enter in 2 hours.' } } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toMatch(/about 1 hour/i);
+    expect(container.textContent).not.toMatch(/45 minutes/i);
+    expect(container.textContent).not.toMatch(/in 2 hours/i);
+    expect(container.textContent).toMatch(/once dry/i);
+  });
+
+  it('keeps label copy that asserts no timing', () => {
+    const app = {
+      ...BASE_DATA.applications[0],
+      product: { ...BASE_DATA.applications[0].product, precaution_summary: 'Keep people and pets off treated areas until sprays have dried.' },
+    };
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="t" />);
+    expect(container.textContent).toMatch(/until sprays have dried/);
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();
