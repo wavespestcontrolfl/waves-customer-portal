@@ -79,6 +79,37 @@ function etDateOnlyToDate(value) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+/**
+ * The instant the ET calendar day `days` after `from` ends.
+ *
+ * The customer is given a DATE ("book by September 2"), so the deadline has
+ * to be the end of that day in Eastern time — not a fixed multiple of 24
+ * hours from whenever the inspection was stamped, which would expire a
+ * promise mid-afternoon on the day the receipt named (Codex #3178 r2 P0).
+ */
+function etEndOfDayAfterDays(from, days) {
+  const base = from instanceof Date ? from : new Date(from);
+  const target = new Date(base.getTime() + Number(days) * 24 * 60 * 60 * 1000);
+  const etDate = target.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  // The exclusive end is ET midnight of the FOLLOWING day. ET is UTC-4 or
+  // UTC-5 depending on DST, so try both and keep whichever actually reads
+  // as 00:00 in New York — hardcoding either offset lands an hour early or
+  // an hour late half the year.
+  const dayAfter = new Date(`${etDate}T12:00:00Z`);
+  dayAfter.setUTCDate(dayAfter.getUTCDate() + 1);
+  const nextEtDate = dayAfter.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  for (const offset of ['04:00:00', '05:00:00']) {
+    const candidate = new Date(`${nextEtDate}T${offset}Z`);
+    const parts = candidate.toLocaleString('en-US', {
+      timeZone: 'America/New_York', hour12: false, hour: '2-digit', minute: '2-digit',
+    });
+    if (parts.startsWith('00:00')) return candidate;
+  }
+  // Unreachable in practice; the later boundary is the customer-favorable
+  // direction if a locale ever surprises us.
+  return new Date(`${nextEtDate}T05:00:00Z`);
+}
+
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -147,7 +178,11 @@ async function recordInspectionCreditOffer({
   }
 
   const windowDays = creditWindowDaysForServiceKey(serviceKey);
-  const expiresAt = new Date(now.getTime() + windowDays * 24 * 60 * 60 * 1000);
+  // END OF THE ET DAY, not now + N×24h (Codex #3178 r2 P0): the receipt
+  // prints a calendar deadline ("book by September 2"), so a booking made
+  // that afternoon must still qualify. Fixed 24-hour periods from a
+  // 16:00Z anchor would have rejected it.
+  const expiresAt = etEndOfDayAfterDays(now, windowDays);
 
   try {
     // onConflict().ignore() on the unique source visit — a completion
@@ -599,20 +634,17 @@ async function reverseInspectionCreditForBooking({
         // a log line nobody reads — the same posture as every other
         // unreversible money event in this codebase (Codex #3175 r4 P0).
         logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
-        // Alert ONCE (Codex #3178 P2): the hourly sweep re-selects this
-        // offer forever, and a fresh bell every hour trains the office to
-        // ignore it. The durable marker is the note column.
+        // Alert ONCE, but only once one actually LANDED (Codex #3178 r2
+        // P1): notifyAdmin returns null rather than throwing when its
+        // insert fails, so marking first would suppress the alert forever
+        // on a transient failure. Marker follows confirmed delivery.
         try {
-          const marked = await db('inspection_credit_offers')
+          const already = await db('inspection_credit_offers')
             .where({ id: offer.id })
-            .whereNull('reversal_alerted_at')
-            .update({ reversal_alerted_at: new Date(), updated_at: db.fn.now() });
-          if (marked !== 1) continue;
-        } catch (markErr) {
-          logger.warn(`[inspection-credit] alert dedupe marker failed for offer ${offer.id}: ${markErr.message}`);
-        }
-        try {
-          await require('./notification-service').notifyAdmin(
+            .whereNotNull('reversal_alerted_at')
+            .first('id');
+          if (already) continue;
+          const notified = await require('./notification-service').notifyAdmin(
             'billing',
             'Inspection credit could not be reversed',
             `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
@@ -621,6 +653,13 @@ async function reverseInspectionCreditForBooking({
               metadata: { offerId: offer.id, scheduledServiceId, reason: 'credit_already_spent' },
             },
           );
+          if (notified) {
+            await db('inspection_credit_offers')
+              .where({ id: offer.id })
+              .update({ reversal_alerted_at: new Date(), updated_at: db.fn.now() });
+          } else {
+            logger.warn(`[inspection-credit] spent-credit alert not delivered for offer ${offer.id} — will retry next sweep`);
+          }
         } catch (notifyErr) {
           logger.error(`[inspection-credit] reversal alert failed for offer ${offer.id}: ${notifyErr.message}`);
         }

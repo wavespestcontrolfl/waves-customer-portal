@@ -103,8 +103,12 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
     expect(res.recorded).toBe(true);
     expect(res.amount).toBe(75);
     expect(res.windowDays).toBe(DEFAULT_CREDIT_WINDOW_DAYS);
-    // +30 days, frozen — not a live config read at redemption.
-    expect(res.expiresAt.toISOString()).toBe('2026-09-02T12:00:00.000Z');
+    // The deadline is the END of the ET day 30 days out — the receipt
+    // prints a calendar date, so that whole day must remain bookable.
+    const lastMoment = new Date(res.expiresAt.getTime() - 1000)
+      .toLocaleString('en-US', { timeZone: 'America/New_York' });
+    expect(lastMoment).toContain('9/2/2026');
+    expect(lastMoment).toContain('11:59:59 PM');
     // The whole point: no ledger movement happens at closeout.
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
