@@ -1959,9 +1959,44 @@ function passiveRecheckOnTrap(clause) {
 // Clause split: sentence enders plus the coordinators that introduce a NEW
 // verb phrase, so "we inspected the attic AND set eight traps" is judged as
 // two clauses rather than one 40-character window.
+//
+// `and` is the one coordinator that has to be CONDITIONAL, because it does
+// two different jobs. Splitting it unconditionally cut coordinated objects
+// in half — "we checked the snap and glue traps" became "we checked the
+// snap" (a verb with no trap) plus "glue traps today" (a trap with no verb),
+// and neither half matched, so the claim published on a declared setup
+// (codex P1 round 9). It only starts a new clause when a VERB follows it;
+// joining an object's modifiers, it does not.
+const CLAUSE_BREAK_RE = /[.!?;,]|\b(?:but|then|while|before|after|so)\b/i;
+// Verbs a SETUP legitimately performs. Not re-check claims themselves — they
+// exist only to recognize that a new predicate has started after `and`.
+const PREDICATE_VERB = /^(?:set|sets|setting|place[sd]?|placing|install(?:ed|ing|s)?|add(?:ed|ing|s)?|bait(?:ed|ing|s)?|position(?:ed|ing|s)?|remove[sd]?|removing|seal(?:ed|ing|s)?|document(?:ed|ing|s)?|note[sd]?|noting|monitor(?:ed|ing|s)?|treat(?:ed|ing|s)?|found|left)$/i;
+// Skipped when deciding what follows `and`, so "and carefully set …" is still
+// recognized as a new predicate rather than read as an object modifier.
+const ADVERBIAL = /ly$|^(?:also|again|now|today|just|already)$/i;
+
+function splitOnPredicateAnd(piece) {
+  const toks = words(piece);
+  const out = [];
+  let start = 0;
+  for (let i = 0; i < toks.length; i += 1) {
+    if (!/^and$/i.test(toks[i])) continue;
+    let j = i + 1;
+    while (j < toks.length && ADVERBIAL.test(toks[j])) j += 1;
+    const next = toks[j];
+    if (next && (RECHECK_VERB.test(next) || PREDICATE_VERB.test(next))) {
+      out.push(toks.slice(start, i).join(' '));
+      start = i + 1;
+    }
+  }
+  out.push(toks.slice(start).join(' '));
+  return out;
+}
+
 function clauses(text) {
   return String(text || '')
-    .split(/[.!?;,]|\b(?:and|but|then|while|before|after|so)\b/i)
+    .split(CLAUSE_BREAK_RE)
+    .flatMap((piece) => splitOnPredicateAnd(piece || ''))
     .map((c) => c.trim())
     .filter(Boolean);
 }
@@ -2050,6 +2085,14 @@ function countContradictions(text, values = {}) {
   const str = normalizeWordNumbers(text);
   const found = [];
   const check = (claims, raw, kind) => {
+    // A CLEARED field is missing, not zero. The closeout keeps '' in values
+    // when the tech types a count and then deletes it, and both Number('')
+    // and Number(null) are 0 — which would read as "the tech recorded zero"
+    // and silently reject any body that mentions a count (codex P2 round 9).
+    // Blank has to short-circuit before the coercion, or the unverifiable
+    // case documented above does not actually cover the common way a value
+    // goes missing.
+    if (raw === null || raw === undefined || String(raw).trim() === '') return;
     const actual = Number(raw);
     if (!Number.isInteger(actual) || claims.size !== 1) return;
     const [claimed] = [...claims];

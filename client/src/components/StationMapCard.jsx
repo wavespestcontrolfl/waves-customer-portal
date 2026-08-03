@@ -77,8 +77,13 @@ function stationStatusMeta(status, programMeta, plan = false, initialSetup = fal
   return base;
 }
 
-function stationSummaryLine(summary, programMeta, initialSetup = false) {
+function stationSummaryLine(summary, programMeta, initialSetup = false, countVerified = true) {
   if (!summary || !summary.total) return null;
+  // On a declared setup whose count the report disputes, the pin LABELS stay
+  // setup-correct but this line says nothing — it is the only place the map
+  // restates the number, and restating a number that disagrees with the
+  // typed finding is the contradiction being avoided (codex P2 round 9).
+  if (initialSetup && !countVerified) return null;
   const parts = [];
   // Same rule as the pin label: traps placed today were SET, not inspected.
   // Counts the ACCESSIBLE pins, not every pin — `checked` excludes
@@ -293,6 +298,9 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
   // A declared trap SETUP is a per-VISIT fact, so it never applies to the
   // 'plan' variant (that embed aggregates the latest check across visits).
   const initialSetup = !plan && stationMap.initialSetup === true;
+  // Absent (older payloads) means "no dispute recorded" — only an explicit
+  // false suppresses the count line.
+  const setupCountVerified = stationMap.setupCountVerified !== false;
   const intro = plan
     ? programMeta.intro.replace('Colors reflect this visit.', PLAN_INTRO_SUFFIX)
     : (initialSetup
@@ -308,7 +316,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
   const legend = legendKeys.map((key) => (key === 'on_file'
     ? { key, ...onFileMeta }
     : { key, ...stationStatusMeta(key, programMeta, plan, initialSetup) }));
-  const summaryLine = stationSummaryLine(stationMap.summary, programMeta, initialSetup);
+  const summaryLine = stationSummaryLine(stationMap.summary, programMeta, initialSetup, setupCountVerified);
   const mutedColor = plan ? '#475569' : 'var(--muted)';
   const lineColor = plan ? '#E7E2D7' : 'var(--line)';
   const Wrapper = plan ? 'div' : 'section';

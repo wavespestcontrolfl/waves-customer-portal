@@ -1058,3 +1058,42 @@ test('moving or retiring an existing station never rewrites its ownership', asyn
   // A renter relocating a station they BOUGHT keeps owning it.
   expect(state.stations.find((row) => row.id === 'st-1').owned_by).toBe('customer');
 });
+
+// A declared trap setup and a disputed COUNT are separate facts. Round 6
+// withheld initialSetup entirely on a count mismatch, which did not make the
+// map neutral — without the flag the card falls back to re-check wording, so
+// a declared setup published "inspected" beside "Traps set: 6" (codex P2
+// round 9). The stage now always survives; only the number is suppressed.
+test('a disputed trap count suppresses the map count, not the setup stage', () => {
+  const rows = [
+    stationRow('st-r1', 1, pin(0.2, 0.3), { program: 'trapping' }),
+    stationRow('st-r2', 2, pin(0.4, 0.5), { program: 'trapping' }),
+  ];
+  const context = (typedTrapCount) => buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [
+      { station_id: 'st-r1', status: 'ok' },
+      { station_id: 'st-r2', status: 'ok' },
+    ],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_trapping'],
+    serviceDate: '2026-07-13',
+    initialSetup: true,
+    typedTrapCount,
+  });
+
+  const agreeing = context(2);
+  expect(agreeing.initialSetup).toBe(true);
+  expect(agreeing.setupCountVerified).toBe(true);
+
+  // The tech hand-edited traps_checked away from the pin count.
+  const disputed = context(6);
+  expect(disputed.initialSetup).toBe(true);      // stage is declared, not disputed
+  expect(disputed.setupCountVerified).toBe(false); // the number is
+
+  // No typed count to compare against is not a dispute.
+  const unknown = context(null);
+  expect(unknown.initialSetup).toBe(true);
+  expect(unknown.setupCountVerified).toBe(true);
+});

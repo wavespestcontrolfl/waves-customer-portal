@@ -983,6 +983,33 @@ describe('setup matcher scans past adverbs in the passive (round 8)', () => {
   });
 });
 
+describe('coordinated trap objects stay in one clause (round 9)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('`and` joining an object\'s modifiers does not split the claim apart', () => {
+    for (const text of [
+      'We checked the snap and glue traps today.',
+      'We reset the snap and glue traps.',
+      'We inspected the wooden and metal traps.',
+      'The snap and glue traps were checked.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('`and` introducing a new predicate still splits, including after an adverb', () => {
+    for (const text of [
+      'We inspected the attic and set eight traps today.',
+      'We inspected the attic and carefully set eight traps.',
+      'We baited and set the traps.',
+      'We inspected the exterior and placed the devices.',
+      'We set the snap and glue traps today.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});
+
 describe('technician body count claims reconcile against the typed values (round 8)', () => {
   const { countContradictions } = require('../services/service-report/activity-indicators');
 
@@ -1010,5 +1037,25 @@ describe('technician body count claims reconcile against the typed values (round
     // nothing structured to reconcile against is unverifiable, not wrong
     expect(countContradictions('We checked 8 traps today.', {})).toEqual([]);
     expect(countContradictions('We checked the traps today.', { traps_checked: 6 })).toEqual([]);
+  });
+
+  // Round 9: a CLEARED field is missing, not zero — Number('') is 0, which
+  // would read as "the tech recorded zero" and reject any body with a count.
+  test('a blank or cleared count is unverifiable, not a recorded zero', () => {
+    for (const values of [
+      { traps_checked: '' },
+      { traps_checked: null },
+      { traps_checked: '   ' },
+      { traps_checked: undefined },
+    ]) {
+      expect(countContradictions('We checked 8 traps today.', values)).toEqual([]);
+    }
+    for (const values of [{ captures: '' }, { captures: null }]) {
+      expect(countContradictions('We removed 2 rats from the traps.', values)).toEqual([]);
+    }
+    // a real zero still reconciles
+    expect(countContradictions('There were 3 captures.', { captures: 0 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('There were 0 captures.', { captures: 0 })).toEqual([]);
   });
 });

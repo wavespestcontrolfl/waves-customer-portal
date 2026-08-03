@@ -752,16 +752,24 @@ function buildStationMapReportContext({
     // Trapping only: a setup declaration has no meaning for bait stations,
     // which are installed once and checked forever.
     //
-    // Also withheld when the map's own accessible-pin count disagrees with
-    // the typed count the report publishes (codex P2 on #3159). The closeout
-    // autofills traps_checked from the pins but RELINQUISHES the field once
-    // the tech hand-edits it, so the two can legitimately diverge — and the
-    // setup summary is the one line that restates that number back to the
-    // customer. When they disagree we say nothing rather than contradict the
-    // typed finding; the map keeps its neutral wording.
+    // A count disagreement suppresses only the NUMBER, never the stage. An
+    // earlier revision withheld `initialSetup` entirely on a mismatch, on the
+    // theory that the map then stayed neutral — it does not. Without the flag
+    // the card falls back to re-check wording ("Checked — no capture",
+    // "8 of 8 stations inspected"), so a declared setup published inspection
+    // language beside "Traps set: 6" — a worse contradiction than the one the
+    // withholding was meant to avoid (codex P2 round 9).
+    //
+    // The stage is declared by the tech and is not in dispute; only the count
+    // is. The closeout autofills traps_checked from the pins but RELINQUISHES
+    // the field once the tech hand-edits it, so the two can legitimately
+    // diverge. So: keep the setup labels, and let the card drop the summary
+    // line that would restate the disputed number.
     ...(initialSetup && program === 'trapping'
-      && (typedTrapCount == null || typedTrapCount === summary.checked)
-      ? { initialSetup: true }
+      ? {
+        initialSetup: true,
+        setupCountVerified: typedTrapCount == null || typedTrapCount === summary.checked,
+      }
       : {}),
     image: {
       url: satelliteMap.live.url,
