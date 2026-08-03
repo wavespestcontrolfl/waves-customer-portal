@@ -952,6 +952,24 @@ describe('admin customers route helpers', () => {
     const [rodentAliasLine] = scheduleLinesFromEstimate(nameOnlyRodent, rodentIndex);
     expect(rodentAliasLine.perApplicationPrice).toBeUndefined();
     expect(rodentAliasLine.monthlyPrice).toBe(39);
+    // Specialty one-time rows (exclusion et al.) travel the specItems
+    // branch — they carry the accepted net too (codex r6).
+    const specialtyDiscounted = {
+      id: 'est-pa-13',
+      onetime_total: 400,
+      estimate_data: {
+        result: {
+          oneTime: { specItems: [
+            { service: 'exclusion', name: 'Exclusion Work', price: 500, manualFinalOneTime: 400 },
+          ] },
+        },
+      },
+    };
+    const specLines = scheduleLinesFromEstimate(specialtyDiscounted, index);
+    const exclusion = specLines.find((l) => /exclusion/i.test(l.name));
+    expect(exclusion.acceptedOneTimePrice).toBe(400);
+    expect(exclusion.price).toBe(500);
+
 
 
 

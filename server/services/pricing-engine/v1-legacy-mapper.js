@@ -874,6 +874,11 @@ function mapV1ToLegacyShape(v1Result) {
       const mappedDetail = termiticideDetail(li, detail);
       v1SpecItems.push({
         service: li.service, name, price, det: mappedDetail,
+        // Accepted NET after a manual discount hit this specialty line —
+        // `price` stays GROSS, same contract as the ONE_TIME_SERVICES
+        // branch. Zero is a real accepted value.
+        ...(Number.isFinite(Number(li.manualFinalOneTime))
+          ? { manualFinalOneTime: Number(li.manualFinalOneTime) } : {}),
         onProg: !!li.includedOnProgram,
         quoteRequired,
         reason: li.reason,
@@ -1071,6 +1076,10 @@ function mapV1ToLegacyShape(v1Result) {
           service: s.service,
           name: s.name,
           price: s.quoteRequired ? null : s.price,
+          // Accepted NET rides with the gross price (never for a
+          // quote-required row, which has no accepted amount yet).
+          ...(!s.quoteRequired && Number.isFinite(Number(s.manualFinalOneTime))
+            ? { manualFinalOneTime: Number(s.manualFinalOneTime) } : {}),
           detail: s.det,
           exteriorDetail: s.exteriorDetail,
           warning: s.warning,
