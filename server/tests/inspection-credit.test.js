@@ -18,6 +18,11 @@ jest.mock('../services/customer-credit', () => ({
   postCreditMovement: (...a) => mockPostCreditMovement(...a),
 }));
 
+const mockNotifyAdmin = jest.fn(async () => ({ id: 'notif-1' }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: (...a) => mockNotifyAdmin(...a),
+}));
+
 let mockOffers = [];
 let mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date() }];
 let mockClaimResult = 1;
@@ -278,9 +283,13 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     const [args] = mockPostCreditMovement.mock.calls[0];
     // NEGATIVE delta — the money goes back.
     expect(args).toMatchObject({ customerId: 'cust-1', delta: -75, source: 'inspection_credit' });
-    // Reopened so a real booking can still earn it, and the mint binding
-    // cleared so it can mint again.
-    expect(mockUpdates[0]).toMatchObject({ status: 'offered', credit_ledger_id: null, redeemed_at: null });
+    // Reopened so a real booking can still earn it, the mint binding
+    // cleared so it can mint again, and the alert marker cleared so the
+    // reopened offer gets a fresh alert cycle (a stale marker from an
+    // earlier failed attempt would suppress a future spent-credit alert).
+    expect(mockUpdates[0]).toMatchObject({
+      status: 'offered', credit_ledger_id: null, redeemed_at: null, reversal_alerted_at: null,
+    });
   });
 
   it('rebinds instead of reversing when another live booking still stands in the window', async () => {
@@ -306,6 +315,42 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     }];
     await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
     expect(mockUpdates[0]).toMatchObject({ status: 'expired' });
+  });
+
+  it('spent credit raises the office alert atomically with the marker claim', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      expires_at: new Date('2099-01-01'), credit_ledger_id: 'ledger-1',
+    }];
+    // The credit was already spent: the ledger refuses to go negative.
+    mockPostCreditMovement.mockRejectedValueOnce(new Error('insufficient balance'));
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, , , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(category).toBe('billing');
+    expect(opts.metadata).toMatchObject({ offerId: 'offer-1', reason: 'credit_already_spent' });
+    // The insert rides the SAME transaction as the marker claim, so a
+    // crash between the two can't split them.
+    expect(opts.connection).toBeDefined();
+    // The claim itself: marker stamped, guarded on being unset.
+    expect(mockUpdates.some((p) => p.reversal_alerted_at instanceof Date)).toBe(true);
+  });
+
+  it('a swallowed notification failure releases the marker claim for the next sweep', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      expires_at: new Date('2099-01-01'), credit_ledger_id: 'ledger-1',
+    }];
+    mockPostCreditMovement.mockRejectedValueOnce(new Error('insufficient balance'));
+    // notifyAdmin returns null instead of throwing when its insert fails.
+    mockNotifyAdmin.mockResolvedValueOnce(null);
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ reversed: 0 });
+    // The claim is thrown back (transaction rollback) and logged for retry
+    // — never marked as alerted when nothing landed.
+    const logger = require('../services/logger');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('will retry next sweep'));
   });
 });
 

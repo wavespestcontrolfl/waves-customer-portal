@@ -705,6 +705,11 @@ async function reverseInspectionCreditForBooking({
               redeemed_at: null,
               redeemed_scheduled_service_id: null,
               credit_ledger_id: null,
+              // A successful reversal starts a fresh alert cycle (Codex
+              // #3178 r9 P2): a stale marker from an earlier FAILED attempt
+              // would suppress the one alert a future spent-credit failure
+              // on the reopened offer is allowed to raise.
+              reversal_alerted_at: null,
               updated_at: trx.fn.now(),
             });
           if (claimed !== 1) {
@@ -731,34 +736,45 @@ async function reverseInspectionCreditForBooking({
         // a log line nobody reads — the same posture as every other
         // unreversible money event in this codebase (Codex #3175 r4 P0).
         logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
-        // Alert ONCE, but only once one actually LANDED (Codex #3178 r2
-        // P1): notifyAdmin returns null rather than throwing when its
-        // insert fails, so marking first would suppress the alert forever
-        // on a transient failure. Marker follows confirmed delivery.
+        // Alert ONCE, atomically (Codex #3178 r9 P2, tightening r2 P1):
+        // the marker CLAIM and the notification insert commit together.
+        // Claiming first — guarded on the marker being unset — row-locks
+        // the offer so concurrent sweeps can't double-alert; if the insert
+        // doesn't land, the rollback clears the claim and the next sweep
+        // retries. The marker still never outlives a delivery that didn't
+        // happen, it just can't drift from one that did.
         try {
-          const already = await db('inspection_credit_offers')
-            .where({ id: offer.id })
-            .whereNotNull('reversal_alerted_at')
-            .first('id');
-          if (already) continue;
-          const notified = await require('./notification-service').notifyAdmin(
-            'billing',
-            'Inspection credit could not be reversed',
-            `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
-            {
-              link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
-              metadata: { offerId: offer.id, scheduledServiceId, reason: 'credit_already_spent' },
-            },
-          );
-          if (notified) {
-            await db('inspection_credit_offers')
+          await db.transaction(async (trx) => {
+            const alertClaimed = await trx('inspection_credit_offers')
               .where({ id: offer.id })
-              .update({ reversal_alerted_at: new Date(), updated_at: db.fn.now() });
-          } else {
-            logger.warn(`[inspection-credit] spent-credit alert not delivered for offer ${offer.id} — will retry next sweep`);
-          }
+              .whereNull('reversal_alerted_at')
+              .update({ reversal_alerted_at: new Date(), updated_at: trx.fn.now() });
+            if (alertClaimed !== 1) return; // already alerted
+            const notified = await require('./notification-service').notifyAdmin(
+              'billing',
+              'Inspection credit could not be reversed',
+              `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
+              {
+                link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
+                metadata: { offerId: offer.id, scheduledServiceId, reason: 'credit_already_spent' },
+                connection: trx,
+              },
+            );
+            if (!notified) {
+              // notifyAdmin swallows its own insert failure and returns
+              // null; throwing rolls the claim back so the next sweep
+              // retries the alert.
+              const e = new Error('spent-credit alert did not land');
+              e.inspectionCreditSkip = 'alert_not_delivered';
+              throw e;
+            }
+          });
         } catch (notifyErr) {
-          logger.error(`[inspection-credit] reversal alert failed for offer ${offer.id}: ${notifyErr.message}`);
+          if (notifyErr?.inspectionCreditSkip === 'alert_not_delivered') {
+            logger.warn(`[inspection-credit] spent-credit alert not delivered for offer ${offer.id} — will retry next sweep`);
+          } else {
+            logger.error(`[inspection-credit] reversal alert failed for offer ${offer.id}: ${notifyErr.message}`);
+          }
         }
       }
     }
