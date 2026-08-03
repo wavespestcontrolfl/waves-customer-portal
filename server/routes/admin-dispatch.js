@@ -6527,6 +6527,37 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       } catch (creditErr) {
         logger.error(`[dispatch] inspection credit offer failed for ${svc.id}: ${creditErr.message}`);
       }
+      // Prepaid/pre-minted inspections settle BEFORE the offer exists, so
+      // their receipt went out without the written deadline (Codex #3178
+      // P2). Resend the receipt now that the memo lookup can see the
+      // offer — only on the FIRST record (recorded:true), only for an
+      // invoice already paid (an unpaid one gets the memo on its normal
+      // receipt), and never payer-billed (a third party's AP inbox must
+      // not hear about the homeowner's credit). Fire-and-forget: the tech
+      // is standing in the driveway and the completion never waits on an
+      // email; sendReceiptEmail's idempotency key makes replays safe.
+      if (inspectionCreditOffer?.recorded && inspectionCreditOffer.offerId) {
+        const offerId = inspectionCreditOffer.offerId;
+        const visitId = svc.id;
+        setImmediate(() => {
+          void (async () => {
+            try {
+              const paidInvoice = await db('invoices')
+                .where({ scheduled_service_id: visitId, status: 'paid' })
+                .whereNull('payer_id')
+                .orderBy('created_at', 'desc')
+                .first('id');
+              if (!paidInvoice) return;
+              const { sendReceiptEmail } = require('../services/invoice-email');
+              await sendReceiptEmail(paidInvoice.id, {
+                idempotencyKey: `inspection-credit-offer-${offerId}`,
+              });
+            } catch (resendErr) {
+              logger.warn(`[dispatch] inspection credit receipt resend failed for ${visitId}: ${resendErr.message}`);
+            }
+          })();
+        });
+      }
     }
 
     if (!completionPhotosUploadedBeforeCommit && Array.isArray(completionPhotos) && completionPhotos.length) {
