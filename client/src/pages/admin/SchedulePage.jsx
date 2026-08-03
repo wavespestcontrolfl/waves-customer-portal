@@ -2679,7 +2679,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <EstimateProvenanceCard
                   quotedTotal={estimateSource.quotedTotal}
                   onetimeTotal={estimateSource.onetimeTotal}
-                  currentPrice={appointmentTotal}
+                  // Single-appointment context (same rule as the mobile
+                  // sheet): a multi-service estimate books separate rows, so
+                  // this row's total must not be compared against the whole
+                  // estimate — suppress unless exactly one priced line.
+                  currentPrice={(estimateSource.lines || []).filter((l) => Number(l?.price) > 0).length > 1
+                    ? null : appointmentTotal}
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
                   lines={estimateSource.lines}
