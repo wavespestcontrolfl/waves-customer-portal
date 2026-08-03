@@ -651,12 +651,6 @@ async function main() {
         )
         : []),
     ];
-    // An orphan flag is written even when the webhook WON the race and settled
-    // the invoice — production calls that the happy self-heal (:8481-8486) but
-    // still writes charge_failed with orphaned=true (:8505-8507). If the
-    // resolved invoice now reads paid/prepaid, money and records agree and
-    // there is nothing to reconcile; telling the operator otherwise sends them
-    // after a ledger that is already correct.
     // Outcomes belonging to a different invoice on this visit (refunded,
     // replaced, superseded) are deliberately NOT evidence about the resolved
     // one — say so, or the tool looks like it ignored the log.
@@ -664,10 +658,35 @@ async function main() {
       console.log(`  (${otherInvoiceOutcomes.length} terminal outcome(s) on this visit belong to a DIFFERENT invoice`);
       console.log(`   and are not evidence about ${inv ? inv.id : 'the resolved invoice'} — see [OTHER INVOICE] above.)`);
     }
+
+    // An orphan flag is written even when the webhook WON the race and settled
+    // the invoice — production calls that the happy self-heal (:8481-8486) but
+    // still writes charge_failed with orphaned=true (:8505-8507).
+    //
+    // "Invoice is settled" alone does NOT prove that self-heal, though: a
+    // retry, an operator collection, or the customer paying the pay link also
+    // leaves it paid, and in those cases the orphaned PaymentIntent may ALSO
+    // have taken money — a duplicate charge that still needs reconciling. The
+    // audit row does not record the PI, so this cannot be settled from the DB;
+    // it is reported as inconclusive with the exact Stripe check to run, and
+    // never silently cleared.
     const unresolvedLedger = invSettled ? [] : flaggedLedger;
     if (invSettled && flaggedLedger.length) {
-      console.log(`  (${flaggedLedger.length} orphan/reconciliation flag(s) on this visit SELF-HEALED —`);
-      console.log(`   the webhook settled invoice ${inv.id} to '${invStatus}', so money and records agree.)`);
+      console.log('  INCONCLUSIVE — an orphan/reconciliation flag exists AND the invoice is settled.');
+      console.log('  Those two facts fit two very different stories:');
+      console.log(`    - the webhook won the race and settled invoice ${inv.id} itself (self-heal, nothing owed), or`);
+      console.log('    - the orphaned charge took money AND something else (retry, pay link, operator)');
+      console.log('      paid the invoice — a DUPLICATE charge that still needs reconciling.');
+      for (const { l, d } of flaggedLedger) {
+        console.log(`    flagged: ${l.created_at.toISOString()} ${l.event_type}`
+          + `${d.orphaned ? ' ORPHANED' : ''}${d.reconciliation_required ? ' reconciliation_required' : ''}`);
+      }
+      console.log(`\n  Verify in Stripe: does ${inv.stripe_payment_intent_id
+        ? `PaymentIntent ${inv.stripe_payment_intent_id}`
+        : 'the invoice\'s PaymentIntent'} account for the full settled amount,`);
+      console.log(`  and is there any SECOND successful charge against invoice ${inv.id}?`);
+      process.exitCode = 2;
+      return;
     }
     if (unresolvedLedger.length) {
       console.log('  RECONCILE — this visit has an unresolved ledger problem, which outranks');
@@ -725,6 +744,33 @@ async function main() {
       return;
     }
 
+    // Evaluated BEFORE the state-derived blockers: a settled invoice ALWAYS
+    // adds its own "the resolved invoice is paid" BLOCK, which would otherwise
+    // return first and name the current paid state as the historical reason
+    // the charge was skipped — making this branch unreachable and the verdict
+    // wrong. The settlement is the thing that needs explaining here, not a
+    // blocker, so it is answered ahead of the replay.
+    if (unattributedSettlement) {
+      console.log(`  INCONCLUSIVE — the invoice is ${invStatus}, but NO charge event is recorded`);
+      console.log('  against it, so the payment cannot be attributed. Both of these fit equally:');
+      console.log('    - the lane charged the card and the best-effort audit insert failed');
+      console.log('      (its error is swallowed after the invoice is already paid), or');
+      console.log('    - the customer paid the generated pay link, or an operator collected.');
+      console.log(`\n  Settle it in Stripe: ${inv?.stripe_payment_intent_id
+        ? `PaymentIntent ${inv.stripe_payment_intent_id}`
+        : 'no PaymentIntent on the invoice'} — an off-session charge from this`);
+      console.log('  lane is distinguishable there from a customer-initiated payment.');
+      const otherBlocks = findings.filter((f) => f.level === BLOCK
+        && !/the resolved invoice is (paid|prepaid)/.test(f.label));
+      if (otherBlocks.length) {
+        console.log(`\n  ${otherBlocks.length} lane blocker(s) also present — if the payment turns out to be`);
+        console.log('  customer-initiated, these are the reason the auto-charge never ran:');
+        for (const f of otherBlocks) console.log(`    - ${f.label}`);
+      }
+      process.exitCode = 2;
+      return;
+    }
+
     const firstBlockIdx = findings.findIndex((f) => f.level === BLOCK);
     const firstUnknownIdx = findings.findIndex((f) => f.level === UNKNOWN);
     const firstBlock = firstBlockIdx === -1 ? null : findings[firstBlockIdx];
@@ -757,18 +803,6 @@ async function main() {
       console.log('  INCONCLUSIVE — nothing blocked among the conditions this script could check,');
       console.log('  but the following could not be verified, so the lane is NOT cleared:');
       for (const u of unknowns) console.log(`    - ${u.label}`);
-      process.exitCode = 2;
-    } else if (unattributedSettlement) {
-      console.log('  INCONCLUSIVE — every lane condition passed and the invoice is now');
-      console.log(`  ${invStatus}, but NO charge event is recorded against it, so the payment`);
-      console.log('  cannot be attributed. Both of these fit the evidence equally:');
-      console.log('    - the lane charged the card and the best-effort audit insert failed');
-      console.log('      (its error is swallowed after the invoice is already paid), or');
-      console.log('    - the customer paid the generated pay link, or an operator collected.');
-      console.log(`  Settle it in Stripe: ${inv?.stripe_payment_intent_id
-        ? `PaymentIntent ${inv.stripe_payment_intent_id}`
-        : 'no PaymentIntent on the invoice'} — an off-session charge from this lane`);
-      console.log('  is distinguishable there from a customer-initiated payment.');
       process.exitCode = 2;
     } else {
       console.log('  Every lane condition was verified and passed, and no charge failure is recorded.');
