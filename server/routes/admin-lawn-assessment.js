@@ -984,12 +984,11 @@ router.post('/confirm', async (req, res, next) => {
 
         // 5. Standalone lawn assessments (fallback customer picker, no
         //    scheduled service — service_id is null) have no later completion
-        //    SMS to fold the score into, so they still get the standalone
-        //    "lawn health report ready" notification. Assessments linked to a
-        //    service instead get the score folded into the single completion
-        //    service-report text (see admin-dispatch completion +
-        //    LawnIntel.buildCompletionScoreBlock) so the customer gets one
-        //    message, not two. This step runs after recommendation generation
+        //    SMS at all, so they still get the standalone "lawn health report
+        //    ready" notification. Assessments linked to a service do NOT: that
+        //    visit's completion text is a short link to the report, and the
+        //    score lives on the report (owner ruling 2026-08-01 retired the
+        //    score fold-in). This step runs after recommendation generation
         //    (step 2) so the standalone notification's tip is populated.
         if (!updated.service_id) {
           await LawnIntel.sendAssessmentNotification(assessmentId);

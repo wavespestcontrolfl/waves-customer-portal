@@ -42,27 +42,14 @@ function serviceReportV1SmsType({ hasInvoiceLink = false } = {}) {
 //     came with the transaction, and Twilio enforces the STOP keyword at the
 //     account level whether or not the body advertises it. Opt-out wording
 //     belongs on estimates and the marketing-adjacent lanes only.
-//   - No lawn synthesis lead-in. Lawn reads exactly like pest; the score band
-//     and watering advice belong on the report, not in a text.
-function buildServiceReportV1Sms({
-  customerFirstName,
-  reportUrl,
-  payUrl,
-  serviceType,
-} = {}) {
-  const url = String(reportUrl || '').trim();
-  if (!url) return '';
-
-  const firstName = normalizeName(customerFirstName);
-  const greeting = firstName ? `Hi ${firstName},` : 'Hi,';
-  const lines = [`${greeting} your ${serviceTypeLabel(serviceType)} report is ready: ${url}`];
-
-  const invoiceUrl = String(payUrl || '').trim();
-  if (invoiceUrl) lines.push(`Invoice: ${invoiceUrl}`);
-
-  return lines.join('\n');
-}
-
+//   - No lawn synthesis lead-in and no score/tip fold-in. Lawn reads exactly
+//     like pest; the score band and watering advice belong on the report.
+//
+// There is no code-built body any more. Completion texts render from the
+// EDITABLE DB TEMPLATE for every service line, so these vars are the whole
+// contract between this module and what the customer receives — a second,
+// hand-assembled implementation could only drift from the template and give
+// tests false confidence about copy the deployed row does not render.
 function buildServiceReportV1SmsVars({
   customerFirstName,
   reportUrl,
@@ -100,7 +87,7 @@ function buildServiceReportV1DeliveryContext({
   payUrl,
 } = {}) {
   if (!shouldSendServiceReportV1Delivery(record)) {
-    return { enabled: false, body: '', smsType: null, metadata: {} };
+    return { enabled: false, smsType: null, metadata: {} };
   }
 
   const config = getServiceLineConfig(record.service_line || service?.service_type);
@@ -116,16 +103,8 @@ function buildServiceReportV1DeliveryContext({
     payUrl,
     serviceType,
   });
-  const body = buildServiceReportV1Sms({
-    customerFirstName: service?.first_name,
-    reportUrl: smsReportUrl || reportUrl,
-    payUrl,
-    serviceType,
-  });
-
   return {
     enabled: true,
-    body,
     vars,
     smsType,
     metadata: {
@@ -141,7 +120,6 @@ function buildServiceReportV1DeliveryContext({
 
 module.exports = {
   buildServiceReportV1DeliveryContext,
-  buildServiceReportV1Sms,
   buildServiceReportV1SmsVars,
   serviceReportV1SmsType,
   shouldSendServiceReportV1Delivery,

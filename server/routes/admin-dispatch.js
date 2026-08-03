@@ -8927,25 +8927,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
           } catch { /* best-effort — render-time reconciliation still applies */ }
         }
+        // The trace/applications lookup that used to feed this call is gone
+        // with the re-entry line. It existed so the SMS could apply the same
+        // read-time exterior normalization the report does (codex P2 #3007
+        // r12/r13); with no advisory in the text there is nothing to
+        // normalize, and resolveTracedExteriorZone queries scheduled_services,
+        // resolves a completion profile and reads treatment_zone_maps — real
+        // synchronous work on every completion whose result would be discarded.
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
-            // Trace evidence resolved here (async) so the sync SMS builder
-            // can apply the same read-time exterior normalization the
-            // report does (codex P2 #3007 r12).
-            record: {
-              ...record,
-              scheduled_service_id: record.scheduled_service_id || svc.id,
-              // The applied products can be the only exterior evidence
-              // (application_area) — the sync SMS normalizer needs them
-              // (codex P1 #3007 r13).
-              applications: (typeof products !== 'undefined' && Array.isArray(products)) ? products : [],
-              tracedExteriorZone: await require('../services/service-report/reentry')
-                .resolveTracedExteriorZone({
-                  scheduled_service_id: record.scheduled_service_id || svc.id,
-                  service_type: svc.service_type,
-                  interior_only_lane: completionProfile?.serviceKey === 'bed_bug_treatment',
-                }),
-            },
+            record,
             service: svc,
             reportUrl,
             smsReportUrl: reportSmsUrl,
@@ -9093,7 +9084,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // same content the synthesis lead-in carried, arriving by a second
         // route: lawn texts still read nothing like pest, and still ran long.
         // The score and the tip belong on the report, which the text links to.
-        // buildCompletionScoreBlock is untouched and still feeds the report.
+        // buildCompletionScoreBlock existed only to format that fold-in and had
+        // no other caller, so it is removed with it; computeAssessmentScoreParts
+        // stays — sendAssessmentNotification (unlinked assessments, manual
+        // re-send) still uses it.
         if (sentSmsBody) {
           // smsNotesDelta accumulates every key this SMS leg owns — each
           // persisted write below merges the delta only (mergeRecordNotesKeys),

@@ -8,7 +8,7 @@
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 const { reconcileLawnReport } = require('../services/service-report/report-consistency');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
-const { buildServiceReportV1Sms } = require('../services/service-report/delivery');
+const { buildServiceReportV1SmsVars } = require('../services/service-report/delivery');
 const { frozenSmsSummary } = require('../services/service-report/lawn-report-write-gate');
 
 const APPLICATIONS = [
@@ -118,22 +118,23 @@ describe('Lawn Report V2 — consistency golden fixtures', () => {
 
   // Owner ruling 2026-08-01: lawn reads like pest. The frozen synthesis (score
   // band + watering action) is still written to the record — the REPORT is its
-  // consumer — but it no longer leads the completion text, which is now the
-  // plain templated line for every service line.
-  test('SMS never carries the frozen synthesis line — lawn reads like pest', () => {
-    const summaryLine = 'Your St. Augustine lawn report is ready: stable — watching watering. Check sprinkler coverage there.';
-    const withSummary = buildServiceReportV1Sms({
-      customerFirstName: 'Tony', reportUrl: 'https://x/r/abc', serviceType: 'Lawn Care', summaryLine,
+  // consumer — but nothing about it reaches the completion text any more. The
+  // text renders from the DB template, and these vars are everything it gets,
+  // so a synthesis line could only appear if one were added HERE.
+  test('SMS vars carry nothing lawn-specific — lawn reads like pest', () => {
+    const lawn = buildServiceReportV1SmsVars({
+      customerFirstName: 'Tony', reportUrl: 'https://x/r/abc', serviceType: 'Lawn Care',
     });
-    expect(withSummary).toBe('Hi Tony, your Lawn Care report is ready: https://x/r/abc');
-    expect(withSummary).not.toMatch(/watering|sprinkler|stable/i);
-    expect(withSummary).not.toMatch(/STOP/i);
-
-    // Same shape for a pest visit — the only difference is the service name.
-    const pest = buildServiceReportV1Sms({
+    const pest = buildServiceReportV1SmsVars({
       customerFirstName: 'Tony', reportUrl: 'https://x/r/abc', serviceType: 'Pest Control',
     });
-    expect(pest).toBe('Hi Tony, your Pest Control report is ready: https://x/r/abc');
+
+    // Identical shape; the service name is the only difference.
+    expect(Object.keys(lawn).sort()).toEqual(Object.keys(pest).sort());
+    expect({ ...lawn, service_type: null }).toEqual({ ...pest, service_type: null });
+
+    // No score, watering advice, or opt-out wording can ride along.
+    expect(Object.values(lawn).join(' ')).not.toMatch(/watering|sprinkler|stable|score|\/100|STOP/i);
   });
 
   test('frozenSmsSummary reads the persisted write-gate line (object or JSON string)', () => {
