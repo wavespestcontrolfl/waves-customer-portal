@@ -1,0 +1,255 @@
+/**
+ * Inspection credit — "your inspection fee is credited toward any service
+ * you book within N days" (owner-approved 2026-08-02).
+ *
+ * TWO legs, deliberately separated so a promise never moves money on its own:
+ *
+ *   recordInspectionCreditOffer()  at inspection CLOSEOUT — writes the
+ *     durable promise (amount + expiry FROZEN) and nothing else. No ledger
+ *     entry, no balance change. An offer that is never redeemed simply
+ *     lapses; there is nothing to reverse and no sweep to run.
+ *
+ *   redeemInspectionCreditForBooking()  when the customer BOOKS — mints the
+ *     credit into the existing customer-credit ledger, which the normal
+ *     auto-apply machinery then puts against their invoice.
+ *
+ * Exactly-once is enforced by the DATABASE, not by flow control: the offers
+ * table is unique on source_scheduled_service_id (one offer per inspection)
+ * and on credit_ledger_id (one mint per offer). Redemption additionally
+ * claims the row with a status-guarded UPDATE before it posts money, so two
+ * concurrent bookings cannot both mint.
+ *
+ * DARK behind GATE_INSPECTION_CREDIT, checked on BOTH legs: flipping the
+ * gate off stops new promises and pauses redemption without orphaning
+ * offers already made.
+ */
+const db = require('../models/db');
+const logger = require('./logger');
+const { isEnabled } = require('../config/feature-gates');
+const { postCreditMovement } = require('./customer-credit');
+
+// A booking in one of these states never earns a redemption — a cancelled
+// or no-showed visit is not the service the credit was promised toward.
+// Mirrors estimate-conversion-guard's NON_LIVE_APPOINTMENT_STATUSES.
+const NON_LIVE_APPOINTMENT_STATUSES = Object.freeze([
+  'cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show',
+]);
+
+// Owner ruling 2026-08-02. Per-service overrides come from pricing_config
+// (rodent_inspection.creditable_within_days is the existing precedent at 14)
+// — this is only the fallback when a service carries no window of its own.
+const DEFAULT_CREDIT_WINDOW_DAYS = 30;
+
+function round2(n) {
+  return Math.round((Number(n) || 0) * 100) / 100;
+}
+
+function gateOn() {
+  try {
+    return isEnabled('inspectionCredit');
+  } catch (err) {
+    logger.warn(`[inspection-credit] gate read failed — treating as off: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * The creditable window for a service, in days. pricing_config is
+ * authoritative (db-bridge overlays it onto the constants), so a service
+ * with its own creditable_within_days keeps it; everything else takes the
+ * owner default. Read ONCE at closeout and frozen onto the offer — a later
+ * config change must never move a promise already made.
+ */
+function creditWindowDaysForServiceKey(serviceKey) {
+  try {
+    const { RODENT } = require('./pricing-engine/constants');
+    if (String(serviceKey || '') === 'rodent_inspection') {
+      const days = Number(RODENT?.inspection?.creditableWithinDays);
+      if (Number.isFinite(days) && days > 0) return Math.round(days);
+    }
+  } catch { /* fall through to the default */ }
+  return DEFAULT_CREDIT_WINDOW_DAYS;
+}
+
+/**
+ * Record the promise at inspection closeout. Best-effort by contract: a
+ * failure here must NEVER fail the completion — the visit is done and the
+ * tech is standing in the driveway. Returns a result object, never throws.
+ *
+ * `amount` is what the customer is actually being charged for the
+ * inspection. A zero/absent amount records NO offer: crediting money we
+ * never billed would mint real dollars out of nothing (same fail-closed
+ * posture as the fee rails).
+ */
+async function recordInspectionCreditOffer({
+  customerId,
+  scheduledServiceId,
+  serviceRecordId = null,
+  serviceKey = null,
+  amount,
+  createdBy = 'system:inspection_closeout',
+  now = new Date(),
+}) {
+  if (!gateOn()) return { recorded: false, reason: 'feature_disabled' };
+  if (!customerId || !scheduledServiceId) {
+    return { recorded: false, reason: 'missing_identifiers' };
+  }
+  const frozenAmount = round2(amount);
+  if (!(frozenAmount > 0)) {
+    return { recorded: false, reason: 'no_billable_amount' };
+  }
+
+  const windowDays = creditWindowDaysForServiceKey(serviceKey);
+  const expiresAt = new Date(now.getTime() + windowDays * 24 * 60 * 60 * 1000);
+
+  try {
+    // onConflict().ignore() on the unique source visit — a completion
+    // retry/replay re-runs this leg and must not create a second promise.
+    const [row] = await db('inspection_credit_offers')
+      .insert({
+        customer_id: customerId,
+        source_scheduled_service_id: scheduledServiceId,
+        source_service_record_id: serviceRecordId,
+        amount: frozenAmount,
+        status: 'offered',
+        expires_at: expiresAt,
+        created_by: createdBy,
+        note: `Inspection fee credited toward any service booked within ${windowDays} days`,
+      })
+      .onConflict('source_scheduled_service_id')
+      .ignore()
+      .returning(['id', 'amount', 'expires_at']);
+
+    if (!row) {
+      // The offer already existed — report the EXISTING terms so the
+      // receipt states what the customer was actually promised.
+      const existing = await db('inspection_credit_offers')
+        .where({ source_scheduled_service_id: scheduledServiceId })
+        .first('id', 'amount', 'expires_at', 'status');
+      return existing
+        ? {
+          recorded: false, reason: 'already_offered', offerId: existing.id,
+          amount: round2(existing.amount), expiresAt: existing.expires_at, windowDays,
+        }
+        : { recorded: false, reason: 'insert_conflict_unresolved' };
+    }
+
+    logger.info(
+      `[inspection-credit] offer ${row.id} recorded for customer ${customerId} `
+      + `($${frozenAmount.toFixed(2)}, ${windowDays}d) — mints only on rebook`,
+    );
+    return {
+      recorded: true, offerId: row.id, amount: frozenAmount, expiresAt, windowDays,
+    };
+  } catch (err) {
+    // Best-effort: never fail a completion over the credit promise.
+    logger.error(`[inspection-credit] offer record FAILED for visit ${scheduledServiceId}: ${err.message}`);
+    return { recorded: false, reason: 'error', error: err.message };
+  }
+}
+
+/**
+ * Redeem any open, unexpired offer for this customer against a booking they
+ * just made. Mints ONE credit movement per offer, inside the same
+ * transaction that claims the offer row, so a crash between claim and mint
+ * cannot strand a redeemed-but-uncredited promise.
+ *
+ * Best-effort by contract (a booking must never fail because crediting
+ * failed) — returns a summary, never throws.
+ */
+async function redeemInspectionCreditForBooking({
+  customerId,
+  scheduledServiceId,
+  bookingStatus = null,
+  createdBy = 'system:inspection_credit_rebook',
+  now = new Date(),
+}) {
+  if (!gateOn()) return { redeemed: 0, reason: 'feature_disabled' };
+  if (!customerId || !scheduledServiceId) return { redeemed: 0, reason: 'missing_identifiers' };
+  // A booking that is already cancelled/no-showed is not the service the
+  // credit was promised toward.
+  if (bookingStatus && NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingStatus).toLowerCase())) {
+    return { redeemed: 0, reason: 'booking_not_live' };
+  }
+
+  try {
+    const open = await db('inspection_credit_offers')
+      .where({ customer_id: customerId, status: 'offered' })
+      .where('expires_at', '>=', now)
+      // The inspection itself must not redeem its own offer.
+      .whereNot({ source_scheduled_service_id: scheduledServiceId })
+      .orderBy('expires_at', 'asc')
+      .select('id', 'amount', 'expires_at');
+    if (!open.length) return { redeemed: 0, reason: 'no_open_offer' };
+
+    let redeemed = 0;
+    let total = 0;
+    for (const offer of open) {
+      try {
+        await db.transaction(async (trx) => {
+          // Status-guarded claim: the row moves out of 'offered' before any
+          // money posts, so a concurrent booking finds nothing to claim.
+          // Re-check expiry in the claim so a boundary-crossing race can't
+          // redeem a just-lapsed offer.
+          const claimed = await trx('inspection_credit_offers')
+            .where({ id: offer.id, status: 'offered' })
+            .where('expires_at', '>=', now)
+            .update({
+              status: 'redeemed',
+              redeemed_at: now,
+              redeemed_scheduled_service_id: scheduledServiceId,
+              updated_at: trx.fn.now(),
+            });
+          if (claimed !== 1) {
+            const e = new Error('offer claim lost a race');
+            e.inspectionCreditSkip = 'claim_lost';
+            throw e;
+          }
+          const { entry } = await postCreditMovement({
+            customerId,
+            delta: round2(offer.amount),
+            source: 'inspection_credit',
+            note: 'Inspection fee credited toward booked service',
+            createdBy,
+          }, trx);
+          // Bind the mint to the offer — the UNIQUE credit_ledger_id is the
+          // durable exactly-once proof.
+          await trx('inspection_credit_offers')
+            .where({ id: offer.id })
+            .update({ credit_ledger_id: entry.id, updated_at: trx.fn.now() });
+        });
+        redeemed += 1;
+        total = round2(total + round2(offer.amount));
+        logger.info(`[inspection-credit] offer ${offer.id} redeemed on booking ${scheduledServiceId}`);
+      } catch (err) {
+        if (err?.inspectionCreditSkip === 'claim_lost') continue;
+        logger.error(`[inspection-credit] redemption FAILED for offer ${offer.id}: ${err.message}`);
+      }
+    }
+    return { redeemed, amount: total };
+  } catch (err) {
+    logger.error(`[inspection-credit] redemption sweep FAILED for customer ${customerId}: ${err.message}`);
+    return { redeemed: 0, reason: 'error', error: err.message };
+  }
+}
+
+/**
+ * Receipt copy for a recorded offer — the exact promise the customer is
+ * being shown. Returns null when there is nothing to say, so callers can
+ * spread it into an optional memo slot.
+ */
+function inspectionCreditReceiptMemo({ amount, windowDays } = {}) {
+  const amt = round2(amount);
+  if (!(amt > 0)) return null;
+  const days = Number(windowDays) > 0 ? Math.round(windowDays) : DEFAULT_CREDIT_WINDOW_DAYS;
+  return `Your $${amt.toFixed(2)} inspection fee is credited toward any service you book within ${days} days.`;
+}
+
+module.exports = {
+  recordInspectionCreditOffer,
+  redeemInspectionCreditForBooking,
+  inspectionCreditReceiptMemo,
+  creditWindowDaysForServiceKey,
+  DEFAULT_CREDIT_WINDOW_DAYS,
+  NON_LIVE_APPOINTMENT_STATUSES,
+};

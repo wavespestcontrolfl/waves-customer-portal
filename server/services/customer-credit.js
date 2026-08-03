@@ -121,6 +121,10 @@ const CREDIT_DISPLAY_TYPE_BY_SOURCE = Object.freeze({
   referral: 'referral',
   manual: 'promo',
   adjustment: 'promo',
+  // A source ABSENT from this map is invisible in the portal Credits card —
+  // the customer would be told their inspection fee was credited and then
+  // see no credit. 'service' → "Service credit".
+  inspection_credit: 'service',
 });
 
 // Controlled, customer-safe label per display type. We deliberately do NOT
