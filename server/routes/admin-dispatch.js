@@ -2960,16 +2960,6 @@ router.put('/:serviceId/status', async (req, res, next) => {
               // (Codex #3153 r16 P1) — never a silent successful cancel.
               await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: apptFeeOutcome });
             }
-            // Inspection credit: reverse IMMEDIATELY on a cancelled visit
-            // (Codex #3178 r6 P0). The hourly sweep is recovery only — an
-            // hour of spendable unearned credit is long enough for it to be
-            // consumed, after which reversal can only become a write-off.
-            try {
-              await require('../services/inspection-credit')
-                .reverseInspectionCreditForBooking({ scheduledServiceId: target.id });
-            } catch (e) {
-              logger.error(`[dispatch] inspection credit reversal failed for ${target.id}: ${e.message}`);
-            }
           } catch (e) {
             // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
             logger.error(`[admin-dispatch] series cancellation card-hold handling failed (target ${target.id}): ${e.message}`);
@@ -2992,6 +2982,21 @@ router.put('/:serviceId/status', async (req, res, next) => {
           await InvoiceService.voidOpenInvoicesForCancelledService(target.id);
         }
       } catch (e) { logger.error(`[admin-dispatch] series cancellation invoice void sweep failed: ${e.message}`); }
+
+      // Inspection credit reversal runs AFTER the invoice void (Codex
+      // #3178 r7 P0). Voiding an invoice RESTORES any credit applied to
+      // it; reversing first would find the balance too low, fail, and then
+      // the void would hand that $75 back as spendable. Immediate rather
+      // than left to the hourly sweep — unearned credit must not sit
+      // spendable for an hour.
+      for (const target of targets) {
+        try {
+          await require('../services/inspection-credit')
+            .reverseInspectionCreditForBooking({ scheduledServiceId: target.id });
+        } catch (e) {
+          logger.error(`[admin-dispatch] inspection credit reversal failed for ${target.id}: ${e.message}`);
+        }
+      }
 
       for (const target of targets) {
         try {
@@ -3226,6 +3231,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
       try {
         const InvoiceService = require('../services/invoice');
         await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
+        // Inspection credit: reverse AFTER the invoice void (which
+        // restores any applied credit) so the balance can cover it — and
+        // immediately, so unearned credit never sits spendable waiting on
+        // the hourly sweep (Codex #3178 r7 P0).
+        try {
+          await require('../services/inspection-credit')
+            .reverseInspectionCreditForBooking({ scheduledServiceId: svc.id });
+        } catch (e) {
+          logger.error(`[admin-dispatch] inspection credit reversal failed for ${svc.id}: ${e.message}`);
+        }
       } catch (e) { logger.error(`[admin-dispatch] cancellation invoice void sweep failed: ${e.message}`); }
 
       // One-time card-on-file hold: a cancellation inside the window charges the
@@ -3308,6 +3323,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
       try {
         const InvoiceService = require('../services/invoice');
         await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
+        // Inspection credit: reverse AFTER the invoice void (which
+        // restores any applied credit) so the balance can cover it — and
+        // immediately, so unearned credit never sits spendable waiting on
+        // the hourly sweep (Codex #3178 r7 P0).
+        try {
+          await require('../services/inspection-credit')
+            .reverseInspectionCreditForBooking({ scheduledServiceId: svc.id });
+        } catch (e) {
+          logger.error(`[admin-dispatch] inspection credit reversal failed for ${svc.id}: ${e.message}`);
+        }
       } catch (e) { logger.error(`[admin-dispatch] no-show invoice void sweep failed: ${e.message}`); }
 
       // One-time card-on-file hold: a no-show triggers the flat fee against the
@@ -6515,7 +6540,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           serviceRecordId: record.id,
           serviceKey: completionProfile?.serviceKey || null,
           createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,
-          ...(inspectionMoment ? { now: inspectionMoment } : {}),
+          // The promise is made NOW; the window is anchored to the
+          // inspection's service date (backdated closeouts must not get a
+          // fresh 30 days, but must also not back-date the ordering guard).
+          ...(inspectionMoment ? { windowAnchor: inspectionMoment } : {}),
         });
       } catch (creditErr) {
         logger.error(`[dispatch] inspection credit offer failed for ${svc.id}: ${creditErr.message}`);

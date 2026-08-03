@@ -177,7 +177,14 @@ async function recordInspectionCreditOffer({
   serviceKey = null,
   amount = null,
   createdBy = 'system:inspection_closeout',
+  // The real moment the promise was made — the ordering boundary every
+  // redemption guard compares against.
   now = new Date(),
+  // The inspection's service date, used ONLY to compute the expiry window
+  // (Codex #3178 r7 P0). Conflating the two put created_at at noon on the
+  // service date, so a booking made that afternoon — but BEFORE the
+  // closeout — could pass the ordering guard and mint a credit it preceded.
+  windowAnchor = null,
 }) {
   if (!gateOn()) return { recorded: false, reason: 'feature_disabled' };
   if (!customerId || !scheduledServiceId) {
@@ -195,7 +202,7 @@ async function recordInspectionCreditOffer({
   // prints a calendar deadline ("book by September 2"), so a booking made
   // that afternoon must still qualify. Fixed 24-hour periods from a
   // 16:00Z anchor would have rejected it.
-  const expiresAt = etEndOfDayAfterDays(now, windowDays);
+  const expiresAt = etEndOfDayAfterDays(windowAnchor || now, windowDays);
 
   try {
     // onConflict().ignore() on the unique source visit — a completion
@@ -207,10 +214,9 @@ async function recordInspectionCreditOffer({
         source_service_record_id: serviceRecordId,
         amount: frozenAmount,
         status: 'offered',
-        // Stamped from the INSPECTION moment, not the insert (Codex #3178
-        // r5 P0): a recovered offer written days later would otherwise sort
-        // after the very booking it should credit, and every ordering guard
-        // (redemption, adoption) would reject it forever.
+        // The actual promise moment. A recovered offer passes the original
+        // closeout time here so it doesn't sort after the booking it should
+        // credit; the expiry window is anchored separately.
         created_at: now,
         expires_at: expiresAt,
         created_by: createdBy,
@@ -534,9 +540,12 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           serviceRecordId: visit.record_id,
           serviceKey,
           createdBy: 'system:inspection_credit_recovery',
-          // ET wall-clock: a date-only service_date parsed as UTC midnight
-          // lands on the previous ET day and shifts the window early.
+          // The promise dates from the CLOSEOUT (the service record), so
+          // ordering guards accept bookings made after it; the window is
+          // anchored to the service date. ET wall-clock — a date-only value
+          // parsed as UTC midnight lands on the previous ET day.
           now: etDateOnlyToDate(visit.service_date) || now,
+          windowAnchor: etDateOnlyToDate(visit.service_date) || now,
         });
         // The offer arrived LATE, so a qualifying booking may already have
         // happened while it was missing (Codex #3178 r3 P1). Adopt the
