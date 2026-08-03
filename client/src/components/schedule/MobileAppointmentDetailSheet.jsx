@@ -599,13 +599,13 @@ export default function MobileAppointmentDetailSheet({
           <EstimateProvenanceCard
             quotedTotal={estimateSource.quotedTotal}
             onetimeTotal={estimateSource.onetimeTotal}
-            // This sheet shows ONE scheduled row; a multi-service estimate
-            // books its lines as separate appointments, so comparing this
-            // row's price against the whole estimate manufactures false
-            // deltas — suppress unless the estimate has exactly one priced
-            // line (then the visit IS the quoted plan).
-            currentPrice={prepaidCovered
-              || (estimateSource.lines || []).filter((l) => Number(l?.price) > 0).length > 1
+            // Most quotes book every line as ONE appointment (primary +
+            // add-ons) whose price IS the whole-visit charge — the
+            // comparison stands. Only a genuinely split booking (seasonal +
+            // year-round → multiple series anchors, counted server-side)
+            // suppresses it: comparing one row against the whole quote
+            // manufactures deltas.
+            currentPrice={prepaidCovered || Number(estimateSource.linkedSeriesCount) > 1
               ? null : price}
             deposit={estimateSource.deposit}
             payment={estimateSource.payment}

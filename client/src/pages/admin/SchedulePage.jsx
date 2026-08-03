@@ -2679,11 +2679,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                 <EstimateProvenanceCard
                   quotedTotal={estimateSource.quotedTotal}
                   onetimeTotal={estimateSource.onetimeTotal}
-                  // Single-appointment context (same rule as the mobile
-                  // sheet): a multi-service estimate books separate rows, so
-                  // this row's total must not be compared against the whole
-                  // estimate — suppress unless exactly one priced line.
-                  currentPrice={(estimateSource.lines || []).filter((l) => Number(l?.price) > 0).length > 1
+                  // Same rule as the mobile sheet: the comparison stands for
+                  // the common one-group booking; only a genuinely split
+                  // quote (multiple series anchors, counted server-side)
+                  // suppresses it.
+                  currentPrice={Number(estimateSource.linkedSeriesCount) > 1
                     ? null : appointmentTotal}
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
