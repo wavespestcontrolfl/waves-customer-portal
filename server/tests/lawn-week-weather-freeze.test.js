@@ -160,6 +160,29 @@ describe('freeze contract in the render path', () => {
     expect(signature.startsWith('-lap1')).toBe(false);
   });
 
+  // Fail-closed on CACHING, fail-soft on VIEWING. An unresolved freeze still
+  // renders — a customer should see their report — but a durably cached copy
+  // would keep those numbers forever while a later view freezes different
+  // provider data, and no future PDF request would retry.
+  test('an UNFROZEN render is served but never cached — both PDF paths', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    const reportsPublic = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
+    for (const src of [pdfQueue, reportsPublic]) {
+      expect(src).toMatch(/weekWeatherUnfrozen/);
+    }
+    // pdf-queue returns the bytes with no key rather than storing.
+    expect(pdfQueue).toMatch(/weekWeatherUnfrozen[\s\S]{0,300}?uncached: true/);
+    // reports-public branches AROUND the putReportPdf call.
+    expect(reportsPublic).toMatch(/weekWeatherUnfrozen[\s\S]{0,400}?\} else if/);
+  });
+
+  test('the flag is set ONLY when a fetched week could not be frozen', () => {
+    // Not when a frozen week was replayed, and not when nothing was fetched —
+    // either of those would make every such render permanently uncacheable.
+    expect(source).toMatch(/\} else \{\s*\n[\s\S]{0,500}?weekWeatherUnfrozen = true;/);
+    expect(source).toMatch(/let weekWeatherUnfrozen = false;/);
+  });
+
   test('only a RESOLVED week is frozen', () => {
     // Persisting a null would lock in "no rainfall known" forever, turning a
     // transient provider outage into a permanently blank water card.

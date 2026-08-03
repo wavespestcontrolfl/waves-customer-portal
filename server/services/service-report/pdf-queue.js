@@ -143,6 +143,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const isDeliveryPin = !!pinnedLawnAssessmentId;
   const effectivePin = pinnedLawnAssessmentId || canonical.pin;
   let pdf;
+  // The payload the render was produced from — its flags decide whether this
+  // output may be cached.
+  let renderedData = null;
   // The signature of the narrative text actually rendered travels ON the
   // payload (attached by report-data at the moment the text was chosen) —
   // never re-read from the DB, so a background generation landing mid-render
@@ -153,6 +156,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+    renderedData = data;
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
     // into them (codex P2 r2: this path bypasses the route helper's strip).
@@ -211,6 +215,14 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // the pre-render signature, where it reads as current forever. Re-read and
     // require stability before publishing; if it moved, skip the store and let
     // the next view render cleanly. (Pinned renders never reach here.)
+    // A render whose week's weather could not be FROZEN is not reproducible —
+    // a later view may freeze different provider data while this cached object
+    // kept these numbers forever, and no future PDF request would retry the
+    // freeze. Serve the bytes, cache nothing.
+    if (renderedData?.lawnAssessment?.weekWeatherUnfrozen) {
+      logger.warn(`[service-report-pdf] week weather unfrozen for ${recordId} — not caching this render`);
+      return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
+    }
     const laAfter = await lawnAssessmentPdfSignature(service, knex);
     if (laAfter !== laSignature) {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);

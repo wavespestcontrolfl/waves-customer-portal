@@ -2218,6 +2218,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // and every later render replays it. Lazy rather than written at completion,
   // because that also settles the reports already issued: each one freezes at
   // its next view instead of continuing to drift with the provider.
+  // Set when a week was fetched but could NOT be frozen. A render in that state
+  // is not reproducible — the next one may freeze different provider data — so
+  // it must never be durably cached (see weekWeatherUnfrozen on the payload).
+  let weekWeatherUnfrozen = false;
   const frozenWeekWeather = parseJsonObject(service.structured_notes).lawnWeekWeather || null;
   if (frozenWeekWeather && typeof frozenWeekWeather === 'object') {
     completionRainfall7dInches = frozenWeekWeather.rainInches ?? null;
@@ -2261,6 +2265,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
           completionDailyRain = Array.isArray(canonicalWeek.dailyRain) ? canonicalWeek.dailyRain : completionDailyRain;
           completionRainConfidence = canonicalWeek.rainConfidence ?? completionRainConfidence;
           completionRainSource = canonicalWeek.rainSource ?? completionRainSource;
+        } else {
+          // Neither wrote nor read back a canonical week. The live report still
+          // renders (fail soft — a customer should see their report), but this
+          // output is NOT reproducible, so it must not be cached: a later view
+          // could freeze different data while a stored PDF kept these numbers
+          // forever, and no future PDF request would retry the freeze.
+          weekWeatherUnfrozen = true;
         }
       }
     } catch (e) { /* non-blocking */ }
@@ -2302,6 +2313,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     overwateringSignal: parseJsonObject(assessment.composite_scores).overwatering_signal === true,
     fawnSnapshot,
     waterContext,
+    // NOT reproducible: the week was fetched but could not be frozen, so a
+    // later render may show different numbers. Any caller that durably caches
+    // a render must skip storing when this is true.
+    weekWeatherUnfrozen,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {
