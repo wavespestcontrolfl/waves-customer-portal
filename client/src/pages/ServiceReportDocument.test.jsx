@@ -359,11 +359,49 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText(/performing very well for peak season/)).toBeInTheDocument();
   });
 
-  it('keeps a pest V2 customer concern, not just the top-level card', () => {
-    const data = { ...BASE_DATA, pestReportV2: { customerConcern: { customerConcern: 'Ants by the dishwasher again.', acknowledgement: 'We treated that run and placed bait.' } } };
-    render(<ServiceReportDocument data={data} token="tok123" />);
+  it('keeps a pest V2 customer concern, using buildCustomerConcernCard\'s real shape', () => {
+    // { headline, concern, body, nextStep } — pest-report-v2.js:148-157.
+    const card = {
+      headline: 'What you flagged',
+      concern: 'Ants by the dishwasher again.',
+      body: 'You reported this during your visit.',
+      nextStep: 'Text us if it changes.',
+    };
+    render(<ServiceReportDocument data={{ ...BASE_DATA, pestReportV2: { customerConcern: card } }} token="t" />);
+    expect(screen.getByText('What you flagged')).toBeInTheDocument();
     expect(screen.getByText(/Ants by the dishwasher again/)).toBeInTheDocument();
-    expect(screen.getByText(/We treated that run and placed bait/)).toBeInTheDocument();
+    expect(screen.getByText(/You reported this during your visit/)).toBeInTheDocument();
+    cleanup();
+    // and the non-V2 fallback card uses the same builder
+    const top = render(<ServiceReportDocument data={{ ...BASE_DATA, customerConcernCard: card }} token="t" />);
+    expect(top.container.textContent).toMatch(/Ants by the dishwasher again/);
+  });
+
+  it('does not print default treatment precautions on an untreated visit', () => {
+    // data.advisory carries service-line DEFAULTS even when nothing was applied
+    const data = { ...BASE_DATA, applications: [], dynamicContext: {}, advisory: { pet_advisory: 'Keep pets off treated zones until dry.' } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('Keep pets off treated zones until dry.');
+    expect(container.textContent).not.toContain('Re-entry & precautions');
+  });
+
+  it('resolves legacy contact dispositions and cleans legacy summaries', () => {
+    const data = {
+      ...BASE_DATA,
+      typedReport: null,
+      customerInteraction: 'spoke',
+      summary: 'Thanks for having us out today. We focused on the perimeter. You should see activity ease over the next 1-2 weeks, and - Waves',
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText('Spoke with someone at the home')).toBeInTheDocument();
+    expect(container.textContent).not.toContain(', and - Waves');
+    expect(container.textContent).not.toContain('should see activity ease');
+  });
+
+  it("keeps a bug file's recorded location", () => {
+    const data = { ...BASE_DATA, pestReportV2: { bugFiles: [{ pestKey: 'ghost_ant', suspectLabel: 'Ghost ant', whereSeen: 'the kitchen sink cabinet', whyItMatters: 'They trail to moisture.' }] } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/Seen at the kitchen sink cabinet/);
   });
 
   it('hides an N/A EPA number and keeps lawn applications scoped to the lawn', () => {

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
+import { cleanVisitSummary } from './ReportViewPage';
 
 // Work-order style service report document (owner direction 2026-08-03,
 // modeled on the TruGreen WO / All U Need service-notification formats):
@@ -132,9 +133,23 @@ const INTERACTION_LABELS = {
   not_home_partial_access: 'Not home — partial access to the service areas',
   customer_specific_concern: 'Spoke with someone about a specific concern',
   tech_home_no_answer: 'Home — no answer at the door',
+  customer_home_spoke_with_them: 'Spoke with someone at the home',
+  customer_home_no_answer: 'Home — no answer at the door',
+  spoke: 'Spoke with someone at the home',
+  customer_not_home: 'No one was home during the visit',
+  no_customer_contact: 'No customer interaction recorded',
+  gate_access_used: 'Used the recorded access instructions',
   tech_not_home: 'Customer not home during service',
   left_note: 'Left a note for the customer',
 };
+
+// Normalize like customerInteractionCopy so historical spellings still resolve.
+function interactionLabel(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return INTERACTION_LABELS[key] || null;
+}
 
 // COMPLIANCE (AGENTS.md): never print a fixed re-entry/drying figure — the
 // idiom is "ready once dry" plus the technician-anchored ready-at time. This
@@ -319,8 +334,11 @@ export default function ServiceReportDocument({ data, token }) {
   // the PDF can claim nothing notable was found directly above those findings.
   const reconciledResult = typeof data.reportV2?.todaysResult === 'string'
     ? data.reportV2.todaysResult.trim() : '';
+  // Stored legacy recaps carry known defects (a broken ", and - Waves" tail and
+  // an over-strong "should see activity ease" promise) that cleanVisitSummary
+  // exists to strip — printing data.summary raw reintroduced both.
   const summaryBody = reconciledResult
-    || result?.body || data.summary || data.dynamicContext?.aiSummary?.body || '';
+    || result?.body || cleanVisitSummary(data.summary) || data.dynamicContext?.aiSummary?.body || '';
   if (summaryBody && !summaryParagraphs.includes(summaryBody)) summaryParagraphs.push(summaryBody);
 
   // V2 payloads carry the PRINCIPAL result for their service lines — the
@@ -492,7 +510,7 @@ export default function ServiceReportDocument({ data, token }) {
       .map(([key, label]) => `${label} ${legacyLawnScores[key]}`)
     : [];
   const mowing = data.mowingHeight || null;
-  const interaction = INTERACTION_LABELS[data.customerInteraction] || null;
+  const interaction = interactionLabel(data.customerInteraction);
 
   return (
     <div className="service-report-v1 service-report-document" style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}>
@@ -595,14 +613,20 @@ export default function ServiceReportDocument({ data, token }) {
             carries it in pestReportV2.customerConcern, other lines in the
             top-level card. Losing it makes the report read as if the
             concern was ignored. */}
-        {concern && (concern.customerConcern || concern.acknowledgement || concern.response) && (
+        {concern && (concern.concern || concern.body) && (
           <div className="doc-keep">
-            <SectionHeader>Your concern this visit</SectionHeader>
-            {concern.customerConcern && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{concern.customerConcern}</p>
+            {/* buildCustomerConcernCard returns { headline, concern, body,
+                nextStep } — an earlier guess at customerConcern/acknowledgement
+                meant this section never mounted at all (codex P2 r6). */}
+            <SectionHeader>{concern.headline || 'What you flagged'}</SectionHeader>
+            {concern.concern && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>&ldquo;{concern.concern}&rdquo;</p>
             )}
-            {(concern.acknowledgement || concern.response) && (
-              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{concern.acknowledgement || concern.response}</p>
+            {concern.body && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{concern.body}</p>
+            )}
+            {concern.nextStep && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{concern.nextStep}</p>
             )}
           </div>
         )}
@@ -656,7 +680,8 @@ export default function ServiceReportDocument({ data, token }) {
             ))}
             {pestBugFiles.map((bug, i) => (
               <Bullet key={bug.pestKey || i}>
-                <strong>{bug.suspectLabel}{bug.suspectLabel ? ':' : ''}</strong> {[bug.whyItMatters, bug.whatWeDid].filter(Boolean).join(' ')}
+                <strong>{bug.suspectLabel}{bug.suspectLabel ? ':' : ''}</strong>{' '}
+                {[bug.whereSeen ? `Seen at ${bug.whereSeen}.` : '', bug.whyItMatters, bug.whatWeDid].filter(Boolean).join(' ')}
               </Bullet>
             ))}
             {legacyLawnScores?.overallScore != null && (
@@ -698,14 +723,21 @@ export default function ServiceReportDocument({ data, token }) {
         )}
 
         {/* Re-entry */}
-        {(reentry || data.advisory?.pet_advisory) && (
+        {/* data.advisory carries SERVICE-LINE DEFAULTS (report-data merges
+            advisoryDefaults and normalization only zeros the timers), so an
+            inspection-only visit still has pet_advisory set. Printing "keep
+            pets off treated zones until dry" on a visit with no treatment is
+            a false treatment claim (codex P1 r6) — the default advisory only
+            renders when something was actually applied. A real re-entry
+            context is itself evidence of treatment and always renders. */}
+        {(reentry || (data.advisory?.pet_advisory && hasRenderableTreatment)) && (
           <div className="doc-keep">
             <SectionHeader>Re-entry &amp; precautions</SectionHeader>
             {reentry?.customerSummary && <Bullet>{reentry.customerSummary}</Bullet>}
             {(reentry?.targets || []).map((target) => (
               <Bullet key={target.key || target.label}>{reentryTargetLine(target)}</Bullet>
             ))}
-            {(reentry?.petAdvisory || data.advisory?.pet_advisory) && (
+            {(reentry?.petAdvisory || (hasRenderableTreatment ? data.advisory?.pet_advisory : null)) && (
               <Bullet>{reentry?.petAdvisory || data.advisory.pet_advisory}</Bullet>
             )}
             {reentry?.irrigationReadyAt && (
