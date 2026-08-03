@@ -57,8 +57,16 @@
  * Reads only. Prints IDs, amounts and statuses — never names, phones, or card
  * details.
  *
- * Exit codes:  0 = every condition verified and passing, no recorded failure
- *              1 = a blocking condition (or a recorded charge failure) found
+ * The autopay_log is DIRECT EVIDENCE and outranks the state replay, which is a
+ * reconstruction that drifts after the fact. A confirmed latest success means
+ * the answer is "it WAS charged" and any current-state blocker (the invoice now
+ * reads paid) is a CONSEQUENCE of that charge, not the reason it was skipped.
+ * An unresolved orphaned / reconciliation_required failure outranks even that:
+ * money and records disagree, and a later success does not clear it.
+ *
+ * Exit codes:  0 = charge confirmed, or every condition verified and passing
+ *              1 = a blocker, a recorded charge failure, or a ledger
+ *                  reconciliation problem
  *              2 = inconclusive (something could not be verified)
  *
  * Run:  railway run --service Postgres node ops/agents/completion-charge-why.js --visit=<scheduled_service_id>
@@ -566,7 +574,62 @@ async function main() {
     }
 
     // Verdict.
+    //
+    // The autopay_log is DIRECT EVIDENCE of what actually happened; every
+    // check above is a reconstruction from current row state, which drifts
+    // after the fact. So a terminal outcome outranks state-derived blockers:
+    // once a charge has succeeded, "the resolved invoice is paid" is a
+    // CONSEQUENCE of that charge, not the reason it didn't happen, and
+    // reporting it as the cause contradicts this tool's own evidence.
+    //
+    // Reconciliation outranks even that. An orphaned charge (Stripe took the
+    // money, the DB write failed) or a reconciliation_required flag is a
+    // ledger integrity problem that a later success does not clear, so it must
+    // never exit 0 no matter how healthy the rest of the replay looks.
     console.log('\n=== verdict ===');
+    const unresolvedLedger = [
+      ...supersededFlags,
+      ...(chargeFailure
+        ? [{ l: chargeFailure, d: parseNotes(chargeFailure.details) }].filter(
+          ({ d }) => d.orphaned || d.reconciliation_required,
+        )
+        : []),
+    ];
+    if (unresolvedLedger.length) {
+      console.log('  RECONCILE — this visit has an unresolved ledger problem, which outranks');
+      console.log('  every other finding: a charge left money and records disagreeing.');
+      for (const { l, d } of unresolvedLedger) {
+        console.log(`    ${l.created_at.toISOString()} ${l.event_type}`
+          + `${d.orphaned ? ' ORPHANED (Stripe charged, DB write failed)' : ''}`
+          + `${d.reconciliation_required ? ' reconciliation_required' : ''}`);
+      }
+      console.log('  Fix the ledger first; re-run afterwards for the charge-lane answer.');
+      process.exitCode = 1;
+      return;
+    }
+    if (chargeFailure) {
+      const d = parseNotes(chargeFailure.details);
+      console.log(`  BLOCKED: the charge was attempted and FAILED (${chargeFailure.event_type}, ${chargeFailure.created_at.toISOString()})`);
+      console.log(`  ${d.error || 'no error recorded'}`);
+      console.log('  Every eligibility predicate passed — this is a charge-time failure, not a lane problem.');
+      process.exitCode = 1;
+      return;
+    }
+    if (chargeSuccess) {
+      console.log(`  ANSWERED: the card WAS charged (${chargeSuccess.event_type}, ${chargeSuccess.created_at.toISOString()}).`);
+      console.log('  The premise of the question does not hold for this visit.');
+      const stale = findings.filter((f) => f.level === BLOCK);
+      if (stale.length) {
+        console.log(`\n  ${stale.length} state-derived finding(s) below are CONSEQUENCES of that charge,`);
+        console.log('  not reasons it was skipped — current row state reflects the completed charge:');
+        for (const f of stale) console.log(`    - ${f.label}`);
+      }
+      console.log('\n  If the customer still received a pay-link text, the SMS lane is the place');
+      console.log('  to look, not the charge lane — see the completion SMS section above.');
+      process.exitCode = 0;
+      return;
+    }
+
     const firstBlockIdx = findings.findIndex((f) => f.level === BLOCK);
     const firstUnknownIdx = findings.findIndex((f) => f.level === UNKNOWN);
     const firstBlock = firstBlockIdx === -1 ? null : findings[firstBlockIdx];
