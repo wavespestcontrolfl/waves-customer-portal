@@ -4430,17 +4430,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             }
             // Void any still-open invoice pre-minted for this visit so
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
+            // Inspection-credit reversal runs inside the void helper (after
+            // the voids restore any applied credit) — shared hook across
+            // every cancellation path, so none can forget it.
             await voidOpenInvoicesForCancelledService(id);
-            // Inspection credit: reverse IMMEDIATELY on cancellation
-            // (Codex #3178 r6 P0). The hourly sweep is recovery only — an
-            // hour of spendable unearned credit is long enough to be
-            // consumed, after which reversal can only become a write-off.
-            try {
-              await require('../services/inspection-credit')
-                .reverseInspectionCreditForBooking({ scheduledServiceId: id });
-            } catch (e) {
-              logger.error(`[admin-schedule] inspection credit reversal failed for ${id}: ${e.message}`);
-            }
             // One-time card-on-file hold: charge in-window late-cancel fee or
             // release outside it — same as the single-cancel paths.
             // payload.waiveCardHoldFee = business-initiated cancel, release

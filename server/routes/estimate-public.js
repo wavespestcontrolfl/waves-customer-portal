@@ -9991,6 +9991,32 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
     }
 
+    // Inspection credit: redeem NOW — the bookings committed above, and
+    // the invoice has not been delivered yet (pre-push P0). Relying on the
+    // hourly sweep here let the customer receive or even pay the full
+    // invoice before the promised $75 existed; redeeming first puts the
+    // credit in the balance so the send-time auto-apply
+    // (sendViaSMSAndEmail → autoApplyAccountCreditIfEnabled) consumes it.
+    // Best-effort per booking — the sweep remains the durable guarantee.
+    if (customerId) {
+      const creditBookingIds = [...new Set([
+        ...acceptedAppointmentsToRegister.map((appt) => appt?.id),
+        txResult.standardConversion?.firstScheduledServiceId,
+        txResult.annualPrepayConversion?.firstScheduledServiceId,
+      ].filter(Boolean))];
+      for (const bookingId of creditBookingIds) {
+        try {
+          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+            customerId,
+            scheduledServiceId: bookingId,
+            createdBy: 'system:inspection_credit_estimate_accept',
+          });
+        } catch (creditErr) {
+          logger.warn(`[estimate-accept] inspection credit redemption deferred to sweep: ${creditErr.message}`);
+        }
+      }
+    }
+
     // Post-commit invoice delivery for every accept-minted invoice —
     // invoice-mode, annual prepay, and the standard conversion's setup/
     // first-application invoice (which the converter used to auto-send;

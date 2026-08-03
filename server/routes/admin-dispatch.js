@@ -2982,21 +2982,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
           await InvoiceService.voidOpenInvoicesForCancelledService(target.id);
         }
       } catch (e) { logger.error(`[admin-dispatch] series cancellation invoice void sweep failed: ${e.message}`); }
-
-      // Inspection credit reversal runs AFTER the invoice void (Codex
-      // #3178 r7 P0). Voiding an invoice RESTORES any credit applied to
-      // it; reversing first would find the balance too low, fail, and then
-      // the void would hand that $75 back as spendable. Immediate rather
-      // than left to the hourly sweep — unearned credit must not sit
-      // spendable for an hour.
-      for (const target of targets) {
-        try {
-          await require('../services/inspection-credit')
-            .reverseInspectionCreditForBooking({ scheduledServiceId: target.id });
-        } catch (e) {
-          logger.error(`[admin-dispatch] inspection credit reversal failed for ${target.id}: ${e.message}`);
-        }
-      }
+      // Inspection credit reversal runs INSIDE voidOpenInvoicesForCancelledService
+      // (after the voids, which restore any applied credit) — one hook every
+      // cancellation path shares, so no cancel surface can forget it.
 
       for (const target of targets) {
         try {
@@ -3230,17 +3218,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // helper (skips applied payments / live PaymentIntents); best-effort.
       try {
         const InvoiceService = require('../services/invoice');
+        // Inspection-credit reversal runs inside the void helper (after the
+        // voids restore any applied credit) — shared hook, can't be forgotten.
         await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
-        // Inspection credit: reverse AFTER the invoice void (which
-        // restores any applied credit) so the balance can cover it — and
-        // immediately, so unearned credit never sits spendable waiting on
-        // the hourly sweep (Codex #3178 r7 P0).
-        try {
-          await require('../services/inspection-credit')
-            .reverseInspectionCreditForBooking({ scheduledServiceId: svc.id });
-        } catch (e) {
-          logger.error(`[admin-dispatch] inspection credit reversal failed for ${svc.id}: ${e.message}`);
-        }
       } catch (e) { logger.error(`[admin-dispatch] cancellation invoice void sweep failed: ${e.message}`); }
 
       // One-time card-on-file hold: a cancellation inside the window charges the
@@ -3322,17 +3302,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // (skips applied payments / live PaymentIntents); best-effort.
       try {
         const InvoiceService = require('../services/invoice');
+        // Inspection-credit reversal runs inside the void helper (after the
+        // voids restore any applied credit) — shared hook, can't be forgotten.
         await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
-        // Inspection credit: reverse AFTER the invoice void (which
-        // restores any applied credit) so the balance can cover it — and
-        // immediately, so unearned credit never sits spendable waiting on
-        // the hourly sweep (Codex #3178 r7 P0).
-        try {
-          await require('../services/inspection-credit')
-            .reverseInspectionCreditForBooking({ scheduledServiceId: svc.id });
-        } catch (e) {
-          logger.error(`[admin-dispatch] inspection credit reversal failed for ${svc.id}: ${e.message}`);
-        }
       } catch (e) { logger.error(`[admin-dispatch] no-show invoice void sweep failed: ${e.message}`); }
 
       // One-time card-on-file hold: a no-show triggers the flat fee against the

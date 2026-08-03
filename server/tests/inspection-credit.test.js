@@ -354,6 +354,55 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
   });
 });
 
+describe('cancellation reversal hook — one shared seam, not N wired copies', () => {
+  it('voidOpenInvoicesForCancelledService reverses even when there is nothing to void', async () => {
+    // The reversal lives in the void helper's `finally` so EVERY cancel
+    // path that voids gets it for free (status-cancel, bulk, no-show,
+    // offboarding, cancellation processor) — and a cancel with no open
+    // invoice must still give the credit back.
+    const InspectionCredit = require('../services/inspection-credit');
+    const spy = jest.spyOn(InspectionCredit, 'reverseInspectionCreditForBooking')
+      .mockResolvedValue({ reversed: 0 });
+    try {
+      const InvoiceService = require('../services/invoice');
+      mockOffers = []; // invoice candidate scan resolves empty → early return path
+      await InvoiceService.voidOpenInvoicesForCancelledService('svc-cancelled');
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'svc-cancelled' }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('booking + redemption wiring — source contracts (routes too large to exercise here)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  it('graduating a held slot writes the booking marker on the SAME client (pre-push P0)', () => {
+    // Both estimate-accept branches (one-time and recurring) book by
+    // graduating the hold in commitReservation; the one-time path never
+    // reaches the converter's marker, so the marker must live here.
+    const source = fs.readFileSync(path.join(__dirname, '../services/slot-reservation.js'), 'utf8');
+    expect(source).toContain("await require('./inspection-credit').markBookingForInspectionCredit(client, {");
+  });
+
+  it('redemption runs BEFORE the invoice mints/delivers on both conversion paths (pre-push P0)', () => {
+    // The hourly sweep alone let the customer receive — or pay — the full
+    // invoice before the promised $75 existed. Global-pool conversions
+    // redeem before converter step 4; the public accept (converter rides
+    // the accept trx, bookings invisible to the redeemer until commit)
+    // redeems post-commit before delivery, where the send-time auto-apply
+    // consumes the balance.
+    const converter = fs.readFileSync(path.join(__dirname, '../services/estimate-converter.js'), 'utf8');
+    expect(converter).toContain('if (firstScheduledServiceId && !usingCallerDatabase) {');
+    const acceptRoute = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    const redeemAt = acceptRoute.indexOf("createdBy: 'system:inspection_credit_estimate_accept'");
+    const deliveryAt = acceptRoute.indexOf('Post-commit invoice delivery for every accept-minted invoice');
+    expect(redeemAt).toBeGreaterThan(-1);
+    expect(deliveryAt).toBeGreaterThan(redeemAt);
+  });
+});
+
 describe('closeout route wiring — source contracts (the completion route is too large to exercise here)', () => {
   const fs = require('fs');
   const path = require('path');

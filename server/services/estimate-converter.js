@@ -2693,6 +2693,26 @@ const EstimateConverter = {
       }),
     });
 
+    // Inspection credit: redeem after the bookings above committed and
+    // BEFORE the setup/prepay invoice mints (pre-push P0), so the credit
+    // sits in the balance and the invoice machinery auto-applies it —
+    // otherwise the customer can receive or pay the full invoice before
+    // the promised $75 exists. Global-pool conversions only: when this
+    // conversion rides a caller's transaction (the public accept), the
+    // booking is not yet visible to the redeemer's own transaction — that
+    // path redeems post-commit in estimate-public, before delivery.
+    if (firstScheduledServiceId && !usingCallerDatabase) {
+      try {
+        await require('./inspection-credit').redeemInspectionCreditForBooking({
+          customerId,
+          scheduledServiceId: firstScheduledServiceId,
+          createdBy: 'system:inspection_credit_estimate_accept',
+        });
+      } catch (creditErr) {
+        logger.warn(`[estimate-converter] inspection credit redemption deferred to sweep: ${creditErr.message}`);
+      }
+    }
+
     // 4. Create the setup/prepay invoice. Public accepts auto-send it and
     //    return the pay URL; admin/manual conversion can disable auto-send.
     //    Standard pay-per-application invoices include first app and the
