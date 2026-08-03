@@ -33,7 +33,7 @@ const mockChainCalls = [];
 jest.mock('../models/db', () => {
   const makeChain = (table) => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning']) {
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning', 'forUpdate']) {
       chain[m] = jest.fn((...args) => { mockChainCalls.push({ m, args }); return chain; });
     }
     // select()/the builder itself resolves to the open-offer list
@@ -273,6 +273,25 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
     const none = await sweepInspectionCreditRedemptions();
     expect(none.redeemed).toBe(0);
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
+  it('the mint re-validates the booking UNDER LOCK — a cancel that wins the race stops the money', async () => {
+    // Every caller's liveness read happens before the claim transaction
+    // starts; a cancellation can commit in between and its reversal finds
+    // no redeemed offer yet. The in-transaction re-read (FOR UPDATE) is
+    // what stops $75 landing against a cancelled booking.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-03'), expires_at: new Date('2099-01-01'),
+      source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = [{ id: 'svc-booked', created_at: new Date('2026-08-05') }];
+    mockBookings = [{ id: 'svc-booked', created_at: new Date('2026-08-05'), status: 'cancelled' }];
+    const res = await sweepInspectionCreditRedemptions();
+    expect(res.redeemed).toBe(0);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    // And the guard read really locked the row.
+    expect(mockChainCalls.some((c) => c.m === 'forUpdate')).toBe(true);
   });
 
   it('rescues an offer the expiry race closed — expired is provisional, never money-terminal', async () => {

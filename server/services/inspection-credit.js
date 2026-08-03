@@ -285,21 +285,55 @@ async function markBookingForInspectionCredit(trx, { customerId, scheduledServic
   // kill-switch period could never prove its booking afterwards, and would
   // silently expire.
   if (!customerId || !scheduledServiceId || !trx) return 0;
+  const eventRow = {
+    customer_id: customerId,
+    scheduled_service_id: scheduledServiceId,
+    source: source ? String(source).slice(0, 40) : null,
+  };
   try {
     await trx.transaction(async (sp) => {
       await sp('inspection_credit_booking_events')
-        .insert({
-          customer_id: customerId,
-          scheduled_service_id: scheduledServiceId,
-          source: source ? String(source).slice(0, 40) : null,
-        })
+        .insert(eventRow)
         .onConflict('scheduled_service_id')
         .ignore();
     });
     return 1;
   } catch (err) {
-    // The savepoint rolled back; the caller's transaction is still healthy.
-    logger.warn(`[inspection-credit] booking event failed for ${scheduledServiceId}: ${err.message}`);
+    // The savepoint rolled back; the caller's transaction is still healthy
+    // and the booking MUST still commit (a booking never fails because
+    // crediting failed). But this event is the ONLY proof redemption
+    // accepts, so a swallowed failure is silent permanent credit loss
+    // (pre-push P0). Recovery ladder: retry post-commit on the global pool
+    // (covers transient failures — by then the booking is committed and
+    // visible), and if that also fails, raise an office alert so the loss
+    // is an exception someone sees, never a log line nobody reads.
+    logger.error(`[inspection-credit] booking event failed for ${scheduledServiceId} (post-commit retry queued): ${err.message}`);
+    setImmediate(() => {
+      void (async () => {
+        try {
+          await db('inspection_credit_booking_events')
+            .insert(eventRow)
+            .onConflict('scheduled_service_id')
+            .ignore();
+          logger.info(`[inspection-credit] booking event recovered post-commit for ${scheduledServiceId}`);
+        } catch (retryErr) {
+          logger.error(`[inspection-credit] booking event retry failed for ${scheduledServiceId}: ${retryErr.message}`);
+          try {
+            await require('./notification-service').notifyAdmin(
+              'billing',
+              'Inspection-credit booking evidence failed to record',
+              'A real booking could not record its inspection-credit evidence, so any open credit for this customer will not auto-apply. Verify the booking and apply the credit manually if one was promised.',
+              {
+                link: `/admin/customers/${customerId}`,
+                metadata: { scheduledServiceId, customerId, source: eventRow.source, reason: 'booking_event_write_failed' },
+              },
+            );
+          } catch (alertErr) {
+            logger.error(`[inspection-credit] booking event failure alert failed for ${scheduledServiceId}: ${alertErr.message}`);
+          }
+        }
+      })();
+    });
     return 0;
   }
 }
@@ -358,6 +392,25 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
         e.inspectionCreditSkip = 'claim_lost';
         throw e;
       }
+      // Re-validate the BOOKING under lock, inside the same transaction
+      // that mints (pre-push P0): every caller's liveness read happens
+      // before this transaction starts, so a cancellation could commit in
+      // between — its reversal would find no redeemed offer yet, then this
+      // mint would land $75 against a cancelled booking, spendable until
+      // the hourly sweep. Locking the row here serializes against the
+      // cancel (which updates the same row); non-live or a foreign
+      // customer rolls the claim back untouched.
+      const bookingRow = await trx('scheduled_services')
+        .where({ id: bookingId })
+        .forUpdate()
+        .first('status', 'customer_id');
+      if (!bookingRow
+        || NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingRow.status || '').toLowerCase())
+        || (bookingRow.customer_id != null && String(bookingRow.customer_id) !== String(customerId))) {
+        const e = new Error('booking went non-live (or changed hands) before the mint');
+        e.inspectionCreditSkip = 'booking_not_live';
+        throw e;
+      }
       const { entry } = await postCreditMovement({
         customerId,
         delta: round2(amount),
@@ -374,6 +427,12 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
     return true;
   } catch (err) {
     if (err?.inspectionCreditSkip === 'claim_lost') return false;
+    if (err?.inspectionCreditSkip === 'booking_not_live') {
+      // Not an error: the cancel won the race and the claim rolled back
+      // untouched — the offer stays open for a real booking.
+      logger.info(`[inspection-credit] offer ${offerId} not minted — booking ${bookingId} went non-live first`);
+      return false;
+    }
     // Left 'offered' on purpose — the sweep retries it.
     logger.error(`[inspection-credit] redemption FAILED for offer ${offerId}: ${err.message}`);
     return false;
