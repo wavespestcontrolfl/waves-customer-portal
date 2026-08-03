@@ -1287,8 +1287,12 @@ router.get('/:token', async (req, res, next) => {
       const tzSignature = await treatmentZonePdfSignature(service, db);
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
       const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
+      // Assessment identity + copy version, computed ONCE before the render and
+      // reused for both the expected-key check and the store, so the key always
+      // describes the same assessment on both sides (#3168).
+      const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, db),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1346,10 +1350,21 @@ router.get('/:token', async (req, res, next) => {
         });
       }
       try {
-        const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, db),
-        });
-        await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
+        // Re-read the assessment component AFTER the render and require it to
+        // match the pre-render value. The browser fetches its own data, so a
+        // selection that moved mid-render would otherwise store the PDF of
+        // assessment A under B's key, where it reads as current forever. Same
+        // shape as the Pest Pressure config re-check above: if it moved, skip
+        // the store and let the next view render cleanly.
+        const laAfter = await lawnAssessmentPdfSignature(service, db);
+        if (laAfter !== laSignature) {
+          logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else {
+          const key = await putReportPdf(service.id, pdf, {
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
+          });
+          await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
+        }
       } catch (storageErr) {
         logger.warn(`[reports-public] PDF storage skipped for ${service.id}: ${storageErr.message}`);
       }

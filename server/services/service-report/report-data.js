@@ -1865,8 +1865,15 @@ async function lawnAssessmentPdfSignature(service, knex = db) {
   try {
     const line = service?.service_line || detectServiceLine(service?.service_type);
     if (line !== 'lawn') return '';
-    const assessment = await loadLinkedLawnAssessment(service, knex);
-    if (!assessment?.id) return '';
+    // failClosed so a transient lookup error is NOT mistaken for "no
+    // assessment": both used to yield '', which is also the legacy/pre-change
+    // key shape — so during a blip a stale cached lawn PDF would read as
+    // current. An error now lands in the catch below and produces a key that
+    // matches nothing.
+    const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
+    // A CONFIRMED absence gets its own non-empty marker, distinct from both a
+    // non-lawn record and the legacy empty key.
+    if (!assessment?.id) return '-la0';
     const recs = typeof assessment.recommendations === 'string'
       ? assessment.recommendations
       : JSON.stringify(assessment.recommendations || '');
@@ -1876,7 +1883,11 @@ async function lawnAssessmentPdfSignature(service, knex = db) {
       .slice(0, 12);
     return `-la${stamp}`;
   } catch {
-    return '';
+    // Unreadable state must never produce a key that could MATCH a stored
+    // object — that is how a stale PDF gets served during an outage. A value
+    // nothing can match forces a re-render instead: extra work, never wrong
+    // content, and never a 500 on a report view.
+    return `-laerr${crypto.randomBytes(6).toString('hex')}`;
   }
 }
 
