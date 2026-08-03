@@ -1995,6 +1995,17 @@ const ADVERBIAL = /ly$|^(?:also|again|now|today|just|already)$/i;
 // objects stay joined — "the snap and glue traps" has no auxiliary.
 const CLAUSE_AUX = /^(?:was|were|is|are|has|have|had|will|would|can|could|should|may|might|must)$/i;
 const NEW_SUBJECT_LOOKAHEAD = 4;
+// A REPEATED SUBJECT before the predicate — "we inspected the attic and WE
+// set eight traps" — blocked the verb test, and the new-subject scan broke
+// on the lexical verb without splitting, so the attic's `inspected` bound
+// to the later traps and valid copy was discarded (codex P2 round 14). A
+// subject pronoun followed by a predicate is unambiguous, so it is simply
+// skipped for the verb test. A determiner+noun subject with a lexical verb
+// ("and the assistant set eight traps") deliberately stays joined: without
+// a parser it is indistinguishable from a reduced participle modifying the
+// object ("the snap and glue traps placed along the wall"), and the
+// passive/auxiliary forms of such clauses are already split by CLAUSE_AUX.
+const SUBJECT_PRONOUN = /^(?:we|i|they|she|he)$/i;
 
 function splitOnPredicateAnd(piece) {
   const toks = words(piece);
@@ -2004,6 +2015,10 @@ function splitOnPredicateAnd(piece) {
     if (!/^and$/i.test(toks[i])) continue;
     let j = i + 1;
     while (j < toks.length && ADVERBIAL.test(toks[j])) j += 1;
+    if (SUBJECT_PRONOUN.test(toks[j] || '')) {
+      j += 1;
+      while (j < toks.length && ADVERBIAL.test(toks[j])) j += 1;
+    }
     const next = toks[j];
     if (!next) continue;
     let splits = RECHECK_VERB.test(next) || PREDICATE_VERB.test(next);
@@ -2098,16 +2113,28 @@ function normalizeWordNumbers(text) {
 // bare partitives ("one of the traps") claim no total at all.
 //
 // The modifier run between the count and its trap noun is bounded by
-// MEANING, not by a flat token cap: adjectives ("exterior mechanical
-// snap") extend the same noun phrase, while animals, partitives, articles,
-// conjunctions, and prepositions signal the number belongs to something
-// else — "2 rats near the traps" counts rats, not traps. The old two-token
-// cap missed "We checked 8 exterior mechanical snap traps" entirely, so
-// the stale 8 published beside a corrected "Traps checked: 6" (codex P1
-// round 13); an uncapped run without the exclusions would have re-created
-// the rats-near-the-traps false positive instead.
-const TRAP_MODIFIER_RUN = '(?:\\s+(?!(?:rats?|mice|mouse|rodents?|animals?|captures?|catches|of|the|a|an|and|or|nor|but|with|without|near|at|in|on|for|from|around|along|inside|outside|behind|beneath|under|over|by|to)\\b)[a-z-]+){0,6}?';
+// MEANING, with no token cap at all: adjectives ("exterior mechanical
+// snap") extend the same noun phrase however long it runs, while animals,
+// partitives, articles, conjunctions, and prepositions signal the number
+// belongs to something else — "2 rats near the traps" counts rats, not
+// traps. The old two-token cap missed "We checked 8 exterior mechanical
+// snap traps" entirely (codex P1 round 13), and the interim {0,6} was the
+// same mistake smaller — catalog prose runs past any fixed cap (codex P2
+// round 14). The exclusions alone terminate the phrase: real intervening
+// prose always carries an article or preposition, and any excluded token
+// breaks the chain before it reaches `traps`.
+const TRAP_MODIFIER_RUN = '(?:\\s+(?!(?:rats?|mice|mouse|rodents?|animals?|captures?|catches|of|the|a|an|and|or|nor|but|with|without|near|at|in|on|for|from|around|along|inside|outside|behind|beneath|under|over|by|to|between|through|beyond|across|past|into|onto|above|below|beside|toward|towards|against|off)\\b)[a-z-]+)*?';
 const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:of|out\\s+of)\\s+(\\d+))?(${TRAP_MODIFIER_RUN})\\s+(?:traps?|devices?)\\b`, 'gi');
+// Numeric partitives WITH a check predicate claim the checked count even
+// though they never name a roster: "We checked 8 of the traps" puts 8
+// against the structured count, where a bare "one of the traps held a
+// capture" still claims nothing (codex P1 round 14). Active checked/
+// inspected forms only, deliberately: "reset 3 of the traps" is a subset
+// ACTION on some of the checked traps, and "set/placed 3 of the traps in
+// the attic" is distributive placement prose — counting either against
+// the structured total would re-create the copy-discarding false positive
+// this PR exists to fix.
+const TRAP_PARTITIVE_PREDICATE_RE = /\b(?:checked|inspected)\s+(\d+)\s+of\s+(?:the|our|these|those|all|its)\b(?:\s+[a-z-]+){0,2}?\s+(?:traps?|devices?)\b/gi;
 const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
 const CAUGHT_CLAIM_RE = /\b(?:caught|captured|removed)\s+(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b/gi;
 // The PASSIVE capture claim, where the animal precedes its verb: "two mice
@@ -2183,6 +2210,9 @@ function trapRosterClaims(text) {
     if (SUBSET_LEAD_RE.test(lead) || SUBSET_LEAD_RE.test(trail)) return;
     claims.add(Number(m.second != null ? m.second : m.first));
   });
+  const partitive = new RegExp(TRAP_PARTITIVE_PREDICATE_RE.source, 'gi');
+  let pm;
+  while ((pm = partitive.exec(text)) !== null) claims.add(Number(pm[1]));
   return claims;
 }
 

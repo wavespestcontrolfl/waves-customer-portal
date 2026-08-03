@@ -1286,3 +1286,70 @@ describe('a new subject after `and` keeps its verb to itself (round 13)', () => 
       .toBeGreaterThan(0);
   });
 });
+
+// Round 14: "We checked 8 of the traps" names no roster, so no pattern
+// claimed it and a stale 8 froze beside a corrected count. Numeric
+// partitives with an active check predicate now reconcile; bare partitives
+// and subset/distributive actions still claim nothing.
+describe('numeric partitives with a check predicate reconcile (round 14)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('checked/inspected N of the traps reconciles against the count', () => {
+    expect(countContradictions('We checked 8 of the traps today.', { traps_checked: 6 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('We inspected eight of the traps.', { traps_checked: 6 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('We checked 8 of the traps today.', { traps_checked: 8 }))
+      .toEqual([]);
+  });
+
+  test('bare partitives and subset/distributive actions still claim nothing', () => {
+    expect(countContradictions('One of the traps held a capture.', { traps_checked: 6 }))
+      .toEqual([]);
+    // a subset ACTION on some of the checked traps
+    expect(countContradictions('We reset 3 of the traps.', { traps_checked: 6 }))
+      .toEqual([]);
+    // distributive placement prose
+    expect(countContradictions('We set 3 of the traps in the attic.', { traps_checked: 6 }))
+      .toEqual([]);
+  });
+});
+
+// Round 14: the interim {0,6} modifier cap was the two-token mistake made
+// smaller — catalog prose runs past any fixed cap. The exclusion boundaries
+// alone terminate the noun phrase now.
+describe('catalog-length modifier runs still reconcile (round 14)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('seven modifiers between count and noun reconcile', () => {
+    const text = 'We placed 8 new black plastic heavy-duty professional-grade mechanical snap traps.';
+    expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    expect(countContradictions(text, { traps_checked: 8 })).toEqual([]);
+  });
+
+  test('excluded tokens still end the phrase regardless of length', () => {
+    expect(countContradictions('We removed 2 rats near the traps.', { traps_checked: 6 }))
+      .toEqual([]);
+  });
+});
+
+// Round 14: a repeated subject pronoun before the predicate — "…and WE set
+// eight traps" — blocked the verb test, so the clause stayed joined and the
+// attic's `inspected` bound to the later traps.
+describe('repeated-subject clauses split (round 14)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('pronoun + predicate after `and` reads as setup prose', () => {
+    for (const text of [
+      'We inspected the attic and we set eight traps today.',
+      'We inspected the crawlspace and I placed the devices.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+
+  test('a real recheck in either conjunct still rejects', () => {
+    expect(setupContradictions('We checked the traps and we added bait.').length)
+      .toBeGreaterThan(0);
+  });
+});

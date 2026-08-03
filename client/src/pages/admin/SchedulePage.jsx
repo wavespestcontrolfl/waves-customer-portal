@@ -5811,6 +5811,17 @@ export function typedActivityScoreConflict(schemaType, values, score) {
   return null;
 }
 
+// Follow-up-only trap actions a declared Initial setup cannot carry —
+// mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS in
+// server/services/service-report/activity-indicators.js.
+const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
+  "Traps reset",
+  "Traps moved",
+  "Traps replaced",
+  "Bait/lure refreshed",
+  "Damaged or missing traps found",
+];
+
 // Termite Phase-3 attestation contradictions, mirrored pre-submit so the
 // tech gets the inline prompt instead of the server 422 (Codex P3 r3 on
 // #2703). The method list mirrors TERMITE_PERIMETER_METHODS in
@@ -5837,6 +5848,33 @@ export function typedFieldValueConflicts(schemaType, values) {
     conflicts.push(
       'The inspection notice must be affixed before completing — affix the notice and select "Yes"',
     );
+  }
+  // Initial-setup constraints on rodent trapping, mirrored pre-submit so
+  // the tech gets the inline prompt instead of the server 422 (codex P2
+  // round 14 on #3159) — same rationale as the termite mirrors above, and
+  // the caller already runs this for both the primary and every companion
+  // section. The action list mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS and
+  // the messages mirror validateTypedFindings in activity-indicators.js.
+  if (
+    schemaType === "rodent_trapping" &&
+    String(values?.trap_visit_type ?? "").trim() === "Initial setup"
+  ) {
+    const followUpOnly = String(values?.trap_actions ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .filter((action) => SETUP_INCOMPATIBLE_TRAP_ACTIONS.includes(action));
+    if (followUpOnly.length) {
+      conflicts.push(
+        `Trap actions ${followUpOnly.map((a) => `"${a}"`).join(", ")} describe traps that were already out — either clear them or set this visit to "Follow-up check"`,
+      );
+    }
+    const trapsPlaced = Number(values?.traps_checked);
+    if (!Number.isInteger(trapsPlaced) || trapsPlaced < 1) {
+      conflicts.push(
+        'An initial setup must record how many traps were set — enter the count, or set this visit to "Follow-up check"',
+      );
+    }
   }
   return conflicts;
 }
