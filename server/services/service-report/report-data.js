@@ -42,6 +42,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { publicPortalUrl } = require('../../utils/portal-url');
 
 let PhotoService = null;
 try {
@@ -3665,6 +3666,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       : photoPayload,
     photoChain,
     pdfUrl: `/api/reports/${token}`,
+    // Canonical PUBLIC origin for links baked into the permanent PDF. The
+    // headless renderer opens the page through CLIENT_URL /
+    // SERVICE_REPORT_PDF_BASE_URL, which on prod is the raw Railway
+    // hostname — window.location.origin would put that in a customer's
+    // document. publicPortalUrl() reads PUBLIC_PORTAL_URL first.
+    publicOrigin: publicPortalUrl(),
     legacy: {
       // No raw technician_notes here (owner ruling 2026-07-16): the field is
       // internal — access codes, billing notes — and the only sanctioned path

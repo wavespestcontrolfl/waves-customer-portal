@@ -38,11 +38,19 @@ const MUTED = '#5B6A77';
 const LINE = '#C9CED4';
 const HAIR = '#E2E6EA';
 const TZ = 'America/New_York';
-// A PDF rendered from a preview/dev deployment carries a token that only
-// resolves on THAT environment — hardcoding production made those artifacts'
-// links dead. The renderer itself uses the configured base (pdf-puppeteer.js).
+// Link precedence for the permanent document:
+//   1. data.publicOrigin — the server's canonical PUBLIC portal origin. The
+//      headless renderer opens the page through CLIENT_URL /
+//      SERVICE_REPORT_PDF_BASE_URL, which on prod is the RAW RAILWAY
+//      HOSTNAME, so window.location.origin would bake an internal host into
+//      a customer's document.
+//   2. window.location.origin — preview/dev renders, whose tokens only
+//      resolve on that deployment, so their artifacts must link to it.
+//   3. the production portal.
 const PORTAL_FALLBACK = 'https://portal.wavespestcontrol.com';
-function portalBase() {
+function portalBase(publicOrigin) {
+  const canonical = String(publicOrigin || '').trim().replace(/\/+$/, '');
+  if (canonical) return canonical;
   if (typeof window !== 'undefined' && window.location?.origin) return window.location.origin;
   return PORTAL_FALLBACK;
 }
@@ -398,7 +406,7 @@ export default function ServiceReportDocument({ data, token }) {
 
   const stationMap = data.stationMap?.available && Array.isArray(data.stationMap.stations) && data.stationMap.stations.length
     ? data.stationMap : null;
-  const reportUrl = `${portalBase()}/report/${encodeURIComponent(token)}`;
+  const reportUrl = `${portalBase(data.publicOrigin)}/report/${encodeURIComponent(token)}`;
   const reportNumber = String(data.serviceRecordId || token || '').replace(/-/g, '').slice(0, 10).toUpperCase();
 
   const summaryParagraphs = [];

@@ -857,6 +857,17 @@ async function stationMapPdfSignature(service, knex) {
       .count({ n: '*' })
       .first();
     const checkCount = Number(checks?.n || 0);
+    // Only visits that can actually RENDER a placement map get a station
+    // signature. A station customer's unrelated lawn or general-pest report
+    // is rejected by buildStationMapReportContext as not_station_visit, so
+    // signing it would let a station move invalidate healthy cached PDFs
+    // that contain no map. Conservative on purpose: recorded checks OR a
+    // station-program service line counts as a station visit — under-gating
+    // costs a needless re-render, over-gating would leave a real placement
+    // map stale, which is the worse failure.
+    const line = `${service?.service_line || ''} ${service?.service_type || ''}`.toLowerCase();
+    const stationVisit = checkCount > 0 || /termite|rodent|bait|trap/.test(line);
+    if (!stationVisit) return '';
     const checkStamp = new Date(checks?.updated || 0).getTime();
     const checkPart = checkCount
       ? `c${checkCount}x${Number.isFinite(checkStamp) ? checkStamp : 0}`
@@ -894,9 +905,11 @@ async function stationMapPdfSignature(service, knex) {
       .catch(() => null);
     const lat = coords?.lat ?? null;
     const lng = coords?.lng ?? null;
-    const centerPart = lat != null && lng != null
-      ? `g${Number(lat).toFixed(5)},${Number(lng).toFixed(5)}`
-      : '';
+    // FULL precision: report-data passes the raw coordinate into
+    // resolveZoneRowsImageDrift, and at zoom 20 a 0.000001 degree change
+    // shifts a pin measurably (and can push an edge pin out of frame), so
+    // rounding here would leave a visibly stale PDF looking current.
+    const centerPart = lat != null && lng != null ? `g${lat},${lng}` : '';
     const zoomPart = geom ? `z${geom.zoom ?? 20}v${geom.version ?? 0}` : '';
     return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}${checkPart}${centerPart}${zoomPart}`;
   } catch {

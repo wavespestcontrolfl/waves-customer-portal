@@ -678,6 +678,18 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/We will recheck the shaded areas/);
   });
 
+  it('prefers the server\'s canonical public origin over the rendering host', () => {
+    // prod renders open through CLIENT_URL = the raw Railway hostname
+    const data = { ...BASE_DATA, publicOrigin: 'https://portal.wavespestcontrol.com' };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.querySelector('a[href="https://portal.wavespestcontrol.com/report/tok123"]')).toBeTruthy();
+    expect(container.textContent).not.toContain(window.location.origin);
+    cleanup();
+    // preview/dev renders (no canonical origin) still link to themselves
+    const preview = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(preview.container.querySelector(`a[href="${window.location.origin}/report/tok123"]`)).toBeTruthy();
+  });
+
   it('emits the interactive report URL as a real link', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     const link = container.querySelector(`a[href="${window.location.origin}/report/tok123"]`);
