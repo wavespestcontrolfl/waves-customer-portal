@@ -631,3 +631,18 @@ describe('disputed setup counts stay out of the narrative (round 12)', () => {
     expect(summary).toContain('7 of 7 traps were set');
   });
 });
+
+// Round 19 (codex P2): a declared setup can land on ANY visit —
+// isInitialRodentTrapSetup deliberately ignores visitSequence — but the
+// prompt told the model it was the FIRST visit of the program, licensing
+// an ordinal claim no grounding validator can reject when the setup
+// follows earlier rodent visits. The rule now says only that the traps
+// were placed today, and explicitly forbids ranking the visit.
+describe('setup prompt rule asserts no visit ordinal (round 19)', () => {
+  const { SYSTEM_PROMPT } = require('../services/service-report/rodent-report-narrative')._test;
+
+  test('the initial_trap_setup rule no longer claims the first program visit', () => {
+    expect(SYSTEM_PROMPT).not.toMatch(/FIRST visit of the trapping program/i);
+    expect(SYSTEM_PROMPT).toMatch(/never state or imply that this is the first visit/i);
+  });
+});

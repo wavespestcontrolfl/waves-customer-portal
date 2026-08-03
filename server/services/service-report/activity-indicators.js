@@ -2172,6 +2172,27 @@ const CHECK_PREDICATE_TRAIL_RE = new RegExp(
   `^(?:\\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*\\s+${CHECK_VERB_PAST}\\b`,
   'i',
 );
+// Distributive ACTION predicates: a count they govern is the subset of
+// traps the action touched, never the roster — the same r14 ruling that
+// keeps set/reset out of the partitive rules, extended to bare counts.
+// "We checked 8 traps and reset 2 traps" read the 2 as a rival total, and
+// the deliberate more-than-one-claim bail then let the stale 8 publish
+// (codex P1 r19). A sibling of RECHECK_VERB's action forms, NOT derived
+// from it: that list also holds check/inspect/examine/test, which DO
+// govern rosters. Same anchoring and inflection spelling as the check
+// predicates above.
+const ACTION_VERB_PAST = '(?:re-?set(?:ting|s)?|re-?bait(?:ed|ing|s)?|re-?fresh(?:ed|ing|es)?'
+  + '|re-?position(?:ed|ing|s)?|replace[sd]?|replacing|swap(?:ped|ping|s)?'
+  + '|move[sd]?|moving|service[sd]?|servicing)';
+const ACTION_PREDICATE_LEAD_RE = new RegExp(
+  `\\b${ACTION_VERB_PAST}(?:\\s+(?:[a-z]+ly|all|both|just|now))*(?:\\s+(?:a|the)\\s+(?:total|count)\\s+of)?\\s*$`,
+  'i',
+);
+const ACTION_PREDICATE_TRAIL_RE = new RegExp(
+  '^(?:\\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*'
+  + '\\s+(?:re-?set|re-?baited|re-?freshed|re-?positioned|replaced|swapped|moved|serviced)\\b',
+  'i',
+);
 
 const SETUP_EMPTY_CAPTURE_RES = [
   /\bno\s+(?:new\s+)?captures?\b/i,
@@ -2461,6 +2482,11 @@ function trapRosterClaims(text) {
     const trail = i + 1 < found.length
       ? ''
       : cueText.slice(m.end, m.end + 30).split(/[.!?]/)[0];
+    // A count a distributive ACTION verb governs is the subset the action
+    // touched — "reset 2 traps" claims nothing about how many exist — and
+    // must drop before the roster logic, or it becomes a rival total that
+    // bails the whole subject (codex P1 r19).
+    if (ACTION_PREDICATE_LEAD_RE.test(lead) || ACTION_PREDICATE_TRAIL_RE.test(trail)) return;
     // A count whose OWN predicate is a check verb is a roster assertion no
     // matter what else shares its windows: in "Due to activity, we checked
     // 8 traps" the cue is the REASON for the visit, not a status on the 8,
@@ -2580,9 +2606,38 @@ function setupContradictions(text) {
   }
   for (const rx of SETUP_EMPTY_CAPTURE_RES) {
     const match = str.match(rx);
-    if (match) found.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
+    if (match && !emptyCaptureExempt(str, match.index)) {
+      found.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
+    }
   }
   return found;
+}
+
+// Conditional or future INTENT preceding an empty-capture claim exempts
+// it: "IF no captures are recorded at the next check, we will adjust the
+// placements" is a decision rule about a future check, not a claim that
+// the new traps were already checked — and it is exactly the forward-
+// looking copy a setup should write (codex P2 r19). Only markers BEFORE
+// the match, inside its own sentence, govern: a promise AFTER a completed
+// claim must not excuse it ("No mice were caught and we will return next
+// week" still rejects — the round-16 rule, learned the hard way on the
+// verb side). Derived from FUTURE_INTENT_RE (one source) plus the
+// conditional openers, which the verb walk never needed because a verb
+// under "if" is inflected differently.
+// Bare expectation verbs join here (FUTURE_INTENT_RE only carries
+// "expect to"): "We EXPECT no captures until the first check" states an
+// expectation, not an observation.
+const EMPTY_CAPTURE_INTENT_RE = new RegExp(
+  `${FUTURE_INTENT_RE.source}|\\b(?:if|unless|in\\s+case|should|expect(?:s|ed|ing)?|anticipate[sd]?)\\b`,
+  'i',
+);
+function emptyCaptureExempt(str, index) {
+  const before = String(str).slice(0, index);
+  const sentenceStart = Math.max(
+    before.lastIndexOf('.'), before.lastIndexOf('!'),
+    before.lastIndexOf('?'), before.lastIndexOf(';'),
+  );
+  return EMPTY_CAPTURE_INTENT_RE.test(before.slice(sentenceStart + 1));
 }
 
 /**

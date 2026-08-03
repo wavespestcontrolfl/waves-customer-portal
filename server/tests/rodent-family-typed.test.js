@@ -1889,6 +1889,56 @@ describe('a cue is not a status on a count the check verb governs (audit on 4240
   });
 });
 
+// Round 19 (codex P1): "We checked 8 traps and reset 2 traps" read the 2
+// as a rival total, and the deliberate more-than-one-claim bail then let
+// the stale 8 publish. A count a distributive action verb governs is the
+// subset the action touched — the same r14 ruling that keeps set/reset
+// out of the partitive rules, extended to bare counts.
+describe('action counts are subsets, not rival totals (round 19)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a numeric action clause no longer bails the roster claim', () => {
+    for (const text of [
+      'We checked 8 traps and reset 2 traps.',
+      'We checked 8 traps and moved 2 traps.',
+      'We checked 8 traps and 2 traps were replaced.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    }
+    expect(countContradictions('We checked 8 traps and reset 2 traps.', { traps_checked: 8 }))
+      .toEqual([]);
+  });
+
+  test('an action count alone claims no roster', () => {
+    expect(countContradictions('We reset 2 traps.', { traps_checked: 6 })).toEqual([]);
+    expect(countContradictions('2 traps were replaced.', { traps_checked: 6 })).toEqual([]);
+  });
+});
+
+// Round 19 (codex P2): the empty-capture screens matched forward-looking
+// copy — "If no captures are recorded at the next check, we will adjust"
+// is a decision rule about a future check, exactly what a setup should
+// write. Conditional/future intent BEFORE the match exempts it; a promise
+// AFTER a completed claim still does not (the round-16 rule).
+describe('empty-capture claims under conditional or future intent (round 19)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test.each([
+    'If no captures are recorded at the next check, we will adjust the placements.',
+    'Should no captures appear by the next visit, we will reposition the traps.',
+    'We expect no captures until the first check.',
+  ])('allows: %s', (text) => {
+    expect(setupContradictions(text)).toEqual([]);
+  });
+
+  test.each([
+    'No mice were caught and we will return next week.',
+    'No captures were recorded.',
+  ])('still rejects: %s', (text) => {
+    expect(setupContradictions(text).length).toBeGreaterThan(0);
+  });
+});
+
 // Pre-push audit on 42406f3: examine and test are plain synonyms of
 // check/inspect — a report saying the traps were examined or tested
 // presupposes traps to examine, exactly as bare check/inspect do — but
