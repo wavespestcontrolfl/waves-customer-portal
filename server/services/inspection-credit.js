@@ -525,7 +525,9 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         .whereNull('o.id')
         .limit(limit)
         .select('s.id as id', 's.customer_id as customer_id', 's.service_id as service_id',
-          'r.id as record_id', 'r.service_date as service_date');
+          'r.id as record_id', 'r.service_date as service_date',
+          // The CLOSEOUT instant — the real moment the promise was made.
+          'r.created_at as closed_out_at');
       for (const visit of missing) {
         let serviceKey = null;
         try {
@@ -540,11 +542,13 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           serviceRecordId: visit.record_id,
           serviceKey,
           createdBy: 'system:inspection_credit_recovery',
-          // The promise dates from the CLOSEOUT (the service record), so
-          // ordering guards accept bookings made after it; the window is
-          // anchored to the service date. ET wall-clock — a date-only value
-          // parsed as UTC midnight lands on the previous ET day.
-          now: etDateOnlyToDate(visit.service_date) || now,
+          // The promise moment is the CLOSEOUT instant (Codex #3178 r8
+          // P0). Passing the service date here backdated created_at to noon
+          // on that day, so a booking made that afternoon but BEFORE the
+          // closeout would qualify and mint money it preceded. The service
+          // date anchors only the expiry window (ET wall-clock — a date-only
+          // value parsed as UTC midnight lands on the previous ET day).
+          now: visit.closed_out_at ? new Date(visit.closed_out_at) : now,
           windowAnchor: etDateOnlyToDate(visit.service_date) || now,
         });
         // The offer arrived LATE, so a qualifying booking may already have
