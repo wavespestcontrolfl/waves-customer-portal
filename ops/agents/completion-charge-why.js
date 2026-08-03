@@ -10,11 +10,13 @@
  * the charge. Every check below mirrors a specific line of that lane; when the
  * lane moves, this script has to move with it.
  *
- * Why this exists: three of the failure modes are silent (gate off, no lane
- * row, lane excluded) and two ring the office bell ("Auto Pay charge skipped —
- * no accepted amount on file" / "... above accepted amount — review"). Telling
- * them apart by hand means six joins across five tables, and the remedy is
- * different for each.
+ * Why this exists: most of the failure modes are silent (gate off, no lane row,
+ * lane excluded, Auto Pay down), and the two that ring the office bell ("Auto
+ * Pay charge skipped — no accepted amount on file" / "... above accepted amount
+ * — review") only ring when the lane got that far. Telling them apart by hand
+ * means six joins across five tables, and the remedy differs for each. Note a
+ * bell's ABSENCE is not evidence: a within-cap invoice raises none by design,
+ * and both notifyAdmin calls swallow their own failures.
  *
  * CHECK ORDER MIRRORS PRODUCTION'S NESTING, not convenience, because the
  * verdict is the FIRST blocker and a wrongly-ordered check sends the operator
@@ -107,8 +109,10 @@ async function main() {
   const client = new Client({ connectionString: url, ssl: { rejectUnauthorized: false } });
   await client.connect();
 
-  // Ordered findings. The first BLOCK is the verdict; any UNKNOWN prevents a
-  // clean verdict even when nothing blocked.
+  // Findings, in production-nesting order — POSITION is load-bearing. The
+  // first BLOCK is the verdict only when no UNKNOWN precedes it; an earlier
+  // unverified condition could have stopped production before that block was
+  // ever reached, so the run is inconclusive instead.
   const findings = [];
   const say = (level, label, detail) => {
     findings.push({ level, label, detail });
@@ -167,7 +171,7 @@ async function main() {
     console.log(`  backfill        ${notes.backfill === true}`);
     console.log('');
 
-    console.log('=== lane replay, in production nesting order (first BLOCK is the cause) ===');
+    console.log('=== lane replay, in production nesting order ===');
 
     // 1. Gate. Lives on the portal service; an unknown gate must never yield a
     //    clean verdict.
@@ -515,8 +519,8 @@ async function main() {
         `${d.orphaned ? 'ORPHANED (Stripe charged, DB write failed) ' : ''}${d.reconciliation_required ? 'reconciliation_required ' : ''}— a later success does not clear this; reconcile the ledger.`);
     }
 
-    // 12. Office bells — the free discriminator between "lane never engaged"
-    //     (silent) and "cap blocked it" (bell).
+    // 12. Office bells. A bell that IS present is strong evidence the cap
+    //     branch ran. Its ABSENCE proves nothing — see below.
     console.log('\n=== office bells for this visit ===');
     const { rows: notifRows } = await client.query(
       `SELECT id, title, created_at
@@ -528,7 +532,14 @@ async function main() {
       [visitId],
     );
     if (!notifRows.length) {
-      console.log('  none — the lane never reached the cap checks (gate off, no lane row, or lane excluded).');
+      // Absence proves nothing about which branch ran. A within-cap invoice
+      // raises no bell by design, and both notifyAdmin calls are best-effort
+      // inside a swallowing catch (admin-dispatch.js:8315-8332) — so a bell
+      // can be missing from a successful charge AND from a failed
+      // notification. Report the absence, never infer the branch.
+      console.log('  no cap-review notification recorded for this visit.');
+      console.log('  (Not evidence the lane stopped early: a within-cap invoice raises no bell,');
+      console.log('   and both notifyAdmin calls are best-effort and swallow their own failures.)');
     } else {
       for (const n of notifRows) console.log(`  ${n.created_at.toISOString()}  ${n.title}`);
     }
@@ -544,11 +555,21 @@ async function main() {
       }
     }
 
-    // Verdict. A BLOCK wins; otherwise any UNKNOWN makes the run inconclusive.
+    // Verdict. `findings` is in production-nesting order, so POSITION decides:
+    // an UNKNOWN standing EARLIER than the first BLOCK means production may
+    // have stopped before ever reaching that block, and naming it as the cause
+    // would recreate the very ordering error this tool exists to prevent —
+    // e.g. an unreadable gate plus a missing lane row must not be reported as
+    // "no lane row", because a dark gate would have stopped it first.
     console.log('\n=== verdict ===');
-    const firstBlock = findings.find((f) => f.level === BLOCK);
+    const firstBlockIdx = findings.findIndex((f) => f.level === BLOCK);
+    const firstUnknownIdx = findings.findIndex((f) => f.level === UNKNOWN);
+    const firstBlock = firstBlockIdx === -1 ? null : findings[firstBlockIdx];
     const unknowns = findings.filter((f) => f.level === UNKNOWN);
-    if (firstBlock) {
+    const unknownPrecedesBlock = firstUnknownIdx !== -1
+      && (firstBlockIdx === -1 || firstUnknownIdx < firstBlockIdx);
+
+    if (firstBlock && !unknownPrecedesBlock) {
       console.log(`  BLOCKED: ${firstBlock.label}`);
       if (firstBlock.detail) console.log(`  ${firstBlock.detail}`);
       const laterBlocks = findings.filter((f) => f.level === BLOCK && f !== firstBlock);
@@ -556,9 +577,19 @@ async function main() {
         console.log(`  (${laterBlocks.length} further blocker(s) downstream — fix this one first, then re-run.)`);
       }
       if (unknowns.length) {
-        console.log(`  (${unknowns.length} condition(s) unverified — see above.)`);
+        console.log(`  (${unknowns.length} condition(s) unverified, all AFTER this blocker — see above.)`);
       }
       process.exitCode = 1;
+    } else if (firstBlock && unknownPrecedesBlock) {
+      console.log('  INCONCLUSIVE — a blocker was found, but an EARLIER condition could not be');
+      console.log('  verified, so this may not be the cause: production checks the earlier one');
+      console.log('  first and would never have reached this point if it failed.');
+      console.log(`\n  earliest unverified: ${findings[firstUnknownIdx].label}`);
+      if (findings[firstUnknownIdx].detail) console.log(`    ${findings[firstUnknownIdx].detail}`);
+      console.log(`\n  first blocker found downstream: ${firstBlock.label}`);
+      if (firstBlock.detail) console.log(`    ${firstBlock.detail}`);
+      console.log('\n  Resolve the unverified condition above, then re-run for a definitive answer.');
+      process.exitCode = 2;
     } else if (unknowns.length) {
       console.log('  INCONCLUSIVE — nothing blocked among the conditions this script could check,');
       console.log('  but the following could not be verified, so the lane is NOT cleared:');
