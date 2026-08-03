@@ -442,4 +442,11 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
   }
 };
 
+// Exposed so callers can compare a RENDERED body against a URL they hold.
+// getTemplate strips https:// from owned portal hosts before returning, so a
+// caller checking `body.includes(fullUrl)` would never match — normalising both
+// sides through this same function is the only way that comparison stays true
+// as SCHEMELESS_SMS_HOSTS changes.
+router.stripPortalUrlScheme = stripPortalUrlScheme;
+
 module.exports = router;

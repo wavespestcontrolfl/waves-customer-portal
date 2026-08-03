@@ -98,6 +98,20 @@ const gates = {
   // unset or any non-'true' value.
   apptCardCompletionCharge: process.env.GATE_APPT_CARD_COMPLETION_CHARGE === 'true',
 
+  // Report-lane completion text for a visit that DOES have a bill. The
+  // service_report_v1_with_invoice template ("Your {service_type} report is
+  // ready … Invoice for today's visit: {pay_url}") has been unreachable since
+  // it was written: admin-dispatch computed its pay link but the branch that
+  // consumes it required !invoiceCreated, so every report-v1 line with an
+  // invoice fell through to the generic service_complete_with_invoice instead.
+  // #3166 rewrote the copy of a template nothing could render.
+  // Customer-facing copy change on a billed visit — ships dark. Gate off: the
+  // report lane keeps standing down whenever an invoice exists and the generic
+  // invoice text sends exactly as today. Kill switch: unset or any non-'true'
+  // value. The template must ALSO be present and active (probed per send) —
+  // gate on, row missing/inactive = unchanged behavior.
+  reportV1InvoiceSms: process.env.GATE_REPORT_V1_INVOICE_SMS === 'true',
+
   // Annual prepay sold from the New Appointment modal on a booking with NO
   // linked quote. Operator-initiated, but it invoices a customer for a full
   // year and sends the pay link, so it ships dark and opt-in in EVERY
