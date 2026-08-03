@@ -36,6 +36,11 @@ const NAME = 'SpeedZone Southern';
 // row still matches, so an admin edit in the meantime is never clobbered.
 const PREV_EXCLUDED = ['floratam', 'st_augustine_unknown_cultivar'];
 const NEXT_EXCLUDED = ['floratam', 'bitterblue', 'st_augustine_unknown_cultivar'];
+// The one cultivar this migration adds — appended when absent rather than
+// written as part of a whole-array replacement.
+const BITTERBLUE = 'bitterblue';
+
+exports.BITTERBLUE = BITTERBLUE;
 
 const HEAT_RESTRICTIONS = [
   'Do not broadcast apply below 50°F or above 85°F ambient; above 90°F the risk of turf discoloration increases further.',
@@ -85,13 +90,25 @@ exports.up = async function up(knex) {
     .whereNull('heat_restrictions')
     .update({ heat_restrictions: HEAT_RESTRICTIONS, updated_at: new Date() });
 
-  // Cultivar exclusions: only when the list is exactly what we recorded, so an
-  // edited list is left alone.
+  // Cultivar exclusions: APPEND Bitterblue when it is missing, rather than
+  // requiring the whole array to equal a recorded baseline.
+  //
+  // Demanding an exact match meant an environment that had added another valid
+  // exclusion — or merely reordered the array — was skipped, and stayed
+  // without Bitterblue even though the label names it explicitly. This list is
+  // what ProtocolReferenceTabV2 renders as the technician-facing exclusions,
+  // so a skipped row shows incomplete safety data. Appending only what is
+  // absent adds the cultivar without disturbing anything already there.
   await knex('products_catalog')
     .whereRaw('LOWER(name) = LOWER(?)', [NAME])
-    .whereRaw('excluded_turf_species = ?::jsonb', [JSON.stringify(PREV_EXCLUDED)])
+    .whereRaw("NOT (COALESCE(excluded_turf_species, '[]'::jsonb) @> ?::jsonb)", [
+      JSON.stringify([BITTERBLUE]),
+    ])
     .update({
-      excluded_turf_species: JSON.stringify(NEXT_EXCLUDED),
+      excluded_turf_species: knex.raw(
+        "COALESCE(excluded_turf_species, '[]'::jsonb) || ?::jsonb",
+        [JSON.stringify([BITTERBLUE])],
+      ),
       updated_at: new Date(),
     });
 };

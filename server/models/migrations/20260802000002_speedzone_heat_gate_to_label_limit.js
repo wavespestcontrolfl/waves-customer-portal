@@ -43,9 +43,14 @@ exports.SEASONAL_BLOCK = SEASONAL_BLOCK;
 async function shiftGateThreshold(knex, { from, to }) {
   // lawn_protocol_gates.logic is jsonb: {"product":"SpeedZone","maxTempF":90}
   if (await knex.schema.hasTable('lawn_protocol_gates')) {
+    // Clamp ANY ceiling above the label limit, not just an exact 90. An
+    // environment with a hand-edited 86 or 95 was previously skipped and kept
+    // an off-label ceiling — the same "preserve stricter, correct laxer" rule
+    // the catalog migration follows. A ceiling below 85 is someone being more
+    // careful than the label and is left alone.
     await knex('lawn_protocol_gates')
       .where('gate_key', 'speedzone_heat_gate')
-      .whereRaw("logic->>'maxTempF' = ?", [String(from)])
+      .whereRaw("(logic->>'maxTempF')::numeric > ?", [to])
       .update({
         logic: knex.raw("jsonb_set(logic, '{maxTempF}', ?::jsonb)", [String(to)]),
       });
@@ -72,11 +77,17 @@ async function shiftGateThreshold(knex, { from, to }) {
     // rule_text is what a technician actually reads — the numbers inside
     // `logic` are advisory metadata that nothing evaluates against live
     // weather, so this string is the gate in practice.
+    // Normalize the DISPLAYED ceiling independently of the numeric one, and by
+    // pattern rather than by exact string: a rule edited to say 95°F would
+    // otherwise escape a literal 90°F replacement and keep contradicting the
+    // clamped logic. Only the "above NN°F" ceiling phrase is touched, and only
+    // when NN exceeds the limit — the 50°F floor and the 40°F forecast rule in
+    // the appended sentence are left alone.
     await knex('lawn_protocol_gates')
       .where('gate_key', 'speedzone_heat_gate')
-      .whereRaw('rule_text LIKE ?', [`%${from}°F%`])
+      .whereRaw("(substring(rule_text from 'above ([0-9]+)°F'))::numeric > ?", [to])
       .update({
-        rule_text: knex.raw('REPLACE(rule_text, ?, ?)', [`${from}°F`, `${to}°F`]),
+        rule_text: knex.raw("regexp_replace(rule_text, 'above [0-9]+°F', ?)", [`above ${to}°F`]),
       });
 
     // The label prohibits more than the upper bound, and the rest of it was
@@ -98,8 +109,10 @@ async function shiftGateThreshold(knex, { from, to }) {
 
   // lawn_protocol_products.gates is jsonb: {"maxTempF":90,"gateProduct":"SpeedZone..."}
   if (await knex.schema.hasTable('lawn_protocol_products')) {
+    // Same clamp as the gate logic above — any ceiling over the label limit,
+    // not only an exact 90.
     await knex('lawn_protocol_products')
-      .whereRaw("gates->>'maxTempF' = ?", [String(from)])
+      .whereRaw("(gates->>'maxTempF')::numeric > ?", [to])
       .whereRaw('product_name ILIKE ?', ['%speedzone%'])
       .update({
         gates: knex.raw("jsonb_set(gates, '{maxTempF}', ?::jsonb)", [String(to)]),
@@ -149,8 +162,16 @@ async function shiftGateThreshold(knex, { from, to }) {
   // would then contradict every other source. Guarded on the old value so a
   // reworded note is never clobbered.
   if (await knex.schema.hasTable('service_product_usage')) {
+    // The table holds product_id (uuid) — there is NO `product` column. An
+    // earlier version filtered on `product ILIKE`, which Postgres rejects at
+    // parse time regardless of whether any row would have matched, so the
+    // migration aborted and took the deploy with it. Resolve the id through
+    // the catalog instead.
     await knex('service_product_usage')
-      .whereRaw('product ILIKE ?', ['%speedzone%'])
+      .whereIn(
+        'product_id',
+        knex('products_catalog').select('id').whereRaw('name ILIKE ?', ['%speedzone%']),
+      )
       .whereRaw('notes LIKE ?', [`%${from}°F%`])
       .update({ notes: knex.raw('REPLACE(notes, ?, ?)', [`${from}°F`, `${to}°F`]) });
   }

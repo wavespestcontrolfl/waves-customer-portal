@@ -31,6 +31,13 @@ exports.FIELD_KEY = FIELD_KEY;
 // Swap the option inside the target field only, leaving every other section,
 // field and option exactly as-is. jsonb round-trips through JS so the nested
 // rewrite stays readable rather than becoming a jsonb_path_query expression.
+// Seeded fields are identified by `id`, NOT `key`: the seed builders produce
+// `{ id, type, label, options }` (see the `ms`/`sel` helpers in
+// seed-job-form-templates.js), and JobFormSection reads `f.id` too. An earlier
+// version of this matched `field.key`, which is undefined on every real
+// template — so the migration silently did nothing on exactly the rows it
+// exists to fix. `key` is still accepted in case a hand-built template uses
+// it, but `id` is the real schema.
 function renameOption(sections, from, to) {
   if (!Array.isArray(sections)) return { sections, changed: false };
   let changed = false;
@@ -40,7 +47,8 @@ function renameOption(sections, from, to) {
     return {
       ...section,
       fields: fields.map((field) => {
-        if (field?.key !== FIELD_KEY || !Array.isArray(field.options)) return field;
+        const identifier = field?.id ?? field?.key;
+        if (identifier !== FIELD_KEY || !Array.isArray(field.options)) return field;
         if (!field.options.includes(from)) return field;
         changed = true;
         return { ...field, options: field.options.map((o) => (o === from ? to : o)) };

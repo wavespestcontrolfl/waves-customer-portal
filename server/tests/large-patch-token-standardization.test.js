@@ -22,6 +22,9 @@ function mockKnex() {
   };
   const knex = () => Object.create(proto);
   knex.schema = { hasTable: async () => true };
+  // Migrations use knex.raw() for jsonb expressions; the mock records them as
+  // an inert marker so the shape of an update can still be asserted.
+  knex.raw = (sql, bindings) => ({ __raw: sql, bindings });
   return { knex, calls };
 }
 
@@ -192,16 +195,24 @@ describe('raw SQL compiles — jsonb ? operator is escaped', () => {
 describe('deployed lawn template rename', () => {
   const tpl = require('../models/migrations/20260802000003_lawn_visit_template_large_patch');
 
+  // Fixture built the way the SEED builds it — `{ id, type, label, options }`.
+  // The earlier fixture used `key`, which no real template has, so the test
+  // passed while the migration matched nothing on actual seeded rows. Mirror
+  // the producer, never an assumption about its shape.
+  const sel = (id, label, options) => ({ id, type: 'select', label, options });
+  const ms = (id, label, options) => ({ id, type: 'multi_select', label, options });
+
   const sections = () => ([
     {
       id: 'assessment',
+      title: 'Pre-Treatment Assessment',
       fields: [
-        // A different field that also mentions brown — must NOT be touched.
-        { key: 'turf_color', options: ['Dark green — healthy', 'Brown patches'] },
-        { key: 'disease_symptoms', options: ['None', 'Brown patch', 'Dollar spot'] },
+        // Describes appearance, not diagnosis — must NOT be touched.
+        sel('turf_color', 'Turf color', ['Dark green — healthy', 'Brown patches']),
+        ms('disease_symptoms', 'Disease / issues', ['None', 'Brown patch', 'Dollar spot']),
       ],
     },
-    { id: 'other', fields: [{ key: 'notes', type: 'text' }] },
+    { id: 'other', fields: [{ id: 'notes', type: 'textarea', label: 'Notes' }] },
   ]);
 
   test('renames only the disease option, in only that field', () => {
@@ -214,15 +225,29 @@ describe('deployed lawn template rename', () => {
     expect(out[1]).toEqual(sections()[1]);
   });
 
+  test('matches the REAL seeded template, not an invented shape', () => {
+    // Guards the bug directly: the seed's own builders are the source of
+    // truth for field identity, and they emit `id`.
+    const seedSrc = require('fs').readFileSync(
+      require('path').join(__dirname, '../scripts/seed-job-form-templates.js'),
+      'utf8',
+    );
+    expect(seedSrc).toMatch(/const ms = \(id,/);
+    expect(seedSrc).not.toMatch(/const ms = \(key,/);
+    // And the migration finds the field on that shape.
+    const onlyId = [{ fields: [ms('disease_symptoms', 'D', ['Brown patch'])] }];
+    expect(tpl.renameOption(onlyId, tpl.OLD, tpl.NEW).changed).toBe(true);
+  });
+
   test('reports no change when the template was already renamed', () => {
-    const already = [{ id: 'a', fields: [{ key: 'disease_symptoms', options: ['Large patch'] }] }];
+    const already = [{ id: 'a', fields: [{ id: 'disease_symptoms', options: ['Large patch'] }] }];
     expect(tpl.renameOption(already, tpl.OLD, tpl.NEW).changed).toBe(false);
   });
 
   test('tolerates templates with no fields or odd shapes', () => {
     expect(tpl.renameOption(null, tpl.OLD, tpl.NEW).changed).toBe(false);
     expect(tpl.renameOption([{ id: 'x' }], tpl.OLD, tpl.NEW).changed).toBe(false);
-    expect(tpl.renameOption([{ fields: [{ key: 'disease_symptoms' }] }], tpl.OLD, tpl.NEW).changed)
+    expect(tpl.renameOption([{ fields: [{ id: 'disease_symptoms' }] }], tpl.OLD, tpl.NEW).changed)
       .toBe(false);
   });
 
