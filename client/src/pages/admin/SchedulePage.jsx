@@ -1063,6 +1063,16 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
   const isCompletedVisit =
     String(service.status || "").toLowerCase() === "completed";
+  // Re-entry windows for a COMPLETED visit (interior/exterior dry-down
+  // minutes on the customer report). Same posture as the time-on-site
+  // correction: OUTSIDE `form`, saved through the dedicated admin-only
+  // PATCH /admin/dispatch/:id/reentry endpoint, and seeded from the server
+  // (the values live in the report record's advisory, which the appointment
+  // payload doesn't carry) — the seed doubles as the dirty check so an
+  // untouched field never PATCHes.
+  const [reentryInfo, setReentryInfo] = useState(null);
+  const [reentryExterior, setReentryExterior] = useState("");
+  const [reentryInterior, setReentryInterior] = useState("");
   // Immediate reschedule text when this save moves the visit's date or
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
@@ -1129,6 +1139,28 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       .catch(() => {});
     return () => { cancelled = true; };
   }, [service?.id]);
+  // Seed the re-entry fields from the report record's stored advisory.
+  // A fetch failure (or a visit with no report record) just leaves the
+  // fields hidden — nothing to edit.
+  useEffect(() => {
+    if (!service?.id || !isCompletedVisit) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/dispatch/${service.id}/reentry`)
+      .then((data) => {
+        if (cancelled) return;
+        setReentryInfo(data || null);
+        if (data?.hasRecord) {
+          setReentryExterior(
+            data.exteriorMinutes != null ? String(data.exteriorMinutes) : "",
+          );
+          setReentryInterior(
+            data.interiorMinutes != null ? String(data.interiorMinutes) : "",
+          );
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [service?.id, isCompletedVisit]);
   const [isRecurring, setIsRecurring] = useState(serviceIsRecurringTemplate);
   const [recurringFreq, setRecurringFreq] = useState(
     service.recurringPattern || service.recurring_pattern || "quarterly",
@@ -1488,6 +1520,40 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         return;
       }
     }
+    // Re-entry correction rides the same Save button through its own
+    // admin-only PATCH — same validate-first / PATCH-after-details posture
+    // as the time-on-site correction. A side is dirty only when it differs
+    // from the server seed; blank never submits (there is no "unset" edit —
+    // type 0 to clear a window).
+    const reentrySeeded = reentryInfo?.hasRecord === true;
+    const reentrySeedValue = (v) => (v != null ? String(v) : "");
+    const reentryDirtySide = (value, seed) =>
+      reentrySeeded &&
+      isAdminUser &&
+      String(value || "").trim() !== "" &&
+      String(value || "").trim() !== seed;
+    const reentryExteriorDirty = reentryDirtySide(
+      reentryExterior,
+      reentrySeedValue(reentryInfo?.exteriorMinutes),
+    );
+    const reentryInteriorDirty = reentryDirtySide(
+      reentryInterior,
+      reentrySeedValue(reentryInfo?.interiorMinutes),
+    );
+    if (reentryExteriorDirty || reentryInteriorDirty) {
+      for (const raw of [
+        reentryExteriorDirty ? reentryExterior : null,
+        reentryInteriorDirty ? reentryInterior : null,
+      ]) {
+        if (raw == null) continue;
+        const minutes = Math.round(Number(String(raw).trim()));
+        if (!Number.isFinite(minutes) || minutes < 0 || minutes > 1440) {
+          alert("Re-entry must be 0–1440 minutes (0 removes the wait).");
+          setSaving(false);
+          return;
+        }
+      }
+    }
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -1700,6 +1766,33 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         } catch (patchErr) {
           alert(
             `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
+          );
+        }
+      }
+      if (reentryExteriorDirty || reentryInteriorDirty) {
+        try {
+          await adminFetch(`/admin/dispatch/${service.id}/reentry`, {
+            method: "PATCH",
+            body: JSON.stringify({
+              ...(reentryExteriorDirty
+                ? {
+                    exteriorMinutes: Math.round(
+                      Number(String(reentryExterior).trim()),
+                    ),
+                  }
+                : {}),
+              ...(reentryInteriorDirty
+                ? {
+                    interiorMinutes: Math.round(
+                      Number(String(reentryInterior).trim()),
+                    ),
+                  }
+                : {}),
+            }),
+          });
+        } catch (patchErr) {
+          alert(
+            `Appointment saved, but the re-entry correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
           );
         }
       }
@@ -2980,6 +3073,69 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     here if the on-site timer wasn&rsquo;t closed out on time.
                     Saving updates the report and job costing; no customer
                     messages are sent, and the report PDF regenerates.
+                  </div>{" "}
+                </div>
+              )}{" "}
+              {isCompletedVisit && isAdminUser && reentryInfo?.hasRecord && (
+                <div style={{ marginBottom: 14 }}>
+                  {" "}
+                  <label style={labelStyle}>
+                    Re-entry after treatment (minutes)
+                  </label>{" "}
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                      gap: 12,
+                    }}
+                  >
+                    {" "}
+                    <div>
+                      {" "}
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min="0"
+                        max="1440"
+                        step="1"
+                        value={reentryExterior}
+                        onChange={(e) => setReentryExterior(e.target.value)}
+                        placeholder={`Exterior (default ${reentryInfo?.defaults?.exteriorMinutes ?? 30})`}
+                        className="font-medium"
+                        style={inputStyle}
+                      />{" "}
+                      <div
+                        style={{ fontSize: 11, color: D.muted, marginTop: 4 }}
+                      >
+                        Exterior
+                      </div>{" "}
+                    </div>{" "}
+                    <div>
+                      {" "}
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min="0"
+                        max="1440"
+                        step="1"
+                        value={reentryInterior}
+                        onChange={(e) => setReentryInterior(e.target.value)}
+                        placeholder={`Interior (default ${reentryInfo?.defaults?.interiorMinutes ?? 30})`}
+                        className="font-medium"
+                        style={inputStyle}
+                      />{" "}
+                      <div
+                        style={{ fontSize: 11, color: D.muted, marginTop: 4 }}
+                      >
+                        Interior
+                      </div>{" "}
+                    </div>{" "}
+                  </div>{" "}
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                    How long the report tells the customer to stay off treated
+                    areas after this visit (0 removes the wait). Saving
+                    updates the report and regenerates its PDF; no customer
+                    messages are sent.
                   </div>{" "}
                 </div>
               )}{" "}

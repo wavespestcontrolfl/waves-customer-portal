@@ -1081,6 +1081,45 @@ function timeOnSiteEditPlan({ minutes, service = {}, structuredNotes = {}, now =
   };
 }
 
+// Validation/shape plan for the after-the-fact re-entry edit (PATCH
+// /:serviceId/reentry): admin correction of a completed visit's advisory
+// re-entry windows (interior/exterior treatment dry-down). Values are whole
+// minutes; 0 is legal and removes that window from the customer report
+// ("no wait"); an omitted side is left untouched. Only completed rows
+// qualify — the advisory is persisted by the completion write, so there is
+// nothing to edit before close-out. Pure for testability (_test).
+const REENTRY_EDIT_MAX_MINUTES = 1440;
+function reentryEditPlan({ exteriorMinutes, interiorMinutes, service = {} } = {}) {
+  const invalid = {
+    status: 400,
+    error: {
+      error: `Re-entry minutes must be between 0 and ${REENTRY_EDIT_MAX_MINUTES}`,
+      code: 'reentry_invalid',
+    },
+  };
+  const parseSide = (value) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const rounded = Math.round(Number(value));
+    return Number.isFinite(rounded) && rounded >= 0 && rounded <= REENTRY_EDIT_MAX_MINUTES
+      ? rounded
+      : NaN;
+  };
+  const exterior = parseSide(exteriorMinutes);
+  const interior = parseSide(interiorMinutes);
+  if (Number.isNaN(exterior) || Number.isNaN(interior)) return invalid;
+  if (exterior === undefined && interior === undefined) return invalid;
+  if (service.status !== 'completed') {
+    return {
+      status: 409,
+      error: {
+        error: 'Re-entry can only be edited on a completed visit — close the visit out first',
+        code: 'service_not_completed',
+      },
+    };
+  }
+  return { exterior, interior };
+}
+
 // Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
 // completion transaction commits, the record's structured_notes freeze IS the
 // completion — and the request hash carries `backfill`/`timeOnSite` in a
@@ -2645,6 +2684,190 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       ...(timeEntryCorrected != null ? { timeEntryCorrected } : {}),
       ...(timeEntryCorrectionBlocked ? { timeEntryCorrectionBlocked } : {}),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/reentry — the completed visit's stored
+// re-entry windows plus the service-line defaults a fresh completion would
+// write. Read-only seed for the appointment editor's re-entry fields; the
+// STORED advisory values are returned raw (not scope-normalized) because
+// this is the edit surface — the admin corrects what is persisted, and the
+// display surfaces keep making their own normalization call.
+router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const config = getServiceLineConfig(svc.service_type);
+    const defaults = {
+      exteriorMinutes: Number(config?.advisoryDefaults?.exterior_reentry_min) || 0,
+      interiorMinutes: Number(config?.advisoryDefaults?.interior_reentry_min) || 0,
+    };
+    // Schema lookup failures PROPAGATE (same posture as the time-on-site
+    // edit): a degraded {} would silently report "no record" for a visit
+    // that has one.
+    const serviceRecordCols = await db('service_records').columnInfo();
+    if (!serviceRecordCols.advisory) return res.json({ hasRecord: false, defaults });
+    const { record, ambiguous } = await require('../services/job-costing')
+      .resolveServiceRecord(db, svc, serviceRecordCols);
+    if (ambiguous || !record) {
+      return res.json({ hasRecord: false, ...(ambiguous ? { recordAmbiguous: true } : {}), defaults });
+    }
+    const advisory = parseJsonObject(record.advisory);
+    const minutesOrNull = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+    };
+    res.json({
+      hasRecord: true,
+      exteriorMinutes: minutesOrNull(advisory.exterior_reentry_min),
+      interiorMinutes: minutesOrNull(advisory.interior_reentry_min),
+      adjusted: advisory.reentry_adjusted === true,
+      defaults,
+    });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/dispatch/:serviceId/reentry — after-the-fact correction
+// of a completed visit's re-entry windows (interior/exterior dry-down
+// minutes on the report and its Re-Entry card). ADMIN-ONLY, and a pure data
+// correction like the time-on-site edit above: no status transition, no
+// markComplete, and NO customer communications — the completion comms
+// already fired with the advisory as it stood.
+//
+// What it writes (single transaction):
+//  - service_records.advisory (the resolved record, required — the advisory
+//    lives nowhere else): the typed exterior/interior minutes plus a durable
+//    `reentry_adjusted: true` marker that (a) makes the typed windows
+//    authoritative over scope-derived zeroing in
+//    normalizeAdvisoryForTreatmentScope on every read surface, and (b) is
+//    stamped beside a first-edit-only `reentry_prior` snapshot of the
+//    pre-correction values. The merge is a single-statement jsonb expression
+//    against the column's CURRENT value (same clobber-avoidance posture as
+//    the time-on-site structured_notes merge).
+//  - pdf_storage_key → NULL so the cached report PDF re-renders with the
+//    corrected windows (its cache signature does not vary on advisory).
+//  - FK-heal: a pre-FK record found through the legacy soft-join gets its
+//    scheduled_service_id stamped so later lookups are tuple-independent.
+// The audit rides the transaction (activity_log `reentry_adjusted`), and
+// record resolution runs under the scheduled_services row lock so an
+// in-flight completion finalization's fresh record is seen (same reasoning
+// as the time-on-site edit). No job-costing leg — re-entry never prices.
+router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const serviceRecordCols = await db('service_records').columnInfo();
+    if (!serviceRecordCols.advisory) {
+      return res.status(409).json({
+        error: 'This deployment has no advisory column to correct',
+        code: 'advisory_unsupported',
+      });
+    }
+    const plan = reentryEditPlan({
+      exteriorMinutes: req.body?.exteriorMinutes,
+      interiorMinutes: req.body?.interiorMinutes,
+      service: svc,
+    });
+    if (plan.error) return res.status(plan.status).json(plan.error);
+
+    let outcome = null;
+    await db.transaction(async (trx) => {
+      // Row lock first: serializes with a completion finalization that is
+      // creating this visit's service_records row inside its own
+      // transaction, and with a concurrent re-entry correction.
+      const lockedSvc = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+      const { record, viaFk, ambiguous } = await require('../services/job-costing')
+        .resolveServiceRecord(trx, lockedSvc || svc, serviceRecordCols);
+      if (ambiguous) {
+        // Unlike the time-on-site edit there is nothing else to correct —
+        // the advisory lives only on the record, so an ambiguous legacy
+        // match aborts the whole correction instead of half-landing it.
+        outcome = {
+          status: 409,
+          body: {
+            error: 'Several legacy report records match this visit — correct the record manually',
+            code: 'record_ambiguous',
+          },
+        };
+        return;
+      }
+      if (!record) {
+        outcome = {
+          status: 404,
+          body: {
+            error: 'No report record found for this visit — there is no re-entry advisory to correct',
+            code: 'record_not_found',
+          },
+        };
+        return;
+      }
+      const previousAdvisory = parseJsonObject(record.advisory);
+      const mergeKeys = { reentry_adjusted: true };
+      if (plan.exterior !== undefined) mergeKeys.exterior_reentry_min = plan.exterior;
+      if (plan.interior !== undefined) mergeKeys.interior_reentry_min = plan.interior;
+      const recordUpdate = {
+        // ATOMIC key merge against the column's CURRENT value — a
+        // whole-column read-modify-write could erase keys a concurrent
+        // writer lands between our read and this update. reentry_prior is
+        // captured first-edit-only (`-> 'reentry_prior' IS NOT NULL`
+        // detects the key even when a side holds JSON null, which is what
+        // a no-prior first edit writes).
+        advisory: trx.raw(
+          `(COALESCE(advisory::jsonb, '{}'::jsonb) || ?::jsonb)
+           || (CASE WHEN COALESCE(advisory::jsonb, '{}'::jsonb) -> 'reentry_prior' IS NOT NULL
+                THEN '{}'::jsonb
+                ELSE jsonb_build_object('reentry_prior', jsonb_build_object(
+                  'exterior_reentry_min', COALESCE(advisory::jsonb -> 'exterior_reentry_min', 'null'::jsonb),
+                  'interior_reentry_min', COALESCE(advisory::jsonb -> 'interior_reentry_min', 'null'::jsonb)))
+              END)`,
+          [JSON.stringify(mergeKeys)],
+        ),
+      };
+      if (serviceRecordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;
+      if (!viaFk && serviceRecordCols.scheduled_service_id) {
+        recordUpdate.scheduled_service_id = svc.id;
+      }
+      await trx('service_records').where({ id: record.id }).update(recordUpdate);
+
+      // Audit rides the correction transaction — an audit that can't be
+      // written rolls the correction back rather than leaving an unaudited
+      // change to customer safety guidance.
+      const describeSide = (label, value) => (value === undefined
+        ? null
+        : `${label} ${value === 0 ? 'cleared' : `${value} min`}`);
+      const changed = [
+        describeSide('exterior', plan.exterior),
+        describeSide('interior', plan.interior),
+      ].filter(Boolean).join(', ');
+      await trx('activity_log').insert({
+        admin_user_id: req.technicianId,
+        customer_id: svc.customer_id,
+        action: 'reentry_adjusted',
+        description: `Re-entry corrected (${changed}) for ${svc.service_type || 'service'}`,
+        metadata: JSON.stringify({
+          scheduled_service_id: svc.id,
+          service_record_id: record.id,
+          previous: {
+            exterior_reentry_min: previousAdvisory.exterior_reentry_min ?? null,
+            interior_reentry_min: previousAdvisory.interior_reentry_min ?? null,
+          },
+          new: {
+            ...(plan.exterior !== undefined ? { exterior_reentry_min: plan.exterior } : {}),
+            ...(plan.interior !== undefined ? { interior_reentry_min: plan.interior } : {}),
+          },
+        }),
+      });
+      outcome = {
+        status: 200,
+        body: {
+          success: true,
+          ...(plan.exterior !== undefined ? { exteriorMinutes: plan.exterior } : {}),
+          ...(plan.interior !== undefined ? { interiorMinutes: plan.interior } : {}),
+          recordUpdated: true,
+        },
+      };
+    });
+    res.status(outcome.status).json(outcome.body);
   } catch (err) { next(err); }
 });
 
@@ -12254,6 +12477,8 @@ module.exports._test = {
   liveTimeOnSitePlan,
   adjustedCompletionEndInstant,
   timeOnSiteEditPlan,
+  reentryEditPlan,
+  REENTRY_EDIT_MAX_MINUTES,
   frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,

@@ -463,6 +463,11 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
 
 function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
+  // Admin re-entry correction (PATCH /admin/dispatch/:serviceId/reentry):
+  // the typed windows are authoritative. The admin chose them looking at the
+  // completed visit, so scope-derived zeroing must not second-guess the
+  // correction — a strict boolean gate only the correction endpoint writes.
+  if (normalized.reentry_adjusted === true) return normalized;
   const scope = treatmentScope({ service, applications, zones });
 
   if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
