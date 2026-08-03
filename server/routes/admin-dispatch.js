@@ -534,8 +534,8 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration }) {
-  return [blackout, nLimit, manager, calibration]
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory }) {
+  return [blackout, nLimit, manager, calibration, inventory]
     .filter((record) => record && record.advisory)
     .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
     .map((block) => block && block.message)
@@ -1482,13 +1482,11 @@ async function deductProductInventory(trx, {
     };
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
+  // A shortfall no longer throws a waveguard_inventory_lockout: the lawn
+  // closeout treats inventory as advisory (owner directive 2026-08-03), so
+  // the deduction proceeds, inventory_on_hand goes negative, and the
+  // movement/snapshot below record the insufficient-stock state for audit.
   const insufficient = stockAfter < 0;
-  if (insufficient) {
-    const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
-    err.statusCode = 400;
-    err.code = 'waveguard_inventory_lockout';
-    throw err;
-  }
   const { unitCost, costUsed } = calculateInventoryCost({
     product: inventoryProduct,
     deductedAmount,
@@ -3658,6 +3656,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardNLimitApproval = null;
     let waveguardManagerApproval = null;
     let waveguardCalibrationAdvisory = null;
+    let waveguardInventoryAdvisory = null;
     let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
@@ -4863,15 +4862,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         ...inventoryPlanLockoutBlocks(plan),
         ...await actualProductInventoryBlocks(products),
       ];
+      // Advisory, not a lockout (owner directive 2026-08-03: the inventory
+      // gate came off the lawn closeout with the other approval ceremonies —
+      // a stale stock count must not trap the tech on the screen). The
+      // shortfall is recorded for audit and the deduction path lets
+      // inventory_on_hand go negative so the count self-reports the drift.
       if (inventoryBlocks.length) {
-        const validationErr = new Error('WaveGuard inventory lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Inventory lockout',
-          code: 'waveguard_inventory_lockout',
-          details: inventoryBlocks.map((block) => block.message),
-          blocks: inventoryBlocks,
-        });
+        waveguardInventoryAdvisory = {
+          advisory: true,
+          recordedByTechnicianId: req.technicianId,
+          recordedByRole: req.techRole || null,
+          recordedAt: new Date().toISOString(),
+          blocks: inventoryBlocks.map((block) => ({
+            code: block.code,
+            message: block.message,
+            productId: block.productId || null,
+            productName: block.productName || null,
+          })),
+        };
       }
       const managerApprovalCheck = await evaluateWaveGuardManagerApprovals(db, {
         customerId: svc.customer_id,
@@ -5393,6 +5401,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardNLimitApproval,
             waveguardManagerApproval,
             waveguardCalibrationAdvisory,
+            waveguardInventoryAdvisory,
             waveguardTankCleanout,
             ...(treeShrubCloseoutSummary ? {
               treeShrubCloseout: treeShrubCloseoutSummary,
@@ -7045,6 +7054,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           nLimit: waveguardNLimitApproval,
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
+          inventory: waveguardInventoryAdvisory,
         }),
         ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
         ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -9735,6 +9745,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         nLimit: waveguardNLimitApproval,
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
+        inventory: waveguardInventoryAdvisory,
       }),
       ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
       ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),

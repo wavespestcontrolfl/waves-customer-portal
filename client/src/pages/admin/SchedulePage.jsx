@@ -9436,14 +9436,15 @@ export function CompletionPanel({
   // and default-product-disposition no longer gate completion. Real safeguards
   // stay: a WaveGuard lawn completion must record at least one applied product
   // (an empty list would write a protocol completion with no actuals or
-  // inventory deductions), every applied product needs actual amounts, and
-  // inventory blocks still hold.
+  // inventory deductions) and every applied product needs actual amounts.
+  // Inventory shortfalls no longer gate closeout (owner directive 2026-08-03):
+  // the plan banner still shows them, and the server records them as an
+  // advisory and lets stock go negative.
   const protocolActualsCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
     (selectedProducts.length === 0 ||
-      selectedProductsMissingActualAmount.length > 0 ||
-      treatmentPlanInventoryBlocks.length > 0);
+      selectedProductsMissingActualAmount.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -9618,9 +9619,7 @@ export function CompletionPanel({
     : protocolActualsCompletionBlocked
       ? !selectedProducts.length
         ? "Products Applied Required"
-        : selectedProductsMissingActualAmount.length
-          ? "Product Actuals Required"
-          : "Inventory Blocked"
+        : "Product Actuals Required"
       : treeShrubCompletionBlocked
         ? "Tree/Shrub Closeout Required"
         : isIncompleteVisit
@@ -11289,19 +11288,6 @@ export function CompletionPanel({
         `Enter actual product amount and unit before closeout: ${selectedProductsMissingActualAmount
           .map((product) => product.name || "Selected product")
           .join(", ")}.`,
-      );
-      return;
-    }
-    if (
-      calibrationRequired &&
-      !isIncompleteVisit &&
-      treatmentPlanInventoryBlocks.length
-    ) {
-      alert(
-        `Resolve inventory blocks before closeout: ${treatmentPlanInventoryBlocks
-          .map((block) => block.message)
-          .filter(Boolean)
-          .join(" ")}`,
       );
       return;
     }
