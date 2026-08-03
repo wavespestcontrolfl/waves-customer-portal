@@ -11631,7 +11631,17 @@ export function CompletionPanel({
       // Keep the panel open when a pest recap is pending — it renders async and the
       // tech approves/sends it from the success overlay (the approve UI is otherwise
       // unreachable once the panel auto-closes).
-      if (!result?.followupSuggestion?.required && !recapEligible) {
+      // Completion advisories also hold the overlay open (codex P2 r2 on
+      // #3179): the 1.2s auto-dismiss isn't enough to read even one
+      // shortfall message — the tech dismisses via the Done button instead.
+      const advisoriesNeedReading =
+        Array.isArray(result?.completionAdvisories) &&
+        result.completionAdvisories.length > 0;
+      if (
+        !result?.followupSuggestion?.required &&
+        !recapEligible &&
+        !advisoriesNeedReading
+      ) {
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
@@ -12158,7 +12168,7 @@ export function CompletionPanel({
                   <div
                     style={{
                       fontFamily: font,
-                      fontSize: 13,
+                      fontSize: 14,
                       color: M.warn,
                       background: M.warn + "14",
                       border: `1px solid ${M.warn}`,
@@ -12197,7 +12207,9 @@ export function CompletionPanel({
                   <PestRecapCard serviceId={service.id} />
                 </div>
               )}
-              {recapEligible && !completionResult?.followupSuggestion?.required && (
+              {(recapEligible ||
+                (completionResult?.completionAdvisories?.length ?? 0) > 0) &&
+                !completionResult?.followupSuggestion?.required && (
                 <button
                   type="button"
                   onClick={() => onClose(true)}
@@ -14171,7 +14183,7 @@ export function CompletionPanel({
               completionResult.completionAdvisories.length > 0 && (
                 <div
                   style={{
-                    fontSize: 13,
+                    fontSize: 14,
                     color: D.amber,
                     background: D.amber + "14",
                     border: `1px solid ${D.amber}`,
@@ -14190,7 +14202,9 @@ export function CompletionPanel({
                   ))}
                 </div>
               )}
-            {recapEligible && !completionResult?.followupSuggestion?.required && (
+            {(recapEligible ||
+              (completionResult?.completionAdvisories?.length ?? 0) > 0) &&
+              !completionResult?.followupSuggestion?.required && (
               <button
                 type="button"
                 onClick={() => onClose(true)}

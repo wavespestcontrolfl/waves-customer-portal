@@ -567,15 +567,6 @@ function annualNLockoutBlocks(plan) {
     .filter((block) => block.code === 'annual_n_budget_exceeded');
 }
 
-function inventoryPlanLockoutBlocks(plan) {
-  return (plan?.inventory?.blocks || [])
-    .filter((block) => [
-      'inventory_product_inactive',
-      'inventory_depleted',
-      'inventory_insufficient_stock',
-    ].includes(block.code));
-}
-
 function toETNoonServiceDate(value) {
   const dateOnly = value
     ? String(value instanceof Date ? value.toISOString() : value).slice(0, 10)
@@ -4868,10 +4859,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             blocks: mappedNBlocks,
           };
       }
-      const inventoryBlocks = [
-        ...inventoryPlanLockoutBlocks(plan),
-        ...await actualProductInventoryBlocks(products),
-      ];
+      // Actuals only — the plan's inventory blocks describe PLANNED products,
+      // so a depleted planned product the tech removed, substituted, or
+      // under-applied would persist a shortfall advisory for a product that
+      // was never overdrawn (codex P2 r2 on #3179). What was actually
+      // submitted (here) plus what was actually deducted (the FOR UPDATE
+      // reconcile after the deduction loop) covers every applied product.
+      const inventoryBlocks = await actualProductInventoryBlocks(products);
       // Advisory, not a lockout (owner directive 2026-08-03: the inventory
       // gate came off the lawn closeout with the other approval ceremonies —
       // a stale stock count must not trap the tech on the screen). The
@@ -5080,7 +5074,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           code: 'completion_resume_missing_record',
         });
       }
-      linkedLawnAssessmentId = parseJsonObject(record.structured_notes).lawnAssessmentId || null;
+      const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      linkedLawnAssessmentId = resumedStructuredNotes.lawnAssessmentId || null;
+      // The WaveGuard advisory records were committed with the record, but
+      // the resume path skips the preflight and the deduction transaction —
+      // without this rehydrate, completionAdvisoryMessages would read the
+      // null initializers and the success UI would omit a recorded shortfall
+      // on a resumed retry (codex P2 r2 on #3179).
+      waveguardBlackoutApproval = resumedStructuredNotes.waveguardBlackoutApproval || null;
+      waveguardNLimitApproval = resumedStructuredNotes.waveguardNLimitApproval || null;
+      waveguardManagerApproval = resumedStructuredNotes.waveguardManagerApproval || null;
+      waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
+      waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
       durableCompletionCommitted = true;
     } else {
       try {
