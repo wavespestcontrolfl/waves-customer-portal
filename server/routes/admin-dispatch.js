@@ -6164,35 +6164,57 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // without the preflight having recorded an advisory (codex P2 r1 on
           // #3179). The locked deduction result is authoritative.
           if (isWaveGuardLawnCompletion(svc)) {
-            const advisoryProductIds = new Set(
-              (waveguardInventoryAdvisory?.blocks || [])
+            const deductionStatusByProductId = new Map(
+              inventoryDeductions
+                .filter((deduction) => deduction.productId != null)
+                .map((deduction) => [String(deduction.productId), deduction.status]),
+            );
+            // The inverse race also exists (codex P2 r3 on #3179): stock
+            // replenished between the unlocked preflight read and the FOR
+            // UPDATE deduction means the preflight's shortfall never
+            // happened — drop any preflight stock block the locked deduction
+            // refuted with a clean 'deducted'. Non-stock blocks (inactive
+            // product) and products the deduction couldn't quantify are kept.
+            const keptBlocks = (waveguardInventoryAdvisory?.blocks || []).filter(
+              (block) => !(
+                block.code === 'actual_inventory_insufficient_stock'
+                && block.productId != null
+                && deductionStatusByProductId.get(String(block.productId)) === 'deducted'
+              ),
+            );
+            const keptProductIds = new Set(
+              keptBlocks
                 .map((block) => (block.productId != null ? String(block.productId) : null))
                 .filter(Boolean),
             );
             const shortfallBlocks = inventoryDeductions
               .filter((deduction) => deduction.status === 'deducted_insufficient_stock'
-                && !advisoryProductIds.has(String(deduction.productId)))
+                && !keptProductIds.has(String(deduction.productId)))
               .map((deduction) => ({
                 code: 'actual_inventory_insufficient_stock',
                 message: `${deduction.productName} went to ${deduction.stockAfter} ${deduction.inventoryUnit} on hand after deducting ${deduction.deductedAmount} ${deduction.inventoryUnit}.`,
                 productId: deduction.productId || null,
                 productName: deduction.productName || null,
               }));
-            if (shortfallBlocks.length) {
-              waveguardInventoryAdvisory = {
+            const reconciledBlocks = [...keptBlocks, ...shortfallBlocks];
+            waveguardInventoryAdvisory = reconciledBlocks.length
+              ? {
                 advisory: true,
                 recordedByTechnicianId: req.technicianId,
                 recordedByRole: req.techRole || null,
                 recordedAt: new Date().toISOString(),
                 ...(waveguardInventoryAdvisory || {}),
-                blocks: [...(waveguardInventoryAdvisory?.blocks || []), ...shortfallBlocks],
-              };
-            }
+                blocks: reconciledBlocks,
+              }
+              : null;
           }
           record.structured_notes = {
             ...(record.structured_notes || {}),
             inventoryDeductions,
-            ...(waveguardInventoryAdvisory ? { waveguardInventoryAdvisory } : {}),
+            // Explicit even when null: the initial insert may have committed
+            // a preflight advisory this reconcile just refuted — a
+            // conditional spread would leave the stale record in the notes.
+            ...(isWaveGuardLawnCompletion(svc) ? { waveguardInventoryAdvisory } : {}),
           };
           await trx('service_records')
             .where({ id: record.id })

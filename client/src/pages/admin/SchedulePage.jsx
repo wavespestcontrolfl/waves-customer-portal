@@ -9125,6 +9125,14 @@ export function CompletionPanel({
   const hideServicePhotos = isLawn && companionSchemas.length === 0;
   const serviceTypeForArea = service?.serviceType || service?.service_type || "";
   const calibrationRequired = isLawn && !!service.waveguardTier;
+  // Advisory inventory posture is member-tier only — mirrors the server's
+  // isWaveGuardLawnCompletion. A One-Time/Commercial lawn visit still gets
+  // the hard inventory gate client-side, because the server passes
+  // allowNegative: false for it and would 400 the closeout with the original
+  // inventory lockout (codex P2 r3 on #3179).
+  const inventoryAdvisoryTier = ["Bronze", "Silver", "Gold", "Platinum"].includes(
+    service?.waveguardTier,
+  );
   const currentAdminUser = (() => {
     try {
       return JSON.parse(localStorage.getItem("waves_admin_user") || "null");
@@ -9437,14 +9445,16 @@ export function CompletionPanel({
   // stay: a WaveGuard lawn completion must record at least one applied product
   // (an empty list would write a protocol completion with no actuals or
   // inventory deductions) and every applied product needs actual amounts.
-  // Inventory shortfalls no longer gate closeout (owner directive 2026-08-03):
-  // the plan banner still shows them, and the server records them as an
-  // advisory and lets stock go negative.
+  // Inventory shortfalls no longer gate MEMBER-tier closeouts (owner
+  // directive 2026-08-03): the plan banner still shows them, and the server
+  // records them as an advisory and lets stock go negative. Non-member lawn
+  // tiers keep the gate — the server hard-fails their deductions.
   const protocolActualsCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
     (selectedProducts.length === 0 ||
-      selectedProductsMissingActualAmount.length > 0);
+      selectedProductsMissingActualAmount.length > 0 ||
+      (!inventoryAdvisoryTier && treatmentPlanInventoryBlocks.length > 0));
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -9619,7 +9629,9 @@ export function CompletionPanel({
     : protocolActualsCompletionBlocked
       ? !selectedProducts.length
         ? "Products Applied Required"
-        : "Product Actuals Required"
+        : selectedProductsMissingActualAmount.length
+          ? "Product Actuals Required"
+          : "Inventory Blocked"
       : treeShrubCompletionBlocked
         ? "Tree/Shrub Closeout Required"
         : isIncompleteVisit
@@ -11288,6 +11300,20 @@ export function CompletionPanel({
         `Enter actual product amount and unit before closeout: ${selectedProductsMissingActualAmount
           .map((product) => product.name || "Selected product")
           .join(", ")}.`,
+      );
+      return;
+    }
+    if (
+      calibrationRequired &&
+      !isIncompleteVisit &&
+      !inventoryAdvisoryTier &&
+      treatmentPlanInventoryBlocks.length
+    ) {
+      alert(
+        `Resolve inventory blocks before closeout: ${treatmentPlanInventoryBlocks
+          .map((block) => block.message)
+          .filter(Boolean)
+          .join(" ")}`,
       );
       return;
     }
@@ -14136,12 +14162,25 @@ export function CompletionPanel({
               inset: 0,
               background: D.bg + "ee",
               display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              zIndex: 10,
               flexDirection: "column",
+              // Scrollable, with margin-auto centering on the inner wrapper —
+              // centered flex overflow clips the top unreachably once the
+              // advisories/follow-up CTAs make the content taller than the
+              // panel (codex P2 r3 on #3179; mirrors the mobile overlay).
+              overflowY: "auto",
+              zIndex: 10,
+              padding: 24,
             }}
           >
+            <div
+              style={{
+                margin: "auto",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                width: "100%",
+              }}
+            >
             {" "}
             <div style={{ fontSize: 64, marginBottom: 16, color: D.green }}>
               &#10003;
@@ -14262,6 +14301,7 @@ export function CompletionPanel({
                 </button>
               </div>
             )}
+            </div>
           </div>
         )}
         {/* Header */}

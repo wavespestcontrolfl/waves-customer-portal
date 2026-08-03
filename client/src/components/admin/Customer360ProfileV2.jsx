@@ -2204,7 +2204,7 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
             record ? (
               <div
                 key={label}
-                className="mt-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5"
+                className="mt-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5 text-14"
               >
                 {" "}
                 <div className="flex items-center gap-2 text-zinc-900 font-medium mb-1">
