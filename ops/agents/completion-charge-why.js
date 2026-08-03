@@ -14,25 +14,31 @@
  * row, lane excluded) and two ring the office bell ("Auto Pay charge skipped —
  * no accepted amount on file" / "... above accepted amount — review"). Telling
  * them apart by hand means six joins across five tables, and the remedy is
- * different for each — the sticky `accepted_amount = 0` sentinel in particular
- * is NOT fixed by flipping the charge gate.
+ * different for each.
+ *
+ * CHECK ORDER MIRRORS PRODUCTION'S NESTING, not convenience. Auto Pay is an
+ * OUTER condition on the charge block (admin-dispatch.js:8217-8220), so the cap
+ * comparison and its office bell are only reachable once Auto Pay passes —
+ * reporting an over-cap blocker to an operator whose Auto Pay was off would
+ * send them to adjust an invoice that was never the problem.
  *
  * A CLEAN verdict is only ever printed when every condition was actually
- * verified. Anything this script cannot see from the DB (most importantly the
- * charge gate, which lives on the portal service) is reported as INCONCLUSIVE
- * and exits nonzero — a diagnostic that says "all conditions passed" when it
- * simply could not check one of them is worse than no diagnostic at all.
+ * verified AND no recorded charge failure exists for the visit. Anything this
+ * script cannot see from the DB (most importantly the charge gate, which lives
+ * on the portal service) is reported as INCONCLUSIVE and exits nonzero — a
+ * diagnostic that says "all conditions passed" when it simply could not check
+ * one of them is worse than no diagnostic at all.
  *
- * Auto Pay eligibility is evaluated with the PRODUCTION helpers
+ * Auto Pay eligibility uses the PRODUCTION helpers
  * (server/services/autopay-eligibility.js) rather than a re-implementation, so
- * the ET pause window and the card-expiry semantics cannot drift from the rail
- * the route actually runs.
+ * the ET pause window and card-expiry semantics cannot drift from the rail.
+ * Live payer resolution mirrors services/payer.js `resolveForInvoice`.
  *
  * Reads only. Prints IDs, amounts and statuses — never names, phones, or card
  * details.
  *
- * Exit codes:  0 = every condition verified and passing
- *              1 = a blocking condition found (the verdict names it)
+ * Exit codes:  0 = every condition verified and passing, no recorded failure
+ *              1 = a blocking condition (or a recorded charge failure) found
  *              2 = inconclusive (something could not be verified)
  *
  * Run:  railway run --service Postgres node ops/agents/completion-charge-why.js --visit=<scheduled_service_id>
@@ -104,7 +110,9 @@ async function main() {
     const { rows: visitRows } = await client.query(
       `SELECT s.id, s.customer_id, s.is_recurring, s.estimated_price, s.status,
               s.recurring_parent_id, s.source_estimate_id, s.completed_at, s.scheduled_date,
-              c.billing_mode, c.autopay_enabled, c.autopay_paused_until, c.ach_status
+              s.payer_id AS visit_payer_id,
+              c.billing_mode, c.autopay_enabled, c.autopay_paused_until, c.ach_status,
+              c.payer_id AS customer_payer_id
          FROM scheduled_services s
          LEFT JOIN customers c ON c.id = s.customer_id
         WHERE s.id = $1`,
@@ -116,8 +124,16 @@ async function main() {
     }
     const v = visitRows[0];
 
-    // The completion record carries the frozen outcome + backfill marker the
-    // route branched on. Without it several guards are unverifiable.
+    // self_pay_override is newer than some deployments — resolveForInvoice
+    // feature-detects it, so this does too.
+    let selfPayOverride = null;
+    try {
+      const { rows } = await client.query(
+        'SELECT self_pay_override FROM scheduled_services WHERE id = $1', [visitId],
+      );
+      selfPayOverride = rows[0]?.self_pay_override === true;
+    } catch { selfPayOverride = null; /* column absent on this deployment */ }
+
     const { rows: recRows } = await client.query(
       `SELECT id, structured_notes, report_template_version, created_at
          FROM service_records
@@ -142,10 +158,10 @@ async function main() {
     console.log(`  backfill        ${notes.backfill === true}`);
     console.log('');
 
-    console.log('=== lane replay (first BLOCK is the cause) ===');
+    console.log('=== lane replay, in production nesting order (first BLOCK is the cause) ===');
 
-    // 1. Gate. Lives on the portal service; usually invisible from here, and
-    //    an unknown gate must never yield a clean verdict.
+    // 1. Gate. Lives on the portal service; an unknown gate must never yield a
+    //    clean verdict.
     const gate = process.env.GATE_APPT_CARD_COMPLETION_CHARGE;
     if (gate === undefined) {
       say(UNKNOWN, 'GATE_APPT_CARD_COMPLETION_CHARGE not visible from this service',
@@ -203,7 +219,10 @@ async function main() {
       }
     }
 
-    // 4. Invoice.
+    // 4. Invoices. `alreadyPaid` is set by a SEPARATE search for ANY paid
+    //    invoice on the visit (admin-dispatch.js:7110-7115) — a newer open
+    //    invoice does not clear it, so the whole result set has to be scanned
+    //    before picking one to describe.
     const { rows: invRows } = await client.query(
       `SELECT id, status, subtotal, total, discount_amount, payer_id, credit_applied,
               service_record_id, created_at
@@ -214,25 +233,96 @@ async function main() {
         ORDER BY created_at DESC`,
       [visitId],
     );
+    const paidRow = invRows.find((r) => ['paid', 'prepaid'].includes(String(r.status).toLowerCase()));
+    const openRow = invRows.find((r) => !['paid', 'prepaid', 'processing'].includes(String(r.status).toLowerCase()));
+    for (const r of invRows) {
+      const st = String(r.status);
+      console.log(`         invoice ${r.id} status=${st} subtotal=${money(r.subtotal ?? r.total)} discount=${money(r.discount_amount)} payer_id=${r.payer_id || 'none'}`);
+    }
     if (!invRows.length) {
       say(BLOCK, 'no non-void invoice for this visit', 'nothing to charge.');
-    }
-    const inv = invRows[0] || null;
-    if (inv) {
-      const subtotal = inv.subtotal != null ? Number(inv.subtotal) : Number(inv.total || 0);
-      const netSubtotal = Math.round((subtotal - Math.max(0, Number(inv.discount_amount) || 0)) * 100) / 100;
-      console.log(`         invoice ${inv.id} status=${inv.status} subtotal=${money(subtotal)} discount=${money(inv.discount_amount)} net=${money(netSubtotal)} payer_id=${inv.payer_id || 'none'}`);
-      if (['paid', 'prepaid', 'processing'].includes(String(inv.status).toLowerCase())) {
-        say(INFO, `invoice is now ${inv.status}`,
-          'it may have been settled AFTER the completion — this script reads current state, not the state the route saw.');
-      }
-      if (inv.payer_id) {
-        say(BLOCK, 'invoice has a payer_id', 'third-party-billed invoices never auto-charge the homeowner.');
-      }
-      inv._net = netSubtotal;
+    } else if (paidRow) {
+      say(BLOCK, `a paid/prepaid invoice exists for this visit (${paidRow.id}, ${paidRow.status})`,
+        'the route sets alreadyPaid from ANY paid invoice on the visit — a newer open invoice does NOT clear it, so the completion charge is suppressed. Remedy: reconcile the duplicate invoices before expecting an auto-charge.');
+    } else {
+      say(OK, 'no paid/prepaid invoice suppressing the lane');
     }
 
-    // 5. The lane row itself — appointment_card_requests, completed/satisfied.
+    // The invoice the cap would be compared against.
+    const inv = openRow || invRows[0] || null;
+    if (inv) {
+      const subtotal = inv.subtotal != null ? Number(inv.subtotal) : Number(inv.total || 0);
+      inv._net = Math.round((subtotal - Math.max(0, Number(inv.discount_amount) || 0)) * 100) / 100;
+      if (inv.payer_id) {
+        say(BLOCK, `invoice ${inv.id} has a payer_id`, 'third-party-billed invoices never auto-charge the homeowner.');
+      }
+    }
+
+    // 5. LIVE payer at the charge boundary. A payer assigned after the invoice
+    //    was pre-minted lives only on scheduled_services / customers — the
+    //    reused invoice's payer_id stays null, and the route re-resolves it
+    //    (admin-dispatch.js:8361-8377 via services/payer resolveForInvoice).
+    //    Mirrored here: per-visit payer wins; self_pay_override blocks the
+    //    account-default fallback; otherwise the customer's payer applies.
+    let livePayerId = null;
+    if (v.visit_payer_id) {
+      livePayerId = v.visit_payer_id;
+    } else if (selfPayOverride === true) {
+      livePayerId = null;
+    } else if (selfPayOverride === null) {
+      say(UNKNOWN, 'scheduled_services.self_pay_override not readable',
+        'cannot rule out that an account-default payer applies to this visit.');
+      livePayerId = v.customer_payer_id || null;
+    } else {
+      livePayerId = v.customer_payer_id || null;
+    }
+    if (livePayerId) {
+      say(BLOCK, `live payer resolves to ${livePayerId}`,
+        `the charge boundary re-resolves the payer and refuses to charge when one exists, even with invoices.payer_id null (source: ${v.visit_payer_id ? 'visit' : 'customer default'}). The payer flows own this bill.`);
+    } else {
+      say(OK, 'live payer resolution = self-pay');
+    }
+
+    // 6. AUTO PAY — an OUTER condition on the charge block, so it is evaluated
+    //    BEFORE the cap. With Auto Pay off the route never reaches the cap
+    //    comparison and never raises the above-amount bell.
+    const { rows: pmRows } = await client.query(
+      `SELECT id, processor, method_type, is_default, autopay_enabled,
+              stripe_payment_method_id, exp_month, exp_year
+         FROM payment_methods
+        WHERE customer_id = $1 AND processor = 'stripe'
+          AND is_default = true AND autopay_enabled = true`,
+      [v.customer_id],
+    );
+    let autopayOk = true;
+    const failAutopay = (label, detail) => { autopayOk = false; say(BLOCK, label, detail); };
+    if (v.autopay_enabled === false) {
+      failAutopay('customer.autopay_enabled = false', 'Auto Pay is off — the charge condition never runs, and the cap is never evaluated.');
+    }
+    if (isPaused(v)) {
+      failAutopay(`Auto Pay paused through ${String(v.autopay_paused_until).slice(0, 10)} (ET)`,
+        'a pause covering today blocks the charge. NOTE: compared against TODAY, not the completion date — re-check if the visit is older.');
+    } else if (v.autopay_paused_until) {
+      say(OK, `Auto Pay pause expired (${String(v.autopay_paused_until).slice(0, 10)})`);
+    }
+    if (!pmRows.length) {
+      failAutopay('no default Stripe payment method with autopay_enabled', 'nothing chargeable on file at the charge boundary.');
+    } else {
+      const pm = pmRows[0];
+      if (!pm.stripe_payment_method_id) {
+        failAutopay(`payment method ${pm.id} has no stripe_payment_method_id`, 'not chargeable.');
+      } else if (isExpiredCardMethod(pm)) {
+        failAutopay(`default card expired or malformed expiry (${pm.exp_month || '--'}/${pm.exp_year || '----'})`,
+          'isExpiredCardMethod treats a malformed expiry as expired. NOTE: evaluated against TODAY, not the completion date.');
+      } else {
+        say(OK, `chargeable ${pm.method_type} method on file (exp ${pm.exp_month || '--'}/${pm.exp_year || '----'})`);
+      }
+      if (v.ach_status && v.ach_status !== 'active' && isBankMethodType(pm.method_type)) {
+        failAutopay(`ach_status=${v.ach_status} with a bank default method`, 'the lane forces card-only when ACH is unhealthy.');
+      }
+    }
+
+    // 7. The lane row itself — appointment_card_requests, completed/satisfied.
     const { rows: laneRows } = await client.query(
       `SELECT id, customer_id, status, accepted_amount, selected_plan, created_at
          FROM appointment_card_requests
@@ -250,10 +340,8 @@ async function main() {
     } else {
       say(OK, `lane row ${lane.id} status=${lane.status}`);
 
-      // 6. Hold-rail exclusion.
       const { rows: holdRows } = await client.query(
-        'SELECT id FROM estimate_card_holds WHERE scheduled_service_id = $1',
-        [visitId],
+        'SELECT id FROM estimate_card_holds WHERE scheduled_service_id = $1', [visitId],
       );
       if (holdRows.length) {
         say(BLOCK, `estimate_card_holds row ${holdRows[0].id} exists`,
@@ -262,7 +350,6 @@ async function main() {
         say(OK, 'no estimate_card_holds row');
       }
 
-      // 7. Consent must belong to the visit's CURRENT customer.
       if (String(lane.customer_id) !== String(v.customer_id)) {
         say(BLOCK, `lane customer ${lane.customer_id} != visit customer ${v.customer_id}`,
           'a reassigned visit never rides a prior customer consent into automatic collection.');
@@ -270,67 +357,74 @@ async function main() {
         say(OK, 'lane customer matches visit customer');
       }
 
-      // 8. accepted_amount — the frozen cap. 0 is a STICKY sentinel.
+      // 8. accepted_amount — the frozen cap. Only meaningful once Auto Pay has
+      //    passed: production evaluates the cap INSIDE the Auto Pay-gated
+      //    block, so an over-cap report while Auto Pay is down would send the
+      //    operator to fix the wrong thing.
       const accepted = lane.accepted_amount == null ? null : Number(lane.accepted_amount);
+      const capLevel = autopayOk ? BLOCK : INFO;
+      const capNote = autopayOk ? '' : ' (Auto Pay blocked first — production never reached this comparison and raised NO bell)';
       if (accepted == null) {
-        say(BLOCK, 'accepted_amount IS NULL',
-          'pre-migration row or unstamped render — the lane routes to office review. Expect the "no accepted amount on file" bell.');
+        say(capLevel, `accepted_amount IS NULL${capNote}`,
+          'pre-migration row or unstamped render — the lane routes to office review.'
+          + (autopayOk ? ' Expect the "no accepted amount on file" bell.' : ''));
       } else if (accepted === 0) {
-        say(BLOCK, 'accepted_amount = 0 (STICKY sentinel)',
+        say(capLevel, `accepted_amount = 0 (STICKY sentinel)${capNote}`,
           'the /secure page never DISPLAYED a price, so nothing was stamped. Causes: GATE_SECURE_PLAN_CHOICE off, estimated_price null/0 at render, a commercial property, or a source_estimate_id visit. '
-          + 'This row is now PERMANENTLY unchargeable — the stamp is CASE WHEN accepted_amount = 0 THEN 0, so flipping the charge gate alone changes nothing. '
-          + 'Remedy: flip GATE_SECURE_PLAN_CHOICE first, confirm the visit has estimated_price > 0, then re-secure the card so a FRESH row stamps a real cap.');
+          + 'This row is PERMANENTLY unchargeable and CANNOT be repaired: appointment_card_requests.scheduled_service_id is UNIQUE (one request per visit, ever), so no re-secure can create a fresh row, and every later stamp preserves zero via CASE WHEN accepted_amount = 0 THEN 0. '
+          + 'Remedy for THIS visit: collect manually (send the pay link or charge in admin) — the auto-charge is not recoverable. '
+          + 'Remedy for FUTURE visits: flip GATE_SECURE_PLAN_CHOICE and confirm visits carry estimated_price > 0 before the /secure link goes out, so a real cap gets stamped.');
       } else {
         say(OK, `accepted_amount = ${money(accepted)}`);
-        // 9. Cap comparison.
         if (inv && inv._net > accepted + 0.005) {
-          say(BLOCK, `invoice net ${money(inv._net)} exceeds cap ${money(accepted)}`,
-            'over-cap invoices route to office review and keep the pay link. Expect the "above accepted amount" bell. Remedy: adjust the invoice to the accepted amount or collect manually.');
+          say(capLevel, `invoice net ${money(inv._net)} exceeds cap ${money(accepted)}${capNote}`,
+            'over-cap invoices route to office review and keep the pay link.'
+            + (autopayOk
+              ? ' Expect the "above accepted amount" bell. Remedy: adjust the invoice to the accepted amount or collect manually.'
+              : ' Fix the Auto Pay blocker above first — this comparison was never reached.'));
         } else if (inv) {
           say(OK, `invoice net ${money(inv._net)} within cap ${money(accepted)}`);
         }
       }
     }
 
-    // 10. Auto Pay at the charge boundary — evaluated with the production
-    //     helpers so the ET pause window and expiry rules match the rail.
-    const { rows: pmRows } = await client.query(
-      `SELECT id, processor, method_type, is_default, autopay_enabled,
-              stripe_payment_method_id, exp_month, exp_year
-         FROM payment_methods
-        WHERE customer_id = $1 AND processor = 'stripe'
-          AND is_default = true AND autopay_enabled = true`,
-      [v.customer_id],
-    );
-    if (v.autopay_enabled === false) {
-      say(BLOCK, 'customer.autopay_enabled = false', 'Auto Pay is off — the charge condition never runs.');
-    }
-    if (isPaused(v)) {
-      say(BLOCK, `Auto Pay paused through ${String(v.autopay_paused_until).slice(0, 10)} (ET)`,
-        'a pause covering today blocks the charge. NOTE: this compares against TODAY, not the completion date — re-check if the visit is older.');
-    } else if (v.autopay_paused_until) {
-      say(OK, `Auto Pay pause expired (${String(v.autopay_paused_until).slice(0, 10)})`);
-    }
-    if (!pmRows.length) {
-      say(BLOCK, 'no default Stripe payment method with autopay_enabled',
-        'nothing chargeable on file at the charge boundary.');
-    } else {
-      const pm = pmRows[0];
-      if (!pm.stripe_payment_method_id) {
-        say(BLOCK, `payment method ${pm.id} has no stripe_payment_method_id`, 'not chargeable.');
-      } else if (isExpiredCardMethod(pm)) {
-        say(BLOCK, `default card expired or malformed expiry (${pm.exp_month || '--'}/${pm.exp_year || '----'})`,
-          'isExpiredCardMethod treats a malformed expiry as expired — the charge rail refuses it. NOTE: evaluated against TODAY, not the completion date.');
+    // 9. A recorded charge FAILURE. Every predicate can pass and the charge
+    //    still throw (processor decline, Stripe/config error, DB failure) —
+    //    the route logs charge_failed with this visit id.
+    let chargeFailure = null;
+    try {
+      const { rows: logRows } = await client.query(
+        `SELECT id, event_type, amount_cents, created_at, details
+           FROM autopay_log
+          WHERE customer_id = $1
+            AND details::jsonb ->> 'scheduled_service_id' = $2
+          ORDER BY created_at DESC`,
+        [v.customer_id, visitId],
+      );
+      console.log('\n=== autopay_log for this visit ===');
+      if (!logRows.length) {
+        console.log('  no charge attempt recorded.');
       } else {
-        say(OK, `chargeable ${pm.method_type} method on file (exp ${pm.exp_month || '--'}/${pm.exp_year || '----'})`);
+        for (const l of logRows) {
+          const d = parseNotes(l.details);
+          console.log(`  ${l.created_at.toISOString()}  ${l.event_type}  source=${d.source || '?'}  ${d.error ? `error=${d.error}` : ''}`);
+        }
+        chargeFailure = logRows.find((l) => String(l.event_type).includes('failed')) || null;
       }
-      if (v.ach_status && v.ach_status !== 'active' && isBankMethodType(pm.method_type)) {
-        say(BLOCK, `ach_status=${v.ach_status} with a bank default method`, 'the lane forces card-only when ACH is unhealthy.');
-      }
+    } catch (e) {
+      say(UNKNOWN, `autopay_log not readable (${e.message})`,
+        'a recorded charge failure cannot be ruled out.');
+    }
+    if (chargeFailure) {
+      const d = parseNotes(chargeFailure.details);
+      say(BLOCK, `charge ATTEMPTED and FAILED (${chargeFailure.event_type}, ${chargeFailure.created_at.toISOString()})`,
+        `every eligibility predicate passed and the charge itself failed: ${d.error || 'no error recorded'}`
+        + `${d.orphaned ? ' — ORPHANED: Stripe charged but the DB write failed, reconcile immediately.' : ''}`
+        + `${d.reconciliation_required ? ' — reconciliation_required flagged.' : ''}`);
     }
 
-    // 11. Did the office get belled? This is the free discriminator between
-    //     "lane never engaged" (silent) and "cap blocked it" (bell).
+    // 10. Office bells — the free discriminator between "lane never engaged"
+    //     (silent) and "cap blocked it" (bell).
     console.log('\n=== office bells for this visit ===');
     const { rows: notifRows } = await client.query(
       `SELECT id, title, created_at
@@ -347,7 +441,7 @@ async function main() {
       for (const n of notifRows) console.log(`  ${n.created_at.toISOString()}  ${n.title}`);
     }
 
-    // 12. What the customer actually received.
+    // 11. What the customer actually received.
     console.log('\n=== completion SMS actually sent ===');
     if (!recRows.length) {
       console.log('  no service_records row.');
@@ -365,8 +459,12 @@ async function main() {
     if (firstBlock) {
       console.log(`  BLOCKED: ${firstBlock.label}`);
       if (firstBlock.detail) console.log(`  ${firstBlock.detail}`);
+      const laterBlocks = findings.filter((f) => f.level === BLOCK && f !== firstBlock);
+      if (laterBlocks.length) {
+        console.log(`  (${laterBlocks.length} further blocker(s) downstream — fix this one first, then re-run.)`);
+      }
       if (unknowns.length) {
-        console.log(`  (${unknowns.length} further condition(s) unverified — the block above is the first one found, not necessarily the only one.)`);
+        console.log(`  (${unknowns.length} condition(s) unverified — see above.)`);
       }
       process.exitCode = 1;
     } else if (unknowns.length) {
@@ -375,7 +473,7 @@ async function main() {
       for (const u of unknowns) console.log(`    - ${u.label}`);
       process.exitCode = 2;
     } else {
-      console.log('  Every lane condition was verified and passed on the CURRENT row state.');
+      console.log('  Every lane condition was verified and passed, and no charge failure is recorded.');
       console.log('  Either the charge did happen, or a row changed after the completion');
       console.log('  (the lane reads state at completion time, not now).');
       console.log('  Cross-check the Stripe PaymentIntent for the invoice above.');
