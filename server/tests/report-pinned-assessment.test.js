@@ -290,7 +290,7 @@ describe('#3168 — assessment identity is part of the PDF storage key', () => {
       const keyLines = source.split('\n').filter((l) => l.includes('visibilitySignature:'));
       expect(keyLines.length).toBeGreaterThanOrEqual(2);
       for (const line of keyLines) {
-        expect(line).toMatch(/laSignature|lawnAssessmentPdfSignature\(/);
+        expect(line).toMatch(/laSignature|laRenderSignature|lawnAssessmentPdfSignature\(/);
       }
     }
   });
@@ -350,7 +350,7 @@ describe('#3172 — ordinary renders are pinned to CANONICAL and stay cacheable'
   test('pin and signature come from a SINGLE canonical lookup', () => {
     for (const source of [pdfQueueSource, reportsPublicSource]) {
       expect(source).toMatch(/const canonical = await resolveCanonicalLawnRender\(/);
-      expect(source).toMatch(/laSignature = canonical\.signature/);
+      expect(source).toMatch(/la(Render)?Signature = canonical\.signature/);
     }
     // No render site may resolve the pin independently of the signature.
     expect(pdfQueueSource).not.toMatch(/await canonicalLawnPin\(/);
