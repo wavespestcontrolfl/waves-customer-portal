@@ -1,4 +1,4 @@
-const { completionUsesReportLane } = require('../routes/admin-dispatch')._test;
+const { completionUsesReportLane, reportV1InvoiceBodyCarriesPayLink } = require('../routes/admin-dispatch')._test;
 const { serviceReportV1SmsType } = require('../services/service-report/delivery');
 
 // The defect this pins: buildServiceReportV1DeliveryContext has always
@@ -67,6 +67,32 @@ describe('completionUsesReportLane', () => {
 
     // And the template key that route now reaches is the one #3166 rewrote.
     expect(serviceReportV1SmsType({ hasInvoiceLink: true })).toBe('service_report_v1_with_invoice');
+  });
+
+  test('a customer with a bill never gets a text without the pay link', () => {
+    const payUrl = 'https://portal.wavespestcontrol.com/l/invoice-xyz89';
+    // The arming probe (isOptInSmsTemplateEnabled) only proves the row exists
+    // and is active. These are the bodies it would happily arm.
+    const usable = `Hello Van! Your pest control report is ready: https://x/l/r\n\nInvoice for today's visit: ${payUrl}`;
+    expect(reportV1InvoiceBodyCarriesPayLink(usable, payUrl)).toBe(true);
+
+    // Operator edited {pay_url} out of the template in /admin — renders fine,
+    // reads fine, and leaves the customer no way to pay.
+    expect(reportV1InvoiceBodyCarriesPayLink(
+      'Hello Van! Your pest control report is ready: https://x/l/r', payUrl,
+    )).toBe(false);
+
+    // An active sms_template_variants row outranks the base row, so a good
+    // base template is no guarantee either.
+    expect(reportV1InvoiceBodyCarriesPayLink('Thanks! See your report: https://x/l/r', payUrl)).toBe(false);
+
+    // Render failure / deactivated between probe and send.
+    expect(reportV1InvoiceBodyCarriesPayLink(null, payUrl)).toBe(false);
+    expect(reportV1InvoiceBodyCarriesPayLink('', payUrl)).toBe(false);
+
+    // A missing pay URL is unusable, never vacuously true.
+    expect(reportV1InvoiceBodyCarriesPayLink(usable, '')).toBe(false);
+    expect(reportV1InvoiceBodyCarriesPayLink(usable, null)).toBe(false);
   });
 
   test('gate off leaves every un-billed path byte-identical to today', () => {

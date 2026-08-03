@@ -262,12 +262,45 @@ async function main() {
     // Then the invoice the route would reuse: newest non-void on the current
     // record, else newest non-void on the visit (invRows is already
     // created_at DESC).
-    const inv = (record && invRows.find((r) => String(r.service_record_id) === String(record.id)))
+    let inv = (record && invRows.find((r) => String(r.service_record_id) === String(record.id)))
       || invRows[0]
       || null;
 
-    if (!invRows.length) {
-      say(BLOCK, 'no non-void invoice for this visit', 'nothing to charge.');
+    // Production has a THIRD lookup when both of the above miss: an
+    // accepted-estimate first-application invoice, which can hang off a
+    // DIFFERENT same-day service row for the same estimate
+    // (services/estimate-first-application-invoice.js). Declaring "no invoice"
+    // without it names the wrong cause and sends the operator to mint a
+    // duplicate.
+    let estimateInv = null;
+    if (!invRows.length && v.source_estimate_id && v.scheduled_date) {
+      const { rows: estRows } = await client.query(
+        `SELECT i.*
+           FROM invoices i
+           JOIN scheduled_services fv ON i.scheduled_service_id = fv.id
+          WHERE i.customer_id = $1
+            AND fv.source_estimate_id = $2
+            AND fv.scheduled_date = $3
+            AND i.status <> 'void'
+          ORDER BY i.created_at DESC`,
+        [v.customer_id, v.source_estimate_id, v.scheduled_date],
+      );
+      estimateInv = estRows.find((r) => {
+        const title = String(r.title || '').toLowerCase();
+        const n = String(r.notes || '').toLowerCase();
+        return n.includes('auto-generated from accepted estimate')
+          && n.includes('customer selected pay per application')
+          && (title.includes('first application') || n.includes('first application'));
+      }) || null;
+      if (estimateInv) {
+        console.log(`         invoice ${estimateInv.id} status=${estimateInv.status} (accepted-estimate first-application invoice, adopted from another same-day visit)`);
+        inv = estimateInv;
+      }
+    }
+
+    if (!invRows.length && !estimateInv) {
+      say(BLOCK, 'no non-void invoice for this visit',
+        'nothing to charge — checked the visit, its service records, and the accepted-estimate first-application fallback.');
     } else if (paidRow) {
       say(BLOCK, `the current completion record already has a ${paidRow.status} invoice (${paidRow.id})`,
         'the route sets alreadyPaid from a paid/prepaid invoice on THIS record, which suppresses the completion charge.');

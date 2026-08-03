@@ -8977,15 +8977,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // A toggled-off or removed variant must not cost the customer their
           // completion text (owner report 2026-07-06: the since-removed
           // progress variant was inactive and progress visits would have
-          // texted nothing). The with-invoice body was probed active moments
-          // ago, so a null here means a variant/render failure in between —
-          // and the fallback must keep the PAY LINK. Dropping to the base
-          // report text would leave a customer holding an open invoice with no
-          // way to pay it, so this falls to the generic invoice template
-          // instead; only the un-billed lane can fall back to bare report copy
-          // (where sentSmsType is already service_report_v1 and there is
-          // nothing to fall back to).
-          if (!body && sentSmsType === 'service_report_v1_with_invoice') {
+          // texted nothing). For the BILLED lane the bar is higher: the text
+          // must actually carry the pay link, so the RENDERED body is checked
+          // for the URL rather than trusting the arming probe.
+          // isOptInSmsTemplateEnabled only proves the row exists and is
+          // active — an operator can edit {pay_url} out of the body in /admin,
+          // and `sms_template_variants` outranks the base row anyway, so an
+          // active template can render a perfectly good text with no way to
+          // pay. Either way this falls to the generic invoice template;
+          // dropping to the base report copy would leave a customer holding an
+          // open invoice and no link. Only the un-billed lane can fall back to
+          // bare report copy (where sentSmsType is already service_report_v1
+          // and there is nothing to fall back to).
+          if (sentSmsType === 'service_report_v1_with_invoice'
+            && !reportV1InvoiceBodyCarriesPayLink(body, payUrl)) {
             sentSmsType = 'service_complete_with_invoice';
             body = await renderTemplate(sentSmsType, {
               first_name: svc.first_name || '',
@@ -11741,6 +11746,24 @@ function completionSavedCardFallbackPolicy({
 // reportV1InvoiceArmed is the caller's short-circuit — gate ON *and* the
 // with-invoice template present and active. It is only ever true for a billed
 // visit; an un-billed one has nothing to arm.
+// Is a rendered report-lane invoice body actually usable — i.e. does it carry
+// the pay link? Arming this lane only proves the sms_templates row exists and
+// is active; it does NOT prove the body still contains {pay_url}. The body is
+// operator-editable in /admin, and an active `sms_template_variants` row
+// outranks the base row entirely, so an armed, successfully-rendered text can
+// reach a customer with an open invoice and no way to pay it. Checking the
+// rendered output (not the stored template) is what makes that unreachable.
+function reportV1InvoiceBodyCarriesPayLink(body, payUrl) {
+  const text = String(body || '');
+  const url = String(payUrl || '').trim();
+  if (!text) return false;
+  // No pay URL to carry means this was never the billed lane — the caller
+  // only reaches this check with one, so treat a missing URL as unusable
+  // rather than vacuously true.
+  if (!url) return false;
+  return text.includes(url);
+}
+
 function completionUsesReportLane({
   reportLaneEnabled,
   invoiceCreated,
@@ -12211,6 +12234,7 @@ module.exports._test = {
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
   completionUsesReportLane,
+  reportV1InvoiceBodyCarriesPayLink,
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
   applyBackfillRecordTimingPolicy,
