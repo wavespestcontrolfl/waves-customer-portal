@@ -792,6 +792,25 @@ describe('admin customers route helpers', () => {
     };
     const [rodentLine] = scheduleLinesFromEstimate(monthlyBilled, index);
     expect(rodentLine.perApplicationPrice).toBeUndefined();
+    // Parent-level WaveGuard/manual discount with LIST-only rows (Codex
+    // #3173 r3): provenance is REFUSED — the accepted price is discounted
+    // and the rows can't prove the net figure.
+    const parentDiscounted = {
+      id: 'est-pa-4',
+      monthly_total: 174.08,
+      estimate_data: {
+        result: { recurring: {
+          discount: 0.15,
+          services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 180, visitsPerYear: 4, mo: 60 },
+            { service: 'lawn_care', name: 'Lawn Care', perTreatment: 89, visitsPerYear: 9, mo: 66.75 },
+          ],
+        } },
+      },
+    };
+    const discountedLines = scheduleLinesFromEstimate(parentDiscounted, index);
+    for (const l of discountedLines) expect(l.perApplicationPrice).toBeUndefined();
+
   });
 
 });

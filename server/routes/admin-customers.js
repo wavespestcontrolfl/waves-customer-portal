@@ -382,7 +382,7 @@ function isSchedulableOneTimeEstimateLine(line) {
   return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
 }
 
-function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
+function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurringDiscounted = false }) {
   const name = String(line?.displayName || line?.label || line?.name || line?.serviceName || line?.service || '').trim();
   if (!name) return null;
   // Per-VISIT fields first; the monthly fields are a last resort and carry
@@ -467,7 +467,10 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
         // per-service amounts.
         const appliedPct = Number(line?.discount?.appliedDiscountPercent
           ?? line?.discount?.effectiveDiscount ?? 0);
-        if (appliedPct > 0
+        // Line-level OR parent-level (result.recurring.discount /
+        // manualDiscount — Codex #3173 r3) discount with only list figures
+        // on the row: refuse provenance rather than overstate.
+        if ((appliedPct > 0 || parentRecurringDiscounted)
           && moneyOrNull(line?.priceAfterDiscount) == null
           && !(Number(line?.annualAfterDiscount) > 0)
           && !(Number(line?.finalAnnual) > 0)) {
@@ -519,6 +522,17 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
     recurringSvcList = [];
     oneTimeList = [];
   }
+  // Parent-level recurring discount (Codex #3173 r3): persisted engine
+  // estimates commonly store the WaveGuard/manual discount at
+  // result.recurring.discount while service rows keep LIST perTreatment
+  // values — per-application provenance must be refused for those rows or
+  // the UI would present undiscounted figures as the accepted price.
+  let parentRecurringDiscounted = false;
+  try {
+    const rec = estData?.result?.recurring || estData?.recurring || {};
+    parentRecurringDiscounted = Number(rec?.discount) > 0
+      || (rec?.manualDiscount && Number(rec.manualDiscount.value) > 0);
+  } catch { parentRecurringDiscounted = false; }
   const schedulableOneTimeList = oneTimeList.filter(isSchedulableOneTimeEstimateLine);
   const monthlyTotal = Number(estimate.monthly_total || 0);
   const annualTotal = Number(estimate.annual_total || 0);
@@ -529,7 +543,7 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
   const suppressFallback = onlyFilteredBillingRows && !hasRecurringEstimateTotal;
 
   const lines = [
-    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex })),
+    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex, parentRecurringDiscounted })),
     ...schedulableOneTimeList.map((line) => formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex })),
   ].filter(Boolean);
 
