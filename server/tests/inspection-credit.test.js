@@ -22,11 +22,12 @@ let mockOffers = [];
 let mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date() }];
 let mockClaimResult = 1;
 const mockUpdates = [];
+const mockChainCalls = [];
 jest.mock('../models/db', () => {
   const makeChain = () => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'select', 'onConflict', 'ignore', 'returning']) {
-      chain[m] = jest.fn(() => chain);
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'select', 'onConflict', 'ignore', 'returning']) {
+      chain[m] = jest.fn(() => { mockChainCalls.push(m); return chain; });
     }
     // select()/the builder itself resolves to the open-offer list
     chain.then = (res, rej) => Promise.resolve(mockOffers).then(res, rej);
@@ -49,6 +50,7 @@ jest.mock('../models/db', () => {
 
 const {
   recordInspectionCreditOffer,
+  reverseInspectionCreditForBooking,
   sweepInspectionCreditRedemptions,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
@@ -63,6 +65,7 @@ beforeEach(() => {
   mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date() }];
   mockClaimResult = 1;
   mockUpdates.length = 0;
+  mockChainCalls.length = 0;
 });
 
 describe('recordInspectionCreditOffer — the promise, not the money', () => {
@@ -155,10 +158,13 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
     const [args] = mockPostCreditMovement.mock.calls[0];
     expect(args).toMatchObject({ customerId: 'cust-1', delta: 75, source: 'inspection_credit' });
-    // The claim moves the row terminal BEFORE money posts...
-    expect(mockUpdates[0]).toMatchObject({ status: 'redeemed', redeemed_scheduled_service_id: 'svc-2' });
+    // The ATTEMPT is recorded first (so the sweep can retry only real
+    // booking attempts)...
+    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-2' });
+    // ...then the claim moves the row terminal BEFORE money posts...
+    expect(mockUpdates[1]).toMatchObject({ status: 'redeemed', redeemed_scheduled_service_id: 'svc-2' });
     // ...and the mint is bound back as the exactly-once proof.
-    expect(mockUpdates[1]).toMatchObject({ credit_ledger_id: 'ledger-1' });
+    expect(mockUpdates[2]).toMatchObject({ credit_ledger_id: 'ledger-1' });
   });
 
   it('a lost claim race mints NOTHING (the other booking won)', async () => {
@@ -185,17 +191,55 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
-  it('redeems an open offer whose customer booked through ANY surface, and never throws', async () => {
-    // The sweep re-derives redemption from persisted state, so a booking
-    // path that never called redeem still gets the credit.
+  it('retries only offers where a real booking surface already attempted redemption', async () => {
+    // Deliberately NOT "any later scheduled_services row": seeders, bulk
+    // rebooks and imports create rows nobody booked, and crediting those
+    // would hand out money for nothing. The attempt marker is the evidence.
     mockOffers = [{
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
       created_at: new Date('2026-08-01'), source_scheduled_service_id: 'svc-insp',
+      redeemed_scheduled_service_id: 'svc-booked',
       expires_at: new Date('2099-01-01'),
     }];
     const res = await sweepInspectionCreditRedemptions();
     expect(res.reason).toBeUndefined();
     expect(typeof res.redeemed).toBe('number');
+    // The sweep must filter on the attempt marker — an offer with no
+    // recorded attempt is never swept.
+    expect(mockChainCalls.some((c) => c === 'whereNotNull')).toBe(true);
+  });
+});
+
+describe('reverseInspectionCreditForBooking — a cancelled booking gives it back', () => {
+  it('is inert while the gate is dark', async () => {
+    mockGateOn = false;
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(res).toMatchObject({ reversed: 0, reason: 'feature_disabled' });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
+  it('reverses the ledger movement and reopens the offer inside its window', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      expires_at: new Date('2099-01-01'), credit_ledger_id: 'ledger-1',
+    }];
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ reversed: 1 });
+    const [args] = mockPostCreditMovement.mock.calls[0];
+    // NEGATIVE delta — the money goes back.
+    expect(args).toMatchObject({ customerId: 'cust-1', delta: -75, source: 'inspection_credit' });
+    // Reopened so a real booking can still earn it, and the mint binding
+    // cleared so it can mint again.
+    expect(mockUpdates[0]).toMatchObject({ status: 'offered', credit_ledger_id: null, redeemed_at: null });
+  });
+
+  it('a lapsed offer closes out instead of dangling reopened', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      expires_at: new Date('2020-01-01'), credit_ledger_id: 'ledger-1',
+    }];
+    await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(mockUpdates[0]).toMatchObject({ status: 'expired' });
   });
 });
 
@@ -218,10 +262,15 @@ describe('window + receipt copy', () => {
     expect(validatePricingConfigData('inspection_credit', { amount: 75, creditableWithinDays: 1.5 }).ok).toBe(false);
   });
 
-  it('states the exact promise, and says nothing when there is nothing to promise', () => {
-    expect(inspectionCreditReceiptMemo({ amount: 75, windowDays: 30 }))
-      .toBe('Your $75.00 inspection fee is credited toward any service you book within 30 days.');
-    expect(inspectionCreditReceiptMemo({ amount: 0, windowDays: 30 })).toBeNull();
+  it('states a flat SERVICE credit with the frozen deadline — never "your inspection fee"', () => {
+    const memo = inspectionCreditReceiptMemo({ amount: 75, expiresAt: '2026-09-02T12:00:00Z' });
+    expect(memo).toContain('$75.00 service credit');
+    expect(memo).toContain('September 2, 2026');
+    // The credit is FLAT, so calling it the fee paid would misstate a
+    // comped or $125 inspection.
+    expect(memo).not.toMatch(/your inspection fee/i);
+    expect(inspectionCreditReceiptMemo({ amount: 0, expiresAt: '2026-09-02' })).toBeNull();
+    expect(inspectionCreditReceiptMemo({ amount: 75 })).toBeNull();
     expect(inspectionCreditReceiptMemo({})).toBeNull();
   });
 });

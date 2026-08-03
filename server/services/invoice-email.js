@@ -362,11 +362,9 @@ async function inspectionCreditMemoForInvoice(invoice) {
       .first('amount', 'expires_at');
     if (!offer) return '';
     const { inspectionCreditReceiptMemo } = require('./inspection-credit');
-    const days = Math.max(
-      1,
-      Math.ceil((new Date(offer.expires_at).getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
-    );
-    return inspectionCreditReceiptMemo({ amount: offer.amount, windowDays: days }) || '';
+    // The FROZEN expiry rides through — a resend must state the same
+    // deadline, never a recomputed "N days left".
+    return inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '';
   } catch (err) {
     logger.warn(`[invoice-email] inspection credit memo lookup failed: ${err.message}`);
     return '';
