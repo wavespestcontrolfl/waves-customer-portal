@@ -2293,6 +2293,15 @@ const EstimateConverter = {
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+              // Held-slot acceptance is a booking too (Codex #3178 r3 P1)
+              // — the auto-schedule path below is not the only way an
+              // accepted estimate becomes an appointment.
+              try {
+                await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                  customerId: standaloneRow.customer_id,
+                  scheduledServiceId: parentRow.id,
+                });
+              } catch { /* never blocks a conversion */ }
               let seedResult = null;
               try {
                 seedResult = await seedRecurringFollowUpsForParent(trx, parentRow, unit.service, {

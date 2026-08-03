@@ -22,6 +22,7 @@ let mockOffers = [];
 let mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date() }];
 let mockClaimResult = 1;
 let mockBookings = [];
+let mockAlternates = [];
 const mockUpdates = [];
 const mockChainCalls = [];
 jest.mock('../models/db', () => {
@@ -34,9 +35,12 @@ jest.mock('../models/db', () => {
     // Table-aware: a scheduled_services lookup is a BOOKING probe, not an
     // offer read — conflating them made the reversal path think another
     // live booking existed.
-    const isBookings = String(table || '').includes('scheduled_services');
-    chain.then = (res, rej) => Promise.resolve(isBookings ? mockBookings : mockOffers).then(res, rej);
-    chain.first = jest.fn(async () => (isBookings ? (mockBookings[0] || null) : (mockOffers[0] || null)));
+    const t = String(table || '');
+    const isAlternateProbe = t.includes('as o2');
+    const isBookings = t.includes('scheduled_services') && !isAlternateProbe;
+    const rows = isAlternateProbe ? mockAlternates : (isBookings ? mockBookings : mockOffers);
+    chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+    chain.first = jest.fn(async () => rows[0] || null);
     chain.insert = jest.fn(() => {
       const ins = {};
       ins.onConflict = jest.fn(() => ins);
@@ -70,6 +74,7 @@ beforeEach(() => {
   mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date() }];
   mockClaimResult = 1;
   mockBookings = [];
+  mockAlternates = [];
   mockUpdates.length = 0;
   mockChainCalls.length = 0;
 });
@@ -150,7 +155,9 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
   });
 
   it('does not redeem against a cancelled/no-show booking', async () => {
-    for (const status of ['cancelled', 'no_show', 'rescheduled']) {
+    // 'rescheduled' deliberately absent: the customer reschedule endpoint
+    // stamps it while the visit simply MOVES — they are still booked.
+    for (const status of ['cancelled', 'no_show', 'skipped']) {
       const res = await redeemInspectionCreditForBooking({
         customerId: 'cust-1', scheduledServiceId: 'svc-2', bookingStatus: status,
       });
@@ -237,11 +244,20 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
 });
 
 describe('reverseInspectionCreditForBooking — a cancelled booking gives it back', () => {
-  it('is inert while the gate is dark', async () => {
+  it('still reverses while the gate is dark — minted money must come back', async () => {
+    // Turning the gate off stops new promises; it must NOT strand credit
+    // already in a customer's balance for a booking they cancelled.
     mockGateOn = false;
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
     const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
-    expect(res).toMatchObject({ reversed: 0, reason: 'feature_disabled' });
-    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(res).toEqual({ reversed: 1 });
+    expect(mockPostCreditMovement).toHaveBeenCalledWith(
+      expect.objectContaining({ delta: -75 }), expect.anything(),
+    );
   });
 
   it('reverses the ledger movement and reopens the offer inside its window', async () => {
@@ -265,7 +281,9 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
       created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
       credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
     }];
-    mockBookings = [{ id: 'svc-other' }];
+    // A PROVEN booking (another offer's marker points at a live visit),
+    // not merely any live scheduled_services row.
+    mockAlternates = [{ id: 'svc-other' }];
     const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ reversed: 0 });
     // Money stays with the customer — they still have a qualifying booking.

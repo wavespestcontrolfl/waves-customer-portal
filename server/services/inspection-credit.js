@@ -31,8 +31,12 @@ const { postCreditMovement } = require('./customer-credit');
 // A booking in one of these states never earns a redemption — a cancelled
 // or no-showed visit is not the service the credit was promised toward.
 // Mirrors estimate-conversion-guard's NON_LIVE_APPOINTMENT_STATUSES.
+// Statuses that mean the customer's booking is GONE. 'rescheduled' is
+// deliberately absent (Codex #3178 r3 P1): the customer reschedule
+// endpoint stamps that status while the visit simply MOVES — treating it
+// as gone would claw back a credit from someone who is still booked.
 const NON_LIVE_APPOINTMENT_STATUSES = Object.freeze([
-  'cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show',
+  'cancelled', 'canceled', 'skipped', 'no_show',
 ]);
 
 // Owner ruling 2026-08-03. Per-service overrides come from pricing_config
@@ -113,6 +117,10 @@ function etEndOfDayAfterDays(from, days) {
     }
   }
   return new Date(`${nextEtDate}T05:00:00Z`);
+}
+
+function windowMs(days) {
+  return Number(days || DEFAULT_CREDIT_WINDOW_DAYS) * 24 * 60 * 60 * 1000;
 }
 
 function round2(n) {
@@ -472,7 +480,7 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         } catch { serviceKey = null; }
         // Frozen from the SERVICE DATE — the customer's window started when
         // the inspection happened, not when recovery ran.
-        await recordInspectionCreditOffer({
+        const created = await recordInspectionCreditOffer({
           customerId: visit.customer_id,
           scheduledServiceId: visit.id,
           serviceRecordId: visit.record_id,
@@ -482,6 +490,32 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           // lands on the previous ET day and shifts the window early.
           now: etDateOnlyToDate(visit.service_date) || now,
         });
+        // The offer arrived LATE, so a qualifying booking may already have
+        // happened while it was missing (Codex #3178 r3 P1). Adopt the
+        // earliest PROVEN booking inside the window — proven meaning
+        // another offer's marker points at it, the same evidence standard
+        // redemption uses; a bare scheduled_services row could be a seeder.
+        if (created?.recorded && created.offerId) {
+          try {
+            const priorBooking = await db('inspection_credit_offers as o2')
+              .join('scheduled_services as s2', 's2.id', 'o2.redeemed_scheduled_service_id')
+              .where('o2.customer_id', visit.customer_id)
+              .whereNotIn('s2.status', NON_LIVE_APPOINTMENT_STATUSES)
+              .where('s2.created_at', '>=', created.expiresAt ? new Date(created.expiresAt.getTime() - windowMs(created.windowDays)) : now)
+              .where('s2.created_at', '<=', created.expiresAt || now)
+              .whereNot('s2.id', visit.id)
+              .orderBy('s2.created_at', 'asc')
+              .first('s2.id as id');
+            if (priorBooking) {
+              await db('inspection_credit_offers')
+                .where({ id: created.offerId, status: 'offered' })
+                .whereNull('redeemed_scheduled_service_id')
+                .update({ redeemed_scheduled_service_id: priorBooking.id, updated_at: db.fn.now() });
+            }
+          } catch (adoptErr) {
+            logger.warn(`[inspection-credit] late-offer booking adoption failed for ${visit.id}: ${adoptErr.message}`);
+          }
+        }
       }
     } catch (err) {
       logger.error(`[inspection-credit] closeout recovery failed: ${err.message}`);
@@ -570,7 +604,11 @@ async function reverseInspectionCreditForBooking({
   createdBy = 'system:inspection_credit_reversal',
   now = new Date(),
 }) {
-  if (!gateOn()) return { reversed: 0, reason: 'feature_disabled' };
+  // Deliberately NOT gate-checked (Codex #3178 r3 P1): once an offer has
+  // redeemed, its money is in the customer's general balance. Turning the
+  // gate off must stop new promises, not strand credit for bookings that
+  // were later cancelled — that would leave real money out with no path
+  // back.
   if (!scheduledServiceId) return { reversed: 0, reason: 'missing_identifiers' };
   try {
     const redeemedOffers = await db('inspection_credit_offers')
@@ -585,15 +623,20 @@ async function reverseInspectionCreditForBooking({
         // live booking still stands in that window, the customer is still
         // entitled to it — rebind rather than claw it back (Codex #3178
         // P1): cancelling one of two bookings must not cost them the credit.
-        const alternate = await db('scheduled_services')
-          .where({ customer_id: offer.customer_id })
-          .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
-          .where('created_at', '>=', offer.created_at)
-          .where('created_at', '<=', offer.expires_at)
-          .whereNot({ id: scheduledServiceId })
-          .whereNot({ id: offer.source_scheduled_service_id || '00000000-0000-0000-0000-000000000000' })
-          .orderBy('created_at', 'asc')
-          .first('id');
+        // A PROVEN customer booking only (Codex #3178 r3 P1): another
+        // offer for this customer whose marker points at a live visit is
+        // evidence a booking surface ran. Any live scheduled_services row
+        // would have counted seeded series children and bulk rebooks.
+        const alternate = await db('inspection_credit_offers as o2')
+          .join('scheduled_services as s2', 's2.id', 'o2.redeemed_scheduled_service_id')
+          .where('o2.customer_id', offer.customer_id)
+          .whereNotIn('s2.status', NON_LIVE_APPOINTMENT_STATUSES)
+          .where('s2.created_at', '>=', offer.created_at)
+          .where('s2.created_at', '<=', offer.expires_at)
+          .whereNot('s2.id', scheduledServiceId)
+          .whereNot('s2.id', offer.source_scheduled_service_id || '00000000-0000-0000-0000-000000000000')
+          .orderBy('s2.created_at', 'asc')
+          .first('s2.id as id');
         if (alternate) {
           await db('inspection_credit_offers')
             .where({ id: offer.id, status: 'redeemed' })
