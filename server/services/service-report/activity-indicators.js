@@ -1885,6 +1885,9 @@ const RECHECK_VERB = new RegExp('^(?:'
   + '|replace[sd]?|replacing'
   + '|swap(?:ped|ping|s)?'
   + '|move[sd]?|moving'
+  // Servicing a trap presupposes it was already out (codex P1) — a setup
+  // places traps, it does not service them.
+  + '|service[sd]?|servicing|services'
   + ')$', 'i');
 // Per-verb `re-` prefixes, for the same reason RECHECK_VERB spells them out:
 // a single leading `(?:re-?)?` in front of a literal `rebaited` cannot match
@@ -1898,7 +1901,7 @@ const RECHECK_PARTICIPLE = new RegExp('^(?:'
   + '|re-?baited'
   + '|re-?freshed'
   + '|re-?positioned'
-  + '|replaced|swapped|moved'
+  + '|replaced|swapped|moved|serviced'
   + ')$', 'i');
 // Where a verb's object phrase ENDS. Listing terminators rather than the
 // allowed modifiers is the only version that survives real prose: an
@@ -2035,6 +2038,13 @@ function splitOnPredicateAnd(piece) {
     // it splits: "traps were checked and WE WILL return" must not let the
     // second clause's future marker excuse the first clause's claim.
     if (!splits && sawPronoun && CLAUSE_AUX.test(next)) splits = true;
+    // A future marker's scope ENDS at a coordinator. Truncating the clause
+    // at the marker is right when the promise comes last, but reversed —
+    // "Follow-up scheduled next week AND trap inspection completed today" —
+    // it threw away the real claim behind it (codex P1). Once a future
+    // marker has appeared, this `and` starts a fresh clause that is judged
+    // on its own.
+    if (!splits && FUTURE_INTENT_RE.test(toks.slice(start, i).join(' '))) splits = true;
     // With no pronoun, an auxiliary IMMEDIATELY after `and` is a
     // shared-subject verb phrase ("were set and were checked later") — that
     // window must stay joined so the participle still binds to its trap
@@ -2075,9 +2085,16 @@ const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
 // count claims below and the noun-form re-check patterns that follow
 // share one definition of "what ends a trap noun phrase" rather than
 // keeping two that can drift.
+// Animals terminate the phrase ONLY when they are not naming the trap.
+// "rat traps", "mouse traps", and "rodent traps" are the ordinary compound
+// names in this trade, and treating the animal as an absolute terminator
+// meant "We checked 8 mouse traps today" extracted no claim at all — the
+// most natural phrasing there is, silently unguarded (codex P1). The
+// conditional keeps "2 rats near the traps" counting rats, not traps.
+const TRAP_ANIMAL_NOUNS = '(?:rats?|mice|mouse|rodents?|animals?)';
 const TRAP_PHRASE_TERMINATORS = [
   // 1. rival head nouns + partitives/articles
-  'rats?', 'mice', 'mouse', 'rodents?', 'animals?', 'captures?', 'catches',
+  'captures?', 'catches',
   'droppings', 'burrows?', 'holes?', 'gaps?', 'marks?', 'signs?', 'samples?',
   'of', 'the', 'a', 'an', 'and', 'or', 'nor', 'but',
   // 2. prepositions
@@ -2096,7 +2113,7 @@ const TRAP_PHRASE_TERMINATORS = [
   'observed', 'noted', 'counted', 'found', 'saw', 'removed', 'replaced',
   're-?set', 'swapped', 'moved',
 ];
-const TRAP_MODIFIER_RUN = `(?:\\s+(?!(?:${TRAP_PHRASE_TERMINATORS.join('|')})\\b)[a-z-]+)*?`;
+const TRAP_MODIFIER_RUN = `(?:\\s+(?!${TRAP_ANIMAL_NOUNS}\\b(?!\\s+(?:traps?|devices?)\\b))(?!(?:${TRAP_PHRASE_TERMINATORS.join('|')})\\b)[a-z-]+)*?`;
 // A bare number is a determiner here too, so "checked 6 of 8 traps" and "6
 // of 8 traps were checked" route through the partitive rules — see
 // CHECK_PREDICATE_* below for why that matters.

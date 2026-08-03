@@ -1678,3 +1678,70 @@ describe('subordinate clauses bind their participle to their OWN subject', () =>
     }
   });
 });
+
+// Codex round on dd815f69d — three fail-open holes, all letting a real
+// re-check claim publish on a declared setup.
+describe('round on dd815f69d — compound trap names, serviced, future-first order', () => {
+  const {
+    countContradictions,
+    setupContradictions,
+  } = require('../services/service-report/activity-indicators');
+
+  // The animal tokens were absolute terminators in the modifier run, so the
+  // ordinary compound names of this trade extracted no claim at all.
+  test('animal names modifying `traps` are part of the phrase, not a boundary', () => {
+    for (const text of [
+      'We checked 8 mouse traps today.',
+      'We checked 8 rat traps today.',
+      'We set 8 rodent traps in the attic.',
+      'We checked 8 heavy-duty mouse traps today.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    }
+    expect(countContradictions('We checked 8 mouse traps today.', { traps_checked: 8 })).toEqual([]);
+  });
+
+  test('…while an animal NOT naming the trap still ends the phrase', () => {
+    for (const text of [
+      'We removed 2 rats near the traps.',
+      'We removed 2 rats from the traps.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 })).toEqual([]);
+    }
+  });
+
+  // Servicing presupposes the trap was already out.
+  test('serviced-trap claims contradict a setup', () => {
+    for (const text of [
+      'We serviced all 8 traps today.',
+      'All traps were serviced today.',
+      'The traps were serviced on arrival.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+    expect(setupContradictions('We serviced the property exterior today.')).toEqual([]);
+  });
+
+  // Truncating at the future marker is right when the promise comes LAST;
+  // reversed, it threw away the real claim standing behind it.
+  test('a claim after a future phrase is still judged', () => {
+    for (const text of [
+      'Follow-up scheduled next week and trap inspection completed today.',
+      'We will return next week and the traps were checked today.',
+      'Next visit scheduled and we checked the traps.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('…and promises in either order are still exempt', () => {
+    for (const text of [
+      'We will return to check the traps in one week.',
+      'Traps are set and we will inspect the traps on the follow-up visit.',
+      'We inspected the attic and will set traps next visit.',
+      'Initial setup complete, trap check scheduled for next week.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});
