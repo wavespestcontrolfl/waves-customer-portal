@@ -48,6 +48,15 @@ function portalBase() {
 
 const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 
+// Mirrors STATION_CARD_PROGRAM_META in StationMapCard: "activity" means bait
+// consumption on a bait program and a recorded capture on a trapping program —
+// a generic word would misstate the outcome in the permanent record.
+const STATION_ACTIVITY_SUMMARY = {
+  termite: 'with termite activity',
+  rodent: 'with bait consumption',
+  trapping: 'with captures recorded',
+};
+
 // serviceDate is a DATE serialized at UTC midnight — format in UTC so the
 // calendar day never rolls back. Timestamps format in ET like every other
 // customer surface.
@@ -381,7 +390,12 @@ export default function ServiceReportDocument({ data, token }) {
   // only. The web report renders neither array; the PDF must not either.
   // Lawn visits carry their guidance in the assessment + V2 aftercare
   // instead of typedReport — same section, same voice.
-  const assessRecs = data.lawnAssessment?.recommendations?.recommendations;
+  // Legacy assessment recommendations are the LawnAssessmentCard's content,
+  // which the live report renders INSTEAD of (never alongside) LawnReportV2Section.
+  // Flattening both into one list produced duplicate mowing guidance and three
+  // overlapping watering instructions in the same section — same suppression
+  // rule already applied to lawnAssessment.observations.
+  const assessRecs = data.reportV2 ? null : data.lawnAssessment?.recommendations?.recommendations;
   (Array.isArray(assessRecs) ? [...assessRecs].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)) : [])
     .forEach((rec) => pushRec(rec?.action || rec?.text || rec));
   pushRec(data.reportV2?.aftercare?.watering);
@@ -422,27 +436,22 @@ export default function ServiceReportDocument({ data, token }) {
     ? data.pestPressure : null;
 
   const concern = data.customerConcernCard || v2Concern || null;
-  const nextAppt = data.nextAppointment || null;
   const isWaveGuard = Boolean(data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard);
-  // The displayed arrival window is ALWAYS windowStart + 2 hours — window_end
-  // is the internal job block and never renders on a customer surface.
-  const arrivalWindow = (() => {
-    const m = /^(\d{1,2}):(\d{2})/.exec(String(nextAppt?.windowStart || ''));
-    if (!m) return '';
-    const startMin = Number(m[1]) * 60 + Number(m[2]);
-    const label = (mins) => {
-      const h24 = Math.floor((mins % 1440) / 60);
-      const mm = String(mins % 60).padStart(2, '0');
-      const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-      return `${h12}:${mm} ${h24 < 12 ? 'AM' : 'PM'}`;
-    };
-    return `${label(startMin)}–${label(startMin + 120)}`;
-  })();
 
   // Untyped visits record their findings at the top level; the typed
   // snapshot only covers typed reports. Both must reach the document or the
   // PDF silently drops what the visit recorded (codex P1).
+  // ⛔ EXCLUDE category 'observation'. report-data.js synthesizes those from
+  // protocol.observations, which merges parser-approved structured lists with
+  // taggedNoteLines(technician_notes, ['found']) — RAW notes. By the time the
+  // payload reaches the client the two are indistinguishable, so rendering any
+  // of them could put "[found] Gate code 4417" in a permanent customer PDF.
+  // AGENTS.md: raw technician_notes never egress on any report path. Fail
+  // closed — real structured findings (the findings table, which carry detail
+  // and recommendation) still render. A server-side split of approved
+  // observations from raw note lines would let these come back.
   const recordFindings = (Array.isArray(data.findings) ? data.findings : [])
+    .filter((finding) => finding && finding.category !== 'observation')
     .filter((finding) => String(finding?.title || finding?.detail || '').trim());
   // Combined-service visits carry companion sections. internalOnly ones are
   // STAFF-ONLY and must never print — the same rule the web report's print
@@ -512,6 +521,7 @@ export default function ServiceReportDocument({ data, token }) {
           border: 1.5px solid #fff; box-shadow: 0 0 0 1px ${LINE};
         }
         .service-report-document .doc-station-pin.is-activity { background: #A33B2E; }
+        .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
       `}</style>
       <div className="doc-page">
@@ -676,8 +686,12 @@ export default function ServiceReportDocument({ data, token }) {
             )}
             {recordFindings.map((finding) => (
               <Bullet key={finding.id || finding.title}>
-                {finding.title && <strong>{finding.title}{finding.detail ? ': ' : ''}</strong>}
-                {finding.detail}
+                {/* A title with no detail is a flag ("Fresh droppings found"),
+                    not a label — bolding it with nothing after reads as a
+                    missing value. */}
+                {finding.detail
+                  ? <><strong>{finding.title}:</strong> {finding.detail}</>
+                  : finding.title}
               </Bullet>
             ))}
           </div>
@@ -834,7 +848,7 @@ export default function ServiceReportDocument({ data, token }) {
               {stationMap.stations.map((station) => (
                 <span
                   key={station.id || station.number}
-                  className={`doc-station-pin${station.status === 'activity' ? ' is-activity' : ''}${station.status === 'inaccessible' ? ' is-inaccessible' : ''}`}
+                  className={`doc-station-pin${station.status === 'activity' ? ' is-activity' : ''}${station.status === 'serviced' ? ' is-serviced' : ''}${station.status === 'inaccessible' ? ' is-inaccessible' : ''}`}
                   style={{ left: `${(station.cx * 100).toFixed(2)}%`, top: `${(station.cy * 100).toFixed(2)}%` }}
                 >{station.number}</span>
               ))}
@@ -844,7 +858,8 @@ export default function ServiceReportDocument({ data, token }) {
                 {[
                   `${stationMap.summary.total} ${stationMap.program === 'trapping' ? 'traps' : 'stations'}`,
                   stationMap.summary.checked != null ? `${stationMap.summary.checked} checked` : null,
-                  stationMap.summary.activity != null ? `${stationMap.summary.activity} with activity` : null,
+                  stationMap.summary.serviced ? `${stationMap.summary.serviced} serviced this visit` : null,
+                  stationMap.summary.activity ? `${stationMap.summary.activity} ${STATION_ACTIVITY_SUMMARY[stationMap.program] || 'with activity'}` : null,
                   stationMap.summary.inaccessible ? `${stationMap.summary.inaccessible} inaccessible` : null,
                 ].filter(Boolean).join(' · ')}
                 {' '}· positions to scale — satellite view in your online report
@@ -935,7 +950,11 @@ export default function ServiceReportDocument({ data, token }) {
         {/* Record footer */}
         <div className="doc-keep" style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
           <div style={{ fontSize: 10, color: MUTED, lineHeight: 1.6 }}>
-            {nextAppt?.scheduledDate ? <>Next service: {fmtServiceDate(nextAppt.scheduledDate)}{arrivalWindow ? ` · ${arrivalWindow}` : ''}{nextAppt.serviceType ? ` · ${nextAppt.serviceType}` : ''}.<br /></> : null}
+            {/* No next-service line: stripLiveOnlyScheduleFields deletes
+                nextAppointment (and reportV2.snapshot.nextVisit) from EVERY
+                non-live render, precisely so a reschedule can't fossilize a
+                stale appointment in a cached PDF. Rendering it here was dead
+                code that only ever appeared in a direct component test. */}
             {isWaveGuard ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
             Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
             <br />

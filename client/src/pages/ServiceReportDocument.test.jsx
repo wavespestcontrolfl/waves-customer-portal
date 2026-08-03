@@ -288,11 +288,14 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(off.container.textContent).not.toMatch(/Pest Pressure/);
   });
 
-  it('carries the next appointment and the WaveGuard re-service benefit', () => {
+  it('carries the WaveGuard benefit but never a next-appointment line', () => {
+    // stripLiveOnlyScheduleFields removes nextAppointment from every non-live
+    // render so a reschedule can't fossilize in a cached PDF — the document
+    // must not depend on it even when a caller passes one.
     const data = { ...BASE_DATA, nextAppointment: { scheduledDate: '2026-09-01T00:00:00.000Z', serviceType: 'Quarterly Pest Control' }, waveGuardTier: 'Silver' };
     const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
-    expect(container.textContent).toMatch(/Next service: September 1, 2026/);
     expect(container.textContent).toMatch(/WaveGuard members receive free re-service/);
+    expect(container.textContent).not.toMatch(/Next service:/);
   });
 
   it('drops a treatment map that fails to load instead of printing an empty claim', () => {
@@ -437,7 +440,40 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
     expect(screen.getByText('Follow-up already planned')).toBeInTheDocument();
     expect(screen.getByText(/We will recheck the flagged areas/)).toBeInTheDocument();
-    expect(container.textContent).toMatch(/9:00 AM–11:00 AM/);
+    // NO next-service line: stripLiveOnlyScheduleFields deletes nextAppointment
+    // from every non-live render, so rendering it would be dead code that only
+    // ever appears in a test like this one.
+    expect(container.textContent).not.toMatch(/Next service:/);
+  });
+
+  it('never prints observation-category findings (they can carry raw [found] notes)', () => {
+    const data = {
+      ...BASE_DATA,
+      findings: [
+        { id: 'observation-1', category: 'observation', severity: 'medium', title: 'Gate code 4417, bill the office', detail: '' },
+        { id: 'f2', category: 'pest_activity', severity: 'high', title: 'Ant trail at the slider', detail: 'Treated and monitored.' },
+      ],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('Gate code');
+    expect(container.textContent).toMatch(/Ant trail at the slider/);
+  });
+
+  it('uses program-specific station outcome wording and the serviced state', () => {
+    const data = {
+      ...BASE_DATA,
+      stationMap: {
+        available: true,
+        program: 'trapping',
+        stations: [{ id: 's1', number: 1, cx: 0.4, cy: 0.5, status: 'serviced' }],
+        summary: { total: 1, checked: 1, serviced: 1, activity: 1, inaccessible: 0 },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/1 serviced this visit/);
+    expect(container.textContent).toMatch(/1 with captures recorded/);
+    expect(container.textContent).not.toMatch(/with activity/);
+    expect(container.querySelector('.doc-station-pin.is-serviced')).toBeTruthy();
   });
 
   it('keeps the typed cross-visit history', () => {
@@ -469,6 +505,24 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
     expect(container.textContent).toContain('Full interactive report');
     expect(container.textContent).toContain(`${window.location.origin}/report/tok123`);
+  });
+
+  it('does not stack legacy assessment recommendations on top of the V2 ones', () => {
+    const legacyRec = 'Maintain mowing at approximately 3.5-4 inches.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      lawnAssessment: { recommendations: { recommendations: [{ priority: 1, action: legacyRec }] } },
+      reportV2: { mowing: { recommendation: 'The lawn is being kept at 3.5 inches — stay in that range.' } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/stay in that range/);
+    expect(container.textContent).not.toContain(legacyRec);
+    cleanup();
+
+    // ...but a legacy report with no V2 still shows them
+    const legacy = render(<ServiceReportDocument data={{ ...data, reportV2: null }} token="t" />);
+    expect(legacy.container.textContent).toContain(legacyRec);
   });
 
   it('hides the conditions readings when the visit recorded none', () => {
