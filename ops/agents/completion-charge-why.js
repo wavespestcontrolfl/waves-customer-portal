@@ -16,11 +16,20 @@
  * them apart by hand means six joins across five tables, and the remedy is
  * different for each.
  *
- * CHECK ORDER MIRRORS PRODUCTION'S NESTING, not convenience. Auto Pay is an
- * OUTER condition on the charge block (admin-dispatch.js:8217-8220), so the cap
- * comparison and its office bell are only reachable once Auto Pay passes —
- * reporting an over-cap blocker to an operator whose Auto Pay was off would
- * send them to adjust an invoice that was never the problem.
+ * CHECK ORDER MIRRORS PRODUCTION'S NESTING, not convenience, because the
+ * verdict is the FIRST blocker and a wrongly-ordered check sends the operator
+ * to fix something that was never the problem:
+ *
+ *   gate → lane preconditions (billing mode, one-time, performed, not backfill,
+ *   invoice + alreadyPaid) → LANE MEMBERSHIP (appointment_card_requests)
+ *   → AUTO PAY → CAP → LIVE PAYER → recorded charge failure
+ *
+ * Lane membership comes first because only a visit on the lane reaches the
+ * charge block at all (admin-dispatch.js:8095-8133). Auto Pay is the outer
+ * condition on that block (8217-8220), so the cap and its office bell are
+ * unreachable until it passes. The live-payer re-resolve happens INSIDE the
+ * block, after the cap (8361-8377) — so an over-cap visit reports the cap bell,
+ * not the payer.
  *
  * A CLEAN verdict is only ever printed when every condition was actually
  * verified AND no recorded charge failure exists for the visit. Anything this
@@ -219,10 +228,11 @@ async function main() {
       }
     }
 
-    // 4. Invoices. `alreadyPaid` is set by a SEPARATE search for ANY paid
-    //    invoice on the visit (admin-dispatch.js:7110-7115) — a newer open
-    //    invoice does not clear it, so the whole result set has to be scanned
-    //    before picking one to describe.
+    // 4. Invoices. `alreadyPaid` comes from a SEPARATE lookup scoped to the
+    //    CURRENT completion record (admin-dispatch.js:7110-7115); the invoice
+    //    the route then reuses is selected independently. Both are mirrored
+    //    below — collapsing them reports the wrong blocker when an older paid
+    //    invoice sits alongside a newer open one.
     const { rows: invRows } = await client.query(
       `SELECT id, status, subtotal, total, discount_amount, payer_id, credit_applied,
               service_record_id, created_at
@@ -280,12 +290,13 @@ async function main() {
       }
     }
 
-    // 5. LIVE payer at the charge boundary. A payer assigned after the invoice
-    //    was pre-minted lives only on scheduled_services / customers — the
-    //    reused invoice's payer_id stays null, and the route re-resolves it
-    //    (admin-dispatch.js:8361-8377 via services/payer resolveForInvoice).
-    //    Mirrored here: per-visit payer wins; self_pay_override blocks the
-    //    account-default fallback; otherwise the customer's payer applies.
+    // LIVE payer at the charge boundary. Defined here, INVOKED after the cap —
+    // production re-resolves the payer inside the charge block, after the cap
+    // comparison (admin-dispatch.js:8361-8377 via services/payer
+    // resolveForInvoice), so an over-cap visit reports the cap bell, not this.
+    // Mirrored: per-visit payer wins; self_pay_override blocks the
+    // account-default fallback; otherwise the customer's payer applies.
+    async function checkLivePayer() {
     let livePayerId = null;
     if (v.visit_payer_id) {
       livePayerId = v.visit_payer_id;
@@ -323,10 +334,12 @@ async function main() {
     } else {
       say(OK, 'live payer resolution = self-pay');
     }
+    }
 
-    // 6. AUTO PAY — an OUTER condition on the charge block, so it is evaluated
-    //    BEFORE the cap. With Auto Pay off the route never reaches the cap
-    //    comparison and never raises the above-amount bell.
+    // AUTO PAY — the outer condition on the charge block. Defined here,
+    // INVOKED after lane membership is established, because production only
+    // reaches it for a visit already on the appointment-card lane.
+    async function checkAutoPay() {
     const { rows: pmRows } = await client.query(
       `SELECT id, processor, method_type, is_default, autopay_enabled,
               stripe_payment_method_id, exp_month, exp_year
@@ -362,8 +375,12 @@ async function main() {
         failAutopay(`ach_status=${v.ach_status} with a bank default method`, 'the lane forces card-only when ACH is unhealthy.');
       }
     }
+    return autopayOk;
+    }
 
-    // 7. The lane row itself — appointment_card_requests, completed/satisfied.
+    // 7. Lane membership — appointment_card_requests, completed/satisfied.
+    //    Production establishes this FIRST (admin-dispatch.js:8095-8133); only
+    //    a visit on this lane reaches the Auto Pay / cap block below.
     const { rows: laneRows } = await client.query(
       `SELECT id, customer_id, status, accepted_amount, selected_plan, created_at
          FROM appointment_card_requests
@@ -397,11 +414,18 @@ async function main() {
       } else {
         say(OK, 'lane customer matches visit customer');
       }
+    }
 
-      // 8. accepted_amount — the frozen cap. Only meaningful once Auto Pay has
-      //    passed: production evaluates the cap INSIDE the Auto Pay-gated
-      //    block, so an over-cap report while Auto Pay is down would send the
-      //    operator to fix the wrong thing.
+    // 8. AUTO PAY — the outer condition on the charge block
+    //    (admin-dispatch.js:8217-8220). Only a visit that already established
+    //    lane membership above reaches it, and the cap below sits inside it.
+    const autopayOk = await checkAutoPay();
+
+    // 9. accepted_amount — the frozen cap. Production evaluates it INSIDE the
+    //    Auto Pay-gated block, so it is only meaningful once BOTH lane
+    //    membership and Auto Pay have passed; otherwise production never got
+    //    here and raised no bell.
+    if (lane) {
       const accepted = lane.accepted_amount == null ? null : Number(lane.accepted_amount);
       const capLevel = autopayOk ? BLOCK : INFO;
       const capNote = autopayOk ? '' : ' (Auto Pay blocked first — production never reached this comparison and raised NO bell)';
@@ -429,7 +453,11 @@ async function main() {
       }
     }
 
-    // 9. A recorded charge FAILURE. Every predicate can pass and the charge
+    // 10. LIVE payer re-resolution — production's LAST gate before the charge
+    //     itself, after the cap comparison.
+    await checkLivePayer();
+
+    // 11. A recorded charge FAILURE. Every predicate can pass and the charge
     //    still throw (processor decline, Stripe/config error, DB failure) —
     //    the route logs charge_failed with this visit id.
     let chargeFailure = null;
@@ -464,7 +492,7 @@ async function main() {
         + `${d.reconciliation_required ? ' — reconciliation_required flagged.' : ''}`);
     }
 
-    // 10. Office bells — the free discriminator between "lane never engaged"
+    // 12. Office bells — the free discriminator between "lane never engaged"
     //     (silent) and "cap blocked it" (bell).
     console.log('\n=== office bells for this visit ===');
     const { rows: notifRows } = await client.query(
@@ -482,7 +510,7 @@ async function main() {
       for (const n of notifRows) console.log(`  ${n.created_at.toISOString()}  ${n.title}`);
     }
 
-    // 11. What the customer actually received.
+    // 13. What the customer actually received.
     console.log('\n=== completion SMS actually sent ===');
     if (!recRows.length) {
       console.log('  no service_records row.');
