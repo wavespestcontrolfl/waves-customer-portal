@@ -1248,6 +1248,57 @@ async function recordFirstTouchHoldOwned(args, procToken) {
   return null;
 }
 
+// Mint email read-back cards ATOMICALLY with the release-claim invalidation
+// (Codex #3084 r54): an autocommit card insert followed by a separate repen
+// left a window where a release — its one card question already answered
+// under the send lock — could see the fresh card commit while the
+// invalidation still waited on its hold-row lock, and send the DOI/drip to
+// the now-unreviewed address before committing. One transaction, r52 shape:
+// hold-row locks FIRST, then the processing_token-conditioned call_log lock
+// (a stale worker aborts the mint entirely — the owner files its own card),
+// then the card writes, then repenHoldsForFreshEmailReview riding the same
+// transaction as a savepoint. The card and the invalidation now commit or
+// roll back TOGETHER, so r44's dangerous half-state (card durably filed,
+// claims still valid) cannot exist; a failed mint leaves no card, which the
+// token-fenced end-of-run recovery covers. repen's r44 durable-state error
+// still propagates (the caller fails the run retryably).
+async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid, invalidateClaims = true }) {
+  if (!cards.length) return;
+  try {
+    const minted = await db.transaction(async (trx) => {
+      if (await trx.schema.hasTable('first_touch_holds')) {
+        await trx('first_touch_holds')
+          .where({ call_log_id: callLogId })
+          .forUpdate()
+          .select('id');
+      }
+      const owned = await trx('call_log')
+        .where({ id: callLogId })
+        .where('processing_token', procToken)
+        .forUpdate()
+        .first('id');
+      if (!owned) return false;
+      for (const card of cards) {
+        await trx('triage_items')
+          .insert(card)
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      }
+      if (invalidateClaims) {
+        const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
+        await repenHoldsForFreshEmailReview(callLogId, trx);
+      }
+      return true;
+    });
+    if (!minted) {
+      logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — skipping the email card mint (the owner files it)`);
+    }
+  } catch (mintErr) {
+    if (mintErr.emailReviewStateUnavailable) throw mintErr;
+    logger.warn(`[call-proc] fenced email card mint failed for ${maskSid(callSid)}: ${mintErr.message}`);
+  }
+}
+
 // True when the call has a live email read-back card — the extracted address
 // is a transcription guess and must not receive first-touch email until the
 // office confirms it. 'in_progress' counts as live (canonical open-review set,
@@ -6041,6 +6092,11 @@ const CallRecordingProcessor = {
               // bare "could not be verified".
               const isAddressFlag = flag === 'address_unverified' || flag === 'address_recovered';
               const isEmailFlag = flag === 'email_unverified' || flag === 'email_invalid';
+              // Email cards are minted in the FENCED transaction below
+              // (Codex #3084 r54) — their insert must be atomic with the
+              // release-claim invalidation, or an in-flight release can
+              // send between the card commit and the repen.
+              if (isEmailFlag) continue;
               await db('triage_items')
                 .insert(buildTriageItem({
                   callLogId: call.id,
@@ -6058,7 +6114,7 @@ const CallRecordingProcessor = {
                     ...(flag === 'address_recovered' ? recoveryPassStamp : {}),
                     ...(contactDictation?.addresses?.[0]?.confirmation_question
                       ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
-                  } : (isEmailFlag ? dictationEmailPayload : null),
+                  } : null,
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
@@ -6066,16 +6122,24 @@ const CallRecordingProcessor = {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
           }
-          if (needsConfirmation.includes('email_unverified') || needsConfirmation.includes('email_invalid')) {
-            // A fresh email card puts the address back under review — an
-            // in-flight release claimed BEFORE this card landed must not
-            // send it (Codex #3084 r43): the fence-invalidating re-pend
-            // makes that claimant's pre-send gate refuse. A FAILED
-            // invalidation throws the durable-state error (r44) — the
-            // catch below rethrows it into the extraction_failed retry.
-            const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
-            await repenHoldsForFreshEmailReview(call.id, db);
-          }
+          // Card mint + claim invalidation ride ONE token-fenced
+          // transaction (Codex #3084 r54 — see mintEmailReviewCardsFenced;
+          // r43's invalidation and r44's durable-state error semantics
+          // both preserved, now atomic with the card writes).
+          await mintEmailReviewCardsFenced({
+            callLogId: call.id,
+            procToken,
+            callSid,
+            cards: needsConfirmation.slice(0, 10)
+              .filter((flag) => flag === 'email_unverified' || flag === 'email_invalid')
+              .map((flag) => buildTriageItem({
+                callLogId: call.id,
+                flag,
+                extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                severity: 'advisory',
+                extraPayload: dictationEmailPayload,
+              })),
+          });
         }
       } catch (bridgeErr) {
         // The bridge is advisory EXCEPT for the r44 invalidation: with the
@@ -6136,30 +6200,24 @@ const CallRecordingProcessor = {
           // Same Needs Review surfacing as the shadow branch: the inbox is
           // driven by triage_items rows, so without these an auto-routed call
           // in enforce/V2-off mode would never show the read-back prompt.
-          for (const flag of emailReasons.slice(0, 10)) {
-            try {
-              await db('triage_items')
-                .insert(buildTriageItem({
-                  callLogId: call.id,
-                  flag,
-                  extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
-                  severity: 'advisory',
-                  // Same decoder evidence as the shadow branch — candidates +
-                  // the exact question to ask on the read-back.
-                  extraPayload: dictationEmailPayload,
-                }))
-                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                .ignore();
-            } catch (triageErr) {
-              logger.warn(`[call-proc] email triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
-            }
-          }
-          if (emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid')) {
-            // Same r43 claim invalidation as the shadow branch above; a
-            // failure throws into the extraction_failed retry (r44).
-            const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
-            await repenHoldsForFreshEmailReview(call.id, db);
-          }
+          // Same fenced mint as the shadow branch (Codex #3084 r54): the
+          // card writes and the r43 claim invalidation ride one
+          // token-fenced transaction; r44's durable-state error still
+          // throws into the extraction_failed retry. Decoder evidence
+          // (candidates + the exact read-back question) rides each card.
+          await mintEmailReviewCardsFenced({
+            callLogId: call.id,
+            procToken,
+            callSid,
+            invalidateClaims: emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid'),
+            cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
+              callLogId: call.id,
+              flag,
+              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+              severity: 'advisory',
+              extraPayload: dictationEmailPayload,
+            })),
+          });
         }
       } catch (emailErr) {
         // Advisory EXCEPT the r44 invalidation — see the shadow branch.
@@ -6426,6 +6484,15 @@ const CallRecordingProcessor = {
           // keys the retry rebuild (never timestamps — a customer someone
           // else created in the window must not be auto-subscribed). The
           // customer-link update later in the run re-asserts it (r24).
+          // call_log.customer_id is set HERE too (pre-push P0, r54): the
+          // email-correction fanout discovers its scope — cards, hold
+          // rows, advisory locks — through call_log.customer_id, so a
+          // customer visible before the link left a window where an
+          // operator correcting the brand-new record missed this call
+          // entirely, and the run could later record the stale extracted
+          // address with the correction's evidence nowhere on the call.
+          // Token-fenced: a worker that lost the claim rolls the whole
+          // creation back (the owning run creates and links its own).
           let newCust;
           await db.transaction(async (trx) => {
             [newCust] = await trx('customers').insert(applyContactNormalization({
@@ -6447,13 +6514,22 @@ const CallRecordingProcessor = {
               pipeline_stage_changed_at: new Date(),
               nearest_location_id: loc.id,
             })).returning('*');
-            await trx('call_log').where({ id: call.id }).update({
-              metadata: trx.raw(
-                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
-                [JSON.stringify(String(newCust.id))],
-              ),
-              updated_at: new Date(),
-            });
+            const linked = await trx('call_log')
+              .where({ id: call.id })
+              .where('processing_token', procToken)
+              .update({
+                customer_id: newCust.id,
+                metadata: trx.raw(
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
+                  [JSON.stringify(String(newCust.id))],
+                ),
+                updated_at: new Date(),
+              });
+            if (!linked) {
+              const lost = new Error('processing claim lost during customer creation — rolled back');
+              lost.claimLost = true;
+              throw lost;
+            }
           });
           customerId = newCust.id;
           createdCustomerFromCall = true;

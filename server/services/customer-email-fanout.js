@@ -793,20 +793,46 @@ async function propagateCustomerEmailChange({
     // new_lead enrollment after the sweep above ran — the marker merge is
     // the correction's first write that waits out that release's row
     // lock, and its retarget fixes only the HOLD. The freshly committed,
-    // immediately-due enrollment still carries the rejected address, and
-    // its prior target is unknowable here (the merge already rewrote the
-    // hold), so this sweep matches by ownership — SCOPED to the new_lead
-    // template (Codex #3084 r38): only a hold release creates the late
-    // enrollment this race-repair exists for, and it always enrolls
-    // new_lead. A billing-recipient automation deliberately carries a
-    // SEPARATE address resolved from notification_prefs — an
-    // ownership-only rewrite would redirect dunning steps away from the
-    // intended billing contact. Unlinked rows stay untouched (the r26
-    // ownership rule).
-    counts.automations += await conn('automation_enrollments')
-      .where({ customer_id: customerId, status: 'active', template_key: 'new_lead' })
-      .whereRaw('LOWER(email) != ?', [newEmail.toLowerCase()])
-      .update({ email: newEmail, updated_at: now });
+    // immediately-due enrollment still carries the rejected address.
+    // SCOPED to the new_lead template (Codex #3084 r38): only a hold
+    // release creates the late enrollment this race-repair exists for. A
+    // billing-recipient automation deliberately carries a SEPARATE
+    // address resolved from notification_prefs. Unlinked rows stay
+    // untouched (the r26 ownership rule).
+    // Ownership alone is NOT evidence (Codex #3084 r54): a public-quote
+    // requester's deliberately DIFFERENT address (public-quote.js enrolls
+    // new_lead at the requester's email while the customer record keeps
+    // its own) must not be redirected by a later edit to the stored
+    // address. The raced release's target IS knowable now: it enrolls at
+    // its hold row's held target, and the marker merge above was this
+    // correction's first write to wait out that release's row lock — so a
+    // POST-MERGE re-read of the snapshot's hold rows sees it (the merge's
+    // CASE preserves a real released row's held_email). Match set = old
+    // email ∪ pre-lock prior targets ∪ post-merge held targets; anything
+    // else linked to the customer is presumed intentional and stays.
+    const lateReleaseTargets = [];
+    {
+      let heldNowQuery = conn('first_touch_holds').where({ customer_id: customerId });
+      if (snapshotCallIds) heldNowQuery = heldNowQuery.whereIn('call_log_id', snapshotCallIds);
+      const heldNowRows = await heldNowQuery.select('held_email');
+      const newEmailLcFinal = newEmail.toLowerCase();
+      for (const row of heldNowRows) {
+        const target = String(row.held_email || '').trim().toLowerCase();
+        if (target && target !== newEmailLcFinal) lateReleaseTargets.push(target);
+      }
+    }
+    const finalSweepTargets = [...new Set([oldEmail, ...priorHoldTargets, ...lateReleaseTargets].filter(Boolean))];
+    if (finalSweepTargets.length) {
+      counts.automations += await conn('automation_enrollments')
+        .where({ customer_id: customerId, status: 'active', template_key: 'new_lead' })
+        .whereRaw('LOWER(email) != ?', [newEmail.toLowerCase()])
+        .where(function knownTargets() {
+          for (const target of finalSweepTargets) {
+            this.orWhereRaw('LOWER(email) = ?', [target]);
+          }
+        })
+        .update({ email: newEmail, updated_at: now });
+    }
 
     // A correction is itself the ANSWER to a dismissed read-back card
     // (Codex #3084 r34): dismissal is "not actionable", so the ledger

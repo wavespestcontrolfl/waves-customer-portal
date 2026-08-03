@@ -2,7 +2,7 @@
 // customer email edit — only rows still carrying the customer's OLD email,
 // only non-terminal rows, never on an email removal — and resolves the open
 // email read-back cards the edit answers (keeping call_log.review_status in
-// sync). Origin: the 2026-07-13 charlesw.robb@ correction took four
+// sync). Origin: the 2026-07-13 dotted-address correction took four
 // hand-written UPDATEs; this service makes the record edit do all of it.
 
 jest.mock('../models/db', () => jest.fn());
@@ -173,20 +173,21 @@ function makeConn(cfg = {}) {
   return conn;
 }
 
-const BEFORE = { id: 'cust-1', email: 'charlesw.robb@gmail.com' };
-const AFTER = { id: 'cust-1', email: 'charleswrobb@gmail.com' };
+const BEFORE = { id: 'cust-1', email: 'chris.w.sample@example.com' };
+const AFTER = { id: 'cust-1', email: 'chriswsample@example.com' };
 
-// Synthetic pair for the 2026-07-30 hold-lane tests — the production-derived
-// address above must not grow new occurrences (AGENTS.md PII rule).
+// Synthetic pair for the 2026-07-30 hold-lane tests. ALL fixtures in this
+// file are synthetic example.com identities (AGENTS.md PII rule — the
+// original production-derived fixture was scrubbed 2026-08-03).
 const HOLD_BEFORE = { id: 'cust-1', email: 'sam.typo@example.com' };
 const HOLD_AFTER = { id: 'cust-1', email: 'samtypo@example.com' };
 
 describe('propagateCustomerEmailChange', () => {
   test('syncs lead, estimate, and newsletter copies and resolves the email review card', async () => {
     const conn = makeConn({
-      newsletter_subscribers: { firstQueue: [{ id: 739 }, { id: 739, email: 'charlesw.robb@gmail.com' }, null] },
+      newsletter_subscribers: { firstQueue: [{ id: 739 }, { id: 739, email: 'chris.w.sample@example.com' }, null] },
       email_template_automation_runs: {
-        rows: [{ id: 'run-1', payload: { customer_email: 'charlesw.robb@gmail.com', first_name: 'Charles' } }],
+        rows: [{ id: 'run-1', payload: { customer_email: 'chris.w.sample@example.com', first_name: 'Chris' } }],
       },
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
@@ -196,28 +197,28 @@ describe('propagateCustomerEmailChange', () => {
     // after the marker merges (r37); the stub counts each idempotent pass.
     expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, newsletterDeliveries: 1, automations: 3, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1, heldDripResumed: 0 });
 
-    expect(conn.__updates('leads')[0].arg.email).toBe('charleswrobb@gmail.com');
-    expect(conn.__updates('estimates')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
+    expect(conn.__updates('leads')[0].arg.email).toBe('chriswsample@example.com');
+    expect(conn.__updates('estimates')[0].arg.customer_email).toBe('chriswsample@example.com');
     // The stale "PDF emailed" marker (stamped for the OLD address) drops with the sync.
     expect(conn.__updates('estimates')[0].arg.estimate_data.__raw).toContain("- 'proposalDelivery'");
     // In-flight ('sending') rows get a COLUMN-ONLY sync — never an
     // estimate_data write under an active send claim.
     const sendingSync = conn.__updates('estimates')[1].arg;
-    expect(sendingSync.customer_email).toBe('charleswrobb@gmail.com');
+    expect(sendingSync.customer_email).toBe('chriswsample@example.com');
     expect(sendingSync.estimate_data).toBeUndefined();
     expect(conn.__calls.some((c) => c.table === 'estimates' && c.op === 'where'
       && c.arg && c.arg.status === 'sending')).toBe(true);
-    expect(conn.__updates('automation_enrollments')[0].arg.email).toBe('charleswrobb@gmail.com');
+    expect(conn.__updates('automation_enrollments')[0].arg.email).toBe('chriswsample@example.com');
     const runSync = conn.__updates('email_template_automation_runs')[0].arg;
-    expect(runSync.recipient_email).toBe('charleswrobb@gmail.com');
+    expect(runSync.recipient_email).toBe('chriswsample@example.com');
     // Payload template variables carrying the old email are rewritten too —
     // the executor renders the body from the stored payload.
-    expect(JSON.parse(runSync.payload)).toEqual({ customer_email: 'charleswrobb@gmail.com', first_name: 'Charles' });
-    expect(conn.__updates('referral_promoters')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
-    expect(conn.__updates('notification_prefs')[0].arg.billing_email).toBe('charleswrobb@gmail.com');
-    expect(conn.__updates('customer_contracts')[0].arg.recipient_email).toBe('charleswrobb@gmail.com');
-    expect(conn.__updates('booking_intents')[0].arg.email).toBe('charleswrobb@gmail.com');
-    expect(conn.__updates('newsletter_subscribers')[0].arg.email).toBe('charleswrobb@gmail.com');
+    expect(JSON.parse(runSync.payload)).toEqual({ customer_email: 'chriswsample@example.com', first_name: 'Chris' });
+    expect(conn.__updates('referral_promoters')[0].arg.customer_email).toBe('chriswsample@example.com');
+    expect(conn.__updates('notification_prefs')[0].arg.billing_email).toBe('chriswsample@example.com');
+    expect(conn.__updates('customer_contracts')[0].arg.recipient_email).toBe('chriswsample@example.com');
+    expect(conn.__updates('booking_intents')[0].arg.email).toBe('chriswsample@example.com');
+    expect(conn.__updates('newsletter_subscribers')[0].arg.email).toBe('chriswsample@example.com');
 
     const cardUpdate = conn.__updates('triage_items')[0].arg;
     expect(cardUpdate.status).toBe('resolved');
@@ -241,15 +242,15 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn();
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     const leadFilter = conn.__calls.find((c) => c.table === 'leads' && c.op === 'whereRaw');
-    expect(leadFilter.arg.bindings).toEqual(['charlesw.robb@gmail.com']);
+    expect(leadFilter.arg.bindings).toEqual(['chris.w.sample@example.com']);
     const estFilter = conn.__calls.find((c) => c.table === 'estimates' && c.op === 'whereRaw');
-    expect(estFilter.arg.bindings).toEqual(['charlesw.robb@gmail.com']);
+    expect(estFilter.arg.bindings).toEqual(['chris.w.sample@example.com']);
   });
 
   test('no-ops when the email did not actually change (case-insensitive)', async () => {
     const conn = makeConn();
     const counts = await propagateCustomerEmailChange({
-      before: { id: 'cust-1', email: 'Charleswrobb@Gmail.com' },
+      before: { id: 'cust-1', email: 'Chriswsample@Example.com' },
       after: AFTER,
     }, conn);
     expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0, heldDripResumed: 0 });
@@ -271,8 +272,8 @@ describe('propagateCustomerEmailChange', () => {
       newsletter_subscribers: {
         firstQueue: [
           { id: 739 }, // unlocked snapshot (r46: deliveries rotate before the lock)
-          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1' },   // locked old row
-          { id: 900, email: 'charleswrobb@gmail.com', customer_id: 'cust-other' }, // target, already linked elsewhere
+          { id: 739, email: 'chris.w.sample@example.com', customer_id: 'cust-1' },   // locked old row
+          { id: 900, email: 'chriswsample@example.com', customer_id: 'cust-other' }, // target, already linked elsewhere
         ],
       },
     });
@@ -307,8 +308,8 @@ describe('propagateCustomerEmailChange', () => {
       newsletter_subscribers: {
         firstQueue: [
           { id: 739 }, // unlocked snapshot (r46)
-          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1' }, // locked old row
-          { id: 900, email: 'charleswrobb@gmail.com', customer_id: null },      // unlinked target
+          { id: 739, email: 'chris.w.sample@example.com', customer_id: 'cust-1' }, // locked old row
+          { id: 900, email: 'chriswsample@example.com', customer_id: null },      // unlinked target
         ],
       },
     });
@@ -345,14 +346,14 @@ describe('propagateCustomerEmailChange', () => {
       newsletter_subscribers: {
         firstQueue: [
           { id: 739 }, // unlocked snapshot (r46)
-          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1', first_name: 'Charles' },
+          { id: 739, email: 'chris.w.sample@example.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1', first_name: 'Chris' },
           null, // no row on the corrected spelling
         ],
       },
     });
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     expect(result.pendingConfirmation).toMatchObject({
-      id: 739, email: 'charleswrobb@gmail.com', first_name: 'Charles',
+      id: 739, email: 'chriswsample@example.com', first_name: 'Chris',
     });
     // The OLD token was delivered to the typo mailbox — the re-send must use
     // a FRESH one, and the row rotates BOTH bearer tokens with the move.
@@ -372,7 +373,7 @@ describe('propagateCustomerEmailChange', () => {
     // Newsletter footers delivered the unsubscribe link to the old mailbox.
     const conn = makeConn({
       newsletter_subscribers: {
-        firstQueue: [{ id: 739 }, { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'active' }, null],
+        firstQueue: [{ id: 739 }, { id: 739, email: 'chris.w.sample@example.com', customer_id: 'cust-1', status: 'active' }, null],
       },
     });
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
@@ -387,7 +388,7 @@ describe('propagateCustomerEmailChange', () => {
   test('an ACTIVE subscriber move carries no pendingConfirmation', async () => {
     const conn = makeConn({
       newsletter_subscribers: {
-        firstQueue: [{ id: 739 }, { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'active' }, null],
+        firstQueue: [{ id: 739 }, { id: 739, email: 'chris.w.sample@example.com', customer_id: 'cust-1', status: 'active' }, null],
       },
     });
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
@@ -533,11 +534,11 @@ describe('propagateCustomerEmailChange', () => {
 
   test('a payload without email keys gets a recipient-only run sync', async () => {
     const conn = makeConn({
-      email_template_automation_runs: { rows: [{ id: 'run-2', payload: { first_name: 'Charles' } }] },
+      email_template_automation_runs: { rows: [{ id: 'run-2', payload: { first_name: 'Chris' } }] },
     });
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     const runSync = conn.__updates('email_template_automation_runs')[0].arg;
-    expect(runSync.recipient_email).toBe('charleswrobb@gmail.com');
+    expect(runSync.recipient_email).toBe('chriswsample@example.com');
     expect(runSync.payload).toBeUndefined();
   });
 
@@ -876,7 +877,7 @@ describe('resendPendingConfirmation', () => {
 
   test('sends to the corrected address and stamps confirmation_sent_at', async () => {
     sendConfirmationEmail.mockResolvedValueOnce(true);
-    const payload = { id: 739, email: 'charleswrobb@gmail.com', first_name: 'Charles', confirmation_token: 'tok-1' };
+    const payload = { id: 739, email: 'chriswsample@example.com', first_name: 'Chris', confirmation_token: 'tok-1' };
     const conn = makeConn(matchRow(payload));
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
