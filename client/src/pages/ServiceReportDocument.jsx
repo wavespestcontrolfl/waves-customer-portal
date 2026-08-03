@@ -207,31 +207,31 @@ function interactionLabel(value) {
 // compounds ("twenty-four"), and the indefinite/half forms.
 const REENTRY_NUMBER_WORDS = 'a|an|one|two|three|four|five|six|seven|eight|nine|ten'
   + '|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen'
-  + '|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|half|several|a few';
-const REENTRY_TIME_RX = new RegExp(
-  // a clock time
-  '\\d{1,2}:\\d{2}\\s*(am|pm)'
-  // or a quantity (digits or words, optionally hyphen-compounded) + a unit
-  + `|\\b(\\d+(\\.\\d+)?|(${REENTRY_NUMBER_WORDS})([\\s-](${REENTRY_NUMBER_WORDS}))?)`
-  + '[\\s-]*(minute|min|hour|hr|day)s?\\b',
-  'i',
-);
+  + '|twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety|hundred|half|several';
+// ANY quantity — a digit anywhere, or a spelled-out number as its own word.
+const REENTRY_QUANTITY_RX = new RegExp(`\\d|\\b(${REENTRY_NUMBER_WORDS})\\b`, 'i');
 const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 
-// The ban is on fixed RE-ENTRY/DRYING figures — not on agronomic windows.
-// "Wait twenty-four hours before mowing" and "water in within an hour" are
-// label-required aftercare and must survive; erasing them would strip real
-// instructions from the permanent record. So sanitize per SENTENCE, and only
-// where the timing is attached to a re-entry/drying claim.
-const REENTRY_CLAIM_RX = /\b(re-?enter|re-?entry|entry|ready|keep (people|pets|children|kids|everyone)?\s*(off|out|away|clear)|stay (off|out|away)|off (the )?treated|until (it|they|sprays?|surfaces?)? ?(is|are)? ?dry|dries|drying|safe)\b/i;
-
+// ALLOWLIST, not a blocklist. Three rounds of widening a pattern
+// ("about 1 hour" → "five hours" → "Dry time is 2 hours" / "Ready at 7 PM")
+// showed that matching every way free text can state a time is unwinnable,
+// and each miss publishes a fixed re-entry figure. So: in RE-ENTRY fields
+// specifically, a sentence survives only if it states no quantity at all.
+// Placement and handling copy ("Placed in cracks, voids... do not disturb",
+// "until sprays have dried") carries no number and passes through; anything
+// numeric is replaced by the governed once-dry line.
+//
+// Scope matters: this runs ONLY on re-entry fields. Agronomic guidance
+// ("wait twenty-four hours before mowing") lives in aftercare.watering and
+// the recommendations list, which are never sanitized — the ban is on fixed
+// re-entry/drying figures, not on mowing or watering windows.
 function sanitizeReentryCopy(value) {
   const text = String(value || '').trim();
   if (!text) return '';
   const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean);
   let replaced = false;
   const kept = sentences.filter((sentence) => {
-    if (REENTRY_TIME_RX.test(sentence) && REENTRY_CLAIM_RX.test(sentence)) {
+    if (REENTRY_QUANTITY_RX.test(sentence)) {
       replaced = true;
       return false;
     }
@@ -391,9 +391,15 @@ export default function ServiceReportDocument({ data, token }) {
   const gaugePhoto = data.mowingHeight?.photoUrl
     ? [{ id: 'mowing-gauge', url: data.mowingHeight.photoUrl, caption: 'Turf height measured at this visit', isMoment: true }]
     : [];
+  // A failed image is NOT silently dropped: an omission nobody can see is the
+  // worst outcome for a permanent record, and refusing the whole render (an
+  // earlier attempt) risked denying the report indefinitely when an S3 object
+  // is permanently gone. Instead the frame stays with an explicit
+  // unavailable note pointing at the online report, so the artifact is honest
+  // and always available.
   const photos = [...galleryPhotos, ...v2AssessmentPhotos, ...momentPhotos, ...gaugePhoto]
-    .filter((photo) => !failedImages.has(photo.url))
-    .filter((photo, i, all) => all.findIndex((other) => other.url === photo.url) === i);
+    .filter((photo, i, all) => all.findIndex((other) => other.url === photo.url) === i)
+    .map((photo) => (failedImages.has(photo.url) ? { ...photo, unavailable: true } : photo));
   const tracedMapRaw = data.treatmentMap?.traced?.snapshotUrl || null;
   const tracedMapUrl = tracedMapRaw && !failedImages.has(tracedMapRaw) ? tracedMapRaw : null;
   // buildReportV1Data ALWAYS builds mapSvg, even for an inspection-only or
@@ -654,12 +660,6 @@ export default function ServiceReportDocument({ data, token }) {
   return (
     <div
       className="service-report-v1 service-report-document"
-      /* A failed image is dropped so the document never shows a broken
-         frame — but silently omitting evidence from a PERMANENT record and
-         then caching it is worse than not rendering at all. This marker lets
-         the renderer refuse the capture so the existing PDF retry path runs
-         instead of storing an incomplete artifact (codex P1). */
-      {...(failedImages.size > 0 ? { 'data-render-incomplete': 'images' } : {})}
       style={{ background: '#fff', color: INK, fontFamily: FONT, minHeight: '100vh' }}
     >
       <style>{`
@@ -1087,6 +1087,15 @@ export default function ServiceReportDocument({ data, token }) {
                   {/* fixed-height contain thumbnails: a portrait field photo
                       at natural size ran taller than the page and split
                       across a break. Full resolution stays in the portal. */}
+                  {photo.unavailable ? (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', textAlign: 'center',
+                      width: '100%', height: 190, background: '#F7F8F9', borderRadius: 4,
+                      border: `1px dashed ${LINE}`, color: MUTED, fontSize: 9.5, padding: 8, boxSizing: 'border-box',
+                    }}>
+                      Photo unavailable in this document — view it in your online report
+                    </div>
+                  ) : (
                   <img
                     src={photo.url}
                     /* alt must respect the same suppression as the visible
@@ -1097,6 +1106,7 @@ export default function ServiceReportDocument({ data, token }) {
                     onError={() => markImageFailed(photo.url)}
                     style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 4, border: `1px solid ${HAIR}` }}
                   />
+                  )}
                   {!suppressPhotoCaption(photo) && (photo.caption || photo.stateBadge) && (
                     <figcaption style={{ fontSize: 9.5, color: MUTED, lineHeight: 1.45, marginTop: 3 }}>
                       {photo.caption || photo.stateBadge}

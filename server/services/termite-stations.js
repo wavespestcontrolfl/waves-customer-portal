@@ -865,8 +865,25 @@ async function stationMapPdfSignature(service, knex) {
     // station-program service line counts as a station visit — under-gating
     // costs a needless re-render, over-gating would leave a real placement
     // map stale, which is the worse failure.
-    const line = `${service?.service_line || ''} ${service?.service_type || ''}`.toLowerCase();
-    const stationVisit = checkCount > 0 || /termite|rodent|bait|trap/.test(line);
+    // Use the SAME typed-flow gate buildStationMapReportContext uses, read
+    // from the same place report-data reads it (service_data's
+    // typedReportSnapshot + companionReportSnapshots) — a keyword guess on
+    // service_line missed legacy typed companion visits with no check rows
+    // and a generic service label, which render current geometry and so must
+    // invalidate when a station moves. Checks still count on their own.
+    let typedTypes = [];
+    try {
+      const sd = typeof service?.service_data === 'string'
+        ? JSON.parse(service.service_data)
+        : (service?.service_data || {});
+      const primary = sd?.typedReportSnapshot?.type || null;
+      const companions = Array.isArray(sd?.companionReportSnapshots)
+        ? sd.companionReportSnapshots.map((c) => c && c.type).filter(Boolean)
+        : [];
+      typedTypes = [primary, ...companions].filter(Boolean);
+    } catch { typedTypes = []; }
+    const stationVisit = checkCount > 0
+      || STATION_PROGRAMS.some((prog) => typedTypes.includes(PROGRAM_TYPED_FLOW[prog]));
     if (!stationVisit) return '';
     const checkStamp = new Date(checks?.updated || 0).getTime();
     const checkPart = checkCount

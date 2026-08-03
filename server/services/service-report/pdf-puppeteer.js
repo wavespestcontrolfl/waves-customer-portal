@@ -52,15 +52,6 @@ async function renderReportPdfWithBrowser(url) {
     page = await browser.newPage({ viewport: { width: 1120, height: 1440 } });
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForSelector('.service-report-v1', { timeout: 10000 });
-    // The document marks itself incomplete when a required image failed to
-    // load. Storing that capture would freeze a transient S3/CDN blip into
-    // the permanent record until some unrelated cache-key change; throwing
-    // hands it to the caller's existing enqueuePdfRenderRetry path instead.
-    if (await page.$('[data-render-incomplete]')) {
-      const err = new Error('Report render incomplete: one or more images failed to load');
-      err.code = 'render_incomplete';
-      throw err;
-    }
     await page.emulateMedia({ media: 'print', colorScheme: 'light' });
     return await page.pdf({
       format: 'Letter',
