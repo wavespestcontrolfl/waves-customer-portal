@@ -1938,7 +1938,7 @@ function activeRecheckOnTrap(clause) {
   for (let i = 0; i < toks.length; i += 1) {
     if (!RECHECK_VERB.test(toks[i])) continue;
     for (let j = i + 1; j < toks.length && !OBJECT_PHRASE_END.test(toks[j]); j += 1) {
-      if (TRAP_NOUNS.test(toks[j])) return toks.slice(i, j + 1).join(' ');
+      if (TRAP_NOUNS.test(toks[j])) return { text: toks.slice(i, j + 1).join(' '), verbAt: i, toks };
     }
   }
   return null;
@@ -1972,7 +1972,7 @@ function passiveRecheckOnTrap(clause) {
   const trapAt = toks.findIndex((t) => TRAP_NOUNS.test(t));
   if (trapAt === -1) return null;
   for (let i = trapAt + 1; i < toks.length && !OBJECT_PHRASE_END.test(toks[i]); i += 1) {
-    if (RECHECK_PARTICIPLE.test(toks[i])) return `${toks[trapAt]} … ${toks[i]}`;
+    if (RECHECK_PARTICIPLE.test(toks[i])) return { text: `${toks[trapAt]} … ${toks[i]}`, verbAt: i, toks };
   }
   return null;
 }
@@ -2038,12 +2038,17 @@ function splitOnPredicateAnd(piece) {
     // it splits: "traps were checked and WE WILL return" must not let the
     // second clause's future marker excuse the first clause's claim.
     if (!splits && sawPronoun && CLAUSE_AUX.test(next)) splits = true;
-    // A future marker's scope ENDS at a coordinator. Truncating the clause
-    // at the marker is right when the promise comes last, but reversed —
-    // "Follow-up scheduled next week AND trap inspection completed today" —
-    // it threw away the real claim behind it (codex P1). Once a future
-    // marker has appeared, this `and` starts a fresh clause that is judged
-    // on its own.
+    // A future predicate after `and` is its own clause: "We inspected the
+    // attic AND WILL SET traps next visit" must not let the active scan run
+    // out of the first predicate and bind `inspected` to the second one's
+    // traps. `and` is deliberately not an object-phrase terminator (it joins
+    // coordinated objects — "the snap and glue traps"), so the split is what
+    // separates them. Uses the SAME regex as the governance test, so the two
+    // cannot drift apart — the mistake an earlier version of this made with
+    // a hand-rolled token list.
+    if (!splits && FUTURE_GOVERNOR_RE.test(next)) splits = true;
+    // Once a future marker has appeared, this `and` also starts a fresh
+    // clause, so a claim standing behind a promise is still judged.
     if (!splits && FUTURE_INTENT_RE.test(toks.slice(start, i).join(' '))) splits = true;
     // With no pronoun, an auxiliary IMMEDIATELY after `and` is a
     // shared-subject verb phrase ("were set and were checked later") — that
@@ -2219,6 +2224,35 @@ const SETUP_RECHECK_NOUN_RES = [
 // noun instead had the body discarded. Applied per clause, ahead of the
 // verb scans, so a real claim in a neighbouring clause still rejects.
 const FUTURE_INTENT_RE = /\b(?:will|shall|going\s+to|plan(?:ning)?\s+to|expect\s+to|due\s+to|scheduled|upcoming|return\s+to|be\s+back\s+to|next\s+(?:visit|week|month|trip))\b/i;
+// Whether a future marker GOVERNS a particular verb, rather than merely
+// sharing a clause with it. Three attempts at the coarser question all
+// failed in a different direction: skipping the clause let a promise carry
+// out the claim beside it; truncating at the marker lost a claim that came
+// after it; and the coordinator rule still lost one EMBEDDED behind it —
+// "We will continue monitoring the traps WE CHECKED today", where `will`
+// governs `continue`, not `checked`.
+//
+// Governance is local: an auxiliary or infinitival head sits within a
+// couple of tokens of the verb it governs ("will inspect", "plan to
+// check", "return to check", "are going to inspect"). Anything further
+// away is governing something else. Deliberately a small window — a wider
+// one is how the last three versions swallowed neighbouring claims.
+const FUTURE_GOVERNOR_RE = /\b(?:will|shall|going|plan|planning|expect|due|return|back|scheduled|upcoming)\b/i;
+function futureGovernsVerb(toks, verbAt) {
+  return FUTURE_GOVERNOR_RE.test(toks.slice(Math.max(0, verbAt - 3), verbAt).join(' '));
+}
+// Same question for the noun-form patterns, asked of the text in front of
+// the match. A coordinator ends the reach — "Follow-up scheduled next week
+// AND trap inspection completed today" is two assertions, and only the
+// first one is a promise.
+function futureGovernsMatch(text, index) {
+  const before = String(text).slice(0, index);
+  const lastBreak = Math.max(
+    before.lastIndexOf(' and '), before.lastIndexOf(' but '), before.lastIndexOf(' then '),
+  );
+  const window = before.slice(lastBreak + 1).trim().split(/\s+/).slice(-3).join(' ');
+  return FUTURE_GOVERNOR_RE.test(window);
+}
 
 // Word-form numbers normalized to numerals before any count check, so
 // "eight traps" is validated exactly like "8 traps". Shared with the
@@ -2468,20 +2502,13 @@ function setupContradictions(text) {
   const str = String(text || '');
   const found = [];
   for (const clause of clauses(str)) {
-    // A future marker governs what comes AFTER it, so judge only the text
-    // in FRONT of it. Skipping the whole clause instead let a promise carry
-    // out a real claim standing beside it — "We checked the traps and will
-    // return next week" — and the first attempt at that (splitting the
-    // clause on a list of future tokens) held a SECOND list that had to
-    // agree with this one; "plan to" / "expect to" / "going to" were in the
-    // exemption but not the splitter, so the hole reopened one layer down
-    // (two consecutive pre-push P1s). Truncating here means there is one
-    // list and the two cannot drift.
-    const future = clause.match(FUTURE_INTENT_RE);
-    const judged = future ? clause.slice(0, future.index) : clause;
-    if (!judged.trim()) continue;
+    // The whole clause is judged; the future exemption is applied to the
+    // matched VERB rather than to a span of text (see futureGovernsVerb).
+    const judged = clause;
     const hit = activeRecheckOnTrap(judged) || passiveRecheckOnTrap(judged);
-    if (hit) found.push(`setup_recheck_claim:${hit.toLowerCase()}`);
+    if (hit && !futureGovernsVerb(hit.toks, hit.verbAt)) {
+      found.push(`setup_recheck_claim:${hit.text.toLowerCase()}`);
+    }
     // The noun forms run per clause under the SAME intent guard as the verb
     // scans. Whole-string matching left them exposed to the tense hole the
     // verb side had fixed: the gap's own future lookahead only covers text
@@ -2490,7 +2517,9 @@ function setupContradictions(text) {
     // been read as a completed re-check by the pattern added for round 16.
     for (const rx of SETUP_RECHECK_NOUN_RES) {
       const nounHit = judged.match(rx);
-      if (nounHit) found.push(`setup_recheck_claim:${nounHit[0].trim().toLowerCase()}`);
+      if (nounHit && !futureGovernsMatch(judged, nounHit.index)) {
+        found.push(`setup_recheck_claim:${nounHit[0].trim().toLowerCase()}`);
+      }
     }
   }
   for (const rx of SETUP_EMPTY_CAPTURE_RES) {

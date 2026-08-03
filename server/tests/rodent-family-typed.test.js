@@ -1778,3 +1778,72 @@ describe('active and partitive empty-trap claims contradict a setup', () => {
     }
   });
 });
+
+// The future exemption is now VERB-SCOPED (futureGovernsVerb) rather than a
+// span of text. Three earlier versions each failed differently: skipping
+// the clause let a promise carry out the claim beside it; truncating at the
+// marker lost a claim after it; the coordinator rule still lost one
+// EMBEDDED behind it — "We will continue monitoring the traps WE CHECKED
+// today", where `will` governs `continue`, not `checked`.
+//
+// This is the accumulated corpus from every round on this lane, kept as one
+// block so any future change to the guard has to satisfy all of it at once.
+describe('setup prose corpus — completed claims vs. promises', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  const MUST_REJECT = [
+    'We will continue monitoring the traps we checked today.',
+    'We checked the traps and will return next week.',
+    'We checked the traps and plan to return next week.',
+    'We checked the traps and expect to return next week.',
+    'We checked the traps and are going to return next week.',
+    'Follow-up scheduled next week and trap inspection completed today.',
+    'We will return next week and the traps were checked today.',
+    'Traps were checked and we will return next week.',
+    'The traps were set and were checked later.',
+    'We checked the traps in the attic.',
+    'All traps were carefully inspected.',
+    '8 traps checked today.',
+    'Trap inspection completed today.',
+    'We completed an inspection of the traps today.',
+    'We performed a check of the traps.',
+    'We serviced all 8 traps today.',
+    'All traps were serviced today.',
+    'No mice were caught.',
+    'We found all 8 traps empty.',
+    'None of the traps caught anything.',
+    'The traps produced no catches.',
+  ];
+
+  const MUST_PASS = [
+    'We will return to check the traps in one week.',
+    'We will return for the scheduled trap check.',
+    'We plan to check the traps next week.',
+    'We are going to inspect the traps on the follow-up.',
+    'Traps are set and we will inspect the traps on the follow-up visit.',
+    'We inspected the attic and will set traps next visit.',
+    'We will complete an inspection of the traps next week.',
+    'The trap check will be completed on our next visit.',
+    'Initial setup complete, trap check scheduled for next week.',
+    'Trap placement completed - trap check in 7 days.',
+    'The next trap check is scheduled for next week.',
+    'We set 7 traps today. We will return for the scheduled trap check.',
+    'We set traps once the crawlspace was checked.',
+    'We set traps as the attic was inspected.',
+    'We set 8 traps in the empty crawlspace.',
+    'We inspected the attic and set eight traps today.',
+    'We inspected the exterior before placing the traps.',
+    'We set 8 traps today.',
+    'We serviced the property exterior today.',
+    'We completed an inspection of the attic.',
+    'Set eight snap traps in the attic. We will be back to check them.',
+  ];
+
+  test.each(MUST_REJECT)('rejects: %s', (text) => {
+    expect(setupContradictions(text).length).toBeGreaterThan(0);
+  });
+
+  test.each(MUST_PASS)('allows: %s', (text) => {
+    expect(setupContradictions(text)).toEqual([]);
+  });
+});
