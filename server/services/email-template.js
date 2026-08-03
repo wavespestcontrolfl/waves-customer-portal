@@ -50,14 +50,28 @@ const GLASS_THEME = {
   // engine stops): dreamy blue blob left, soft sky top-right, faint
   // deep-blue lower-right, creamy gold low-left, pale airy base.
   pageBg: '#EDF4FA',
-  pageBgImage: 'radial-gradient(1200px 800px at -8% 12%,rgba(10,126,194,.22),transparent 60%),radial-gradient(1000px 700px at 108% 0%,rgba(56,170,225,.16),transparent 60%),radial-gradient(900px 700px at 96% 90%,rgba(6,90,140,.13),transparent 62%),radial-gradient(800px 600px at -6% 100%,rgba(240,165,0,.15),transparent 58%),linear-gradient(180deg,#EAF3FB 0%,#F6FAFE 48%,#EAF2F9 100%)',
+  // OPAQUE-ONLY EMAIL CHROME (owner call 2026-08-02). The frosted scene and
+  // the translucent card are what break Gmail's dark transform: it inverts
+  // text it can reason about, leaves rgba/gradient surfaces alone, and the
+  // result is pale text on a pale card. Outlook and every other
+  // gradient/rgba-less client ALREADY degraded to exactly this flat render,
+  // so this makes one known-good appearance universal rather than inventing
+  // a new one. The glass language stays on the portal and reports.
+  pageBgImage: null,
   // Barely-there frosted card, like the estimate page's price/summary
   // cards: a whisper of white over the scene. card stays the solid
   // fallback — glass surfaces emit background:<card>;background:
   // <cardGlassBg> so Outlook and other rgba-less clients degrade to
   // clean flat white.
   card: '#FFFFFF',
-  cardGlassBg: 'rgba(255,255,255,0.42)',
+  // Opaque, NOT null. This value doubles as the "glass theme is active"
+  // sentinel in three places (glassPillHeader's block layout, and ctaChip,
+  // which returns the gold bar under glass per the owner call 2026-07-06
+  // that ALL buttons render as identical gold bars). Nulling it silently
+  // reverted every secondary CTA to the old outlined chip. Keeping it
+  // truthy but opaque preserves the identity checks while removing the
+  // transparency that Gmail's transform cannot reason about.
+  cardGlassBg: '#FFFFFF',
   cardBorder: '#EFF6FC', // glass edge highlight (solid — rgba borders go black in Outlook)
   headerBand: 'rgba(255,255,255,0.25)', // legacy-layout bands (unused by the glass layout)
   footerBand: 'rgba(233,243,251,0.5)',
@@ -415,6 +429,11 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
     .dm-box, .dm-box p, .dm-box li { color: #DCE9F3 !important; }
     .dm-chip { background: #12354F !important; color: #CFE6F5 !important; }
     a.dm-link { color: #6CC1F0 !important; }
+    /* Detail-table hairlines and dividers: the light rule colour
+       disappears against the dark card, so the block renderer tags
+       them dm-rule and they take a visible dark-mode border. */
+    .dm-rule { border-color: #1E4460 !important; }
+    hr.dm-rule { border-top-color: #1E4460 !important; }
   }
   [data-ogsc] body, [data-ogsb] body, [data-ogsc] .dm-body { background: #071F30 !important; }
   [data-ogsc] .dm-page, [data-ogsb] .dm-page { background: #071F30 !important; background-image: none !important; }
@@ -432,6 +451,8 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
   [data-ogsc] .dm-box, [data-ogsc] .dm-box p, [data-ogsc] .dm-box li { color: #DCE9F3 !important; }
   [data-ogsc] .dm-chip, [data-ogsb] .dm-chip { background: #12354F !important; color: #CFE6F5 !important; }
   [data-ogsc] a.dm-link { color: #6CC1F0 !important; }
+  [data-ogsc] .dm-rule, [data-ogsb] .dm-rule { border-color: #1E4460 !important; }
+  [data-ogsc] hr.dm-rule, [data-ogsb] hr.dm-rule { border-top-color: #1E4460 !important; }
 </style>
 </head>
 <body class="dm-body" style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
@@ -489,12 +510,12 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
   return glassPage(T, { preheader, contentHtml, msoWidth: 560 });
 }
 
-function glassServiceEmail({ preheader, body, footerNote } = {}) {
+function glassServiceEmail({ preheader, body, footerNote, darkAwareBody = false } = {}) {
   const T = GLASS_THEME;
   const contentHtml = `${glassPillHeader(T)}
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:620px;">
         <tr><td style="padding:28px 0 0 0;">
-          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.58;color:${T.body};">${body || ''}</div>`, '26px 28px')}
+          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.58;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: darkAwareBody })}
         </td></tr>
         ${footerNote ? `
         <tr><td align="center" style="padding:24px 4px 0 4px;">
@@ -592,8 +613,8 @@ function plainText(lines) {
  *   footerNote?: string,
  * }} opts
  */
-function wrapServiceEmail({ preheader, body, footerNote } = {}) {
-  return glassServiceEmail({ preheader, body, footerNote });
+function wrapServiceEmail({ preheader, body, footerNote, darkAwareBody } = {}) {
+  return glassServiceEmail({ preheader, body, footerNote, darkAwareBody });
 }
 
 /**

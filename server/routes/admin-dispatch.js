@@ -40,7 +40,6 @@ const TurfHeightOcr = require('../services/turf-height-ocr');
 const { fetchApplicationConditions } = require('../services/service-report/application-conditions');
 const {
   buildServiceReportV1DeliveryContext,
-  foldLawnScoreIntoCompletionSms,
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
@@ -8913,62 +8912,51 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           || autopayCoversVisit
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase());
         // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
-        // source of truth) and run the consistency check, so the SMS below leads with
-        // the same line as the report. Best-effort; never blocks completion.
-        let lawnReportSmsSummary = null;
+        // source of truth) and run the consistency check. Its smsSummary is no
+        // longer read — the completion text is the plain DB template for every
+        // service line (owner ruling 2026-08-01) — but the freeze and the
+        // consistency check are what the REPORT reads, so the gate stays.
+        // Best-effort; never blocks completion.
         if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
           try {
             const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
             const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
-            lawnReportSmsSummary = gate.smsSummary || null;
             // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
             // fold the frozen synthesis back in so the later sending/sent writes (which
             // spread recordStructuredNotes) don't clobber it.
             if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
           } catch { /* best-effort — render-time reconciliation still applies */ }
         }
+        // The trace/applications lookup that used to feed this call is gone
+        // with the re-entry line. It existed so the SMS could apply the same
+        // read-time exterior normalization the report does (codex P2 #3007
+        // r12/r13); with no advisory in the text there is nothing to
+        // normalize, and resolveTracedExteriorZone queries scheduled_services,
+        // resolves a completion profile and reads treatment_zone_maps — real
+        // synchronous work on every completion whose result would be discarded.
         const serviceReportV1SmsContext = serviceReportV1Delivery
           ? buildServiceReportV1DeliveryContext({
-            // Trace evidence resolved here (async) so the sync SMS builder
-            // can apply the same read-time exterior normalization the
-            // report does (codex P2 #3007 r12).
-            record: {
-              ...record,
-              scheduled_service_id: record.scheduled_service_id || svc.id,
-              // The applied products can be the only exterior evidence
-              // (application_area) — the sync SMS normalizer needs them
-              // (codex P1 #3007 r13).
-              applications: (typeof products !== 'undefined' && Array.isArray(products)) ? products : [],
-              tracedExteriorZone: await require('../services/service-report/reentry')
-                .resolveTracedExteriorZone({
-                  scheduled_service_id: record.scheduled_service_id || svc.id,
-                  service_type: svc.service_type,
-                  interior_only_lane: completionProfile?.serviceKey === 'bed_bug_treatment',
-                }),
-            },
+            record,
             service: svc,
             reportUrl,
             smsReportUrl: reportSmsUrl,
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
-            summaryLine: lawnReportSmsSummary,
           })
           : null;
         if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
           sentSmsType = serviceReportV1SmsContext.smsType;
-          // The DB service_report_v1 template carries no {summary_line}; when the
-          // write-gate froze a V2 lead, send the prebuilt body (which leads with that
-          // synthesis) so the customer sees it instead of the generic "report is
-          // ready" line. Otherwise keep the editable DB template.
-          let body;
-          if (lawnReportSmsSummary && serviceReportV1SmsContext.body) {
-            body = serviceReportV1SmsContext.body;
-          } else {
-            body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
-              workflow: 'dispatch_service_complete',
-              entity_type: 'service_record',
-              entity_id: record.id,
-            });
-          }
+          // Always the editable DB template (owner ruling 2026-08-01). The lawn
+          // lane used to swap in a prebuilt body leading with the V2 synthesis —
+          // the score band plus a watering action — which made lawn texts read
+          // nothing like pest and pushed them past one segment. That synthesis
+          // belongs on the report. The write-gate above still runs: it freezes
+          // the synthesis onto the record and runs the consistency check, both
+          // of which the REPORT depends on; only its SMS lead-in is retired.
+          let body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
+            workflow: 'dispatch_service_complete',
+            entity_type: 'service_record',
+            entity_id: record.id,
+          });
           // A toggled-off or removed variant must not cost the customer
           // their completion text — fall back to the base report template
           // before giving up (owner report 2026-07-06: the since-removed
@@ -9089,37 +9077,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             }
           }
         }
-        // Lawn health score consolidation: fold the confirmed assessment's
-        // score (and tip) into the SAME completion report text instead of
-        // sending a separate "lawn health report ready" SMS at confirm time.
-        // Branch-agnostic — applies to whichever completion template was
-        // chosen above. Best-effort; a failure here must never block the send.
-        if (sentSmsBody && !isIncompleteVisit && completedLawnAssessmentId) {
-          try {
-            const LawnIntel = require('../services/lawn-intelligence');
-            const scoreParts = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
-            // The tip is recommendation-derived: unless the grounded regen
-            // SUCCEEDED, it may be the stale confirm-time text that
-            // contradicts today's applications — an SMS is unrecallable, so
-            // suppress the tip and send the score alone (codex P1 r12). The
-            // score line is tech-confirmed assessment data, not
-            // recommendation output.
-            if (scoreParts && lawnRecRegenAttempted && !lawnRecRegenGrounded) {
-              scoreParts.tipLine = '';
-            }
-            if (scoreParts?.scoreLine) {
-              const folded = foldLawnScoreIntoCompletionSms(sentSmsBody, scoreParts, { maxSegments: 2 });
-              if (folded.folded) {
-                sentSmsBody = folded.body;
-                if (folded.truncated) completionSmsWasTruncated = true;
-              } else {
-                logger.info(`[dispatch] lawn score fold-in skipped for ${record.id} (segment budget)`);
-              }
-            }
-          } catch (scoreErr) {
-            logger.warn(`[dispatch] lawn score fold-in failed for ${record.id}: ${scoreErr.message}`);
-          }
-        }
+        // The lawn score/tip fold-in was REMOVED 2026-08-01 (owner ruling).
+        // It appended the confirmed assessment's score line and a
+        // recommendation-derived tip — watering advice among it — to lawn
+        // completion texts, and budgeted two segments to fit them. That is the
+        // same content the synthesis lead-in carried, arriving by a second
+        // route: lawn texts still read nothing like pest, and still ran long.
+        // The score and the tip belong on the report, which the text links to.
+        // buildCompletionScoreBlock existed only to format that fold-in and had
+        // no other caller, so it is removed with it; computeAssessmentScoreParts
+        // stays — sendAssessmentNotification (unlinked assessments, manual
+        // re-send) still uses it.
         if (sentSmsBody) {
           // smsNotesDelta accumulates every key this SMS leg owns — each
           // persisted write below merges the delta only (mergeRecordNotesKeys),

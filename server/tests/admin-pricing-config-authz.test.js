@@ -26,6 +26,7 @@ jest.mock('../models/db', () => {
       where() { return b; },
       whereIn() { return b; },
       whereNull() { return b; },
+      forUpdate() { return b; },
       join() { return b; },
       select() { return b; },
       orderBy() { return b; },

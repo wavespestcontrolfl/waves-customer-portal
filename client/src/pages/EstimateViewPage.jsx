@@ -2518,7 +2518,7 @@ function CardHoldModal({ intent, onSuccess, onCancel }) {
     return () => { cancelled = true; };
   }, [intent]);
 
-  const feeText = fmtMoney(intent.noShowFeeAmount != null ? intent.noShowFeeAmount : 49);
+  const feeText = fmtMoney(intent.noShowFeeAmount != null ? intent.noShowFeeAmount : 75);
   const windowText = `${intent.cancelWindowHours != null ? intent.cancelWindowHours : 24} hours`;
 
   const handleSave = useCallback(async () => {
