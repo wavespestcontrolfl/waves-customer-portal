@@ -254,6 +254,11 @@ export default function ServiceReportDocument({ data, token }) {
     && (Object.values(normalizedConditions).some((value) => value != null && value !== '') || usingWeeklyRain)
     ? normalizedConditions : null;
   const applications = Array.isArray(data.applications) ? data.applications : [];
+  // A station check is a device inspection, not an application — listing a
+  // snap trap under "Products applied" with a Total applied contradicts the
+  // record on a station-check-only visit. The placement section covers them.
+  const appliedProducts = applications
+    .filter((app) => (app.method || 'perimeter_spray') !== 'station_check');
   // Lawn-assessment photos fall back to raw per-photo vision `observations`
   // as their caption (report-data.js). The lawn V2 path deliberately drops
   // those blurbs — they over-diagnose — in favour of ONE consolidated,
@@ -322,6 +327,15 @@ export default function ServiceReportDocument({ data, token }) {
   // zoneIds.length — a legacy/manual row carrying only applicationArea is
   // dropped from the SVG, so requiring only the method still labelled an
   // unmarked base schematic "Where we treated" (codex P1 r3).
+  // TWO DIFFERENT QUESTIONS, two predicates. "Did treatment happen?" governs
+  // aftercare and precautions and must NOT require zone IDs — a legacy/manual
+  // application can carry only applicationArea and is still a real treatment.
+  // "Can the schematic draw it?" additionally needs zone IDs, because that is
+  // what treatment-map.js filters on. Reusing the map predicate for aftercare
+  // silently stripped watering and re-entry instructions from those visits.
+  const hasActualTreatment = applications
+    .some((app) => (app.method || 'perimeter_spray') !== 'station_check');
+
   const hasRenderableTreatment = applications.some((app) => {
     const method = app.method || 'perimeter_spray';
     const zoneIds = Array.isArray(app.zone_ids) ? app.zone_ids : (Array.isArray(app.zoneIds) ? app.zoneIds : []);
@@ -426,7 +440,7 @@ export default function ServiceReportDocument({ data, token }) {
   // today's treatment" when there were NO applications — printing it on an
   // inspection-only lawn visit claims a treatment that didn't happen (5th
   // variant of this class: defaults read as evidence).
-  if (hasRenderableTreatment) pushRec(data.reportV2?.aftercare?.watering);
+  if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
   pushRec(v2NextMove);
   // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
   // snapshot.customerAction and per-insight customerAction; omitting it drops
@@ -735,6 +749,7 @@ export default function ServiceReportDocument({ data, token }) {
                 {finding.detail
                   ? <><strong>{finding.title}:</strong> {finding.detail}</>
                   : finding.title}
+                {finding.recommendation ? ` ${finding.recommendation}` : ''}
               </Bullet>
             ))}
           </div>
@@ -748,20 +763,20 @@ export default function ServiceReportDocument({ data, token }) {
             a false treatment claim (codex P1 r6) — the default advisory only
             renders when something was actually applied. A real re-entry
             context is itself evidence of treatment and always renders. */}
-        {(reentry || (data.advisory?.pet_advisory && hasRenderableTreatment)) && (
+        {(reentry || (data.advisory?.pet_advisory && hasActualTreatment)) && (
           <div className="doc-keep">
             <SectionHeader>Re-entry &amp; precautions</SectionHeader>
             {reentry?.customerSummary && <Bullet>{reentry.customerSummary}</Bullet>}
             {(reentry?.targets || []).map((target) => (
               <Bullet key={target.key || target.label}>{reentryTargetLine(target)}</Bullet>
             ))}
-            {(reentry?.petAdvisory || (hasRenderableTreatment ? data.advisory?.pet_advisory : null)) && (
+            {(reentry?.petAdvisory || (hasActualTreatment ? data.advisory?.pet_advisory : null)) && (
               <Bullet>{reentry?.petAdvisory || data.advisory.pet_advisory}</Bullet>
             )}
             {reentry?.irrigationReadyAt && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
-            {hasRenderableTreatment && data.reportV2?.aftercare?.reentry && (
+            {hasActualTreatment && data.reportV2?.aftercare?.reentry && (
               <Bullet>{data.reportV2.aftercare.reentry}</Bullet>
             )}
           </div>
@@ -776,7 +791,7 @@ export default function ServiceReportDocument({ data, token }) {
         )}
 
         {/* Products applied */}
-        {applications.length > 0 && (
+        {appliedProducts.length > 0 && (
           <div>
             <SectionHeader>Products applied</SectionHeader>
             <table style={{ fontSize: 11 }}>
@@ -791,7 +806,7 @@ export default function ServiceReportDocument({ data, token }) {
                   ))}
                 </tr>
               </thead>
-              {applications.map((app, index) => {
+              {appliedProducts.map((app, index) => {
                   const product = app.product || {};
                   const name = product.name || app.productName || 'Product';
                   return (
@@ -807,7 +822,7 @@ export default function ServiceReportDocument({ data, token }) {
                         </td>
                       </tr>
                       <tr>
-                        <td colSpan={4} style={{ padding: `0 0 8px 0`, borderBottom: index < applications.length - 1 ? `1px solid ${HAIR}` : 'none' }}>
+                        <td colSpan={4} style={{ padding: `0 0 8px 0`, borderBottom: index < appliedProducts.length - 1 ? `1px solid ${HAIR}` : 'none' }}>
                           <div style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5 }}>
                             {product.active_ingredient && <div><strong style={{ color: INK, fontWeight: 600 }}>Active ingredient:</strong> {product.active_ingredient}</div>}
                             {app.methodLabel && <div><strong style={{ color: INK, fontWeight: 600 }}>Method:</strong> {app.methodLabel}</div>}
@@ -974,6 +989,16 @@ export default function ServiceReportDocument({ data, token }) {
               <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
                 {String(companion.todaysResult.headline).replace(/\.$/, '')}.
                 {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
+              </p>
+            )}
+            {/* Same containment rule TodaysResultCard uses: the snapshot
+                builder usually folds nextStep into the body, so only print it
+                when it adds something — but never drop the companion
+                service's instruction entirely. */}
+            {companion.todaysResult?.nextStep
+              && !String(companion.todaysResult.body || '').includes(companion.todaysResult.nextStep) && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                {companion.todaysResult.nextStep}
               </p>
             )}
             {(companion.findings || [])

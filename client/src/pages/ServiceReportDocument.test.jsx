@@ -597,6 +597,49 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(legacy.container.textContent).toContain(legacyRec);
   });
 
+  it('keeps aftercare for a legacy application that has no zone ids', () => {
+    // "did treatment happen" must not inherit the map predicate's zone-id rule
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      dynamicContext: {},
+      applications: [{ id: 'a1', method: 'broadcast_spray', zone_ids: [], applicationArea: 'Front lawn', product: { name: 'LESCO' } }],
+      advisory: { pet_advisory: 'Keep pets off treated turf until dry.' },
+      reportV2: { aftercare: { watering: 'Water in lightly tomorrow.', reentry: 'No re-entry wait once dry.' } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toContain('Keep pets off treated turf until dry.');
+    expect(container.textContent).toContain('Water in lightly tomorrow.');
+    expect(container.textContent).toContain('No re-entry wait once dry.');
+    // ...but the schematic still needs zone ids, so no treatment-map claim
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
+  it('does not list a station check under products applied', () => {
+    const data = {
+      ...BASE_DATA,
+      applications: [{ id: 'a1', method: 'station_check', totalAmount: '1', amountUnit: 'ea', product: { name: 'Victor Snap Trap' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('Products applied');
+    expect(container.textContent).not.toContain('Victor Snap Trap');
+  });
+
+  it('renders a structured finding\'s recommendation', () => {
+    const data = { ...BASE_DATA, findings: [{ id: 'f1', category: 'conducive_condition', title: 'Mulch against the slab', detail: '', recommendation: 'Pull the mulch back six inches from the foundation.' }] };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/Pull the mulch back six inches/);
+  });
+
+  it('keeps a companion service\'s next step', () => {
+    const data = {
+      ...BASE_DATA,
+      companionReports: [{ type: 'mosquito', reportTypeLabel: 'Mosquito Service', todaysResult: { headline: 'Pressure was light', body: 'We treated the resting areas.', nextStep: 'Empty the bird bath weekly.' }, findings: [] }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/Empty the bird bath weekly/);
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();
