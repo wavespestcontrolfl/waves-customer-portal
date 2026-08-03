@@ -915,6 +915,44 @@ describe('admin customers route helpers', () => {
     const bb = otLines.find((l) => /bed bug/i.test(l.name));
     expect(bb.acceptedOneTimePrice).toBe(220);
     expect(bb.price).toBe(300);
+    // Accepted ZERO recurring (fixed/100% manual discount consuming the
+    // base) wins over the pre-manual annual — presence, not positivity
+    // (codex r5).
+    const fullyDiscounted = {
+      id: 'est-pa-11',
+      monthly_total: 0,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', amount: 484, recurringAmount: 484 },
+          recurring: { services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 121, annualAfterDiscount: 484, manualFinalAnnual: 0, visitsPerYear: 4, mo: 40.33 },
+          ] },
+        },
+      },
+    };
+    const [fdLine] = scheduleLinesFromEstimate(fullyDiscounted, index);
+    expect(fdLine.perApplicationPrice).toBeUndefined(); // $0/visit is not a per-application CHARGE
+
+    // Catalog aliases normalize to engine keys before the billing-unit
+    // decision: a name-only rodent-bait row matches rodent_bait_quarterly
+    // in the catalog but must still take the monthly-billed exemption
+    // (codex r5).
+    const rodentIndex = indexServicesForSchedule([
+      { id: 31, service_key: 'rodent_bait_quarterly', name: 'Quarterly Rodent Bait Station Service', short_name: 'Rodent Bait', category: 'rodent', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 },
+    ]);
+    const nameOnlyRodent = {
+      id: 'est-pa-12',
+      monthly_total: 39,
+      estimate_data: {
+        result: { recurring: { services: [
+          { name: 'Rodent Bait Stations', perTreatment: 117, visitsPerYear: 4, mo: 39 },
+        ] } },
+      },
+    };
+    const [rodentAliasLine] = scheduleLinesFromEstimate(nameOnlyRodent, rodentIndex);
+    expect(rodentAliasLine.perApplicationPrice).toBeUndefined();
+    expect(rodentAliasLine.monthlyPrice).toBe(39);
+
 
 
 

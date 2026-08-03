@@ -429,7 +429,20 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   // legacy/name-only rows carry no `service` key, but the catalog match
   // resolves one — a name-only "Termite Station Rental" must still hit the
   // monthly-billed exemption, never stamp $31/application.
-  const resolvedServiceKey = String(line?.service || matched?.service_key || '').trim();
+  // Engine key wins; the catalog key is the fallback for name-only legacy
+  // rows — but catalog keys are ALIASES of engine keys (a rodent-bait line
+  // matches the catalog's `rodent_bait_quarterly`, Codex #3173 r5), so they
+  // are normalized back before any billing-unit decision. Unknown catalog
+  // keys pass through unchanged.
+  const CATALOG_TO_ENGINE_KEY = {
+    rodent_bait_quarterly: 'rodent_bait',
+    rodent_bait_monthly: 'rodent_bait',
+    commercial_rodent_bait_quarterly: 'commercial_rodent_bait',
+    termite_station_rental_quarterly: 'termite_station_rental',
+    commercial_termite_bait_quarterly: 'commercial_termite_bait',
+  };
+  const rawServiceKey = String(line?.service || matched?.service_key || '').trim();
+  const resolvedServiceKey = CATALOG_TO_ENGINE_KEY[rawServiceKey] || rawServiceKey;
   return {
     serviceId: matched?.id || null,
     serviceKey: matched?.service_key || line?.service || null,
@@ -502,7 +515,7 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // on the row: refuse provenance rather than overstate.
         if ((appliedPct > 0 || parentRecurringDiscounted)
           && moneyOrNull(line?.priceAfterDiscount) == null
-          && !(Number(line?.manualFinalAnnual) > 0)
+          && !(Number.isFinite(Number(line?.manualFinalAnnual)) && Number(line.manualFinalAnnual) >= 0)
           && !(Number(line?.annualAfterDiscount) > 0)
           && !(Number(line?.finalAnnual) > 0)) {
           return {};
@@ -522,9 +535,19 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // manualFinalAnnual is the accepted POST-manual-discount annual —
         // annualAfterDiscount is only pre-manual/WaveGuard (Codex #3173
         // r4). It outranks every other annual in both branches.
-        const acceptedAnnual = Number(line?.manualFinalAnnual) > 0
+        // PRESENCE, not positivity (Codex #3173 r5): a fixed/100% manual
+        // discount that consumes the whole base stamps manualFinalAnnual: 0
+        // — an accepted ZERO must win over the pre-manual annual, not be
+        // rejected into it.
+        const acceptedAnnual = Number.isFinite(Number(line?.manualFinalAnnual))
+          && Number(line.manualFinalAnnual) >= 0
           ? Number(line.manualFinalAnnual)
           : (Number(line?.annualAfterDiscount) > 0 ? Number(line.annualAfterDiscount) : undefined);
+        // An accepted annual of ZERO means the discount consumed the whole
+        // base — there is no per-application CHARGE to quote, and the
+        // canonical helper would fall back to the LIST rate here (its
+        // discountedAnnual > 0 test). Refuse: the net totals tell the truth.
+        if (acceptedAnnual === 0) return {};
         const pa = perApplicationForLine(discountedPerApp != null
           ? {
             service: resolvedServiceKey,

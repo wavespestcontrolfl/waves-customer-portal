@@ -416,18 +416,26 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   // directly comparable, and suppressing it hid real operator price changes
   // (Codex #3173 r5).
   const oneTimeLineCount = serviceLines.filter((l) => l.oneTimePrice != null).length;
+  // A fully-discounted (accepted-$0) one-time quote is still comparable
+  // (Codex #3173 r5): an operator editing that visit to a nonzero price is
+  // exactly the drift the warning exists for, so the sum may be zero — only
+  // the ABSENCE of priced lines disqualifies it.
   const visitComparable = allRecurringPerApp && recurringLineCount === 1 && oneTimeLineSum === 0
     ? perAppSum
     : (recurringLineCount === 0 && oneTimeLineCount > 0
-      && serviceLines.length === oneTimeLineCount && oneTimeLineSum > 0
+      && serviceLines.length === oneTimeLineCount
       ? oneTimeLineSum : null);
   const groupComparable = allRecurringPerApp
     ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)
     : (perAppPrices.length || monthlyPrices.length ? null : quoted);
   const quotedComparable = compareScope === 'visit' ? visitComparable : groupComparable;
-  const showVsQuoted = price != null && quotedComparable != null && quotedComparable > 0
+  // An accepted-$0 quote still warns when the visit now charges something
+  // (Codex #3173 r5) — the percentage is meaningless against a zero base,
+  // so the delta chip is suppressed while the comparison itself stands.
+  const showVsQuoted = price != null && quotedComparable != null && quotedComparable >= 0
     && price > 0 && Math.abs(quotedComparable - price) > 0.01;
-  const deltaPct = showVsQuoted ? Math.round(((price - quotedComparable) / quotedComparable) * 100) : 0;
+  const deltaPct = showVsQuoted && quotedComparable > 0
+    ? Math.round(((price - quotedComparable) / quotedComparable) * 100) : 0;
 
   const lineStyle = {
     display: 'flex',
@@ -530,7 +538,11 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
 
       {showVsQuoted && (
         <div style={{ fontSize: 11, color: MUTED, marginTop: 4, paddingLeft: 2 }}>
-          Current price {money(price)} ({deltaPct > 0 ? '+' : ''}{deltaPct}% vs quoted)
+          {/* A percentage against an accepted $0 is meaningless — name the
+              quoted amount instead so the drift is still visible. */}
+          {quotedComparable > 0
+            ? `Current price ${money(price)} (${deltaPct > 0 ? '+' : ''}${deltaPct}% vs quoted)`
+            : `Current price ${money(price)} (quoted ${money(quotedComparable)})`}
         </div>
       )}
     </div>
