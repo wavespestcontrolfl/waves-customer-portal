@@ -230,6 +230,22 @@ function validatePricingConfigData(configKey, data, oldConfig) {
         return fail(`waveguard_tiers.${tier}.min_services must be a positive integer`);
       }
     }
+  } else if (configKey === 'estimate_card_hold') {
+    // Charge-authoritative: db-bridge overlays these onto CARD_HOLD, and
+    // both card-on-file rails DISCLOSE then AUTO-CHARGE them — a typo here
+    // becomes a consented $750 fee on real cards. Bounded: positive whole
+    // cents ≤ $500; whole-hour window in [1, 168] (a week).
+    const fee = num(data?.noShowFeeAmount);
+    if (!isPositive(data?.noShowFeeAmount) || fee > 500) {
+      return fail('estimate_card_hold.noShowFeeAmount must be a positive dollar amount no greater than 500');
+    }
+    if (Math.abs(fee * 100 - Math.round(fee * 100)) > 1e-6) {
+      return fail('estimate_card_hold.noShowFeeAmount must not have sub-cent precision');
+    }
+    const win = num(data?.cancelWindowHours);
+    if (!Number.isInteger(win) || win < 1 || win > 168) {
+      return fail('estimate_card_hold.cancelWindowHours must be a whole number of hours between 1 and 168');
+    }
   } else if (configKey === 'termite_bond') {
     // Warranty-bond quarterly rates by term (owner 2026-07-20). Strictly
     // positive dollars — the db-bridge sync coerces and overwrites runtime

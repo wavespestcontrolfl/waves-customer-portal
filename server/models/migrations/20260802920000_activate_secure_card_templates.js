@@ -15,6 +15,15 @@
  * Guarded: an admin who already activated a template is untouched (the
  * update targets is_active:false rows only). down() deactivates both —
  * dark is the safe rollback direction for this lane.
+ *
+ * ⚠️ DEPLOY ORDERING (Codex #3164 P1): APPOINTMENT_CARD_REQUEST is already
+ * true in prod, so this migration is the lever that makes the base lane
+ * LIVE at deploy time. GATE_SECURE_PLAN_CHOICE must be enabled BEFORE this
+ * deploys: a /secure page opened while plan choice is off stamps the
+ * sticky accepted_amount=0 sentinel ("render showed no price"), which
+ * permanently blocks automatic completion charging for that visit — the
+ * monotonic-down consent stamp can never be raised later. (Flipped in prod
+ * 2026-08-02, ahead of this deploy, while templates were still inactive.)
  */
 const KEYS = ['secure_appointment_card', 'secure_appointment_card_plans'];
 

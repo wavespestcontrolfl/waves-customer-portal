@@ -27,7 +27,11 @@ const CHANGELOG_IDENTITY = {
 
 exports.up = async function (knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return;
-  const row = await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).first();
+  // Locking read (knex runs migrations in a transaction): an admin saving
+  // this row through the pricing panel mid-deploy must serialize with the
+  // whole-object write below, or their edit would be overwritten by this
+  // read's stale snapshot.
+  const row = await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).forUpdate().first();
   const oldData = row ? (typeof row.data === 'string' ? JSON.parse(row.data) : (row.data || {})) : null;
   // An admin already at (or past) $75 is left alone; down() keys off the
   // audit row this branch skips writing.
@@ -85,11 +89,14 @@ exports.down = async function (knex) {
     .orderBy('changed_at', 'desc')
     .first('id', 'old_value');
   if (!ownUp) return;
-  const row = await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).first();
+  const row = await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).forUpdate().first();
   if (!row) return;
   const data = typeof row.data === 'string' ? JSON.parse(row.data) : (row.data || {});
   if (Number(data.noShowFeeAmount) !== NEW_FEE) return; // admin moved it since — leave alone
   const priorData = ownUp.old_value ? JSON.parse(ownUp.old_value) : null;
+  // What this rollback ACTUALLY leaves behind — recorded verbatim in the
+  // audit row (null strictly means "row deleted", never "snapshot restored").
+  let finalValue = null;
   if (priorData == null) {
     // up() created this row. Delete it ONLY while it still exactly matches
     // what up() wrote — an admin edit since (window change, added keys)
@@ -100,26 +107,33 @@ exports.down = async function (knex) {
       && Number(data.cancelWindowHours) === 24;
     if (untouchedCreate) {
       await knex('pricing_config').where({ config_key: 'estimate_card_hold' }).del();
+      finalValue = null;
     } else {
+      finalValue = { ...data, noShowFeeAmount: OLD_FEE };
       await knex('pricing_config')
         .where({ config_key: 'estimate_card_hold' })
-        .update({ data: JSON.stringify({ ...data, noShowFeeAmount: OLD_FEE }), updated_at: knex.fn.now() });
+        .update({ data: JSON.stringify(finalValue), updated_at: knex.fn.now() });
     }
   } else {
     // Restore ONLY the fee from the recorded snapshot — every other key
     // keeps its CURRENT value so admin edits made after deployment are
     // never overwritten by the old snapshot.
     const priorFee = Number(priorData.noShowFeeAmount);
-    const reverted = { ...data, noShowFeeAmount: Number.isFinite(priorFee) && priorFee > 0 ? priorFee : OLD_FEE };
+    finalValue = { ...data, noShowFeeAmount: Number.isFinite(priorFee) && priorFee > 0 ? priorFee : OLD_FEE };
     await knex('pricing_config')
       .where({ config_key: 'estimate_card_hold' })
-      .update({ data: JSON.stringify(reverted), updated_at: knex.fn.now() });
+      .update({ data: JSON.stringify(finalValue), updated_at: knex.fn.now() });
   }
   await knex('pricing_config_audit').insert({
     config_key: 'estimate_card_hold',
     old_value: JSON.stringify(data),
-    new_value: ownUp.old_value || null,
+    new_value: finalValue == null ? null : JSON.stringify(finalValue),
     changed_by: MIGRATION_TAG,
-    reason: 'Rollback: no-show/late-cancel fee $75 reverted to the audited prior state',
+    reason: 'Rollback: no-show/late-cancel fee $75 reverted (fee-only restore; row deleted only when still exactly as created)',
   });
+  // The changelog row must not keep reporting a reverted change as current
+  // (and a later re-up must record its own fresh entry, not reuse this one).
+  if (await knex.schema.hasTable('pricing_changelog')) {
+    await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
+  }
 };

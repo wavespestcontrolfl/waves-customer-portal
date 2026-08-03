@@ -311,6 +311,22 @@ describe('cardHoldNoShowFee / cardHoldCancelWindowHours', () => {
   });
 });
 
+describe('estimate_card_hold admin validation (bounded — charge-authoritative values)', () => {
+  const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+  it('accepts sane values, rejects typos and extremes', () => {
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75, cancelWindowHours: 24 }).ok).toBe(true);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 49.5, cancelWindowHours: 48 }).ok).toBe(true);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 750, cancelWindowHours: 24 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 0, cancelWindowHours: 24 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: -75, cancelWindowHours: 24 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75.001, cancelWindowHours: 24 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75, cancelWindowHours: 0 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75, cancelWindowHours: 1.5 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75, cancelWindowHours: 500 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 'many', cancelWindowHours: 24 }).ok).toBe(false);
+  });
+});
+
 describe('resolveCardHoldPolicy', () => {
   it('inert when the flag is off', () => {
     delete process.env.ONE_TIME_CARD_HOLD;
