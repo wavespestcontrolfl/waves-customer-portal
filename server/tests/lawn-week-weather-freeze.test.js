@@ -35,7 +35,9 @@ function makeKnex({ matched = 1, stored = null } = {}) {
       update: jest.fn(async (patch) => { state.patches.push(patch); return matched; }),
       first: jest.fn(async () => {
         state.reads += 1;
-        return stored ? { structured_notes: { lawnWeekWeather: stored } } : { structured_notes: {} };
+        return stored
+          ? { structured_notes: { lawnWeekWeather: { [stored.assessmentId]: stored } } }
+          : { structured_notes: {} };
       }),
     };
     return chain;
@@ -57,7 +59,10 @@ describe('freezeLawnWeekWeather', () => {
     // clobber a concurrent write to those.
     expect(patch.structured_notes.__raw).toContain('||');
     expect(patch.structured_notes.__raw).toContain('jsonb');
-    expect(JSON.parse(patch.structured_notes.bindings[0])).toEqual({ lawnWeekWeather: WEEK });
+    // Keyed BY ASSESSMENT, and merged two levels deep — a top-level merge of the
+    // whole object would wipe every other assessment's frozen week.
+    expect(patch.structured_notes.__raw).toContain("jsonb_build_object('lawnWeekWeather'");
+    expect(JSON.parse(patch.structured_notes.bindings[0])).toEqual({ 'assess-A': WEEK });
   });
 
   // The race this closes: a live view and a PDF render can render the same
@@ -71,6 +76,8 @@ describe('freezeLawnWeekWeather', () => {
     expect(state.raws).toHaveLength(1);
     expect(state.raws[0]).toMatch(/lawnWeekWeather/);
     expect(state.raws[0]).toMatch(/IS NULL/i);
+    // Per KEY, not per record — the predicate tests this assessment's slot.
+    expect(state.raws[0]).toMatch(/-> 'lawnWeekWeather' -> \?/);
     // No SELECT preceded it — the predicate IS the guard.
     expect(state.wheres).toHaveLength(1);
   });
@@ -114,14 +121,19 @@ describe('freezeLawnWeekWeather', () => {
     await expect(freezeLawnWeekWeather('svc-1', WEEK, knex)).resolves.toBeNull();
   });
 
-  test('the predicate replaces a snapshot belonging to another assessment', async () => {
+  // Replacing on a differing id looked equivalent to keying and is not:
+  // canonical selection can move A → B → A (a re-do, then a pinned delivery for
+  // the original), and each move would destroy the other's snapshot and send
+  // that report back to mutable provider data.
+  test('another assessment\'s snapshot is NEVER overwritten', async () => {
     const { knex, state } = makeKnex();
     await freezeLawnWeekWeather('svc-1', WEEK, knex);
-    // First-writer-wins holds WITHIN an assessment; a different assessment is a
-    // different question and legitimately overwrites.
-    expect(state.raws[0]).toMatch(/assessmentId/);
-    expect(state.raws[0]).toMatch(/IS DISTINCT FROM/);
-    expect(state.raws[0]).toMatch(/IS NULL/);
+    // Nothing in the write or the predicate can reach a sibling key.
+    expect(state.raws[0]).not.toMatch(/IS DISTINCT FROM/);
+    const raw = state.patches[0].structured_notes.__raw;
+    expect(raw).toMatch(/COALESCE\(COALESCE\(structured_notes::jsonb, '\{\}'::jsonb\) -> 'lawnWeekWeather', '\{\}'::jsonb\) \|\|/);
+    // Verified against Postgres: a sibling assessment's entry and unrelated
+    // structured_notes keys both survive this merge.
   });
 
   test('a snapshot with no assessment id is never written', async () => {
@@ -136,6 +148,20 @@ describe('freezeLawnWeekWeather', () => {
     await expect(freezeLawnWeekWeather(null, WEEK, knex)).resolves.toBeNull();
     await expect(freezeLawnWeekWeather('svc-1', null, knex)).resolves.toBeNull();
     expect(state.patches).toHaveLength(0);
+  });
+});
+
+describe('storedWeekFor', () => {
+  const { storedWeekFor } = require('../services/service-report/report-data');
+  const NOTES = { lawnWeekWeather: { 'assess-A': WEEK, 'assess-B': { ...WEEK, assessmentId: 'assess-B', rainInches: 0.2 } } };
+
+  test('reads only the requested assessment\'s slot', () => {
+    expect(storedWeekFor(NOTES, 'assess-A').rainInches).toBe(3.23);
+    expect(storedWeekFor(NOTES, 'assess-B').rainInches).toBe(0.2);
+    expect(storedWeekFor(NOTES, 'assess-C')).toBeNull();
+    expect(storedWeekFor(NOTES, null)).toBeNull();
+    expect(storedWeekFor({}, 'assess-A')).toBeNull();
+    expect(storedWeekFor(null, 'assess-A')).toBeNull();
   });
 });
 
@@ -167,7 +193,7 @@ describe('freeze contract in the render path', () => {
     // If the fetch still ran, the report would keep drifting with the provider
     // and the freeze would be decorative.
     expect(source).toMatch(/frozenWeekWeather[\s\S]{0,1200}?fetchServiceWeekWeather/);
-    expect(source).toMatch(/const storedWeekWeather = parseJsonObject\(service\.structured_notes\)\.lawnWeekWeather/);
+    expect(source).toMatch(/const storedWeekWeather = storedWeekFor\(service\.structured_notes, assessment\?\.id\)/);
   });
 
   test('the render ADOPTS the canonical week, winner or loser', () => {

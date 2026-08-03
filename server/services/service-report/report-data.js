@@ -2030,36 +2030,51 @@ function frozenWeekMatches(frozen, assessment) {
     && ymd(frozen.serviceDate) === ymd(assessment?.service_date);
 }
 
+// Snapshots are stored as a MAP keyed by assessment id, never as one object per
+// record. Replacing on a differing id looked equivalent and is not: canonical
+// selection can move A → B → A (a re-do, then a pinned delivery for the
+// original), and each move would destroy the other assessment's snapshot and
+// send that report back to mutable provider data — permanence defeated by the
+// mechanism meant to provide it. Keyed, every assessment keeps its own frozen
+// week and first-writer-wins applies per key.
+function storedWeekFor(structuredNotes, assessmentId) {
+  if (!assessmentId) return null;
+  const map = parseJsonObject(structuredNotes).lawnWeekWeather;
+  if (!map || typeof map !== 'object') return null;
+  const entry = map[assessmentId];
+  return entry && typeof entry === 'object' ? entry : null;
+}
+
 async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
   if (!serviceRecordId || !weekWeather || !weekWeather.assessmentId) return null;
+  const { assessmentId } = weekWeather;
   try {
     const updated = await knex('service_records')
       .where({ id: serviceRecordId })
-      // First writer wins WITHIN an assessment; a different assessment
-      // legitimately replaces the snapshot, because its week is a different
-      // question. Still one predicate, still no read-then-write.
+      // First writer wins PER ASSESSMENT — the guard is this key's absence, in
+      // the predicate, with no preceding read.
       .whereRaw(
-        "(COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather' IS NULL"
-        + " OR COALESCE(structured_notes::jsonb, '{}'::jsonb) #>> '{lawnWeekWeather,assessmentId}' IS DISTINCT FROM ?)",
-        [weekWeather.assessmentId],
+        "COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather' -> ? IS NULL",
+        [assessmentId],
       )
       .update({
+        // Two-level merge: the inner || adds this key to the existing map
+        // (or an empty one), the outer || puts the map back. A top-level ||
+        // with the whole object would replace every other assessment's entry.
         structured_notes: knex.raw(
-          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
-          [JSON.stringify({ lawnWeekWeather: weekWeather })],
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('lawnWeekWeather',"
+          + " COALESCE(COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather', '{}'::jsonb) || ?::jsonb)",
+          [JSON.stringify({ [assessmentId]: weekWeather })],
         ),
       });
     if (updated > 0) return weekWeather;
 
-    // Lost the race: adopt whatever the winner stored, so both renders agree —
-    // but only if the winner was answering the SAME question. A snapshot for a
-    // different assessment is not ours to render.
+    // Lost the race for THIS key: adopt what the winner stored so both renders
+    // agree. Another assessment's entry is not ours to read.
     const row = await knex('service_records')
       .where({ id: serviceRecordId })
       .first('structured_notes');
-    const stored = parseJsonObject(row?.structured_notes).lawnWeekWeather || null;
-    if (!stored || stored.assessmentId !== weekWeather.assessmentId) return null;
-    return stored;
+    return storedWeekFor(row?.structured_notes, assessmentId);
   } catch (err) {
     logger.warn(`[report-data] lawn week-weather freeze failed for ${serviceRecordId}: ${err.message}`);
     return null;
@@ -2258,7 +2273,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // on its own, so the queue waits for it rather than burning retries, and the
   // customer's report email is not held hostage to it. Carries WHY.
   let weekWeatherPendingReason = null;
-  const storedWeekWeather = parseJsonObject(service.structured_notes).lawnWeekWeather || null;
+  const storedWeekWeather = storedWeekFor(service.structured_notes, assessment?.id);
   // Replayed ONLY for the assessment it was frozen for — see frozenWeekMatches.
   const frozenWeekWeather = frozenWeekMatches(storedWeekWeather, assessment) ? storedWeekWeather : null;
   if (frozenWeekWeather) {
@@ -4066,6 +4081,7 @@ module.exports = {
   resolveCanonicalLawnRender,
   freezeLawnWeekWeather,
   frozenWeekMatches,
+  storedWeekFor,
   LAWN_RENDER_STRATEGY,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
