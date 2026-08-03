@@ -459,8 +459,13 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
     // set is public-quote's (the same one that refuses per-app for them).
     ...(kind === 'recurring' && moneyOrNull(line?.mo, line?.monthly) != null && (() => {
       try {
+        const svcKey = String(line?.service || '').trim();
+        // Commercial recurring bills MONTHLY by rule (AGENTS.md: commercial
+        // is exempt from the per-application unit — Codex #3173 r2), on top
+        // of the canonical monthly-billed key set.
+        if (svcKey.startsWith('commercial_')) return true;
         const { MONTHLY_BILLED_SERVICE_KEYS } = require('./public-quote')._internals;
-        return MONTHLY_BILLED_SERVICE_KEYS.has(String(line?.service || '').trim());
+        return MONTHLY_BILLED_SERVICE_KEYS.has(svcKey);
       } catch { return false; }
     })()
       ? { monthlyPrice: moneyOrNull(line?.mo, line?.monthly) } : {}),
@@ -472,6 +477,11 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // Refuse per-application provenance for such lines; legacy totals
         // (which ARE net) tell the truth until the mapper carries net
         // per-service amounts.
+        // Commercial recurring is EXEMPT from the per-application unit rule
+        // (AGENTS.md; the public quote path gates on commercialDetected the
+        // same way — Codex #3173 r2): it bills monthly, so its perTreatment
+        // must never stamp per-application provenance.
+        if (String(line?.service || '').trim().startsWith('commercial_')) return {};
         const appliedPct = Number(line?.discount?.appliedDiscountPercent
           ?? line?.discount?.effectiveDiscount ?? 0);
         // Line-level OR parent-level (result.recurring.discount /

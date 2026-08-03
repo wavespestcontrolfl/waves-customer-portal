@@ -62,6 +62,13 @@ describe('CreateAppointmentModal won estimate helpers', () => {
         { cadence: 'monthly', price: 24 },
       ],
     })).toBe('$64.33/mo');
+    // An ALL-monthly proven set (rodent-bait-only quote) still renders its
+    // unit — and keeps the recurring charge next to one-time work.
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 39,
+      onetimeTotal: 250,
+      lines: [{ cadence: 'quarterly', price: 117, monthlyPrice: 39 }],
+    })).toBe('$39.00/mo + $250.00 one-time');
   });
 
   it('auto-selects exactly one unlinked accepted estimate for an empty schedule form', () => {

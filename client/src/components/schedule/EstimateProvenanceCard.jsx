@@ -363,11 +363,13 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   // (Codex #3173 r2). Unprovable lines → legacy total tells the whole truth.
   const recurringLineCount = serviceLines.filter((l) => l.recurring).length;
   const allRecurringPerApp = perAppPrices.length > 0 && perAppPrices.length === recurringLineCount;
-  const allRecurringProven = perAppPrices.length > 0
+  // All-monthly proven sets qualify too (rodent-bait-only quotes —
+  // Codex #3173 r2): each line just renders its own true unit.
+  const allRecurringProven = recurringLineCount > 0
     && perAppPrices.length + monthlyPrices.length === recurringLineCount;
   const quotedLabel = allRecurringProven
     ? [
-      `${perAppPrices.map((p) => money(p)).join(' + ')}/application`,
+      ...(perAppPrices.length ? [`${perAppPrices.map((p) => money(p)).join(' + ')}/application`] : []),
       ...monthlyPrices.map((m) => `${money(m)}/mo`),
       ...(oneTime > 0 ? [`${money(oneTime)} one-time`] : []),
     ].join(' + ')

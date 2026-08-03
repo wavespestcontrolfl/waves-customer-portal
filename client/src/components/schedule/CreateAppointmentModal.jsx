@@ -333,7 +333,10 @@ export function formatScheduleEstimateAmount(estimate) {
     .filter((l) => !(Number(l.perApplicationPrice) > 0) && Number(l.monthlyPrice) > 0)
     .map((l) => Number(l.monthlyPrice));
   const onetime = Number(estimate?.onetimeTotal);
-  if (perApp.length && perApp.length + monthlyOnly.length === recurringLines.length) {
+  // A fully-proven set qualifies even when ALL lines are genuinely monthly
+  // (rodent-bait-only quotes — Codex #3173 r2): requiring a per-app line
+  // dropped their recurring charge from the label entirely.
+  if (recurringLines.length && perApp.length + monthlyOnly.length === recurringLines.length) {
     const parts = [];
     if (perApp.length) parts.push(`${perApp.map((p) => formatMoney(p)).join(' + ')}/application`);
     for (const m of monthlyOnly) parts.push(`${formatMoney(m)}/mo`);
@@ -607,7 +610,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
   // Booster-months dropdown (owner request 2026-08-02): which service line's
   // month checklist is open. One open at a time, like the discount popover.
-  const [boosterOpenIdx, setBoosterOpenIdx] = useState(null);
+  // Keyed by STABLE lineId, never array index (Codex #3173 r2): removing an
+  // earlier service reindexes the array, and an index-keyed open menu would
+  // jump lines and assign boosters to the wrong series.
+  const [boosterOpenKey, setBoosterOpenKey] = useState(null);
 
   const lineDiscountPresets = useMemo(() => {
     return discountPresets.filter((d) => (
@@ -670,6 +676,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const removeServiceAt = (idx) => {
     setServices((arr) => arr.filter((_, i) => i !== idx));
     setLineDiscountOpenIdx((current) => (current === idx ? null : current));
+    // The booster menu is keyed by stable lineId, but manual lines fall back
+    // to an index key — close it outright on any removal so a reindex can
+    // never leave it pointing at a different line.
+    setBoosterOpenKey(null);
   };
   const addServiceFromCatalog = (svc) => {
     // One-time mosquito is priced by the lot-based ladder on the server when
@@ -2399,13 +2409,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   const summary = selected.length
                     ? MONTH_CHIPS.filter((m) => selected.includes(m.value)).map((m) => m.label).join(', ')
                     : 'None';
-                  const open = boosterOpenIdx === idx;
+                  const boosterKey = svc.lineId || `line_${idx}`;
+                  const open = boosterOpenKey === boosterKey;
                   return (
                     <div style={{ gridColumn: '1 / -1', position: 'relative' }}>
                       {serviceFieldLabel('Booster months (optional)')}
                       <button
                         type="button"
-                        onClick={() => setBoosterOpenIdx(open ? null : idx)}
+                        onClick={() => setBoosterOpenKey(open ? null : boosterKey)}
                         aria-label="Booster months"
                         aria-expanded={open}
                         style={{
@@ -2447,7 +2458,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           })}
                           <button
                             type="button"
-                            onClick={() => setBoosterOpenIdx(null)}
+                            onClick={() => setBoosterOpenKey(null)}
                             style={{
                               width: '100%', padding: isMobile ? '10px 12px' : '8px 10px',
                               fontSize: isMobile ? 14 : 12, fontWeight: 500, cursor: 'pointer',

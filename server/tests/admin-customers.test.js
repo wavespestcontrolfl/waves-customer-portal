@@ -831,6 +831,22 @@ describe('admin customers route helpers', () => {
     };
     const manualLines = scheduleLinesFromEstimate(manualDiscounted, index);
     for (const l of manualLines) expect(l.perApplicationPrice).toBeUndefined();
+    // Commercial recurring is EXEMPT from the per-application unit rule
+    // (bills monthly): perTreatment never stamps per-app provenance, and
+    // the true monthly rides as monthlyPrice (codex #3173 r2-2).
+    const commercial = {
+      id: 'est-pa-6',
+      monthly_total: 250,
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'commercial_pest', name: 'Commercial Pest Control', perTreatment: 750, visitsPerYear: 4, mo: 250 },
+        ] } },
+      },
+    };
+    const [commercialLine] = scheduleLinesFromEstimate(commercial, index);
+    expect(commercialLine.perApplicationPrice).toBeUndefined();
+    expect(commercialLine.monthlyPrice).toBe(250);
+
 
 
   });
