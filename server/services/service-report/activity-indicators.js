@@ -2150,8 +2150,23 @@ const TRAP_PARTITIVE_DET = '(?:(?:the|our|these|those|all|its)(?:\\s+\\d+)?|\\d+
 // readings of one construction had drifted apart.
 // A coordinated second verb keeps the check predicate bound to its count:
 // "We checked AND REBAITED 6 of 8 traps" is still a check claim about 6.
-const CHECK_PREDICATE_LEAD_RE = /\b(?:re-?)?(?:checked|inspected)(?:\s+(?:and|or)\s+[a-z-]+)*(?:\s+(?:[a-z]+ly|all|both|just|now))*\s*$/i;
-const CHECK_PREDICATE_TRAIL_RE = /^(?:\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*\s+(?:re-?)?(?:checked|inspected)\b/i;
+// The past-tense check verbs, defined ONCE for every count-governance
+// regex that embeds them (the two anchored predicates here and both
+// partitives below): when RECHECK_VERB gained examined/tested these four
+// still said checked|inspected only, so "Due to activity, we examined 8
+// traps" dropped its roster claim as a subset while "…we checked 8 traps"
+// kept it (codex P1 r17). The set stays narrower than RECHECK_VERB by
+// design — rebaited/moved/serviced/reset are setup-incompatible ACTIONS,
+// not roster scans, and must not govern counts (r14).
+const CHECK_VERB_PAST = '(?:re-?)?(?:checked|inspected|examined|tested)';
+const CHECK_PREDICATE_LEAD_RE = new RegExp(
+  `\\b${CHECK_VERB_PAST}(?:\\s+(?:and|or)\\s+[a-z-]+)*(?:\\s+(?:[a-z]+ly|all|both|just|now))*\\s*$`,
+  'i',
+);
+const CHECK_PREDICATE_TRAIL_RE = new RegExp(
+  `^(?:\\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*\\s+${CHECK_VERB_PAST}\\b`,
+  'i',
+);
 
 const SETUP_EMPTY_CAPTURE_RES = [
   /\bno\s+(?:new\s+)?captures?\b/i,
@@ -2267,14 +2282,19 @@ function futureGovernsVerb(toks, verbAt) {
 // Same question for the noun-form patterns, asked of the text in front of
 // the match. A coordinator ends the reach — "Follow-up scheduled next week
 // AND trap inspection completed today" is two assertions, and only the
-// first one is a promise.
+// first one is a promise. Inside that reach the SAME bounded chain walk as
+// the verb form decides governance: a flat three-token window missed "We
+// are scheduled next week to complete an inspection of the traps", whose
+// governor sits four tokens back behind pure chain tokens, and the valid
+// setup copy was discarded (codex P2 r17) — the exact failure mode the
+// verb side already fixed by walking instead of truncating.
 function futureGovernsMatch(text, index) {
   const before = String(text).slice(0, index);
   const lastBreak = Math.max(
     before.lastIndexOf(' and '), before.lastIndexOf(' but '), before.lastIndexOf(' then '),
   );
-  const window = before.slice(lastBreak + 1).trim().split(/\s+/).slice(-3).join(' ');
-  return FUTURE_GOVERNOR_RE.test(window);
+  const toks = words(before.slice(lastBreak + 1));
+  return futureGovernsVerb(toks, toks.length);
 }
 
 // Word-form numbers normalized to numerals before any count check, so
@@ -2337,11 +2357,11 @@ const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:out\\s+of|of)\\s+(?:t
 // Numeric partitives WITH a check predicate claim the checked count even
 // though they never name a roster: "We checked 8 of the traps" puts 8
 // against the structured count, where a bare "one of the traps held a
-// capture" still claims nothing (codex P1 round 14). Active checked/
-// inspected forms only, deliberately: "reset 3 of the traps" is a subset
-// ACTION on some of the checked traps, and "set/placed 3 of the traps in
-// the attic" is distributive placement prose — counting either against
-// the structured total would re-create the copy-discarding false positive
+// capture" still claims nothing (codex P1 round 14). CHECK_VERB_PAST
+// forms only, deliberately: "reset 3 of the traps" is a subset ACTION on
+// some of the checked traps, and "set/placed 3 of the traps in the attic"
+// is distributive placement prose — counting either against the
+// structured total would re-create the copy-discarding false positive
 // this PR exists to fix.
 //
 // BOTH word orders, and the shared semantic modifier run rather than a
@@ -2349,7 +2369,7 @@ const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:out\\s+of|of)\\s+(?:t
 // so "8 of the traps were checked" — the way a report actually reads —
 // extracted nothing.
 const TRAP_PARTITIVE_ACTIVE_RE = new RegExp(
-  `\\b(?:re-?)?(?:checked|inspected)\\s+(\\d+)\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`,
+  `\\b${CHECK_VERB_PAST}\\s+(\\d+)\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`,
   'gi',
 );
 // The passive predicate is matched as auxiliaries + adverbs + participle
@@ -2361,7 +2381,7 @@ const TRAP_PARTITIVE_ACTIVE_RE = new RegExp(
 const TRAP_PARTITIVE_PASSIVE_RE = new RegExp(
   `\\b(\\d+)\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`
   + '(?:\\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*'
-  + '\\s+(?:re-?)?(?:checked|inspected)\\b',
+  + `\\s+${CHECK_VERB_PAST}\\b`,
   'gi',
 );
 const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;

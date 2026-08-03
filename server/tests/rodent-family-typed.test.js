@@ -1916,3 +1916,60 @@ describe('examine and test are re-check verbs (audit on 42406f3)', () => {
     expect(setupContradictions(text)).toEqual([]);
   });
 });
+
+// Round 17: the check synonyms joined RECHECK_VERB but the four
+// count-governance regexes still said checked|inspected — so "Due to
+// activity, we examined 8 traps" dropped its roster claim as a subset
+// while the checked spelling kept it, and the partitives read "We
+// examined 6 of the 8 traps" as a roster of 8 instead of a checked 6
+// (a false positive against correctly recorded copy). One CHECK_VERB_PAST
+// source now feeds all four.
+describe('examine and test govern counts like check and inspect (round 17)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a discourse-level cue no longer hides a stale examined or tested count', () => {
+    for (const text of [
+      'Due to activity, we examined 8 traps.',
+      'All 8 traps were tested due to activity.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('examined and tested partitives claim the CHECKED count, not the roster', () => {
+    expect(countContradictions('We examined 6 of the 8 traps.', { traps_checked: 6 }))
+      .toEqual([]);
+    expect(countContradictions('6 of the 8 traps were tested.', { traps_checked: 6 }))
+      .toEqual([]);
+    expect(countContradictions('We examined 6 of the 8 traps.', { traps_checked: 5 }).length)
+      .toBeGreaterThan(0);
+  });
+});
+
+// Round 17 (P2): the noun-form future test truncated to the final three
+// tokens before the match, so a governor four tokens back behind pure
+// chain tokens was invisible — "We are scheduled next week to complete an
+// inspection of the traps" read as a completed inspection and the valid
+// setup body was discarded. The same bounded chain walk as the verb form
+// (futureGovernsVerb) now decides both.
+describe('noun-form future governance walks the chain like the verb form (round 17)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test.each([
+    'We are scheduled next week to complete an inspection of the traps.',
+    // `inspection` deliberately: "a check of the traps" also trips the
+    // ACCIDENTAL verb-scan path (`check` doubles as a verb) whose walk is
+    // narrower by design — this block pins the noun path only
+    'We are due back next month to complete an inspection of the traps.',
+  ])('allows: %s', (text) => {
+    expect(setupContradictions(text)).toEqual([]);
+  });
+
+  test.each([
+    // the walk must not let a coordinator carry a promise across assertions
+    'Follow-up scheduled next week and trap inspection completed today.',
+    'We completed an inspection of the traps today.',
+  ])('still rejects: %s', (text) => {
+    expect(setupContradictions(text).length).toBeGreaterThan(0);
+  });
+});

@@ -9012,10 +9012,15 @@ export function CompletionPanel({
   const [stationNumberBase, setStationNumberBase] = useState(1); // server's next number (never reuses retired)
   const stationNewSeqRef = useRef(0);
   // Blocks completion (fail closed) while edits exist that the station-less
-  // payload below would silently drop — see pendingStationEdits.
-  const stationEditsPending = stationFeatureOn
-    && pendingStationEdits({ stationNew, stationMoves, stationStatuses, stationRetired });
-  const stationEditsBlocked = stationEditsPending && stationRegistryFailed;
+  // payload below would silently drop — see pendingStationEdits. Pending is
+  // computed from the restored state WITHOUT stationFeatureOn: a flag
+  // kill-switched (or a program change) after the draft was saved posts no
+  // station entries either, and gating pending on the flag would bypass
+  // the guard in exactly that state (codex P1 r17). With the flag off no
+  // fetch is coming, so the block is terminal, not transient.
+  const stationEditsPending = pendingStationEdits({ stationNew, stationMoves, stationStatuses, stationRetired });
+  const stationEditsBlocked = stationEditsPending && (!stationFeatureOn || stationRegistryFailed);
+  const stationEditsBlockTransient = stationFeatureOn && stationRegistryState === "loading";
   const discardStationEdits = () => {
     setStationNew([]);
     setStationMoves({});
@@ -10538,14 +10543,24 @@ export function CompletionPanel({
     // Bridge until the /property-map refetch resolves — submit iterates
     // preloads, so restored existing-station edits need their rows present.
     // The live fetch overwrites these with fresh (drift-resolved) data.
-    setStationPreloads(
-      Array.isArray(savedDraft.stationPreloads)
-        ? savedDraft.stationPreloads.filter((station) => station
-          && typeof station.id === "string" && station.id)
-        : [],
-    );
-    if (Number.isFinite(Number(savedDraft.stationNumberBase)) && Number(savedDraft.stationNumberBase) >= 1) {
-      setStationNumberBase(Number(savedDraft.stationNumberBase));
+    // ONLY while the registry is unconfirmed: when the fetch resolved
+    // BEFORE the operator clicked Restore, the confirmed roster stays and
+    // the restored edit intents overlay it by id — replacing it with the
+    // draft's older rows re-submitted stations retired since the draft,
+    // skipped this visit's check on stations added since, and recomputed
+    // auto-counts from the stale roster, with nothing triggering another
+    // fetch (codex P1 r17). An intent whose id no longer exists simply
+    // doesn't render or submit, the safe direction.
+    if (stationRegistryState !== "ready") {
+      setStationPreloads(
+        Array.isArray(savedDraft.stationPreloads)
+          ? savedDraft.stationPreloads.filter((station) => station
+            && typeof station.id === "string" && station.id)
+          : [],
+      );
+      if (Number.isFinite(Number(savedDraft.stationNumberBase)) && Number(savedDraft.stationNumberBase) >= 1) {
+        setStationNumberBase(Number(savedDraft.stationNumberBase));
+      }
     }
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
@@ -11430,9 +11445,9 @@ export function CompletionPanel({
     // the registry confirms, or the tech explicitly discards the edits via
     // the registry note.
     if (stationEditsBlocked) {
-      alert(stationRegistryState === "loading"
+      alert(stationEditsBlockTransient
         ? "Hang on — confirming the existing trap/station map. Try again in a moment."
-        : "The existing trap/station map couldn't be loaded, so this completion can't save the map edits restored from your draft. Discard them from the station section, or reload to retry.");
+        : "The trap/station map isn't available for this completion, so it can't save the map edits restored from your draft. Discard them from the station section, or reload to retry.");
       return;
     }
     // WaveGuard lawn: the compliance advisories come from the plan request —
@@ -13524,13 +13539,14 @@ export function CompletionPanel({
                 disabled={generating || success || stationRegistryFailed}
               />
             )}
-            {stationFeatureOn && stationRegistryNoteVisible && (
+            {((stationEditsBlocked && !stationEditsBlockTransient)
+              || (stationFeatureOn && stationRegistryNoteVisible)) && (
               <div style={{ fontSize: 14, color: "#b45309", marginTop: 6 }}>
                 {stationEditsBlocked ? (
                   <>
                     Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
-                    be loaded, so the map edits restored from your draft can&apos;t be saved with
-                    this completion. Reload to retry, or discard them to complete without.{" "}
+                    be confirmed for this completion, so the map edits restored from your draft
+                    can&apos;t be saved with it. Reload to retry, or discard them to complete without.{" "}
                     <button
                       type="button"
                       onClick={discardStationEdits}
@@ -15490,13 +15506,14 @@ export function CompletionPanel({
               disabled={generating || success || stationRegistryFailed}
             />
           )}
-          {stationFeatureOn && stationRegistryNoteVisible && (
+          {((stationEditsBlocked && !stationEditsBlockTransient)
+            || (stationFeatureOn && stationRegistryNoteVisible)) && (
             <div style={{ fontSize: 14, color: "#fbbf24", marginTop: 6 }}>
               {stationEditsBlocked ? (
                 <>
                   Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
-                  be loaded, so the map edits restored from your draft can&apos;t be saved with
-                  this completion. Reload to retry, or discard them to complete without.{" "}
+                  be confirmed for this completion, so the map edits restored from your draft
+                  can&apos;t be saved with it. Reload to retry, or discard them to complete without.{" "}
                   <button
                     type="button"
                     onClick={discardStationEdits}
