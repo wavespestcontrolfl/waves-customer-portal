@@ -892,7 +892,53 @@ function formatEnumLabel(value) {
   )).join(' ');
 }
 
-function applicationPurpose(app = {}, serviceLine = 'pest') {
+// Pest identity for purpose copy comes from what was RECORDED — the product's
+// own name first (the SKU says what it is), then the technician's target list.
+// Ambiguity or no match fails CLOSED to null and the copy stays generic: a
+// wrong pest on a customer report is worse than a generic line (Advion
+// COCKROACH Gel was captioned "Targeted ant bait" and two fogged roach
+// products read "Mosquito pressure reduction" on a live cockroach report,
+// 2026-08-02 — method keywords like bait/fog say the equipment, not the pest).
+const APPLICATION_PEST_FAMILIES = [
+  { noun: 'cockroach', plural: 'cockroaches', pattern: /\b(?:cock)?roach(?:es)?\b/i },
+  { noun: 'ant', plural: 'ants', pattern: /\bants?\b/i },
+  { noun: 'mosquito', plural: 'mosquitoes', pattern: /\bmosquito(?:e?s)?\b/i },
+  { noun: 'termite', plural: 'termites', pattern: /\btermites?\b/i },
+  { noun: 'flea', plural: 'fleas', pattern: /\bfleas?\b/i },
+  { noun: 'bed bug', plural: 'bed bugs', pattern: /\bbed\s*bugs?\b/i },
+  { noun: 'spider', plural: 'spiders', pattern: /\bspiders?\b/i },
+  { noun: 'rodent', plural: 'rodents', pattern: /\brodents?\b|\bmice\b|\bmouse\b|\brats?\b/i },
+];
+
+function matchedPestFamilies(text = '') {
+  if (!text) return [];
+  // Live targets arrive both as display labels ("German cockroaches") and as
+  // canonical enum keys ("german_roaches", "ghost_ant") — `_` is a regex word
+  // character, so \b patterns silently miss the keys without this.
+  const normalized = String(text).replace(/[_-]+/g, ' ');
+  return APPLICATION_PEST_FAMILIES.filter((family) => family.pattern.test(normalized));
+}
+
+export function applicationPestFamily(app = {}) {
+  const byName = matchedPestFamilies(String(app.product?.name || ''));
+  if (byName.length) return byName.length === 1 ? byName[0] : null;
+  const targets = (Array.isArray(app.targets) ? app.targets : [])
+    .map((target) => String(target || '').trim()).filter(Boolean);
+  if (!targets.length) return null;
+  // Matched per target, not on the joined text: an unrecognized co-target
+  // (e.g. Gentrol's prefill of cockroaches + drain flies + pantry pests)
+  // means the recorded scope is wider than any one family — that is
+  // ambiguity, not a match (codex P1, PR #3181 r1).
+  const families = new Set();
+  for (const target of targets) {
+    const matched = matchedPestFamilies(target);
+    if (matched.length !== 1) return null;
+    families.add(matched[0]);
+  }
+  return families.size === 1 ? families.values().next().value : null;
+}
+
+export function applicationPurpose(app = {}, serviceLine = 'pest') {
   const method = String(app.method || '').toLowerCase();
   const product = String(app.product?.name || '').toLowerCase();
   const category = String(app.product?.category || '').toLowerCase();
@@ -931,14 +977,21 @@ function applicationPurpose(app = {}, serviceLine = 'pest') {
     if (method.includes('station')) return 'Station service';
     if (method.includes('bait')) return 'Bait placement';
   }
-  if (method.includes('bait') || product.includes('bait') || product.includes('gel')) return 'Targeted ant bait';
+  if (method.includes('bait') || product.includes('bait') || product.includes('gel')) {
+    const family = applicationPestFamily(app);
+    return family ? `Targeted ${family.noun} bait` : 'Targeted bait placement';
+  }
   if (method.includes('perimeter') || method.includes('broadcast')) return 'Perimeter protection';
   if (method.includes('spot') || method.includes('pin')) return 'Targeted treatment';
-  if (method.includes('fog')) return 'Mosquito pressure reduction';
+  if (method.includes('fog')) {
+    const family = applicationPestFamily(app);
+    if (family?.noun === 'mosquito') return 'Mosquito pressure reduction';
+    return family ? `Targeted ${family.noun} treatment` : 'Space fog treatment';
+  }
   return 'Treatment application';
 }
 
-function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
+export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   const purpose = applicationPurpose(app, serviceLine);
   if (purpose === 'Targeted weed treatment') return 'Applied where visible weed pressure or service notes called for targeted control.';
   if (purpose === 'Lawn insect control') {
@@ -957,7 +1010,15 @@ function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   if (purpose === 'Station service') return 'Checked or serviced at the documented station locations.';
   if (purpose === 'Bait placement') return 'Placed at documented activity or monitoring points.';
   if (purpose === 'Perimeter protection') return 'Used along treated exterior zones to maintain the protective band.';
-  if (purpose === 'Targeted ant bait') return 'Placed for light ant activity at the documented active zone.';
+  const pestFamily = applicationPestFamily(app);
+  if (pestFamily && purpose === `Targeted ${pestFamily.noun} bait`) {
+    return `Placed in small amounts where ${pestFamily.plural} travel and hide, at the placement points documented for this visit.`;
+  }
+  if (purpose === 'Targeted bait placement') return 'Placed at documented activity or monitoring points.';
+  if (pestFamily && purpose === `Targeted ${pestFamily.noun} treatment`) {
+    return `Applied as a fine mist within the treated areas for the ${pestFamily.plural} documented on this visit.`;
+  }
+  if (purpose === 'Space fog treatment') return 'Applied as a fine mist within the treated areas documented for this visit.';
   if (purpose === 'Targeted treatment') return 'Applied only where activity or conditions called for treatment.';
   if (purpose === 'Mosquito pressure reduction') return 'Applied to reduce resting adult mosquito pressure around target areas.';
   const targets = (Array.isArray(app.targets) ? app.targets : []).filter(Boolean);
@@ -985,7 +1046,7 @@ function productIdentifierDetails(app = {}) {
   return details;
 }
 
-function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
+export function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
   const method = String(app.method || '').toLowerCase();
   const productName = String(app.product?.name || 'This product');
   const active = String(app.product?.active_ingredient || '').trim();
@@ -1015,8 +1076,22 @@ function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
   }
 
   if (method.includes('bait') || product.includes('bait') || product.includes('gel')) {
-    details.push(`${productName} is a targeted bait placement. Foraging ants feed on the bait and can carry it back to other ants, which helps reduce activity at the source instead of only addressing the visible trail.`);
-    details.push('Bait depends on foraging behavior, so light activity near the placement for a short period can be normal while ants locate and share the bait.');
+    const family = applicationPestFamily(app);
+    // The transfer/sharing mechanism is only documented for social or
+    // aggregating insects (ants, cockroaches, termites); rodents get
+    // travel-route copy, and every other or unknown target gets feeding-only
+    // copy — the fail-closed path must not invent a treatment mechanism
+    // either (pre-push P1, 2026-08-03).
+    if (family?.noun === 'rodent') {
+      details.push(`${productName} is a targeted bait placement, positioned along documented travel routes and activity points so rodents encounter it where they already move.`);
+    } else if (['ant', 'cockroach', 'termite'].includes(family?.noun)) {
+      details.push(`${productName} is a targeted bait placement. Foraging ${family.plural} feed on the bait and can share it with others in the nest or harborage, which helps reduce activity at the source instead of only where it is visible.`);
+      details.push(`Bait depends on foraging behavior, so some activity near the placement for a short period can be normal while ${family.plural} find and feed on the bait.`);
+    } else {
+      const feeders = family ? family.plural : 'the target pests';
+      details.push(`${productName} is a targeted bait placement. It works as ${feeders} feed on it at the placement points, which helps reduce activity at the source instead of only where it is visible.`);
+      details.push(`Bait depends on feeding behavior, so some activity near the placement for a short period can be normal while ${feeders} find and feed on the bait.`);
+    }
     details.push(...productIdentifierDetails(app));
     return details;
   }
@@ -1037,8 +1112,19 @@ function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
     return details;
   }
 
-  if (serviceLine === 'mosquito' || method.includes('fog')) {
+  if (serviceLine === 'mosquito' || (method.includes('fog') && applicationPestFamily(app)?.noun === 'mosquito')) {
     details.push(`${productName} was documented for mosquito pressure reduction around target resting areas. Mosquito applications are interpreted with weather, shade, moisture, foliage, and recurring pressure because outdoor pressure can rebuild from nearby breeding or resting sites.`);
+    details.push(...productIdentifierDetails(app));
+    return details;
+  }
+
+  if (method.includes('fog')) {
+    // A fog on a pest visit is not a mosquito application — the pest, when
+    // known, comes from the recorded identity, never from the equipment. The
+    // copy states only what is documented: the method, the treated areas,
+    // and the recorded target (no reach/performance claims).
+    const family = applicationPestFamily(app);
+    details.push(`${productName} was applied as a fine fog, distributing the treatment as fine droplets across the areas documented for this visit${family ? ` for the recorded ${family.plural}` : ''}.`);
     details.push(...productIdentifierDetails(app));
     return details;
   }
@@ -1115,7 +1201,9 @@ function applicationZoneText(app = {}, zoneById = new Map(), serviceLine = 'pest
   return app.applicationArea || 'Treated area recorded';
 }
 
-function applicationGroupPurposeCopy(purpose, serviceLine = 'pest') {
+// `app` is any application in the group — the group key includes the purpose
+// string, so every member resolves the same pest family by construction.
+function applicationGroupPurposeCopy(purpose, serviceLine = 'pest', app = {}) {
   if (purpose === 'Perimeter protection') {
     return 'These products were used along treated exterior zones to help maintain the protective band.';
   }
@@ -1137,6 +1225,15 @@ function applicationGroupPurposeCopy(purpose, serviceLine = 'pest') {
   if (purpose === 'Mosquito pressure reduction') {
     return 'These products were applied to reduce mosquito pressure around target resting areas.';
   }
+  const family = applicationPestFamily(app);
+  if (family && purpose === `Targeted ${family.noun} bait`) {
+    return `These bait placements target ${family.plural} where they travel and hide.`;
+  }
+  if (family && purpose === `Targeted ${family.noun} treatment`) {
+    return `These products were applied as a fine mist within the treated areas for the ${family.plural} documented on this visit.`;
+  }
+  if (purpose === 'Targeted bait placement') return 'These products were placed at documented activity or monitoring points.';
+  if (purpose === 'Space fog treatment') return 'These products were applied as a fine mist within the treated areas documented for this visit.';
   return applicationPurposeCopy({ method: '', product: {} }, serviceLine).replace(/^Application recorded.*$/i, 'These products were documented for this service visit.');
 }
 
@@ -1154,7 +1251,7 @@ function groupApplicationsByPurpose(applications = [], data = {}) {
         purpose,
         method,
         zones,
-        copy: applicationGroupPurposeCopy(purpose, data.serviceLine),
+        copy: applicationGroupPurposeCopy(purpose, data.serviceLine, app),
         products: [],
       });
     }
