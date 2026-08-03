@@ -8575,6 +8575,11 @@ export function CompletionPanel({
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
+  // Inspection credit — DEFAULT ON per the owner ruling: an inspection
+  // carries the credit promise unless the tech clears it. The server
+  // defaults it on too, so an older client that sends nothing behaves
+  // identically.
+  const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
   const [reviewTiming, setReviewTiming] = useState("120");
   const [reviewCustomAt, setReviewCustomAt] = useState("");
@@ -9140,6 +9145,10 @@ export function CompletionPanel({
   // untype lane. The STABLE profile key is authoritative (display labels
   // are admin-editable); the name regex is only a fallback for rows whose
   // profile did not resolve (codex P2 r8).
+  // Inspection closeouts carry the credit promise — the toggle only renders
+  // for them, and the server independently re-checks the category so a
+  // crafted payload can't promise a credit on a treatment visit.
+  const isInspectionVisit = service.completionProfile?.category === "inspection";
   const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
     || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
@@ -11434,6 +11443,10 @@ export function CompletionPanel({
         // sub-toggle's visibility (invoice + SMS being sent) so a stale false
         // never posts when the completion SMS is off. false = report-only SMS.
         includePayLink: willInvoice && effectiveSendSms ? includePayLink : true,
+        // Only meaningful on an inspection closeout; mirror the toggle's
+        // visibility so a stale cleared box can't suppress the credit on a
+        // non-inspection visit (where the server ignores it anyway).
+        offerInspectionCredit: isInspectionVisit ? offerInspectionCredit : true,
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
         reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
         reviewDelayMinutes: selectedReviewDelayMinutes,
@@ -13652,6 +13665,48 @@ export function CompletionPanel({
                 >
                   {payerBanner}
                 </div>
+              )}{" "}
+              {/* Inspection credit — DEFAULT ON. The customer is promised
+                  the inspection fee toward anything they book in the
+                  window; the credit only becomes real money when they
+                  actually book. Clearing this is the opt-out for the rare
+                  inspection that shouldn't carry it. */}
+              {isInspectionVisit && (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 12,
+                    padding: "12px 16px",
+                    margin: "0 0 8px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  {" "}
+                  <input
+                    type="checkbox"
+                    checked={offerInspectionCredit}
+                    onChange={(e) => setOfferInspectionCredit(e.target.checked)}
+                    style={{ width: 18, height: 18, accentColor: M.ink, marginTop: 1 }}
+                  />{" "}
+                  <span style={{ fontFamily: font, fontSize: 14, color: M.ink }}>
+                    Credit this inspection toward booked service
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: 12,
+                        color: M.ink3,
+                        marginTop: 2,
+                      }}
+                    >
+                      Applies as account credit only if they book — nothing is
+                      credited now.
+                    </span>
+                  </span>{" "}
+                </label>
               )}{" "}
               {/* Bed bug never offers the no-invoice recap: a performed
                   treatment must mint its invoice (typed-era parity; the

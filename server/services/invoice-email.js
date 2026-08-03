@@ -337,8 +337,44 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   }
 }
 
+/**
+ * The inspection-credit promise for a receipt, or '' when there is none.
+ *
+ * Derived from the OFFER row rather than passed in by callers: every
+ * receipt path (webhook auto-send, operator resend, delivery queue) then
+ * states the promise without each one having to thread it, and the copy
+ * always reflects the terms actually FROZEN on the offer — never a
+ * re-derived guess that a later config edit could drift.
+ *
+ * Only an offer still open and unexpired is announced: once it has been
+ * redeemed the credit is already on the account, and a lapsed one is no
+ * longer true. Never throws — a receipt must go out regardless.
+ */
+async function inspectionCreditMemoForInvoice(invoice) {
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('inspectionCredit')) return '';
+    if (!invoice?.customer_id) return '';
+    const offer = await db('inspection_credit_offers')
+      .where({ customer_id: invoice.customer_id, status: 'offered' })
+      .where('expires_at', '>=', new Date())
+      .orderBy('expires_at', 'asc')
+      .first('amount', 'expires_at');
+    if (!offer) return '';
+    const { inspectionCreditReceiptMemo } = require('./inspection-credit');
+    const days = Math.max(
+      1,
+      Math.ceil((new Date(offer.expires_at).getTime() - Date.now()) / (24 * 60 * 60 * 1000)),
+    );
+    return inspectionCreditReceiptMemo({ amount: offer.amount, windowDays: days }) || '';
+  } catch (err) {
+    logger.warn(`[invoice-email] inspection credit memo lookup failed: ${err.message}`);
+    return '';
+  }
+}
+
 async function sendReceiptEmail(invoiceId, options = {}) {
-  const memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
+  let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
   // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
   // retried delivery doesn't email the customer twice; manual operator
   // resends from /admin/invoices intentionally omit it so the operator
@@ -349,6 +385,10 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
+
+  // An open inspection-credit promise rides the receipt (dark behind the
+  // gate). An explicit caller memo always wins — never silently replaced.
+  if (!memo) memo = await inspectionCreditMemoForInvoice(invoice);
 
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
