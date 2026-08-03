@@ -2171,6 +2171,14 @@ const SETUP_RECHECK_NOUN_RES = [
   new RegExp(`\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b${CLAUSE_GAP('{0,20}?')}\\b${COMPLETION_WORD}\\b`, 'i'),
   new RegExp(`\\b${COMPLETION_WORD}\\b${CLAUSE_GAP('{0,30}?')}\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b`, 'i'),
   new RegExp(`\\b${RECHECK_NOUN}\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b${CLAUSE_GAP('{0,20}?')}\\b${COMPLETION_WORD}\\b`, 'i'),
+  // Completion-first, `of` form: "We completed an inspection of the traps
+  // today". The noun-adjacent pattern above needs "trap inspection", and
+  // the `of` pattern needs its completion word to FOLLOW, so this word
+  // order fell between them. The verb scans don't catch it either —
+  // "check" doubles as a verb so "a check of the traps" is caught
+  // incidentally, but "inspection" has no verb form to match (codex P1
+  // round 16).
+  new RegExp(`\\b${COMPLETION_WORD}\\b${CLAUSE_GAP('{0,20}?')}\\b${RECHECK_NOUN}\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`, 'i'),
 ];
 // A stated INTENTION to check is not a claim that checking happened — and
 // "we will return to check the traps" is exactly what the setup prompt
@@ -2431,14 +2439,20 @@ function setupContradictions(text) {
     if (FUTURE_INTENT_RE.test(clause)) continue; // an intention, not a claim
     const hit = activeRecheckOnTrap(clause) || passiveRecheckOnTrap(clause);
     if (hit) found.push(`setup_recheck_claim:${hit.toLowerCase()}`);
+    // The noun forms run per clause under the SAME intent guard as the verb
+    // scans. Whole-string matching left them exposed to the tense hole the
+    // verb side had fixed: the gap's own future lookahead only covers text
+    // BETWEEN the two anchors, so "We WILL complete an inspection of the
+    // traps next week" — a future promise, with a clean gap — would have
+    // been read as a completed re-check by the pattern added for round 16.
+    for (const rx of SETUP_RECHECK_NOUN_RES) {
+      const nounHit = clause.match(rx);
+      if (nounHit) found.push(`setup_recheck_claim:${nounHit[0].trim().toLowerCase()}`);
+    }
   }
   for (const rx of SETUP_EMPTY_CAPTURE_RES) {
     const match = str.match(rx);
     if (match) found.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
-  }
-  for (const rx of SETUP_RECHECK_NOUN_RES) {
-    const match = str.match(rx);
-    if (match) found.push(`setup_recheck_claim:${match[0].trim().toLowerCase()}`);
   }
   return found;
 }

@@ -1557,3 +1557,41 @@ describe('self-audit II — false positives on correct setup prose', () => {
     expect(setupContradictions('Trap inspection completed today.').length).toBeGreaterThan(0);
   });
 });
+
+// Round 16 (codex P1): completion-first + the `of` word order fell between
+// the noun-adjacent pattern (needs "trap inspection") and the `of` pattern
+// (needs its completion word to follow). The verb scans miss it too —
+// "check" doubles as a verb so "a check of the traps" is caught by
+// accident, but "inspection" has no verb form.
+describe('completion-first `inspection of the traps` (round 16)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('the completion-first `of` order is refused', () => {
+    for (const text of [
+      'We completed an inspection of the traps today.',
+      'We performed a check of the traps.',
+      'Completed inspection of all traps on arrival.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('a non-trap object stays legal', () => {
+    expect(setupContradictions('We completed an inspection of the attic.')).toEqual([]);
+  });
+
+  // Found while fixing the above, not by review: the noun patterns matched
+  // the whole string, so the gap's own future lookahead — which only covers
+  // text BETWEEN the two anchors — left a promise with a clean gap reading
+  // as a completed re-check. They now run per clause under the same intent
+  // guard as the verb scans.
+  test('a FUTURE completion of an inspection is not a claim', () => {
+    for (const text of [
+      'We will complete an inspection of the traps next week.',
+      'Initial setup complete; inspection of the traps is scheduled next week.',
+      'The trap check will be completed on our next visit.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});
