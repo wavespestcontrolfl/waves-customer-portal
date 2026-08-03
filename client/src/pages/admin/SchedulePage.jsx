@@ -12149,9 +12149,34 @@ export function CompletionPanel({
                           : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
-              {/* completionAdvisories are deliberately NOT rendered here —
-                  the success screen stays minimal (owner 2026-07-29); they
-                  are recorded server-side and surface in Customer 360. */}
+              {/* Advisories recorded on the completion (inventory shortfall,
+                  blackout, annual-N, …) — surfaced here per owner 2026-08-03,
+                  reversing the 2026-07-29 minimal-success-screen call; they
+                  are also recorded server-side and surface in Customer 360. */}
+              {Array.isArray(completionResult?.completionAdvisories) &&
+                completionResult.completionAdvisories.length > 0 && (
+                  <div
+                    style={{
+                      fontFamily: font,
+                      fontSize: 13,
+                      color: M.warn,
+                      background: M.warn + "14",
+                      border: `1px solid ${M.warn}`,
+                      borderRadius: 10,
+                      padding: "10px 12px",
+                      marginTop: 10,
+                      maxWidth: 360,
+                      textAlign: "left",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {completionResult.completionAdvisories.map((msg, i) => (
+                      <div key={i} style={{ marginTop: i ? 6 : 0 }}>
+                        {msg}
+                      </div>
+                    ))}
+                  </div>
+                )}
               {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
                 <div
                   style={{
@@ -14140,6 +14165,31 @@ export function CompletionPanel({
                   : "Customer delivery is off for this service — no report or SMS was sent."}
               </div>
             )}
+            {/* Completion advisories (inventory shortfall, blackout, annual-N,
+                …) — surfaced per owner 2026-08-03; also in Customer 360. */}
+            {Array.isArray(completionResult?.completionAdvisories) &&
+              completionResult.completionAdvisories.length > 0 && (
+                <div
+                  style={{
+                    fontSize: 13,
+                    color: D.amber,
+                    background: D.amber + "14",
+                    border: `1px solid ${D.amber}`,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    marginTop: 12,
+                    maxWidth: 360,
+                    textAlign: "left",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {completionResult.completionAdvisories.map((msg, i) => (
+                    <div key={i} style={{ marginTop: i ? 6 : 0 }}>
+                      {msg}
+                    </div>
+                  ))}
+                </div>
+              )}
             {recapEligible && !completionResult?.followupSuggestion?.required && (
               <button
                 type="button"
