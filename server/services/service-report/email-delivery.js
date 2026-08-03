@@ -410,7 +410,14 @@ async function loadServiceRecord(recordId) {
     .first();
 }
 
-async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, forceFreshPdf = false, verifyBeforeSend = null } = {}) {
+async function sendServiceReportV1Email(recordId, {
+  token, reportUrl, pdfUrl, forceFreshPdf = false, verifyBeforeSend = null,
+  // #3168: the assessment the caller's fence sealed. Pinning it on the render
+  // is what makes the attachment's content provable — the renderer navigates
+  // to the report page, which fetches its own data, so without a pin the file
+  // can contain a different assessment than the one that was sealed.
+  pinnedLawnAssessmentId = null,
+} = {}) {
   if (!sendgrid.isConfigured()) {
     return { ok: false, error: 'SendGrid not configured' };
   }
@@ -437,7 +444,13 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, fo
   const base = portalBaseUrl();
   const fullReportUrl = reportUrl || `${base}/report/${encodeURIComponent(reportToken)}`;
   const fullPdfUrl = pdfUrl || `${base}/api/reports/${encodeURIComponent(reportToken)}`;
-  const data = await buildReportV1Data(service, reportToken);
+  // Pinned to the SAME assessment as the attachment (#3168). Left unpinned,
+  // this build could resolve a different assessment than the PDF: the body
+  // would describe one visit's lawn while the attachment showed another's, and
+  // because data.lawnAssessment.assessmentId is what the fence receives as the
+  // render's answer, a correctly-pinned attachment would be deferred as a
+  // mismatch. One pin, one answer, both surfaces.
+  const data = await buildReportV1Data(service, reportToken, undefined, { pinnedLawnAssessmentId });
   data.dynamicContext = await buildServiceReportDynamicContext({
     recordId,
     mode: 'static',
@@ -445,7 +458,9 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, fo
 
   let pdf = null;
   try {
-    const result = await getOrRenderServiceReportPdf(recordId, { token: reportToken, forceFresh: forceFreshPdf });
+    const result = await getOrRenderServiceReportPdf(recordId, {
+      token: reportToken, forceFresh: forceFreshPdf, pinnedLawnAssessmentId,
+    });
     pdf = result.pdf;
     if (result.storageFailed) {
       await enqueuePdfRenderRetry({
@@ -458,6 +473,21 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, fo
       });
     }
   } catch (err) {
+    // A PINNED render must never degrade into an attachment-less send (#3168).
+    // This catch exists so a transient render failure still gets the customer
+    // their report link — reasonable when the attachment is a bonus. But a
+    // pinned render is a fence: its failure means we could not prove what the
+    // attachment would contain, and continuing would mark the delivery SENT
+    // with no attachment, permanently, on a path whose whole contract is
+    // "defer rather than send something unverified". Defer instead.
+    if (pinnedLawnAssessmentId) {
+      logger.warn(`[service-report-v1-email] pinned PDF render failed for ${recordId}; deferring send: ${safePdfRenderError(err)}`);
+      return {
+        ok: false,
+        error: `Pinned report render failed — deferring send: ${safePdfRenderError(err)}`,
+        retryable: true,
+      };
+    }
     logger.warn(`[service-report-v1-email] PDF attachment skipped for ${recordId}: ${safePdfRenderError(err)}`);
     await enqueuePdfRenderRetry({
       serviceRecordId: recordId,

@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature } = require('./report-data');
 const { renderServiceReportV1Pdf } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
@@ -86,6 +86,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
   knex = db,
   allowUnstoredPdf = false,
   pestPressureConfig: providedPestPressureConfig,
+  // #3168: pin which lawn assessment this render shows, so a send fence can
+  // prove the attachment carries the copy it sealed. Rides to the page on the
+  // URL; also pinned on this function's own data build so the storage-key
+  // signature describes the same render.
+  pinnedLawnAssessmentId = null,
 } = {}) {
   const service = await loadServiceRecordForPdf(recordId, knex);
   if (!service) throw new Error('Service record not found');
@@ -118,6 +123,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // PDF, so a gate flip or re-trace must change the key (re-trace also
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
+  // Assessment identity + copy version in the key, so a stale in-flight render
+  // cannot republish over a newer one (#3168).
+  const laSignature = await lawnAssessmentPdfSignature(service, knex);
   let pdf;
   // The signature of the narrative text actually rendered travels ON the
   // payload (attached by report-data at the moment the text was chosen) —
@@ -127,7 +135,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   let tnRenderedSignature = '-tn0';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
@@ -144,6 +152,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       req,
       logger,
       serviceRecordId: recordId,
+      pinnedLawnAssessmentId,
     });
 
     const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
@@ -158,9 +167,41 @@ async function renderAndStoreServiceReportPdf(recordId, {
     pestPressureConfig = latestPestPressureConfig;
     visibilitySignature = latestVisibilitySignature;
   }
+  // A PINNED render never joins the shared cache (#3168). The storage key is
+  // assessment-agnostic, so persisting one would let a later UNPINNED download
+  // serve a PDF built for a specific assessment — and the pinned path exists
+  // precisely for the case where the pin and the current selection disagree.
+  //
+  // Deliberately OUTSIDE the storage try/catch below: that catch exists to let
+  // an ordinary render degrade to an unstored PDF, and swallowing this failure
+  // there would mark the delivery sent while Download PDF kept serving the
+  // known-stale object. A failed clear must fail the render so the delivery
+  // defers and retries.
+  if (pinnedLawnAssessmentId) {
+    // The delivery forced a fresh render precisely because the cached object
+    // may hold an older assessment or recommendation version, so leaving that
+    // key in place would hand the recipient a document different from the
+    // attachment they were just emailed. The next unpinned request re-renders
+    // canonically; nothing reads a null key as an error.
+    await knex('service_records')
+      .where({ id: recordId })
+      .update({ pdf_storage_key: null });
+    return { key: null, pdf, rendered: true, token: reportToken, pinned: true };
+  }
   try {
+    // An UNPINNED cache render opens the report page without a pin, so the
+    // page's own fetch chooses the assessment — and a selection that moved
+    // away and back during the render would otherwise store that PDF under
+    // the pre-render signature, where it reads as current forever. Re-read and
+    // require stability before publishing; if it moved, skip the store and let
+    // the next view render cleanly. (Pinned renders never reach here.)
+    const laAfter = await lawnAssessmentPdfSignature(service, knex);
+    if (laAfter !== laSignature) {
+      logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
+      return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
+    }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -238,13 +279,21 @@ async function clearLawnPdfCorrectionMarker(recordId, knex = db) {
 // deliveries must attach a render produced AFTER final copy settled, and no
 // fence can cover every render path (the public report route renders
 // synchronously without a job row — codex P1 #3093 r23).
-async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, forceFresh = false } = {}) {
+async function getOrRenderServiceReportPdf(recordId, {
+  token, req, knex = db, forceFresh = false, pinnedLawnAssessmentId = null,
+} = {}) {
   // technician_notes + service_data ride along for the summary-copy key
   // component, service_type/service_line for the mosquito-V2 component —
   // the expected key must match what renderAndStore writes.
   const service = await knex('service_records')
     .where({ id: recordId })
-    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
+    // customer_id + service_id ride along for the lawn-assessment component
+    // (#3168): loadLinkedLawnAssessment filters on customer_id and falls back
+    // through the scheduled service, so omitting them makes this side compute
+    // "no assessment" while renderAndStore — which uses the full record —
+    // computes the real hash. The keys would never match and every lawn PDF
+    // would re-render on every lookup.
+    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'customer_id', 'service_id');
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public
@@ -257,7 +306,10 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
       ? JSON.parse(service.structured_notes) : (service?.structured_notes || {});
     correctionPending = notes && notes.lawnPdfCorrectionPending === true;
   } catch { correctionPending = false; }
-  const mustRenderFresh = forceFresh || correctionPending;
+  // A pinned render can never be served from storage: a cached object records
+  // nothing about which assessment it was built from, so returning one would
+  // silently answer a pinned request with unpinned content (#3168).
+  const mustRenderFresh = forceFresh || correctionPending || !!pinnedLawnAssessmentId;
   // Version captured BEFORE the render: the marker may only be cleared when
   // the recommendation copy did not change during the render AND no
   // generation is in flight afterwards — otherwise this render may have
@@ -278,7 +330,7 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
@@ -292,10 +344,14 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     knex,
     allowUnstoredPdf: true,
     pestPressureConfig,
+    pinnedLawnAssessmentId,
   });
   // A completed fresh render satisfies the pending correction — but only
   // once the copy can no longer change (no generation in flight).
-  if (correctionPending && !rendered.storageFailed && fenceReadOk) {
+  // A PINNED render must not clear the correction marker: it stored nothing, so
+  // the canonical cached PDF is still whatever it was. Clearing here would
+  // retire the marker while a stale object remains the one customers download.
+  if (correctionPending && !rendered.storageFailed && !rendered.pinned && fenceReadOk) {
     try {
       if (!lawnAssessmentId) {
         // No linked assessment (stray marker on a non-lawn record) —
@@ -347,6 +403,9 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     storageFailed: !!rendered.storageFailed,
     storageError: rendered.storageError || null,
     token: rendered.token,
+    // Pinned renders are deliberately unstored (#3168) — surfaced so a caller
+    // can tell "no key because storage failed" from "no key by design".
+    pinned: !!rendered.pinned,
   };
 }
 

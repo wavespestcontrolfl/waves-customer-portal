@@ -1,4 +1,5 @@
 const config = require('../../config');
+const logger = require('../logger');
 
 let chromium = null;
 try {
@@ -14,10 +15,49 @@ function serviceReportPublicBase(req) {
   return `${req.protocol}://${req.get('host')}`;
 }
 
-function serviceReportViewerUrl(token, req, mode = 'pdf') {
+// pinnedLawnAssessmentId (#3168): the renderer navigates a headless browser to
+// this page and the page fetches its own report data, so the only way to make
+// the attachment's content deterministic is to tell the page which assessment
+// to show. The data route validates the pin against what this token already
+// exposes and refuses anything else.
+function serviceReportViewerUrl(token, req, mode = 'pdf', { pinnedLawnAssessmentId = null } = {}) {
   const base = serviceReportPublicBase(req).replace(/\/+$/, '');
-  const modeParam = mode ? `?mode=${encodeURIComponent(mode)}` : '';
-  return `${base}/report/${encodeURIComponent(token)}${modeParam}`;
+  const params = [];
+  if (mode) params.push(`mode=${encodeURIComponent(mode)}`);
+  if (pinnedLawnAssessmentId) {
+    // The signature is what makes the pin trustworthy: the route refuses an
+    // unsigned pin, because only this server may ask a report to render a
+    // specific assessment — or none at all.
+    //
+    // If we CANNOT sign (no secret configured), emit no pin at all rather than
+    // an unsigned one. An unsigned pin is refused, which fails the render,
+    // which defers the delivery — so a missing secret would silently stop every
+    // lawn report email until its retries exhausted. Degrading to an unpinned
+    // render loses the pin's guarantee but keeps the post-render selection
+    // re-check that shipped in #3146, and keeps mail flowing.
+    const { signAssessmentPin } = require('./assessment-pin');
+    const signed = signAssessmentPin(token, pinnedLawnAssessmentId);
+    if (!signed) {
+      // FAIL CLOSED. I previously degraded to an unpinned render here so a
+      // missing secret could not stop mail — wrong trade. The post-render
+      // fence cannot compensate: it compares the separately built `data`
+      // assessment, not what the browser fetched, so an unpinned render can
+      // still mail an attachment nothing verified. Stopping deliveries is
+      // visible and recoverable (set the secret); mailing an attachment that
+      // disagrees with the permanent report is silent and unrecallable. And a
+      // missing JWT_SECRET would already have broken auth app-wide, so this is
+      // not a realistic silent-degradation path.
+      const err = new Error('report pin cannot be signed — set REPORT_PIN_SECRET or JWT_SECRET');
+      err.code = 'report_pin_unsignable';
+      err.retryable = true;
+      throw err;
+    }
+    params.push(`assessment=${encodeURIComponent(pinnedLawnAssessmentId)}`);
+    params.push(`asig=${encodeURIComponent(signed.signature)}`);
+    params.push(`aexp=${encodeURIComponent(signed.expiresAt)}`);
+  }
+  const query = params.length ? `?${params.join('&')}` : '';
+  return `${base}/report/${encodeURIComponent(token)}${query}`;
 }
 
 async function launchBrowser() {
