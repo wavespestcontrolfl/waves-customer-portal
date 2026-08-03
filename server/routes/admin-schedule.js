@@ -7792,6 +7792,375 @@ router.get('/card-request-availability', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/schedule/annual-prepay-availability — is the manual
+// prepay-on-book lane live? The New Appointment modal renders its Billing
+// control only on true: an offered choice that silently no-ops while the
+// lane is dark reads to the office as a sold prepay (same rule as the
+// card-on-file checkbox above).
+// requireAdmin, NOT the router-level tech gate (Codex #3161 r3 P2): the
+// preview below is admin-only, so a technician answered `true` here would be
+// shown a Billing control whose every price probe 403s.
+router.get('/annual-prepay-availability', requireAdmin, async (_req, res, next) => {
+  try {
+    res.json({ enabled: isEnabled('prepayOnBook') });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/schedule/annual-prepay-preview — can the booking the
+// operator is composing in the New Appointment modal be sold as an annual
+// prepay, and for exactly how much?
+//
+// Read-only. The modal has no linked estimate in this lane (the quote-linked
+// prepay control at CreateAppointmentModal.jsx:1904 covers that case), so
+// there is no quote to price against — coverage and price derive from the
+// BOOKED plan, exactly like the /secure plan picker does for a booked series.
+// Every number the operator sees comes from here, never from client math:
+// the modal posts what this returns (`mintPayload`) to the Customer 360
+// annual-prepay mint, so a client-side total could otherwise invoice an
+// amount nobody quoted.
+//
+// Ineligible combinations return `eligible: false` with an operator-readable
+// `blockReason` (never a 4xx — "you can't sell prepay on this booking" is a
+// normal answer, not an error) so the modal can disable the choice BEFORE
+// save instead of booking and failing the mint afterwards. Fail closed:
+// anything unsound is ineligible, never a guessed price.
+//
+// TWO input modes:
+//   draft     — customerId + serviceType + price + cadence…, the pre-save
+//               probe that prices the control while the operator composes.
+//   committed — scheduledServiceId, the AUTHORITATIVE one the modal uses at
+//               mint time. Every input is re-read from the persisted series
+//               (Codex #3161 P2): the booking endpoint recomputes discounts
+//               and persists its own estimated_price, so a draft-shaped
+//               payload replayed after save could invoice a per-visit amount
+//               the committed series never carried.
+router.get('/annual-prepay-preview', requireAdmin, async (req, res, next) => {
+  try {
+    // Dark by default (GATE_PREPAY_ON_BOOK): 404 rather than a blockReason —
+    // while the lane is off the endpoint is unobservable, exactly like the
+    // /secure select-plan route.
+    if (!isEnabled('prepayOnBook')) return res.status(404).json({ error: 'Not found' });
+    const {
+      computeSeriesPrepayPricing,
+      PLAN_CLASS_BY_SERVICE_KEY,
+      annualPrepayOverlapStatusClause,
+    } = require('../services/secure-appointment-plans');
+
+    // Local-calendar date-only reads (NOT toISOString) — a UTC slice on a
+    // timestamptz shifts the boundary a day in ET.
+    const { callBookingDateOnly } = require('../services/call-booking-catalog');
+
+    const blocked = (blockReason) => res.json({ eligible: false, blockReason });
+
+    // ── Resolve the plan inputs ──────────────────────────────────────────
+    // Committed mode wins when a visit id is supplied; the series PARENT owns
+    // the cadence and the weekend rule, so a child row resolves to it.
+    const scheduledServiceId = String(req.query.scheduledServiceId || '').trim();
+    let input = null;
+    if (scheduledServiceId) {
+      const visit = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('id', 'customer_id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
+          'recurring_pattern', 'recurring_interval_days', 'recurring_parent_id', 'skip_weekends',
+          'recurring_ongoing', 'booster_months', 'source_estimate_id');
+      if (!visit) return res.status(404).json({ error: 'Scheduled service not found' });
+      const parent = visit.recurring_parent_id
+        ? await db('scheduled_services')
+          .where({ id: visit.recurring_parent_id })
+          .first('id', 'service_type', 'estimated_price', 'scheduled_date', 'window_start',
+            'recurring_pattern', 'recurring_interval_days', 'skip_weekends', 'recurring_ongoing',
+            'booster_months', 'source_estimate_id')
+        : visit;
+      const anchor = parent || visit;
+      // An estimate-origin series already made its billing choice at accept —
+      // that lane owns its own prepay control.
+      if (anchor.source_estimate_id) {
+        return blocked('is handled by the linked quote — accept it as annual prepay from the estimate instead');
+      }
+      // Fail CLOSED on an unreadable add-on count (Codex #3161 r2 P2):
+      // swallowing the error as "no add-ons" would let a transient blip
+      // approve and SEND a primary-service annual invoice for a series that
+      // actually carries add-on lines billing outside its coverage.
+      let addonCount;
+      try {
+        addonCount = await db('scheduled_service_addons')
+          .where({ scheduled_service_id: anchor.id })
+          .count({ n: '*' })
+          .first();
+      } catch (addonErr) {
+        logger.warn(`[schedule:prepay-preview] add-on lookup failed for series ${anchor.id}: ${addonErr.message} — refusing`);
+        return blocked('couldn’t confirm the booked add-on lines — refresh and try again');
+      }
+      const boosters = (() => {
+        const raw = anchor.booster_months;
+        if (!raw) return [];
+        try { return Array.isArray(raw) ? raw : JSON.parse(raw); } catch { return []; }
+      })();
+      // A FINITE series caps how many visits the operator sold. Ongoing
+      // series have no cap (the coverage seeder extends them), so only a
+      // non-ongoing one carries a count worth comparing.
+      let bookedVisitCount = null;
+      if (anchor.recurring_ongoing === false) {
+        try {
+          const seriesCount = await db('scheduled_services')
+            .where(function series() {
+              this.where({ id: anchor.id }).orWhere({ recurring_parent_id: anchor.id });
+            })
+            .whereNotIn('status', ['cancelled', 'canceled', 'rescheduled'])
+            .count({ n: '*' })
+            .first();
+          bookedVisitCount = Number(seriesCount?.n) || null;
+        } catch (countErr) {
+          logger.warn(`[schedule:prepay-preview] series count failed for ${anchor.id}: ${countErr.message} — refusing`);
+          return blocked('couldn’t confirm how many visits this series carries — refresh and try again');
+        }
+      }
+      input = {
+        mode: 'committed',
+        bookedVisitCount,
+        customerId: String(anchor.customer_id || visit.customer_id || ''),
+        coverageServiceType: String(anchor.service_type || '').trim(),
+        perVisit: anchor.estimated_price != null ? Number(anchor.estimated_price) : null,
+        rawCadence: String(anchor.recurring_pattern || '').trim(),
+        intervalDays: Number(anchor.recurring_interval_days),
+        hasAddons: Number(addonCount?.n || 0) > 0,
+        hasBoosters: Array.isArray(boosters) && boosters.length > 0,
+        skipWeekends: !!anchor.skip_weekends,
+        firstVisitDateRaw: callBookingDateOnly(anchor.scheduled_date),
+        windowStartRaw: anchor.window_start || null,
+      };
+    } else {
+      const draftCount = Number.parseInt(req.query.recurringCount, 10);
+      input = {
+        mode: 'draft',
+        bookedVisitCount: Number.isInteger(draftCount) && draftCount >= 2 ? draftCount : null,
+        customerId: String(req.query.customerId || '').trim(),
+        coverageServiceType: String(req.query.serviceType || '').trim(),
+        perVisit: req.query.price === undefined || req.query.price === null || req.query.price === ''
+          ? null
+          : Number(req.query.price),
+        rawCadence: String(req.query.cadence || '').trim(),
+        intervalDays: Number(req.query.intervalDays),
+        hasAddons: req.query.hasAddons === 'true',
+        hasBoosters: req.query.hasBoosters === 'true',
+        skipWeekends: req.query.skipWeekends === 'true',
+        firstVisitDateRaw: req.query.firstVisitDate,
+        windowStartRaw: req.query.windowStart,
+      };
+    }
+
+    const { customerId, coverageServiceType, perVisit } = input;
+    if (!customerId || !coverageServiceType) {
+      return res.status(400).json({ error: 'customerId and serviceType are required' });
+    }
+
+    // A blank / zero rate is "manual quote pending", NEVER $0 (waves-billing
+    // invariant 8) — there is no year to price yet.
+    if (!(perVisit > 0)) {
+      return blocked('needs a per-visit price — a blank rate means the quote is still manual');
+    }
+
+    // The modal encodes every-6-weeks as pattern 'custom' + 42-day interval;
+    // normalize the same way the prepay-on-book preflight does, else a valid
+    // 6-week plan reads as an unsupported custom cadence.
+    const cadence = (input.rawCadence === 'custom' && input.intervalDays === 42)
+      ? 'every_6_weeks'
+      : input.rawCadence;
+    if (!cadence || cadence === 'one_time') return blocked('needs a recurring visit');
+    const visitsPerYear = visitsPerYearForCadence(cadence);
+    const coverageCadence = prepayCoverageCadenceForPattern(cadence);
+    if (!visitsPerYear || !coverageCadence) {
+      return blocked('isn’t available for this visit cadence (the year’s coverage schedule can’t be derived from it)');
+    }
+
+    // A capped series sells FEWER visits than the prepaid year covers (Codex
+    // #3161 r3 P2): booking 2 quarterly visits then selling a 4-visit year
+    // would have the coverage seeder schedule the 2 extra visits the operator
+    // explicitly capped away. Leave the series ongoing, or book the full year.
+    if (input.bookedVisitCount != null && input.bookedVisitCount < visitsPerYear) {
+      return blocked(`needs the full year on the schedule — this booking is capped at ${input.bookedVisitCount} visit${input.bookedVisitCount === 1 ? '' : 's'} but a prepaid year covers ${visitsPerYear}. Leave Visits blank (ongoing) or book ${visitsPerYear}`);
+    }
+
+    // THE question behind both guards below: will the coverage seeder have to
+    // CREATE visits, or only adopt ones the booking already put on the
+    // schedule? A finite series that covers the year is fully booked (the cap
+    // guard above proved bookedVisitCount >= visitsPerYear), and an ongoing
+    // series pre-seeds 4. Nothing is seeded ⇒ the seeder's date arithmetic
+    // never runs ⇒ neither its weekday nor its weekend blindness can move a
+    // visit, and the sale is safe (Codex #3161 r7 P2).
+    const ONGOING_PRESEEDED_VISITS = 4;
+    const coverageSeedsTail = input.bookedVisitCount == null
+      && visitsPerYear > ONGOING_PRESEEDED_VISITS;
+
+    // Coverage-seeding math must match the math the BOOKING used, or the
+    // prepaid visits the seeder adds land on different days than the series
+    // the operator sold (Codex #3161 r6 P1). The booking dates month-interval
+    // cadences with addETMonthsByWeekday — ordinal weekday, "4th Tuesday" —
+    // while coverageScheduleDates walks addMonthsSameDay. Quarterly and
+    // slower are fully pre-seeded, and every_6_weeks is day-gap arithmetic in
+    // BOTH places, so both stay eligible.
+    const MONTH_BASED_COVERAGE = new Set(['monthly', 'bimonthly', 'quarterly', 'triannual', 'semiannual', 'annual']);
+    if (coverageSeedsTail && MONTH_BASED_COVERAGE.has(coverageCadence)) {
+      return blocked(`isn’t available on an ongoing ${coverageCadence} series — the booking only pre-seeds ${ONGOING_PRESEEDED_VISITS} visits and the prepaid year’s remaining ${visitsPerYear - ONGOING_PRESEEDED_VISITS} would be scheduled by day-of-month instead of the booked weekday. Enter ${visitsPerYear} in Visits to book the whole year`);
+    }
+
+    // Weekend rule (Codex #3161 r1 P1, scoped in r7): coverageScheduleDates
+    // knows nothing about skip_weekends, so a seeded tail can land on the
+    // Sat/Sun the operator excluded. Only refuse when there IS a tail — a
+    // fully pre-seeded year is adopted as booked, weekend rule included.
+    if (coverageSeedsTail && input.skipWeekends) {
+      return blocked(`isn’t available on an ongoing series that skips weekends — the ${visitsPerYear - ONGOING_PRESEEDED_VISITS} visits seeded after the booked ones ignore that rule. Enter ${visitsPerYear} in Visits to book the whole year`);
+    }
+
+    // Same two combinations the quote-linked prepay control refuses: the
+    // prepay invoice prices ONE recurring plan, so add-on lines and booster
+    // months would bill outside the coverage the customer paid for.
+    if (input.hasAddons) {
+      return blocked('can’t be combined with add-on service lines — book them as a separate appointment');
+    }
+    if (input.hasBoosters) return blocked('can’t be combined with booster months');
+
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'property_type', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Monthly members' visits are covered by dues — the booking POST strips
+    // estimated_price for them (memberSeriesCovered), so an armed prepay
+    // would book fine and then find an unpriced series with nothing to
+    // invoice (Codex #3161 r4 P2).
+    //
+    // billing_mode 'annual_prepay' is deliberately NOT refused here (Codex
+    // #3161 r7 P2): that mode persists after a term expires, so refusing on
+    // it would block the renewal sale — booking next year's first visit after
+    // the current term_end. What actually matters is whether a term still
+    // COVERS the proposed start, which the overlap check below tests against
+    // termStart, exactly as the mint's own guard does.
+    const lane = resolveBillingLane(customer);
+    if (lane.mode === 'monthly_membership') {
+      return blocked('isn’t available for monthly members — their visits are covered by dues, so this booking carries no per-visit price to sell');
+    }
+
+    // Commercial/business invoices carry county tax (InvoiceService.create
+    // computes it), which would split the total quoted here from the total
+    // minted — same v1 exclusion the /secure picker takes. Customer 360's
+    // mint, where the operator sees the taxed total before sending, stays
+    // the path for those.
+    if (['commercial', 'business'].includes(String(customer.property_type || '').toLowerCase())) {
+      return blocked('isn’t available for commercial properties here — mint it from Customer 360 so the taxed total is visible before sending');
+    }
+
+    // Third-party-billed customers never get a homeowner prepay invoice.
+    // Fail toward refusing on a lookup error (same rule as the card-request
+    // funnel and the /secure lane).
+    try {
+      const PayerService = require('../services/payer');
+      const resolved = await PayerService.resolveForInvoice({ customerId, throwOnError: true });
+      if (resolved?.payerId) return blocked('isn’t available — this customer’s invoices bill to a third-party payer');
+    } catch (payerErr) {
+      logger.warn(`[schedule:prepay-preview] payer lookup failed for customer ${customerId}: ${payerErr.message} — refusing`);
+      return blocked('couldn’t confirm who this customer bills to — refresh and try again');
+    }
+
+    // Same service→incentive-class whitelist the /secure page uses: solo
+    // pest/mosquito take the $99 WaveGuard setup waiver, the discountable
+    // residential programs take the percentage. Anything unlisted (commercial
+    // keys, unclassifiable names) has no owner-approved prepay incentive.
+    const { recurringServiceKey } = require('../services/estimate-converter');
+    const planClass = PLAN_CLASS_BY_SERVICE_KEY[recurringServiceKey({ name: coverageServiceType })] || null;
+    if (!planClass) return blocked('isn’t available for this service');
+
+    // The term is anchored on the visit being booked, so the coverage seeder
+    // ADOPTS this series instead of seeding a duplicate one (the mint's
+    // firstVisitDate/firstVisitWindowStart contract, PR #3126).
+    const today = etDateString();
+    const firstVisitDate = validScheduleDate(input.firstVisitDateRaw)
+      ? String(input.firstVisitDateRaw).split('T')[0]
+      : null;
+    const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
+    const normalizedWindowStart = firstVisitDate && input.windowStartRaw
+      ? AnnualPrepayTimes.normalizeWindowStart(String(input.windowStartRaw))
+      : null;
+    // The mint REFUSES a window with no room for a 60-minute visit before
+    // midnight (admin-customers.js — "too late in the day"), so a 23:00
+    // booking would have failed the mint AFTER the appointment committed
+    // (Codex #3161 r9 P2). The window is an optional convenience — it gives
+    // visit 1 an arrival time on the term — and coverage adopts the booked
+    // visit by DATE regardless, so drop the unusable window instead of
+    // refusing the sale. The booked appointment keeps its own 23:00 slot;
+    // only the term's stored arrival window is omitted.
+    const firstVisitWindowStart = normalizedWindowStart
+      && AnnualPrepayTimes._private.addMinutesHHMM(normalizedWindowStart, 60)
+      ? normalizedWindowStart
+      : null;
+    // A COMMITTED series must anchor on its own visit, never on today
+    // (Codex #3161 r8 P2): a booking that commits just before ET midnight and
+    // previews just after it has a persisted date validScheduleDate now reads
+    // as past. Falling back to today would start the term after the booked
+    // visit, so coverage could not adopt it — the visit would bill per
+    // application while the seeder scheduled a replacement inside the window.
+    if (input.mode === 'committed' && !firstVisitDate) {
+      return blocked('couldn’t anchor the prepaid year on the booked visit — its date is no longer in the future. Refresh, and mint from Customer 360 if this visit still needs prepay');
+    }
+    const termStart = firstVisitDate || today;
+
+    // Surface an existing term as a block rather than letting the mint 409
+    // after the appointment is already booked. Compared against the PROPOSED
+    // term start, not today (Codex #3161 r3 P2) — the mint's own guard allows
+    // termStart > activeTermEnd, so a renewal booked to begin after the
+    // current term ends is a legitimate sale, not an overlap.
+    const overlapping = await db('annual_prepay_terms')
+      .where({ customer_id: customerId })
+      .where(annualPrepayOverlapStatusClause())
+      .orderBy('term_end', 'desc')
+      .first('id', 'term_end');
+    const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
+    if (overlapEnd && termStart <= overlapEnd) {
+      return blocked(`isn’t available — this customer already has an annual prepay term through ${overlapEnd}. Book the first visit after that date to sell the renewal`);
+    }
+
+    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
+    const planLabel = `${coverageServiceType} Annual Prepay`;
+
+    res.json({
+      eligible: true,
+      blockReason: null,
+      perVisit: Math.round(perVisit * 100) / 100,
+      visitsPerYear,
+      coverageCadence,
+      coverageServiceType,
+      planLabel,
+      annualBase: pricing.annualBase,
+      prepayTotal: pricing.prepay.total,
+      discountAmount: pricing.prepay.discount,
+      discountLabel: pricing.prepay.ratePctLabel,
+      // Deliberately NOT pricing.setupFee (Codex #3161 r4 P2): the $99 waiver
+      // is a real incentive on the /secure picker, where choosing per
+      // application STAMPS pending_setup_fee. Nothing in this manual lane
+      // writes that fee, so a per-visit booking here never owes it and there
+      // is nothing to waive — claiming otherwise sells a discount that does
+      // not exist. (The class still drives the no-percentage rule above.)
+      setupFee: null,
+      termStart,
+      // Ready-to-post body for the Customer 360 mint
+      // (POST /api/admin/customers/:id/annual-prepay-invoice), so the modal
+      // relays server-derived values instead of composing an amount itself.
+      mintPayload: {
+        amount: pricing.prepay.total,
+        visitCount: visitsPerYear,
+        coverageCadence,
+        serviceType: coverageServiceType,
+        planLabel,
+        termStart,
+        ...(firstVisitDate ? { firstVisitDate } : {}),
+        ...(firstVisitWindowStart ? { firstVisitWindowStart } : {}),
+        note: 'Annual prepay sold when the visit was booked.',
+      },
+    });
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/schedule/:id/card-request — card-on-file / Auto Pay
 // secure-link state for one appointment, for the schedule editor's Cards
 // on file panel. Read-only rollup of the three sources of truth: the

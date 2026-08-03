@@ -83,6 +83,37 @@ function cents(n) {
   return Math.round(Number(n) * 100) / 100;
 }
 
+/**
+ * The annual-prepay incentive arithmetic for a recurring series, as one pure
+ * function so every lane that quotes a prepay year uses the SAME formula:
+ * this page's plan context and the admin booking modal's prepay preview
+ * (routes/admin-schedule.js). A second copy of this math is how a customer
+ * ends up quoted one total on the secure link and invoiced another.
+ *
+ * planClass comes from PLAN_CLASS_BY_SERVICE_KEY: 'fee_waiver' (solo
+ * pest/mosquito — the $99 WaveGuard setup waiver IS the incentive, no % off)
+ * or 'discount' (ANNUAL_PREPAY_DISCOUNT_PCT off the recurring annual). The
+ * two never stack — owner ruling baked into constants.js.
+ */
+function computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass }) {
+  const annualBase = cents(Number(perVisit) * Number(visitsPerYear));
+  const discountRate = planClass === 'discount' ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
+  const prepayTotal = cents(annualBase * (1 - discountRate));
+  return {
+    annualBase,
+    prepay: {
+      total: prepayTotal,
+      discount: cents(annualBase - prepayTotal),
+      // Rendered label, server-derived so the client never holds a rate
+      // constant. '' for the waiver class (the waiver line is the pitch).
+      ratePctLabel: discountRate > 0 ? `${Math.round(discountRate * 1000) / 10}%` : '',
+    },
+    setupFee: planClass === 'fee_waiver'
+      ? { amount: WAVEGUARD_SETUP_FEE, waivedWithPrepay: true }
+      : null,
+  };
+}
+
 // The booked cadence, normalized the way the admin prepay-on-book path
 // normalizes it: the modal encodes every-6-weeks as pattern 'custom' with a
 // 42-day interval (admin-schedule.js). Any other custom interval has no
@@ -181,26 +212,16 @@ async function buildSecurePlanContext({ request, visitId }) {
     const overlapEnd = overlapping ? callBookingDateOnly(overlapping.term_end) : null;
     if (overlapEnd && today <= overlapEnd) return null;
 
-    const annualBase = cents(perVisit * visitsPerYear);
-    const discountRate = planClass === 'discount' ? ANNUAL_PREPAY_DISCOUNT_PCT : 0;
-    const prepayTotal = cents(annualBase * (1 - discountRate));
+    const pricing = computeSeriesPrepayPricing({ perVisit, visitsPerYear, planClass });
 
     return {
       mode: 'recurring',
       planClass,
       perVisit: cents(perVisit),
       visitsPerYear,
-      annualBase,
-      prepay: {
-        total: prepayTotal,
-        discount: cents(annualBase - prepayTotal),
-        // Rendered label, server-derived so the client never holds a rate
-        // constant. '' for the waiver class (the waiver line is the pitch).
-        ratePctLabel: discountRate > 0 ? `${Math.round(discountRate * 1000) / 10}%` : '',
-      },
-      setupFee: planClass === 'fee_waiver'
-        ? { amount: WAVEGUARD_SETUP_FEE, waivedWithPrepay: true }
-        : null,
+      annualBase: pricing.annualBase,
+      prepay: pricing.prepay,
+      setupFee: pricing.setupFee,
       selected: request?.selected_plan || null,
     };
   } catch (err) {
@@ -617,5 +638,13 @@ module.exports = {
   prepaySelectionState,
   selectSecurePlan,
   applyPerApplicationLaneStamp,
+  // Shared with the admin booking modal's prepay preview — one incentive
+  // formula and one service→incentive-class whitelist across both lanes.
+  computeSeriesPrepayPricing,
+  PLAN_CLASS_BY_SERVICE_KEY,
+  // Read-side (lock-free) overlap probe, shared rather than re-mirrored: a
+  // third copy of the coverage-holding status list is a drift bug waiting
+  // to happen. The LOCKING assert still lives in admin-customers._private.
+  annualPrepayOverlapStatusClause: overlapStatusClause,
   _test: { normalizedPattern, PLAN_CLASS_BY_SERVICE_KEY, overlapStatusClause },
 };
