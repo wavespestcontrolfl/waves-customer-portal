@@ -426,6 +426,21 @@ describe('freeze contract in the render path', () => {
     expect(pdfQueue).toMatch(/render completed but was not cacheable \(\$\{result\.uncachedReason \|\| 'unfrozen'\}\)/);
   });
 
+  // A claimed job with no counted outcome reads as a silent hole in the queue
+  // summary — the scheduler would log zero queued for retry while jobs waited
+  // nightly, hiding an expected state from the only place it surfaces.
+  test('DEFERRED jobs are counted, and counted separately from retries', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    expect(pdfQueue).toMatch(/deferred: 0,/);
+    expect(pdfQueue).toMatch(/result\.status === 'deferred'\) summary\.deferred \+= 1;/);
+    // Not folded into requeued: a nightly wait must not read as a job erroring.
+    expect(pdfQueue).not.toMatch(/'deferred'\) summary\.requeued/);
+    // Both schedulers surface it.
+    for (const f of ['../services/scheduler.js', '../index.js']) {
+      expect(fs.readFileSync(path.join(__dirname, f), 'utf8')).toMatch(/\$\{(result|summary)\.deferred\} deferred/);
+    }
+  });
+
   test('only a RESOLVED week is frozen', () => {
     expect(source).toMatch(/\} else if \(completionRainfall7dInches != null\) \{\s*\n\s*const canonicalWeek = await freezeLawnWeekWeather\(/);
   });

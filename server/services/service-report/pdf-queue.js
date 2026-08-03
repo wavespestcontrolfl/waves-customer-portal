@@ -689,6 +689,11 @@ async function processDuePdfRenderJobs({ now = new Date(), limit = CLAIM_LIMIT }
     succeeded: 0,
     failed: 0,
     requeued: 0,
+    // Jobs waiting on a weather state that only time resolves. Counted
+    // separately from `requeued`: a deferral is not a retry, and folding the
+    // two would make a healthy nightly wait indistinguishable from a job that
+    // keeps erroring.
+    deferred: 0,
     recovered: 0,
   };
   const recovered = await recoverStalePdfRenderClaims(now, knex);
@@ -701,6 +706,7 @@ async function processDuePdfRenderJobs({ now = new Date(), limit = CLAIM_LIMIT }
     if (result.status === 'succeeded') summary.succeeded += 1;
     else if (result.status === 'failed') summary.failed += 1;
     else if (result.status === 'queued') summary.requeued += 1;
+    else if (result.status === 'deferred') summary.deferred += 1;
   }
   return summary;
 }

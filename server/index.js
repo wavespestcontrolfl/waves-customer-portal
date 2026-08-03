@@ -956,7 +956,7 @@ httpServer.listen(PORT, () => {
           const { processDuePdfRenderJobs } = require('./services/service-report/pdf-queue');
           const summary = await processDuePdfRenderJobs();
           if (summary.claimed || summary.recovered) {
-            logger.info(`[service-report-pdf-queue] processed ${summary.claimed} job(s): ${summary.succeeded} succeeded, ${summary.requeued} requeued, ${summary.failed} failed, ${summary.recovered} recovered`);
+            logger.info(`[service-report-pdf-queue] processed ${summary.claimed} job(s): ${summary.succeeded} succeeded, ${summary.requeued} requeued, ${summary.deferred} deferred, ${summary.failed} failed, ${summary.recovered} recovered`);
           }
         } catch (err) {
           logger.error(`[service-report-pdf-queue] processor failed: ${err.message}`);
