@@ -324,7 +324,7 @@ function cardOnFileRow(cardsOnFile) {
   };
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, estimateRef, cardsOnFile, style }) {
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onetimeTotal, deposit, payment, lines, estimateRef, cardsOnFile, style }) {
   const quoted = Number(quotedTotal) || 0;
   const refLabel = String(estimateRef || '').trim();
   const price = currentPrice != null ? Number(currentPrice) : null;
@@ -334,8 +334,26 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
     .map((line) => ({
       name: String(line?.estimateLabel || line?.name || '').trim(),
       cadence: cadenceLabel(line?.cadence, line?.intervalDays),
+      recurring: !!line?.cadence && line.cadence !== 'one_time',
+      // Real per-visit quote prices only — the server marks lines synthesized
+      // from bare monthly/one-time totals, which must never read
+      // "/application" (per-month copy audit rule).
+      perAppPrice: line?.cadence && line.cadence !== 'one_time'
+        && line?.derived !== 'estimate_totals_fallback' && Number(line?.price) > 0
+        ? Number(line.price) : null,
+      oneTimePrice: line?.cadence === 'one_time' && Number(line?.price) > 0 ? Number(line.price) : null,
     }))
     .filter((line) => line.name);
+  // Honest quoted framing (owner ruling 2026-08-02): a blended
+  // "monthly + one-time" total matches nothing the customer ever pays at
+  // once. When real per-application prices exist, the header reads
+  // "$121/application + $99 one-time"; otherwise it keeps the legacy total.
+  const perAppPrices = serviceLines.map((l) => l.perAppPrice).filter((p) => p != null);
+  const perAppSum = perAppPrices.reduce((s, p) => s + p, 0);
+  const oneTime = Number(onetimeTotal) || 0;
+  const quotedLabel = perAppPrices.length
+    ? `${perAppPrices.map((p) => money(p)).join(' + ')}/application${oneTime > 0 ? ` + ${money(oneTime)} one-time` : ''}`
+    : money(quoted);
   const rows = paymentRows(payment);
   const dep = depositRow(deposit);
   if (dep) rows.push(dep);
@@ -346,8 +364,13 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   // Backed by summary.payerBilled (always resolved, gate-independent); fall back
   // to the deposit exemptReason for older payloads.
   const payerBilled = !!(deposit && (deposit.payerBilled || deposit.exemptReason === 'payer_billed'));
-  const showVsQuoted = price != null && quoted > 0 && price > 0 && Math.abs(quoted - price) > 0.01;
-  const deltaPct = showVsQuoted ? Math.round(((price - quoted) / quoted) * 100) : 0;
+  // Compare the visit's charge against the QUOTED PER-APPLICATION amount when
+  // one exists — measuring a per-visit price against the blended
+  // monthly+one-time total manufactured phantom deltas (a $121/application
+  // booking read as "-11% vs quoted $135.30").
+  const quotedComparable = perAppPrices.length ? perAppSum : quoted;
+  const showVsQuoted = price != null && quotedComparable > 0 && price > 0 && Math.abs(quotedComparable - price) > 0.01;
+  const deltaPct = showVsQuoted ? Math.round(((price - quotedComparable) / quotedComparable) * 100) : 0;
 
   const lineStyle = {
     display: 'flex',
@@ -372,7 +395,7 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
           )}
           <span style={{ flex: 1 }} />
           <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-            Quoted {money(quoted)}
+            Quoted {quotedLabel}
           </span>
         </div>
 
@@ -412,9 +435,13 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
             {serviceLines.map((line, i) => (
               <div key={`${line.name}-${i}`} style={lineStyle}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: INK, minWidth: 0 }}>{line.name}</div>
-                {line.cadence && (
+                {(line.cadence || line.perAppPrice != null || line.oneTimePrice != null) && (
                   <div style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, whiteSpace: 'nowrap' }}>
-                    {line.cadence}
+                    {line.perAppPrice != null
+                      ? `${money(line.perAppPrice)}/application${line.cadence ? ` · ${line.cadence}` : ''}`
+                      : line.oneTimePrice != null
+                        ? `${money(line.oneTimePrice)} one-time`
+                        : line.cadence}
                   </div>
                 )}
               </div>

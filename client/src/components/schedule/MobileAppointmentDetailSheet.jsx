@@ -598,6 +598,7 @@ export default function MobileAppointmentDetailSheet({
         {estimateSource && (
           <EstimateProvenanceCard
             quotedTotal={estimateSource.quotedTotal}
+            onetimeTotal={estimateSource.onetimeTotal}
             currentPrice={prepaidCovered ? null : price}
             deposit={estimateSource.deposit}
             payment={estimateSource.payment}

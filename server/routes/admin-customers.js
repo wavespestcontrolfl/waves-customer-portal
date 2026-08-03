@@ -491,6 +491,10 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
       cadence: fallbackIsRecurring ? 'quarterly' : 'one_time',
       source: fallbackIsRecurring ? 'recurring' : 'one_time',
       estimateId: estimate.id,
+      // This price came from the estimate's MONTHLY/one-time totals, not a
+      // real per-visit quote line — client copy must not label it
+      // "/application" (the per-month audit rule).
+      derived: 'estimate_totals_fallback',
     });
   }
 
