@@ -711,12 +711,14 @@ describe('propagateCustomerEmailChange', () => {
       status: 'released',
     });
     // A SECOND correction must retarget a zero-work released marker — the
-    // conflict merge carries a CASE that adopts the newer address only for
-    // marker rows (never real holds).
-    const markerMerge = conn.__calls.find((c) => c.table === 'first_touch_holds' && c.op === 'merge');
-    expect(markerMerge).toBeDefined();
-    expect(String(markerMerge.arg.held_email.__raw)).toContain('excluded.held_email');
-    expect(String(markerMerge.arg.held_email.__raw)).toContain("NOT first_touch_holds.held_newsletter");
+    // post-insert retarget UPDATE carries a CASE that adopts the newer
+    // address only for marker rows (never real holds). r55: the corrected
+    // address travels as a BINDING (the insert is DO NOTHING now, so
+    // there is no excluded.* to reference).
+    const markerRetarget = conn.__updates('first_touch_holds')
+      .find((u) => u.arg.held_email && u.arg.held_email.__raw && String(u.arg.held_email.__raw).includes('NOT first_touch_holds.held_newsletter'));
+    expect(markerRetarget).toBeDefined();
+    expect(markerRetarget.arg.held_email.__bindings).toEqual([HOLD_AFTER.email]);
   });
 
   test('a correction leaves a SETTLED ledger marker for reviewed calls with no hold row', async () => {
@@ -820,11 +822,39 @@ describe('propagateCustomerEmailChange', () => {
     // never touched.
     const conn = makeConn({ triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }] } });
     await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
-    const merge = conn.__calls.find((c) => c.table === 'first_touch_holds' && c.op === 'merge');
-    expect(String(merge.arg.held_email.__raw)).toContain("IN ('pending', 'releasing')");
-    expect(String(merge.arg.last_error.__raw)).toContain('email_denied_await_correction');
-    expect(String(merge.arg.status.__raw)).toContain("THEN 'pending'");
-    expect(merge.arg.updated_at).toBeUndefined();
+    const retarget = conn.__updates('first_touch_holds')
+      .find((u) => u.arg.held_email && u.arg.held_email.__raw && String(u.arg.held_email.__raw).includes('NOT first_touch_holds.held_newsletter'));
+    expect(retarget).toBeDefined();
+    expect(String(retarget.arg.held_email.__raw)).toContain("IN ('pending', 'releasing')");
+    expect(String(retarget.arg.last_error.__raw)).toContain('email_denied_await_correction');
+    expect(String(retarget.arg.status.__raw)).toContain("THEN 'pending'");
+    expect(retarget.arg.updated_at).toBeUndefined();
+  });
+
+  test('a raced pending target overwritten by the marker retarget still reaches the final sweep (r55)', async () => {
+    // The race: the pre-lock hold snapshot predates a release's insert;
+    // that release claims a hold at X, commits an active new_lead
+    // enrollment at X, and its DOI failure re-pends the row with
+    // held_email = X. The marker retarget rewrites the row to the
+    // corrected address, so the post-merge re-read can never recover X —
+    // the pre-merge FOR UPDATE read (after the waiting DO NOTHING
+    // insert) is the ONLY point X is observable, and the final sweep
+    // must still match the enrollment stranded at X.
+    const conn = makeConn({
+      triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }] },
+      first_touch_holds: {
+        rowsQueue: [
+          [], // pre-lock snapshot: the raced insert is not yet visible
+          [{ held_email: 'raced.target@example.com', status: 'pending' }], // pre-merge FOR UPDATE read
+          [{ held_email: HOLD_AFTER.email }], // post-merge re-read: already retargeted, X gone
+        ],
+      },
+    });
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    const sweepTargets = conn.__calls
+      .filter((c) => c.table === 'automation_enrollments' && c.op === 'orWhereRaw')
+      .map((c) => (c.arg.bindings || [])[0]);
+    expect(sweepTargets).toContain('raced.target@example.com');
   });
 
   test('a final ownership-scoped enrollment retarget runs after the marker merges', async () => {

@@ -1266,6 +1266,14 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
   if (!cards.length) return;
   try {
     const minted = await db.transaction(async (trx) => {
+      // Advisory lock FIRST (Codex #3084 r55): with no hold rows yet — the
+      // normal early-processing state — the FOR UPDATE below locks nothing,
+      // and the mint would take call_log before triage_items while the
+      // fanout/admin-triage writers hold cards and then update call_log:
+      // an insert conflicting with a still-open card would deadlock. The
+      // shared per-call advisory lock serializes this mint against every
+      // card writer regardless of what rows exist.
+      await lockTriageCall(trx, callLogId);
       if (await trx.schema.hasTable('first_touch_holds')) {
         await trx('first_touch_holds')
           .where({ call_log_id: callLogId })
@@ -1295,7 +1303,17 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
     }
   } catch (mintErr) {
     if (mintErr.emailReviewStateUnavailable) throw mintErr;
-    logger.warn(`[call-proc] fenced email card mint failed for ${maskSid(callSid)}: ${mintErr.message}`);
+    // EVERY mint failure fails the run (Codex #3084 r55): continuing
+    // without the card leaves a window where the new hold records with no
+    // live current-cycle card — if an older cycle has a RESOLVED email
+    // card, the ledger sweep can read that historical disposition as
+    // approval and release the fresh extraction before the end-of-run
+    // recovery ever files its card. Retryable, same path as the r44
+    // durable-state failures.
+    logger.error(`[call-proc] fenced email card mint failed for ${maskSid(callSid)}: ${mintErr.message} — failing the run (retryable)`);
+    const stateErr = new Error('email_review_state_unavailable');
+    stateErr.emailReviewStateUnavailable = true;
+    throw stateErr;
   }
 }
 
@@ -10696,6 +10714,7 @@ CallRecordingProcessor._test = {
   hasWorkableLeadSignal,
   voicemailCallbackAlertPlan,
   shouldHoldLeadEmailEnrollment,
+  mintEmailReviewCardsFenced,
   transcribeRecording,
   extractCallDataV2,
   CALL_EXTRACTION_ROUTE,

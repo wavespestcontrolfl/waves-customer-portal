@@ -21,6 +21,8 @@ jest.mock('../models/db', () => {
     whereNull: jest.fn(() => chain),
     whereNot: jest.fn(() => chain),
     first: jest.fn(() => (mockFirstError ? Promise.reject(mockFirstError) : Promise.resolve(mockFirstResult))),
+    forUpdate: jest.fn(() => chain),
+    select: jest.fn(() => chain),
     insert: jest.fn(() => { if (mockInsertError) throw mockInsertError; return chain; }),
     onConflict: jest.fn(() => chain),
     ignore: jest.fn(async () => 1),
@@ -44,7 +46,7 @@ jest.mock('../services/call-routing-gates', () => ({ buildTriageItem: (x) => x }
 const db = require('../models/db');
 const { _test } = require('../services/call-recording-processor');
 
-const { shouldHoldLeadEmailEnrollment } = _test;
+const { shouldHoldLeadEmailEnrollment, mintEmailReviewCardsFenced } = _test;
 
 beforeEach(() => {
   mockFirstResult = null;
@@ -96,5 +98,42 @@ describe('shouldHoldLeadEmailEnrollment', () => {
       emailReviewStateUnavailable: true,
     });
     expect(db._chain.insert).toHaveBeenCalled();
+  });
+});
+
+describe('mintEmailReviewCardsFenced (r55)', () => {
+  const CARD = { call_log_id: 'call-1', reason_code: 'email_unverified' };
+
+  test('takes the shared per-call advisory lock BEFORE the hold lookup', async () => {
+    // With no hold rows yet — the normal early-processing state — the
+    // FOR UPDATE locks nothing, and an unserialized mint would take
+    // call_log before triage_items while fanout/admin-triage writers
+    // hold cards and then update call_log: AB-BA deadlock. The advisory
+    // lock must be the transaction's first acquisition.
+    mockFirstResult = { id: 'call-1' }; // ownership check passes
+    await mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [CARD], callSid: 'CA1', invalidateClaims: false,
+    });
+    const advisoryCall = db.raw.mock.calls.find(
+      (c) => typeof c[0] === 'string' && c[0].includes('pg_advisory_xact_lock'),
+    );
+    expect(advisoryCall).toBeDefined();
+    expect(advisoryCall[1]).toEqual(['triage-call-review', 'call-1']);
+    const advisoryOrder = db.raw.mock.invocationCallOrder[
+      db.raw.mock.calls.findIndex((c) => typeof c[0] === 'string' && c[0].includes('pg_advisory_xact_lock'))
+    ];
+    expect(advisoryOrder).toBeLessThan(db._chain.forUpdate.mock.invocationCallOrder[0]);
+  });
+
+  test('ANY mint failure fails the run retryably — never warn-and-continue', async () => {
+    // Continuing without the card leaves the fresh hold with no live
+    // current-cycle card: a RESOLVED card from an older cycle reads as
+    // approval to the ledger sweep, releasing the unreviewed extraction
+    // before the end-of-run recovery files its card.
+    mockFirstResult = { id: 'call-1' };
+    mockInsertError = new Error('card insert down');
+    await expect(mintEmailReviewCardsFenced({
+      callLogId: 'call-1', procToken: 'tok', cards: [CARD], callSid: 'CA1', invalidateClaims: false,
+    })).rejects.toMatchObject({ emailReviewStateUnavailable: true });
   });
 });

@@ -754,6 +754,18 @@ async function propagateCustomerEmailChange({
     // never touched by the CASE.
     const zeroWorkMarker = "first_touch_holds.status = 'released' AND NOT first_touch_holds.held_drip AND NOT first_touch_holds.held_newsletter";
     const reviewedCallIds = [...new Set(reviewedCalls.map((r) => r.call_log_id).filter(Boolean))];
+    // Pre-merge target capture (Codex #3084 r55): when the pre-lock hold
+    // snapshot predates a raced release's insert, the pending row that
+    // release leaves behind (claimed → enrolled → DOI failed → re-pended)
+    // carries the ONLY record of the address its new_lead enrollment was
+    // created at. The retarget below rewrites pending/releasing rows to
+    // the corrected address, so the post-merge re-read can never recover
+    // that target and the final sweep leaves the enrollment mailing the
+    // rejected address. The ON CONFLICT DO NOTHING insert is what waits
+    // out the racing transaction's row lock (a plain FOR UPDATE cannot
+    // see an uncommitted insert); once it returns, the pre-merge state is
+    // lockable and readable, and only THEN is the retarget applied.
+    const racedMergeTargets = [];
     for (const callId of reviewedCallIds) {
       await conn('first_touch_holds')
         .insert({
@@ -769,20 +781,31 @@ async function propagateCustomerEmailChange({
           updated_at: now,
         })
         .onConflict('call_log_id')
-        .merge({
-          // Real pending/releasing rows RETARGET here too (Codex #3084
-          // r36): recordFirstTouchHold can insert the first real row
-          // after this transaction's retarget updates already found
-          // nothing — the conflict merge is the last correction write
-          // that can still see it, and preserving its extracted target
-          // would let a claimant (or the resolved-card sweep) send to
-          // the address the operator just rejected. Deny-lift and the
-          // ownerless releasing→pending flip mirror the retarget
-          // updates; updated_at stays untouched (never extend a
-          // possibly-dead claimant's stale window).
-          held_email: conn.raw(`CASE WHEN ${zeroWorkMarker} OR first_touch_holds.status IN ('pending', 'releasing') THEN excluded.held_email ELSE first_touch_holds.held_email END`),
-          released_at: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN excluded.released_at ELSE first_touch_holds.released_at END`),
-          corrected_at: conn.raw(`CASE WHEN ${zeroWorkMarker} OR first_touch_holds.status IN ('pending', 'releasing') THEN excluded.corrected_at ELSE first_touch_holds.corrected_at END`),
+        .ignore();
+      const [preMerge] = await conn('first_touch_holds')
+        .where({ call_log_id: callId })
+        .forUpdate()
+        .select('held_email', 'status');
+      if (preMerge && ['pending', 'releasing'].includes(preMerge.status)) {
+        const target = String(preMerge.held_email || '').trim().toLowerCase();
+        if (target && target !== newEmail.toLowerCase()) racedMergeTargets.push(target);
+      }
+      // Real pending/releasing rows RETARGET here too (Codex #3084
+      // r36): recordFirstTouchHold can insert the first real row
+      // after this transaction's retarget updates already found
+      // nothing — this is the last correction write that can still
+      // see it, and preserving its extracted target would let a
+      // claimant (or the resolved-card sweep) send to the address the
+      // operator just rejected. Deny-lift and the ownerless
+      // releasing→pending flip mirror the retarget updates;
+      // updated_at stays untouched (never extend a possibly-dead
+      // claimant's stale window).
+      await conn('first_touch_holds')
+        .where({ call_log_id: callId })
+        .update({
+          held_email: conn.raw(`CASE WHEN ${zeroWorkMarker} OR first_touch_holds.status IN ('pending', 'releasing') THEN ? ELSE first_touch_holds.held_email END`, [newEmail]),
+          released_at: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN ? ELSE first_touch_holds.released_at END`, [now]),
+          corrected_at: conn.raw(`CASE WHEN ${zeroWorkMarker} OR first_touch_holds.status IN ('pending', 'releasing') THEN ? ELSE first_touch_holds.corrected_at END`, [now]),
           status: conn.raw("CASE WHEN first_touch_holds.status = 'releasing' AND first_touch_holds.last_error = 'email_denied_await_correction' THEN 'pending' ELSE first_touch_holds.status END"),
           last_error: conn.raw("CASE WHEN first_touch_holds.status IN ('pending', 'releasing') AND first_touch_holds.last_error = 'email_denied_await_correction' THEN NULL ELSE first_touch_holds.last_error END"),
         });
@@ -821,7 +844,10 @@ async function propagateCustomerEmailChange({
         if (target && target !== newEmailLcFinal) lateReleaseTargets.push(target);
       }
     }
-    const finalSweepTargets = [...new Set([oldEmail, ...priorHoldTargets, ...lateReleaseTargets].filter(Boolean))];
+    // racedMergeTargets (r55): pre-merge pending/releasing targets the
+    // retarget above overwrote — same hold-lane evidence tier as the
+    // held targets read back here, recoverable ONLY before the merge.
+    const finalSweepTargets = [...new Set([oldEmail, ...priorHoldTargets, ...lateReleaseTargets, ...racedMergeTargets].filter(Boolean))];
     if (finalSweepTargets.length) {
       counts.automations += await conn('automation_enrollments')
         .where({ customer_id: customerId, status: 'active', template_key: 'new_lead' })
