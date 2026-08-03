@@ -2143,10 +2143,15 @@ function claimedCounts(text, patterns) {
  *
  * Deliberately narrow, because a false positive silently discards the
  * technician's reviewed copy — the exact failure this PR exists to fix:
- *  - only ONE distinct claim per subject is enforced. Several numbers are a
- *    breakdown ("two snap traps and six glue traps"), not a total, and
- *    summing them would be a guess.
- *  - a missing/non-integer structured value is unverifiable, not wrong.
+ *  - only ONE distinct ROSTER claim per subject is enforced. Two competing
+ *    totals are a breakdown ("two snap traps and six glue traps"), and
+ *    summing them would be a guess. Status SUBSETS are not competing totals
+ *    and are dropped before this test — counting them as rivals made the
+ *    guard bail on the commonest multi-count sentence there is ("we checked
+ *    8 traps and found activity at 2 traps"), letting a stale total through
+ *    (codex P1 round 11).
+ *  - a missing, blank, or non-integer structured value is unverifiable,
+ *    not wrong.
  */
 function countContradictions(text, values = {}) {
   const str = normalizeWordNumbers(text);
