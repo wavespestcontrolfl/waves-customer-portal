@@ -452,10 +452,17 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
     // Display copy keys off THIS field; `price` above keeps its historical
     // pre-fill semantics untouched. Absent = no provable per-application
     // charge, and clients keep legacy copy.
-    // Explicit MONTHLY provenance for recurring lines (mixed-unit labels):
-    // the engine's mo/monthly is the line's true normalized monthly, which
-    // genuinely monthly-billed plans display as their unit.
-    ...(kind === 'recurring' && moneyOrNull(line?.mo, line?.monthly) != null
+    // Explicit MONTHLY provenance ONLY for genuinely monthly-billed service
+    // keys (Codex #3173 r4): every per-application row also carries `mo` as
+    // a normalized list figure — stamping it would let a discount-suppressed
+    // pest row fall through to an undiscounted "$X/mo". The canonical key
+    // set is public-quote's (the same one that refuses per-app for them).
+    ...(kind === 'recurring' && moneyOrNull(line?.mo, line?.monthly) != null && (() => {
+      try {
+        const { MONTHLY_BILLED_SERVICE_KEYS } = require('./public-quote')._internals;
+        return MONTHLY_BILLED_SERVICE_KEYS.has(String(line?.service || '').trim());
+      } catch { return false; }
+    })()
       ? { monthlyPrice: moneyOrNull(line?.mo, line?.monthly) } : {}),
     ...(kind === 'recurring' ? (() => {
       try {
@@ -530,8 +537,15 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
   let parentRecurringDiscounted = false;
   try {
     const rec = estData?.result?.recurring || estData?.recurring || {};
+    // Manual discounts persist at result.manualDiscount /
+    // result.totals.manualDiscount / summary.manualDiscount (Codex #3173
+    // r4) — resolve them through the SAME normalizer the estimate page
+    // uses, plus the recurring-scoped legacy spots.
+    const { normalizeManualDiscountSummary } = require('./estimate-public');
+    const recManual = rec?.manualDiscount || null;
     parentRecurringDiscounted = Number(rec?.discount) > 0
-      || (rec?.manualDiscount && Number(rec.manualDiscount.value) > 0);
+      || !!normalizeManualDiscountSummary(estData)
+      || (recManual && (Number(recManual.value) > 0 || Number(recManual.amount) > 0));
   } catch { parentRecurringDiscounted = false; }
   const schedulableOneTimeList = oneTimeList.filter(isSchedulableOneTimeEstimateLine);
   const monthlyTotal = Number(estimate.monthly_total || 0);

@@ -765,6 +765,9 @@ describe('admin customers route helpers', () => {
     const [listLine] = scheduleLinesFromEstimate(listOnly, index);
     expect(listLine.perApplicationPrice).toBe(121);
     expect(listLine.price).toBe(121); // pre-fill semantics untouched
+    // Per-application rows carry `mo` only as a normalized list figure —
+    // never monthly provenance (codex r4).
+    expect(listLine.monthlyPrice).toBeUndefined();
 
     // Discounted row: priceAfterDiscount (per-treatment-after-discount) wins
     // over the list perTreatment AND over the list annual.
@@ -792,6 +795,8 @@ describe('admin customers route helpers', () => {
     };
     const [rodentLine] = scheduleLinesFromEstimate(monthlyBilled, index);
     expect(rodentLine.perApplicationPrice).toBeUndefined();
+    // ...but DOES carry explicit monthly provenance (its true billing unit).
+    expect(rodentLine.monthlyPrice).toBe(39);
     // Parent-level WaveGuard/manual discount with LIST-only rows (Codex
     // #3173 r3): provenance is REFUSED — the accepted price is discounted
     // and the rows can't prove the net figure.
@@ -810,6 +815,23 @@ describe('admin customers route helpers', () => {
     };
     const discountedLines = scheduleLinesFromEstimate(parentDiscounted, index);
     for (const l of discountedLines) expect(l.perApplicationPrice).toBeUndefined();
+    // Aggregate manual discount at result.manualDiscount (the persisted
+    // engine location, codex r4) with list-only rows: provenance refused.
+    const manualDiscounted = {
+      id: 'est-pa-5',
+      monthly_total: 90,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', amount: 780 },
+          recurring: { services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 180, visitsPerYear: 4, mo: 60 },
+          ] },
+        },
+      },
+    };
+    const manualLines = scheduleLinesFromEstimate(manualDiscounted, index);
+    for (const l of manualLines) expect(l.perApplicationPrice).toBeUndefined();
+
 
   });
 

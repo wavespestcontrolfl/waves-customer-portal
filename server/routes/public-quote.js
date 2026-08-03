@@ -1880,6 +1880,7 @@ module.exports._internals = {
   isPublicCommercialQuote,
   publicQuotePestLabel,
   perApplicationForLine,
+  MONTHLY_BILLED_SERVICE_KEYS,
   publicQuoteBedBugInput,
   estimateBlocksBookingHandoff,
   estimateBlocksSelfBookLink,
