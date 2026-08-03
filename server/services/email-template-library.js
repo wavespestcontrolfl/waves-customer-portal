@@ -99,9 +99,35 @@ function textFor(payload, key) {
   return String(value);
 }
 
+// Markdown links inside block prose: [label](https://…).
+//
+// Block content is escaped, so an authored <a> tag would render as literal
+// text — until now the ONLY way to put a link in a template was a cta block,
+// which renders as a full-width gold bar. That is right for the primary
+// action and much too heavy for "here's the background reading". This adds
+// the inline option without loosening escaping: the whole string is escaped
+// FIRST, then only this exact pattern is turned back into an anchor, and the
+// href still goes through safeUrl (so javascript:/data: collapse to '#').
+// Anchors carry dm-link so they stay legible on the dark card.
+//
+// The plain-text arm renders "label (url)" — a text-part reader needs the
+// destination, not a dangling label.
+const MD_LINK_RE = /\[([^\]\n]+)\]\((\S+?)\)/g;
+
+function linkifyEscaped(escaped) {
+  return escaped.replace(MD_LINK_RE, (whole, label, rawHref) => {
+    // The href was escaped along with everything else; undo the two entities
+    // that legitimately occur in a URL before validating it.
+    const href = safeUrl(rawHref.replace(/&amp;/g, '&').replace(/&#39;/g, "'"));
+    if (!href || href === '#') return whole;
+    return `<a class="dm-link" href="${escapeHtml(href)}" target="_blank" rel="noopener" style="color:#0A7EC2;text-decoration:underline;">${label}</a>`;
+  });
+}
+
 function renderInline(text, payload, { html = true } = {}) {
   const rendered = String(text || '').replace(VARIABLE_RE, (_, key) => textFor(payload, key));
-  return html ? escapeHtml(rendered) : rendered;
+  if (!html) return rendered.replace(MD_LINK_RE, (_w, label, href) => `${label} (${href})`);
+  return linkifyEscaped(escapeHtml(rendered));
 }
 
 function extractVariables(input, out = new Set()) {
