@@ -16567,19 +16567,19 @@ const PRODUCT_DESCRIPTIONS = {
 const TRACK_SAFETY_RULES = {
   st_augustine: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT in April (spring green-up) or fall transition — use Celsius WG",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   A_St_Aug_Sun: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT in April (spring green-up) or fall transition — use Celsius WG",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   B_St_Aug_Shade: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT in April (spring green-up) or fall transition — use Celsius WG",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],

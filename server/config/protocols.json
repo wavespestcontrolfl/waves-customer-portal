@@ -3,13 +3,13 @@
     "st_augustine": {
       "name": "St. Augustine Lawn Care Protocol",
       "notes": [
-        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. Use Celsius WG for hot-season broadleaf. Do not apply to St. Augustinegrass during spring green-up or the fall-to-winter transition.",
+        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. NOT in April on St. Augustine (still spring green-up) and not during the fall-to-winter transition; use Celsius WG instead.",
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
         "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
         "★ NEW v4: N RATE CONTROL — Explicit lb N/1,000 per visit in Notes. Annual target: Basic/Std 1.5 lb N, Enh/Prem 3.0 lb N.",
         "★ NEW v4: Soil-test branching — P index >80 skip 24-2-11, K >80 ppm skip K-Flow. Chinch IPM ≥20/sq ft threshold + MOA ro",
-        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. SpeedZone Apr weather-gated at 85°F.",
+        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. April broadleaf is Celsius WG — SpeedZone barred during spring green-up.",
         "★ NEW v4: Aug drive-by scout + Dec wellness touchpoint for Basic/Std. Thatch measurement V3+V10. Irrigation VWC audit V2",
         "★ ST. AUGUSTINE IS ONE TRACK: Do not split the protocol into full-sun vs shade programs. Use site observations only as condition checks for stress, disease, irrigation, and herbicide safety."
       ],
@@ -65,9 +65,9 @@
         {
           "visit": 4,
           "month": "Apr",
-          "primary": "Acelepryn Xtra liquid preventive ($6.78)\n★ SpeedZone Southern + NIS WEATHER-GATED ($5.95)\nK-Flow 0-0-25 liquid K ($2.18)",
-          "secondary": "Primo Maxx PGR Premium only ($1.91)\nDismiss if sedge ($4.36)\n★ IF forecast >85°F → Celsius WG instead of SpeedZone\n★ VERIFY turf is past spring green-up — label prohibits SpeedZone on St. Augustine during green-up",
-          "material_cost": "36.13",
+          "primary": "Acelepryn Xtra liquid preventive ($6.78)\n★ Celsius WG + NIS broadleaf ($3.84) — SpeedZone is BARRED in April (green-up)\nK-Flow 0-0-25 liquid K ($2.18)",
+          "secondary": "Primo Maxx PGR Premium only ($1.91)\nDismiss if sedge ($4.36)",
+          "material_cost": "34.02",
           "labor_cost": "26.96",
           "tiers": {
             "bronze": false,
@@ -75,7 +75,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "CRITICAL: Acelepryn before chinch season. N rate: 0 lb N. ★ SpeedZone NOW WEATHER-GATED at 85°F — Celsius WG fallback.",
+          "notes": "CRITICAL: Acelepryn before chinch season. N rate: 0 lb N. ★ NO SpeedZone on St. Augustine in April — still spring green-up, and the label prohibits application during green-up (owner-confirmed 2026-08-02). Celsius WG is the April broadleaf. ⚠ Counts against the Celsius 3-apps/year cap.",
           "conditional_cost": "0.55"
         },
         {
@@ -210,7 +210,7 @@
       "site_condition_rules": {
         "default": "standard_st_augustine",
         "stress_check": "If turf is heat, drought, scalp, or disease stressed, hold PGR and hot herbicide until manager review.",
-        "herbicide_heat_gate": "SpeedZone Southern is weather-gated to 50-85°F; use Celsius WG fallback when heat risk is high. Do not apply to St. Augustinegrass during spring green-up or the fall-to-winter transition.",
+        "herbicide_heat_gate": "SpeedZone Southern is weather-gated to 50-85°F; use Celsius WG fallback when heat risk is high. Do not apply to St. Augustinegrass in April (spring green-up) or during the fall-to-winter transition.",
         "disease_check": "Pull-test and inspect roots when thinning or patch symptoms are present; choose fungicide by diagnosis, not by sun/shade label.",
         "irrigation_vwc_threshold": "Use VWC/audit notes to adjust irrigation recommendations; do not create a separate St. Augustine shade program."
       }

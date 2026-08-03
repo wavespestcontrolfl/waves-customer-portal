@@ -269,6 +269,26 @@ describe("TRACK_SAFETY_RULES — SpeedZone heat limit", () => {
     expect(missingFloor).toEqual([]);
   });
 
+  it("names April specifically on St. Augustine tracks", () => {
+    // Owner confirmed 2026-08-02 that April is still spring green-up here, so
+    // the rule is concrete rather than a verify prompt: no SpeedZone in April,
+    // Celsius WG instead. Bermuda and zoysia are unaffected — the green-up
+    // prohibition is St. Augustine-specific on the label.
+    const sa = rules.filter(([t]) => /st_aug|st_augustine/i.test(t));
+    sa.forEach(([track, list]) => {
+      const sz = list.find((r) => /speedzone/i.test(r));
+      expect(`${track}: ${sz}`).toMatch(/April/);
+      expect(`${track}: ${sz}`).toMatch(/Celsius/i);
+    });
+    // Non-St.-Augustine tracks must NOT pick up the April bar.
+    rules
+      .filter(([t]) => !/st_aug|st_augustine/i.test(t))
+      .forEach(([track, list]) => {
+        const sz = list.find((r) => /speedzone/i.test(r));
+        expect(`${track}: ${sz}`).not.toMatch(/April/);
+      });
+  });
+
   it("carries the St. Augustine seasonal prohibition on St. Augustine tracks", () => {
     // Spring green-up and the fall transition are St. Augustine-specific on
     // the label, so they belong on those tracks and not on bermuda/zoysia.
