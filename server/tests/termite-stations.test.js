@@ -1058,3 +1058,61 @@ test('moving or retiring an existing station never rewrites its ownership', asyn
   // A renter relocating a station they BOUGHT keeps owning it.
   expect(state.stations.find((row) => row.id === 'st-1').owned_by).toBe('customer');
 });
+
+// ---------------------------------------------------------------------------
+// stationMapSatelliteSignaturePart — the cache key must invalidate when the
+// satellite basemap becomes available, because availability gates whether the
+// placement section prints at all (codex P2 #3176 r17): a PDF cached while
+// the provider was off must re-render once it comes on.
+// ---------------------------------------------------------------------------
+describe('stationMapSatelliteSignaturePart', () => {
+  const { stationMapSatelliteSignaturePart } = require('../services/termite-stations');
+  const SAT_VARS = [
+    'SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED',
+    'SERVICE_REPORT_SATELLITE_TREATMENT_MAP_V1',
+    'service_report_satellite_treatment_map_v1',
+    'SERVICE_REPORT_BASEMAP_PROVIDER',
+    'GOOGLE_STATIC_MAPS_API_KEY',
+    'GOOGLE_MAPS_API_KEY',
+  ];
+  let snap;
+  beforeEach(() => {
+    snap = Object.fromEntries(SAT_VARS.map((v) => [v, process.env[v]]));
+    for (const v of SAT_VARS) delete process.env[v];
+  });
+  afterEach(() => {
+    for (const v of SAT_VARS) {
+      if (snap[v] === undefined) delete process.env[v];
+      else process.env[v] = snap[v];
+    }
+  });
+
+  test('s0 with no provider configured — the render gate would refuse, so the key says so', () => {
+    expect(stationMapSatelliteSignaturePart()).toBe('s0');
+  });
+
+  test('s0 while the satellite gate is off, even with a keyed provider', () => {
+    process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED = 'false';
+    process.env.GOOGLE_STATIC_MAPS_API_KEY = 'k';
+    expect(stationMapSatelliteSignaturePart()).toBe('s0');
+  });
+
+  test('adding the Google key flips the component — the map-less cached PDF must re-render', () => {
+    const before = stationMapSatelliteSignaturePart();
+    process.env.GOOGLE_STATIC_MAPS_API_KEY = 'k';
+    const after = stationMapSatelliteSignaturePart();
+    expect(before).toBe('s0');
+    expect(after).toBe('s1google_maps');
+    expect(after).not.toBe(before);
+  });
+
+  test('an explicitly requested google provider WITHOUT its key stays s0 — getLiveMapConfig would return null', () => {
+    process.env.SERVICE_REPORT_BASEMAP_PROVIDER = 'google';
+    expect(stationMapSatelliteSignaturePart()).toBe('s0');
+  });
+
+  test('mock provider stays s0 — its canDisplayLive is false, so the render gate refuses it too', () => {
+    process.env.SERVICE_REPORT_BASEMAP_PROVIDER = 'mock';
+    expect(stationMapSatelliteSignaturePart()).toBe('s0');
+  });
+});

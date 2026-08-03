@@ -830,6 +830,35 @@ function buildStationMapCurrentContext({
 // their existing keys (no mass cache bust). Fail-soft: a lookup error must
 // never block PDF serving.
 // knex is REQUIRED — this module has no module-level db binding.
+
+// The satellite-availability component of the station-map cache key.
+//
+// The placement section renders ONLY when the live basemap resolves
+// (buildStationMapReportContext returns available:false otherwise), so
+// availability is part of what the document prints: turning the provider on
+// later must invalidate the map-less cached PDF (codex P2 r17). Mirrors the
+// render gate's inputs — the satellite feature gate, a provider with live
+// capability, and (for Google) the API key whose absence makes
+// getLiveMapConfig return null (providers/google-maps-provider.js:28).
+// Coordinates and zoom, the other live-config inputs, are hashed by the
+// caller. 's0' = the section cannot render; 's1<provider>' = it can, keyed
+// by provider so a provider swap also invalidates.
+function stationMapSatelliteSignaturePart() {
+  try {
+    const { isSatelliteTreatmentMapEnabled, getBasemapProvider } = require('./maps/basemap-provider');
+    const provider = isSatelliteTreatmentMapEnabled() ? getBasemapProvider() : null;
+    if (provider?.capabilities?.canDisplayLive) {
+      const keyed = provider.key === 'google_maps'
+        ? !!(process.env.GOOGLE_STATIC_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY)
+        : true;
+      if (keyed) return `s1${provider.key}`;
+    }
+    return 's0';
+  } catch {
+    return 's0';
+  }
+}
+
 async function stationMapPdfSignature(service, knex) {
   try {
     // Gate state is part of the key: flipping SERVICE_REPORT_STATION_MAP_ENABLED
@@ -928,7 +957,7 @@ async function stationMapPdfSignature(service, knex) {
     // rounding here would leave a visibly stale PDF looking current.
     const centerPart = lat != null && lng != null ? `g${lat},${lng}` : '';
     const zoomPart = geom ? `z${geom.zoom ?? 20}v${geom.version ?? 0}` : '';
-    return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}${checkPart}${centerPart}${zoomPart}`;
+    return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}${checkPart}${centerPart}${zoomPart}${stationMapSatelliteSignaturePart()}`;
   } catch {
     return '';
   }
@@ -936,6 +965,7 @@ async function stationMapPdfSignature(service, knex) {
 
 module.exports = {
   stationMapPdfSignature,
+  stationMapSatelliteSignaturePart,
   STATION_STATUSES,
   STATION_OWNERS,
   STATION_PROGRAMS,

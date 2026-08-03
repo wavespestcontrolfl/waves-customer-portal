@@ -122,3 +122,59 @@ describe('portalUrl(path)', () => {
     expect(portalUrl('/pay/tok')).toBe('https://portal.wavespestcontrol.com/pay/tok');
   });
 });
+
+describe('configuredPublicPortalOrigin()', () => {
+   
+  const { configuredPublicPortalOrigin } = require('../utils/portal-url');
+  const ALL_VARS = [...VARS, 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT'];
+  let envBefore;
+
+  beforeEach(() => {
+    envBefore = Object.fromEntries(ALL_VARS.map((v) => [v, process.env[v]]));
+    for (const v of ALL_VARS) delete process.env[v];
+  });
+
+  afterEach(() => {
+    for (const k of ALL_VARS) {
+      if (envBefore[k] === undefined) delete process.env[k];
+      else process.env[k] = envBefore[k];
+    }
+  });
+
+  test('returns the explicit origin when PUBLIC_PORTAL_URL is set', () => {
+    process.env.PUBLIC_PORTAL_URL = 'https://canonical.example.com/';
+    expect(configuredPublicPortalOrigin()).toBe('https://canonical.example.com');
+  });
+
+  test('never trusts CLIENT_URL — on prod it is the raw Railway hostname', () => {
+    process.env.CLIENT_URL = 'https://waves-portal-production.up.railway.app';
+    expect(configuredPublicPortalOrigin()).toBe('');
+  });
+
+  test('CLIENT_URL-only PRODUCTION falls back to the canonical origin — permanent PDFs must never embed the Railway host (codex P2 #3176 r17)', () => {
+    process.env.CLIENT_URL = 'https://waves-portal-production.up.railway.app';
+    process.env.RAILWAY_ENVIRONMENT_NAME = 'production';
+    expect(configuredPublicPortalOrigin()).toBe('https://portal.wavespestcontrol.com');
+  });
+
+  test('legacy RAILWAY_ENVIRONMENT var also identifies production', () => {
+    process.env.RAILWAY_ENVIRONMENT = 'Production';
+    expect(configuredPublicPortalOrigin()).toBe('https://portal.wavespestcontrol.com');
+  });
+
+  test('a PREVIEW environment keeps the empty origin — its tokens resolve only on the preview host (r3)', () => {
+    process.env.CLIENT_URL = 'https://waves-portal-pr-3176.up.railway.app';
+    process.env.RAILWAY_ENVIRONMENT_NAME = 'waves-customer-portal-pr-3176';
+    expect(configuredPublicPortalOrigin()).toBe('');
+  });
+
+  test('local dev (no Railway vars) keeps the empty origin', () => {
+    expect(configuredPublicPortalOrigin()).toBe('');
+  });
+
+  test('an explicit origin wins over the environment name', () => {
+    process.env.PUBLIC_PORTAL_URL = 'https://staging.example.com';
+    process.env.RAILWAY_ENVIRONMENT_NAME = 'production';
+    expect(configuredPublicPortalOrigin()).toBe('https://staging.example.com');
+  });
+});

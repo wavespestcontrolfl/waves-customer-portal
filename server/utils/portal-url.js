@@ -83,7 +83,20 @@ function configuredPublicPortalOrigin() {
   const explicit = process.env.PUBLIC_PORTAL_URL
     || process.env.PORTAL_URL
     || process.env.PORTAL_DOMAIN;
-  return explicit ? normalize(explicit) : '';
+  if (explicit) return normalize(explicit);
+  // Production's only portal var today is CLIENT_URL — the raw Railway
+  // hostname (docs/email-deliverability-audit-2026-06-01.md) — so returning
+  // '' here sent the document to its renderer-origin fallback, which in the
+  // PDF pipeline is exactly that Railway host: permanent PDFs embedded the
+  // infrastructure URL (codex P2 r17, tightening r12). The environment NAME
+  // separates the two cases r12 conflated: only the production environment
+  // takes the canonical default, while a preview keeps '' — its tokens
+  // resolve solely on the preview host, and handing it the production
+  // origin would bake links that cannot resolve (the r3 finding).
+  const envName = String(process.env.RAILWAY_ENVIRONMENT_NAME
+    || process.env.RAILWAY_ENVIRONMENT || '').toLowerCase();
+  if (envName === 'production') return PRODUCTION_DEFAULT;
+  return '';
 }
 
 module.exports = { publicPortalUrl, portalUrl, configuredPublicPortalOrigin };
