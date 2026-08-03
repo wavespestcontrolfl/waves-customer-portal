@@ -334,7 +334,14 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
   try {
     await db.transaction(async (trx) => {
       const claimed = await trx('inspection_credit_offers')
-        .where({ id: offerId, status: 'offered' })
+        .where({ id: offerId })
+        // 'expired' is provisional, never money-terminal (pre-push P0):
+        // the sweep can expire an offer in a race with a booking whose
+        // event commits between the evidence check and the expire UPDATE.
+        // The ordering guard below is the real arbiter — a booking made
+        // inside the window reclaims the offer. 'redeemed' plus the unique
+        // ledger id remains the only money-terminal state.
+        .whereIn('status', ['offered', 'expired'])
         // Ordering, re-validated under the claim: promise BEFORE booking,
         // booking BEFORE expiry. Redemption is judged by when the customer
         // booked, never by when this code happens to run.
@@ -413,10 +420,27 @@ async function redeemInspectionCreditForBooking({
     logger.warn(`[inspection-credit] booking lookup failed for ${scheduledServiceId}: ${err.message}`);
     return { redeemed: 0, reason: 'booking_lookup_failed' };
   }
+  // The booking EVENT is the authoritative booking moment (pre-push P0) —
+  // the same evidence standard the sweep judges by. A graduated hold's
+  // scheduled_services.created_at is the RESERVATION instant, which can
+  // predate the promise even though the customer actually BOOKED (accepted)
+  // after it; judging by the row time would find no offer and let the
+  // invoice deliver unreduced.
+  try {
+    const evt = await db('inspection_credit_booking_events')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('created_at');
+    if (evt?.created_at) bookedAt = new Date(evt.created_at);
+  } catch (evtErr) {
+    logger.warn(`[inspection-credit] booking event lookup failed for ${scheduledServiceId}: ${evtErr.message}`);
+  }
 
   try {
     const open = await db('inspection_credit_offers')
-      .where({ customer_id: customerId, status: 'offered' })
+      .where({ customer_id: customerId })
+      // 'expired' included on purpose — provisional, and the time-window
+      // guards below (re-validated under the claim) are the real arbiter.
+      .whereIn('status', ['offered', 'expired'])
       // Promised before this booking, still live when it was made.
       .where('created_at', '<=', bookedAt)
       .where('expires_at', '>=', bookedAt)
@@ -628,6 +652,42 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       } catch (err) {
         logger.error(`[inspection-credit] sweep failed for offer ${offer.id}: ${err.message}`);
       }
+    }
+
+    // Expiry-race rescue (pre-push P0): a booking transaction can commit
+    // its event between the evidence check above and the expire UPDATE, so
+    // the offer lands 'expired' holding a qualifying booking nobody scans
+    // again. Targeted JOIN (same bounded-working-set posture as the
+    // reversal query): only expired, never-minted offers with an in-window
+    // live proven booking; the claim's ordering guard re-validates.
+    try {
+      const raceExpired = await db('inspection_credit_booking_events as e')
+        .join('inspection_credit_offers as o', 'o.customer_id', 'e.customer_id')
+        .join('scheduled_services as s', 's.id', 'e.scheduled_service_id')
+        .where('o.status', 'expired')
+        .whereNull('o.credit_ledger_id')
+        .whereRaw('e.created_at >= o.created_at')
+        .whereRaw('e.created_at <= o.expires_at')
+        .whereRaw('e.scheduled_service_id IS DISTINCT FROM o.source_scheduled_service_id')
+        .whereNotIn('s.status', NON_LIVE_APPOINTMENT_STATUSES)
+        .limit(limit)
+        .select('o.id as offer_id', 'o.customer_id as customer_id', 'o.amount as amount',
+          'e.scheduled_service_id as booking_id', 'e.created_at as booked_at');
+      for (const row of raceExpired) {
+        if (!row.offer_id || !row.booking_id) continue;
+        const ok = await redeemSpecificOffer({
+          offerId: row.offer_id,
+          customerId: row.customer_id,
+          amount: row.amount,
+          bookingId: row.booking_id,
+          bookingCreatedAt: new Date(row.booked_at),
+          createdBy: 'system:inspection_credit_sweep_expiry_rescue',
+          now,
+        });
+        if (ok) redeemed += 1;
+      }
+    } catch (rescueErr) {
+      logger.error(`[inspection-credit] expiry rescue failed: ${rescueErr.message}`);
     }
 
     if (redeemed || expired || reversed) {

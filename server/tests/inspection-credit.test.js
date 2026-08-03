@@ -34,7 +34,7 @@ jest.mock('../models/db', () => {
   const makeChain = (table) => {
     const chain = {};
     for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning']) {
-      chain[m] = jest.fn(() => { mockChainCalls.push(m); return chain; });
+      chain[m] = jest.fn((...args) => { mockChainCalls.push({ m, args }); return chain; });
     }
     // select()/the builder itself resolves to the open-offer list
     // Table-aware: a scheduled_services lookup is a BOOKING probe, not an
@@ -212,6 +212,26 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ redeemed: 0, amount: 0 });
   });
+
+  it('a graduated hold redeems by its BOOKING moment, never the reservation instant', async () => {
+    // Hold reserved 08-01 (BEFORE the promise existed); accept graduated it
+    // 08-10. The row's created_at is the reservation — judging by it would
+    // find no offer and the invoice would deliver unreduced. The booking
+    // EVENT (written at graduation) carries the real moment.
+    mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-01'), status: 'confirmed' }];
+    mockAlternates = [{ created_at: new Date('2026-08-10') }];
+    mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ redeemed: 1, amount: 75 });
+    // The ordering guard compared against the EVENT time, not the row time.
+    const orderingWheres = mockChainCalls.filter((c) => c.m === 'where'
+      && c.args[0] === 'created_at' && c.args[1] === '<=');
+    expect(orderingWheres.length).toBeGreaterThan(0);
+    const eventMs = new Date('2026-08-10').getTime();
+    const holdMs = new Date('2026-08-01').getTime();
+    expect(orderingWheres.every((c) => new Date(c.args[2]).getTime() === eventMs)).toBe(true);
+    expect(orderingWheres.some((c) => new Date(c.args[2]).getTime() === holdMs)).toBe(false);
+  });
 });
 
 describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
@@ -229,7 +249,7 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
     mockOffers = [];
     await sweepInspectionCreditRedemptions();
     // The recovery query must filter on the persisted opt-in marker.
-    const raw = mockChainCalls.filter((c) => c === 'whereRaw');
+    const raw = mockChainCalls.filter((c) => c.m === 'whereRaw');
     expect(raw.length).toBeGreaterThan(0);
   });
 
@@ -253,6 +273,23 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
     const none = await sweepInspectionCreditRedemptions();
     expect(none.redeemed).toBe(0);
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
+  it('rescues an offer the expiry race closed — expired is provisional, never money-terminal', async () => {
+    // A booking's event can commit between the sweep's evidence check and
+    // its expire UPDATE; the offer lands 'expired' holding a qualifying
+    // booking. The rescue join finds it and the claim (which accepts
+    // 'expired' precisely because of this race) re-validates the ordering.
+    mockOffers = [];
+    mockAlternates = [{
+      offer_id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      booking_id: 'svc-9', booked_at: new Date('2026-08-10'),
+    }];
+    const res = await sweepInspectionCreditRedemptions();
+    expect(res.redeemed).toBe(1);
+    expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
+    const [args] = mockPostCreditMovement.mock.calls[0];
+    expect(args).toMatchObject({ customerId: 'cust-1', delta: 75, source: 'inspection_credit' });
   });
 });
 
