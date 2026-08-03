@@ -57,6 +57,20 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     logger.info(`[${routeTag}] Armed reminders for confirmed outbound-review booking ${svc.id}`);
   } catch (e) { logger.error(`[${routeTag}] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
 
+  // 1a. Inspection-credit booking evidence — written HERE, not at the AI
+  // booking insert (pre-push P0): a pending outbound-review row is not a
+  // closed deal until this office confirmation, and the hourly sweep would
+  // otherwise treat the event plus the live 'pending' status as proof and
+  // mint $75 for an appointment the customer never confirmed. Idempotent
+  // (unique per booking); never blocks the confirmation.
+  try {
+    await require('./inspection-credit').markBookingForInspectionCredit(db, {
+      customerId: svc.customer_id,
+      scheduledServiceId: svc.id,
+      source: 'phone_call',
+    });
+  } catch (e) { logger.warn(`[${routeTag}] inspection-credit booking evidence failed for ${svc.id}: ${e.message}`); }
+
   // 2. Close the originating call lead. The insert path deliberately skipped
   // conversion for the pending review row; it stashed the lead's id on the
   // outbound_booking_review triage card, because the booking can REUSE an

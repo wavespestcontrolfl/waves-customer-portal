@@ -465,6 +465,19 @@ describe('booking + redemption wiring — source contracts (routes too large to 
     expect(source).toContain("await require('./inspection-credit').markBookingForInspectionCredit(client, {");
   });
 
+  it('outbound-review phone bookings earn evidence at CONFIRMATION, never at AI insert (pre-push P0)', () => {
+    // A pending outbound-review row is not a closed deal until the office
+    // confirms — evidence at insert would let the sweep mint $75 for an
+    // appointment the customer never confirmed.
+    const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const guardAt = callProc.indexOf('if (!outboundReviewBooking) {');
+    const markerAt = callProc.indexOf("markBookingForInspectionCredit(trx, {");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(markerAt).toBeGreaterThan(guardAt); // marker sits inside the guard
+    const confirmHook = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
+    expect(confirmHook).toContain("markBookingForInspectionCredit(db, {");
+  });
+
   it('redemption runs BEFORE the invoice mints/delivers on both conversion paths (pre-push P0)', () => {
     // The hourly sweep alone let the customer receive — or pay — the full
     // invoice before the promised $75 existed. Global-pool conversions
