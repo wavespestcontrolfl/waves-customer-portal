@@ -76,7 +76,10 @@ beforeEach(() => {
   mockOffers = [];
   mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date() }];
   mockClaimResult = 1;
-  mockBookings = [];
+  // Default: the booking being redeemed against exists and is live. The
+  // service reads its authoritative created_at/status rather than
+  // trusting the caller.
+  mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-10'), status: 'confirmed' }];
   mockAlternates = [];
   mockUpdates.length = 0;
   mockChainCalls.length = 0;
@@ -161,8 +164,9 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     // 'rescheduled' deliberately absent: the customer reschedule endpoint
     // stamps it while the visit simply MOVES — they are still booked.
     for (const status of ['cancelled', 'no_show', 'skipped']) {
+      mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-10'), status }];
       const res = await redeemInspectionCreditForBooking({
-        customerId: 'cust-1', scheduledServiceId: 'svc-2', bookingStatus: status,
+        customerId: 'cust-1', scheduledServiceId: 'svc-2',
       });
       expect(res).toEqual({ redeemed: 0, reason: 'booking_not_live' });
     }

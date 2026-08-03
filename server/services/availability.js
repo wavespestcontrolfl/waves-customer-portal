@@ -458,6 +458,15 @@ class AvailabilityEngine {
         zone: zone?.zone_name?.split('/')[0]?.trim()?.toLowerCase() || null,
       }).returning('*');
 
+      // Inspection credit: this is a REAL customer booking (AI assistant /
+      // confirmed call path), so record durable evidence in-transaction —
+      // the hourly sweep mints from it (Codex #3178 r6 P0).
+      await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId,
+        scheduledServiceId: scheduledRow.id,
+        source: 'availability_confirm',
+      });
+
       return { booking: bookingRow, scheduled: scheduledRow };
     });
 

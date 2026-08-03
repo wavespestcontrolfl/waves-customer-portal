@@ -8531,6 +8531,14 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
+                  // Inspection credit: a booked phone sale is a REAL
+                  // customer booking — durable evidence, same transaction
+                  // (Codex #3178 r6 P0). The hourly sweep mints from it.
+                  await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                    customerId: created.customer_id,
+                    scheduledServiceId: created.id,
+                    source: 'phone_call',
+                  });
                   if (outboundReviewBooking) {
                     // A pending outbound-callback booking is NOT a closed deal
                     // yet — the office confirms it first. Do NOT convert the lead

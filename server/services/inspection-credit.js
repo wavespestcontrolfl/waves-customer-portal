@@ -389,7 +389,24 @@ async function redeemInspectionCreditForBooking({
   if (bookingStatus && NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingStatus).toLowerCase())) {
     return { redeemed: 0, reason: 'booking_not_live' };
   }
-  const bookedAt = bookingCreatedAt ? new Date(bookingCreatedAt) : now;
+  // The booking's OWN created_at and live status, read from the row
+  // (Codex #3178 r6 P0). Defaulting to `now` let an offer created AFTER
+  // the appointment — but before this post-commit path ran — slip past the
+  // ordering guard and mint a credit the booking never earned.
+  let bookedAt = bookingCreatedAt ? new Date(bookingCreatedAt) : null;
+  try {
+    const row = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('created_at', 'status');
+    if (!row) return { redeemed: 0, reason: 'booking_not_found' };
+    if (NON_LIVE_APPOINTMENT_STATUSES.includes(String(row.status || '').toLowerCase())) {
+      return { redeemed: 0, reason: 'booking_not_live' };
+    }
+    bookedAt = row.created_at ? new Date(row.created_at) : (bookedAt || now);
+  } catch (err) {
+    logger.warn(`[inspection-credit] booking lookup failed for ${scheduledServiceId}: ${err.message}`);
+    return { redeemed: 0, reason: 'booking_lookup_failed' };
+  }
 
   try {
     const open = await db('inspection_credit_offers')

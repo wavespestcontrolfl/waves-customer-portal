@@ -2960,6 +2960,16 @@ router.put('/:serviceId/status', async (req, res, next) => {
               // (Codex #3153 r16 P1) — never a silent successful cancel.
               await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: target.id, outcome: apptFeeOutcome });
             }
+            // Inspection credit: reverse IMMEDIATELY on a cancelled visit
+            // (Codex #3178 r6 P0). The hourly sweep is recovery only — an
+            // hour of spendable unearned credit is long enough for it to be
+            // consumed, after which reversal can only become a write-off.
+            try {
+              await require('../services/inspection-credit')
+                .reverseInspectionCreditForBooking({ scheduledServiceId: target.id });
+            } catch (e) {
+              logger.error(`[dispatch] inspection credit reversal failed for ${target.id}: ${e.message}`);
+            }
           } catch (e) {
             // Thrown fee step = unresolved lane ownership (Codex #3153 r22 P1).
             logger.error(`[admin-dispatch] series cancellation card-hold handling failed (target ${target.id}): ${e.message}`);
