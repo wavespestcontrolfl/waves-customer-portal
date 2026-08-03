@@ -640,6 +640,57 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/Empty the bird bath weekly/);
   });
 
+  it('does not republish a suppressed lawn caption through alt text', () => {
+    const rawBlurb = 'Possible take-all root rot with severe decline visible';
+    const data = {
+      ...BASE_DATA,
+      reportV2: { photoSummary: 'Turf is dense across the yard.' },
+      photos: [{ id: 'lawn-9', url: 'https://cdn.example.com/lawn.jpg', caption: rawBlurb }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const img = container.querySelector('img[src="https://cdn.example.com/lawn.jpg"]');
+    expect(img).toBeTruthy();
+    expect(img.getAttribute('alt')).not.toContain('root rot');
+    expect(container.innerHTML).not.toContain(rawBlurb);
+  });
+
+  it('marks a target-derived pest card as not observed this visit', () => {
+    const data = {
+      ...BASE_DATA,
+      pestReportV2: { bugFiles: [
+        { pestKey: 'ghost_ant', suspectLabel: 'Ghost ant', confirmedByTech: false, whyItMatters: 'Common in this area.' },
+        { pestKey: 'german_roach', suspectLabel: 'German roach', confirmedByTech: true, whereSeen: 'the pantry', whyItMatters: 'Tied to moisture.' },
+      ] },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/Ghost ant \(covered by today.s treatment/);
+    expect(container.textContent).toMatch(/German roach:/);
+    expect(container.textContent).not.toMatch(/German roach \(covered/);
+  });
+
+  it('carries the Waves-side next-visit commitment', () => {
+    const data = { ...BASE_DATA, reportV2: { snapshot: { wavesNext: 'We will recheck the shaded areas at the next visit.' } } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/We will recheck the shaded areas/);
+  });
+
+  it('emits the interactive report URL as a real link', () => {
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    const link = container.querySelector(`a[href="${window.location.origin}/report/tok123"]`);
+    expect(link).toBeTruthy();
+  });
+
+  it('labels the station status colors', () => {
+    const data = {
+      ...BASE_DATA,
+      stationMap: { available: true, program: 'rodent', stations: [{ id: 's1', number: 1, cx: 0.3, cy: 0.4, status: 'activity' }], summary: { total: 1, activity: 1 } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/Bait consumption observed/);
+    expect(container.textContent).toMatch(/Serviced this visit/);
+    expect(container.textContent).toMatch(/Not accessible/);
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();

@@ -52,6 +52,12 @@ const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-ser
 // Mirrors STATION_CARD_PROGRAM_META in StationMapCard: "activity" means bait
 // consumption on a bait program and a recorded capture on a trapping program —
 // a generic word would misstate the outcome in the permanent record.
+const STATION_ACTIVITY_LEGEND = {
+  termite: 'Termite activity observed',
+  rodent: 'Bait consumption observed',
+  trapping: 'Capture recorded',
+};
+
 const STATION_ACTIVITY_SUMMARY = {
   termite: 'with termite activity',
   rodent: 'with bait consumption',
@@ -186,9 +192,9 @@ function Label({ children }) {
 function InfoRow({ label, children }) {
   if (children == null || children === '') return null;
   return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '1.5px 0' }}>
+    <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', padding: '1.5px 0', minWidth: 0 }}>
       <Label>{label}</Label>
-      <span style={{ color: INK, fontSize: 11.5, lineHeight: 1.35 }}>{children}</span>
+      <span style={{ color: INK, fontSize: 11.5, lineHeight: 1.35, minWidth: 0, overflowWrap: 'anywhere' }}>{children}</span>
     </div>
   );
 }
@@ -390,6 +396,10 @@ export default function ServiceReportDocument({ data, token }) {
     .filter((insight) => insight && (insight.headline || insight.whatWeSaw));
   const v2Diagnosis = (Array.isArray(v2?.diagnosis) ? v2.diagnosis : [])
     .filter((row) => row && row.customerExplanation);
+  // buildBugFilesContext sets confirmedByTech:false for cards that exist only
+  // because a product LISTS that pest as a target — no sighting was recorded
+  // (premium-experience.js:540). Printing those plain under "What we found"
+  // turns a coverage target into a confirmed find in the permanent record.
   const pestBugFiles = (Array.isArray(pestV2?.bugFiles) ? pestV2.bugFiles : [])
     .filter((bug) => bug && (bug.suspectLabel || bug.whatWeDid));
   // The principal SPATIAL result for recurring pest/mosquito V2 visits —
@@ -447,6 +457,10 @@ export default function ServiceReportDocument({ data, token }) {
   // required actions (e.g. correcting irrigation) from the artifact.
   pushRec(v2?.snapshot?.customerAction);
   pushRec(v2?.followUp?.customerAction);
+  // wavesNext is what WAVES will do next (future tense, never the past-tense
+  // wavesAction) — a commitment, so it belongs in the permanent record.
+  pushRec(v2?.snapshot?.wavesNext
+    || (Array.isArray(v2?.insights) ? v2.insights : []).map((i) => i?.nextVisitPlan).find(Boolean));
   (Array.isArray(v2?.insights) ? v2.insights : []).forEach((insight) => pushRec(insight?.customerAction));
   pushRec(v2?.mowing?.recommendation);
 
@@ -600,7 +614,9 @@ export default function ServiceReportDocument({ data, token }) {
 
         {/* Info grid */}
         <div className="doc-keep" style={{ display: 'grid', gridTemplateColumns: '1.2fr 1.1fr 0.9fr', gap: '4px 22px', marginTop: 10 }}>
-          <div>
+          {/* minWidth:0 on each column: grid otherwise honours a long unbroken
+              email's min-content width and squeezes the other two columns. */}
+          <div style={{ minWidth: 0 }}>
             <SectionHeader>Customer</SectionHeader>
             <InfoRow label="Name">{data.customerName}</InfoRow>
             <InfoRow label="Address">{data.serviceAddress || data.propertyAddress}</InfoRow>
@@ -712,7 +728,7 @@ export default function ServiceReportDocument({ data, token }) {
             ))}
             {pestBugFiles.map((bug, i) => (
               <Bullet key={bug.pestKey || i}>
-                <strong>{bug.suspectLabel}{bug.suspectLabel ? ':' : ''}</strong>{' '}
+                <strong>{bug.suspectLabel}{bug.confirmedByTech === false ? ' (covered by today\u2019s treatment \u2014 not observed on this visit)' : ''}:</strong>{' '}
                 {[bug.whereSeen ? `Seen at ${bug.whereSeen}.` : '', bug.whyItMatters, bug.whatWeDid].filter(Boolean).join(' ')}
               </Bullet>
             ))}
@@ -918,6 +934,14 @@ export default function ServiceReportDocument({ data, token }) {
                 >{station.number}</span>
               ))}
             </div>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6, fontSize: 9.5, color: MUTED }}>
+              {[['', 'On file'], ['is-serviced', 'Serviced this visit'], ['is-activity', STATION_ACTIVITY_LEGEND[stationMap.program] || 'Activity observed'], ['is-inaccessible', 'Not accessible']].map(([cls, label]) => (
+                <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <span className={`doc-station-pin ${cls}`} style={{ position: 'static', transform: 'none', width: 11, height: 11, fontSize: 0 }} aria-hidden="true" />
+                  {label}
+                </span>
+              ))}
+            </div>
             {stationMap.summary && (
               <div style={{ marginTop: 5, fontSize: 10.5, color: MUTED }}>
                 {[
@@ -952,7 +976,11 @@ export default function ServiceReportDocument({ data, token }) {
                       across a break. Full resolution stays in the portal. */}
                   <img
                     src={photo.url}
-                    alt={photo.caption || 'Service photo'}
+                    /* alt must respect the same suppression as the visible
+                       caption — otherwise the raw per-photo vision text the V2
+                       path deliberately replaces is republished to screen
+                       readers and the PDF accessibility layer (codex P1). */
+                    alt={(!suppressPhotoCaption(photo) && photo.caption) || 'Service photo'}
                     onError={() => markImageFailed(photo.url)}
                     style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 4, border: `1px solid ${HAIR}` }}
                   />
@@ -1033,7 +1061,11 @@ export default function ServiceReportDocument({ data, token }) {
             {isWaveGuard ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
             Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
             <br />
-            Full interactive report: {reportUrl}
+            Full interactive report:{' '}
+            {/* a real <a> so the PDF carries a link annotation — viewer URL
+                autodetection is optional, and this is the only route to the
+                analysis this record intentionally omits */}
+            <a href={reportUrl} style={{ color: NAVY, textDecoration: 'underline' }}>{reportUrl}</a>
             <br />
             This report is provided for your records. This is not an invoice.
             {/* Claim tamper-evidence only when photos are actually displayed
