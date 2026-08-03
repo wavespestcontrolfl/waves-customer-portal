@@ -9448,13 +9448,22 @@ export function CompletionPanel({
   // Inventory shortfalls no longer gate MEMBER-tier closeouts (owner
   // directive 2026-08-03): the plan banner still shows them, and the server
   // records them as an advisory and lets stock go negative. Non-member lawn
-  // tiers keep the gate — the server hard-fails their deductions.
+  // tiers keep the full gate — the server hard-fails their deductions.
+  // Inactive products stay a hard gate for EVERY tier: the completion route
+  // rejects them product-by-product regardless of the advisory posture, so
+  // letting the submit through would trap the tech on a closeout error
+  // (codex P2 r4 on #3179).
+  const treatmentPlanGatingInventoryBlocks = inventoryAdvisoryTier
+    ? treatmentPlanInventoryBlocks.filter(
+        (block) => block?.code === "inventory_product_inactive",
+      )
+    : treatmentPlanInventoryBlocks;
   const protocolActualsCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
     (selectedProducts.length === 0 ||
       selectedProductsMissingActualAmount.length > 0 ||
-      (!inventoryAdvisoryTier && treatmentPlanInventoryBlocks.length > 0));
+      treatmentPlanGatingInventoryBlocks.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -11306,11 +11315,10 @@ export function CompletionPanel({
     if (
       calibrationRequired &&
       !isIncompleteVisit &&
-      !inventoryAdvisoryTier &&
-      treatmentPlanInventoryBlocks.length
+      treatmentPlanGatingInventoryBlocks.length
     ) {
       alert(
-        `Resolve inventory blocks before closeout: ${treatmentPlanInventoryBlocks
+        `Resolve inventory blocks before closeout: ${treatmentPlanGatingInventoryBlocks
           .map((block) => block.message)
           .filter(Boolean)
           .join(" ")}`,

@@ -6169,27 +6169,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 .filter((deduction) => deduction.productId != null)
                 .map((deduction) => [String(deduction.productId), deduction.status]),
             );
-            // The inverse race also exists (codex P2 r3 on #3179): stock
-            // replenished between the unlocked preflight read and the FOR
-            // UPDATE deduction means the preflight's shortfall never
-            // happened — drop any preflight stock block the locked deduction
-            // refuted with a clean 'deducted'. Non-stock blocks (inactive
-            // product) and products the deduction couldn't quantify are kept.
+            // Any preflight stock block whose product reached the locked
+            // deduction is superseded by that deduction's outcome: sufficient
+            // stock refutes it, and a locked shortfall replaces it with the
+            // authoritative counts — stock can move between the unlocked read
+            // and the lock in either direction, so preflight numbers must
+            // never survive a locked result (codex P2 r3+r4 on #3179).
+            // Non-stock blocks (inactive product) and preflight blocks for
+            // products the deduction never quantified are kept.
             const keptBlocks = (waveguardInventoryAdvisory?.blocks || []).filter(
               (block) => !(
                 block.code === 'actual_inventory_insufficient_stock'
                 && block.productId != null
-                && deductionStatusByProductId.get(String(block.productId)) === 'deducted'
+                && ['deducted', 'deducted_insufficient_stock'].includes(
+                  deductionStatusByProductId.get(String(block.productId)),
+                )
               ),
             );
-            const keptProductIds = new Set(
+            const keptShortfallProductIds = new Set(
               keptBlocks
+                .filter((block) => block.code === 'actual_inventory_insufficient_stock')
                 .map((block) => (block.productId != null ? String(block.productId) : null))
                 .filter(Boolean),
             );
             const shortfallBlocks = inventoryDeductions
               .filter((deduction) => deduction.status === 'deducted_insufficient_stock'
-                && !keptProductIds.has(String(deduction.productId)))
+                && !keptShortfallProductIds.has(String(deduction.productId)))
               .map((deduction) => ({
                 code: 'actual_inventory_insufficient_stock',
                 message: `${deduction.productName} went to ${deduction.stockAfter} ${deduction.inventoryUnit} on hand after deducting ${deduction.deductedAmount} ${deduction.inventoryUnit}.`,
