@@ -1745,3 +1745,36 @@ describe('round on dd815f69d — compound trap names, serviced, future-first ord
     }
   });
 });
+
+// Pre-push audit P1: the empty-capture set only knew the copular form
+// ("traps were empty"). Active, partitive, and yield phrasings assert the
+// same performed check.
+describe('active and partitive empty-trap claims contradict a setup', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('active, partitive and yield forms are refused', () => {
+    for (const text of [
+      'We found all 8 traps empty.',
+      'None of the traps caught anything.',
+      'None of the 8 traps had activity.',
+      'None of 8 traps were sprung.',
+      'The traps produced no catches.',
+      'The traps yielded no rodents.',
+      'The traps sat empty.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('an ATTRIBUTIVE "empty" describing the place stays legal', () => {
+    // Only copulas and quantifiers may sit between the trap noun and the
+    // word, so an empty room the traps were placed in is untouched.
+    for (const text of [
+      'We set 8 traps in the empty crawlspace.',
+      'We set traps along the empty wall void.',
+      'We placed devices in the empty attic space.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});

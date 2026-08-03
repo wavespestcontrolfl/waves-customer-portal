@@ -2163,6 +2163,14 @@ const SETUP_EMPTY_CAPTURE_RES = [
   /\bno\s+(?:[a-z-]+\s+){0,2}?(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed|trapped)\b/i,
   /\b(?:(?:did|do|does|have|has|had)\s+not|didn['’]t|don['’]t|doesn['’]t|haven['’]t|hasn['’]t|hadn['’]t)\s+(?:yet\s+)?(?:catch|caught|capture[ds]?|trap(?:ped)?)\b/i,
   /\bnothing\s+(?:was\s+|has\s+been\s+|had\s+been\s+)?(?:caught|captured|trapped)\b/i,
+  // Active and partitive ways of saying the traps came up empty — all of
+  // them assert a check that a setup has not performed (codex P1). The
+  // "empty" form stays PREDICATIVE so "we set 8 traps in the empty
+  // crawlspace" is untouched: only copulas and quantifiers may sit between
+  // the trap noun and the word.
+  /\b(?:traps?|devices?)\s+(?:(?:were|was|are|is|all|still|found|sat|sit)\s+)*empty\b/i,
+  new RegExp(`\\bnone\\s+of\\s+${TRAP_PARTITIVE_DET}\\b(?:\\s+[a-z-]+){0,3}?\\s+(?:traps?|devices?)\\b`, 'i'),
+  /\b(?:produced|yielded|held|contained)\s+(?:no|zero|0)\s+(?:catches|captures|rodents?|rats?|mice)\b/i,
 ];
 
 // NOUN-form re-check claims: "Trap inspection completed today", "We
