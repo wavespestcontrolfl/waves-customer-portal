@@ -2873,7 +2873,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // and the report's photo gallery. Appended AFTER the service_photos hash chain
   // is validated below so the tamper-evident chain stays over service_photos only.
   if (serviceLine === 'lawn') {
-    const linkedAssessment = await loadLinkedLawnAssessment(service, knex);
+    // Reuse the assessment the SCORECARD resolved rather than resolving again
+    // (#3168). A second independent lookup can land on a different row mid-
+    // render, producing a report whose copy and photos come from different
+    // assessments — and a fence comparing only the selection would still pass
+    // it. The scorecard already honoured any pin, so this inherits it.
+    const linkedAssessment = lawnAssessment?.assessmentId
+      ? { id: lawnAssessment.assessmentId }
+      : await loadLinkedLawnAssessment(service, knex);
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must

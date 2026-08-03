@@ -8723,6 +8723,16 @@ export default function ReportViewPage() {
     const requestedMode = new URLSearchParams(window.location.search).get('mode');
     return ['pdf', 'static', 'sms_preview'].includes(requestedMode) ? requestedMode : 'live';
   }, []);
+  // ?assessment=<id> pins which lawn assessment this render shows (#3168). The
+  // PDF renderer opens this page with the pin, and the page's OWN fetch is what
+  // actually builds the report — so the pin has to be forwarded here or it does
+  // nothing at all. The server validates it against the assessments this token
+  // already exposes and answers 409 for anything else.
+  const pinnedAssessmentId = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const requested = new URLSearchParams(window.location.search).get('assessment');
+    return requested && requested.trim() ? requested.trim() : null;
+  }, []);
 
   // Liquid-glass theme — live view only, mounted at the PAGE level so the
   // scene is up from the very first paint (loading skeleton included), not
@@ -8737,7 +8747,8 @@ export default function ReportViewPage() {
     let cancelled = false;
     setLoading(true);
     setLoadError(false);
-    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`;
+    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
+      + (pinnedAssessmentId ? `&assessment=${encodeURIComponent(pinnedAssessmentId)}` : '');
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only. Guarded:
@@ -8775,7 +8786,7 @@ export default function ReportViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, mode, loadAttempt]);
+  }, [token, mode, pinnedAssessmentId, loadAttempt]);
 
   useEffect(() => {
     if (!data || data.error) return;

@@ -165,6 +165,15 @@ async function renderAndStoreServiceReportPdf(recordId, {
     visibilitySignature = latestVisibilitySignature;
   }
   try {
+    // A PINNED render never joins the shared cache (#3168). The storage key is
+    // assessment-agnostic, so persisting one would let a later UNPINNED
+    // download serve a PDF built for a specific assessment — and the pinned
+    // path exists precisely for the case where the pin and the current
+    // selection disagree. The delivery gets its bytes in-hand; nothing is
+    // written, and pdf_storage_key keeps pointing at the canonical render.
+    if (pinnedLawnAssessmentId) {
+      return { key: null, pdf, rendered: true, token: reportToken, pinned: true };
+    }
     const key = await putReportPdf(recordId, pdf, {
       visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service),
     });
@@ -307,7 +316,10 @@ async function getOrRenderServiceReportPdf(recordId, {
   });
   // A completed fresh render satisfies the pending correction — but only
   // once the copy can no longer change (no generation in flight).
-  if (correctionPending && !rendered.storageFailed && fenceReadOk) {
+  // A PINNED render must not clear the correction marker: it stored nothing, so
+  // the canonical cached PDF is still whatever it was. Clearing here would
+  // retire the marker while a stale object remains the one customers download.
+  if (correctionPending && !rendered.storageFailed && !rendered.pinned && fenceReadOk) {
     try {
       if (!lawnAssessmentId) {
         // No linked assessment (stray marker on a non-lawn record) —
@@ -359,6 +371,9 @@ async function getOrRenderServiceReportPdf(recordId, {
     storageFailed: !!rendered.storageFailed,
     storageError: rendered.storageError || null,
     token: rendered.token,
+    // Pinned renders are deliberately unstored (#3168) — surfaced so a caller
+    // can tell "no key because storage failed" from "no key by design".
+    pinned: !!rendered.pinned,
   };
 }
 

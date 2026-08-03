@@ -1420,6 +1420,10 @@ router.get('/:token/data', async (req, res, next) => {
     return res.status(404).json({ error: 'Report not found' });
   }
   res.setHeader('Cache-Control', 'no-store');
+  // Hoisted so the catch can identify the visit WITHOUT logging the report
+  // token — that token is a bearer credential for a customer-facing report
+  // carrying their address (#3168).
+  let serviceRecordId = null;
   try {
     const mode = ['pdf', 'static', 'sms_preview'].includes(req.query.mode)
       ? req.query.mode
@@ -1454,6 +1458,7 @@ router.get('/:token/data', async (req, res, next) => {
       .first();
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
+    serviceRecordId = service.id;
 
     // Staff browsers attach their portal JWT on this fetch (ReportViewPage)
     // — the same signal that opens suppressed shadow reports also unlocks
@@ -1551,7 +1556,11 @@ router.get('/:token/data', async (req, res, next) => {
     // and the caller could not tell. 409 so the render errors and the delivery
     // defers retryably. The message names no ids — the caller supplied it.
     if (err?.code === 'pinned_assessment_unavailable') {
-      logger.warn(`[reports-public] pinned assessment refused for token ${req.params.token}: ${err.message}`);
+      // NEVER log the report token — it is a bearer credential for a
+      // customer-facing report carrying their address, so plain-text logs
+      // would become a credential store. The service-record id identifies the
+      // visit for debugging and grants nothing.
+      logger.warn(`[reports-public] pinned assessment refused for service_record ${serviceRecordId || 'unknown'}`);
       return res.status(409).json({ error: 'Requested assessment is not available for this report' });
     }
     return next(err);
