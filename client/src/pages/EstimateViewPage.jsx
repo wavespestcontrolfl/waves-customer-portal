@@ -5205,8 +5205,11 @@ function EstimateViewPageInner() {
               2026-07-07, re-affirmed 2026-07-23) — the per-service boxes and
               the sticky book bar carry the plan's price. This renders ONLY
               to itemize a plan-wide credit (e.g. Referral Credit) and its
-              net; creditless bundles render nothing here. */}
-          {services.length > 1 ? (
+              net; creditless bundles render nothing here. When the server
+              itemized the credit INTO the per-service sections (owner ruling
+              2026-08-03: the discount shows within each section, per
+              application), this card would restate the same credit — skip. */}
+          {services.length > 1 && renderFlags.manualDiscountItemizedInSections !== true ? (
             <PlanTotalSummary
               combined={pricing.combinedRecurring}
               selectedFrequency={combinedFrequency}

@@ -15978,6 +15978,184 @@ function defaultFrequencyForSection(section = {}) {
     || null;
 }
 
+// ─── Per-service manual-discount slices (owner ruling 2026-08-03) ─────────────
+// On a split multi-service plan the labeled manual discount rendered ONLY as a
+// figure-less plan-level card below the sections ("Applied to your plan when
+// you book"), while every section quoted its pre-credit per-application price —
+// the customer could not see what they'd actually pay per application (the
+// owner's complaint on EST-2026-0609). A PERCENT credit scoped to the recurring
+// annual slices exactly per service line — pct × that line's WaveGuard-net
+// price — so each section's card can carry its own slice and net price, and the
+// figures still sum to the plan credit by construction.
+//
+// PERCENT + recurring-only + uncapped ONLY, all-or-nothing: a FIXED amount
+// allocates against the whole selected combo (a static per-row slice would be a
+// number no cadence honors), and any cap/suppression/floor-breach means some
+// cadence doesn't carry the full pct — those shapes keep the plan-level card.
+// Every guard below bails WITHOUT mutating, so a bail leaves today's rendering.
+const SECTION_CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
+
+// md.eligibleServices/excludedServices entries are resolveDiscountKey outputs —
+// tier-suffixed for tiered services ('lawn_care_enhanced') — while sections key
+// by base service. Prefix-match so every tier of an eligible service matches.
+function manualDiscountServiceKeyMatches(entries, sectionKey) {
+  if (!Array.isArray(entries)) return false;
+  const key = String(sectionKey || '');
+  if (!key) return false;
+  return entries.some((entry) => {
+    const candidate = String(entry || '');
+    return candidate === key || candidate.startsWith(`${key}_`);
+  });
+}
+
+function stampPerServiceManualDiscountSlices(services = [], payload = {}) {
+  const md = payload?.manualDiscount;
+  if (!md || md.type !== 'PERCENT') return false;
+  const pct = Number(md.value);
+  const recurringAmount = Math.round((Number(md.recurringAmount ?? md.amount) || 0) * 100) / 100;
+  if (!(pct > 0) || !(recurringAmount > 0)) return false;
+  if (md.capped === true || md.capReason || md.floorBreach) return false;
+  // A one-time slice means scope 'recurring_and_one_time…' — the recurring
+  // sections can't carry the whole credit, so the plan card must stay.
+  if (Number(md.oneTimeAmount) > 0) return false;
+  if (md.scope && md.scope !== 'recurring_annual_after_waveguard') return false;
+  if (payload.manualDiscountSuppressed === true || payload.quoteRequired === true) return false;
+
+  const recurringSections = services.filter((section) => section?.isRecurring && section.key !== 'bundle');
+  // Single-service ladders already net the credit into their rows and carry the
+  // row-level manualDiscount; this pass exists for the pre-credit split shape.
+  if (recurringSections.length < 2) return false;
+  if (recurringSections.some((section) => (section.frequencies || [])
+    .some((frequency) => frequency?.manualDiscount || frequency?.manualDiscountSuppressed === true))) return false;
+
+  // Every combined cadence row must carry the SAME uncapped PERCENT credit —
+  // a cadence where the floor caps or suppresses it would render section
+  // slices the accept-time plan total doesn't grant at that selection.
+  const combinedRows = Array.isArray(payload.frequencies) ? payload.frequencies : [];
+  if (!combinedRows.length) return false;
+  const combinedOk = combinedRows.every((frequency) => {
+    if (frequency?.manualDiscountSuppressed === true) return false;
+    const row = frequency?.manualDiscount;
+    return row && row.type === 'PERCENT' && Number(row.value) === pct
+      && row.capped !== true && !row.capReason && !row.floorBreach;
+  });
+  if (!combinedOk) return false;
+
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  // Compute every slice first; commit only if EVERY row of EVERY eligible
+  // section slices cleanly (all-or-nothing — a partial stamp would double-show
+  // part of the credit next to the plan card, or hide the rest of it).
+  const slicePlans = [];
+  // Engine-fresh payloads carry eligibleServices; stored snapshots normalize
+  // the credit WITHOUT it. Absent list → assume every section is eligible and
+  // let the default-selection reconciliation below catch a wrong assumption
+  // (pct × an actually-excluded line would overshoot the plan credit → bail).
+  const eligibleList = Array.isArray(md.eligibleServices) && md.eligibleServices.length
+    ? md.eligibleServices
+    : null;
+  for (const section of recurringSections) {
+    const eligible = (!eligibleList || manualDiscountServiceKeyMatches(eligibleList, section.key))
+      && !manualDiscountServiceKeyMatches(md.excludedServices, section.key);
+    if (!eligible) continue;
+    const frequencies = Array.isArray(section.frequencies) ? section.frequencies : [];
+    if (!frequencies.length) return false;
+    for (const frequency of frequencies) {
+      if (frequency.quoteRequired === true || Number(frequency.lowConfidenceRangePct) > 0) return false;
+      const treatments = Array.isArray(frequency.perServiceTreatments) ? frequency.perServiceTreatments : [];
+      // Split sections carry at most their own treatment row; more rows means
+      // an unsplit shape this static slicing can't attribute.
+      if (treatments.length > 1) return false;
+      const treatment = treatments[0] || null;
+      const perApp = Number(treatment?.displayPrice ?? treatment?.perTreatment ?? frequency.perTreatment) || 0;
+      const visits = Number(frequency.visitsPerYear) > 0
+        ? Number(frequency.visitsPerYear)
+        : (Number(treatment?.visitsPerYear) > 0
+          ? Number(treatment.visitsPerYear)
+          : (SECTION_CADENCE_VISITS[frequency.key] || 0));
+      const monthly = Number(frequency.monthly) || 0;
+      if (perApp > 0 && visits > 0) {
+        const perAppSlice = round2(perApp * (pct / 100));
+        if (!(perAppSlice > 0)) return false;
+        slicePlans.push({
+          section, frequency, treatment, kind: 'per_application',
+          perApp, visits, perAppSlice, annualSlice: round2(perAppSlice * visits),
+        });
+      } else if (monthly > 0) {
+        // Flat-monthly rows (termite bait monitoring) carry the slice on the
+        // monthly; PriceCard's standalone in-card row renders it per interval.
+        const monthlySlice = round2(monthly * (pct / 100));
+        if (!(monthlySlice > 0)) return false;
+        slicePlans.push({
+          section, frequency, treatment: null, kind: 'flat_monthly',
+          monthly, monthlySlice, annualSlice: round2(monthlySlice * 12),
+        });
+      } else {
+        return false;
+      }
+    }
+  }
+  if (!slicePlans.length) return false;
+
+  // Default-selection reconciliation: the per-section slices at each section's
+  // default row must rebuild the plan credit the combined payload nets out —
+  // beyond cent-rounding drift, some assumption above is wrong (e.g. a line
+  // the credit doesn't actually cover); keep the card. Each per-application
+  // slice cent-rounds by ≤ $0.005, amplified by that row's visit count, so the
+  // tolerance scales with the default rows' total visits — while a genuinely
+  // excluded line overshoots by pct × its whole annual, dollars past any
+  // rounding budget.
+  let defaultSliceTotal = 0;
+  let defaultVisitTotal = 0;
+  for (const section of recurringSections) {
+    const defaultRow = defaultFrequencyForSection(section);
+    const plan = slicePlans.find((candidate) => candidate.frequency === defaultRow);
+    if (!plan) continue;
+    defaultSliceTotal += plan.annualSlice;
+    defaultVisitTotal += plan.kind === 'per_application' ? plan.visits : 12;
+  }
+  if (Math.abs(round2(defaultSliceTotal) - recurringAmount) > 0.005 * defaultVisitTotal + 0.02) return false;
+
+  const label = String(md.label || 'Discount');
+  for (const plan of slicePlans) {
+    const { frequency, treatment, annualSlice } = plan;
+    if (plan.kind === 'per_application') {
+      const netPerApp = round2(plan.perApp - plan.perAppSlice);
+      const netAnnual = round2(plan.perApp * plan.visits - annualSlice);
+      if (Number(frequency.perTreatment) > 0) frequency.perTreatment = netPerApp;
+      if (Number(frequency.monthly) > 0) frequency.monthly = round2(netAnnual / 12);
+      if (Number(frequency.annual) > 0) frequency.annual = netAnnual;
+      if (treatment) {
+        if (Number(treatment.displayPrice) > 0) treatment.displayPrice = netPerApp;
+        if (Number(treatment.perTreatment) > 0 && !(Number(treatment.displayPrice) > 0)) treatment.perTreatment = netPerApp;
+        if (Number(treatment.monthly) > 0) treatment.monthly = round2(netAnnual / 12);
+      }
+    } else {
+      const netMonthly = round2(plan.monthly - plan.monthlySlice);
+      frequency.monthly = netMonthly;
+      if (Number(frequency.annual) > 0) frequency.annual = round2(netMonthly * 12);
+    }
+    // The row-level object PriceCard already understands (single-service shape):
+    // amount/recurringAmount are THIS service's annual slice; prices above are
+    // net of it, so anchor − WaveGuard slice − manual slice = headline.
+    frequency.manualDiscount = {
+      type: 'PERCENT',
+      value: pct,
+      label,
+      source: md.source || null,
+      presetId: md.presetId || null,
+      presetKey: md.presetKey || null,
+      amount: annualSlice,
+      recurringAmount: annualSlice,
+      oneTimeAmount: 0,
+      monthlyAmount: round2(annualSlice / 12),
+      scope: 'recurring_annual_after_waveguard',
+      stackingOrder: 'after_waveguard',
+      itemizedPerService: true,
+    };
+  }
+  return true;
+}
+
 function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, services = []) {
   const recurringSections = services.filter((section) => section?.isRecurring);
   if (!recurringSections.length) return null;
@@ -16259,6 +16437,10 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     buildCombinedRecurring(contractPayload, estimate, estData, services),
     lowConfidenceRange,
   );
+  // AFTER combinedRecurring: the stamp nets section rows for display, and the
+  // combined build must keep reading the pre-credit rows (its own totals
+  // already net the plan credit once — netted inputs would double-count it).
+  const manualDiscountItemizedInSections = stampPerServiceManualDiscountSlices(services, contractPayload);
   const serviceCategories = services.map((section) => (
     section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)
   ));
@@ -16291,7 +16473,14 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     ...contractPayload,
     services,
     combinedRecurring,
-    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring, estData, estimate),
+    renderFlags: {
+      ...buildRenderFlags(contractPayload, services, combinedRecurring, estData, estimate),
+      // The plan credit is fully itemized inside the per-service sections —
+      // the client must NOT also render the plan-level discount card, or the
+      // same credit reads twice (owner ruling 2026-08-03: the discount shows
+      // within the sections, per application).
+      ...(manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
+    },
     askChips,
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
@@ -16566,7 +16755,13 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
     quoteRequired: quoteState.quoteRequired,
     quoteRequiredReason: quoteState.reason,
     quoteRequiredItems: quoteState.items,
-    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring, estData, estimate),
+    renderFlags: {
+      ...buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring, estData, estimate),
+      // Carry the per-service itemization flag attachPublicPricingContract set
+      // alongside its section stamping — this rebuild would silently drop it
+      // and the client would render the plan credit twice.
+      ...(withContract.renderFlags?.manualDiscountItemizedInSections ? { manualDiscountItemizedInSections: true } : {}),
+    },
   };
 }
 
@@ -18826,3 +19021,6 @@ module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
 // and the mirrored-section label rule.
 module.exports.extractEngineInputs = extractEngineInputs;
 module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
+// Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
+// split multi-service plans.
+module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;
