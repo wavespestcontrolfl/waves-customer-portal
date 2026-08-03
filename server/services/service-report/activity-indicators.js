@@ -2026,6 +2026,16 @@ const SETUP_EMPTY_CAPTURE_RES = [
   /\bnothing\s+(?:was\s+)?(?:caught|captured)\b/i,
   /\bcaptures?\s+(?:were|was)\s+not\s+recorded\b/i,
   /\b(?:traps?|devices?)\s+(?:were|was)\s+empty\b/i,
+  // Numeric and word-form zero say the same thing without the word "no":
+  // "0 captures were recorded", "There were zero captures", "caught 0
+  // rats". The count guard cannot reject these — a structured captures of
+  // 0 makes a zero CLAIM arithmetically accurate — but on a setup the
+  // traps just went out, so any zero-capture reading still implies a check
+  // that never happened (codex P1 round 12). setupContradictions runs on
+  // UN-normalized text, so both the digit and the word form are matched.
+  /\b(?:0|zero)\s+(?:new\s+)?(?:captures?|catches)\b/i,
+  /\b(?:caught|captured|removed)\s+(?:0|zero)\b/i,
+  /\b(?:0|zero)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed)\b/i,
 ];
 
 // Word-form numbers normalized to numerals before any count check, so
@@ -2077,6 +2087,24 @@ const CAUGHT_PASSIVE_CLAIM_RE = /\b(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mou
 // status mentioned in a previous one can't reclassify this count.
 const SUBSET_LEAD_RE = /\b(?:activity|captur|consum|access|damag|missing|sprung|empty|disturb|chew)/i;
 
+// A capture COUNT inside a window is not a status cue for the trap count
+// beside it. In "We checked 8 traps and recorded 2 captures" the trailing
+// window saw `captur`, dropped the only roster claim as a status subset,
+// and a stale 8 sailed past the guard while the capture guard separately
+// validated the 2 (codex P1 round 12; the lead window had the same hole —
+// "We recorded 2 captures and checked 8 traps"). Capture claims are masked
+// out length-preservingly BEFORE the windows are read, so indices still
+// line up and a cue survives only when it describes the trap count itself
+// ("8 traps had captures"), not when it belongs to a neighbouring capture
+// count. Masking the whole matched span (not just the cue word) also
+// covers a window that slices mid-claim.
+function maskCaptureClaims(text) {
+  return [CAPTURE_CLAIM_RE, CAUGHT_CLAIM_RE, CAUGHT_PASSIVE_CLAIM_RE].reduce(
+    (out, rx) => out.replace(new RegExp(rx.source, 'gi'), (m) => ' '.repeat(m.length)),
+    text,
+  );
+}
+
 // Trap ROSTER claims only — subset counts are recognized and dropped rather
 // than counted as competing totals.
 //
@@ -2100,16 +2128,17 @@ function trapRosterClaims(text) {
     });
   }
   const claims = new Set();
+  const cueText = maskCaptureClaims(text);
   found.forEach((m, i) => {
     if (/\bof\b/i.test(m.filler || '')) return; // "1 of the traps" — no total claimed
-    const lead = text
+    const lead = cueText
       .slice(i > 0 ? found[i - 1].end : Math.max(0, m.index - 40), m.index)
       .split(/[.!?]/).pop();
     // Only the LAST claim owns the text after it; otherwise that text is the
     // next claim's lead and is judged there.
     const trail = i + 1 < found.length
       ? ''
-      : text.slice(m.end, m.end + 30).split(/[.!?]/)[0];
+      : cueText.slice(m.end, m.end + 30).split(/[.!?]/)[0];
     if (SUBSET_LEAD_RE.test(lead) || SUBSET_LEAD_RE.test(trail)) return;
     claims.add(Number(m.second != null ? m.second : m.first));
   });

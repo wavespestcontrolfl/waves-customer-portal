@@ -2784,6 +2784,22 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     .find((snap) => require('./activity-indicators')
       .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)) || null;
 
+  // The narrative lanes below TELL THE CUSTOMER the traps went out today, so
+  // their stage resolves only from snapshots this viewer is allowed to see.
+  // The raw lookup above stays raw for the shared map's wording (round-8
+  // ruling: whether traps went out is a fact about the visit) — but an
+  // internal_only trapping companion on an auto-sent primary must not leak
+  // "your traps were placed" into a summary whose own section is suppressed
+  // for this viewer (codex P1 round 12). Staff viewers see internal
+  // sections, so their narrative may still name the stage. The primary is
+  // always visible here: an internal_only PRIMARY never mints a report
+  // token in the first place.
+  const narrativeTrapSetupSnapshot = [
+    typedSnapshot,
+    ...companionSnapshots.filter((snap) => staffViewer || snap.delivery === 'auto_send'),
+  ].find((snap) => require('./activity-indicators')
+    .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)) || null;
+
   const stationMap = buildStationMapReportContext({
     stationRows,
     checkRows: stationCheckRows,
@@ -3488,14 +3504,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       typedReport: typedSnapshot,
       // Explicit, because the trapping snapshot may be a COMPANION while
       // typedReport is the primary — the narrative cannot derive the stage
-      // from a snapshot it was never handed (codex P1 round 10).
-      visitStage: trapSetupSnapshot ? 'initial_trap_setup' : null,
+      // from a snapshot it was never handed (codex P1 round 10). Viewer-
+      // filtered (codex P1 round 12): see narrativeTrapSetupSnapshot.
+      visitStage: narrativeTrapSetupSnapshot ? 'initial_trap_setup' : null,
       activity,
       stationSummary: stationMap?.summary || null,
       // summary.activity semantics differ by program (traps with a capture
       // vs stations with bait consumption) — the narrative names the fact
       // accordingly and must know which map this is.
       stationProgram: stationMap?.program || null,
+      // The map card suppresses its own count line when the tech's typed
+      // trap count disagrees with the pinned roster; the narrative must not
+      // resurrect the disputed number from stationSummary (codex P1 r12).
+      stationCountDisputed: stationMap?.initialSetup === true
+        && stationMap?.setupCountVerified === false,
       applications,
       photos: photoPayload,
       nextAppointment,
@@ -3550,11 +3572,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       reportTypeLabel: typedSnapshot.reportTypeLabel || typedSnapshot.typeLabel || null,
       typedReport: typedSnapshot,
       // Same reason as the rodent lane above: a non-rodent primary can carry
-      // a rodent_trapping companion that selects the station map.
-      visitStage: trapSetupSnapshot ? 'initial_trap_setup' : null,
+      // a rodent_trapping companion that selects the station map. Viewer-
+      // filtered for the same round-12 reason.
+      visitStage: narrativeTrapSetupSnapshot ? 'initial_trap_setup' : null,
       activity,
       stationSummary: stationMap?.summary || null,
       stationProgram: stationMap?.program || null,
+      stationCountDisputed: stationMap?.initialSetup === true
+        && stationMap?.setupCountVerified === false,
       applications,
       photos: photoPayload,
       nextAppointment,

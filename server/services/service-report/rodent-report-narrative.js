@@ -164,15 +164,25 @@ function activityFacts(activity = null) {
 // capture count (one trap can hold more than one capture — codex P1 #3004),
 // so the fact names say exactly what the number is and the actual capture
 // count, when recorded, arrives via the typed findings.
-function stationFacts(stationSummary = null, program = null) {
+function stationFacts(stationSummary = null, program = null, countDisputed = false) {
   if (!stationSummary || !stationSummary.total) return null;
-  const base = {
-    program: program || null,
-    total: stationSummary.total,
-    checked: stationSummary.checked || 0,
-    serviced: stationSummary.serviced || 0,
-    inaccessible: stationSummary.inaccessible || 0,
-  };
+  // A disputed setup count (the tech's typed trap count disagrees with the
+  // pinned roster — setupCountVerified false on the map context) keeps every
+  // roster-derived number OUT of the facts: the map card already suppresses
+  // its count line, and whatever number reaches these facts is one the model
+  // is licensed to print ("8 of 8 traps were set" beside "Traps set: 6" —
+  // codex P1 round 12). The typed findings still carry the tech's own count,
+  // which is the ratified one. Activity stays: a capture recorded AT a pin
+  // is an event fact, not a roster restatement.
+  const base = countDisputed
+    ? { program: program || null, countDisputed: true }
+    : {
+      program: program || null,
+      total: stationSummary.total,
+      checked: stationSummary.checked || 0,
+      serviced: stationSummary.serviced || 0,
+      inaccessible: stationSummary.inaccessible || 0,
+    };
   if (program === 'trapping') {
     return { ...base, trapsWithCaptureRecorded: stationSummary.activity || 0 };
   }
@@ -198,6 +208,7 @@ function groundingFacts({
   activity = null,
   stationSummary = null,
   stationProgram = null,
+  stationCountDisputed = false,
   applications = [],
   photos = [],
   nextAppointment = null,
@@ -247,7 +258,7 @@ function groundingFacts({
       : null,
     findings: findingFacts(typedReport),
     activity: activityFacts(activity),
-    stations: stationFacts(stationSummary, stationProgram),
+    stations: stationFacts(stationSummary, stationProgram, stationCountDisputed === true),
     devices: deviceFacts(applications),
     photoEvidence: photoFacts(photos),
     // The tech-reviewed consolidated photo analysis, when present — richer
@@ -287,7 +298,11 @@ function deterministicSummary(facts) {
   } else if (facts.recap) {
     parts.push(facts.recap);
   }
-  if (facts.stations && facts.stations.checked > 0) {
+  // countDisputed carries no checked count at all — the sentence still names
+  // the stage (round-9 lesson: staying silent produces re-check wording
+  // elsewhere), it just never restates a number the tech has disputed.
+  if (facts.stations && (facts.stations.checked > 0
+    || (facts.stations.countDisputed && facts.stations.program === 'trapping'))) {
     const s = facts.stations;
     if (s.program === 'trapping') {
       // Capture wording is sourced from the records that actually carry it:
@@ -311,7 +326,10 @@ function deterministicSummary(facts) {
         // captures recorded" line on the setup visit reads as a failed check.
         clause = 'no captures recorded';
       }
-      parts.push(`${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were ${setup ? 'set' : 'inspected'}${clause ? `, with ${clause}` : ''}.`);
+      const scaffold = s.countDisputed
+        ? `Traps were ${setup ? 'set' : 'inspected'} on this visit`
+        : `${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were ${setup ? 'set' : 'inspected'}`;
+      parts.push(`${scaffold}${clause ? `, with ${clause}` : ''}.`);
     } else if (s.program === 'rodent') {
       // Same sourcing rule as captures (codex round-7 P1, mirroring the
       // round-3 trapping fix): a zero-consumption claim is grounded only in

@@ -574,3 +574,44 @@ test('an explicit stage never overrides a snapshot that declares one itself', ()
   // A follow-up snapshot with no explicit stage stays a follow-up.
   expect(groundingFacts({ ...input(), visitStage: null }).visitStage).toBeNull();
 });
+
+// Round 12: the map suppresses its own count line when the tech's typed trap
+// count disputes the pinned roster (setupCountVerified false on the map
+// context), but the narrative only received stationSummary — so its fallback
+// printed "N of N traps were set" anyway, and the grounded number set
+// licensed the model to echo the same disputed number.
+describe('disputed setup counts stay out of the narrative (round 12)', () => {
+  test('stationCountDisputed strips roster numbers from the facts', () => {
+    const facts = groundingFacts({ ...setupInput(), stationCountDisputed: true });
+    expect(facts.stations.countDisputed).toBe(true);
+    expect(facts.stations.total).toBeUndefined();
+    expect(facts.stations.checked).toBeUndefined();
+    expect(facts.stations.serviced).toBeUndefined();
+    expect(facts.stations.inaccessible).toBeUndefined();
+    // Event facts survive — a capture recorded AT a pin is not a roster
+    // restatement, and the map keeps showing those pins.
+    expect(facts.stations.trapsWithCaptureRecorded).toBe(0);
+  });
+
+  test('the deterministic summary names the stage without restating a number', () => {
+    const summary = deterministicSummary(groundingFacts({ ...setupInput(), stationCountDisputed: true }));
+    expect(summary).toContain('Traps were set on this visit');
+    expect(summary).not.toMatch(/\d+ of \d+/);
+  });
+
+  test('a model echo of the disputed map count is ungrounded', () => {
+    // The real failure shape: 8 pins on the map, typed count 7 — disputed.
+    // Without the strip, total: 8 sits in the facts and licenses "8 of 8".
+    const facts = groundingFacts({
+      ...setupInput(),
+      stationSummary: { total: 8, checked: 8, activity: 0, serviced: 0, inaccessible: 0 },
+      stationCountDisputed: true,
+    });
+    expect(ungroundedClaims('8 of 8 traps were set today.', facts).length).toBeGreaterThan(0);
+  });
+
+  test('an undisputed setup still prints the verified count', () => {
+    const summary = deterministicSummary(groundingFacts(setupInput()));
+    expect(summary).toContain('7 of 7 traps were set');
+  });
+});

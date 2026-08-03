@@ -8882,6 +8882,14 @@ export function CompletionPanel({
   // zone-mark widget this also fed was retired 2026-07-23 — the traced
   // Treatment Zone Mapper is the report's coverage-map source now.
   const [propertyMap, setPropertyMap] = useState(null);
+  // The station QUERY inside /property-map failed and the server substituted
+  // an empty roster (stationsLoaded false). The map still renders, so
+  // without this flag the tech could pin "new" traps numbered from 1 over
+  // an invisible existing registry and submit duplicate or skipped entries
+  // (codex P2 round 12). While set, station marking is disabled and the
+  // completion posts no station entries at all — an unloaded registry is
+  // unavailable, not empty.
+  const [stationRegistryFailed, setStationRegistryFailed] = useState(false);
   // Image params restored from a saved draft (checkout detour) — lets a
   // restored station submit stamp the drift ref for pins placed pre-detour
   // even if the live /property-map refetch hasn't resolved yet.
@@ -8967,6 +8975,7 @@ export function CompletionPanel({
         if (cancelled) return;
         setPropertyMap(res || null);
         if (!res?.available) return;
+        setStationRegistryFailed(res.stationsLoaded === false);
         setStationPreloads((Array.isArray(res.stations) ? res.stations : [])
           .filter((station) => (station.program || "termite") === stationProgram)
           .map((station) => ({
@@ -11724,7 +11733,11 @@ export function CompletionPanel({
         // pin must not restamp its drift ref with today's image params);
         // creates go last so server numbering (payload order) matches the
         // provisional numbers the tech saw.
-        ...(stationFeatureOn
+        // A failed station registry (stationsLoaded false) posts NOTHING:
+        // the editor is disabled, but the submit guard is the boundary that
+        // matters — a status-only entry against a fallback roster would
+        // still mint check rows the visit's map cannot show (codex P2 r12).
+        ...(stationFeatureOn && !stationRegistryFailed
           ? (() => {
             const image = (propertyMap?.available && propertyMap.image) || zoneMapImageFallback;
             const ref = image
@@ -13342,8 +13355,15 @@ export function CompletionPanel({
                 onRemoveStation={removeStationPin}
                 program={stationProgram || "termite"}
                 maxStations={Number(propertyMap?.stationCap) || 80}
-                disabled={generating || success}
+                disabled={generating || success || stationRegistryFailed}
               />
+            )}
+            {stationFeatureOn && stationRegistryFailed && (
+              <div style={{ fontSize: 14, color: "#b45309", marginTop: 6 }}>
+                Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t be
+                loaded, so marking is unavailable for this completion. Complete the visit
+                normally — the registry is unchanged.
+              </div>
             )}
             {/* Service findings — typed specialty completion */}
             {isTypedFindings && (
@@ -15281,8 +15301,15 @@ export function CompletionPanel({
               program={stationProgram || "termite"}
               maxStations={Number(propertyMap?.stationCap) || 80}
               dark
-              disabled={generating || success}
+              disabled={generating || success || stationRegistryFailed}
             />
+          )}
+          {stationFeatureOn && stationRegistryFailed && (
+            <div style={{ fontSize: 14, color: "#fbbf24", marginTop: 6 }}>
+              Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t be
+              loaded, so marking is unavailable for this completion. Complete the visit
+              normally — the registry is unchanged.
+            </div>
           )}
           {/* Service findings — typed specialty completion */}
           {isTypedFindings && (

@@ -1138,3 +1138,69 @@ describe('technician body count claims reconcile against the typed values (round
     expect(countContradictions('There were 0 captures.', { captures: 0 })).toEqual([]);
   });
 });
+
+// Round 12: the two windows around a trap count treated a NEIGHBOURING
+// capture claim's noun as a status cue. "We checked 8 traps and recorded 2
+// captures" dropped its only roster claim as a subset — so the stale 8
+// escaped the guard while the capture guard separately validated the 2.
+// Capture claims are now masked out of the windows before cues are read.
+describe('capture claims are not status cues for the trap roster (round 12)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a neighbouring capture count no longer hides a stale roster', () => {
+    for (const text of [
+      'We checked 8 traps and recorded 2 captures.', // capture claim trails
+      'We recorded 2 captures and checked 8 traps.', // capture claim leads
+      'Two mice were captured and we checked 8 traps.', // passive form leads
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('the same shapes pass when the roster agrees, and the capture guard still fires', () => {
+    expect(countContradictions('We checked 8 traps and recorded 2 captures.', { traps_checked: 8, captures: 2 }))
+      .toEqual([]);
+    expect(countContradictions('We checked 8 traps and recorded 2 captures.', { traps_checked: 8, captures: 3 }).length)
+      .toBeGreaterThan(0);
+  });
+
+  test('a cue describing the trap count itself is still a subset', () => {
+    // "captures" with no count of its own belongs to the trap number beside
+    // it — the masking removes whole capture CLAIMS, not the cue vocabulary.
+    expect(countContradictions('We checked 8 traps and found captures at 2 traps.', { traps_checked: 8 }))
+      .toEqual([]);
+    // a subset on its own still asserts no roster size
+    expect(countContradictions('8 traps had captures.', { traps_checked: 6 })).toEqual([]);
+  });
+});
+
+// Round 12: numeric and word-form zero-capture claims said the same thing as
+// "no captures" without the word "no", and the count guard can't help — a
+// structured captures of 0 makes the zero claim arithmetically accurate. On
+// a setup the traps just went out, so the claim still implies a check that
+// never happened.
+describe('zero-capture claims contradict a declared setup (round 12)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('digit and word-form zeros are refused', () => {
+    for (const text of [
+      '0 captures were recorded.',
+      'There were zero captures.',
+      'We recorded 0 new captures.',
+      'Zero catches so far.',
+      'We caught 0 rodents.',
+      '0 rats were caught.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('setup prose mentioning zero for anything else survives', () => {
+    for (const text of [
+      'We set 8 traps with zero disruption to the home.',
+      'We placed the traps along the zero-clearance soffit line.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});
