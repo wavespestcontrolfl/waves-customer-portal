@@ -9146,9 +9146,12 @@ export function CompletionPanel({
   // are admin-editable); the name regex is only a fallback for rows whose
   // profile did not resolve (codex P2 r8).
   // Inspection closeouts carry the credit promise — the toggle only renders
-  // for them, and the server independently re-checks the category so a
-  // crafted payload can't promise a credit on a treatment visit.
-  const isInspectionVisit = service.completionProfile?.category === "inspection";
+  // for them AND only when the server says the lane is live, so a dark gate
+  // never shows the tech a promise that will be silently dropped. The
+  // server independently re-checks the category too, so a crafted payload
+  // can't promise a credit on a treatment visit.
+  const isInspectionVisit = service.completionProfile?.category === "inspection"
+    && service.inspectionCreditAvailable === true;
   const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
     || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);

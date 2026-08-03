@@ -2268,6 +2268,12 @@ router.get('/:date?', async (req, res, next) => {
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         completionProfile,
+        // Whether the inspection-credit lane is actually live. The closeout
+        // panel renders its promise checkbox only on true (Codex #3175 P1):
+        // an offered, pre-checked promise the server silently ignores reads
+        // to the tech — and then to the customer — as a credit that was
+        // recorded. Same rule as the card-on-file checkbox.
+        inspectionCreditAvailable: require('../config/feature-gates').isEnabled('inspectionCredit'),
         // Typed-findings schema embedded per appointment so mobile completion
         // never blocks on a registry fetch (bad-network field conditions).
         // Null for everything except cut-over specialty types.
@@ -6450,6 +6456,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
     }
 
+    // Recorded inspection-credit promise (null unless this closeout made
+    // one). Declared HERE, before its only assignment — a `let` referenced
+    // above its declaration is a temporal-dead-zone throw, which would have
+    // turned every eligible closeout into a logged false failure.
+    let inspectionCreditOffer = null;
+
     // Inspection credit promise (dark behind GATE_INSPECTION_CREDIT).
     // Keyed ONLY to a successful inspection closeout plus the explicit
     // opt-out — deliberately NOT inside the invoice-mint branch (Codex
@@ -7126,10 +7138,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let invoiceCreated = false;
     let payUrl = null;
     let invoice = null;
-    // Recorded inspection-credit promise (null unless this closeout made
-    // one) — carried to the receipt so the customer is told the terms that
-    // were actually frozen, never a re-derived guess.
-    let inspectionCreditOffer = null;
     let alreadyPaid = false;
     let paymentCollectionSuppressed = false;
     let paymentReconciliationRequired = false;

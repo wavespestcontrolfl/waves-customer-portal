@@ -181,73 +181,108 @@ async function recordInspectionCreditOffer({
  * Best-effort by contract (a booking must never fail because crediting
  * failed) — returns a summary, never throws.
  */
+/**
+ * Claim and mint ONE specific offer against ONE booking. The claim is
+ * status-guarded AND ordering-guarded inside the transaction: the booking
+ * must have been created after the promise and before it lapsed, so no
+ * caller can mint an offer that no booking followed (Codex #3175 P0), and a
+ * concurrent redeemer finds nothing left to claim.
+ *
+ * Returns true only when money actually posted. Never throws.
+ */
+async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, bookingCreatedAt, createdBy, now }) {
+  try {
+    await db.transaction(async (trx) => {
+      const claimed = await trx('inspection_credit_offers')
+        .where({ id: offerId, status: 'offered' })
+        // Ordering, re-validated under the claim: promise BEFORE booking,
+        // booking BEFORE expiry. Redemption is judged by when the customer
+        // booked, never by when this code happens to run.
+        .where('created_at', '<=', bookingCreatedAt)
+        .where('expires_at', '>=', bookingCreatedAt)
+        .update({
+          status: 'redeemed',
+          redeemed_at: now,
+          redeemed_scheduled_service_id: bookingId,
+          updated_at: trx.fn.now(),
+        });
+      if (claimed !== 1) {
+        const e = new Error('offer claim lost a race or failed its ordering guard');
+        e.inspectionCreditSkip = 'claim_lost';
+        throw e;
+      }
+      const { entry } = await postCreditMovement({
+        customerId,
+        delta: round2(amount),
+        source: 'inspection_credit',
+        note: 'Inspection fee credited toward booked service',
+        createdBy,
+      }, trx);
+      // UNIQUE credit_ledger_id — the durable exactly-once proof.
+      await trx('inspection_credit_offers')
+        .where({ id: offerId })
+        .update({ credit_ledger_id: entry.id, updated_at: trx.fn.now() });
+    });
+    logger.info(`[inspection-credit] offer ${offerId} redeemed on booking ${bookingId}`);
+    return true;
+  } catch (err) {
+    if (err?.inspectionCreditSkip === 'claim_lost') return false;
+    // Left 'offered' on purpose — the sweep retries it.
+    logger.error(`[inspection-credit] redemption FAILED for offer ${offerId}: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Fast path: redeem against a booking the customer just made. Only offers
+ * promised BEFORE this booking and still unexpired at booking time qualify
+ * — an offer created later has no booking following it and must not mint.
+ *
+ * Best-effort by contract (a booking must never fail because crediting
+ * failed) and NOT the guarantee — sweepInspectionCreditRedemptions is.
+ * Never throws.
+ */
 async function redeemInspectionCreditForBooking({
   customerId,
   scheduledServiceId,
   bookingStatus = null,
+  bookingCreatedAt = null,
   createdBy = 'system:inspection_credit_rebook',
   now = new Date(),
 }) {
   if (!gateOn()) return { redeemed: 0, reason: 'feature_disabled' };
   if (!customerId || !scheduledServiceId) return { redeemed: 0, reason: 'missing_identifiers' };
-  // A booking that is already cancelled/no-showed is not the service the
-  // credit was promised toward.
   if (bookingStatus && NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingStatus).toLowerCase())) {
     return { redeemed: 0, reason: 'booking_not_live' };
   }
+  const bookedAt = bookingCreatedAt ? new Date(bookingCreatedAt) : now;
 
   try {
     const open = await db('inspection_credit_offers')
       .where({ customer_id: customerId, status: 'offered' })
-      .where('expires_at', '>=', now)
-      // The inspection itself must not redeem its own offer.
+      // Promised before this booking, still live when it was made.
+      .where('created_at', '<=', bookedAt)
+      .where('expires_at', '>=', bookedAt)
       .whereNot({ source_scheduled_service_id: scheduledServiceId })
       .orderBy('expires_at', 'asc')
-      .select('id', 'amount', 'expires_at');
+      .select('id', 'amount');
     if (!open.length) return { redeemed: 0, reason: 'no_open_offer' };
 
     let redeemed = 0;
     let total = 0;
     for (const offer of open) {
-      try {
-        await db.transaction(async (trx) => {
-          // Status-guarded claim: the row moves out of 'offered' before any
-          // money posts, so a concurrent booking finds nothing to claim.
-          // Re-check expiry in the claim so a boundary-crossing race can't
-          // redeem a just-lapsed offer.
-          const claimed = await trx('inspection_credit_offers')
-            .where({ id: offer.id, status: 'offered' })
-            .where('expires_at', '>=', now)
-            .update({
-              status: 'redeemed',
-              redeemed_at: now,
-              redeemed_scheduled_service_id: scheduledServiceId,
-              updated_at: trx.fn.now(),
-            });
-          if (claimed !== 1) {
-            const e = new Error('offer claim lost a race');
-            e.inspectionCreditSkip = 'claim_lost';
-            throw e;
-          }
-          const { entry } = await postCreditMovement({
-            customerId,
-            delta: round2(offer.amount),
-            source: 'inspection_credit',
-            note: 'Inspection fee credited toward booked service',
-            createdBy,
-          }, trx);
-          // Bind the mint to the offer — the UNIQUE credit_ledger_id is the
-          // durable exactly-once proof.
-          await trx('inspection_credit_offers')
-            .where({ id: offer.id })
-            .update({ credit_ledger_id: entry.id, updated_at: trx.fn.now() });
-        });
+      const ok = await redeemSpecificOffer({
+        offerId: offer.id,
+        customerId,
+        amount: offer.amount,
+        bookingId: scheduledServiceId,
+        bookingCreatedAt: bookedAt,
+        createdBy,
+        now,
+      });
+      if (ok) {
         redeemed += 1;
         total = round2(total + round2(offer.amount));
-        logger.info(`[inspection-credit] offer ${offer.id} redeemed on booking ${scheduledServiceId}`);
-      } catch (err) {
-        if (err?.inspectionCreditSkip === 'claim_lost') continue;
-        logger.error(`[inspection-credit] redemption FAILED for offer ${offer.id}: ${err.message}`);
       }
     }
     return { redeemed, amount: total };
@@ -281,39 +316,55 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
   let redeemed = 0;
   let expired = 0;
   try {
-    // Lapsed offers: terminal, and never redeemable again.
-    expired = await db('inspection_credit_offers')
-      .where({ status: 'offered' })
-      .where('expires_at', '<', now)
-      .update({ status: 'expired', updated_at: db.fn.now() });
-
+    // Every still-open offer, INCLUDING lapsed ones: redemption is judged
+    // by when the customer BOOKED, not by when this sweep runs (Codex
+    // #3175 P0). A booking made inside the window still earns its credit
+    // even if the fast path failed, cron was down, or the gate was off
+    // until after the expiry date.
     const open = await db('inspection_credit_offers')
       .where({ status: 'offered' })
-      .where('expires_at', '>=', now)
       .orderBy('created_at', 'asc')
       .limit(limit)
-      .select('id', 'customer_id', 'created_at', 'source_scheduled_service_id');
+      .select('id', 'customer_id', 'amount', 'created_at', 'expires_at', 'source_scheduled_service_id');
 
     for (const offer of open) {
       try {
-        // A live booking made AFTER the promise, and not the inspection
-        // itself — the same test the at-booking path applies, re-derived
-        // from persisted state so it holds for every booking surface.
+        // A live booking made inside THIS offer's window, and not the
+        // inspection itself. Re-derived from persisted state, so it holds
+        // for every booking surface.
         const booking = await db('scheduled_services')
           .where({ customer_id: offer.customer_id })
           .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
           .where('created_at', '>=', offer.created_at)
+          .where('created_at', '<=', offer.expires_at)
           .whereNot({ id: offer.source_scheduled_service_id || '00000000-0000-0000-0000-000000000000' })
           .orderBy('created_at', 'asc')
-          .first('id');
-        if (!booking) continue;
-        const res = await redeemInspectionCreditForBooking({
-          customerId: offer.customer_id,
-          scheduledServiceId: booking.id,
-          createdBy: 'system:inspection_credit_sweep',
-          now,
-        });
-        redeemed += Number(res?.redeemed) || 0;
+          .first('id', 'created_at');
+
+        if (booking) {
+          // Redeem THIS offer only — never a customer-wide sweep, which
+          // would mint offers no booking followed.
+          const ok = await redeemSpecificOffer({
+            offerId: offer.id,
+            customerId: offer.customer_id,
+            amount: offer.amount,
+            bookingId: booking.id,
+            bookingCreatedAt: booking.created_at,
+            createdBy: 'system:inspection_credit_sweep',
+            now,
+          });
+          if (ok) redeemed += 1;
+          continue;
+        }
+
+        // No qualifying booking: expire only once the window has genuinely
+        // passed. Status-guarded so it can't stomp a concurrent redemption.
+        if (new Date(offer.expires_at) < now) {
+          const closed = await db('inspection_credit_offers')
+            .where({ id: offer.id, status: 'offered' })
+            .update({ status: 'expired', updated_at: db.fn.now() });
+          expired += Number(closed) || 0;
+        }
       } catch (err) {
         // One bad offer must not stop the sweep — it retries next run.
         logger.error(`[inspection-credit] sweep failed for offer ${offer.id}: ${err.message}`);
