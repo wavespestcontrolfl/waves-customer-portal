@@ -1913,8 +1913,18 @@ async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false
   return null;
 }
 
+// The sentinel for "this render must show NO lawn assessment" (#3168). A fence
+// that sealed an empty selection needs to pin that too: without it the render
+// is simply unpinned, and a row that becomes eligible during the browser's
+// fetch and ineligible again before the post-render check slips past both
+// checks into the attachment.
+const PIN_NO_ASSESSMENT = 'none';
+
 async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null } = {}) {
   if (serviceLine !== 'lawn') return null;
+  // Pinned-empty is unconditional: the attachment provably carries no lawn
+  // section, which is exactly what the fence sealed.
+  if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return null;
   const assessment = pinnedAssessmentId
     ? await loadPinnedLawnAssessment(service, pinnedAssessmentId, knex)
     : await loadLinkedLawnAssessment(service, knex);
@@ -3768,6 +3778,7 @@ module.exports = {
   loadLinkedLawnAssessment,
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,
+  PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,
   defaultGeometry,

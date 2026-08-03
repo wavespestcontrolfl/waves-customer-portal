@@ -250,6 +250,8 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // so the held-payload fallback is covered too: null -> a newly confirmed row
   // is a change, and must defer.
   let canonicalAtResolve = null;
+  // Only lawn reports carry an assessment, so only they are worth pinning.
+  let isLawnDelivery = false;
 
   if (heldForGrounding) {
     const KnowledgeBridge = require('../knowledge-bridge');
@@ -282,11 +284,12 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // failClosed (codex P1 #3135 r2): a transient DB error must NOT read as
   // "not a lawn record". Swallowing it would dispatch an unfenced attachment;
   // defer retryably instead — only a clean query returning no row bypasses.
-  const { loadLinkedLawnAssessment } = require('./report-data');
+  const { loadLinkedLawnAssessment, PIN_NO_ASSESSMENT } = require('./report-data');
   try {
     const serviceRow = await knex('service_records')
       .where({ id: delivery.service_record_id })
-      .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
+      .first('id', 'customer_id', 'scheduled_service_id', 'service_id', 'service_line');
+    isLawnDelivery = String(serviceRow?.service_line || '') === 'lawn';
     const linked = serviceRow
       ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true })
       : null;
@@ -437,7 +440,15 @@ async function processServiceReportDelivery(delivery, knex = db) {
       // page's freedom to choose. A pin the report cannot legitimately show
       // fails the render, so the delivery defers rather than mailing an
       // attachment whose contents nothing verified.
-      pinnedLawnAssessmentId: fencedAssessmentId,
+      // 'none' when nothing resolved — an ABSENT pin is not the same as a pin
+      // of absence (#3168 r1). Without the sentinel a null selection renders
+      // unpinned, and a row that becomes eligible during the browser's fetch
+      // and ineligible again before the post-render check passes both checks
+      // and lands unsealed lawn copy in the attachment.
+      // LAWN deliveries only. Pinning a pest report would be meaningless (it
+      // has no lawn section to pin) while making every pest render fresh and
+      // unstored, since a pinned render deliberately bypasses the cache.
+      pinnedLawnAssessmentId: isLawnDelivery ? (fencedAssessmentId || PIN_NO_ASSESSMENT) : null,
       verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {

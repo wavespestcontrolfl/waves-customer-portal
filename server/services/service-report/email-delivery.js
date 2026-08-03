@@ -467,6 +467,21 @@ async function sendServiceReportV1Email(recordId, {
       });
     }
   } catch (err) {
+    // A PINNED render must never degrade into an attachment-less send (#3168).
+    // This catch exists so a transient render failure still gets the customer
+    // their report link — reasonable when the attachment is a bonus. But a
+    // pinned render is a fence: its failure means we could not prove what the
+    // attachment would contain, and continuing would mark the delivery SENT
+    // with no attachment, permanently, on a path whose whole contract is
+    // "defer rather than send something unverified". Defer instead.
+    if (pinnedLawnAssessmentId) {
+      logger.warn(`[service-report-v1-email] pinned PDF render failed for ${recordId}; deferring send: ${safePdfRenderError(err)}`);
+      return {
+        ok: false,
+        error: `Pinned report render failed — deferring send: ${safePdfRenderError(err)}`,
+        retryable: true,
+      };
+    }
     logger.warn(`[service-report-v1-email] PDF attachment skipped for ${recordId}: ${safePdfRenderError(err)}`);
     await enqueuePdfRenderRetry({
       serviceRecordId: recordId,

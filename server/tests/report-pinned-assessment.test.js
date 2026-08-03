@@ -45,6 +45,7 @@ function makeKnex(rows) {
 const {
   loadLinkedLawnAssessment,
   loadPinnedLawnAssessment,
+  PIN_NO_ASSESSMENT,
 } = require('../services/service-report/report-data');
 
 describe('#3168 pinned assessment — authorization boundary', () => {
@@ -134,6 +135,29 @@ describe('#3168 pinned assessment — the pin itself', () => {
     await expect(loadPinnedLawnAssessment(SERVICE, 'assess-NOPE', knex)).rejects.toThrow();
     // Sanity: the fallback really would have succeeded.
     await expect(loadLinkedLawnAssessment(SERVICE, knex)).resolves.toMatchObject({ id: 'assess-A' });
+  });
+});
+
+describe('#3168 pinned assessment — pinning ABSENCE', () => {
+  const OLD_CLIENT_URL = process.env.CLIENT_URL;
+  beforeAll(() => { process.env.CLIENT_URL = 'https://portal.example'; });
+  afterAll(() => { process.env.CLIENT_URL = OLD_CLIENT_URL; });
+
+  // An absent pin is not a pin of absence. A fence that sealed "no assessment"
+  // has to say so, or the render is simply unpinned and a row that becomes
+  // eligible during the browser's fetch and ineligible again before the
+  // post-render check slips past both checks into the attachment.
+  test('the sentinel is a value the URL can carry', () => {
+    expect(typeof PIN_NO_ASSESSMENT).toBe('string');
+    expect(PIN_NO_ASSESSMENT.length).toBeGreaterThan(0);
+    expect(serviceReportViewerUrl('tok-1', null, 'pdf', { pinnedLawnAssessmentId: PIN_NO_ASSESSMENT }))
+      .toBe(`https://portal.example/report/tok-1?mode=pdf&assessment=${PIN_NO_ASSESSMENT}`);
+  });
+
+  test('the sentinel can never collide with a real assessment id', () => {
+    // Ids are uuids; the sentinel deliberately is not one, so a row could
+    // never be named 'none' and be resolved by accident.
+    expect(PIN_NO_ASSESSMENT).not.toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-/i);
   });
 });
 
