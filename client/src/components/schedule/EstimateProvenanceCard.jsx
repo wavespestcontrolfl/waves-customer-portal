@@ -335,12 +335,13 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
       name: String(line?.estimateLabel || line?.name || '').trim(),
       cadence: cadenceLabel(line?.cadence, line?.intervalDays),
       recurring: !!line?.cadence && line.cadence !== 'one_time',
-      // Real per-visit quote prices only — the server marks lines synthesized
-      // from bare monthly/one-time totals, which must never read
-      // "/application" (per-month copy audit rule).
+      // perApplicationPrice is EXPLICIT provenance from the server's
+      // canonical (discount-aware) derivation — `price` can be a list rate
+      // or a synthesized monthly figure, so it is never trusted for
+      // per-application copy (per-month copy audit rule).
       perAppPrice: line?.cadence && line.cadence !== 'one_time'
-        && line?.derived !== 'estimate_totals_fallback' && Number(line?.price) > 0
-        ? Number(line.price) : null,
+        && Number(line?.perApplicationPrice) > 0
+        ? Number(line.perApplicationPrice) : null,
       oneTimePrice: line?.cadence === 'one_time' && Number(line?.price) > 0 ? Number(line.price) : null,
     }))
     .filter((line) => line.name);

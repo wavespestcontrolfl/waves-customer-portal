@@ -19,7 +19,7 @@ describe('EstimateProvenanceCard quoted framing', () => {
         quotedTotal={135.30}
         onetimeTotal={99}
         currentPrice={121}
-        lines={[{ name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121 }]}
+        lines={[{ name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121, perApplicationPrice: 121 }]}
         estimateRef="EST-2026-0001"
       />,
     );
@@ -37,7 +37,7 @@ describe('EstimateProvenanceCard quoted framing', () => {
         onetimeTotal={200}
         currentPrice={321}
         lines={[
-          { name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121 },
+          { name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
           { name: 'Bed Bug Treatment', cadence: 'one_time', price: 200 },
         ]}
         estimateRef="EST-2026-0003"
@@ -54,7 +54,7 @@ describe('EstimateProvenanceCard quoted framing', () => {
         onetimeTotal={0}
         currentPrice={321}
         lines={[
-          { name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121 },
+          { name: 'Quarterly Pest Control', cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
           { name: 'Mystery Add-on', cadence: 'quarterly', price: null },
         ]}
         estimateRef="EST-2026-0004"

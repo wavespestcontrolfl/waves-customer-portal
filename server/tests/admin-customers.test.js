@@ -749,4 +749,49 @@ describe('admin customers route helpers', () => {
       service_report_notify_primary: false,
     });
   });
+
+  test('perApplicationPrice: canonical discount-aware provenance on engine rows (codex #3167 audit)', () => {
+    const index = indexServicesForSchedule([]);
+    // Engine pest row: perTreatment is the explicit per-application signal.
+    const listOnly = {
+      id: 'est-pa-1',
+      monthly_total: 40.33,
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'pest_control', name: 'Pest Control', perTreatment: 121, visitsPerYear: 4, mo: 40.33, monthly: 40.33 },
+        ] } },
+      },
+    };
+    const [listLine] = scheduleLinesFromEstimate(listOnly, index);
+    expect(listLine.perApplicationPrice).toBe(121);
+    expect(listLine.price).toBe(121); // pre-fill semantics untouched
+
+    // Discounted row: priceAfterDiscount (per-treatment-after-discount) wins
+    // over the list perTreatment AND over the list annual.
+    const discounted = {
+      id: 'est-pa-2',
+      monthly_total: 36.30,
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'pest_control', name: 'Pest Control', perTreatment: 121, priceAfterDiscount: 108.90, visitsPerYear: 4, annual: 484, mo: 40.33 },
+        ] } },
+      },
+    };
+    const [discLine] = scheduleLinesFromEstimate(discounted, index);
+    expect(discLine.perApplicationPrice).toBe(108.90);
+
+    // Genuinely monthly-billed keys never carry per-application provenance.
+    const monthlyBilled = {
+      id: 'est-pa-3',
+      monthly_total: 39,
+      estimate_data: {
+        result: { recurring: { services: [
+          { service: 'rodent_bait', name: 'Rodent Bait Stations', perTreatment: 117, visitsPerYear: 4, mo: 39 },
+        ] } },
+      },
+    };
+    const [rodentLine] = scheduleLinesFromEstimate(monthlyBilled, index);
+    expect(rodentLine.perApplicationPrice).toBeUndefined();
+  });
+
 });

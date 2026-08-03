@@ -29,16 +29,17 @@ describe('CreateAppointmentModal won estimate helpers', () => {
     expect(formatScheduleEstimateAmount({
       monthlyTotal: 36.30,
       onetimeTotal: 99,
-      lines: [{ cadence: 'quarterly', price: 121 }],
+      lines: [{ cadence: 'quarterly', price: 121, perApplicationPrice: 121 }],
     })).toBe('$121.00/application + $99.00 one-time');
     // Multiple recurring lines join without summing across cadences.
     expect(formatScheduleEstimateAmount({
       monthlyTotal: 116.55,
-      lines: [{ cadence: 'monthly', price: 114 }, { cadence: 'quarterly', price: 132 }],
+      lines: [{ cadence: 'monthly', price: 114, perApplicationPrice: 114 }, { cadence: 'quarterly', price: 132, perApplicationPrice: 132 }],
     })).toBe('$114.00 + $132.00/application');
-    // A server-synthesized fallback line carries a MONTHLY figure — labeling
-    // it per-application would misstate the charge, so the legacy /mo copy
-    // stands until the quote has real lines.
+    // A line without explicit per-application provenance (synthesized
+    // monthly fallback, genuinely monthly-billed plan, list-only data)
+    // keeps the legacy /mo copy — the server only stamps
+    // perApplicationPrice via the canonical discount-aware derivation.
     expect(formatScheduleEstimateAmount({
       monthlyTotal: 24,
       lines: [{ cadence: 'quarterly', price: 24, derived: 'estimate_totals_fallback' }],
@@ -49,7 +50,7 @@ describe('CreateAppointmentModal won estimate helpers', () => {
     expect(formatScheduleEstimateAmount({
       monthlyTotal: 64.33,
       lines: [
-        { cadence: 'quarterly', price: 121 },
+        { cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
         { cadence: 'monthly', price: 24, derived: 'estimate_totals_fallback' },
       ],
     })).toBe('$64.33/mo');

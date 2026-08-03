@@ -1879,6 +1879,7 @@ module.exports = router;
 module.exports._internals = {
   isPublicCommercialQuote,
   publicQuotePestLabel,
+  perApplicationForLine,
   publicQuoteBedBugInput,
   estimateBlocksBookingHandoff,
   estimateBlocksSelfBookLink,

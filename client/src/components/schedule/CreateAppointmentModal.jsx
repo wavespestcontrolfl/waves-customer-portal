@@ -319,9 +319,12 @@ export function formatScheduleEstimateAmount(estimate) {
   // mislabel as per-application.
   const lines = Array.isArray(estimate?.lines) ? estimate.lines : [];
   const recurringLines = lines.filter((l) => l && l.cadence && l.cadence !== 'one_time');
+  // perApplicationPrice is EXPLICIT provenance from the server's canonical
+  // derivation (discount-aware; genuinely monthly-billed lines never carry
+  // it) — never inferred from `price`, whose fields can be list rate.
   const perApp = recurringLines
-    .filter((l) => l.derived !== 'estimate_totals_fallback' && Number(l.price) > 0)
-    .map((l) => Number(l.price));
+    .filter((l) => Number(l.perApplicationPrice) > 0)
+    .map((l) => Number(l.perApplicationPrice));
   const onetime = Number(estimate?.onetimeTotal);
   // EVERY recurring line must be proven per-application (Codex P1): a mixed
   // quote (per-app pest + genuinely-monthly legacy monitoring) must not

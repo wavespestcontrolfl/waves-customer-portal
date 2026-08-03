@@ -441,6 +441,50 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     source: kind,
     estimateId: estimate.id,
     ...(monthlyFallbackPrice != null ? { derived: 'estimate_totals_fallback' } : {}),
+    // EXPLICIT per-application provenance (Codex P1): the canonical
+    // public-quote derivation owns the rules — explicit per-app signal +
+    // visit count, DISCOUNTED annual preferred over the list rate, and
+    // genuinely monthly-billed keys (rodent bait, station rental) excluded
+    // by design. These are ENGINE result rows, not wizard lineItems, so a
+    // thin field adapter feeds the one shared derivation (never a second
+    // parser): perTreatment is the engine's explicit per-application
+    // signal, and priceAfterDiscount is its per-treatment-after-discount.
+    // Display copy keys off THIS field; `price` above keeps its historical
+    // pre-fill semantics untouched. Absent = no provable per-application
+    // charge, and clients keep legacy copy.
+    ...(kind === 'recurring' ? (() => {
+      try {
+        const { perApplicationForLine } = require('./public-quote')._internals;
+        const cadenceFields = {
+          visitsPerYear: line?.visitsPerYear,
+          visits: line?.visits,
+          appsPerYear: line?.appsPerYear,
+          frequency: line?.frequency,
+        };
+        // priceAfterDiscount IS per-treatment-after-discount — when present
+        // it must win outright, so the LIST annual is withheld (the
+        // canonical fn would otherwise prefer annual/visits and resurrect
+        // the undiscounted rate).
+        const discountedPerApp = moneyOrNull(line?.priceAfterDiscount);
+        const pa = perApplicationForLine(discountedPerApp != null
+          ? {
+            service: line?.service,
+            perApp: discountedPerApp,
+            ...cadenceFields,
+            annualAfterDiscount: line?.annualAfterDiscount,
+          }
+          : {
+            service: line?.service,
+            perApp: moneyOrNull(line?.perApp, line?.perTreatment) || undefined,
+            perVisit: line?.perVisit,
+            ...cadenceFields,
+            annualAfterDiscount: line?.annualAfterDiscount,
+            finalAnnual: line?.finalAnnual,
+            annual: line?.annual ?? line?.ann,
+          });
+        return pa?.amount > 0 ? { perApplicationPrice: pa.amount } : {};
+      } catch { return {}; }
+    })() : {}),
   };
 }
 
