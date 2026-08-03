@@ -3485,7 +3485,23 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // snapshot) never resurfaces via the summary.
   {
     const technicianReport = technicianReportCustomerCopy(service.technician_notes);
-    const drivesSummary = technicianReport?.body
+    // A viewer-visible trapping snapshot declaring an initial setup screens
+    // the body BEFORE it wins the summary. The snapshot that accepted this
+    // body can be a different findings type entirely (a non-trapping
+    // primary with a trapping COMPANION), so its acceptance never ran the
+    // setup guard — and a body generated before the companion's selector
+    // changed can still say the traps were checked or that nothing was
+    // caught, winning the Visit Summary beside the companion's frozen
+    // "Traps set" result (codex P1 r18). Same fallback as the narrative
+    // lanes: the recap stays, and with the source left as 'recap' the
+    // gated rodent narrative below rebuilds a grounded summary instead.
+    // Uses narrativeTrapSetupSnapshot so viewer visibility matches the
+    // narrative's stage rules exactly (round 12).
+    const trapSetupScreened = !narrativeTrapSetupSnapshot
+      || !technicianReport?.body
+      // Scoped require matches this file's pattern for report-time helpers.
+      || require('./activity-indicators').setupContradictions(technicianReport.body).length === 0;
+    const drivesSummary = technicianReport?.body && trapSetupScreened
       && (!typedSnapshot || typedSnapshot.todaysResult?.bodySource === 'technician_report');
     if (drivesSummary) {
       visitSummary = technicianReport.body;

@@ -689,6 +689,43 @@ export function pendingStationEdits({ stationNew, stationMoves, stationStatuses,
     || stationRetired.length > 0;
 }
 
+// Mirrors positionKey in server/services/termite-stations.js: the
+// completion sync deduplicates an id-less create landing on an existing
+// row's exact position and attaches its check row to the EXISTING station.
+// A draft pin colliding with a registry row confirmed after the draft was
+// saved (another writer added a station there while the billing detour
+// waited) must therefore not display or auto-count as a second trap — the
+// completion would record one station while the frozen count says two
+// (codex P1 r18). The pin drops and its status transfers to the existing
+// row (the same outcome the server's dedupe produces) unless that row
+// already carries one.
+export function reconcileNewPinsWithRegistry({ stationNew, stationPreloads, stationStatuses }) {
+  const existingByPosition = new Map();
+  stationPreloads.forEach((station) => {
+    if (station?.shape?.cx != null && station?.shape?.cy != null) {
+      existingByPosition.set(`${Number(station.shape.cx)}:${Number(station.shape.cy)}`, station.id);
+    }
+  });
+  const keptNew = [];
+  const statuses = { ...stationStatuses };
+  let changed = false;
+  stationNew.forEach((pin) => {
+    const key = pin?.shape?.cx != null && pin?.shape?.cy != null
+      ? `${Number(pin.shape.cx)}:${Number(pin.shape.cy)}`
+      : null;
+    const existingId = key == null ? undefined : existingByPosition.get(key);
+    if (existingId === undefined) {
+      keptNew.push(pin);
+      return;
+    }
+    changed = true;
+    if (statuses[pin.key] && !statuses[existingId]) statuses[existingId] = statuses[pin.key];
+    delete statuses[pin.key];
+  });
+  if (!changed) return { changed, stationNew, stationStatuses };
+  return { changed, stationNew: keptNew, stationStatuses: statuses };
+}
+
 // Accepts "HH:MM" or "HH:MM:SS" (DB rows carry seconds; time inputs don't).
 function timeToMinutes(value) {
   if (typeof value !== "string") return null;
@@ -8089,6 +8126,13 @@ export function StationMarkingStep({
   program = "termite", // 'termite' | 'rodent' — labels only, mechanics shared
   disabled = false,
   dark = false,
+  // A declared trap SETUP cannot carry serviced pins (the server rejects
+  // the completion) — hide the chip so the conflict can't be created by
+  // tap. A pin already serviced (restored, or marked before the visit-type
+  // selector changed) keeps its chip visible so the operator can see the
+  // mark and switch it off; the handleSubmit mirror still catches it if
+  // they don't (codex P2 r18).
+  disallowServiced = false,
 }) {
   const [selectedKey, setSelectedKey] = useState(null);
   const [addMode, setAddMode] = useState(false);
@@ -8451,17 +8495,21 @@ export function StationMarkingStep({
         {selected && !addMode && (
           <>
             <span style={{ fontSize: 11, color: mutedInk }}>Station {selected.number}:</span>
-            {showStatuses && Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
-              <button
-                key={status}
-                type="button"
-                disabled={disabled}
-                onClick={() => { if (!disabled) onSetStatus(selected.key, status); }}
-                style={chipStyle(statusOf(selected.key) === status, meta.color)}
-              >
-                {stationStatusLabel(status, program)}
-              </button>
-            ))}
+            {showStatuses && Object.entries(STATION_STATUS_UI)
+              .filter(([status]) => status !== "serviced"
+                || !disallowServiced
+                || statusOf(selected.key) === "serviced")
+              .map(([status, meta]) => (
+                <button
+                  key={status}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => { if (!disabled) onSetStatus(selected.key, status); }}
+                  style={chipStyle(statusOf(selected.key) === status, meta.color)}
+                >
+                  {stationStatusLabel(status, program)}
+                </button>
+              ))}
             {selected.shape && (
               <button
                 type="button"
@@ -8485,12 +8533,16 @@ export function StationMarkingStep({
       </div>
       {showStatuses && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", marginTop: 8 }}>
-          {Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
-            <span key={status} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: mutedInk }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: meta.color }} />
-              {stationStatusLabel(status, program)}
-            </span>
-          ))}
+          {Object.entries(STATION_STATUS_UI)
+            .filter(([status]) => status !== "serviced"
+              || !disallowServiced
+              || stations.some((station) => statusOf(station.key) === "serviced"))
+            .map(([status, meta]) => (
+              <span key={status} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: mutedInk }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: meta.color }} />
+                {stationStatusLabel(status, program)}
+              </span>
+            ))}
         </div>
       )}
     </div>
@@ -9027,6 +9079,13 @@ export function CompletionPanel({
     setStationStatuses({});
     setStationRetired([]);
   };
+  // Latest new-pin/status state for the async /property-map resolution: a
+  // restore can land while the fetch is in flight, and the effect closure
+  // would reconcile the PRE-restore values (resurrecting state the restore
+  // replaced). The editor is disabled for the whole in-flight window, so
+  // the restore is the only writer this bridges.
+  const stationEditsRef = useRef({ stationNew: [], stationStatuses: {} });
+  stationEditsRef.current = { stationNew, stationStatuses };
 
   // Default the rodent trapping "This visit" select, into whichever slice
   // owns the rodent_trapping schema for this visit (primary findings vs. a
@@ -9082,7 +9141,7 @@ export function CompletionPanel({
           return;
         }
         setStationRegistryState(res.stationsLoaded === false ? "failed" : "ready");
-        setStationPreloads((Array.isArray(res.stations) ? res.stations : [])
+        const freshPreloads = (Array.isArray(res.stations) ? res.stations : [])
           .filter((station) => (station.program || "termite") === stationProgram)
           .map((station) => ({
             id: String(station.id),
@@ -9092,7 +9151,22 @@ export function CompletionPanel({
               ? station.geometryImage
               : null,
             stale: Boolean(station.staleMark),
-          })));
+          }));
+        setStationPreloads(freshPreloads);
+        // Draft pins restored while this fetch was in flight can collide
+        // with rows another writer confirmed since the draft was saved —
+        // same reconcile as the restore's ready path, via the latest-edits
+        // ref (the effect closure predates the restore).
+        if (res.stationsLoaded !== false) {
+          const reconciled = reconcileNewPinsWithRegistry({
+            ...stationEditsRef.current,
+            stationPreloads: freshPreloads,
+          });
+          if (reconciled.changed) {
+            setStationNew(reconciled.stationNew);
+            setStationStatuses(reconciled.stationStatuses);
+          }
+        }
         setStationNumberBase(
           Number(res.nextStationNumberByProgram?.[stationProgram])
           || Number(res.nextStationNumber)
@@ -9340,6 +9414,19 @@ export function CompletionPanel({
     ),
   );
   const [findingsValues, setFindingsValues] = useState({});
+  // The trapping section — primary OR companion, `trap_visit_type` can
+  // live in either — declares this visit as the initial trap setup. ONE
+  // source for the serviced-pin rules: the handleSubmit mirror of the
+  // server's rejection, and the editor hiding the "Serviced" chip so the
+  // conflict can't be created by tap in the first place (codex P2 r18).
+  const declaresTrapSetup = [
+    findingsValues,
+    ...companionSchemas.map(
+      (schema) => (companionState[schema.type] || EMPTY_COMPANION_ENTRY).values,
+    ),
+  ].some(
+    (values) => String(values?.trap_visit_type ?? "").trim() === "Initial setup",
+  );
   const [typedActivityScore, setTypedActivityScore] = useState(null);
   // Pin semantics (contract §4): while untouched, the score recomputes from
   // deriveScores[values[deriveField]]; the FIRST tap on the picker pins
@@ -10520,7 +10607,6 @@ export function CompletionPanel({
         && typeof station.key === "string"
         && station.shape && typeof station.shape === "object")
       : [];
-    setStationNew(restoredStationNew);
     // keep the key sequence ahead of restored pins so a new add can't
     // collide with a restored key
     stationNewSeqRef.current = restoredStationNew.reduce((max, station) => {
@@ -10532,11 +10618,28 @@ export function CompletionPanel({
         ? savedDraft.stationMoves
         : {},
     );
-    setStationStatuses(
-      savedDraft.stationStatuses && typeof savedDraft.stationStatuses === "object"
-        ? savedDraft.stationStatuses
-        : {},
-    );
+    const restoredStatuses = savedDraft.stationStatuses && typeof savedDraft.stationStatuses === "object"
+      ? savedDraft.stationStatuses
+      : {};
+    // Against a CONFIRMED registry, a restored pin can collide with a row
+    // another writer added at the same position while the draft waited —
+    // the server dedupes that create onto the existing row, so displaying
+    // and auto-counting both here records one station while the frozen
+    // count says two (codex P1 r18). Reconcile before setting; the
+    // unconfirmed path keeps the raw restore and reconciles when the
+    // fetch resolves (see the /property-map effect).
+    if (stationRegistryState === "ready") {
+      const reconciled = reconcileNewPinsWithRegistry({
+        stationNew: restoredStationNew,
+        stationPreloads,
+        stationStatuses: restoredStatuses,
+      });
+      setStationNew(reconciled.stationNew);
+      setStationStatuses(reconciled.stationStatuses);
+    } else {
+      setStationNew(restoredStationNew);
+      setStationStatuses(restoredStatuses);
+    }
     setStationRetired(
       Array.isArray(savedDraft.stationRetired) ? savedDraft.stationRetired : [],
     );
@@ -11621,15 +11724,8 @@ export function CompletionPanel({
     // setup, and a legitimate serviced BAIT-STATION pin must not be blocked
     // (codex P1). Mirrors the server's scoping exactly.
     if (stationFeatureOn && stationProgram === "trapping" && !isIncompleteVisit) {
-      const declaresTrapSetup = [
-        findingsValues,
-        ...companionSchemas.map(
-          (schema) => (companionState[schema.type] || EMPTY_COMPANION_ENTRY).values,
-        ),
-      ].some(
-        (values) =>
-          String(values?.trap_visit_type ?? "").trim() === "Initial setup",
-      );
+      // declaresTrapSetup is the hoisted component-level source — the same
+      // value hides the "Serviced" chip in the editor (codex P2 r18).
       if (
         declaresTrapSetup &&
         stationDisplay.some(
@@ -13536,6 +13632,7 @@ export function CompletionPanel({
                 onRemoveStation={removeStationPin}
                 program={stationProgram || "termite"}
                 maxStations={Number(propertyMap?.stationCap) || 80}
+                disallowServiced={stationProgram === "trapping" && declaresTrapSetup}
                 disabled={generating || success || stationRegistryFailed}
               />
             )}
@@ -15503,6 +15600,7 @@ export function CompletionPanel({
               program={stationProgram || "termite"}
               maxStations={Number(propertyMap?.stationCap) || 80}
               dark
+              disallowServiced={stationProgram === "trapping" && declaresTrapSetup}
               disabled={generating || success || stationRegistryFailed}
             />
           )}
