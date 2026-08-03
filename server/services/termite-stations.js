@@ -29,6 +29,7 @@
 // server persists.
 
 const { sanitizeZoneShape } = require('./property-zones');
+const { stampedDivergesSql } = require('./stamped-address');
 const { resolveZoneRowsImageDrift } = require('./service-report/zone-drift');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -872,18 +873,27 @@ async function stationMapPdfSignature(service, knex) {
       .orderBy('version', 'desc')
       .first('zoom', 'version')
       .catch(() => null);
-    // Read coordinates HERE rather than off the caller's row. The two paths
-    // that compose this key load different column sets (the queue path uses a
-    // lightweight explicit select; renderAndStore joins customers), so any
-    // signature input taken from `service` silently differs between them and
-    // the expected key can never match the stored one — a permanent cache
-    // miss that re-renders every emailed report. Same input, every caller.
-    const customer = await knex('customers')
-      .where({ id: customerId })
-      .first('latitude', 'longitude')
+    // Resolve coordinates HERE, with the report's OWN precedence expression.
+    // Two reasons this can't come from the caller's row or from customers
+    // directly: (1) the paths that compose this key load different column
+    // sets, so any input taken from `service` differs between them and the
+    // expected key never matches the stored one — a permanent cache miss
+    // that re-renders every emailed report; (2) the map centers on the
+    // STAMPED visit coordinates when the stamp diverges from the primary
+    // address, so hashing customers.latitude would both miss a corrected
+    // stamp and re-render on unrelated primary-address edits. Reusing
+    // stampedDivergesSql keeps this identical to report-data's center.
+    const coords = await knex('service_records as sr')
+      .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+      .leftJoin('customers as c', 'sr.customer_id', 'c.id')
+      .where('sr.id', service.id)
+      .first(
+        knex.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as lat`),
+        knex.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as lng`),
+      )
       .catch(() => null);
-    const lat = customer?.latitude ?? null;
-    const lng = customer?.longitude ?? null;
+    const lat = coords?.lat ?? null;
+    const lng = coords?.lng ?? null;
     const centerPart = lat != null && lng != null
       ? `g${Number(lat).toFixed(5)},${Number(lng).toFixed(5)}`
       : '';
