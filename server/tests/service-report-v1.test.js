@@ -32,7 +32,7 @@ const {
 } = require('../services/service-report/pdf-events');
 const {
   buildServiceReportV1DeliveryContext,
-  buildServiceReportV1Sms,
+  buildServiceReportV1SmsVars,
   serviceReportV1SmsType,
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
@@ -1641,6 +1641,24 @@ describe('service report v1', () => {
     expect(liveCompleted.confidence).toBe('high');
   });
 
+  test('typed serviceLabel names the actual service in the completed event; absent label keeps the per-line copy', () => {
+    const base = {
+      service: {
+        status: 'completed',
+        service_line: 'pest',
+        arrived_at: '2026-06-20T14:00:00.000Z',
+        completed_at: '2026-06-20T14:30:00.000Z',
+      },
+      serviceLine: 'pest',
+    };
+    const labeled = buildVisitTimeline({ ...base, serviceLabel: 'Bed Bug Treatment' });
+    expect(labeled.events.find((e) => e.type === 'service_completed').customerDescription)
+      .toBe('Your technician completed your Bed Bug Treatment and finalized the report.');
+    const unlabeled = buildVisitTimeline(base);
+    expect(unlabeled.events.find((e) => e.type === 'service_completed').customerDescription)
+      .toBe('Your technician completed the pest control service and finalized the report.');
+  });
+
   test('visit timeline adds Service completed for completed reports even when Bouncie has no completion event', () => {
     const timeline = buildVisitTimeline({
       service: {
@@ -2585,50 +2603,68 @@ describe('service report v1', () => {
     })).toBe('status=500 Failed at https://portal.wavespestcontrol.com/report/[redacted]');
   });
 
-  test('v1 SMS delivery copy includes public report link and advisory re-entry', () => {
-    const body = buildServiceReportV1Sms({
+  // Owner ruling 2026-08-01: the completion text names the service, carries the
+  // link, and stops there — no re-entry line, no opt-out footer. Re-entry lives
+  // on the linked report; the text exists to get the customer there in one
+  // segment. A transactional notice about work already done is not the place
+  // for opt-out wording (that stays on estimates and the marketing lanes).
+  //
+  // These assert the VARS, not a hand-built body. Completion texts render from
+  // the editable DB template, so the vars are the entire contract — asserting a
+  // second, code-built string would only prove that string agrees with itself.
+  test('v1 SMS vars name the service and supply exactly what the template needs', () => {
+    const vars = buildServiceReportV1SmsVars({
       customerFirstName: 'Van',
       reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
-      advisory: {
-        exterior_reentry_min: 30,
-        interior_reentry_min: 120,
-      },
+      serviceType: 'Pest Control Service',
     });
 
-    expect(body).toContain('Hi Van, your Waves service report is ready: https://portal.wavespestcontrol.com/report/token-1');
-    expect(body).toContain('Re-entry: 30 min outside, 120 min inside.');
-    expect(body).toContain('Reply STOP to opt out.');
-    expect(body).not.toContain('serviceData');
+    expect(vars.service_type).toBe('Pest Control');
+    expect(vars.report_url).toBe('https://portal.wavespestcontrol.com/report/token-1');
+    expect(vars.first_name).toBe('Van');
+    // Retired from the copy, still SUPPLIED: an unresolved placeholder
+    // suppresses the whole send rather than rendering blank (#3121).
+    expect(vars.reentry_line).toBe('');
   });
 
-  test('v1.1 SMS delivery keeps the existing body unchanged when dynamic context exists', () => {
-    const body = buildServiceReportV1Sms({
+  test('v1 SMS vars fall back to a bare "service" when the visit has no type', () => {
+    // The template supplies the possessive, so an empty type must not render
+    // "your your service report".
+    const vars = buildServiceReportV1SmsVars({
+      customerFirstName: 'Van',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+    });
+    expect(vars.service_type).toBe('service');
+  });
+
+  test('v1 SMS vars ignore advisory and dynamic context entirely', () => {
+    // Both used to shape the copy. Neither may reach the text now — a rich
+    // dynamic context must not resurrect a re-entry line by another route.
+    const vars = buildServiceReportV1SmsVars({
       customerFirstName: 'Ava',
       reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
-      advisory: {
-        exterior_reentry_min: 30,
-        interior_reentry_min: 120,
-      },
+      serviceType: 'Lawn Care',
+      advisory: { exterior_reentry_min: 30, interior_reentry_min: 120 },
       dynamicContext: {
-        pressureTrend: {
-          direction: 'down',
-          customerSummary: 'Pest pressure is down 38% since your first WaveGuard service.',
-        },
         reentry: {
           displayTimezone: 'America/New_York',
-          targets: [
-            { key: 'exterior', readyAt: '2026-05-16T14:12:00.000Z' },
-            { key: 'interior', readyAt: '2026-05-16T15:42:00.000Z' },
-          ],
+          targets: [{ key: 'exterior', readyAt: '2026-05-16T14:12:00.000Z' }],
         },
       },
     });
 
-    expect(body).toBe(
-      'Hi Ava, your Waves service report is ready: https://portal.wavespestcontrol.com/report/token-1\n'
-      + 'Re-entry: 30 min outside, 120 min inside.\n'
-      + 'Reply STOP to opt out.'
-    );
+    expect(vars.reentry_line).toBe('');
+    expect(Object.values(vars).join(' ')).not.toMatch(/Re-entry|30 min|STOP/i);
+  });
+
+  test('v1 SMS vars carry the invoice link when the visit bills on completion', () => {
+    const vars = buildServiceReportV1SmsVars({
+      customerFirstName: 'Ava',
+      reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+      payUrl: 'https://portal.wavespestcontrol.com/pay/inv-9',
+      serviceType: 'Lawn Care',
+    });
+    expect(vars.pay_url).toBe('https://portal.wavespestcontrol.com/pay/inv-9');
   });
 
   test('v1 SMS delivery gates on template version and completed status', () => {
@@ -2681,9 +2717,15 @@ describe('service report v1', () => {
 
     expect(context.enabled).toBe(true);
     expect(context.smsType).toBe(serviceReportV1SmsType({ hasInvoiceLink: true }));
-    expect(context.body).toContain('https://portal.wavespestcontrol.com/l/report-abc12');
-    expect(context.body).toContain('Re-entry: 45 min outside, 90 min inside.');
-    expect(context.body).toContain('Invoice: https://portal.wavespestcontrol.com/l/invoice-xyz89');
+    // No code-built body any more — the DB template renders from these vars,
+    // so they are the whole contract. service_type must be SUPPLIED or the
+    // placeholder goes unresolved and the send is silently suppressed (#3121);
+    // reentry_line is kept as an empty string for the same reason.
+    expect(context.body).toBeUndefined();
+    expect(context.vars.report_url).toBe('https://portal.wavespestcontrol.com/l/report-abc12');
+    expect(context.vars.pay_url).toBe('https://portal.wavespestcontrol.com/l/invoice-xyz89');
+    expect(context.vars.service_type).toBe('Residential Pest Control');
+    expect(context.vars.reentry_line).toBe('');
     expect(context.metadata).toMatchObject({
       original_message_type: 'service_report_v1_with_invoice',
       service_record_id: 'service-1',

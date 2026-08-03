@@ -42,8 +42,24 @@ function formatVisitLabel(value, timeZone = DEFAULT_TIME_ZONE) {
   });
 }
 
+// Bare YYYY-MM-DD for filenames and stamps. pg hydrates DATE columns at the
+// process's LOCAL midnight (pg-types parseDate does new Date(y, m, d)), so
+// local getters read the calendar date back correctly whatever timezone the
+// server runs in — toISOString would shift a day for zones ahead of UTC.
+// Naive interpolation of the hydrated Date printed the full Date.toString()
+// into customer-visible attachment names.
+function dateOnlyStamp(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  }
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value || '').trim());
+  return m ? m[1] : '';
+}
+
 module.exports = {
   DEFAULT_TIME_ZONE,
+  dateOnlyStamp,
   dateOnlyToNoonUtc,
   formatReadyTime,
   formatVisitLabel,

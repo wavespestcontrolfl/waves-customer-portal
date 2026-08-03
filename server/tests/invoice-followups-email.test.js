@@ -123,7 +123,7 @@ describe('invoice follow-up email sidecar', () => {
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
     // Every sequence UPDATE stamps updated_at via knex's `.fn.now()` (the
-    // merge-undo activity gate reads that column), so the stub connection
+    // ownership-change checks read that column), so the stub connection
     // needs the same surface the real knex instance exposes.
     db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   });
@@ -215,12 +215,12 @@ describe('invoice follow-up email sidecar', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
-  test('refuses the touch when a merge-undo repointed the sequence under the claim lock (r19)', async () => {
-    // The batch row is a pre-undo snapshot. A merge-undo that committed
-    // between runPending's SELECT and fireStep's FOR UPDATE repoints both the
-    // invoice and its sequence to the restored loser — sending from the stale
-    // row.customer_id would mail the restored customer's invoice, and its
-    // bearer /pay/:token, to the WINNER. The post-lock ownership gate drops
+  test('refuses the touch when the sequence was repointed under the claim lock', async () => {
+    // The batch row is a snapshot. An ownership change that committed between
+    // runPending's SELECT and fireStep's FOR UPDATE (a customer merge repoints
+    // both the invoice and its sequence) leaves row.customer_id naming the
+    // previous owner — sending from it would mail one customer's invoice, and
+    // its bearer /pay/:token, to another. The post-lock ownership gate drops
     // the touch; the sequence stays active and due for the next run.
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
@@ -253,15 +253,15 @@ describe('invoice follow-up email sidecar', () => {
 
   test('arms a new sequence from the LOCKED invoice owner, not the pre-lock read (r19)', async () => {
     // scheduleForInvoice used to capture customer_id from an unlocked read and
-    // carry it through several awaits into the INSERT. If a merge-undo held
-    // the invoice lock across that window, the insert landed a winner-owned
-    // sequence on a loser-owned invoice. Ownership now comes from the row read
-    // under FOR UPDATE.
+    // carry it through several awaits into the INSERT. If another writer held
+    // the invoice lock across that window, the insert landed a sequence owned
+    // by the previous customer on an invoice that had moved. Ownership now
+    // comes from the row read under FOR UPDATE.
     const sequenceInsert = chain({ returning: [{ id: 'seq-new' }] });
     setDbQueues({
       invoices: [
-        chain({ first: invoice({ created_at: '2026-05-20T12:00:00.000Z' }) }), // unlocked preview (pre-undo owner)
-        // post-lock truth: a merge-undo repointed the invoice while we waited
+        chain({ first: invoice({ created_at: '2026-05-20T12:00:00.000Z' }) }), // unlocked preview (prior owner)
+        // post-lock truth: the invoice was repointed while we waited
         chain({ first: invoice({ customer_id: 'cust-restored', created_at: '2026-05-20T12:00:00.000Z' }) }),
       ],
       invoice_followup_sequences: [

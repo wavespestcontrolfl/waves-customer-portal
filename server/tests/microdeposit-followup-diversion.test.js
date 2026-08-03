@@ -94,8 +94,8 @@ describe('invoice-followups micro-deposit diversion', () => {
     // fireStep claims inside a transaction that locks the invoice row —
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
-    // Sequence UPDATEs stamp updated_at via knex's .fn.now() (the merge-undo
-    // activity signal), so the stub connection needs that surface too.
+    // Sequence UPDATEs stamp updated_at via knex's .fn.now() (the
+    // touched-since signal), so the stub connection needs that surface too.
     db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   });
   afterEach(() => jest.useRealTimers());

@@ -1047,6 +1047,13 @@ class GscOpportunityMiner {
         service,
         city,
         signal_metadata: {
+          // `impressions` is the canonical key EVERY other bucket writes and
+          // the one content-brief-builder reads into gsc_signal. Omitting it
+          // here (recent/prior only) made every seasonal_rising draft fail
+          // the quality gate's gsc_signal_attached hard check — the evidence
+          // existed, the gate just couldn't see it. Keep the descriptive
+          // keys too; the growth story needs both windows.
+          impressions: recentImp,
           impressions_recent_14d: recentImp,
           impressions_prior_14d: priorImp,
           growth_pct: growth,
@@ -1200,8 +1207,13 @@ class GscOpportunityMiner {
                -- the row with feedback recorded here, and the morning miner
                -- runs BEFORE the engine — dropping the marker would turn the
                -- intended single feedback-informed redraft into repeated
-               -- blind first attempts. jsonb_exists(), not the ? operator
-               -- (knex reads ? as a binding placeholder).
+               -- blind first attempts. jsonb_exists(), not the question-mark
+               -- operator — and this comment must never contain that literal
+               -- character either: knex counts binding placeholders across
+               -- the WHOLE raw string, SQL comments included, so a stray one
+               -- here breaks every daily mine with a binding-count error
+               -- (shipped 07-30, caught 07-31: "Expected 13 bindings, saw
+               -- 15" — the two extras were in this very comment).
                signal_metadata = CASE
                  WHEN jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')
                  THEN EXCLUDED.signal_metadata

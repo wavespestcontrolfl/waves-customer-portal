@@ -9,7 +9,6 @@ const CUSTOMER_PREFERENCE_KEYS = new Set([
   'tech_en_route',
   'tech_arrived',
   'service_completed',
-  'billing_reminder',
   'payment_confirmation_sms',
 ]);
 
@@ -47,8 +46,11 @@ async function existingCustomerNotification(customerId, dedupeKey, connection = 
 const { stripEmoji } = require('../utils/strip-emoji');
 
 const NotificationService = {
-  // Create a notification
-  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, connection = db }) {
+  // Create a notification.
+  // `bell` (admin recipients only) is an explicit site-level policy tag:
+  // true always rings, false never rings — see notification-bell-policy.js.
+  // It only has effect while GATE_ADMIN_BELL_POLICY is on.
+  async create({ recipientType, recipientId, category, title, body, icon, link, metadata, bell, connection = db }) {
     try {
       // Demo/internal test accounts (App Store review account) must not ring
       // the admin bell — their bounce alerts and junk service requests are
@@ -66,6 +68,39 @@ const NotificationService = {
         // releases its claim and 500s). Intentional suppression must read
         // as success-without-a-row.
         return { id: null, suppressed: true };
+      }
+      // Admin bell policy (GATE_ADMIN_BELL_POLICY, default off): when the
+      // gate is on, only allowlisted lanes ring the shared admin bell —
+      // everything else is silenced HERE (no row) so every path through the
+      // service is covered: direct notifyAdmin sites, the trigger registry
+      // (its bell write lands here with metadata.triggerKey), and the
+      // converted ex-raw-insert sites. Same truthy sentinel as the internal
+      // test-customer gate above: intentional suppression must read as
+      // success-without-a-row, never as an insert failure.
+      if (recipientType === 'admin') {
+        try {
+          const bellPolicy = require('./notification-bell-policy');
+          if (bellPolicy.isBellPolicyEnabled()) {
+            const allowed = await bellPolicy.bellAllowed({
+              category,
+              triggerKey: metadata?.triggerKey || null,
+              options: { bell },
+            });
+            if (!allowed) {
+              // Category + triggerKey only — titles/bodies carry customer
+              // names and addresses, which must not leak into logs.
+              logger.info('[bell-policy] silenced', {
+                category,
+                triggerKey: metadata?.triggerKey || null,
+              });
+              return { id: null, suppressed: true, reason: 'bell_policy' };
+            }
+          }
+        } catch (err) {
+          // Policy failure must never break notifications — fall through
+          // and insert (fail-open matches gate-off behavior).
+          logger.warn(`[notifications] bell policy check failed: ${err.message}`);
+        }
       }
       // A title that was ONLY emoji falls back to the original rather than
       // inserting an empty string.

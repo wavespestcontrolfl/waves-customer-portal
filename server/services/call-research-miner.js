@@ -63,6 +63,9 @@ const CALL_RESEARCH_PRIMARY = Object.freeze({
   model: process.env.CALL_RESEARCH_MODEL || DEFAULT_MODEL_FOR[PRIMARY_PROVIDER] || 'gpt-5.6-sol',
 });
 const CALL_RESEARCH_ROUTE = Object.freeze({
+  // Stable dispatch-metrics identity — the resolved routes can coincide with
+  // other lanes' (call-extraction shares the Sol primary by default).
+  name: 'callResearch',
   primary: CALL_RESEARCH_PRIMARY,
   fallback: CALL_RESEARCH_PRIMARY.provider === MODELS.PROVIDER.ANTHROPIC
     ? Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: DEFAULT_MODEL_FOR[MODELS.PROVIDER.OPENAI] })

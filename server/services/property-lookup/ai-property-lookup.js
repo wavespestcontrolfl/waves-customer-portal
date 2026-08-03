@@ -1127,6 +1127,78 @@ function detectUnassessedVacantParcel(record) {
   };
 }
 
+// Sanitization is restricted to builds this recent — see the demolition
+// note inside detectStaleImageryTurfConflict.
+const STALE_IMAGERY_NEW_CONSTRUCTION_MAX_AGE_YEARS = 3;
+
+// The inverse of the vacant-parcel window: the county roll assesses a
+// COMPLETED building but the satellite vision pass measured an empty lot —
+// an explicit 0 for BOTH treatable turf and impervious surface. With an
+// assessed structure on the parcel, 0% impervious cover is internally
+// impossible (the roof alone is impervious), so those zeros describe the
+// IMAGERY, not the property: the tiles predate construction (Static Maps
+// carries no capture date to compare against — this contradiction is the
+// only freshness signal available) or missed the parcel. A genuine no-lawn
+// property (paved / rock / artificial turf) reads HIGH impervious with the
+// structure visible, so a confirmed vision 0 never trips this — that
+// explicit-zero-is-a-measurement rule stays intact. Prod sweep 2026-07-30:
+// 33 of 229 cached lookups matched, every sampled one a 2024–26 build in
+// Parrish / Palmetto / LWR / Sarasota. Returns the conflict evidence
+// (drives the profile sanitization + HIGH verify flag in
+// buildEnrichedProfile and the short cache TTL in lookup-cache) or null.
+function detectStaleImageryTurfConflict(record, ai) {
+  if (!record || !ai) return null;
+  const countySqFt = Number(record.squareFootage);
+  if (!Number.isFinite(countySqFt) || countySqFt <= 0) return null;
+  // The building evidence must be AUTHORITATIVE: merged records also carry
+  // listing- and AI-sourced values, and a vacant-roll parcel with a stale
+  // listing sqft would slip past detectUnassessedVacantParcel (it returns
+  // early on any positive squareFootage) — discarding vision zeros that
+  // are the CORRECT reading of a bare lot (codex P1 #3098). Same trust bar
+  // as the route's trustedCountyTurfCeiling (COUNTY_DIM_SOURCES), accepting
+  // both _fieldEvidence shapes: merged `{ sourceType }` and raw
+  // single-source `[items]`. The bar applies to BOTH load-bearing facts:
+  // squareFootage (a building exists) and yearBuilt (it is a recent build)
+  // — a county-sourced old building with a listing/AI-sourced recent year
+  // must stay ambiguous (pre-push P1 #3098). Prod sweep 2026-07-30: the
+  // county-sourced contradiction rows all carry county yearBuilt evidence,
+  // so the gate keeps the real class covered.
+  const authoritativeEvidence = (field) => {
+    const entry = record._fieldEvidence?.[field];
+    const sourceType = Array.isArray(entry) ? entry[0]?.sourceType : entry?.sourceType;
+    return ['county', 'cadastral', 'verified'].includes(String(sourceType || '').toLowerCase());
+  };
+  if (!authoritativeEvidence('squareFootage')) return null;
+  // Belt: a vacant-roll parcel carrying a defaulted dimension is the OTHER
+  // window (imagery may be the fresher source there) — never both.
+  if (detectUnassessedVacantParcel(record)) return null;
+  // Only a RECENT build proves which side of the contradiction is stale
+  // (codex P2 #3098): against an old assessed home, bare-land vision can be
+  // the CORRECT reading of a demolition/teardown — the roll carries no
+  // demolition signal to tell them apart. Ambiguous (old, unknown, or
+  // non-authoritative yearBuilt) contradictions keep the explicit vision
+  // zeros — the right answer for a teardown — under the existing
+  // explicit-zero rule.
+  if (!authoritativeEvidence('yearBuilt')) return null;
+  const yearBuilt = Number(record.yearBuilt);
+  const currentYear = new Date().getFullYear();
+  if (!Number.isFinite(yearBuilt)
+    || yearBuilt < currentYear - STALE_IMAGERY_NEW_CONSTRUCTION_MAX_AGE_YEARS
+    || yearBuilt > currentYear + 1) {
+    return null;
+  }
+  // Both zeros must be EXPLICIT — null/undefined means "not measured" and
+  // Number(null) === 0 would false-positive on it.
+  const explicitZero = (value) => value === 0 || value === '0';
+  if (!explicitZero(ai.estimatedTurfSf)) return null;
+  const impervious = ai.imperviousSurfacePercent ?? ai.imperviosSurfacePercent;
+  if (!explicitZero(impervious)) return null;
+  return {
+    countySqFt,
+    yearBuilt,
+  };
+}
+
 // Non-detached residential types the county land-use description captures but
 // the PAO building-type text / numeric DOR code flatten to "Single Family".
 const COUNTY_GIS_SPECIFIC_TYPES = new Set(['Townhome', 'Interior Townhome', 'Condo', 'Duplex', 'Multifamily']);
@@ -4590,6 +4662,7 @@ module.exports = {
   hasCountyEvidence,
   buildPropertyDataQuality,
   detectUnassessedVacantParcel,
+  detectStaleImageryTurfConflict,
   detectMultiSitusMasterParcel,
   isPreMarkerParkRecord,
   canonicalLookupAddress,

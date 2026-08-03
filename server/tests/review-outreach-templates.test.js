@@ -22,9 +22,10 @@ describe('review outreach templates', () => {
     expect(getOutreachTemplate('nope')).toBeNull();
   });
 
-  test('the default cadence is Day 0/3/7 ending on email', () => {
-    expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.day)).toEqual([0, 3, 7]);
-    expect(DEFAULT_SEQUENCE_PLAN[DEFAULT_SEQUENCE_PLAN.length - 1].channel).toBe('email');
+  test('the default cadence is Day 0/3/4 ending on email, Day-3 SMS weekdays-only', () => {
+    expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.day)).toEqual([0, 3, 4]);
+    expect(DEFAULT_SEQUENCE_PLAN.map((s) => s.channel)).toEqual(['sms', 'sms', 'email']);
+    expect(DEFAULT_SEQUENCE_PLAN[1].weekdaysOnly).toBe(true);
     // Every step references a real template.
     for (const step of DEFAULT_SEQUENCE_PLAN) {
       expect(getOutreachTemplate(step.templateKey)).not.toBeNull();

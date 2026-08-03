@@ -43,7 +43,10 @@ function makeConn(cfg = {}) {
     };
     return qb;
   };
-  conn.raw = (sql) => ({ __raw: sql });
+  conn.raw = (sql, bindings) => { calls.push({ table: '__raw', op: 'raw', arg: { sql, bindings } }); return { __raw: sql, __bindings: bindings }; };
+  // Same-conn transaction passthrough — the review-card block wraps its
+  // writes in conn.transaction (shared per-call lock contract).
+  conn.transaction = async (fn) => fn(conn);
   conn.__calls = calls;
   conn.__updates = (table) => calls.filter((c) => c.table === table && c.op === 'update');
   return conn;
@@ -307,7 +310,11 @@ describe('propagateCustomerEmailChange', () => {
     });
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     const reasonFilter = conn.__calls.find((c) => c.table === 'triage_items' && c.op === 'whereIn' && c.arg.col === 'reason_code');
-    expect(reasonFilter.arg.vals).toEqual(['email_unverified', 'email_invalid']);
+    // customer_email_missing joined 2026-08-01: a call that booked WITHOUT an
+    // email files it, and a valid email landing on the profile is exactly the
+    // event that completes it — same lifecycle and validity gate as the two
+    // read-back codes.
+    expect(reasonFilter.arg.vals).toEqual(['email_unverified', 'email_invalid', 'customer_email_missing']);
   });
 });
 

@@ -14,6 +14,9 @@ const {
   STALE_CLAIM_WINDOW_MS,
 } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
+// Admin bell rows go through NotificationService (not raw inserts) so the
+// GATE_ADMIN_BELL_POLICY chokepoint covers them.
+const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
@@ -285,6 +288,91 @@ async function recordCardHoldNoShowFeePayment(paymentIntent) {
   } catch (err) {
     logger.error(`[stripe-webhook] failed to settle card-hold no-show fee ${piId}: ${err.message}`);
     throw err;
+  }
+}
+
+// Sibling of recordCardHoldNoShowFeePayment for fees charged by the
+// appointment-card-request rail (visits secured via /secure with no
+// estimate card hold). Same contract: settle as a paid refundable fee
+// invoice, orphan-record when the customer pointer is missing, throw so
+// Stripe retries on settlement failure.
+async function recordAppointmentCardNoShowFeePayment(paymentIntent) {
+  const piId = paymentIntent.id;
+  const amount = (paymentIntent.amount_received || paymentIntent.amount || 0) / 100;
+  const customerId = paymentIntent.metadata?.waves_customer_id || null;
+  if (!customerId) {
+    logger.warn(`[stripe-webhook] appointment-card no-show fee PI ${piId} missing waves_customer_id — recording orphan`);
+    await recordOrphanSucceededPaymentIntent(paymentIntent, amount, 'appointment_card_no_show_fee_no_customer');
+    return;
+  }
+  try {
+    const ApptCardRequests = require('../services/appointment-card-request');
+    await ApptCardRequests.settleAppointmentNoShowFee(paymentIntent);
+  } catch (err) {
+    logger.error(`[stripe-webhook] failed to settle appointment-card no-show fee ${piId}: ${err.message}`);
+    throw err;
+  }
+}
+
+// Resolve the customer whose own money just settled and clear their billing
+// pause if one is waiting on exactly that (billing-pause.js owns the rules).
+// Skips the non-arrears purposes: a statement is the PAYER's money, an
+// estimate deposit and a no-show fee (either rail's) are not balance
+// payments. A matched invoice is the customer authority (merges repoint
+// invoices while stale PI metadata keeps the merged-away id) — and a
+// PAYER-billed invoice yields no candidate at all, without metadata
+// fallthrough: the payer's tender proves nothing about the homeowner's dead
+// card, which is why they are paused.
+async function maybeAutoClearBillingPauseForIntent(paymentIntent, eventCreated) {
+  if (paymentIntent?.metadata?.waves_statement_id) return;
+  if (paymentIntent?.metadata?.purpose === 'estimate_deposit') return;
+  if (paymentIntent?.metadata?.purpose === 'card_hold_no_show_fee') return;
+  // Merge-semantic exclusion (PR #3153 × #3157): the appointment-card
+  // rail's no-show fee is the same kind of non-arrears money as the
+  // card-hold rail's — a punitive fee settling must never re-enable
+  // billing for a customer paused on a dead card.
+  if (paymentIntent?.metadata?.purpose === 'appointment_card_no_show_fee') return;
+  const invoice = await findInvoiceForPaymentIntent(paymentIntent);
+  // Require a QUALIFYING LEDGER ROW before clearing — "Stripe says the PI
+  // succeeded" is not the same as "we accepted it as settled customer
+  // money". Quarantined tender mismatches and orphaned late duplicates
+  // never write a customer payments row (they land in their own review
+  // tables), and a disputed payment's row has left status='paid' — none of
+  // them should re-enable billing. The exclusions mirror billing-cron's
+  // pause veto exactly, so both sides of the race read one source of
+  // truth. If a quarantine later resolves into a real settlement, THAT
+  // write's own processing re-runs this dispatch and clears then.
+  const ledgerRow = await db('payments')
+    .where({ stripe_payment_intent_id: paymentIntent.id, status: 'paid' })
+    .whereNull('statement_id')
+    .whereRaw("(payments.metadata->>'purpose') IS DISTINCT FROM 'card_hold_no_show_fee'")
+    .whereRaw("(payments.metadata->>'purpose') IS DISTINCT FROM 'appointment_card_no_show_fee'")
+    .whereRaw("(payments.metadata->>'payer_id') IS NULL")
+    .first('id', 'customer_id');
+  if (!ledgerRow) return;
+  // OWNERSHIP, in authority order: the matched invoice (payer-billed yields
+  // NOTHING — the payer's tender proves nothing about the homeowner's dead
+  // card, and no fallthrough: the invoice answers the question); else the
+  // LEDGER row's customer_id — customer merges repoint payments rows while
+  // PI metadata stays frozen on the merged-away id; immutable metadata only
+  // as the last resort.
+  const pausedCustomerId = invoice
+    ? (invoice.payer_id ? null : invoice.customer_id)
+    : (ledgerRow.customer_id || paymentIntent?.metadata?.waves_customer_id || null);
+  if (!pausedCustomerId) return;
+  const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+  const result = await maybeResumeBillingPauseOnPayment(pausedCustomerId, {
+    paymentIntentId: paymentIntent.id,
+    source: 'stripe_webhook',
+    settledAt: eventCreated ? new Date(eventCreated * 1000) : null,
+  });
+  // Business no-ops (not paused, manual pause, ordering refusal) end here.
+  // An INFRASTRUCTURE failure must not be swallowed: the handler's durable
+  // writes are already committed and idempotent, so throwing lets the event
+  // 500 and Stripe redeliver — the retry re-runs the clear instead of the
+  // pause silently surviving a transient DB error forever.
+  if (result?.reason === 'error') {
+    throw new Error(`billing-pause auto-clear failed for customer ${pausedCustomerId} (PI ${paymentIntent.id}): ${result.error?.message || 'unknown'}`);
   }
 }
 
@@ -605,6 +693,16 @@ router.post(
       switch (event.type) {
         case 'payment_intent.succeeded':
           await handlePaymentIntentSucceeded(event.data.object, event.created);
+          // Auto-clear a billing pause on the customer's OWN settled money
+          // (owner ruling 2026-08-01: billing goes back to normal once they
+          // pay). AFTER the handler so every durable ledger write of
+          // whichever branch it took (invoice paid, orphan, quarantine) has
+          // landed first — clearing before the paid row exists loses the
+          // race where billing-cron pauses in between and this event never
+          // fires again. The helper never throws, only clears
+          // 'autopay_final_failure' pauses, compare-and-swaps so a newer
+          // pause is never wiped, and requires the settlement moment.
+          await maybeAutoClearBillingPauseForIntent(event.data.object, event.created);
           break;
 
         case 'payment_intent.processing':
@@ -858,14 +956,12 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     if (eventType === 'failed' && reverted) {
       const reasonMsg = paymentIntent.last_payment_error?.message || 'bank/card declined';
       try {
-        await db('notifications').insert({
-          recipient_type: 'admin',
-          category: 'payment',
-          title: `Statement payment failed: S-${statementId}`,
-          body: `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
-          icon: '⚠️',
-          link: '/admin/payers',
-        });
+        await NotificationService.notifyAdmin(
+          'payment',
+          `Statement payment failed: S-${statementId}`,
+          `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
+          { icon: '⚠️', link: '/admin/payers' },
+        );
       } catch (e) { logger.error(`[stripe-webhook] statement S-${statementId} failure notification insert failed: ${e.message}`); }
       logger.warn(`[stripe-webhook] statement S-${statementId} payment FAILED after confirmation via PI ${piId} (${reasonMsg}) — reverted to payable`);
     }
@@ -902,6 +998,14 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // invoice/tender logic (and the orphan-charge fallback).
   if (paymentIntent.metadata?.purpose === 'card_hold_no_show_fee') {
     await recordCardHoldNoShowFeePayment(paymentIntent);
+    return;
+  }
+
+  // Appointment-card-lane no-show / late-cancel fees — the sibling rail for
+  // visits secured via /secure (appointment_card_requests). Same settlement
+  // contract, own purpose string so ledger metadata names the actual lane.
+  if (paymentIntent.metadata?.purpose === 'appointment_card_no_show_fee') {
+    await recordAppointmentCardNoShowFeePayment(paymentIntent);
     return;
   }
 
@@ -1093,6 +1197,10 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // Update payments table
   const paymentUpdates = {
     status: 'paid',
+    // knex gives updated_at a default but never auto-touches it, and the
+    // billing-cron pause-veto guard reads it to see an in-place ACH
+    // settlement — without this stamp that guard is blind to the flip.
+    updated_at: new Date(),
     stripe_charge_id: paymentIntent.latest_charge || null,
     // An async-settling row (ACH) was inserted with a "(bank payment
     // pending)" description and metadata.payment_state='processing'; the
@@ -1100,7 +1208,22 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
     // forever on settled bank payments. REPLACE is a no-op for rows without
     // the marker. Constant strings only — no request-derived input.
     description: db.raw("REPLACE(description, ' (bank payment pending)', '')"),
-    metadata: db.raw(`jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"')`),
+    // payment_state flip + the Stripe settlement moment in one expression —
+    // the billing-cron pause veto reads settled_event_at, so a delayed
+    // redelivery (updated_at = now, settlement = days ago) cannot pose as
+    // fresh money. Parameterized: the timestamp is bound, never interpolated.
+    metadata: invoiceForTenderGuard?.payer_id
+      // Payer-funded ACH rows already 'processing' at deploy time predate
+      // the payer_id stamp on the processing insert — backfill it at the
+      // flip so the pause veto and the auto-clear can exclude them.
+      ? db.raw(
+        `jsonb_set(jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text)), '{payer_id}', to_jsonb(?::text))`,
+        [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString(), String(invoiceForTenderGuard.payer_id)],
+      )
+      : db.raw(
+        `jsonb_set(jsonb_set(COALESCE(metadata, '{}'::jsonb), '{payment_state}', '"paid"'), '{settled_event_at}', to_jsonb(?::text))`,
+        [eventCreated ? new Date(eventCreated * 1000).toISOString() : new Date().toISOString()],
+      ),
     // Cash basis: the row was stamped with the INITIATION day when
     // payment_intent.processing arrived; restamp to the SETTLEMENT day so
     // revenue lands in the period the money actually cleared (an ACH
@@ -1244,18 +1367,16 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       await trx('payments').insert({
         // OWNERSHIP COMES FROM THE LOCKED ROW, never the pre-lock read.
         // `invoice` was fetched BEFORE this transaction took FOR UPDATE on
-        // it, so a customer-merge UNDO (customer-dedupe.js revertMerge —
-        // it verifies and repoints invoices under FOR UPDATE, and probes
-        // for payments against them BEFORE doing so) can commit while we
-        // wait on that lock and move the invoice to the restored customer.
-        // Inserting `invoice.customer_id` then attaches this payment to the
-        // pre-undo owner: a loser-owned paid invoice whose payment belongs
-        // to the winner. `lockedInvoice` is the post-wait re-read, so it
-        // always names the invoice's CURRENT owner. Ordering both ways:
-        // undo-first → we re-read its result here; webhook-first → the undo
-        // blocks on this same row lock and its payment probe then sees this
-        // committed row and refuses. No extra lock is needed (settlement is
-        // never blocked into failure by one).
+        // it, so any writer that repoints invoices.customer_id — a customer
+        // merge is the live one — can commit while we wait on that lock and
+        // move the invoice to a different customer. Inserting
+        // `invoice.customer_id` then attaches this payment to the PREVIOUS
+        // owner: the invoice sits on one account and the money that settled
+        // it on another, which reconciliation reads as both a missing
+        // payment and an unexplained one. `lockedInvoice` is the post-wait
+        // re-read, so it always names the invoice's CURRENT owner. No extra
+        // lock is needed — settlement must never be blocked into failure by
+        // one, and this ordering does not add any.
         customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
@@ -1282,6 +1403,15 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
           charged_amount: chargedTotal ?? centsToDollars(paymentIntent.amount),
           payment_method: details.paymentMethod || paymentIntent.payment_method_types?.[0] || null,
           payment_state: 'paid',
+          // Stripe's settlement moment, NOT this handler's run time — the
+          // billing-cron pause veto compares this, so a delayed redelivery
+          // of an old success (row created now) cannot pose as fresh money.
+          settled_event_at: eventCreated ? new Date(eventCreated * 1000).toISOString() : null,
+          // Payer ownership rides the ledger row: the pause veto and the
+          // auto-clear both exclude payer-funded money by this marker — a
+          // payer-billed invoice settling during a homeowner's failed retry
+          // must not read as the homeowner's own tender.
+          ...(lockedInvoice.payer_id ? { payer_id: lockedInvoice.payer_id } : {}),
         }),
       });
       if (matchingAmbiguousAttempt) {
@@ -1707,34 +1837,14 @@ async function scheduleReviewAfterPaidInvoice(piId) {
       .first();
     if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
 
-    const serviceRecord = await db('service_records')
-      .where({ id: paidInvoice.service_record_id })
-      .select('structured_notes')
-      .first();
-    let structuredNotes = serviceRecord?.structured_notes || {};
-    if (typeof structuredNotes === 'string') {
-      try { structuredNotes = JSON.parse(structuredNotes); } catch { structuredNotes = {}; }
-    }
-    if (structuredNotes.requestReview === false) {
-      logger.info(`[stripe-webhook] Skipping paid-invoice review request for invoice ${paidInvoice.invoice_number || paidInvoice.id}: completion opted out`);
-      return;
-    }
-    if (structuredNotes.visitOutcome && structuredNotes.visitOutcome !== 'completed') {
-      logger.info(`[stripe-webhook] Skipping paid-invoice review request for invoice ${paidInvoice.invoice_number || paidInvoice.id}: visit outcome ${structuredNotes.visitOutcome}`);
-      return;
-    }
-
+    // Shared guards + enrollment (also used by the admin record-payment path
+    // for off-Stripe settlements): honors the completion's requestReview
+    // intent + visit outcome, dedupes/idempotent under webhook retries.
     const ReviewService = require('../services/review-request');
-    // ReviewService.create dedupes by service_record_id (returns the
-    // existing row instead of inserting), so this is safe under webhook
-    // retries.
-    const request = await ReviewService.create({
-      customerId: paidInvoice.customer_id,
-      serviceRecordId: paidInvoice.service_record_id,
-      triggeredBy: 'auto',
-      delayMinutes: 120,
-    });
-    logger.info(`[stripe-webhook] Queued review request ${request.id} after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    const outcome = await ReviewService.enrollForPaidInvoice(paidInvoice, { source: 'stripe_webhook' });
+    if (outcome.enrolled) {
+      logger.info(`[stripe-webhook] Queued review outreach after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    }
   } catch (err) {
     logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
   }
@@ -2214,6 +2324,98 @@ async function handleChargeRefunded(charge) {
     }
   }
 
+  // Appointment-card fee PI refunded BEFORE settlement (Codex #3153 r16
+  // P0): the fee's paid rows are written by settleAppointmentNoShowFee
+  // under the appointment_card_no_show_fee:<pi> advisory lock. A refund
+  // landing first would find nothing to mark and be acknowledged, and the
+  // later settlement would book fully-paid revenue for refunded money.
+  // Under the SAME lock: re-check for the settlement row (it may have
+  // landed in the window — the generic path below then stamps it) and
+  // otherwise persist a durable refunded payments row that settlement's
+  // in-lock replay check consumes.
+  if (charge.payment_intent && charge.metadata?.purpose === 'appointment_card_no_show_fee') {
+    const feePreRow = await db('payments').where({ stripe_payment_intent_id: charge.payment_intent }).first('id');
+    if (!feePreRow) {
+      const markerWritten = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${charge.payment_intent}`]);
+        const rowInLock = await trx('payments').where({ stripe_payment_intent_id: charge.payment_intent }).first('id');
+        if (rowInLock) return null;
+        // Failed-refund fence RE-CHECKED under the lock (Codex #3153 r23
+        // P1): refund.failed can commit its fence between the handler's
+        // early probe and this lock — a bounced refund must never gain a
+        // terminal refunded marker that replay-skips settlement.
+        if (refundId) {
+          try {
+            if (await db.schema.hasTable('stripe_failed_refunds')) {
+              const fencedInLock = await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+              if (fencedInLock) {
+                logger.warn(`[stripe-webhook] fee refund ${refundId} already fenced as failed — no pre-settlement marker written`);
+                return null;
+              }
+            }
+          } catch (fenceErr) {
+            // FAIL CLOSED (Codex #3153 r24 P0): writing the terminal marker
+            // without a verified fence could replay-skip settlement of
+            // money Stripe kept — throw so the event retries.
+            logger.error(`[stripe-webhook] fee fence re-check failed for ${refundId} — retrying event: ${fenceErr.message}`);
+            throw fenceErr;
+          }
+        }
+        // Canonical refund attribution (Codex #3153 r17 P1):
+        // stripe_refund_id + metadata.stamped_refund_ids are what
+        // handleRefundFailed uses to unwind a bounced refund; refund_status
+        // 'full' matches the statement pre-settlement marker vocabulary.
+        const [markerRow] = await trx('payments').insert({
+          customer_id: charge.metadata?.waves_customer_id || null,
+          processor: 'stripe',
+          payment_date: etDateString(),
+          amount: (Number(charge.amount) || 0) / 100,
+          refund_amount: cumulativeRefundAmountDollars,
+          refund_status: isFullRefund ? 'full' : 'partial',
+          status: isFullRefund ? 'refunded' : 'paid',
+          stripe_payment_intent_id: charge.payment_intent,
+          stripe_charge_id: chargeId,
+          stripe_refund_id: refundId || null,
+          metadata: JSON.stringify({
+            purpose: 'appointment_card_no_show_fee',
+            pre_settlement_refund: true,
+            ...(refundId ? { stamped_refund_ids: [refundId] } : {}),
+          }),
+        }).returning(['id', 'customer_id']);
+        return markerRow || { id: null, customer_id: charge.metadata?.waves_customer_id || null };
+      });
+      if (markerWritten) {
+        logger.warn(`[stripe-webhook] appointment fee PI ${charge.payment_intent} refunded before settlement — durable refund marker written`);
+        // Standard refund communications still fire (Codex #3153 r20 P1):
+        // the early return must not swallow the customer email + admin
+        // notification the shared tail sends. sendRefundIssued is
+        // idempotent by refund id.
+        if (markerWritten.customer_id) {
+          PaymentLifecycleEmail.sendRefundIssued({
+            customerId: markerWritten.customer_id,
+            paymentId: markerWritten.id,
+            refundId: refundId || chargeId,
+            refundAmount: refundAmountDollars,
+            refundDate,
+            refundReason,
+          }).catch((emailErr) => {
+            logger.warn(`[stripe-webhook] fee pre-settlement refund email failed for charge ${chargeId}: ${emailErr.message}`);
+          });
+        }
+        try {
+          await triggerNotification('payment_refunded', {
+            amount: refundAmountDollars,
+            isFullRefund,
+            invoiceId: null,
+          });
+        } catch (e) {
+          logger.warn(`[stripe-webhook] fee pre-settlement refund triggerNotification failed: ${e.message}`);
+        }
+        return;
+      }
+    }
+  }
+
   // Statement refund REORDERED ahead of settlement: if a FULL refund arrives
   // before payment_intent.succeeded wrote the statement payments row, resolve the
   // statement by PI and clear/reset its active PI (so the later succeeded fails
@@ -2297,7 +2499,47 @@ async function handleChargeRefunded(charge) {
   // it with the customer's returned credit stranded. Safe to retry: keyed on
   // stripe_charge_id, and returnAppliedCreditOnRefund re-reads credit_applied under a
   // row lock, so a replayed event is a no-op once the credit is back on the balance.
+  let feeRefundFencedInLock = false;
   const refundedPayment = await db.transaction(async (trx) => {
+    // Fee-lane refunds serialize with settlement's marker adoption (Codex
+    // #3153 r24 P1): an existing fee row (pre-settlement marker or settled
+    // row) updated here unlocked could commit between settlement's plain
+    // read and its adopting write — the newer cumulative refund amount and
+    // id would be overwritten by the stale snapshot and lost. Lane from
+    // trusted charge metadata (mirrors the PI's).
+    if (charge.payment_intent && charge.metadata?.purpose === 'appointment_card_no_show_fee') {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${charge.payment_intent}`]);
+      // BOTH durable bounce fences RE-READ under the lock (Codex #3153
+      // r26 P1): serialization alone doesn't preserve the fence —
+      // refund.failed can acquire this lock first and commit its fence
+      // (stripe_failed_refunds or the row's failed_refund_ids) between
+      // this handler's unlocked probes and our lock acquisition; stamping
+      // afterwards would mark the bounced refund successful while the
+      // failed event's replay sees its fence and skips the unwind. A
+      // fence-read failure throws (fail closed → Stripe retries).
+      if (refundId) {
+        if (await db.schema.hasTable('stripe_failed_refunds')) {
+          const fencedInLock = await trx('stripe_failed_refunds').where({ stripe_refund_id: refundId }).first('stripe_refund_id');
+          if (fencedInLock) {
+            logger.warn(`[stripe-webhook] fee refund ${refundId} was fenced as failed while waiting for the lock — skipping stamp + side effects`);
+            feeRefundFencedInLock = true;
+            return null;
+          }
+        }
+        const rowForFence = await trx('payments').where({ stripe_charge_id: chargeId }).first('metadata');
+        if (rowForFence) {
+          let fenceMeta = {};
+          try {
+            fenceMeta = rowForFence.metadata ? (typeof rowForFence.metadata === 'string' ? JSON.parse(rowForFence.metadata) : rowForFence.metadata) : {};
+          } catch { fenceMeta = {}; }
+          if (Array.isArray(fenceMeta.failed_refund_ids) && fenceMeta.failed_refund_ids.includes(refundId)) {
+            logger.warn(`[stripe-webhook] fee refund ${refundId} already recorded as failed on the payments row — skipping stamp + side effects`);
+            feeRefundFencedInLock = true;
+            return null;
+          }
+        }
+      }
+    }
     await trx('payments')
       .where({ stripe_charge_id: chargeId })
       .update({
@@ -2374,6 +2616,10 @@ async function handleChargeRefunded(charge) {
     }
     return result;
   });
+  // A fence discovered under the lock means the refund BOUNCED — nothing
+  // was stamped, and no refund email/notification may fire for money
+  // Stripe kept (the refund.failed handler already notified the office).
+  if (feeRefundFencedInLock) return;
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,
@@ -2456,14 +2702,23 @@ async function handleRefundFailed(refund) {
   // no-payments case it throws for the same reason — nothing else was
   // written, so the retry is a clean re-run.
   const insertBounceNotification = async (conn, body) => {
-    await conn('notifications').insert({
-      recipient_type: 'admin',
+    // Through NotificationService (connection: conn keeps it inside the
+    // caller's transaction) so the admin bell policy chokepoint covers it.
+    // bell: true — a failed refund is a money failure and must keep ringing
+    // under GATE_ADMIN_BELL_POLICY. create() swallows insert errors into
+    // null; rethrow so the transactional/throw-on-failure contract above
+    // holds and Stripe retries the event.
+    const notif = await NotificationService.create({
+      recipientType: 'admin',
       category: 'billing',
       title: `Refund FAILED at the bank: $${failedDollars.toFixed(2)}`,
       body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). ${body}`,
       icon: '⚠️',
       link: '/admin/invoices',
+      bell: true,
+      connection: conn,
     });
+    if (!notif) throw new Error('refund-failure notification insert failed');
   };
 
   if (!payment) {
@@ -2536,7 +2791,50 @@ async function handleRefundFailed(refund) {
       }
     }
     if (refundId && fenceTableReady) {
+      // Fee-purpose PIs take the fee advisory lock around the fence write
+      // (Codex #3153 r23 P1): the charge.refunded marker path re-checks
+      // this fence under the same lock, so exactly one of {fence, marker}
+      // wins — a bounced refund can never coexist with a terminal
+      // refunded marker that replay-skips settlement. Lane identified from
+      // trusted PI metadata; retrieve failure throws → event retries.
+      let feePiLockKey = null;
+      if (piId) {
+        try {
+          // Local pointer first (no Stripe round-trip for the common
+          // non-fee case); fall back to trusted PI metadata for the rare
+          // crashed-before-pointer charge. A detection failure throws so
+          // the event retries — never an unlocked fence on uncertainty.
+          const feePtr = await db('appointment_card_requests')
+            .where({ no_show_payment_intent_id: piId })
+            .first('id');
+          if (feePtr) {
+            feePiLockKey = `appointment_card_no_show_fee:${piId}`;
+          } else {
+            const fencePi = await require('../services/stripe').retrievePaymentIntent(piId);
+            if (fencePi?.metadata?.purpose === 'appointment_card_no_show_fee') {
+              feePiLockKey = `appointment_card_no_show_fee:${piId}`;
+            }
+          }
+        } catch (detectErr) {
+          // FAIL CLOSED (Codex #3153 r24 P0): fencing without the fee lock
+          // could lose the fence/marker race — throw so Stripe retries.
+          logger.error(`[stripe-webhook] fee-lane detection for failed refund ${refundId} errored — retrying event: ${detectErr.message}`);
+          throw detectErr;
+        }
+      }
       await db.transaction(async (trx) => {
+        if (feePiLockKey) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [feePiLockKey]);
+          // A marker may have landed while we waited — if so, fall out and
+          // let the normal row path (next retry) unwind it instead of
+          // double-recording the fence.
+          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
+          if (rowInLock) {
+            const e = new Error('fee payments row appeared before the fence — retry the event against the row');
+            e.retryRefundFailed = true;
+            throw e;
+          }
+        }
         await trx('stripe_failed_refunds').insert({
           stripe_refund_id: refundId,
           stripe_charge_id: chargeId,
@@ -2585,8 +2883,41 @@ async function handleRefundFailed(refund) {
     logger.warn(`[stripe-webhook] refund-failed invoice/term lookup failed: ${err.message}`);
   }
 
+  // Fee-lane rows unwind UNDER the fee PI advisory lock (Codex #3153 r24
+  // P1): settlement holds that lock while adopting marker values from a
+  // plain (non-FOR UPDATE) read — without the same lock here, the unwind
+  // can commit between settlement's read and write, and the stale adopted
+  // values would resurrect the bounced refund amount and stamped id while
+  // dropping failed_refund_ids. Lane from the row's own purpose metadata
+  // first; pointer fallback fails CLOSED (throw → Stripe retries).
+  let feeUnwindLockKey = null;
+  const feeLockPiId = piId || payment.stripe_payment_intent_id || null;
+  if (feeLockPiId) {
+    let rowPurpose = null;
+    try {
+      const pm = payment.metadata ? (typeof payment.metadata === 'string' ? JSON.parse(payment.metadata) : payment.metadata) : {};
+      rowPurpose = pm?.purpose || null;
+    } catch { rowPurpose = null; }
+    if (rowPurpose === 'appointment_card_no_show_fee') {
+      feeUnwindLockKey = `appointment_card_no_show_fee:${feeLockPiId}`;
+    } else {
+      try {
+        const feePtr = await db('appointment_card_requests')
+          .where({ no_show_payment_intent_id: feeLockPiId })
+          .first('id');
+        if (feePtr) feeUnwindLockKey = `appointment_card_no_show_fee:${feeLockPiId}`;
+      } catch (detectErr) {
+        logger.error(`[stripe-webhook] fee-lane detection for refund unwind ${refundId} errored — retrying event: ${detectErr.message}`);
+        throw detectErr;
+      }
+    }
+  }
+
   let restoredInvoiceId = null;
   await db.transaction(async (trx) => {
+    if (feeUnwindLockKey) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [feeUnwindLockKey]);
+    }
     const row = await trx('payments').where({ id: payment.id }).forUpdate().first();
     if (!row) return;
     let meta = {};
@@ -2720,6 +3051,26 @@ async function handleRefundFailed(refund) {
       await require('../services/annual-prepay-renewals').syncTermForInvoicePayment(restoredInvoiceId);
     } catch (err) {
       logger.error(`[stripe-webhook] annual-prepay resync after refund bounce failed for invoice ${restoredInvoiceId}: ${err.message}`);
+    }
+  }
+
+  // Appointment-fee pre-settlement refund marker whose refund BOUNCED
+  // (Codex #3153 r18 P1): Stripe kept the fee, but the acknowledged
+  // succeeded event will never retry — re-run idempotent settlement so the
+  // retained fee gets its paid invoice + receipt (the settle transaction
+  // adopts the unwound marker row).
+  if (piId) {
+    // NO catch around the re-settlement (Codex #3153 r19 P1): a failure
+    // must propagate so Stripe retries — acknowledging would permanently
+    // strand the retained fee without its paid invoice.
+    const feeRow = await db('payments').where({ stripe_payment_intent_id: piId }).first('metadata');
+    let feeMeta = {};
+    try {
+      feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
+    } catch { feeMeta = {}; }
+    if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_refund === true && !feeMeta.invoice_id) {
+      const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
+      await resettleAppointmentFeeFromPi(piId);
     }
   }
 }
@@ -3174,25 +3525,23 @@ async function handlePayoutEvent(payout, eventType) {
 
   try {
     if (eventType === 'payout.paid') {
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'payout',
-        title: `Payout deposited: $${(payout.amount / 100).toFixed(2)}`,
-        body: `Stripe payout of $${(payout.amount / 100).toFixed(2)} has been deposited to your Capital One account.`,
-        icon: '\uD83C\uDFE6',
-        link: '/admin/banking',
-      });
+      await NotificationService.notifyAdmin(
+        'payout',
+        `Payout deposited: $${(payout.amount / 100).toFixed(2)}`,
+        `Stripe payout of $${(payout.amount / 100).toFixed(2)} has been deposited to your Capital One account.`,
+        { icon: '\uD83C\uDFE6', link: '/admin/banking' },
+      );
     }
 
     if (eventType === 'payout.failed') {
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'payout',
-        title: `Payout FAILED: $${(payout.amount / 100).toFixed(2)}`,
-        body: `Payout failed: ${payout.failure_message || 'Unknown reason'}. Check your bank details.`,
-        icon: '\u26A0\uFE0F',
-        link: '/admin/banking',
-      });
+      await NotificationService.notifyAdmin(
+        'payout',
+        `Payout FAILED: $${(payout.amount / 100).toFixed(2)}`,
+        `Payout failed: ${payout.failure_message || 'Unknown reason'}. Check your bank details.`,
+        // bell: a failed payout is a money failure, not a payout FYI \u2014 it
+        // must ring even though the payout category is silenced by default.
+        { icon: '\u26A0\uFE0F', link: '/admin/banking', bell: true },
+      );
     }
   } catch (err) {
     logger.error(`[stripe-webhook] Payout notification failed: ${err.message}`);
@@ -3504,6 +3853,10 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
     charged_amount: amount,
     payment_method: isAch ? 'us_bank_account' : paymentIntent.payment_method_types?.[0] || null,
     payment_state: 'processing',
+    // Payer ownership survives the processing->paid flip (the flip only
+    // jsonb_sets payment_state and settled_event_at), so the pause veto and
+    // the auto-clear can exclude payer-funded ACH money too.
+    ...(invoice?.payer_id ? { payer_id: invoice.payer_id } : {}),
   });
 
   if (!invoice?.id) {
@@ -3636,8 +3989,8 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
 
       await trx('payments').insert({
         // Post-lock owner, never the pre-lock read — see the succeeded-PI
-        // path above: a merge undo can repoint this invoice while we wait
-        // on its FOR UPDATE, and `invoice` still names the old owner.
+        // path above: a merge can repoint this invoice while we wait on its
+        // FOR UPDATE, and `invoice` still names the old owner.
         customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
@@ -3996,6 +4349,104 @@ async function handleDisputeCreated(dispute) {
   const depositReversal = await handleDepositChargeReversed(dispute.payment_intent, 'dispute.created');
   if (depositReversal.handled) return;
 
+  // Appointment-card fee PI disputed BEFORE settlement (Codex #3153 r18
+  // P1): the succeeded event may still be in flight — with no payments row
+  // this handler would acknowledge into thin air while settlement later
+  // books paid revenue for clawed-back money. Under the SAME advisory lock
+  // settlement uses: re-check for the row (it may have landed in the
+  // window — the normal path below then stamps it) and otherwise persist a
+  // durable 'disputed' marker settlement's in-lock check respects. The fee
+  // lane is identified LOCALLY by no_show_payment_intent_id.
+  if (dispute.payment_intent) {
+    // Lane identified from TRUSTED Stripe PI metadata (Codex #3153 r19
+    // P1): the local no_show_payment_intent_id pointer is stamped
+    // post-charge and can lag a fast dispute; a lookup failure here must
+    // RETRY the event (throw), never read as "not the fee lane".
+    const StripeService = require('../services/stripe');
+    const disputedPi = await StripeService.retrievePaymentIntent(dispute.payment_intent);
+    if (disputedPi?.metadata?.purpose === 'appointment_card_no_show_fee') {
+      const feeReq = { customer_id: disputedPi.metadata?.waves_customer_id || null };
+      // ONE locked transaction that branches on the row's presence UNDER
+      // the lock (Codex #3153 r24 P1): settlement can insert the fee row
+      // while we wait for the lock, and a pre-lock presence check would
+      // send that row down the generic dispute path outside the fee lock —
+      // where a racing won closure's dispute_final stamp could be erased
+      // and its restored invoice re-opened. Existing-row handling keeps the
+      // final-state re-read (r22 P1) and the invoice reopen semantics
+      // (r23 P1); the missing-row branch writes the durable pre-settlement
+      // marker. Fee PIs are fully handled here (return).
+      const feeOutcome = await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
+        const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first();
+        if (!rowInLock) {
+          await trx('payments').insert({
+            customer_id: feeReq.customer_id || null,
+            processor: 'stripe',
+            payment_date: etDateString(),
+            amount: (Number(dispute.amount) || 0) / 100,
+            status: 'disputed',
+            stripe_payment_intent_id: dispute.payment_intent,
+            stripe_charge_id: chargeId,
+            metadata: JSON.stringify({
+              purpose: 'appointment_card_no_show_fee',
+              pre_settlement_dispute: true,
+              dispute_id: dispute.id,
+            }),
+          });
+          return 'pre_settlement';
+        }
+        let meta = {};
+        try {
+          meta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
+        } catch { meta = {}; }
+        if (meta.dispute_final && meta.dispute_id === dispute.id) {
+          logger.warn(`[stripe-webhook] fee dispute ${dispute.id} already closed (${meta.dispute_final}) — created event is a late replay, skipping`);
+          return 'settled';
+        }
+        // Invoice binding captured BEFORE the reopen clears the PI (Codex
+        // #3153 r23 P1) — dispute-closed(won) must still find it.
+        const feeInvoice = await trx('invoices').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status');
+        await trx('payments').where({ id: rowInLock.id }).update({
+          status: 'disputed',
+          failure_reason: `Dispute: ${reason}`,
+          metadata: JSON.stringify({
+            ...meta,
+            dispute_id: dispute.id,
+            ...(feeInvoice?.id ? { dispute_invoice_id: feeInvoice.id } : {}),
+          }),
+        });
+        // Reopen the fee invoice like the generic dispute path (r23 P1):
+        // clear paid_at (reminders/alerts must not read it as paid) and
+        // the PI/charge binding (a replacement payment must be mintable).
+        if (feeInvoice && ['paid', 'processing'].includes(String(feeInvoice.status || '').toLowerCase())) {
+          await trx('invoices').where({ id: feeInvoice.id }).update({
+            status: 'overdue',
+            paid_at: null,
+            stripe_payment_intent_id: null,
+            stripe_charge_id: null,
+            updated_at: trx.fn.now(),
+          });
+        }
+        return 'settled';
+      });
+      if (feeOutcome === 'pre_settlement') {
+        logger.warn(`[stripe-webhook] appointment fee PI ${dispute.payment_intent} disputed before settlement — durable dispute marker written`);
+      }
+      // The standard dispute notification still fires (Codex #3153 r19
+      // P1): the early return must not reduce a live dispute to a log
+      // line — the office needs to submit evidence in time.
+      try {
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Dispute created: $${amount}`,
+          `Dispute ${dispute.id} on charge ${chargeId} (${reason}) — a ${feeOutcome === 'pre_settlement' ? 'no-show fee was disputed before settlement' : 'settled no-show fee was disputed'}. Respond with evidence in the Stripe dashboard.`,
+          { icon: '⚠️', link: '/admin/invoices' },
+        );
+      } catch { /* non-critical */ }
+      return;
+    }
+  }
+
   // Statement disputes key on the PI, NOT the payments row: that row isn't created
   // until payment_intent.succeeded settles, and Stripe does not guarantee webhook
   // ordering. Resolve by PI so a dispute that races/precedes settlement still
@@ -4044,14 +4495,12 @@ async function handleDisputeCreated(dispute) {
         }
       });
       try {
-        await db('notifications').insert({
-          recipient_type: 'admin',
-          category: 'dispute',
-          title: `Statement dispute opened: $${amount}`,
-          body: `Statement S-${disputedStmt.id} chargeback (${reason}). PI ${dispute.payment_intent}. Charge ${chargeId}.`,
-          icon: '⚠️',
-          link: '/admin/payers',
-        });
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Statement dispute opened: $${amount}`,
+          `Statement S-${disputedStmt.id} chargeback (${reason}). PI ${dispute.payment_intent}. Charge ${chargeId}.`,
+          { icon: '⚠️', link: '/admin/payers' },
+        );
       } catch (err) { logger.error(`[stripe-webhook] Statement dispute notification failed: ${err.message}`); }
       return;
     }
@@ -4143,14 +4592,12 @@ async function handleDisputeCreated(dispute) {
 
   // Admin notification
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'dispute',
-      title: `Dispute opened: $${amount}`,
-      body: `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
-      icon: '\u26A0\uFE0F',
-      link: '/admin/invoices',
-    });
+    await NotificationService.notifyAdmin(
+      'dispute',
+      `Dispute opened: $${amount}`,
+      `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
+      { icon: '\u26A0\uFE0F', link: '/admin/invoices' },
+    );
   } catch (err) {
     logger.error(`[stripe-webhook] Dispute notification failed: ${err.message}`);
   }
@@ -4243,6 +4690,82 @@ async function handleDisputeClosed(dispute) {
       dispute_id: dispute.id,
       dispute_final: status,
     });
+
+    // Appointment-fee closures run entirely UNDER the fee PI lock (Codex
+    // #3153 r23 P1): the created handler's locked path re-reads
+    // dispute_final under the same lock, so the final stamp and invoice
+    // restore/reopen must commit there too — otherwise a racing created
+    // can overwrite the final state and strand a reinstated invoice
+    // overdue. Fee invoices carry no statement/annual-prepay ties, so the
+    // row is fully handled here (return). Pre-settlement markers re-run
+    // idempotent settlement after the locked flip.
+    if (closedPaymentMeta.purpose === 'appointment_card_no_show_fee' && payment.stripe_payment_intent_id) {
+      const feePi = String(payment.stripe_payment_intent_id);
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${feePi}`]);
+        const rowInLock = await trx('payments').where({ id: payment.id }).first();
+        if (!rowInLock) return;
+        let meta = {};
+        try {
+          meta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
+        } catch { meta = {}; }
+        const lockedFinalMeta = JSON.stringify({ ...meta, dispute_id: dispute.id, dispute_final: status });
+        if (status === 'won' || status === 'warning_closed') {
+          await trx('payments').where({ id: payment.id }).update({ status: 'paid', metadata: lockedFinalMeta });
+          const invId = meta.invoice_id || meta.dispute_invoice_id || null;
+          const wonInvoice = invId
+            ? await trx('invoices').where({ id: invId }).first('id', 'status', 'stripe_payment_intent_id')
+            : await trx('invoices').where({ stripe_payment_intent_id: feePi }).first('id', 'status', 'stripe_payment_intent_id');
+          const wonInvoicePi = wonInvoice?.stripe_payment_intent_id ? String(wonInvoice.stripe_payment_intent_id) : null;
+          // Restore only when no replacement payment owns the invoice —
+          // the reopen cleared the PI, so null means the dispute owns it.
+          if (wonInvoice && wonInvoice.status !== 'paid' && (!wonInvoicePi || wonInvoicePi === feePi)) {
+            await trx('invoices').where({ id: wonInvoice.id }).update({
+              status: 'paid',
+              paid_at: new Date().toISOString(),
+              stripe_payment_intent_id: feePi,
+              stripe_charge_id: payment.stripe_charge_id || null,
+            });
+          }
+        } else if (status === 'lost') {
+          await trx('payments').where({ id: payment.id }).update({
+            status: 'disputed',
+            failure_reason: `Dispute lost — $${amount} returned to customer`,
+            metadata: lockedFinalMeta,
+          });
+          // Reopen idempotently — created/closed can arrive reversed.
+          const lostInvoice = await trx('invoices').where({ stripe_payment_intent_id: feePi }).first('id', 'status');
+          if (lostInvoice && ['paid', 'processing'].includes(String(lostInvoice.status || '').toLowerCase())) {
+            await trx('invoices').where({ id: lostInvoice.id }).update({
+              status: 'overdue',
+              paid_at: null,
+              stripe_payment_intent_id: null,
+              stripe_charge_id: null,
+              updated_at: trx.fn.now(),
+            });
+          }
+        } else {
+          await trx('payments').where({ id: payment.id }).update({ metadata: lockedFinalMeta });
+        }
+      });
+      // Pre-settlement dispute marker won → the retained fee still needs
+      // its paid invoice/receipt: re-run idempotent settlement (throws on
+      // failure so the event retries).
+      if (['won', 'warning_closed'].includes(status)
+        && closedPaymentMeta.pre_settlement_dispute === true && !closedPaymentMeta.invoice_id) {
+        const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
+        await resettleAppointmentFeeFromPi(feePi);
+      }
+      try {
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Dispute ${status}: $${amount}`,
+          `Dispute on charge ${chargeId} closed as ${status}.`,
+          { icon: status === 'won' ? '✅' : '❌', link: '/admin/invoices' },
+        );
+      } catch { /* non-critical */ }
+      return;
+    }
 
     if (status === 'won' || status === 'warning_closed') {
       // Statement PRE-settlement dispute MARKER (base_amount_cents null ⇒ never
@@ -4368,15 +4891,98 @@ async function handleDisputeClosed(dispute) {
     }
   }
 
+  // Appointment-fee pre-settlement dispute marker closed WON (Codex #3153
+  // r18 P1): the funds are reinstated but the acknowledged succeeded event
+  // will never retry \u2014 flip the marker settleable and re-run idempotent
+  // settlement so the retained fee gets its paid invoice + receipt.
+  if (['won', 'warning_closed'].includes(status) && dispute.payment_intent) {
+    // NO catch around the re-settlement itself (Codex #3153 r19 P1): a
+    // failure must propagate so the event is retried — acknowledging it
+    // would permanently strand the reinstated fee without its invoice.
+    let feeRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status', 'metadata');
+    if (!feeRow) {
+      // WON delivered before BOTH created and succeeded (Codex #3153 r21
+      // P1): identify the lane from trusted PI metadata and persist the
+      // final state under the fee lock — otherwise a late created event
+      // writes a permanently 'disputed' marker, or a late created after
+      // settlement reopens the paid invoice (no dispute_final on record).
+      const wonPi = await require('../services/stripe').retrievePaymentIntent(dispute.payment_intent);
+      if (wonPi?.metadata?.purpose === 'appointment_card_no_show_fee') {
+        await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
+          const rowInLock = await trx('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'metadata');
+          if (rowInLock) {
+            // Settlement (or a created-event marker) won the lock race
+            // (Codex #3153 r24 P1): the closure must still leave its
+            // final-state fence — returning unstamped would let a delayed
+            // created event mark the reinstated payment disputed and
+            // reopen its invoice. Stamp under the same lock; the post-txn
+            // re-read below picks up marker rows for the settle flip.
+            let appearedMeta = {};
+            try {
+              appearedMeta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
+            } catch { appearedMeta = {}; }
+            await trx('payments').where({ id: rowInLock.id }).update({
+              metadata: JSON.stringify({
+                ...appearedMeta,
+                dispute_id: dispute.id,
+                dispute_final: status,
+              }),
+            });
+            return;
+          }
+          await trx('payments').insert({
+            customer_id: wonPi.metadata?.waves_customer_id || null,
+            processor: 'stripe',
+            payment_date: etDateString(),
+            amount: (Number(dispute.amount) || 0) / 100,
+            status: 'paid',
+            stripe_payment_intent_id: dispute.payment_intent,
+            stripe_charge_id: chargeId,
+            metadata: JSON.stringify({
+              purpose: 'appointment_card_no_show_fee',
+              pre_settlement_dispute: true,
+              dispute_id: dispute.id,
+              dispute_final: status,
+            }),
+          });
+        });
+        feeRow = await db('payments').where({ stripe_payment_intent_id: dispute.payment_intent }).first('id', 'status', 'metadata');
+      }
+    }
+    let feeMeta = {};
+    try {
+      feeMeta = feeRow && feeRow.metadata ? (typeof feeRow.metadata === 'string' ? JSON.parse(feeRow.metadata) : feeRow.metadata) : {};
+    } catch { feeMeta = {}; }
+    if (feeMeta.purpose === 'appointment_card_no_show_fee' && feeMeta.pre_settlement_dispute === true && !feeMeta.invoice_id) {
+      // Flip the marker settleable UNDER the fee lock, stamping the final
+      // state (Codex #3153 r22 P1) — a racing created event re-reads
+      // dispute_final under the same lock and skips instead of reopening.
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${dispute.payment_intent}`]);
+        const rowInLock = await trx('payments').where({ id: feeRow.id }).first('id', 'status', 'metadata');
+        if (!rowInLock) return;
+        let lockedMeta = {};
+        try {
+          lockedMeta = rowInLock.metadata ? (typeof rowInLock.metadata === 'string' ? JSON.parse(rowInLock.metadata) : rowInLock.metadata) : {};
+        } catch { lockedMeta = {}; }
+        await trx('payments').where({ id: rowInLock.id }).update({
+          ...(String(rowInLock.status || '').toLowerCase() === 'disputed' ? { status: 'paid' } : {}),
+          metadata: JSON.stringify({ ...lockedMeta, dispute_id: dispute.id, dispute_final: status }),
+        });
+      });
+      const { resettleAppointmentFeeFromPi } = require('../services/appointment-card-request');
+      await resettleAppointmentFeeFromPi(dispute.payment_intent);
+    }
+  }
+
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'dispute',
-      title: `Dispute ${status}: $${amount}`,
-      body: `Dispute on charge ${chargeId} closed as ${status}.`,
-      icon: status === 'won' ? '\u2705' : '\u274C',
-      link: '/admin/invoices',
-    });
+    await NotificationService.notifyAdmin(
+      'dispute',
+      `Dispute ${status}: $${amount}`,
+      `Dispute on charge ${chargeId} closed as ${status}.`,
+      { icon: status === 'won' ? '\u2705' : '\u274C', link: '/admin/invoices' },
+    );
   } catch { /* non-critical */ }
 }
 

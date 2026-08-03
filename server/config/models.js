@@ -191,36 +191,44 @@ const ROUTES = Object.freeze({
 // this map because they do not have drop-in cross-provider equivalents.
 const TEXT_POLICIES = Object.freeze({
   report: Object.freeze({
+    name: 'report',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
   }),
   customerCopy: Object.freeze({
+    name: 'customerCopy',
     // Owner 2026-07-21: customer-facing recap copy rides the flagship —
     // "sonnet is not cutting it" on the report/recap surfaces.
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   contentDraft: Object.freeze({
+    name: 'contentDraft',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   highStakes: Object.freeze({
+    name: 'highStakes',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
   fastStructured: Object.freeze({
+    name: 'fastStructured',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FAST }),
   }),
   balancedAnswer: Object.freeze({
+    name: 'balancedAnswer',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
     fallback: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
   }),
   visionAnalysis: Object.freeze({
+    name: 'visionAnalysis',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: VISION }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   deepAnalysis: Object.freeze({
+    name: 'deepAnalysis',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: DEEP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),

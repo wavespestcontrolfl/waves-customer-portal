@@ -190,7 +190,10 @@ async function runCase(testCase, deps, fixtureDir = DEFAULT_FIXTURE_DIR) {
   const photos = loadCasePhotos(testCase, fixtureDir);
   if (!photos) return { id: testCase.id, status: 'skipped', reason: 'missing photo fixture' };
 
-  const attempt = async () => {
+  // Fixture photos replay through the LIVE diagnosis/narrative path — tag the
+  // dispatches as replay so they stay out of the live lanes' metrics.
+  const { runAsReplay } = require('../llm-dispatch-metrics');
+  const attempt = async () => runAsReplay(async () => {
     const ctx = testCase.context || {};
     const diag = await runDiagnosis({ photos, ...ctx });
     if (!diag.ok) return { ok: false, reason: diag.reason || 'diagnosis_failed', checks: [] };
@@ -209,7 +212,7 @@ async function runCase(testCase, deps, fixtureDir = DEFAULT_FIXTURE_DIR) {
     }
     const checks = [...findingsResult.checks, ...(narrativeResult ? narrativeResult.checks : [])];
     return { ok: checks.every((c) => c.pass), checks, findings: diag.findings };
-  };
+  });
 
   let result = await attempt();
   let flaky = false;
@@ -244,7 +247,7 @@ async function runLawnDiagnosticEval({ caseId, fixtureDir = DEFAULT_FIXTURE_DIR,
   const results = [];
   for (const testCase of selected) {
     // Sequential, not parallel: a model eval should not fan out and hammer the API.
-    results.push(await runCase(testCase, resolvedDeps, fixtureDir)); // eslint-disable-line no-await-in-loop
+    results.push(await runCase(testCase, resolvedDeps, fixtureDir));  
   }
 
   const counts = results.reduce((acc, r) => { acc[r.status] = (acc[r.status] || 0) + 1; return acc; }, {});

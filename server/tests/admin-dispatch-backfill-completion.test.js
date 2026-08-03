@@ -821,14 +821,16 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
     )).toBe(false);
   });
 
-  test('the segment split stays exact: telemetry+key out entirely; backfill always in the MODE segment, timeOnSite only under backfill', () => {
+  test('the segment split stays exact: telemetry+key out entirely; backfill always in the MODE segment, timeOnSite only when typed', () => {
     const attemptsSource = fs.readFileSync(path.join(__dirname, '../services/completion-attempts.js'), 'utf8');
     expect(attemptsSource).toMatch(/const \{ idempotencyKey, timeOnSite, completionTelemetry, backfill, \.\.\.stableBody \} = body \|\| \{\};/);
     // Fix round 13: a NORMAL completion's timeOnSite is the panel's
-    // auto-elapsed timer (ticks every second) — hashing it turned any
-    // transient pre-commit failure into idempotency_key_mismatch on the
-    // next tick. Only a backfill's operator-TYPED minutes bind.
-    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: backfill === true \? \(timeOnSite \?\? null\) : null,/);
+    // auto-elapsed timer STRING (ticks every second) — hashing it turned
+    // any transient pre-commit failure into idempotency_key_mismatch on the
+    // next tick. Operator statements — numbers AND non-timer strings, the
+    // same isOperatorTimeOnSite rule the route's intake gate uses (codex
+    // P2 #3152 round 14) — bind in any mode.
+    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: backfill === true \|\| isOperatorTimeOnSite\(timeOnSite\)/);
     // The resume claim is the ONLY core-segment comparison site; the
     // pending/failed/succeeded sites go through the strict matcher.
     expect(attemptsSource).toMatch(/if \(!resumeHashMatches\(row\.request_hash, requestHash\)\) \{/);
@@ -2213,16 +2215,36 @@ describe('completion route wiring (source contracts)', () => {
     expect(source).toMatch(/invoice\.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion/);
   });
 
-  test('backfill + saved payment method never auto-charges (per-application rail gated off)', () => {
-    // The per-application saved-card/ACH rail — and with it the receipt
-    // enqueue and combined-receipt arming that only happen inside it — runs
-    // exclusively for non-backfill completions. Invoice minting is untouched
+  test('backfill + saved payment method never auto-charges (completion rail gated off)', () => {
+    // The completion saved-card/ACH rail (per-application AND the
+    // appointment-card one-time lane) — and with it the receipt enqueue and
+    // combined-receipt arming that only happen inside it — runs exclusively
+    // for non-backfill completions. Invoice minting is untouched
     // (shouldInvoice runs earlier), so a backfill invoice still mints, open
     // and uncharged, for operator collection.
-    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& perApplicationBilling && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
+    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationBilling \|\| apptCardOneTimeCharge\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
     // autoChargedReceiptPending starts false and is only ever set inside the
     // gated rail — no charge, no combined receipt claim.
     expect(source).toMatch(/let autoChargedReceiptPending = false;/);
+  });
+
+  test('appointment-card one-time lane: gated, hold-lane-exclusive, capped at the stamped price only', () => {
+    // Fail-closed gate read + completed/satisfied row + no hold row.
+    expect(source).toMatch(/isEnabled\('apptCardCompletionCharge'\)/);
+    expect(source).toMatch(/\.whereIn\('status', \['completed', 'satisfied'\]\)/);
+    // r19: the lane additionally requires the consent row to belong to the
+    // visit's CURRENT customer — reassignment never inherits consent.
+    expect(source).toMatch(/apptCardOneTimeCharge = !!laneRow && !holdRow\s*\n\s*&& String\(laneRow\.customer_id\) === String\(svc\.customer_id\);/);
+    // One-time visits only, never the other explicit billing lanes.
+    expect(source).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& svc\.is_recurring !== true/);
+    // The per-application acceptance-fee fallback and the setup-fee
+    // allowances never widen this lane's cap.
+    expect(source).toMatch(/: \(perApplicationBilling && svc\.cust_per_application_fee != null/);
+    expect(source).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
+    expect(source).toMatch(/if \(perApplicationBilling && \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected\)\) \{/);
+    // Autopay-ledger entries name the actual lane.
+    expect(source).toMatch(/const completionChargeSource = perApplicationBilling \? 'per_application_completion' : 'appointment_card_completion';/);
+    expect(source).not.toMatch(/details: \{ source: 'per_application_completion'/);
   });
 
   test('backfill mints the digital card quietly — card.issued email suppressed', () => {
@@ -2253,7 +2275,14 @@ describe('completion route wiring (source contracts)', () => {
     // The auto-apply block is gated on !isBackfillCompletion BEFORE the
     // applyAccountCreditToInvoice call, so a backfilled invoice can neither
     // consume existing credit nor flip itself prepaid.
-    expect(source).toMatch(/if \(!isBackfillCompletion\s*\n\s*&& invoice\?\.id && !alreadyPaid && !invoice\.payer_id\s*\n\s*&& !\['paid', 'prepaid'\][\s\S]{0,200}autoApplyAccountCredit\) \{[\s\S]{0,400}applyAccountCreditToInvoice\(\{ invoiceId: invoice\.id \}\)/);
+    // The span also crosses the appointment-lane over-cap fence (Codex
+    // #3153 r9): over-cap lane invoices keep their credit untouched too.
+    // r16: the appointment lane's frozen cap also rides INTO the credit
+    // apply itself (locked re-check) — the call carries the conditional
+    // maxAuthorizedSubtotal spread.
+    // r21: the appointment lane's credit apply carries the frozen cap AND
+    // the serialized live-payer check into the credit transaction.
+    expect(source).toMatch(/if \(!isBackfillCompletion\s*\n\s*&& invoice\?\.id && !alreadyPaid && !invoice\.payer_id\s*\n\s*&& !\['paid', 'prepaid'\][\s\S]{0,500}!apptCardOverCap && !apptCardLaneUnresolved[\s\S]{0,200}autoApplyAccountCredit\) \{[\s\S]{0,700}applyAccountCreditToInvoice\(\{\s*\n\s*invoiceId: invoice\.id,\s*\n\s*\.\.\.\(apptCardOneTimeCharge \? \{\s*\n\s*maxAuthorizedSubtotal:[\s\S]{0,400}requireSelfPayScheduledServiceId: svc\.id,[\s\S]{0,400}requireOneTimeLane: true,/);
   });
 
   test('backfill never auto-applies the prepaid credit — invoice mutation stays with the reviewer', () => {
@@ -2310,8 +2339,11 @@ describe('completion route wiring (source contracts)', () => {
     // carries the visit's day. For the unknown-end shape the helper returns
     // null and the wall clock flows in instead, but the duration policy
     // strips those rows' end stamps entirely (behavioral coverage above), so
-    // no wall-clock end instant can reach the row.
-    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| completionEndedAt;/);
+    // no wall-clock end instant can reach the row. The live admin override's
+    // adjusted instant sits strictly after backfill's in the fallback chain
+    // and is null in every backfill mode (guarded on !isBackfillCompletion).
+    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc\)\s*\n\s*: null;/);
+    expect(source).toMatch(/const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite\s*\n\s*&& !correctionPreservedMidFlight\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionEndedAt\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| adjustedEndedAt \|\| completionEndedAt;/);
   });
 
   test('an empty scheduled_services timing update is skipped — the blank-duration checked-in closeout must complete (fix round 4)', () => {
@@ -2388,11 +2420,14 @@ describe('completion route wiring (source contracts)', () => {
 
   test('timeOnSite is sanitized ONCE at intake — every consumer reads the same value or absence', () => {
     // Under backfill the raw body value is replaced by the workday-capped
-    // minutes (or null); non-backfill completions pass through untouched.
-    // `let` (fix round 5): the crash-resume block overwrites it with the
-    // FROZEN structured_notes stamp — the only later assignment (contract
-    // above) — so a retry's auto-elapsed timer can never reach a consumer.
-    expect(source).toMatch(/let effectiveTimeOnSite = isBackfillCompletion\s*\n\s*\? backfillTimeOnSiteMinutes\(timeOnSite\)\s*\n\s*: timeOnSite;/);
+    // minutes (or null); non-backfill completions flow through the live
+    // override plan (a numeric admin-typed value is validated fail-closed
+    // there; a string elapsed passes through untouched — see
+    // admin-dispatch-time-on-site.test.js). `let` (fix round 5): the
+    // crash-resume block overwrites it with the FROZEN structured_notes
+    // stamp — the only later assignment (contract above) — so a retry's
+    // auto-elapsed timer can never reach a consumer.
+    expect(source).toMatch(/let effectiveTimeOnSite = isBackfillCompletion\s*\n\s*\? backfillTimeOnSiteMinutes\(timeOnSite\)\s*\n\s*: livePlan\.effectiveTimeOnSite;/);
     // A rejected value logs a note — the closeout still succeeds (no 400
     // path exists between the sanitation and the log).
     expect(source).toMatch(/if \(isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== ''\) \{\s*\n\s*logger\.warn\([\s\S]{0,300}recorded as unknown/);
@@ -2422,7 +2457,7 @@ describe('completion route wiring (source contracts)', () => {
     expect(costingSource).toMatch(/if \(!minutes && untrustedLifecycleSpan\) \{\s*\n\s*const explicit = Number\(explicitLaborMinutes\);\s*\n\s*if \(Number\.isFinite\(explicit\) && explicit > 0\) minutes = Math\.round\(explicit\);\s*\n\s*\}/);
     expect(costingSource).toMatch(/if \(!minutes && !untrustedLifecycleSpan && startTime && endTime\) \{/);
     // calculateJobCost threads the options through to calcLaborCost.
-    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes \},\s*\n\s*\);/);
+    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes \},\s*\n\s*\);/);
   });
 
   test('job costing runs on RESUMED retries too — a released mint failure cannot finalize with financials missing (Codex P2, fix round 13)', () => {
@@ -2460,7 +2495,7 @@ describe('completion route wiring (source contracts)', () => {
     // the first call failed) — must flag the span untrusted AND carry the
     // backdated completed_at stamp (fix round 4).
     const flaggedCalls = source.match(
-      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: req\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*completedAt: backfillTrackerCompletedAt,\s*\n\s*\}\)/g,
+      /trackTransitions\.markComplete\(svc\.id, \{\s*\n\s*actorType: 'admin',\s*\n\s*actorId: req\.technicianId,\s*\n(?:\s*\/\/[^\n]*\n)*\s*untrustedLifecycleSpan: isBackfillCompletion,\s*\n\s*completedAt: backfillTrackerCompletedAt,\s*\n(?:\s*\/\/[^\n]*\n)*\s*expectedCorrectionSeq: svc\.time_on_site_correction_seq \?\? null,\s*\n\s*\}\)/g,
     ) || [];
     expect(flaggedCalls.length).toBe(2);
     // Exactly these two sites exist on the backfill-capable route; the third
@@ -2490,7 +2525,10 @@ describe('completion route wiring (source contracts)', () => {
     // (Round 7's NULL for the unknown-end shape is gone — the helper now
     // returns ET noon of the service day there too, so Billing Recovery's
     // completed_at window can see the visit; instant coverage above.)
-    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n\s*: null;/);
+    // The else branch carries the LIVE admin override's adjusted instant
+    // (codex P2 #3152 round 10) — null for plain live completions, so the
+    // backfill contract itself is unchanged.
+    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? \(completionWallClockAt\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionWallClockAt\)\s*\n\s*: \(finiteDate\(svc\.actual_end_time\) \|\| finiteDate\(svc\.check_out_time\) \|\| null\)\)\s*\n\s*: null\);/);
     // Derived AFTER the crash-resume re-derivation (it reads the healed
     // flag AND the frozen duration), BEFORE the first markComplete that
     // consumes it.
@@ -2503,7 +2541,11 @@ describe('completion route wiring (source contracts)', () => {
     // written only from the caller's instant (finiteDate-validated); absent
     // → the column is omitted, never a wall-clock fallback.
     const trackerSource = fs.readFileSync(path.join(__dirname, '../services/track-transitions.js'), 'utf8');
-    expect(trackerSource).toMatch(/const completedAtStamp = opts\.untrustedLifecycleSpan \? finiteDate\(opts\.completedAt\) : now;/);
+    // Trusted path honors a caller-supplied finite instant (live admin
+    // override, codex P2 #3152 round 11) and keeps the wall clock for every
+    // caller that passes none; both branches sit behind the round-15
+    // transition stamp fence (a newer correction's completed_at stands).
+    expect(trackerSource).toMatch(/let completedAtStamp = \(!transitionStampMatches \|\| priorCorrectionOwnsRow\)\s*\n\s*\? null[\s\S]{0,120}: \(opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\)\);/);
     expect(trackerSource).toMatch(/\.\.\.\(completedAtStamp \? \{ completed_at: completedAtStamp \} : \{\}\),/);
   });
 
@@ -2563,8 +2605,13 @@ describe('completion route wiring (source contracts)', () => {
     const postCommitGates = [
       // account-credit auto-apply
       'if (!isBackfillCompletion\n      && invoice?.id && !alreadyPaid && !invoice.payer_id',
-      // per-application saved-card / ACH auto-charge
-      'if (!isBackfillCompletion\n      && perApplicationBilling && visitPerformed',
+      // completion saved-card / ACH auto-charge (per-application OR the
+      // appointment-card one-time lane — one shared rail, one backfill gate)
+      'if (!isBackfillCompletion\n      && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed',
+      // appointment-card one-time lane derivation (read-only, but its
+      // backfill-skip log reads isBackfillCompletion so it must sit after
+      // the re-derivation too)
+      'let apptCardOneTimeCharge = false;',
       // card-hold charge
       '} else if (isBackfillCompletion) {',
       // digital-business-card issued email

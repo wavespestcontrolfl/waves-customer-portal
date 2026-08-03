@@ -614,12 +614,54 @@ function contactPhoneForCall(call) {
   return String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone;
 }
 
-function routeForV2(extraction, contactPhone, helpers) {
+// The stored AV verdict was computed for the HISTORICAL extraction's address.
+// It transfers to another extraction only when that extraction states the
+// same address (codex round-11 P1) — a re-extraction that changes the street
+// must NOT ride on the old validated_accept, or the replay reports that
+// production would auto-route an address it would actually revalidate.
+// Comparison uses the repo's suffix-insensitive street key + city + zip;
+// an address the verdict doesn't match degrades to null (the pre-AV
+// fallback posture: model/confidence signals + the central gate holding).
+function avVerdictForExtraction(storedAv, verdictExtraction, candidateExtraction, helpers) {
+  if (!storedAv) return null;
+  if (!verdictExtraction || !candidateExtraction) return null;
+  const a = verdictExtraction.property?.service_address || {};
+  const b = candidateExtraction.property?.service_address || {};
+  const key = (sa) => [
+    helpers.streetCompareKey ? helpers.streetCompareKey(sa.street_line_1 || '') : String(sa.street_line_1 || '').toLowerCase(),
+    // Unit rides in the key too (codex round-12 P1): AV sends street_line_2
+    // to Google, so Apt A's verdict must not transfer to Apt B.
+    String(sa.street_line_2 || '').toLowerCase().trim(),
+    String(sa.city || '').toLowerCase().trim(),
+    String(sa.postal_code || '').trim(),
+  ].join('|');
+  return key(a) === key(b) ? storedAv : null;
+}
+
+function routeForV2(extraction, contactPhone, helpers, addressValidation = null, failOpenContext = {}, conflictCheck = null) {
   if (!extraction) return { allowed: false, reason: 'no_extraction', flags: [] };
-  const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], null);
-  const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone });
+  // The stored AV verdict rides along (codex round-10 P1): since the central
+  // address-trust gate (2026-08-01), canAutoRoute without a verdict returns
+  // address_not_validated for every call — replaying without it would score
+  // zero auto-routes and the variance comparison would be meaningless.
+  //
+  // So does the fail-open context (codex round-21 P2, mirroring the readiness
+  // script's round-12 fix): production passes failOpen + callerAni +
+  // knownCustomer, and an established customer who confirms a visit WITHOUT
+  // restating their on-file address normally has a `not_attempted` verdict.
+  // Production dispatches to the verified on-file address; replaying without
+  // the context scores those as address_not_validated and the variance output
+  // reports a divergence that does not exist.
+  const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], addressValidation);
+  const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone, addressValidation });
   const flags = helpers.mergeTriageFlags(modelFlags, deterministicFlags);
-  const route = helpers.canAutoRoute(extraction, { contactPhone });
+  let route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...failOpenContext });
+  // The live path never stops at canAutoRoute: a fail-open allow whose V1
+  // address conflicts with the on-file one is a NEW address and is demoted
+  // back to review. Replaying without it over-counts auto-routes.
+  if (conflictCheck) {
+    route = conflictCheck.demote(route, conflictCheck.extractedV1, conflictCheck.knownCaller);
+  }
   return {
     allowed: !!route.allowed,
     reason: route.allowed ? 'allowed' : (route.reason || 'blocked'),
@@ -798,12 +840,15 @@ async function loadCandidateCalls(db, options) {
     'transcription',
     'ai_extraction',
     'ai_extraction_enriched',
+    'ai_address_validation',
     'v2_extraction_status',
     'ai_extraction_model',
     'ai_extraction_prompt_version',
     'transcription_provider',
     'transcription_model',
     'recording_url',
+    // Feeds the on-file fail-open context the live gate receives (round-21 P2).
+    'customer_id',
   ];
   const selected = optionalColumns
     .filter((col) => callColumns[col])
@@ -866,7 +911,53 @@ async function replayCall(call, context) {
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
-  const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers) : null;
+  const storedAvRaw = parseJson(call.ai_address_validation, null);
+  // Effective-verdict reconstruction (codex round-12 P2, mirroring the
+  // readiness script): a recovered address routed on the recovery's ACCEPTING
+  // verdict while the ORIGINAL unresolvable one was persisted — the
+  // address_recovered card is the durable trace. Recovery adopts only after
+  // confirming exactly ONE real in-area premise, and it REPERSISTED the
+  // recovered address into the enriched extraction, so 'corrected' against
+  // the persisted address is the faithful production input.
+  // The card must speak for the CURRENT pass (codex final-round P2): a call
+  // recovered once and later reprocessed WITHOUT a successful recovery keeps
+  // the old card, and a bare existence check would let it vouch for the newer
+  // unverified verdict. Match the pass stamp the processor writes against the
+  // row's own provenance; an unstamped (pre-2026-08-01) card reconstructs
+  // nothing, which is the fail-closed direction.
+  const recoveredCardRow = await db('triage_items')
+    .where({ call_log_id: call.id, reason_code: 'address_recovered' })
+    .first('id', 'payload')
+    .catch(() => null);
+  const recoveredCardPayload = parseJson(recoveredCardRow?.payload, null) || {};
+  const recoveredCard = !!recoveredCardPayload.extraction_model
+    && recoveredCardPayload.extraction_model === call.ai_extraction_model
+    && recoveredCardPayload.extraction_prompt_version === call.ai_extraction_prompt_version;
+  const storedAv = (recoveredCard && storedAvRaw)
+    ? { status: 'corrected', inServiceArea: true, county: storedAvRaw.county || null, normalized: storedAvRaw.normalized || null, reconstructed_from: 'address_recovered' }
+    : storedAvRaw;
+  // The live routing options production would have used for THIS call: the
+  // same env gate, the caller ANI, and whether the linked customer has a
+  // verified on-file address (codex round-21 P2). Read-only; a lookup failure
+  // degrades to no context, which is the pre-existing (stricter) behavior.
+  // Production's own builder, not an approximation: fail-open is inbound-only
+  // and the on-file lane is limited to actively-served pipeline stages, so a
+  // local "has an address" test over-granted it (local pre-push audit P1).
+  const linkedCustomer = call.customer_id
+    ? await db('customers').where({ id: call.customer_id })
+      .first('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+      .catch(() => null)
+    : null;
+  const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
+    call,
+    customer: linkedCustomer,
+    contactPhone,
+    failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  });
+  // The verdict was computed for the persisted (prior) extraction — it always
+  // applies to priorV2 by construction.
+  const conflictCheck = { demote: CRP.demoteFailOpenOnV1AddressConflict, extractedV1: legacyFlat, knownCaller };
+  const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv, failOpenContext, conflictCheck) : null;
   const scheduled = await findLegacyScheduledService(db, call, scheduledColumns);
 
   let transcriptForExtraction = call.transcription;
@@ -924,7 +1015,9 @@ async function replayCall(call, context) {
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
   const currentRoute = currentExtraction
-    ? routeForV2(currentExtraction, contactPhone, helpers)
+    ? routeForV2(currentExtraction, contactPhone, helpers,
+      avVerdictForExtraction(storedAv, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
+      failOpenContext, conflictCheck)
     : { allowed: false, reason: current.status, flags: [] };
 
   const legacyFieldVariances = currentFlat ? compareFlatFields(legacyFlat, currentFlat, includeValues) : [];

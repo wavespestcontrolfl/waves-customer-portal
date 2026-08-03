@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -32,6 +32,7 @@ const {
 } = require('../services/property-lookup/lookup-cache');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
+const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -774,6 +775,32 @@ router.post('/property-lookup/verify', async (req, res) => {
   }
 });
 
+// Engine-faithful treatable-turf fallback preview for the estimator's
+// stale-imagery path (codex P1 r2 + pre-push P1 r3 #3098). When the
+// conflict guard discarded the vision areas and Confirmed Sq Ft is blank,
+// the client must display the number /calculate-estimate would actually
+// price — and keep displaying it as the rep edits the form. The body is the
+// SAME client-built profile shape doGenerate sends (bed-area defaulted to
+// 0, pool/densities folded in), run through the SAME
+// translateV2CallToV1Input boundary /calculate-estimate uses — a
+// hand-built engine input here previewed 6,196 where the real request
+// priced 7,944 (bed-0 + plausible-max cap path). Pure computation; no DB.
+// (Router-level adminAuthenticate + requireTechOrAdmin already cover this.)
+router.post('/turf-preview', (req, res) => {
+  const profile = req.body?.profile;
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    return res.status(400).json({ error: 'profile required' });
+  }
+  try {
+    const v1Input = translateV2CallToV1Input(profile, [], {});
+    const enginePreview = calculatePropertyProfile(v1Input);
+    res.json({ turfSf: Math.max(0, Math.round(Number(enginePreview?.lawnSqFt) || 0)) });
+  } catch (err) {
+    logger.warn('[property-lookup] turf-preview failed', { error: err.message });
+    res.status(500).json({ error: 'preview failed' });
+  }
+});
+
 
 // ─────────────────────────────────────────────
 // NORMALIZERS
@@ -1329,6 +1356,43 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // like _floodZone); record-less lookups pass it alongside since there is no
   // record to ride.
   const addressAudit = addressAuditParam || rc?._addressAudit || null;
+  // Stale/invalid-imagery guard: the county roll assesses a completed home
+  // but vision measured an empty lot (explicit 0 turf AND 0% impervious —
+  // impossible with a building on the parcel; see
+  // detectStaleImageryTurfConflict). Those zeros describe the imagery, not
+  // the property — drop the vision AREA fields so every downstream consumer
+  // (this profile, the estimator's lot-estimate fallback, pricing's
+  // computeTurfArea) falls back to its documented lot-based defaults instead
+  // of treating "known 0% hardscape / 0 sf beds" as fact and pricing the
+  // FULL lot as treatable turf. The county turf prior is ALSO skipped below:
+  // with the parcel unobservable there is no basis to grade a
+  // 50%-of-ceiling seed above the default ladder. Non-area vision fields
+  // stay — county evidence already out-ranks them where it exists (pool,
+  // cage), and widening the sanitization is deliberately out of scope.
+  // Running here (not in the lookup pipeline) means cache-hit rebuilds
+  // sanitize rows poisoned before this shipped, no backfill needed.
+  const staleImageryConflict = detectStaleImageryTurfConflict(rc, ai);
+  if (staleImageryConflict) {
+    ai = { ...ai };
+    delete ai.estimatedTurfSf;
+    delete ai.imperviousSurfacePercent;
+    delete ai.imperviosSurfacePercent;
+    delete ai.estimatedBedAreaSf;
+    delete ai.estimatedBedAreaPercent;
+    // Fires on every profile build for a conflicted address (fresh + cache
+    // hit) — greppable in Railway to judge how often the guard runs and,
+    // against later confirmed sq ft, whether the lot-based fallback is
+    // generally close enough or the polygon-measurement lane is warranted.
+    // Dimensions + county only: full street addresses never go to the
+    // plain-text logs (codex P1 #3098); the estimate row carries the
+    // address for any follow-up join.
+    logger.info('[property-lookup] stale-imagery turf conflict — vision area fields discarded', {
+      county: rc?.county || null,
+      lotSqFt: rc?.lotSize || null,
+      countySqFt: staleImageryConflict.countySqFt,
+      yearBuilt: staleImageryConflict.yearBuilt,
+    });
+  }
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
   const waterDistance = ai?.waterDistance || 'NONE';
@@ -1386,6 +1450,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // profile IS the association/owner, so it doesn't apply there.
   const countyTurfPriorSf = (
     !visionTurfKnown
+    // A stale-imagery conflict cleared the vision fields, but seeding the
+    // ratio prior would just trade one unsupported point estimate for
+    // another — the default lot ladder (with its verify flag) is the
+    // documented fallback there.
+    && !staleImageryConflict
     && !turfCountyPriorDisabled()
     && countyCeiling
     && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
@@ -1393,6 +1462,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
+  if (staleImageryConflict) {
+    fieldVerifyFlags.push({
+      field: 'estimatedTurfSf',
+      reason: `Satellite analysis conflicts with county records — the imagery shows undeveloped land but the county assesses a ${staleImageryConflict.countySqFt.toLocaleString()} sq ft home${staleImageryConflict.yearBuilt ? ` (built ${staleImageryConflict.yearBuilt})` : ''}. Imagery is likely stale or misaligned; its turf/hardscape estimates were discarded. Confirm treatable lawn area before pricing.`,
+      priority: 'HIGH',
+    });
+  }
   if (countyTurfPriorSf) {
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
@@ -1563,6 +1639,15 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // (see countyTurfPriorSf above); 'none' = no basis — pricing falls back
     // to its lot-based estimate.
     turfSource: visionTurfKnown ? 'vision' : (countyTurfPriorSf ? 'county_prior' : 'none'),
+    // Machine-readable twin of the stale-imagery verify flag (like
+    // unassessedVacantParcel): 'unobservable' = the vision area fields were
+    // discarded by the conflict guard, so the lot-based fallback everything
+    // now shows is a heuristic, not a measurement — consumers must keep the
+    // confirm-before-pricing posture. Absent on normal profiles; an explicit
+    // vision 0 with the structure visible is a real measurement and never
+    // carries this.
+    turfObservation: staleImageryConflict ? 'unobservable' : undefined,
+    turfReason: staleImageryConflict ? 'county_structure_vision_bare_land_conflict' : undefined,
     countyTurfPriorSf,
     // TRUSTED ceiling (county-complete + county-sourced dims) — feeds the
     // exceeds-ceiling review reason; null when the facts are too weak to
@@ -1704,6 +1789,38 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       fieldEvidence: !!(rc?._fieldEvidence && Object.keys(rc._fieldEvidence).length),
     }
   };
+
+  // The number the pricing engine will actually use on this profile if the
+  // operator leaves Confirmed Sq Ft blank (codex P1 r1 + pre-push P1 r3
+  // #3098). Faithfulness is structural, not approximated: the profile goes
+  // through the SAME translateV2CallToV1Input boundary /calculate-estimate
+  // uses, with the one client-side transform doGenerate always applies —
+  // a blank bed-area field lands as estimatedBedAreaSf 0 — folded in
+  // (that explicit 0 flips computeTurfArea from the legacy fallback onto
+  // the plausible-max-capped lot ladder, a materially different number).
+  // The client's lot-estimate fallback displays this when the conflict
+  // guard fired, and re-asks /turf-preview (same computation) as the form
+  // is edited. Fail-open: a preview miss leaves the client on its own
+  // heuristic rather than breaking the profile.
+  if (staleImageryConflict) {
+    try {
+      const previewProfile = {
+        ...profile,
+        estimatedBedAreaSf: Number(profile.estimatedBedAreaSf) || 0,
+      };
+      delete previewProfile.measuredTurfSf;
+      const enginePreview = calculatePropertyProfile(translateV2CallToV1Input(previewProfile, [], {}));
+      const previewSf = Number(enginePreview?.lawnSqFt);
+      // Zero is a REAL engine answer (footprint + hardscape can consume the
+      // lot) — null means only "could not compute" (codex P2 r4 #3098).
+      profile.turfFallbackPreviewSf = Number.isFinite(previewSf) && previewSf >= 0
+        ? Math.round(previewSf)
+        : null;
+    } catch (err) {
+      logger.warn('[property-lookup] stale-imagery turf preview failed', { error: err.message });
+      profile.turfFallbackPreviewSf = null;
+    }
+  }
 
   // Shadow signal comparing the VISION estimate against the deterministic
   // county-facts ceiling (a county-prior seed would compare the ceiling with
@@ -1957,19 +2074,8 @@ function turfRiskReasons(source = {}) {
 }
 
 function needsTurfManualConfirmation(profile = {}, selectedServices = [], options = {}) {
-  let turfServices = selectedTurfPricedServices(selectedServices);
-  if (isCommercialProfile(profile, options)) {
-    // Commercial turf services are manual quote in PR 1; do not block them
-    // with residential lawn pricing measurement confirmation.
-    turfServices = turfServices.filter((service) => ![
-      'LAWN',
-      'OT_LAWN',
-      'TOPDRESS',
-      'DETHATCH',
-      'PLUGGING',
-    ].includes(service));
-  }
-  if (turfServices.length === 0) return null;
+  const allTurfServices = selectedTurfPricedServices(selectedServices);
+  if (allTurfServices.length === 0) return null;
   const manualTurfSf = firstNonNegativeNumber(profile.measuredTurfSf, profile.lawnSqFt);
   if (manualTurfSf !== undefined) return null;
   // Services whose treated area is entered directly (front/back-yard scope)
@@ -1983,7 +2089,43 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
     PLUGGING: plugArea > 0,
     TOPDRESS: topDressArea > 0,
   };
-  if (turfServices.every((service) => areaBoundedExempt[service])) return null;
+  if (allTurfServices.every((service) => areaBoundedExempt[service])) return null;
+
+  // Stale-imagery conflict profiles (turfObservation 'unobservable') have
+  // NO trustworthy turf basis — the vision zeros were discarded and the
+  // engine would otherwise price its lot/hardscape fallback silently
+  // (estimatedTurfSf is 0 here, so the >threshold check below never
+  // fires). A low-confidence fallback must route to confirmation, not
+  // auto-apply (pre-push P1 #3098): require a measured turf entry.
+  // Deliberately BEFORE the commercial filter below — commercial lawn
+  // auto-prices through priceCommercialLawn in the small-commercial pilot,
+  // so a conflicted commercial profile needs the same confirmation
+  // (pre-push P1 r6 #3098). Manual turf and the bounded-area add-on
+  // exemptions above already cleared.
+  if (profile.turfObservation === 'unobservable') {
+    return {
+      field: 'measuredTurfSf',
+      turfObservation: 'unobservable',
+      estimatedTurfSf: 0,
+      reasons: turfRiskReasons(profile),
+      message: 'Satellite imagery conflicts with county records for this property, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.',
+    };
+  }
+
+  let turfServices = allTurfServices;
+  if (isCommercialProfile(profile, options)) {
+    // Commercial turf services are manual quote in PR 1; do not block them
+    // with the residential >threshold measurement confirmation below. (The
+    // unobservable gate above still applies to them.)
+    turfServices = turfServices.filter((service) => ![
+      'LAWN',
+      'OT_LAWN',
+      'TOPDRESS',
+      'DETHATCH',
+      'PLUGGING',
+    ].includes(service));
+  }
+  if (turfServices.length === 0) return null;
 
   const estimatedTurfSf = firstNonNegativeNumber(profile.estimatedTurfSf, profile.estimatedTurfSqFt);
   if (estimatedTurfSf === undefined || estimatedTurfSf <= TURF_MANUAL_CONFIRMATION_SQFT) return null;
@@ -3283,7 +3425,17 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // admin client re-derives profile.footprint = homeSqFt / stories when
     // building the request, and a positive value here would bypass the
     // pricing-side derivation guard entirely (codex P1 #2721).
-    footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprintSqFt ?? p.footprint),
+    //
+    // Below that guard, the operator's typed Home Sq Ft / Stories wins over the
+    // lookup's measured footprint (owner ruling 2026-08-01). The admin form
+    // re-derives profile.footprint from those two fields on every calculate,
+    // but profile.footprintSqFt is spread in from the property-lookup response
+    // and is never recleared — so reading footprintSqFt first made the typed
+    // square footage silently inert on pest pricing (the engine's
+    // resolvePestFootprint takes footprintSqFt before homeSqFt, and this
+    // translator never forwards `footprint`). Same silent-drop class as the
+    // attachedGarage key note in EstimatePage.jsx.
+    footprintSqFt: p.footprintUnknown === true ? 0 : (p.footprint ?? p.footprintSqFt),
     footprintUnknown: p.footprintUnknown === true || undefined,
     perimeterLF: perimeterLF ?? perimeter,
     perimeterSource: p.perimeterSource || null,

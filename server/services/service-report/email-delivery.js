@@ -12,7 +12,7 @@ const {
 const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
-const { formatReadyTime } = require('./time-format');
+const { dateOnlyStamp, formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
@@ -410,7 +410,14 @@ async function loadServiceRecord(recordId) {
     .first();
 }
 
-async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } = {}) {
+async function sendServiceReportV1Email(recordId, {
+  token, reportUrl, pdfUrl, forceFreshPdf = false, verifyBeforeSend = null,
+  // #3168: the assessment the caller's fence sealed. Pinning it on the render
+  // is what makes the attachment's content provable — the renderer navigates
+  // to the report page, which fetches its own data, so without a pin the file
+  // can contain a different assessment than the one that was sealed.
+  pinnedLawnAssessmentId = null,
+} = {}) {
   if (!sendgrid.isConfigured()) {
     return { ok: false, error: 'SendGrid not configured' };
   }
@@ -437,7 +444,13 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
   const base = portalBaseUrl();
   const fullReportUrl = reportUrl || `${base}/report/${encodeURIComponent(reportToken)}`;
   const fullPdfUrl = pdfUrl || `${base}/api/reports/${encodeURIComponent(reportToken)}`;
-  const data = await buildReportV1Data(service, reportToken);
+  // Pinned to the SAME assessment as the attachment (#3168). Left unpinned,
+  // this build could resolve a different assessment than the PDF: the body
+  // would describe one visit's lawn while the attachment showed another's, and
+  // because data.lawnAssessment.assessmentId is what the fence receives as the
+  // render's answer, a correctly-pinned attachment would be deferred as a
+  // mismatch. One pin, one answer, both surfaces.
+  const data = await buildReportV1Data(service, reportToken, undefined, { pinnedLawnAssessmentId });
   data.dynamicContext = await buildServiceReportDynamicContext({
     recordId,
     mode: 'static',
@@ -445,7 +458,9 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
 
   let pdf = null;
   try {
-    const result = await getOrRenderServiceReportPdf(recordId, { token: reportToken });
+    const result = await getOrRenderServiceReportPdf(recordId, {
+      token: reportToken, forceFresh: forceFreshPdf, pinnedLawnAssessmentId,
+    });
     pdf = result.pdf;
     if (result.storageFailed) {
       await enqueuePdfRenderRetry({
@@ -458,6 +473,21 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
       });
     }
   } catch (err) {
+    // A PINNED render must never degrade into an attachment-less send (#3168).
+    // This catch exists so a transient render failure still gets the customer
+    // their report link — reasonable when the attachment is a bonus. But a
+    // pinned render is a fence: its failure means we could not prove what the
+    // attachment would contain, and continuing would mark the delivery SENT
+    // with no attachment, permanently, on a path whose whole contract is
+    // "defer rather than send something unverified". Defer instead.
+    if (pinnedLawnAssessmentId) {
+      logger.warn(`[service-report-v1-email] pinned PDF render failed for ${recordId}; deferring send: ${safePdfRenderError(err)}`);
+      return {
+        ok: false,
+        error: `Pinned report render failed — deferring send: ${safePdfRenderError(err)}`,
+        retryable: true,
+      };
+    }
     logger.warn(`[service-report-v1-email] PDF attachment skipped for ${recordId}: ${safePdfRenderError(err)}`);
     await enqueuePdfRenderRetry({
       serviceRecordId: recordId,
@@ -471,10 +501,33 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
 
   const attachments = pdf ? [{
     content: pdf.toString('base64'),
-    filename: `waves-service-report-${data.serviceDate || recordId}.pdf`,
+    // dateOnlyStamp: serviceDate is a hydrated pg DATE — raw interpolation
+    // put the entire Date.toString() into the customer's attachment name.
+    filename: `waves-service-report-${dateOnlyStamp(data.serviceDate) || recordId}.pdf`,
     type: 'application/pdf',
     disposition: 'attachment',
   }] : undefined;
+
+  // Post-render fence (codex P1 #3093 r36): a recommendation run that
+  // starts after the worker's one-time sanitize check can overwrite the
+  // assessment while the attachment renders. The caller re-verifies the
+  // generation/version state HERE — after the render, before dispatch — and
+  // a false result aborts retryably instead of emailing divergent copy.
+  if (typeof verifyBeforeSend === 'function') {
+    // Report WHICH assessment this render actually used (codex P1 #3135 r3).
+    // The worker resolves the assessment before the render and the builder
+    // resolves it again during the render; because the record backlink is
+    // explicitly non-unique, a row confirmed or relinked in between can become
+    // the renderer's selection while the worker sealed the previous one. The
+    // fence can only be trusted if it seals the copy the customer is actually
+    // about to receive, so the render's own answer is passed back to it.
+    const stillSafe = await verifyBeforeSend({
+      renderedAssessmentId: data?.lawnAssessment?.assessmentId || null,
+    });
+    if (!stillSafe) {
+      return { ok: false, error: 'Report copy changed during render — deferring send', retryable: true };
+    }
+  }
 
   const serviceLabel = serviceDisplayName(data);
   const templateOutcomes = await Promise.allSettled(
@@ -493,7 +546,9 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl } =
         triggerEventId: `service_report_ready:${recordId}:${recipient.role || 'recipient'}`,
         idempotencyKey: serviceReportEmailIdempotencyKey(recordId, recipient),
         categories: ['service_report_v1'],
-        attachments: pdf ? [pdfAttachment(`waves-service-report-${data.serviceDate || recordId}.pdf`, pdf)] : [],
+        // dateOnlyStamp: raw pg DATE interpolation printed the entire
+        // Date.toString() into the customer's attachment name.
+        attachments: pdf ? [pdfAttachment(`waves-service-report-${dateOnlyStamp(data.serviceDate) || recordId}.pdf`, pdf)] : [],
       }).then((result) => ({ recipient, result }))),
   );
   const sent = [];

@@ -132,7 +132,7 @@ Use for: "text Henderson that we're running late", "send a reminder to Smith abo
         customer_id: { type: 'string' },
         phone: { type: 'string', description: 'Direct phone number' },
         message: { type: 'string', description: 'The SMS body' },
-        message_type: { type: 'string', enum: ['manual', 'reminder', 'follow_up', 'billing_reminder'], description: 'Default: manual. Use billing_reminder for billing/overdue-balance nudges — it honors the customer\'s billing_reminder toggle and their Billing Reminder Delivery channel (an email-preferring customer returns a blocked "prefers email" result instead of texting against their choice).' },
+        message_type: { type: 'string', enum: ['manual', 'reminder', 'follow_up', 'billing_reminder'], description: 'Default: manual. Use billing_reminder for billing/overdue-balance nudges — it honors the customer\'s Billing Reminder Delivery channel (an email-preferring customer returns a blocked "prefers email" result instead of texting against their choice). There is no billing opt-out toggle; sms_enabled (STOP) is the only kill switch.' },
       },
       required: ['message'],
     },
@@ -677,7 +677,8 @@ ${lastService ? `Last service: ${lastService.service_type} on ${lastService.serv
 ${nextService ? `Next service: ${nextService.service_type} on ${nextService.scheduled_date}` : ''}
 ${input.context ? `Additional context: ${input.context}` : ''}
 
-Keep it friendly, concise, and action-oriented. Sign as "— Waves Pest Control" only if there's room.
+Keep it friendly, concise, and action-oriented. Sign as "- Waves Pest Control" only if there's room.
+Plain keyboard punctuation only: straight quotes and hyphens, never curly quotes, em dashes, or the ellipsis character (they force UCS-2 encoding and multiply SMS segments).
 Return ONLY the SMS text, nothing else.`
     }],
   });

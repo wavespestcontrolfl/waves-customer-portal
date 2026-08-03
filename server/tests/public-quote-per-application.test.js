@@ -490,3 +490,183 @@ describe('unitOnMultiUnitParcelForcesSiteQuote — unit address on a multi-unit 
     expect(unitOnMultiUnitParcelForcesSiteQuote({ line1: '204 3rd Street West Unit 408' }, { unitCount: 32 })).toBe(true);
   });
 });
+
+/**
+ * Per-service breakdown (2026-08-01): the public quote widget led with a
+ * combined "$X/mo" headline because a multi-service quote has no single
+ * per-application price. The unit rule applies there exactly as it does on
+ * the estimate page, so the response now carries one entry per recurring
+ * service and the widget quotes each the way it bills.
+ */
+describe('derivePerApplicationBreakdown', () => {
+  const { derivePerApplicationBreakdown } = _internals;
+
+  test('multi-service quote yields one per-application entry per recurring service', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', tier: 'enhanced' },
+      },
+    });
+    // derivePerApplication deliberately refuses this shape...
+    expect(derivePerApplication(estimate)).toBeNull();
+    // ...but every line is individually expressible.
+    const lines = derivePerApplicationBreakdown(estimate);
+    expect(lines).not.toBeNull();
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(typeof line.label).toBe('string');
+      expect(line.label.length).toBeGreaterThan(0);
+      expect(line.per_application).toBeGreaterThan(0);
+      expect(line.visits_per_year).toBeGreaterThan(0);
+    }
+    // The entries reconcile with the engine's recurring annual (cent rounding
+    // aside, one cent per line per visit at worst).
+    const annual = Number(estimate.summary.recurringAnnualAfterDiscount);
+    const summed = lines.reduce((acc, l) => acc + l.per_application * l.visits_per_year, 0);
+    // One CENT of rounding per application at worst (codex #3124 r2: the
+    // visit count alone allowed a whole dollar per application).
+    const tolerance = lines.reduce((acc, l) => acc + l.visits_per_year, 0) / 100;
+    expect(Math.abs(summed - annual)).toBeLessThanOrEqual(tolerance);
+  });
+
+  test('single-service quote agrees with derivePerApplication', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const single = derivePerApplication(estimate);
+    const lines = derivePerApplicationBreakdown(estimate);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].per_application).toBe(single.amount);
+    expect(lines[0].visits_per_year).toBe(single.visitsPerYear);
+  });
+
+  // All-or-nothing: a partial breakdown would show two of three charged
+  // services and read as the whole plan.
+  test('returns null when ANY recurring line cannot be expressed per application', () => {
+    const estimate = {
+      lineItems: [
+        { service: 'pest', name: 'Pest Control', monthly: 39, perApp: 117, visitsPerYear: 4 },
+        { service: 'mosquito', name: 'Mosquito', monthly: 54 },
+      ],
+    };
+    expect(derivePerApplicationBreakdown(estimate)).toBeNull();
+  });
+
+  test('returns null when a line has no label to show', () => {
+    const estimate = {
+      lineItems: [{ monthly: 39, perApp: 117, visitsPerYear: 4 }],
+    };
+    expect(derivePerApplicationBreakdown(estimate)).toBeNull();
+  });
+
+  // Codex #3124 r1: raw engine rows carry a service KEY and no name, so the
+  // key must resolve to server-owned copy — never echo 'pest_control'.
+  test('resolves customer-facing labels from the engine service key', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', tier: 'enhanced' },
+      },
+    });
+    const labels = derivePerApplicationBreakdown(estimate).map((l) => l.label);
+    expect(labels).toEqual(expect.arrayContaining(['Pest Control', 'Lawn Care']));
+    for (const label of labels) expect(label).not.toMatch(/_/);
+  });
+
+  test('drops the breakdown for an unrecognized service key rather than leaking it', () => {
+    const estimate = {
+      lineItems: [{ service: 'some_new_engine_key', monthly: 39, perApp: 117, visitsPerYear: 4 }],
+    };
+    expect(derivePerApplicationBreakdown(estimate)).toBeNull();
+  });
+
+  // Codex #3124 r2 (superseding r1): rodent bait is BILLED MONTHLY — its
+  // four visits are an operational cadence, not a billing unit
+  // (service-pricing.js: "quarterly visits (4/yr) — billed monthly to
+  // customer"), and it deliberately emits no perApp/perVisit. Deriving
+  // annual÷visits told the widget the customer pays "$147 per application"
+  // when they pay $49/mo.
+  test('excludes monthly-billed rodent bait rather than inventing a per-application price', () => {
+    const rodentOnly = {
+      lineItems: [{ service: 'rodent_bait', monthly: 49, annual: 588, visitsPerYear: 4 }],
+    };
+    expect(derivePerApplicationBreakdown(rodentOnly)).toBeNull();
+    expect(derivePerApplication(rodentOnly)).toBeNull();
+    // All-or-nothing: a bundle containing rodent drops the whole breakdown
+    // instead of presenting a partial plan.
+    const bundle = {
+      lineItems: [
+        { service: 'pest_control', name: 'Pest Control', monthly: 39, perApp: 117, visitsPerYear: 4 },
+        { service: 'rodent_bait', monthly: 49, annual: 588, visitsPerYear: 4 },
+      ],
+    };
+    expect(derivePerApplicationBreakdown(bundle)).toBeNull();
+  });
+
+  // Codex #3124 r4: RESIDENTIAL termite bait bills per application (owner
+  // 2026-07-20) and the engine emits the explicit pair — the r2 blacklist
+  // over-reached and stripped it. Shape is the real generateEstimate output.
+  test('derives residential termite bait — it bills per application, unlike rodent bait', () => {
+    const termiteOnly = {
+      lineItems: [{ service: 'termite_bait', monthly: 24, perApp: 72, visitsPerYear: 4, annual: 288 }],
+    };
+    const lines = derivePerApplicationBreakdown(termiteOnly);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].label).toBe('Termite Bait Monitoring');
+    expect(lines[0].per_application).toBe(72); // 288 / 4
+    expect(lines[0].visits_per_year).toBe(4);
+    expect(derivePerApplication(termiteOnly)).toEqual({ amount: 72, visitsPerYear: 4 });
+    // And the bundle keeps its full breakdown instead of collapsing.
+    const bundle = {
+      lineItems: [
+        { service: 'pest_control', name: 'Pest Control', monthly: 33.9, perApp: 113, visitsPerYear: 4, annualAfterDiscount: 406.8 },
+        { service: 'termite_bait', monthly: 21.6, perApp: 72, visitsPerYear: 4, annualAfterDiscount: 259.2 },
+      ],
+    };
+    expect(derivePerApplicationBreakdown(bundle)).toHaveLength(2);
+  });
+
+  // Commercial keeps billing monthly and is exempt from the unit rule, even
+  // though its engine rows do carry perApp/perVisit.
+  test('excludes commercial termite bait despite its explicit per-application signal', () => {
+    const commercial = {
+      lineItems: [{ service: 'commercial_termite_bait', monthly: 75, perApp: 225, perVisit: 225, visitsPerYear: 4, annual: 900 }],
+    };
+    expect(derivePerApplicationBreakdown(commercial)).toBeNull();
+    expect(derivePerApplication(commercial)).toBeNull();
+  });
+
+  test('a line with cadence but no explicit per-application signal is excluded', () => {
+    // Absence of perApp/perVisit is the design signal for monthly-billed
+    // shapes — annual÷visits must not stand on its own.
+    const estimate = {
+      lineItems: [{ service: 'some_station_service', name: 'Stations', monthly: 30, annual: 360, visitsPerYear: 4 }],
+    };
+    expect(derivePerApplicationBreakdown(estimate)).toBeNull();
+  });
+
+  // Palm-injection rows carry appsPerYear + perVisit and no name — the real
+  // engine shape (codex #3124 r2); an unrecognized cadence field dropped both
+  // palm-only quotes and every bundle containing palm.
+  test('derives palm injection from appsPerYear and labels it', () => {
+    const estimate = {
+      lineItems: [{ service: 'palm_injection', monthly: 166.67, perVisit: 500, appsPerYear: 4, annual: 2000 }],
+    };
+    const lines = derivePerApplicationBreakdown(estimate);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].label).toBe('Palm Tree Injections');
+    expect(lines[0].per_application).toBe(500); // 2000 / 4
+    expect(lines[0].visits_per_year).toBe(4);
+    expect(derivePerApplication(estimate)).toEqual({ amount: 500, visitsPerYear: 4 });
+  });
+
+  test('one-time-only and empty estimates return null', () => {
+    expect(derivePerApplicationBreakdown({ lineItems: [{ service: 'bed_bug', price: 850 }] })).toBeNull();
+    expect(derivePerApplicationBreakdown({ lineItems: [] })).toBeNull();
+    expect(derivePerApplicationBreakdown(null)).toBeNull();
+  });
+});

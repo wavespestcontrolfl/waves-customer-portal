@@ -40,11 +40,15 @@ jest.mock('../models/db', () => {
     touch.chain = chain;
     return chain;
   };
-  return jest.fn((table) => {
+  const db = jest.fn((table) => {
     const touch = { table };
     mockDbTouches.push(touch);
     return makeChain(mockTableHandlers[table] || {}, touch);
   });
+  // Raw SQL fragments (the monotonic disclosure stamp) — returned as an
+  // inspectable token so tests can pin the SQL contract and its bindings.
+  db.raw = (sql, bindings = []) => ({ __raw: sql, bindings });
+  return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -679,6 +683,34 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     });
   });
 
+  test('completion records consent against the DISCLOSED (row-stamped) terms — never re-reads live config (Codex #3153 r1)', async () => {
+    // The /secure page RENDER stamped the disclosed fee onto the row; the
+    // completion write only records WHEN agreement happened. Re-stamping
+    // amounts here would let a config change between render and consent
+    // move an agreed fee.
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, no_show_fee_amount: '49.00', cancel_window_hours: 24 });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    const completedPatch = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'completed');
+    expect(completedPatch.fee_agreed_at).toBeInstanceOf(Date);
+    expect(completedPatch).not.toHaveProperty('no_show_fee_amount');
+    expect(completedPatch).not.toHaveProperty('cancel_window_hours');
+  });
+
+  test('an UNSTAMPED row (fee off at render, or pre-stamp link) completes with NO fee consent — the rail skips it', async () => {
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    const completedPatch = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'completed');
+    expect(completedPatch.fee_agreed_at).toBeUndefined();
+    expect(completedPatch).not.toHaveProperty('no_show_fee_amount');
+  });
+
   test('lost completion claim (webhook overlap) → no side effects, retryable', async () => {
     mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 1);
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
@@ -867,11 +899,91 @@ describe('loadSecureCardPageData — page state machine', () => {
     expect(update[1]).toMatchObject({ stripe_setup_intent_id: 'seti_1' });
   });
 
+  test('ready render stamps the DISCLOSED terms onto the pending row — fee frozen at disclosure (Codex #3153 r1)', async () => {
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('ready');
+    const stamp = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => 'accepted_amount' in p);
+    expect(stamp).toBeTruthy();
+    // planContext is null here (gate off) → the page shows NO price, so
+    // nothing is accepted: the sticky 0 sentinel pins the row unchargeable
+    // by the completion lane (Codex #3153 r2+r3).
+    expect(stamp.accepted_amount).toBe(0);
+    // The fee stamp is monotonic-DOWN and sentinel-aware (r3): LEAST against
+    // any prior render's value, and a prior no-fee render (window 0) wins.
+    expect(String(stamp.no_show_fee_amount.__raw)).toContain('LEAST(COALESCE(no_show_fee_amount');
+    expect(String(stamp.no_show_fee_amount.__raw)).toContain('CASE WHEN cancel_window_hours = 0 THEN NULL');
+    expect(stamp.no_show_fee_amount.bindings).toContain(75);
+    expect(String(stamp.cancel_window_hours.__raw)).toContain('LEAST(COALESCE(cancel_window_hours');
+    expect(stamp.cancel_window_hours.bindings).toContain(24);
+    // Consent is NOT recorded at render — only /complete stamps fee_agreed_at.
+    expect(stamp.fee_agreed_at).toBeUndefined();
+  });
+
+  test('with the price DISPLAYED (planContext present) the render freezes it as the completion cap', async () => {
+    const plans = require('../services/secure-appointment-plans');
+    const spy = jest.spyOn(plans, 'buildSecurePlanContext')
+      .mockResolvedValueOnce({ mode: 'one_time', perVisit: 135, selected: null });
+    try {
+      const res = await loadSecureCardPageData(REQUEST.token);
+      expect(res.state).toBe('ready');
+      const stamp = touches('appointment_card_requests')
+        .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+        .map(([, patch]) => patch)
+        .find((p) => 'accepted_amount' in p);
+      // Monotonic-DOWN + sticky no-price sentinel (r3): a display can lower
+      // the frozen cap, never raise it, and a prior no-price render wins.
+      expect(String(stamp.accepted_amount.__raw)).toContain('CASE WHEN accepted_amount = 0 THEN 0 ELSE LEAST(COALESCE(accepted_amount');
+      expect(stamp.accepted_amount.bindings).toContain(135);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('the page GET reads the fee disclosure ONCE — note and stamp share a single snapshot (Codex #3153 r4, source contract)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/appointment-card-request.js'), 'utf8');
+    const fn = src.slice(
+      src.indexOf('async function loadSecureCardPageData'),
+      src.indexOf('// ── No-show / late-cancel fee rail'),
+    );
+    expect(fn).toContain('readCancelFeeDisclosure()');
+    // A second config read inside the GET could diverge from the note the
+    // payload returns — the stamp must consume the same snapshot object.
+    expect(fn).not.toContain('cardHoldNoShowFee');
+    expect(fn).not.toContain('cardHoldCancelWindowHours');
+  });
+
+  test('a FAILED disclosure stamp renders unavailable — never a form over terms the row does not carry (pre-push r2 P0)', async () => {
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => ('accepted_amount' in patch ? 0 : 1);
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('unavailable');
+    expect(res.clientSecret).toBeUndefined();
+  });
+
   test('completed request → secured (no new intent minted)', async () => {
     mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'completed' });
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('secured');
     expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
+  });
+
+  test('secured render repeats the FROZEN fee terms for a page-consented row (Codex #3153 r8)', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({
+      ...REQUEST, status: 'completed', no_show_fee_amount: '75.00', cancel_window_hours: 24,
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    // Row values, never live config — and the exact enforced window stated.
+    expect(res.cancelFeeNote).toBe('A $75 fee applies only to no-shows or cancellations less than 24 hours before your visit. Rescheduling is always free.');
+  });
+
+  test('secured render for a satisfied (auto-secured) row carries NO fee note — no disclosure means no fee', async () => {
+    mockTableHandlers.appointment_card_requests.first = () => ({ ...REQUEST, status: 'satisfied' });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('secured');
+    expect(res.cancelFeeNote).toBeNull();
   });
 
   test('a mid-completion row renders secured, never the card form again', async () => {
@@ -921,6 +1033,9 @@ describe('loadSecureCardPageData — page state machine', () => {
     mockTableHandlers.appointment_card_requests.returning = () => [];
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('secured');
+    // Auto-secured = no page disclosure = no fee — the live fee note must
+    // NOT ride this payload (Codex #3153 r9 P2).
+    expect(res.cancelFeeNote).toBeNull();
     // Enrollment is the coverage, not the row (completion auto-charge reads
     // active Auto Pay) — it MUST run before the heal.
     expect(mockEnrollConsentedMethod).toHaveBeenCalledWith(expect.objectContaining({ paymentMethodId: 'pm-row-7' }));

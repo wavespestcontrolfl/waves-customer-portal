@@ -3664,10 +3664,14 @@ function renderMembershipBlockHtml(membership) {
   // this gate exists to suppress.
   const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
     .filter((s) => Number(s.extraDiscountPct) > 0);
+  // monthlySavings is deliberately NOT an admission criterion (pre-push audit
+  // P1, "per month" sweep 2026-08-01). The row can only ever print a discount
+  // percentage or a per-application saving, so a row admitted on monthlySavings
+  // ALONE renders a bare "Member pricing" with no figure — precisely the
+  // no-benefit card the comment above says this gate exists to suppress.
   const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
     .filter((s) => Number(s.discountPct) > 0
-      || Number(s.perApplicationSavings) > 0
-      || Number(s.monthlySavings) > 0);
+      || Number(s.perApplicationSavings) > 0);
   // Nothing to say (e.g. a re-quote of a service the member already has) —
   // skip rather than render a header-and-badge-only card.
   if (!membership.upgrade && existing.length === 0 && added.length === 0) return '';
@@ -3711,7 +3715,7 @@ function renderMembershipBlockHtml(membership) {
           <span class="wg-row-val">
             ${s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}${Number(s.perApplicationSavings) > 0
               ? ` &middot; save ${money(s.perApplicationSavings)} per application`
-              : (Number(s.monthlySavings) > 0 ? ` &middot; save ${money(s.monthlySavings)}/mo` : '')}
+              : ''}
           </span>
         </div>`).join('')}
     </div>` : '';
@@ -4051,13 +4055,38 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   // billed like a residential WaveGuard plan). Detected off the priced
   // commercial recurring line; pest-only commercial is quoteRequired (manual
   // proposal) and handled by the commercialProposal copy above.
-  const commercialManualAccept = !locked && (
+  // The commercial IDENTITY of the estimate — used by the hero fork, which
+  // must hold after acceptance too: a reopened accepted commercial link still
+  // shows the monthly contract it approved (codex #3128 r5; locked makes
+  // commercialManualAccept false by design, but the plan is no less
+  // commercial for having been accepted).
+  const commercialRecurringEstimate = (
     estData?.commercialEstimatedPricing === true
     || recurring.some((s) => {
       const k = String(recurringServiceKey(s) || s.service || s.name || '').toLowerCase();
       return k.includes('commercial_lawn') || k.includes('commercial_tree') || k.includes('commercial_pest') || k.includes('commercial_mosquito') || k.includes('commercial_termite') || k.includes('commercial_rodent');
     })
   );
+  const commercialManualAccept = !locked && commercialRecurringEstimate;
+  // The OTHER identity that bills monthly: a current monthly member whose
+  // accept preserves membership billing (#2978 — the audience buildPricingBundle
+  // strips every billedPerApplication flag for). Resolved live by the route and
+  // passed in; false when the route couldn't resolve it, which keeps the
+  // per-application default (codex #3128 r6).
+  const monthlyBilledEstimate = opts.monthlyBilledEstimate === true;
+  // Either identity means the plan is charged by the month, so neither may
+  // fall through to the "Priced per application" hero.
+  //
+  // This gate sits AFTER serviceCardsCoverRecurringTotal, deliberately (codex
+  // #3128 r8, correcting r6): when the rows reconcile to the total, the
+  // per-application service cards are the RIGHT surface even for a
+  // monthly-billed plan — owner directive 2026-07-01 renders the commercial
+  // turf line exactly that way so the card can carry its application cadence
+  // AND the mowing/edging/maintenance exclusion, and supplementalServiceSummaryHtml
+  // is empty at full coverage, so preempting the cards deletes both from the
+  // proposal the customer approves. The defect r6 named was only the
+  // UNCOVERED total, which is what this arm answers.
+  const recurringBilledMonthly = commercialRecurringEstimate || monthlyBilledEstimate;
 
   // Termite trenching review gate: a trenching job is a high-liability structural
   // service (concrete drilling, a chemical soil barrier, and a warranty/retreat
@@ -4590,16 +4619,21 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
     ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
       ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
-    ` : `
+    ` : recurringBilledMonthly ? `
       <div class="big-price" data-mode-only="recurring">
         ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
         <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
         <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
-        <span class="tier-lbl">${commercialManualAccept ? 'Commercial' : `WaveGuard ${escapeHtml(tier)}`}</span>
+        <span class="tier-lbl">${commercialRecurringEstimate ? 'Commercial' : `WaveGuard ${escapeHtml(tier)}`}</span>
       </div>
-      ${savingsPerMo > 0 && !commercialManualAccept ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
       ${manualDiscountHtml}
-      <div class="day-price" data-mode-only="recurring">${hasOnlyLawnCareServices ? `That\u2019s just ${fmtMoney(dayPrice)}/day to stop lawn pests before they turn green grass brown.` : `That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.`}</div>
+      ${supplementalServiceSummaryHtml}
+    ` : `
+      <div class="big-price" data-mode-only="recurring">
+        <span class="num" style="font-size:34px">Priced per application</span>
+        <span class="tier-lbl">WaveGuard ${escapeHtml(tier)}</span>
+      </div>
+      ${manualDiscount && recurringDisplayManualDiscount > 0 ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>Applied to your plan pricing</strong></div>` : ''}
       ${supplementalServiceSummaryHtml}
     `));
 
@@ -4790,14 +4824,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const on = prefs[key] !== false;
     // Per-row "if you toggle this off, you save …" label
     let savingsLabel = '';
+    // The add-on IS priced per visit (SERVICE_PREFS[].perVisit) — quote the
+    // per-application amount, mirroring shapePreferenceAddOns in the React
+    // payload; the cadence-priced spread ("$40/quarter", "$10/mo") described
+    // a charge shape the plan doesn't bill (codex #3128 r2).
     if (pestRecurring && hasPestOneTime) {
-      const rec = (cfg.perVisit * pestRecurring.visitsPerYear) / 12;
-      const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
-      savingsLabel = `Save ${fmtMoney(intervalPriceFromMonthly(rec, freqKey))}${pricePeriodLabelForFrequencyKey(freqKey)} + ${fmtMoney(cfg.oneTime)} on one-time`;
+      savingsLabel = `Save ${fmtMoney(cfg.perVisit)} per application + ${fmtMoney(cfg.oneTime)} on one-time`;
     } else if (pestRecurring) {
-      const rec = (cfg.perVisit * pestRecurring.visitsPerYear) / 12;
-      const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
-      savingsLabel = `Save ${fmtMoney(intervalPriceFromMonthly(rec, freqKey))}${pricePeriodLabelForFrequencyKey(freqKey)}`;
+      savingsLabel = `Save ${fmtMoney(cfg.perVisit)} per application`;
     } else if (hasPestOneTime) {
       savingsLabel = `Save ${fmtMoney(cfg.oneTime)}`;
     }
@@ -7470,9 +7504,14 @@ async function handleEstimateView(req, res, next) {
     }
 
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData);
+    // Resolved ONCE for this request and handed to every consumer below (the
+    // bundle's flags, the hero fork) — a second lookup could answer
+    // differently and put contradictory billing units on the same page
+    // (pre-push audit P1).
+    const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
     let pricingBundleForView = null;
     try {
-      pricingBundleForView = await buildPricingBundle(estimate);
+      pricingBundleForView = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
     } catch (e) {
       logger.warn(`[estimate-view] pricing bundle quote guard skipped: ${e.message}`);
     }
@@ -7539,6 +7578,8 @@ async function handleEstimateView(req, res, next) {
       ? await require('../services/estimate-converter').resolveCommercialPrepayBaseRate(estimate.customer_id || null, { forceCommercial: true })
       : 0;
 
+    // Does accepting this estimate bill MONTHLY? (codex #3128 r6) The
+    // per-application hero is the residential default, but a current monthly
     // Display-only: fill contact gaps from the linked customer/lead so the
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
@@ -7589,7 +7630,7 @@ async function handleEstimateView(req, res, next) {
       // Same PUBLIC boundary as /data: renderPage only reads whitelisted
       // fields today, but projecting here keeps a future SSR embed from
       // shipping the staff account context to the unauthenticated page.
-    }, estData, publicMembershipView(membership), { showYourWork, prepayBaseRate });
+    }, estData, publicMembershipView(membership), { showYourWork, prepayBaseRate, monthlyBilledEstimate });
   } catch (err) { next(err); }
 }
 
@@ -9834,21 +9875,49 @@ router.put('/:token/accept', async (req, res, next) => {
             const reschedule = confirmedAppointmentRow?.id
               ? await buildRescheduleLink(confirmedAppointmentRow.id, { customerId: customerId || null })
               : { url: null, line: '' };
-            const customerBody = await renderTemplate(
-              'appointment_confirmation',
-              {
-                first_name: firstName,
-                service_type: confirmedServiceLabel,
-                date: serviceDate,
-                time: timeWindow,
-                reschedule_line: reschedule.line,
-              },
-              undefined,
-              { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: confirmedAppointmentRow?.id || estimate.id },
-            );
-            if (!customerBody) {
-              logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
-            }
+            // The v2 render (and its appointment-page link mint) lives
+            // INSIDE the SMS closure below: an email-preferring customer
+            // whose email succeeds never runs the SMS leg, and an eager
+            // build would insert a never-expiring short code no message
+            // carries (codex r4). renderCustomerConfirmationBody is invoked
+            // by the closure at most once.
+            const renderCustomerConfirmationBody = async () => {
+              const { renderAppointmentPageTemplate } = require('../services/appointment-reminders');
+              return renderAppointmentPageTemplate(
+                'appointment_confirmation',
+                async () => {
+                  const { buildAppointmentLink } = require('../services/appointment-link');
+                  const apptLink = confirmedAppointmentRow?.id
+                    ? await buildAppointmentLink(confirmedAppointmentRow.id, { customerId: customerId || null })
+                    : { url: null, line: '' };
+                  // v2 quotes the window through the shared resolver so this
+                  // sender, the reminder sender and the call pipeline agree.
+                  // This path already holds the row, so pass window_start
+                  // straight in rather than re-reading it.
+                  const { confirmationArrivalWindow } = require('../services/appointment-reminders');
+                  const window = await confirmationArrivalWindow({
+                    windowStart: confirmedAppointmentRow?.window_start || null,
+                    scheduledServiceId: confirmedAppointmentRow?.id || null,
+                  });
+                  return {
+                    first_name: firstName,
+                    service_type: confirmedServiceLabel,
+                    date: serviceDate,
+                    time: timeWindow,
+                    window,
+                    appointment_line: apptLink.line,
+                  };
+                },
+                {
+                  first_name: firstName,
+                  service_type: confirmedServiceLabel,
+                  date: serviceDate,
+                  time: timeWindow,
+                  reschedule_line: reschedule.line,
+                },
+                { workflow: 'estimate_accept_onetime_confirmed', entity_type: 'scheduled_service', entity_id: confirmedAppointmentRow?.id || estimate.id },
+              );
+            };
             // Honor the customer's account-level New Appointment Confirmation
             // channel (sms | email | both). Default 'sms' keeps the exact prior
             // send; a lead with no customerId resolves to 'sms' as well.
@@ -9857,7 +9926,11 @@ router.put('/:token/accept', async (req, res, next) => {
               scheduledServiceId: confirmedAppointmentRow?.id,
               serviceLabel: confirmedServiceLabel,
               smsAttempt: async () => {
-                if (!customerBody) return false;
+                const customerBody = await renderCustomerConfirmationBody();
+                if (!customerBody) {
+                  logger.warn(`[estimate-accept] appointment_confirmation template missing/disabled; skipping customer SMS for estimate ${estimate.id}`);
+                  return false;
+                }
                 const sendResult = await sendCustomerMessage({
                   to: estimate.customer_phone,
                   body: customerBody,
@@ -10096,7 +10169,9 @@ router.put('/:token/accept', async (req, res, next) => {
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
       });
-      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
+      // bell: true \u2014 accepted estimates must ring the admin bell even under
+      // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
+      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', bell: true, metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
         await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, {
           icon: '\u2705',
@@ -10654,19 +10729,17 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
     const prefMeta = {};
     for (const k of SERVICE_PREF_KEYS) {
       const cfg = SERVICE_PREFS[k];
+      // Byte-identical to renderPrefRow's label (codex #3128 r8): the toggle
+      // handler writes this string straight over the server-rendered row, so
+      // a cadence spread here silently undid the per-application copy the
+      // page loaded with the moment the customer touched a switch.
       let savingsLabel = '';
       if (pestRecurring && hasPestOneTime) {
-        const rec = Math.round(((cfg.perVisit * pestRecurring.visitsPerYear) / 12) * 100) / 100;
-        const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
-        const intervalSavings = intervalPriceFromMonthly(rec, freqKey);
-        savingsLabel = `Save $${intervalSavings.toFixed(intervalSavings % 1 ? 2 : 0)}${pricePeriodLabelForFrequencyKey(freqKey)} + $${cfg.oneTime} on one-time`;
+        savingsLabel = `Save ${fmtMoney(cfg.perVisit)} per application + ${fmtMoney(cfg.oneTime)} on one-time`;
       } else if (pestRecurring) {
-        const rec = Math.round(((cfg.perVisit * pestRecurring.visitsPerYear) / 12) * 100) / 100;
-        const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
-        const intervalSavings = intervalPriceFromMonthly(rec, freqKey);
-        savingsLabel = `Save $${intervalSavings.toFixed(intervalSavings % 1 ? 2 : 0)}${pricePeriodLabelForFrequencyKey(freqKey)}`;
+        savingsLabel = `Save ${fmtMoney(cfg.perVisit)} per application`;
       } else if (hasPestOneTime) {
-        savingsLabel = `Save $${cfg.oneTime}`;
+        savingsLabel = `Save ${fmtMoney(cfg.oneTime)}`;
       }
       prefMeta[k] = { offDesc: cfg.offDesc, savingsLabel };
     }
@@ -10826,7 +10899,11 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
         'estimate',
         `Extension auto-granted: ${estimate.customer_name}`,
         `${estimate.address || 'no address'} — ${expiredLine}; customer self-served +7 days (through ${granted.newExpiry.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}); ${smsLine}; ${emailLine}`,
-        { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
+        // bell: true — this is a required operator handoff (AGENTS.md: the
+        // office must hear about every self-serve grant). Under
+        // GATE_ADMIN_BELL_POLICY a suppression would return a truthy
+        // sentinel that the retry/claim logic below reads as delivered.
+        { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
       );
       const autoNotification = (await notifyAutoGrant()) || (await notifyAutoGrant());
       if (!autoNotification) {
@@ -10867,7 +10944,10 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       'estimate',
       `Extension requested (again): ${estimate.customer_name}`,
       `${estimate.address || 'no address'} — ${expiredLine}; customer already used their self-serve extension and asked for more time`,
-      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
+      // bell: true — here the notification IS the deliverable: a policy
+      // suppression's truthy sentinel would keep the 24h claim and 201
+      // "request sent" with nothing delivered to anyone.
+      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
     );
     if (!notification) {
       await db('estimates').where({ id: estimate.id }).update({ extension_requested_at: null })
@@ -12999,8 +13079,15 @@ function buildAcceptNotificationPayload({
   // Admin copy still reflects that the invoice was sent.
   const { monthlyText, proposedNote } = acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal);
   if (payerBilled) {
-    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard ${monthlyText}`;
-    const adminPlanLabel = treatAsOneTime ? serviceLabel : `${planLabel}${proposedNote}`;
+    // ADMIN copy keeps the monthly figure (internal shorthand for the plan
+    // size); the CUSTOMER copy must not — a recurring plan is billed per
+    // application, and every other residential branch below already says just
+    // "Your {tier} WaveGuard plan is approved". This branch was missed when
+    // the others were scrubbed (audit 2026-08-01).
+    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard plan`;
+    const adminPlanLabel = treatAsOneTime
+      ? serviceLabel
+      : `${waveguardTier} WaveGuard ${monthlyText}${proposedNote}`;
     // Mirror the non-payer invoice-mode paths: only claim the invoice reached the
     // billing contact when delivery actually succeeded. A payer with no usable AP
     // email fails sendViaSMSAndEmail (invoiceLinkDelivered=false) — surface that
@@ -13167,14 +13254,17 @@ function readV1Shape(estData) {
 
 function shapePreferenceAddOns(prefs, pestTier) {
   if (!pestTier) return [];
-  const visitsPerYear = Number(pestTier.apps || pestTier.v || 4) || 4;
   return SERVICE_PREF_KEYS.map((key) => {
     const cfg = SERVICE_PREFS[key];
-    const monthlySavings = Math.round(((cfg.perVisit * visitsPerYear) / 12) * 100) / 100;
+    // The add-on IS priced per visit (SERVICE_PREFS[].perVisit), so quote it
+    // that way. Spreading it across twelve months described a monthly charge
+    // the customer never sees — the plan bills per application (audit
+    // 2026-08-01).
+    const perApplicationSavings = Math.round(Number(cfg.perVisit) * 100) / 100;
     return {
       key,
       label: cfg.label,
-      detail: `${cfg.offDesc} Save $${monthlySavings.toFixed(monthlySavings % 1 ? 2 : 0)}/mo if removed.`,
+      detail: `${cfg.offDesc} Save $${perApplicationSavings.toFixed(perApplicationSavings % 1 ? 2 : 0)} per application if removed.`,
       preChecked: prefs[key] !== false,
     };
   });
@@ -17010,6 +17100,13 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
 // get every flag stripped, everyone else gets missing flags ADDED on the
 // tier-plan surfaces, so pre-flag send snapshots (sent before this change)
 // serve the same disclosure as fresh builds.
+// Fails CLOSED — an unresolvable lane answers "not monthly" (codex #3128
+// r7/r10). r7 made this a parameter on the theory that flag stripping wanted
+// the opposite default, because suppressing a monthly note hides a description
+// of a real charge. r10 showed that framing was wrong: the flags are not a
+// note, and their ABSENCE is what makes PriceCard render "Billed $X/mo". Both
+// callers are display, both want the same answer, and a knob with one correct
+// setting is just a way to pick the wrong one later.
 async function estimateCustomerPreservesMonthlyBilling(estimate) {
   if (!estimate?.customer_id && !estimate?.customer_phone) return false;
   try {
@@ -17028,12 +17125,32 @@ async function estimateCustomerPreservesMonthlyBilling(estimate) {
     if (!customer) return false;
     return BillingCadence.customerPreservesMonthlyMembership(customer);
   } catch (e) {
-    // Unknown lane with a customer signal present: keep the monthly
-    // disclosure. Wrongly suppressing it hides a description of a real
-    // charge; wrongly showing it merely over-discloses for one transient
-    // failure window.
     logger.warn(`[estimate-public] billing-lane lookup failed for estimate ${estimate?.id}: ${e.message}`);
-    return true;
+    return false;
+  }
+}
+
+// The monthly-billed identity for DISPLAY (the SSR hero fork and its /data
+// mirror) — one resolver, so the two surfaces can't drift.
+//
+// Same two conditions, same order, as buildPricingBundle's flag stripping, but
+// it FAILS CLOSED (codex #3128 r7): the predicate above answers an unresolved
+// lane with "preserves monthly", which is the safe direction for a disclosure
+// note and the unsafe one here — a transient customers-table failure would
+// otherwise classify every linked residential estimate as monthly-billed and
+// print its combined $X/mo total. Unresolved renders per-application, which is
+// what the overwhelming majority of accounts actually bill.
+//
+// The pre-migration branch is NOT a fail-open: without billing_mode /
+// per_application_fee, per-application billing does not exist yet, so every
+// accept genuinely bills monthly (mirrors estimate-converter).
+async function estimateRendersMonthlyBilling(estimate) {
+  try {
+    if (!(await perApplicationBillingColumnsExist())) return true;
+    return await estimateCustomerPreservesMonthlyBilling(estimate);
+  } catch (e) {
+    logger.warn(`[estimate-public] monthly-billing display identity unresolved for estimate ${estimate?.id}: ${e.message}`);
+    return false;
   }
 }
 
@@ -17121,13 +17238,24 @@ function addMissingBilledPerApplicationFlags(bundle) {
   return out;
 }
 
-async function buildPricingBundle(estimate) {
+// `monthlyBilled` lets a caller that ALREADY resolved the verdict hand it in,
+// so one request cannot resolve it twice and get two answers (pre-push audit
+// P1): the flags in this bundle and the cta.monthlyBilled beside it are read
+// by the same page, and a lookup that succeeds for one call and fails for the
+// other would tell it two contradictory things about the same plan.
+async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
   const bundle = await buildPricingBundleInner(estimate);
   if (!bundle || typeof bundle !== 'object') return bundle;
-  if (!(await perApplicationBillingColumnsExist())) {
-    return stripBilledPerApplicationDeep(bundle);
-  }
-  return (await estimateCustomerPreservesMonthlyBilling(estimate))
+  // The SAME fail-closed resolver the hero and /data cta use (codex #3128
+  // r10). This was the last caller reading the fail-OPEN predicate, and the
+  // flags are not merely a disclosure note: PriceCard treats their ABSENCE as
+  // permission to render "Billed $X/mo", so stripping them on a customers
+  // lookup error re-opened the exact monthly spread r7 set out to close — on
+  // the React path, for a per-application plan.
+  const billsMonthly = monthlyBilled === null
+    ? await estimateRendersMonthlyBilling(estimate)
+    : monthlyBilled === true;
+  return billsMonthly
     ? stripBilledPerApplicationDeep(bundle)
     : addMissingBilledPerApplicationFlags(bundle);
 }
@@ -17660,7 +17788,11 @@ router.get('/:token/pdf', dataLimiter, async (req, res, next) => {
     }
     // Lazy require: pdfkit only loads when a PDF is actually requested.
     const { generateEstimateProposalPDF } = require('../services/pdf/estimate-pdf');
-    generateEstimateProposalPDF(estimate, res);
+    // Resolve the LIVE billing lane, exactly like the page's pricing bundle —
+    // persisted snapshot flags freeze at send time and would let this document
+    // contradict the estimate the customer is looking at.
+    const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
+    generateEstimateProposalPDF(estimate, res, await resolveProposalBillingContext(estimate));
   } catch (err) { next(err); }
 });
 
@@ -18156,7 +18288,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       estimateDataForIntelligence = {};
     }
 
-    const pricingBundle = await buildPricingBundle(estimate);
+    // ONE resolution for this request — the bundle's flags and the
+    // cta.monthlyBilled below are read by the same page, so resolving twice
+    // risks handing it two different answers (pre-push audit P1).
+    const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
+    const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
     const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
@@ -18464,6 +18600,17 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // "inspection required" quote-required copy — and is channel-aware
         // about whether the PDF was actually emailed.
         commercialProposal: quoteRequirement.reason === 'commercial_proposal',
+        // Auto-priced commercial (no quote-required proposal): React needs the
+        // commercial identity too — its bundle card keeps the monthly contract
+        // price, mirroring the SSR fork (codex #3128 r5).
+        commercialAutoPriced: isCommercialAutoAcceptEstimate(estimate),
+        // The non-commercial monthly identity (codex #3128 r6): a current
+        // monthly member's accept preserves membership billing, so their
+        // bundle's combined total is the real charge and must not be replaced
+        // by a per-application headline. The SAME resolution the bundle above
+        // used — not a second lookup — so the flags and this flag cannot
+        // disagree within one response.
+        monthlyBilled: monthlyBilledEstimate,
         proposalPdfEmailed: estimateDataForIntelligence?.proposalDelivery?.pdfEmailed === true,
       },
       meta: {
@@ -18541,10 +18688,17 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
+// The cadence an outstanding estimate is quoted at when the customer has not
+// picked one — the same selector the accept path uses for a body with no
+// selectedFrequency, so the estimate PDF cannot name a different default than
+// the one acceptance would price (#3120 r6).
+module.exports.defaultFrequencyFromList = defaultFrequencyFromList;
+module.exports.estimateRendersMonthlyBilling = estimateRendersMonthlyBilling;
 module.exports.addMissingBilledPerApplicationFlags = addMissingBilledPerApplicationFlags;
 module.exports.stripBilledPerApplicationDeep = stripBilledPerApplicationDeep;
 module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationColumnsProbeForTests;

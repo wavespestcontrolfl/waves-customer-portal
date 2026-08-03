@@ -111,10 +111,10 @@ const HOURLY_TIME_OPTIONS = Array.from({ length: 24 }, (_, h) => {
 // Booster months — extra visits on top of a recurring base. Common pattern:
 // quarterly pest + boosters in Jun/Aug. Months are 1-indexed.
 const MONTH_CHIPS = [
-  { value: 1, label: 'J' }, { value: 2, label: 'F' }, { value: 3, label: 'M' },
-  { value: 4, label: 'A' }, { value: 5, label: 'M' }, { value: 6, label: 'J' },
-  { value: 7, label: 'J' }, { value: 8, label: 'A' }, { value: 9, label: 'S' },
-  { value: 10, label: 'O' }, { value: 11, label: 'N' }, { value: 12, label: 'D' },
+  { value: 1, label: 'Jan' }, { value: 2, label: 'Feb' }, { value: 3, label: 'Mar' },
+  { value: 4, label: 'Apr' }, { value: 5, label: 'May' }, { value: 6, label: 'Jun' },
+  { value: 7, label: 'Jul' }, { value: 8, label: 'Aug' }, { value: 9, label: 'Sep' },
+  { value: 10, label: 'Oct' }, { value: 11, label: 'Nov' }, { value: 12, label: 'Dec' },
 ];
 
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44, colorScheme: 'light' };
@@ -310,7 +310,39 @@ function prepayCadenceKey(cadence, intervalDays) {
 }
 
 export function formatScheduleEstimateAmount(estimate) {
+  // Per-application framing (owner ruling 2026-08-02, same rule as the
+  // per-month copy audit): recurring plans read "$X/application" — the
+  // amount the customer is actually billed per visit — never a normalized
+  // "$X/mo" nobody is charged as. Only REAL quote lines qualify: the server
+  // marks lines it synthesized from bare totals (derived:
+  // 'estimate_totals_fallback'), whose price is a monthly figure that would
+  // mislabel as per-application.
+  const lines = Array.isArray(estimate?.lines) ? estimate.lines : [];
+  const recurringLines = lines.filter((l) => l && l.cadence && l.cadence !== 'one_time');
+  // perApplicationPrice / monthlyPrice are EXPLICIT provenance from the
+  // server (discount-aware canonical derivation; the engine's true
+  // normalized monthly) — never inferred from `price`, whose fields can be
+  // list rate. EVERY recurring line must carry a proven unit or the legacy
+  // total tells the whole truth; a mixed quote keeps EACH billing unit
+  // ("$121.00/application + $24.00/mo") — collapsing it to one aggregate
+  // monthly is the exact flat-monthly copy this removes (Codex #3173 r2).
+  const perApp = recurringLines
+    .filter((l) => Number(l.perApplicationPrice) > 0)
+    .map((l) => Number(l.perApplicationPrice));
+  const monthlyOnly = recurringLines
+    .filter((l) => !(Number(l.perApplicationPrice) > 0) && Number(l.monthlyPrice) > 0)
+    .map((l) => Number(l.monthlyPrice));
   const onetime = Number(estimate?.onetimeTotal);
+  // A fully-proven set qualifies even when ALL lines are genuinely monthly
+  // (rodent-bait-only quotes — Codex #3173 r2): requiring a per-app line
+  // dropped their recurring charge from the label entirely.
+  if (recurringLines.length && perApp.length + monthlyOnly.length === recurringLines.length) {
+    const parts = [];
+    if (perApp.length) parts.push(`${perApp.map((p) => formatMoney(p)).join(' + ')}/application`);
+    for (const m of monthlyOnly) parts.push(`${formatMoney(m)}/mo`);
+    if (Number.isFinite(onetime) && onetime > 0) parts.push(`${formatMoney(onetime)} one-time`);
+    return parts.join(' + ');
+  }
   if (Number.isFinite(onetime) && onetime > 0) return `${formatMoney(onetime)} one-time`;
   const monthly = Number(estimate?.monthlyTotal);
   if (Number.isFinite(monthly) && monthly > 0) return `${formatMoney(monthly)}/mo`;
@@ -552,9 +584,36 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   useEffect(() => {
     setBillAsAnnualPrepay(false);
   }, [linkedEstimateIdForPrepay]);
+  // Annual prepay on a MANUAL booking — the phone-"yes" case with no quote
+  // behind it, where billAsAnnualPrepay above has nothing to price. Every
+  // number comes from the server preview
+  // (/admin/schedule/annual-prepay-preview); the modal NEVER composes an
+  // amount, and the mint posts the preview's own mintPayload back. Also
+  // mutually exclusive with collectPrepay (that one records cash taken in
+  // person; this one invoices the year).
+  const [billAsManualPrepay, setBillAsManualPrepay] = useState(false);
+  const [manualPrepay, setManualPrepay] = useState(null);
+  const [manualPrepayLoading, setManualPrepayLoading] = useState(false);
+  // The lane ships dark (GATE_PREPAY_ON_BOOK). Hidden until the probe says
+  // it's live — and hidden on probe failure — because an offered Billing
+  // control whose preview 404s would read as a prepay the office sold.
+  const [prepayOnBookAvailable, setPrepayOnBookAvailable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    adminFetch('/admin/schedule/annual-prepay-availability')
+      .then(r => { if (!cancelled) setPrepayOnBookAvailable(!!r?.enabled); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
+  // Booster-months dropdown (owner request 2026-08-02): which service line's
+  // month checklist is open. One open at a time, like the discount popover.
+  // Keyed by STABLE lineId, never array index (Codex #3173 r2): removing an
+  // earlier service reindexes the array, and an index-keyed open menu would
+  // jump lines and assign boosters to the wrong series.
+  const [boosterOpenKey, setBoosterOpenKey] = useState(null);
 
   const lineDiscountPresets = useMemo(() => {
     return discountPresets.filter((d) => (
@@ -617,6 +676,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const removeServiceAt = (idx) => {
     setServices((arr) => arr.filter((_, i) => i !== idx));
     setLineDiscountOpenIdx((current) => (current === idx ? null : current));
+    // The booster menu is keyed by stable lineId, but manual lines fall back
+    // to an index key — close it outright on any removal so a reindex can
+    // never leave it pointing at a different line.
+    setBoosterOpenKey(null);
   };
   const addServiceFromCatalog = (svc) => {
     // One-time mosquito is priced by the lot-based ladder on the server when
@@ -1235,6 +1298,104 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Deliberately keyed on the scheduling inputs only.
   }, [services, apptDate, recurringCount, skipWeekends, weekendShift]);
 
+  // The booking shape the annual-prepay preview prices, plus the reasons the
+  // CLIENT already knows make it unsellable (no server round-trip needed).
+  // Add-on lines and booster months are passed through as flags rather than
+  // filtered — the server owns those answers, including the reason text.
+  //
+  // targetKey identifies WHICH submitted series the prepay covers: a split
+  // save posts one series per cadence group, and the mint covers exactly one.
+  const manualPrepayPlan = useMemo(() => {
+    const groups = groupServicesForAppointmentSubmit(services);
+    const group = groups[0] || null;
+    if (!selectedCustomer || !group || group.cadence === 'one_time') {
+      return { query: null, localBlock: null, targetKey: null };
+    }
+    // A seasonal + year-round booking splits into TWO recurring series, each
+    // posted separately, but one prepay invoice covers ONE series (Codex
+    // #3161 r2 P1). Selling it here would prepay the first and leave the
+    // other billing per application under a toast that says the year is paid.
+    if (groups.filter((g) => g.cadence !== 'one_time').length > 1) {
+      return {
+        query: null,
+        targetKey: null,
+        localBlock: 'can’t be sold on a booking that splits into more than one recurring series — book them separately',
+      };
+    }
+    const price = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
+    return {
+      targetKey: groupKey(group),
+      localBlock: null,
+      query: {
+        customerId: String(selectedCustomer.id),
+        serviceType: group.lines[0]?.name || '',
+        price: String(price),
+        cadence: group.cadence,
+        intervalDays: String(group.intervalDays || ''),
+        hasAddons: String(group.lines.length > 1),
+        hasBoosters: String(group.lines.some((s) => Array.isArray(s.boosterMonths) && s.boosterMonths.length > 0)),
+        // The coverage seeder can't reproduce a weekend rule on the visits it
+        // fills in after the booked ones, so the server refuses those series —
+        // send it pre-save too, or the control would price a year it can't sell.
+        skipWeekends: String(!!skipWeekends),
+        // A capped series sells fewer visits than a prepaid year covers, so
+        // the server refuses it — send the cap, don't let the control price a
+        // year the booking won't put on the schedule.
+        recurringCount: String(recurringCount || ''),
+        firstVisitDate: String(apptDate || '').split('T')[0],
+        windowStart,
+      },
+    };
+  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount]);
+  const manualPrepayQuery = manualPrepayPlan.query;
+
+  // Preview fetch. Runs whenever the control is on screen — NOT only once
+  // armed — so the operator sees the real price on the button and an
+  // ineligible booking disables it with the reason BEFORE clicking. Read-only
+  // and debounced, so typing a rate doesn't fire a request per keystroke; the
+  // LAST response wins via the cancelled flag.
+  //
+  // Every query change CLEARS the previous answer and disarms the choice
+  // (Codex #3161 r2 P1): a price or cadence edit invalidates the total the
+  // operator agreed to, and leaving prepay armed against a stale-but-eligible
+  // response would invoice an amount they never saw.
+  const manualPrepayQueryKey = manualPrepayQuery ? JSON.stringify(manualPrepayQuery) : '';
+  useEffect(() => {
+    setManualPrepay(null);
+    setBillAsManualPrepay(false);
+    if (!prepayOnBookAvailable || linkedEstimate || !manualPrepayQueryKey) {
+      setManualPrepayLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setManualPrepayLoading(true);
+    const timer = setTimeout(async () => {
+      try {
+        const params = new URLSearchParams(JSON.parse(manualPrepayQueryKey));
+        const r = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
+        if (!cancelled) setManualPrepay(r);
+      } catch (e) {
+        // A failed probe must not read as "eligible" — fail toward the
+        // choice being unavailable, with the reason visible.
+        if (!cancelled) setManualPrepay({ eligible: false, blockReason: `couldn’t be priced: ${e.message}` });
+      } finally {
+        if (!cancelled) setManualPrepayLoading(false);
+      }
+    }, 350);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [prepayOnBookAvailable, linkedEstimate, manualPrepayQueryKey]);
+
+  // Armed ONLY against a resolved, eligible, priced preview — never while one
+  // is in flight. This is the single condition the button and the submit both
+  // read, so a choice can't survive in a state where the operator hasn't seen
+  // the amount.
+  const manualPrepayEligible = manualPrepay?.eligible === true;
+  const manualPrepayArmable = prepayOnBookAvailable && !linkedEstimate && !manualPrepayPlan.localBlock
+    && manualPrepayEligible && !manualPrepayLoading;
+  useEffect(() => {
+    if (!manualPrepayArmable) setBillAsManualPrepay(false);
+  }, [manualPrepayArmable]);
+
   // Compute window_end given a start time and a duration in minutes.
   const computeWindowEnd = (start, durationMin) => {
     const [h, m] = start.split(':').map(Number);
@@ -1290,6 +1451,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // one-time group also carried it, whichever request landed first would
     // accept the estimate (possibly as standard) and strand the prepay.
     let prepayAttachedThisSubmit = false;
+    // Set when the series the manual prepay choice priced is actually created.
+    let prepaySeriesId = null;
     for (const group of groups) {
       const key = groupKey(group);
       // Skip groups already created in a prior attempt of this submit
@@ -1441,6 +1604,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         if (attachAnnualPrepay) prepayAttachedThisSubmit = true;
         const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
         createdGroupKeysRef.current.add(key);
+        // The series the prepay covers, matched by group identity — NOT
+        // "the first result" (a booking can post a one-time group first).
+        if (manualPrepayPlan.targetKey && key === manualPrepayPlan.targetKey && r?.id) {
+          prepaySeriesId = r.id;
+        }
         results.push(r);
       } catch (e) {
         // Idempotent retry recovery, PROVEN only (codex r20 P1 + r21 P0): a
@@ -1493,13 +1661,86 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       alert(lead + tail);
       return;
     }
+    // Annual prepay on a manual booking: mint AFTER the series is committed,
+    // never before — a prepay invoice for a booking that failed to save would
+    // sell a year of visits that don't exist. The preview is re-fetched here
+    // rather than reusing the displayed one so the amount, coverage and
+    // eligibility are re-derived from what was ACTUALLY booked (the operator
+    // can change the rate or date after the last preview), and the server's
+    // own mintPayload is what gets posted.
+    let prepayNotice = '';
+    // manualPrepayArmable is re-read here, not just at click time: it is false
+    // unless a resolved, eligible preview is on screen, so a choice armed and
+    // then invalidated by an edit can never reach the mint.
+    if (billAsManualPrepay && manualPrepayArmable && prepaySeriesId) {
+      setSaving(true);
+      try {
+        // Price from the row the server actually persisted, never from the
+        // draft payload (Codex #3161 P2): the booking endpoint re-resolves
+        // discounts and writes its OWN estimated_price, so replaying the
+        // client-derived shape could invoice a per-visit amount this series
+        // never carried. The endpoint re-derives cadence, coverage anchor and
+        // every eligibility guard from that row too.
+        const params = new URLSearchParams({ scheduledServiceId: String(prepaySeriesId) });
+        const fresh = await adminFetch(`/admin/schedule/annual-prepay-preview?${params}`);
+        if (!fresh?.eligible) {
+          throw new Error(`annual prepay ${fresh?.blockReason || 'is no longer available for this booking'}`);
+        }
+        // The operator agreed to the total on screen. If re-pricing against
+        // the committed series produced a DIFFERENT one (a discount edited
+        // mid-booking, say), stop rather than send an amount nobody reviewed
+        // (Codex #3161 r9 P2) — the booking stands, the year is not invoiced.
+        const shown = Number(manualPrepay?.prepayTotal);
+        if (Number.isFinite(shown) && Math.round(shown * 100) !== Math.round(Number(fresh.prepayTotal) * 100)) {
+          throw new Error(`the price changed while booking — you approved ${formatMoney(shown)} but the committed visit prices at ${formatMoney(fresh.prepayTotal)}, so nothing was invoiced`);
+        }
+        const minted = await adminFetch(`/admin/customers/${selectedCustomer.id}/annual-prepay-invoice`, {
+          method: 'POST',
+          body: JSON.stringify(fresh.mintPayload),
+        });
+        const num = minted?.invoice?.invoice_number ? ` ${minted.invoice.invoice_number}` : '';
+        if (minted?.delivery?.covered_by_credit) {
+          // Account credit covered it outright, so nothing was sent — saying
+          // "sent" would have the office believe the customer was notified.
+          prepayNotice = `Annual prepay invoice${num} for ${formatMoney(fresh.prepayTotal)} was settled by account credit — nothing was sent to the customer.`;
+        } else if (minted?.delivery?.ok === false) {
+          prepayNotice = `Annual prepay invoice${num} created for ${formatMoney(fresh.prepayTotal)}, but sending it failed — send it from the customer's invoices.`;
+          // Blocking, not just the toast (Codex #3161 r5 P2): the modal
+          // unmounts ~1.2s after save and the toast renders at the top of a
+          // scrollable form, so an operator saving from the bottom would
+          // never see it — and the year's invoice would sit unsent.
+          alert(`Annual prepay invoice${num} for ${formatMoney(fresh.prepayTotal)} was created, but SENDING IT FAILED.\n\nThe customer has not received it. Send it from the customer's invoices.`);
+        } else {
+          prepayNotice = `Annual prepay invoice${num} sent for ${formatMoney(fresh.prepayTotal)}.`;
+        }
+      } catch (e) {
+        // Loud, never silent: the appointment IS booked, so the operator must
+        // know the year was not invoiced and where to finish it.
+        // Deliberately NOT "the invoice was not created": the mint commits the
+        // invoice and term, sends, and only then writes its audit row, so a
+        // 500 (or a lost response) can mean the customer already HAS the
+        // invoice. Telling the operator to mint another would double-bill the
+        // year (Codex #3161 r3 P2).
+        alert(`Appointment booked, but the annual prepay step did not complete cleanly: ${e.message}\n\nCheck the customer's invoices BEFORE minting another — the invoice may already exist and have been sent. If none is there, mint it from Customer 360 → Annual prepay.`);
+      } finally {
+        setSaving(false);
+      }
+    }
     const apptCount = results.length || createdGroupKeysRef.current.size;
     const estimateAccepted = results.some((r) => r?.estimateAccepted);
     const apptWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
-    const baseMessage = apptCount === 1
-      ? 'Appointment created — invoice will send with service report'
-      : `${apptCount} appointment series created — invoices will send with each service report`;
-    setToast(estimateAccepted ? `Estimate marked accepted. ${baseMessage}` : baseMessage);
+    // A prepaid year is NOT billed per service report — say what actually
+    // happens instead of the per-visit copy.
+    const baseMessage = prepayNotice
+      ? (apptCount === 1 ? 'Appointment created' : `${apptCount} appointment series created`)
+      : (apptCount === 1
+        ? 'Appointment created — invoice will send with service report'
+        : `${apptCount} appointment series created — invoices will send with each service report`);
+    setToast([
+      estimateAccepted ? 'Estimate marked accepted.' : '',
+      baseMessage,
+      prepayNotice,
+    ].filter(Boolean).join(' '));
     // A guarded estimate (one-time/recurring choice, invoice-mode, expired,
     // pending manager approval) books fine but couldn't be auto-accepted — tell
     // the operator so they can record the win from the Estimates page.
@@ -1887,6 +2128,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           charge. */}
                       <EstimateProvenanceCard
                         quotedTotal={linkedEstimate.quotedTotal}
+                        onetimeTotal={linkedEstimate.onetimeTotal}
                         currentPrice={netSubtotal}
                         deposit={linkedEstimate.deposit}
                         payment={linkedEstimate.payment}
@@ -1995,7 +2237,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         <button
                           type="button"
                           onClick={() => setLinkedEstimate(null)}
-                          style={{ border: 'none', background: 'transparent', color: D.text, cursor: 'pointer', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap', padding: '4px 0' }}
+                          style={{
+                            // Real tap target (owner report 2026-08-02: the
+                            // 12px text button was near-untappable on iPhone).
+                            border: `1px solid ${D.border}`, borderRadius: 6,
+                            background: 'transparent', color: D.text, cursor: 'pointer',
+                            fontSize: isMobile ? 14 : 12, fontWeight: 500, whiteSpace: 'nowrap',
+                            padding: isMobile ? '10px 14px' : '6px 10px',
+                            minHeight: isMobile ? 40 : undefined,
+                          }}
                         >
                           {linkedEstimate.status === 'accepted' ? 'Unlink' : 'Clear'}
                         </button>
@@ -2154,32 +2404,73 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
 
-                {svc.cadence && svc.cadence !== 'one_time' && (
-                  <div style={{ gridColumn: '1 / -1' }}>
-                    {serviceFieldLabel('Booster months (optional)')}
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                      {MONTH_CHIPS.map((m) => {
-                        const on = (svc.boosterMonths || []).includes(m.value);
-                        return (
+                {svc.cadence && svc.cadence !== 'one_time' && (() => {
+                  const selected = Array.isArray(svc.boosterMonths) ? svc.boosterMonths : [];
+                  const summary = selected.length
+                    ? MONTH_CHIPS.filter((m) => selected.includes(m.value)).map((m) => m.label).join(', ')
+                    : 'None';
+                  const boosterKey = svc.lineId || `line_${idx}`;
+                  const open = boosterOpenKey === boosterKey;
+                  return (
+                    <div style={{ gridColumn: '1 / -1', position: 'relative' }}>
+                      {serviceFieldLabel('Booster months (optional)')}
+                      <button
+                        type="button"
+                        onClick={() => setBoosterOpenKey(open ? null : boosterKey)}
+                        aria-label="Booster months"
+                        aria-expanded={open}
+                        style={{
+                          ...inputStyle,
+                          fontSize: isMobile ? 15 : 12,
+                          minHeight: isMobile ? 42 : 36,
+                          padding: isMobile ? '10px 12px' : '8px 10px',
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                          cursor: 'pointer', textAlign: 'left', width: '100%',
+                          color: selected.length ? D.text : D.muted,
+                        }}
+                      >
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>
+                        <span style={{ color: D.muted, marginLeft: 8 }}>{open ? '▴' : '▾'}</span>
+                      </button>
+                      {open && (
+                        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 18, maxHeight: 260, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
+                          {MONTH_CHIPS.map((m) => {
+                            const on = selected.includes(m.value);
+                            return (
+                              <button
+                                key={m.value}
+                                type="button"
+                                onClick={() => toggleBoosterMonth(idx, m.value)}
+                                aria-label={`Booster month ${m.value}`}
+                                aria-pressed={on}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                                  padding: isMobile ? '10px 12px' : '8px 10px',
+                                  fontSize: isMobile ? 15 : 12, fontWeight: 500,
+                                  background: 'transparent', border: 'none', cursor: 'pointer',
+                                  color: on ? D.teal : D.text, textAlign: 'left',
+                                }}
+                              >
+                                <span style={{ width: 14, display: 'inline-block' }}>{on ? '✓' : ''}</span>
+                                {m.label}
+                              </button>
+                            );
+                          })}
                           <button
-                            key={m.value}
                             type="button"
-                            onClick={() => toggleBoosterMonth(idx, m.value)}
-                            aria-label={`Booster month ${m.value}`}
+                            onClick={() => setBoosterOpenKey(null)}
                             style={{
-                              width: 32, height: 32, borderRadius: 6, fontSize: 12,
-                              fontWeight: 500, cursor: 'pointer',
-                              background: on ? D.teal : 'transparent',
-                              color: on ? '#fff' : D.muted,
-                              border: `1px solid ${on ? D.teal : D.border}`,
-                              padding: 0,
+                              width: '100%', padding: isMobile ? '10px 12px' : '8px 10px',
+                              fontSize: isMobile ? 14 : 12, fontWeight: 500, cursor: 'pointer',
+                              background: 'transparent', color: D.muted, border: 'none',
+                              borderTop: `1px solid ${D.border}`, textAlign: 'center',
                             }}
-                          >{m.label}</button>
-                        );
-                      })}
+                          >Done</button>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {!svc.lineDiscount && (
                   <div style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}>
@@ -2368,6 +2659,94 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           )}
         </div>
 
+        {/* Annual prepay on a MANUAL booking — the phone-"yes" with no quote
+            behind it. A linked quote uses the estimate card's own prepay
+            control instead (it prices the QUOTED plan), so this renders only
+            without one. Amounts, coverage and eligibility all come from the
+            server preview; the button never shows a locally computed total. */}
+        {prepayOnBookAvailable && !linkedEstimate && hasRecurringServices && selectedCustomer && (() => {
+          const eligible = manualPrepayEligible;
+          // The reason to SHOW: a client-side refusal, or a resolved preview
+          // that said no. An in-flight probe has no reason yet.
+          const blockReason = manualPrepayPlan.localBlock
+            || (!!manualPrepay && !eligible && !manualPrepayLoading
+              ? (manualPrepay.blockReason || 'isn’t available for this booking')
+              : null);
+          // Clickable ONLY against a resolved eligible price (Codex #3161 r2
+          // P1) — an in-flight probe stays disabled, so the operator can never
+          // arm "pricing…" and save before the amount is known.
+          const armable = manualPrepayArmable;
+          // Sized to the sibling "Collect prepayment" block (14px control,
+          // 13px detail), not the estimate card's denser nested control.
+          const segStyle = (active) => ({
+            flex: 1,
+            padding: '8px 10px',
+            borderRadius: 6,
+            fontSize: 14,
+            fontWeight: 500,
+            cursor: 'pointer',
+            border: active ? '1.5px solid #166534' : `1px solid ${D.border}`,
+            background: active ? '#DCFCE7' : D.bg,
+            color: active ? '#166534' : D.muted,
+          });
+          const prepayLabel = manualPrepayLoading
+            ? 'Annual prepay — pricing…'
+            : (eligible ? `Annual prepay — invoices ${formatMoney(manualPrepay.prepayTotal)}` : 'Annual prepay');
+          return (
+            <div style={sectionStyle}>
+              <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: D.muted, marginBottom: 6 }}>
+                Billing
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {/* Per visit reads active whenever prepay isn't armed OR
+                    can't be sold — that IS how the booking will bill. */}
+                <button
+                  type="button"
+                  onClick={() => setBillAsManualPrepay(false)}
+                  style={segStyle(!billAsManualPrepay || !armable)}
+                >
+                  Per visit
+                </button>
+                <button
+                  type="button"
+                  disabled={!armable}
+                  onClick={() => {
+                    // Turning prepay ON turns OFF the in-person collection
+                    // toggle: one records cash already taken, the other
+                    // invoices the year — both at once double-counts.
+                    setBillAsManualPrepay(true);
+                    setCollectPrepay(false);
+                  }}
+                  style={{
+                    ...segStyle(billAsManualPrepay && armable),
+                    ...(armable ? {} : { opacity: 0.5, cursor: 'not-allowed' }),
+                  }}
+                >
+                  {prepayLabel}
+                </button>
+              </div>
+              {blockReason && (
+                <div style={{ fontSize: 13, color: D.muted, marginTop: 6 }}>
+                  Annual prepay {blockReason}.
+                </div>
+              )}
+              {billAsManualPrepay && eligible && (
+                <div style={{ fontSize: 13, color: D.muted, marginTop: 8, lineHeight: 1.5 }}>
+                  {manualPrepay.visitsPerYear} visits × {formatMoney(manualPrepay.perVisit)} ={' '}
+                  {formatMoney(manualPrepay.annualBase)}
+                  {manualPrepay.discountAmount > 0
+                    ? ` · less ${manualPrepay.discountLabel} prepay discount (${formatMoney(manualPrepay.discountAmount)})`
+                    : ''}
+                  <br />
+                  On save this invoices <strong>{formatMoney(manualPrepay.prepayTotal)}</strong> for the year and
+                  texts/emails the pay link. Visits bill per application until it&rsquo;s paid; on payment the
+                  year&rsquo;s {manualPrepay.visitsPerYear} visits are marked prepaid.
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* Prepaid collection toggle */}
         {hasRecurringServices && (() => {
           const parsedCount = Number.parseInt(recurringCount, 10);
@@ -2378,7 +2757,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           return (
             <div style={{ ...sectionStyle, background: collectPrepay ? '#F0FDF4' : undefined, border: collectPrepay ? '1px solid #BBF7D0' : undefined, borderRadius: 8, padding: collectPrepay ? 14 : undefined }}>
               <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
-                <input type="checkbox" checked={collectPrepay} onChange={(e) => { setCollectPrepay(e.target.checked); if (e.target.checked) setBillAsAnnualPrepay(false); }} />
+                <input type="checkbox" checked={collectPrepay} onChange={(e) => { setCollectPrepay(e.target.checked); if (e.target.checked) { setBillAsAnnualPrepay(false); setBillAsManualPrepay(false); } }} />
                 <span style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>Collect prepayment{billAsAnnualPrepay ? ' in person (turns off the annual-prepay invoice)' : ''}</span>
               </label>
               {collectPrepay && (

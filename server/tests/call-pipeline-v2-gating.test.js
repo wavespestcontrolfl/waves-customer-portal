@@ -11,6 +11,12 @@ const {
   hasNameEmailMismatch,
 } = require('../services/call-triage-flags');
 
+// Auto-routing requires a positively validated address (AGENTS.md: "auto-create
+// only when ... the address validates"), enforced at the common exit since
+// 2026-08-01. Tests below that are about CONSENT or FLAGS pass this clean
+// verdict so they isolate their own subject rather than the address gate.
+const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
+
 const {
   computeAppointmentIdempotencyKey,
   computeAddressHash,
@@ -287,7 +293,7 @@ describe('computeDeterministicTriageFlags', () => {
   test('no SMS consent still allows appointment creation', () => {
     const e = validV2Extraction();
     e.consent.sms_consent_given = false;
-    expect(canAutoRoute(e).allowed).toBe(true);
+    expect(canAutoRoute(e, { addressValidation: AV_CLEAN }).allowed).toBe(true);
   });
 
   test('do not contact', () => {
@@ -422,7 +428,7 @@ describe('mergeTriageFlags', () => {
 
 describe('canAutoRoute', () => {
   test('clean confirmed extraction auto-routes', () => {
-    const result = canAutoRoute(validV2Extraction());
+    const result = canAutoRoute(validV2Extraction(), { addressValidation: AV_CLEAN });
     expect(result.allowed).toBe(true);
   });
 
@@ -469,7 +475,7 @@ describe('canAutoRoute', () => {
   test('model no_sms_consent_captured flag does NOT block appointment', () => {
     const e = validV2Extraction();
     e.triage_flags = ['no_sms_consent_captured'];
-    const result = canAutoRoute(e);
+    const result = canAutoRoute(e, { addressValidation: AV_CLEAN });
     expect(result.allowed).toBe(true);
   });
 
@@ -808,7 +814,7 @@ describe('side-effect guards', () => {
   });
 
   test('scheduling.status=confirmed WITH consent auto-routes', () => {
-    expect(canAutoRoute(validV2Extraction()).allowed).toBe(true);
+    expect(canAutoRoute(validV2Extraction(), { addressValidation: AV_CLEAN }).allowed).toBe(true);
   });
 
   test('no SMS without explicit consent', () => {

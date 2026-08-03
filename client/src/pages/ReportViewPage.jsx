@@ -383,6 +383,14 @@ function reportDocumentTitle(data = {}) {
   return 'Waves Customer Portal';
 }
 
+// Filename handed to the native save/share sheet — date-stamped to match the
+// server's Content-Disposition shape (browser downloads use that header; only
+// the Capacitor path names the file client-side).
+function reportPdfDownloadName(data = {}) {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(data.serviceDate || ''));
+  return m ? `Waves-Service-Report-${m[1]}.pdf` : 'Waves-Service-Report.pdf';
+}
+
 function reportDocumentDescription(data = {}) {
   if (!data || data.error) return DEFAULT_PORTAL_DESCRIPTION;
   const serviceName = serviceDisplayName(data);
@@ -621,6 +629,41 @@ export function visitWorkSummary(data = {}, fallback = '') {
     completed.length ? `${completed.length} area${completed.length === 1 ? '' : 's'} serviced` : null,
     photoCount ? `${photoCount} photo${photoCount === 1 ? '' : 's'} documented` : null,
   ].filter(Boolean);
+  // Typed specialty reports (bed bug etc.) often carry no applications or
+  // coverage rows, which left this cell on the generic fallback even though
+  // the typed findings record exactly what was done — derive it from them.
+  if (!appCount && !completed.length) {
+    const typedFindings = Array.isArray(data.typedReport?.findings) ? data.typedReport.findings : [];
+    const work = typedFindings.find((f) => f?.fieldKey === 'work_completed');
+    // Count only from authoritative arrays — legacy snapshots persist the
+    // chips as one comma-joined string, and splitting display text would
+    // shred labels containing commas (ratified rule, see the findings-card
+    // chips above). Legacy strings get a countless neutral phrase instead.
+    const workParts = Array.isArray(work?.customerValueParts) && work.customerValueParts.length
+      ? work.customerValueParts
+      : (Array.isArray(work?.value) && work.value.length ? work.value : null);
+    const hasLegacyWorkText = !workParts
+      && [work?.customerValueLabel, work?.value].some((v) => typeof v === 'string' && v.trim());
+    const rooms = typedFindings.find((f) => f?.fieldKey === 'rooms_treated');
+    const roomsText = [rooms?.customerValueLabel, rooms?.value]
+      .map((v) => (typeof v === 'string' ? v.trim() : ''))
+      .find(Boolean) || '';
+    // "service steps", not "treatments" — work chips include inspection and
+    // recommendation entries, and a visit of only those must not make a
+    // customer-facing treatment claim.
+    const actionPart = workParts
+      ? `${workParts.length} service step${workParts.length === 1 ? '' : 's'} completed`
+      : (hasLegacyWorkText ? 'Service work completed' : null);
+    const typedParts = [
+      actionPart,
+      // Rooms only RIDE ALONG with an action — work_completed is optional,
+      // and a bare location ("Primary bedroom") is not a statement of what
+      // Waves did (codex P2, post-merge on #3111).
+      actionPart && roomsText && roomsText.length <= 40 ? roomsText : null,
+      photoCount ? `${photoCount} photo${photoCount === 1 ? '' : 's'} documented` : null,
+    ].filter(Boolean);
+    if (typedParts.length) return typedParts.join(' · ');
+  }
   return parts.length ? parts.join(' · ') : fallback;
 }
 
@@ -782,14 +825,34 @@ function dynamicHeroSummary(data) {
   return 'Your routine service is complete.';
 }
 
-function conditionRows(conditions = {}) {
+function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource = null } = {}) {
+  // Lawn reports show the week's rain (the number the water card and 7-day
+  // chart are built from) so every rain figure on the page agrees; other
+  // lines keep the trailing-24h capture (owner 2026-07-30).
+  const usingWeeklyRain = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn));
+  const rainRow = usingWeeklyRain
+    ? ['Rain this week', weeklyRainIn, ' in']
+    : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
+  // Credit the weekly figure's ACTUAL provider when it differs from the
+  // point-capture source — the property-week series is Open-Meteo, but the
+  // area-snapshot fallback's rainfall is local area records, not Open-Meteo
+  // (codex P2 #3093 ×2).
+  const sourceValue = usingWeeklyRain && weeklyRainSource
+    ? (conditions.source
+      ? (String(conditions.source).toLowerCase().includes(String(weeklyRainSource).toLowerCase())
+        ? conditions.source
+        : `${conditions.source} + ${weeklyRainSource}`)
+      // No point-capture source on the record — the weekly figure still has
+      // a known provider, and the Source row must credit it (codex P2 r14).
+      : weeklyRainSource)
+    : conditions.source;
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
     ['Humidity', conditions.humidity_pct ?? conditions.humidity, '%'],
     ['Wind', conditions.wind_mph ?? conditions.wind, ' mph'],
-    ['Rain last 24 hr', conditions.rain_24h_in, ' in'],
+    rainRow,
     ['Sky', conditions.sky ?? conditions.cloudCover, ''],
-    ['Source', conditions.source, ''],
+    ['Source', sourceValue, ''],
   ];
   return rows
     .filter(([, value]) => value !== null && value !== undefined && value !== '')
@@ -1112,10 +1175,13 @@ function conditionInterpretation(conditions = {}) {
     return 'Wind was elevated, so treatment was adjusted to match label and site conditions.';
   }
   if (Number.isFinite(rain) && rain > 0.25) {
-    return 'Recent rainfall was noted. Treatment decisions were adjusted for site conditions.';
+    return 'Rainfall in the 24 hours before treatment was noted. Treatment decisions were adjusted for site conditions.';
   }
   if (hasRain && hasWind && rain <= 0.1 && wind <= 10) {
-    return 'Weather was suitable for treatment. Low rainfall and moderate wind supported exterior application.';
+    // rain_24h_in is a point-in-time 24-hour capture — a wet week can end
+    // in a dry final day, and unqualified "low rainfall" beside the weekly
+    // "Rain this week" row reads as a contradiction (codex P2 r39).
+    return 'Weather was suitable for treatment. Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
   }
   if ((!hasRain || rain <= 0.1) && (!hasWind || wind <= 10)) {
     return 'Weather was marked suitable for treatment.';
@@ -1658,7 +1724,7 @@ function LawnAssessmentCard({ assessment, mode, token, embedded = false }) {
   );
 }
 
-function LawnProtocolCard({ protocol }) {
+function LawnProtocolCard({ protocol, mode = 'live' }) {
   const window = protocol?.window;
   if (!protocol || !window) return null;
   const tasks = Array.isArray(window.requiredTasks) ? window.requiredTasks : [];
@@ -1752,8 +1818,11 @@ function LawnProtocolCard({ protocol }) {
           </p>
         </div>
       )}
+      {/* Force-open outside live so pdf/static print the body — the print
+          rule hides every .report-accordion summary and a closed details
+          would otherwise vanish from legacy lawn PDFs (codex P1). */}
       {products.length > 0 && (
-        <details className="solution-detail report-accordion">
+        <details className="solution-detail report-accordion" open={mode !== 'live'}>
           <summary>
             <span>Protocol products and gates</span>
             <span className="accordion-action">Details</span>
@@ -1958,6 +2027,29 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           live={mode === 'live'}
+          weeklyRainIn={data.serviceLine === 'lawn'
+            // Legacy lawn payloads (no reportV2) still carry the weekly
+            // total on the water context — the all-lawn weekly-rain
+            // invariant must hold on those permanent links too (codex P2
+            // r32).
+            ? (data.reportV2?.water?.rainInches ?? data.lawnAssessment?.waterContext?.rainfallInches7d ?? null)
+            : null}
+          weeklyRainSource={{
+            // MRMS is NOAA's gauge-corrected radar estimate; a mixed week
+            // takes measurements where radar had them and the model on the
+            // gaps, and the Source row has to say so rather than crediting
+            // one provider for both. Unmapped keys fall through to null (no
+            // Source row) instead of printing a raw enum at the customer.
+            open_meteo: 'Open-Meteo',
+            fawn: 'FAWN',
+            area: 'local area rain records',
+            mrms: 'NOAA radar + rain gauges',
+            'mrms+open_meteo': 'NOAA radar + rain gauges, with Open-Meteo on gaps',
+            property_point: 'Open-Meteo',
+            city_collective: 'Open-Meteo (local area)',
+          }[
+            data.reportV2?.water?.rainProvider || data.lawnAssessment?.waterContext?.rainfall7dProvider
+          ] || null}
         />
       </div>
     </section>
@@ -1981,7 +2073,7 @@ function InternalReviewBar() {
   );
 }
 
-function ReportActionBar({ pdfUrl, token, onShare }) {
+function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Report.pdf' }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
   // Clear the copied-feedback timer on unmount so it can't fire setState on
@@ -2012,7 +2104,7 @@ function ReportActionBar({ pdfUrl, token, onShare }) {
                 // the plugins — leave their legacy tap behavior alone.
                 if (canSaveNative()) {
                   e.preventDefault();
-                  saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
+                  saveUrlNative(pdfUrl, fileName)
                     .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
                 }
               }}
@@ -2124,8 +2216,8 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false }) {
-  const rows = conditionRows(conditions);
+function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null, weeklyRainSource = null }) {
+  const rows = conditionRows(conditions, { weeklyRainIn, weeklyRainSource });
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);
@@ -2202,73 +2294,6 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   add(serviceLine === 'lawn' ? 'How is my lawn trending?' : 'What should I watch for next?');
   add('When is my next service?');
   return prompts.slice(0, 5);
-}
-
-function ReportAskBox({ mode, token, serviceLine, data }) {
-  const placeholder = serviceLine === 'lawn' ? 'Ask about this lawn visit' : 'Ask about today’s service';
-  const prompts = reportAskPrompts(data, serviceLine);
-  const [question, setQuestion] = useState('');
-  const [answer, setAnswer] = useState('');
-  const [asking, setAsking] = useState(false);
-
-  const ask = async (text) => {
-    const q = String((text ?? question) || '').trim();
-    if (!q || asking) return;
-    setAsking(true);
-    setAnswer('');
-    try {
-      const response = await fetch(`${API_BASE}/reports/${token}/ask`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'question_failed');
-      setAnswer(data.answer || 'I could not answer that from this report.');
-      // No client-side event here: the server's /ask handler already records
-      // report_question_asked — posting it again double-counted the first
-      // question of every session in report analytics.
-    } catch {
-      setAnswer('I could not answer that right now. Reply to the text message or call Waves for help.');
-    } finally {
-      setAsking(false);
-    }
-  };
-
-  if (mode !== 'live') return null;
-
-  return (
-    <div className="report-ask-box">
-      <div className="section-eyebrow">Ask Waves</div>
-      <div className="report-ask-form">
-        <input
-          id="service-report-question"
-          name="service_report_question"
-          value={question}
-          onChange={(event) => setQuestion(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault();
-              ask();
-            }
-          }}
-          placeholder={placeholder}
-          aria-label="Ask Waves about this service report"
-        />
-        <button data-glass-accent="" type="button" onClick={() => ask()} disabled={asking || !question.trim()}>
-          {asking ? 'Checking...' : 'Submit'}
-        </button>
-      </div>
-      <div className="report-ask-actions" aria-label="Example questions">
-        {prompts.map((prompt) => (
-          <button data-glass="chip" type="button" key={prompt} onClick={() => ask(prompt)} disabled={asking}>
-            {prompt}
-          </button>
-        ))}
-      </div>
-      {answer && <div className="report-ask-answer">{answer}</div>}
-    </div>
-  );
 }
 
 // Floating Ask Waves — the report's AI helper as a slim bar pinned under the
@@ -2365,45 +2390,6 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
       </section>
       </div>
     </>
-  );
-}
-
-export function quickNavigationLinks({ hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true } = {}) {
-  return [
-    ['#visit-summary', 'Summary'],
-    hasReentry ? ['#re-entry', 'Re-entry'] : null,
-    hasVisitTimeline ? ['#service-timeline', 'Timeline'] : null,
-    // The Map link targets the coverage card's anchor; lawn/tree-shrub reports
-    // hide that card, so the link would jump nowhere — omit it there.
-    hasCoverageMap ? ['#service-coverage', 'Map'] : null,
-    hasProducts ? ['#products-applied', 'Products'] : null,
-    hasPestPressure ? ['#pest-pressure', 'Pest Pressure'] : null,
-    hasActivity ? ['#activity', 'Activity'] : null,
-  ].filter(Boolean);
-}
-
-function QuickNavigationAndAsk({ mode, token, serviceLine, data, hasProducts = true, hasVisitTimeline = true, hasPestPressure = false, hasReentry = false, hasActivity = false, hasCoverageMap = true }) {
-  // hasCoverageMap comes from the page (the same hideCoverageCard gate that
-  // decides whether the Service Coverage card renders) — deriving it here
-  // from serviceLine alone missed pest V2, whose card hides while the Map
-  // link would still render and jump nowhere.
-  const links = quickNavigationLinks({ hasProducts, hasVisitTimeline, hasPestPressure, hasReentry, hasActivity, hasCoverageMap });
-
-  return (
-    <section data-glass="card" className="sr-section quick-report-tools" id="quick-navigation">
-      <div className="coverage-section-header">
-        <div>
-          <h2>Need help with this report?</h2>
-          <p className="map-context-copy">Ask Waves about this visit or jump to the section you need.</p>
-        </div>
-      </div>
-      <nav className="quick-nav-row" aria-label="Service report sections">
-        {links.map(([href, label]) => (
-          <a href={href} key={href}>{label}</a>
-        ))}
-      </nav>
-      <ReportAskBox mode={mode} token={token} serviceLine={serviceLine} data={data} />
-    </section>
   );
 }
 
@@ -4044,7 +4030,10 @@ function normalizeVisitTimelineEventType(type) {
   return key;
 }
 
-function serviceCompletedDescription(serviceLine) {
+function serviceCompletedDescription(serviceLine, serviceLabel) {
+  // Typed specialty reports name the actual service — "the pest control
+  // service" reads wrong under a Bed Bug Treatment header.
+  if (serviceLabel) return `Your technician completed your ${serviceLabel} and finalized the report.`;
   const descriptions = {
     pest: 'Your technician completed the pest control service and finalized the report.',
     lawn: 'Your technician completed the lawn service and finalized the report.',
@@ -4064,11 +4053,11 @@ function timelineDefaultLabel(type) {
   return formatEnumLabel(type);
 }
 
-function timelineDefaultDescription(type, serviceLine, occurredAt) {
+function timelineDefaultDescription(type, serviceLine, occurredAt, serviceLabel = null) {
   if (type === 'technician_en_route') return 'Your technician was on the way to the property.';
   if (type === 'technician_on_site') return 'Your technician was recorded at the property.';
   if (type === 'service_completed') {
-    return occurredAt ? serviceCompletedDescription(serviceLine) : 'The service was marked complete.';
+    return occurredAt ? serviceCompletedDescription(serviceLine, serviceLabel) : 'The service was marked complete.';
   }
   return '';
 }
@@ -4102,7 +4091,7 @@ function normalizeVisitTimelineConfig(config = {}) {
   return merged;
 }
 
-function normalizeVisitTimelineEvent(event = {}, index = 0, serviceLine = 'default', config = DEFAULT_VISIT_TIMELINE_CONFIG) {
+function normalizeVisitTimelineEvent(event = {}, index = 0, serviceLine = 'default', config = DEFAULT_VISIT_TIMELINE_CONFIG, serviceLabel = null) {
   const type = normalizeVisitTimelineEventType(event.type);
   if (!PRIMARY_VISIT_TIMELINE_TYPES.has(type)) return null;
   const occurredAt = firstValidTimelineValue(
@@ -4117,7 +4106,7 @@ function normalizeVisitTimelineEvent(event = {}, index = 0, serviceLine = 'defau
     event.customerDescription
     || event.customerVisibleDescription
     || event.customer_visible_description
-    || timelineDefaultDescription(type, serviceLine, occurredAt)
+    || timelineDefaultDescription(type, serviceLine, occurredAt, serviceLabel)
     || '',
   ).trim();
   const source = event.source || (type === 'service_completed' ? 'service_report' : 'bouncie');
@@ -4326,9 +4315,14 @@ export function normalizeVisitTimeline({
   const hasServerTimeline = Boolean(source);
   const { arrivedAt, completedAt } = timelineAnchorTimes(timingSource, visitTiming);
   const reportCompleted = source?.status === 'completed' || completedTimelineReport(timingSource, workflowEvents);
+  // Typed specialty reports carry the linked service name — the completed
+  // event then says "your Bed Bug Treatment" instead of the per-line generic.
+  const typedServiceLabel = timingSource?.typedReport && typeof timingSource?.serviceDisplayName === 'string'
+    ? timingSource.serviceDisplayName.trim() || null
+    : null;
   const rawSourceEvents = Array.isArray(source?.events) ? source.events : workflowEvents;
   const nextEvents = (Array.isArray(rawSourceEvents) ? rawSourceEvents : [])
-    .map((event, index) => normalizeVisitTimelineEvent(event, index, normalizedServiceLine, resolvedConfig))
+    .map((event, index) => normalizeVisitTimelineEvent(event, index, normalizedServiceLine, resolvedConfig, typedServiceLabel))
     .filter(Boolean);
 
   const enRouteAt = firstValidTimelineValue(
@@ -4382,8 +4376,8 @@ export function normalizeVisitTimeline({
       source: 'service_report',
       confidence: completedAt ? 'high' : 'medium',
       status: 'completed',
-      customerDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine) : 'The service was marked complete.',
-      customerVisibleDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine) : 'The service was marked complete.',
+      customerDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine, typedServiceLabel) : 'The service was marked complete.',
+      customerVisibleDescription: completedAt ? serviceCompletedDescription(normalizedServiceLine, typedServiceLabel) : 'The service was marked complete.',
       sortOrder: 3,
     });
   }
@@ -4483,7 +4477,7 @@ export function timelineEventsWithReportTiming(workflowEvents = [], customerInte
   }).events;
 }
 
-function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, customerInteraction, visitTiming, timingSource, loading = false }) {
+function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, customerInteraction, visitTiming, timingSource, loading = false, priorVisits = [] }) {
   const timeline = normalizeVisitTimeline({
     visitTimeline,
     workflowEvents,
@@ -4520,12 +4514,20 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
 
   if (!timeline.enabled) return null;
 
+  // Typed trend programs (bed bug) fold their cross-visit history into this
+  // card (owner 2026-07-31: one timeline story, not a separate "Visit
+  // history" card): prior visits lead as dated rows, today's events follow.
+  const historyRows = (Array.isArray(priorVisits) ? priorVisits : []).filter((v) => v && v.serviceDate);
   return (
     <section data-glass="card" className="sr-section service-workflow-section" id="service-timeline">
       <div className="coverage-section-header">
         <div>
           <h2>{timeline.title || 'Visit Timeline'}</h2>
-          <p className="map-context-copy">{timeline.intro || "Here’s a simple summary of today’s service visit."}</p>
+          <p className="map-context-copy">
+            {historyRows.length
+              ? 'Here’s a simple summary of this visit and your recent service history.'
+              : (timeline.intro || 'Here’s a simple summary of today’s service visit.')}
+          </p>
         </div>
       </div>
 
@@ -4534,6 +4536,19 @@ function ServiceTimelineSection({ serviceType, visitTimeline, workflowEvents, cu
       ) : (
         <>
           <ol className="service-workflow-timeline">
+            {historyRows.map((visit) => (
+              <li className="workflow-event workflow-status-completed" key={visit.serviceRecordId || visit.serviceDate}>
+                <span className="workflow-event-icon" aria-hidden="true">
+                  <CheckCircle2 size={16} strokeWidth={2} />
+                </span>
+                <div className="workflow-event-body">
+                  <div className="workflow-event-heading">
+                    <h3>{formatTimelineDate(visit.serviceDate)}</h3>
+                  </div>
+                  {visit.headline && <p>{visit.headline}</p>}
+                </div>
+              </li>
+            ))}
             {events.map((event) => {
               const Icon = workflowIconForType(event.type);
               return (
@@ -4868,7 +4883,7 @@ function LegacyReport({ data, token, glass = false }) {
               // instead (old binaries without the plugins keep legacy taps).
               if (canSaveNative()) {
                 e.preventDefault();
-                saveUrlNative(pdfUrl, 'Waves_Service_Report.pdf')
+                saveUrlNative(pdfUrl, reportPdfDownloadName(data))
                   .catch(() => showCustomerAlert('Could not save the PDF. Please try again.'));
               }
             }}
@@ -4879,7 +4894,7 @@ function LegacyReport({ data, token, glass = false }) {
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
       </div>
-      <BrandFooter />
+      <BrandFooter appBadges={false} />
     </div>
   );
 }
@@ -4987,6 +5002,24 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   });
   const hasPestPressure = Boolean(data.pestPressure && data.pestPressure.showOnCustomerReport !== false && data.pestPressure.enabled !== false);
   const hasReentry = Boolean(dynamicContext.reentry);
+  // Bed bug: the typed narrative owns the report's ONE summary surface even
+  // without a Pest/Mosquito V2 hero (owner 2026-07-31) — Today's Result
+  // carries the narrative body and the legacy Visit Summary card is
+  // suppressed, the same single-summary pattern as the V2 paths. Narrative
+  // is live-only upstream, so pdf/static keep the legacy layout untouched.
+  const typedNarrativeOwnsSummary = data.summarySource === 'typed_narrative'
+    && data.typedReport?.type === 'bed_bug'
+    && !data.pestReportV2 && !data.mosquitoReportV2;
+  // Bed bug also folds its cross-visit activity history into the Visit
+  // Timeline card (one chronological story) — the standalone "Visit
+  // history" card is suppressed only when the merged rows actually render.
+  const typedTimelineVisits = Array.isArray(data.typedVisitTimeline?.visits)
+    ? data.typedVisitTimeline.visits.filter(Boolean)
+    : [];
+  const mergeTypedVisitHistory = data.typedReport?.type === 'bed_bug'
+    && typedTimelineVisits.length >= 2
+    && normalizedVisitTimeline.enabled
+    && (normalizedVisitTimeline.events || []).length > 0;
   // Lawn and tree & shrub reports don't show the per-area Coverage map — the
   // lawn-intelligence/assessment surfaces tell that story instead. Pest V2
   // hides it too (the "Where we protected" diagram replaces the lettered map).
@@ -5508,28 +5541,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           color: var(--text);
           font-size: 16px;
           line-height: 1.5;
-        }
-        .quick-report-tools .report-ask-box {
-          max-width: none;
-        }
-        .quick-nav-row {
-          display: flex;
-          gap: 8px;
-          overflow-x: auto;
-          padding-bottom: 2px;
-          scrollbar-width: thin;
-        }
-        .quick-nav-row a {
-          flex: 0 0 auto;
-          border: 1px solid var(--line);
-          border-radius: 999px;
-          background: #fff;
-          color: var(--text);
-          font-size: 14px;
-          line-height: 1;
-          font-weight: 800;
-          text-decoration: none;
-          padding: 8px 12px;
         }
         .timeline-note {
           margin: 12px 0 0;
@@ -6747,84 +6758,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         @media (print), (prefers-reduced-motion: reduce) {
           .wx--live * { animation: none !important; }
         }
-        .report-ask-box {
-          margin-top: 16px;
-          border: 1px solid var(--report-border);
-          border-radius: 12px;
-          background: var(--wash);
-          padding: 16px;
-          max-width: ${DOC_COLUMN_MAX}px;
-        }
-        .report-ask-prompt {
-          color: var(--report-text);
-          font-size: 14px;
-          line-height: 1.35;
-          font-weight: 600;
-          margin: -2px 0 12px;
-        }
-        .report-ask-form {
-          display: flex;
-          gap: 8px;
-        }
-        .report-ask-form input {
-          flex: 1;
-          min-width: 0;
-          border: 1px solid var(--report-border);
-          border-radius: 10px;
-          padding: 12px;
-          color: var(--report-text);
-          font: inherit;
-          font-size: 14px;
-          outline: none;
-        }
-        .report-ask-form button,
-        .report-ask-actions button {
-          border: 1px solid var(--report-border);
-          border-radius: 10px;
-          background: #fff;
-          color: var(--report-text);
-          font: inherit;
-          font-size: 14px;
-          padding: 12px;
-          cursor: pointer;
-        }
-        .report-ask-form button {
-          background: ${B.yellow};
-          color: ${B.glassNavy};
-          border-color: ${B.glassNavy};
-          font-weight: 800;
-          min-width: 72px;
-        }
-        .report-ask-form button:disabled,
-        .report-ask-actions button:disabled {
-          opacity: .5;
-          cursor: default;
-        }
-        .report-ask-actions {
-          display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
-          gap: 8px;
-          margin-top: 12px;
-        }
-        .report-ask-actions button {
-          min-height: 48px;
-          text-align: left;
-          justify-content: flex-start;
-          background: ${B.glassNavy};
-          border-color: ${B.glassNavy};
-          color: #fff;
-        }
-        .report-ask-answer {
-          margin-top: 12px;
-          border: 1px solid var(--report-border);
-          border-radius: 10px;
-          padding: 12px;
-          color: var(--report-text);
-          font-size: 14px;
-          line-height: 1.5;
-          background: #fff;
-          white-space: pre-line;
-        }
         .applied-products-header {
           display: flex;
           justify-content: space-between;
@@ -7823,11 +7756,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .hero-conditions,
         .hero-reentry-status,
         .reentry-target-tile,
-        .report-ask-box,
-        .report-ask-form input,
-        .report-ask-form button,
-        .report-ask-actions button,
-        .report-ask-answer,
         .service-coverage-map,
         .coverage-empty-state,
         .coverage-summary-row,
@@ -7867,7 +7795,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: ${B.glassNavy};
           color: #fff;
         }
-        .report-ask-box,
         .tech-visit-line,
         .hero-conditions,
         .hero-reentry-status,
@@ -7876,11 +7803,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .the-one-thing {
           background: var(--soft-blue);
           border-color: var(--soft-blue-border);
-        }
-        .report-ask-form button {
-          background: ${B.glassNavy};
-          border-color: ${B.glassNavy};
-          color: #fff;
         }
         .review-request-card .review-cta {
           background: ${B.glassNavy};
@@ -7925,8 +7847,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .hero-conditions-copy { display: block; }
           .hero-conditions-copy p { margin-top: 8px; text-align: left; }
           .hero-condition-cell { flex-basis: 138px; }
-          .report-ask-form { flex-direction: column; }
-          .report-ask-actions { grid-template-columns: 1fr; }
           .coverage-section-header { flex-direction: column; }
           .coverage-map-meta { justify-items: start; text-align: left; max-width: none; }
           .service-coverage-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -8089,6 +8009,19 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-top { position: static; }
           .sr-actions,
           .report-action-bar { display: none; }
+          /* Interactive chrome never prints — covers a customer hitting
+             Print on the live view, where the floating Ask-Waves bar and
+             other controls would otherwise stamp into the paper document. */
+          .floating-ask-sentinel,
+          .floating-ask-wrap { display: none; }
+          /* The accordion is a control, not content: never print the
+             "More information / Details" toggle bar or its frame. An open
+             details (force-open on pdf/static, or customer-expanded on a
+             live print) keeps its body; a closed one prints nothing —
+             hiding it entirely on live dropped content the customer had
+             expanded before printing (codex P2). */
+          .report-accordion summary { display: none; }
+          .report-accordion { border: 0; background: transparent; }
           /* Staff-only companion sections never print — the printed page
              must match the customer artifact (the internal warning header
              is hidden in print, so the body must go with it). */
@@ -8103,10 +8036,31 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             border-color: #d4d4d4;
             box-shadow: none;
           }
+          /* Paged layout: products stack one-up so a card never straddles a
+             column AND a page break at the same time. A whole product card
+             can run taller than a page, so the card itself stays breakable —
+             its labeled atoms below keep together instead (avoid on the full
+             card stranded the "Products Applied" header alone on a page). */
+          .applied-products-grid { grid-template-columns: 1fr; }
           .reentry-timer,
-          .pressure-trend-card {
+          .pressure-trend-card,
+          .product-purpose-grid,
+          .product-why,
+          .manufacturer-guideline-note,
+          .solution-product-detail,
+          .workflow-event,
+          .sr-cell,
+          .sr-band,
+          img,
+          video {
             break-inside: avoid;
             page-break-inside: avoid;
+          }
+          /* Headings stay with the content they introduce — no orphaned
+             section titles at the bottom of a page. */
+          h2, h3, .section-eyebrow {
+            break-after: avoid-page;
+            page-break-after: avoid;
           }
         }
       `}</style>
@@ -8123,7 +8077,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             render at the TOP of EVERY service report, above the Waves AI
             bar. */}
         {mode === 'live' && !data.internalOnly && (
-          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />
+          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} fileName={reportPdfDownloadName(data)} />
         )}
 
         {/* Ask Waves floats with the customer: sticky under the shell header for
@@ -8142,7 +8096,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         <TodaysResultCard
           typedReport={data.typedReport}
-          bodyOverride={data.summarySource === 'typed_narrative' && (data.pestReportV2 || data.mosquitoReportV2)
+          bodyOverride={data.summarySource === 'typed_narrative'
+            && (data.pestReportV2 || data.mosquitoReportV2 || typedNarrativeOwnsSummary)
             ? cleanVisitSummary(data.summary)
             : null}
         />
@@ -8169,6 +8124,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             customerInteraction={data.customerInteraction}
             visitTiming={data.visitTiming}
             timingSource={data}
+            priorVisits={mergeTypedVisitHistory ? typedTimelineVisits.filter((v) => !v.isCurrent) : []}
           />
         )}
 
@@ -8212,7 +8168,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
-        {/* V2: Visit Timeline + Ask Waves render directly under Re-entry (lawn + tree_shrub). */}
+        {/* V2: Visit Timeline renders directly under Re-entry (lawn + tree_shrub). */}
         {isV2LeadLayout && (
           <>
             {/* marginTop keeps the 20px card rhythm — the V2 timeline card carries
@@ -8231,27 +8187,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
                 </LawnPrintContext.Provider>
               </div>
             )}
-            {mode !== 'live' && (
-              <QuickNavigationAndAsk
-                mode={mode}
-                token={token}
-                serviceLine={data.serviceLine}
-                data={data}
-                hasProducts={hasApplications}
-                hasVisitTimeline={normalizedVisitTimeline.enabled}
-                hasPestPressure={hasPestPressure}
-                hasReentry={hasReentry}
-                hasActivity={Boolean(data.activity)}
-                hasCoverageMap={!hideCoverageCard}
-              />
-            )}
           </>
         )}
 
         {/* Pest/Mosquito V2 own the summary slot (the dashboard above carries
             the id="visit-summary" anchor), so the legacy Visit Summary
-            paragraph is suppressed for them to avoid showing the report twice. */}
-        {!data.pestReportV2 && !data.mosquitoReportV2 && (
+            paragraph is suppressed for them to avoid showing the report twice.
+            Bed bug's typed narrative owns the summary the same way (it renders
+            as the Today's Result body above). The interactive quick-nav /
+            Ask-Waves section that used to render into pdf/static documents was
+            removed 2026-08-02 (dead chrome in a printed PDF — owner); live
+            mode's ask surface is FloatingAskWaves. */}
+        {!data.pestReportV2 && !data.mosquitoReportV2 && !typedNarrativeOwnsSummary && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data)}</p>
@@ -8345,7 +8292,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             read as ops language on a customer surface. The V2 lawn report
             already tells the treatment story in customer terms, so suppress it
             there — same pattern as LawnProgramOverviewCard below. */}
-        {!data.reportV2 && <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />}
+        {!data.reportV2 && <LawnProtocolCard protocol={dynamicContext.lawnProtocol} mode={mode} />}
 
         {/* Standalone trend card: only for layouts that embed it nowhere
             else — the gauge card hosts it on recurring reports, and the pest
@@ -8391,8 +8338,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* D2: cross-visit timeline right under the gauge — the same trend
             neighborhood. Server ships it only for typed trend programs with
-            2+ visits, so this renders nothing everywhere else. */}
-        <TypedVisitTimelineCard timeline={data.typedVisitTimeline} />
+            2+ visits, so this renders nothing everywhere else. Bed bug folds
+            these rows into the Visit Timeline card instead (owner 2026-07-31)
+            — suppressed here only when the merged rows actually rendered. */}
+        {!mergeTypedVisitHistory && <TypedVisitTimelineCard timeline={data.typedVisitTimeline} />}
 
         {/* Companion typed sections (combined services): primary content
             first, then one block per companion — heading, Today's Result,
@@ -8445,24 +8394,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             covers what was done; the generic program explainer added noise). */}
         {data.serviceLine === 'lawn' && !data.reportV2 && (
           <LawnProgramOverviewCard context={data.lawnProgramOverview} />
-        )}
-
-        {/* V2 (lawn + tree_shrub) renders Ask Waves up top (under Re-entry); otherwise keep it here.
-            Live mode replaces this section with the floating bar; pdf/static keep it. */}
-        {!isV2LeadLayout && mode !== 'live' && (
-          <QuickNavigationAndAsk
-            mode={mode}
-            token={token}
-            serviceLine={data.serviceLine}
-            data={data}
-            hasProducts={hasApplications}
-            hasVisitTimeline={normalizedVisitTimeline.enabled}
-            hasPestPressure={hasPestPressure && !data.pestReportV2 && !data.mosquitoReportV2}
-            hasReentry={hasReentry}
-            hasActivity={Boolean(data.activity)
-              && (Boolean(data.typedReport) || (!data.pestReportV2 && !data.mosquitoReportV2))}
-            hasCoverageMap={!hideCoverageCard}
-          />
         )}
 
         {/* Non-lead-layout lines keep Timeline + Coverage and Products here; lawn +
@@ -8570,7 +8501,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             sms_preview keep the quiet document sign-off so the print
             pipeline stays byte-identical. */}
         {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-        <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
+        <BrandFooter variant={mode === 'live' ? undefined : 'document'} appBadges={false} />
       </div>
     </div>
   );
@@ -8587,6 +8518,25 @@ export default function ReportViewPage() {
     const requestedMode = new URLSearchParams(window.location.search).get('mode');
     return ['pdf', 'static', 'sms_preview'].includes(requestedMode) ? requestedMode : 'live';
   }, []);
+  // ?assessment=<id> pins which lawn assessment this render shows (#3168). The
+  // PDF renderer opens this page with the pin, and the page's OWN fetch is what
+  // actually builds the report — so the pin has to be forwarded here or it does
+  // nothing at all. The server validates it against the assessments this token
+  // already exposes and answers 409 for anything else.
+  const pinnedAssessment = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get('assessment');
+    if (!id || !id.trim()) return null;
+    // The signature travels with the id — the server refuses an unsigned pin,
+    // since pinning narrows what the report says and only this server may ask
+    // for that.
+    return {
+      id: id.trim(),
+      sig: (params.get('asig') || '').trim(),
+      exp: (params.get('aexp') || '').trim(),
+    };
+  }, []);
 
   // Liquid-glass theme — live view only, mounted at the PAGE level so the
   // scene is up from the very first paint (loading skeleton included), not
@@ -8601,7 +8551,12 @@ export default function ReportViewPage() {
     let cancelled = false;
     setLoading(true);
     setLoadError(false);
-    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`;
+    const dataUrl = `${API_BASE}/reports/${token}/data?mode=${encodeURIComponent(mode)}`
+      + (pinnedAssessment
+        ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
+          + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
+          + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
+        : '');
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports
     // and customers never have one. Same-origin localStorage only. Guarded:
@@ -8639,7 +8594,7 @@ export default function ReportViewPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, mode, loadAttempt]);
+  }, [token, mode, pinnedAssessment, loadAttempt]);
 
   useEffect(() => {
     if (!data || data.error) return;

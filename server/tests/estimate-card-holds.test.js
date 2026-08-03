@@ -22,6 +22,15 @@ jest.mock('../services/invoice', () => ({
   create: (...a) => mockInvoiceCreate(...a),
   sendReceipt: (...a) => mockSendReceipt(...a),
   createFromService: (...a) => mockCreateFromService(...a),
+  buildLineItemsForScheduledService: (...a) => mockBuildLines(...a),
+}));
+const mockBuildLines = jest.fn(async () => ({
+  lineItems: [{ description: 'Pest Control', quantity: 1, unit_price: 49, amount: 49, category: 'Pest Control' }],
+  discountIds: undefined,
+}));
+const mockMintWithDeposit = jest.fn(async () => ({ invoice: { id: 'inv_recap', service_record_id: 'sr1' }, reused: false }));
+jest.mock('../services/scheduled-invoice-mint', () => ({
+  mintScheduledServiceInvoiceWithDeposit: (...a) => mockMintWithDeposit(...a),
 }));
 const mockSendSMS = jest.fn();
 jest.mock('../services/twilio', () => ({ sendSMS: (...a) => mockSendSMS(...a) }));
@@ -282,23 +291,39 @@ describe('completion charge accepted-amount cap — frozen at booking, never col
 });
 
 describe('cardHoldNoShowFee / cardHoldCancelWindowHours', () => {
-  it('default to $49 / 24h', () => {
-    expect(cardHoldNoShowFee()).toBe(49);
+  it('default to $75 / 24h (owner ruling 2026-08-01)', () => {
+    expect(cardHoldNoShowFee()).toBe(75);
     expect(cardHoldCancelWindowHours()).toBe(24);
   });
   it('read constants.CARD_HOLD (pricing_config-authoritative) and fall back on junk', () => {
     const { CARD_HOLD } = require('../services/pricing-engine/constants');
     const original = { ...CARD_HOLD };
     try {
-      CARD_HOLD.noShowFeeAmount = 75; CARD_HOLD.cancelWindowHours = 48;
-      expect(cardHoldNoShowFee()).toBe(75);
+      CARD_HOLD.noShowFeeAmount = 60; CARD_HOLD.cancelWindowHours = 48;
+      expect(cardHoldNoShowFee()).toBe(60);
       expect(cardHoldCancelWindowHours()).toBe(48);
       CARD_HOLD.noShowFeeAmount = -5; CARD_HOLD.cancelWindowHours = 'junk';
-      expect(cardHoldNoShowFee()).toBe(49);
+      expect(cardHoldNoShowFee()).toBe(75);
       expect(cardHoldCancelWindowHours()).toBe(24);
     } finally {
       Object.assign(CARD_HOLD, original);
     }
+  });
+});
+
+describe('estimate_card_hold admin validation (bounded — charge-authoritative values)', () => {
+  const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+  it('accepts sane values, rejects typos and extremes', () => {
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75, cancelWindowHours: 24 }).ok).toBe(true);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 49.5, cancelWindowHours: 48 }).ok).toBe(true);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 750, cancelWindowHours: 24 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 0, cancelWindowHours: 24 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: -75, cancelWindowHours: 24 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75.001, cancelWindowHours: 24 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75, cancelWindowHours: 0 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75, cancelWindowHours: 1.5 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 75, cancelWindowHours: 500 }).ok).toBe(false);
+    expect(validatePricingConfigData('estimate_card_hold', { noShowFeeAmount: 'many', cancelWindowHours: 24 }).ok).toBe(false);
   });
 });
 
@@ -312,7 +337,7 @@ describe('resolveCardHoldPolicy', () => {
   it('REQUIRES a hold for a one-time accept with fee + window', () => {
     const p = resolveCardHoldPolicy({ treatAsOneTime: true });
     expect(p.required).toBe(true);
-    expect(p.noShowFeeAmount).toBe(49);
+    expect(p.noShowFeeAmount).toBe(75);
     expect(p.cancelWindowHours).toBe(24);
   });
   it('never required for recurring', () => {
@@ -679,13 +704,17 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
 
   it('mints the completion invoice and charges the held card, OMITTING taxRate so create() auto-computes (commercial+business)', async () => {
     // queue: held(recap) → scheduled_service(prepaid check) → invoice-by-SR(none)
-    // → invoice-by-SS(none) → held(charge) → invoice → pm row
-    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    // → scheduled_services(svc) → service_records(sr) → held(charge) → invoice → pm row
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, { id: 'ss1', source_estimate_id: null }, { id: 'sr1', customer_id: 'cust1', service_type: 'Pest Control' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
-    const arg = mockCreateFromService.mock.calls[0][1];
-    expect(arg.useScheduledReplay).toBe(true);
-    expect(arg.taxRate).toBeUndefined(); // let create() compute county-aware tax (handles 'business')
+    // The mint delegates to the CANONICAL scheduled-invoice-mint helper
+    // (Codex #3153 r4/r5): canonical lock + create() on the lock trx.
+    expect(mockMintWithDeposit).toHaveBeenCalledTimes(1);
+    const params = mockMintWithDeposit.mock.calls[0][0].buildCreateParams();
+    expect(params.taxRate).toBeUndefined(); // let create() compute county-aware tax (handles 'business')
+    expect(params.serviceRecordId).toBe('sr1');
+    expect(params.lineItems.length).toBeGreaterThan(0);
     expect(r).toEqual({ charged: true });
   });
 
@@ -694,16 +723,17 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
     stubDb([HELD, { prepaid_amount: null }, { id: 'inv_recap' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
-    expect(mockCreateFromService).not.toHaveBeenCalled();
+    expect(mockMintWithDeposit).not.toHaveBeenCalled();
     expect(r).toEqual({ charged: true });
   });
 
-  it('reuses a pre-mint invoice linked only by scheduled_service_id (back-links it)', async () => {
-    // held → scheduled_service(prepaid check) → invoice-by-SR(none) → invoice-by-SS FOUND → held → invoice → pm
-    stubDb([HELD, { prepaid_amount: null }, null, { id: 'inv_premint', service_record_id: null }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+  it('adopts a concurrent/pre-mint invoice via the canonical helper and back-links the service record', async () => {
+    // held → scheduled_service(prepaid check) → invoice-by-SR(none) → svc → sr → held → invoice → pm
+    stubDb([HELD, { prepaid_amount: null }, null, { id: 'ss1', source_estimate_id: null }, { id: 'sr1', customer_id: 'cust1' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    mockMintWithDeposit.mockResolvedValueOnce({ invoice: { id: 'inv_premint', service_record_id: null }, reused: true });
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi_c', amount: 49 });
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
-    expect(mockCreateFromService).not.toHaveBeenCalled();
+    expect(mockDbUpdates.some((p) => p.service_record_id === 'sr1')).toBe(true);
     expect(r).toEqual({ charged: true });
   });
 
@@ -717,15 +747,15 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
   });
 
   it('alerts the office when invoice creation fails', async () => {
-    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null]);
-    mockCreateFromService.mockRejectedValueOnce(new Error('createFromService boom'));
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, { id: 'ss1', source_estimate_id: null }, { id: 'sr1', customer_id: 'cust1' }]);
+    mockMintWithDeposit.mockRejectedValueOnce(new Error('mint boom'));
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(r.reason).toBe('invoice_create_failed');
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
   it('alerts the office when the card charge fails (stranded draft, no pay-link UI)', async () => {
-    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, null, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
+    stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, { id: 'ss1', source_estimate_id: null }, { id: 'sr1', customer_id: 'cust1' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('card_declined'), { type: 'StripeCardError', payment_intent: { id: 'pi_x' } }));
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });
     expect(r.reason).toBe('charge_failed');

@@ -165,15 +165,27 @@ function computeServiceRecordFinancials({
 async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, endTime, rate, {
   untrustedLifecycleSpan = false,
   explicitLaborMinutes = null,
+  overrideLaborMinutes = null,
 } = {}) {
   let minutes = 0;
+  // Authoritative operator correction (admin time-on-site edit): wins over
+  // EVERY derived source, including the direct job time entries below — a
+  // visit whose closeout was forgotten usually has a forgotten clock-out
+  // too, so the linked entry carries the same inflated span the operator
+  // just corrected. explicitLaborMinutes stays weaker on purpose (backfill
+  // semantics unchanged: a real clock entry still beats a typed backfill
+  // duration there).
+  {
+    const override = Number(overrideLaborMinutes);
+    if (Number.isFinite(override) && override > 0) minutes = Math.round(override);
+  }
   try {
     // Prefer the JOB time entries tied directly to this visit. time_entries.job_id
     // IS the scheduled_services id (see time-tracking.js), so this attributes
     // exactly. entry_type='job' excludes the shift/break/drive/admin_time clocks
     // (a shift row spans the whole workday) and voided rows are dropped — the
     // same scoping every other time-tracking consumer uses.
-    if (scheduledServiceId) {
+    if (!minutes && scheduledServiceId) {
       const jobEntries = await db('time_entries')
         .where({ job_id: scheduledServiceId, entry_type: 'job' })
         .whereNot('status', 'voided')
@@ -351,12 +363,16 @@ async function resolveServiceRecord(db, svc, srCols) {
  * duration to use instead. Both are ALSO re-derived automatically from the
  * record's persisted structured_notes.backfill marker (and the persisted
  * scheduled_services.service_time_minutes), so recalculations that pass no
- * opts can never resurrect the fabricated span.
+ * opts can never resurrect the fabricated span. opts.overrideLaborMinutes
+ * (admin time-on-site correction) outranks every derived source including
+ * direct job time entries, and is likewise re-derived from the durable
+ * structured_notes.timeOnSiteAdjusted marker on no-opts recalculations.
  */
 async function calculateJobCost(scheduledServiceId, db, {
   recomputeRevenue = false,
   untrustedLifecycleSpan = false,
   explicitLaborMinutes = null,
+  overrideLaborMinutes = null,
 } = {}) {
   db = resolveDb(db);
   if (!scheduledServiceId) throw new Error('scheduledServiceId required');
@@ -365,7 +381,22 @@ async function calculateJobCost(scheduledServiceId, db, {
   if (!svc) throw new Error(`scheduled_service ${scheduledServiceId} not found`);
 
   const srCols = await db('service_records').columnInfo().catch(() => ({}));
-  const { record, ambiguous } = await resolveServiceRecord(db, svc, srCols);
+  const { record: resolvedRecord, ambiguous } = await resolveServiceRecord(db, svc, srCols);
+  // An ambiguous legacy soft-join match contributes NOTHING (codex P2 #3152
+  // round 6): the newest of several same-customer/date/type records is an
+  // arbitrary pick, and using its revenue/products would attach another
+  // visit's financials to this row's job_costs — the same corruption the
+  // service_records write-through guard below has always refused. Costing
+  // proceeds as a record-less visit: revenue derives from the scheduled
+  // service/customer, products contribute nothing, and job_costs carries no
+  // service_record_id.
+  const record = ambiguous ? null : resolvedRecord;
+  if (ambiguous) {
+    logger.warn(
+      `[job-costing] ${scheduledServiceId} — ambiguous legacy service_record match `
+      + '(same customer/date/type duplicates); costing proceeds record-less',
+    );
+  }
   const customer = await db('customers').where({ id: svc.customer_id }).first();
 
   // Durable untrusted-span policy: the backfill closeout route passes
@@ -384,13 +415,40 @@ async function calculateJobCost(scheduledServiceId, db, {
   // not at all under backfill), else 0. The caller option remains honored for
   // any calc made before the completion's record row is committed/visible
   // (belt and braces); caller-supplied explicit minutes win over the column.
-  if (parseJsonObject(record?.structured_notes).backfill === true) {
+  const recordNotes = parseJsonObject(record?.structured_notes);
+  if (recordNotes.backfill === true) {
     untrustedLifecycleSpan = true;
   }
   if (untrustedLifecycleSpan && explicitLaborMinutes == null) {
     const persistedMinutes = Number(svc.service_time_minutes);
     if (Number.isFinite(persistedMinutes) && persistedMinutes > 0) {
       explicitLaborMinutes = persistedMinutes;
+    }
+  }
+  // Same durable-policy shape for the admin time-on-site correction (codex
+  // P1 #3152): the edit/live-override stamps `timeOnSiteAdjusted: true`
+  // beside the corrected duration, and every no-opts recalculation must book
+  // labor from that corrected value — NOT from a linked job time entry,
+  // which carries the same forgotten-clock-out inflation the operator just
+  // corrected (overrideLaborMinutes outranks entries in calcLaborCost;
+  // explicitLaborMinutes deliberately does not, so backfill keeps its
+  // entries-win behavior).
+  if (recordNotes.timeOnSiteAdjusted === true && overrideLaborMinutes == null) {
+    const correctedMinutes = Number(svc.service_time_minutes);
+    if (Number.isFinite(correctedMinutes) && correctedMinutes > 0) {
+      overrideLaborMinutes = correctedMinutes;
+    }
+  }
+  // Second durable home for the same marker (codex P2 #3152 round 5): a
+  // corrected visit with NO resolvable record (missing/ambiguous legacy
+  // rows) can't carry the structured_notes marker at all, so the correction
+  // endpoint stamps scheduled_services.time_on_site_adjusted_minutes — read
+  // here off the row already in hand, no extra query. Redundant with the
+  // record marker when both exist; the caller's explicit option still wins.
+  if (overrideLaborMinutes == null) {
+    const stampedMinutes = Number(svc.time_on_site_adjusted_minutes);
+    if (Number.isFinite(stampedMinutes) && stampedMinutes > 0) {
+      overrideLaborMinutes = stampedMinutes;
     }
   }
 
@@ -413,7 +471,7 @@ async function calculateJobCost(scheduledServiceId, db, {
   });
   const { laborCost, laborHours } = await calcLaborCost(
     db, scheduledServiceId, svc.technician_id, svc.actual_start_time, svc.actual_end_time, laborRate,
-    { untrustedLifecycleSpan, explicitLaborMinutes },
+    { untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes },
   );
   const { productsCost, breakdown } = record?.id
     ? await calcProductsCost(db, record.id)
@@ -445,45 +503,82 @@ async function calculateJobCost(scheduledServiceId, db, {
     products_used: JSON.stringify(breakdown),
   };
 
-  const existing = await db('job_costs').where({ scheduled_service_id: scheduledServiceId }).first();
-  if (existing) {
-    await db('job_costs').where({ id: existing.id }).update(row);
-  } else {
-    await db('job_costs').insert(row);
-  }
-
-  // 2. Write-through to service_records — the table the Dashboard + /admin/revenue
-  //    actually read. Each column is guarded by columnInfo so an environment
-  //    missing the 20260401000027 financial columns is a no-op, not a crash.
-  //    Skipped for ambiguous legacy soft-join matches (multiple same-day visits
-  //    collapsing onto one record) — writing would clobber it and blank the rest.
-  //    Also skipped when the record itself isn't completed: office-handoff visits
-  //    are stored status='incomplete' while their scheduled_service stays
-  //    'completed', and the dashboard counts any non-null revenue — an incomplete
-  //    visit must not surface revenue/margin.
-  const recordCompleted = !srCols.status || record?.status === 'completed';
+  // Correction-stamp fence, ATOMIC with the financial writes (codex P2
+  // #3152 rounds 8+9): the durable time_on_site_adjusted_minutes stamp was
+  // read ONCE with the svc row, and several async reads ran since — a
+  // recalculation that straddled a NEWER correction would land stale labor
+  // last. Round 8's standalone re-read still left a window between check
+  // and write, so the fence now takes the scheduled_services row lock (FOR
+  // UPDATE) in the SAME transaction as both financial writes: a correction
+  // commits its stamp through an UPDATE on that row, so it either commits
+  // before the lock is granted (fence sees the new stamp → skip) or blocks
+  // until these writes commit (its own follow-up recalc then lands the
+  // truth). Full-row read on purpose: selecting the column by name would
+  // throw in an environment that predates migration 20260801400000, while
+  // a missing property compares null === null and proceeds. If the caller
+  // passed a transaction handle, this nests as a savepoint.
   let wroteThrough = false;
-  if (record?.id && !ambiguous && recordCompleted) {
-    const upd = {};
-    const set = (col, val) => { if (srCols[col]) upd[col] = val; };
-    set('revenue', fin.revenue);
-    set('material_cost', fin.material_cost);
-    set('labor_hours', fin.labor_hours);
-    set('labor_cost', fin.labor_cost);
-    set('drive_cost', fin.drive_cost);
-    set('total_job_cost', fin.total_job_cost);
-    set('gross_profit', fin.gross_profit);
-    set('gross_margin_pct', fin.gross_margin_pct);
-    set('revenue_per_man_hour', fin.revenue_per_man_hour);
-    if (Object.keys(upd).length) {
-      await db('service_records').where({ id: record.id }).update(upd);
-      wroteThrough = true;
+  let staleSkipped = false;
+  await db.transaction(async (trx) => {
+    const rowNow = await trx('scheduled_services').where({ id: scheduledServiceId }).forUpdate().first();
+    const norm = (v) => (v == null ? null : Number(v));
+    // The fence compares the monotonic correction seq as well as the minutes
+    // value (codex P2 #3152 round 19): two saves of the SAME minutes are
+    // distinct revisions — if the newer save's recalculation (pricing
+    // against newer products/expenses state) finishes first, the older run
+    // would pass a minutes-only check and land its stale snapshot last.
+    // Missing column (pre-migration) compares null === null and proceeds,
+    // same as the minutes leg.
+    if (norm(rowNow?.time_on_site_adjusted_minutes) !== norm(svc.time_on_site_adjusted_minutes)
+      || norm(rowNow?.time_on_site_correction_seq) !== norm(svc.time_on_site_correction_seq)) {
+      logger.warn(
+        `[job-costing] ${scheduledServiceId} — correction stamp moved during recalculation `
+        + `(${norm(svc.time_on_site_adjusted_minutes)} rev ${norm(svc.time_on_site_correction_seq)} → `
+        + `${norm(rowNow?.time_on_site_adjusted_minutes)} rev ${norm(rowNow?.time_on_site_correction_seq)}); skipping stale financial writes`,
+      );
+      staleSkipped = true;
+      return;
     }
-  } else if (record?.id && ambiguous) {
-    logger.warn(
-      `[job-costing] ${scheduledServiceId} — ambiguous legacy service_record match `
-      + '(same customer/date/type duplicates); skipped service_records write-through',
-    );
+
+    const existing = await trx('job_costs').where({ scheduled_service_id: scheduledServiceId }).first();
+    if (existing) {
+      await trx('job_costs').where({ id: existing.id }).update(row);
+    } else {
+      await trx('job_costs').insert(row);
+    }
+
+    // 2. Write-through to service_records — the table the Dashboard + /admin/revenue
+    //    actually read. Each column is guarded by columnInfo so an environment
+    //    missing the 20260401000027 financial columns is a no-op, not a crash.
+    //    Skipped for ambiguous legacy soft-join matches (multiple same-day visits
+    //    collapsing onto one record) — writing would clobber it and blank the rest.
+    //    Also skipped when the record itself isn't completed: office-handoff visits
+    //    are stored status='incomplete' while their scheduled_service stays
+    //    'completed', and the dashboard counts any non-null revenue — an incomplete
+    //    visit must not surface revenue/margin.
+    // (`ambiguous` here is belt-and-braces — an ambiguous match is already
+    // nulled out at resolution above, so it can't reach this write.)
+    const recordCompleted = !srCols.status || record?.status === 'completed';
+    if (record?.id && !ambiguous && recordCompleted) {
+      const upd = {};
+      const set = (col, val) => { if (srCols[col]) upd[col] = val; };
+      set('revenue', fin.revenue);
+      set('material_cost', fin.material_cost);
+      set('labor_hours', fin.labor_hours);
+      set('labor_cost', fin.labor_cost);
+      set('drive_cost', fin.drive_cost);
+      set('total_job_cost', fin.total_job_cost);
+      set('gross_profit', fin.gross_profit);
+      set('gross_margin_pct', fin.gross_margin_pct);
+      set('revenue_per_man_hour', fin.revenue_per_man_hour);
+      if (Object.keys(upd).length) {
+        await trx('service_records').where({ id: record.id }).update(upd);
+        wroteThrough = true;
+      }
+    }
+  });
+  if (staleSkipped) {
+    return { ...fin, laborHours: fin.labor_hours, serviceRecordId: null, staleSkipped: true };
   }
 
   logger.info(
@@ -567,6 +662,8 @@ async function backfillServiceRecordFinancials(db, { onError } = {}) {
 
 module.exports = {
   calculateJobCost,
+  calcLaborCost,
+  resolveServiceRecord,
   backfillServiceRecordFinancials,
   deriveRevenue,
   computeServiceRecordFinancials,

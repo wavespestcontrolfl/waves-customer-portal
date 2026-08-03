@@ -2166,6 +2166,7 @@ export default function DispatchPageV2({
             setViewMode("day");
           }}
           onViewCustomer={openCustomerSidebar}
+          refreshKey={scheduleRefreshKey}
         />
       )}
       {viewMode === "list" && (
@@ -2700,6 +2701,10 @@ export default function DispatchPageV2({
           onRescheduled={() => {
             setRescheduleService(null);
             fetchSchedule(date);
+            // Week/5-Day and Month fetch their own payloads — bump the key
+            // so a sidebar-launched reschedule can't leave them showing the
+            // appointment at its old date.
+            setScheduleRefreshKey((k) => k + 1);
           }}
         />
       )}
@@ -2837,18 +2842,6 @@ export default function DispatchPageV2({
             setContinueProjectService((s) =>
               s && detailService && String(s.id) === String(detailService.id)
                 ? { ...s, status: "cancelled" }
-                : s,
-            );
-          }}
-          onNoShow={() => {
-            // Same conditional silence as onCancelled (Codex r11 P2).
-            fetchSchedule(date, { silent: !!continueProjectId });
-            // Same week-cache staleness as onCancelled (Codex r4 P2).
-            setScheduleRefreshKey((k) => k + 1);
-            // Same week-origin snapshot retirement as onCancelled (Codex r5).
-            setContinueProjectService((s) =>
-              s && detailService && String(s.id) === String(detailService.id)
-                ? { ...s, status: "no_show" }
                 : s,
             );
           }}
@@ -3111,6 +3104,10 @@ export default function DispatchPageV2({
           onEdit={(svc) => {
             setSelectedScheduleService(null);
             setEditingService(svc);
+          }}
+          onReschedule={(svc) => {
+            setSelectedScheduleService(null);
+            setRescheduleService(svc);
           }}
           onSavedNote={(svc, notes) => {
             setSelectedScheduleService((prev) =>

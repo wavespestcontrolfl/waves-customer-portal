@@ -458,7 +458,7 @@ export default function TechTreatmentZoneModal({
       fd.append('snapshot', blob, 'treatment-zone.png');
       if (lawnMask) {
         // The transparent highlight layer travels alongside the snapshot so
-        // the customer report can PULSE the green over the photo (owner
+        // the customer report can PULSE the highlight over the photo (owner
         // 2026-07-30 "the goal is to show where we sprayed"). Fail-soft: a
         // mask that won't export just means a static report highlight.
         try {

@@ -565,6 +565,62 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 6:25AM ET — LLM dispatch exception digest: aggregates yesterday's
+  // llm_dispatch_log rows and emails the company inbox ONLY when a policy
+  // degraded (all-providers-failed, fallback-rate spike, or gone silent);
+  // green days send nothing. Dark until GATE_LLM_DISPATCH_METRICS=true
+  // (stats + email no-op while off; the retention prune still runs so
+  // accumulated rows age out after a gate-off). runExclusive so a deploy
+  // overlap doesn't double-email the same day.
+  cron.schedule('25 6 * * *', async () => {
+    try {
+      const metrics = require('./llm-dispatch-metrics');
+      const res = await runExclusive('llm-dispatch-digest', () => metrics.runLlmDispatchDigest());
+      // runExclusive returns { skipped, reason } WITHOUT calling the job when
+      // it cannot acquire a DB connection — so on a full database outage the
+      // digest never runs and its own DB-failure alert never fires. Alert from
+      // here instead, over SMTP, touching no database. 'lease_held' is a
+      // normal overlap and is not an outage.
+      if (res && res.skipped && res.reason === 'no_connection') {
+        await metrics.alertRecorderUnreachable(res.reason);
+      }
+    } catch (err) {
+      logger.error(`[llm-dispatch-metrics] cron failed: ${err.message}`);
+      // runExclusive can also THROW before invoking the job — e.g. the pool
+      // hands out a connection but the pg_try_advisory_lock query dies as the
+      // DB goes down (codex #3123 r8, accepted residual then, fixed here).
+      // Alert unless the digest already emailed for this failure
+      // (err.alerted); alertRecorderUnreachable's independent-connection
+      // probe stands down on transient blips, so this cannot false-alarm a
+      // healthy database.
+      if (!err.alerted) {
+        try {
+          const { alertRecorderUnreachable } = require('./llm-dispatch-metrics');
+          await alertRecorderUnreachable(`digest tick threw: ${err.message}`);
+        } catch (alertErr) {
+          logger.error(`[llm-dispatch-metrics] unreachable-alert itself failed: ${alertErr.message}`);
+        }
+      }
+    }
+  }, { timezone: 'America/New_York' });
+
+  // HOURLY at :50 — LLM dispatch recorder heartbeat. Writes one row through
+  // the same insert path real recording uses, so the digest can tell a
+  // genuinely quiet day (heartbeats present, no dispatches) from a day the
+  // recorder was dead (no heartbeats at all). A probe at digest time cannot:
+  // a write path broken all day but recovered overnight would pass it while
+  // the whole lost day reported clean. No runExclusive — a duplicate
+  // heartbeat on deploy overlap is harmless, and skipping one is not; the
+  // digest counts DISTINCT HOURS, so replica duplicates cannot inflate
+  // coverage. No-ops while GATE_LLM_DISPATCH_METRICS is unset.
+  cron.schedule('50 * * * *', async () => {
+    try {
+      await require('./llm-dispatch-metrics').recordHeartbeat();
+    } catch (err) {
+      logger.error(`[llm-dispatch-metrics] heartbeat failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Month-end capture: fire on days 28–31 at 11:50pm ET, but only on the ACTUAL
   // final day (tomorrow ET is the 1st). Records the current (ending) month so it
   // freezes near its true end, capturing same-final-day conversions/churn/rate
@@ -2046,9 +2102,21 @@ function initScheduledJobs() {
                   // generic "Thanks for reaching out — your balance is $X"
                   // must not unlock payment-history amounts.
                   const ackBody = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i.test(String(msg.message_body || ''));
+                  // Monthly-membership dues are a CURRENT obligation, so they
+                  // belong in this set on the same terms as the balance
+                  // (codex #3141 r3). Without them a reviewed "$98.50/mo"
+                  // reply that an operator scheduled instead of sending
+                  // immediately was deterministically retired here as a stale
+                  // amount, so the monthly lane could be drafted and approved
+                  // but never actually sent. Shared definition with the
+                  // drafter's draft-time guard — these two lists had already
+                  // drifted once — and it re-reads the FRESH context above,
+                  // so a lane that stopped collecting between review and fire
+                  // publishes nothing and correctly blocks the send.
                   const authorized = new Set([
                     ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
                     ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
+                    ...ContextAggregator.authorizedDuesCents(ctx),
                     ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
                   ].filter((v) => Number.isFinite(v)));
                   amountsStale = bodyAmounts.some((a) => !authorized.has(a));
@@ -2427,8 +2495,8 @@ function initScheduledJobs() {
     try {
       const { processDuePdfRenderJobs } = require('./service-report/pdf-queue');
       const result = await processDuePdfRenderJobs();
-      if (result.claimed || result.succeeded || result.failed || result.requeued || result.recovered) {
-        logger.info(`Service report PDF renders: ${result.succeeded} succeeded, ${result.requeued} queued for retry, ${result.failed} failed, ${result.recovered} recovered`);
+      if (result.claimed || result.succeeded || result.failed || result.requeued || result.deferred || result.recovered) {
+        logger.info(`Service report PDF renders: ${result.succeeded} succeeded, ${result.requeued} queued for retry, ${result.deferred} deferred, ${result.failed} failed, ${result.recovered} recovered`);
       }
     } catch (err) {
       logger.error(`Service report PDF render cron failed: ${err.message}`);
@@ -2660,16 +2728,18 @@ function initScheduledJobs() {
         logger.warn(`[email-digest] nudge collection failed: ${e.message}`);
       }
 
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'email_digest',
-        title: 'Morning Email Digest',
-        body: `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
-        icon: '\uD83D\uDCE7',
-        link: '/admin/email',
-        metadata: JSON.stringify({ severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' }),
-        created_at: new Date(),
-      }).catch(() => {});
+      // Through NotificationService (not a raw insert) so the admin bell
+      // policy chokepoint covers the digest; notifyAdmin never throws.
+      await require('./notification-service').notifyAdmin(
+        'email_digest',
+        'Morning Email Digest',
+        `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
+        {
+          icon: '\uD83D\uDCE7',
+          link: '/admin/email',
+          metadata: { severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' },
+        },
+      );
 
       logger.info(`[email-digest] Morning digest: ${emails.length} emails, ${leads} leads, ${spam} spam`);
     } catch (err) {
@@ -3911,7 +3981,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/7 SMS+email).
+  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.
@@ -4183,9 +4253,30 @@ function initScheduledJobs() {
           // onSkip inserts a reschedule_log row unconditionally — with the
           // sweep spanning two days, a service yesterday's pass already
           // flagged must not be re-flagged toward the
-          // 2-noshows-in-90-days outreach trigger.
+          // 2-noshows-in-90-days outreach trigger. Occurrence-aware: a soft
+          // Quick Move no-show recorded an EARLIER slot of this same row
+          // (original_date + original_window = that missed slot) and must
+          // not suppress flagging a genuine later miss — including a rebook
+          // later the SAME day, which only the window distinguishes (codex
+          // r2). NULL slot fields match legacy rows to keep their old
+          // per-row dedup.
+          const missedDateStr = svc.scheduled_date
+            ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+            : null;
+          const missedWindowStr = svc.window_start ? `${svc.window_start}-${svc.window_end}` : null;
           const alreadyFlagged = await db('reschedule_log')
             .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
+            .where(function occurrenceMatch() {
+              if (!missedDateStr) return; // no slot info — legacy per-row dedup
+              this.whereNull('original_date').orWhere(function currentSlot() {
+                this.where('original_date', missedDateStr);
+                if (missedWindowStr) {
+                  this.andWhere(function sameWindow() {
+                    this.where('original_window', missedWindowStr).orWhereNull('original_window');
+                  });
+                }
+              });
+            })
             .first('id');
           if (alreadyFlagged) continue;
           try {
@@ -4473,6 +4564,25 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Call-log relink tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // NIGHTLY 3:20 AM — Triage dead-letter drain. Auto-resolves provably-moot
+  // open triage cards and auto-dismisses aged informational flags so the
+  // triage inbox stays an exception queue instead of a landfill (~1,800
+  // open vs 32 resolved when built). Owed-work cards never touched. Dark
+  // behind GATE_TRIAGE_AUTO_RESOLVE. See server/services/triage-auto-resolve.js.
+  // =========================================================================
+  cron.schedule('20 3 * * *', async () => {
+    try {
+      const { runTriageAutoResolve } = require('./triage-auto-resolve');
+      const result = await runTriageAutoResolve();
+      if (!result.skipped && result.applied > 0) {
+        logger.info(`[triage-sweep] applied=${result.applied} deferred=${result.deferred} rules=${JSON.stringify(result.counts)}`);
+      }
+    } catch (err) {
+      logger.error(`Triage auto-resolve tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -646,6 +646,17 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
       service,
       primaryKeyword: data.primary_keyword || null,
       operatorFaqException: opts.operatorFaqException === true,
+      // Operator provenance rides guardContext from the autonomous lane —
+      // without it this preflight reclassified authorized competitor prices
+      // and .gov citations as HARDCODED_PRICE / DISALLOWED_EXTERNAL_LINK and
+      // parked every otherwise-valid fix (Codex r3).
+      operatorCitations: runContext.operatorCitations === true,
+      competitorPriceCitations: runContext.competitorPriceCitations === true,
+      // A brief that FORBIDS prices must be honoured here too, or a banned
+      // price framed with "calculator"/"quote"/"pricing varies" clears this
+      // preflight and only parks later in revalidation (Codex).
+      forbidAllPrices: runContext.forbidAllPrices === true,
+      requiredSourceUrls: Array.isArray(runContext.requiredSourceUrls) ? runContext.requiredSourceUrls : [],
       allowedInternalLinks: Array.isArray(runContext.allowedInternalLinks) ? runContext.allowedInternalLinks : [],
       isRefresh: runContext.isRefresh === true,
       priorBody: typeof runContext.priorBody === 'string' ? runContext.priorBody : null,
@@ -864,19 +875,23 @@ function validateRewrittenMeta(metaDescription, factContext = null, deps = {}) {
     }
     // Blog meta contract (owner rule 2026-07-29): this validator only runs
     // on REWRITTEN blog metas, so the full contract applies with no
-    // grandfathering — no phone (token grammar OR literal), nothing salesy,
-    // and the final sentence must be a soft CTA. Without this, the
-    // scheduler-lane remediation could commit a 115-160-char sales pitch
-    // directly (spam gate + PII were its only checks).
+    // grandfathering — no phone (token grammar OR literal) and nothing
+    // salesy. Without this, the scheduler-lane remediation could commit a
+    // 115-160-char sales pitch directly (spam gate + PII were its only
+    // checks). The soft-CTA ending is NOT enforced here (owner ruling
+    // 2026-07-30: never a blocker) — it's a weight-0 soft signal in
+    // content-quality-gate only.
     const m = String(metaDescription || '').trim();
-    if (spamGate.PHONE_TOKEN_RE.test(m) || /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/.test(m)) {
+    if (spamGate.PHONE_TOKEN_RE.test(m) || /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/.test(m) || spamGate.BARE_PHONE_DIGITS_RE.test(m)) {
       return { ok: false, reason: 'blog meta contract: blog_meta_must_not_carry_phone' };
     }
     if (spamGate.SALESY_META_RE.test(m)) {
       return { ok: false, reason: 'blog meta contract: blog_meta_salesy' };
     }
-    if (!spamGate.endsWithSoftCta(m)) {
-      return { ok: false, reason: 'blog meta contract: blog_meta_missing_soft_cta' };
+    // Sales-copy shapes stay HARD in every sentence (Codex P1s, 2026-07-30)
+    // — "Learn more about saving big" is sales copy SALESY_META_RE misses.
+    if (spamGate.metaHasSalesCopy(m)) {
+      return { ok: false, reason: 'blog meta contract: blog_meta_sales_copy' };
     }
     return { ok: true };
   } catch (e) {

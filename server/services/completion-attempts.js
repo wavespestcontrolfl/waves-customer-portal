@@ -15,6 +15,24 @@ function isUniqueViolation(err) {
   return err?.code === '23505';
 }
 
+// Timer-vs-operator classification for timeOnSite — the SINGLE rule shared
+// by the completion route's intake gate (liveTimeOnSitePlan) and the MODE
+// hash below (codex P2 #3152 round 14: the two disagreeing let an admin's
+// string-form "45" be adjusted by the route but excluded from the hash, so
+// a same-key retry could flip it to "60" past the idempotency check).
+// Genuine panel-timer strings are the ONLY shapes that read as timer noise:
+// "M:SS" below an hour, "H:MM:SS" above (elapsedSince's exact output).
+// Everything else non-empty — numbers, bare "45", "45 min", numbery arrays
+// — is a consequential operator statement.
+const TIMER_ELAPSED_STRING = /^\d+:\d{2}(?::\d{2})?$/;
+
+function isOperatorTimeOnSite(value) {
+  if (value == null || value === '') return false;
+  if (typeof value === 'number') return true;
+  if (typeof value === 'string') return !TIMER_ELAPSED_STRING.test(value.trim());
+  return true;
+}
+
 // Two-segment request hash: `<core>:<mode>` (Codex P1, PR #2897 fix round
 // 10 — narrowing the fix-round-6 exclusion).
 //
@@ -33,14 +51,15 @@ function isUniqueViolation(err) {
 //    same-key retry after a PRE-commit failure could flip them while
 //    passing the idempotency check. They now hash into the MODE segment,
 //    and the pre-commit comparison sites match on the FULL composite.
-//    `timeOnSite` binds ONLY under backfill (Codex P2, fix round 13): a
-//    backfill's value is the operator's TYPED minutes — stable, and worth
-//    pinning pre-commit — but a NORMAL completion posts the panel's
-//    auto-elapsed timer, ticking every second, so hashing it turned any
-//    transient pre-commit failure into idempotency_key_mismatch on the
-//    very next tick instead of a retry. Normal completions keep the
-//    pre-round-10 exclusion; their duration is recomputed server-side from
-//    lifecycle stamps anyway.
+//    `timeOnSite` binds only when it is an operator statement: under
+//    backfill (Codex P2, fix round 13), and — since the live admin
+//    override — whenever the body carries a NUMBER (typed minutes are
+//    stable and consequential in either mode). A NORMAL completion posts
+//    the panel's auto-elapsed timer as a STRING, ticking every second, so
+//    hashing it turned any transient pre-commit failure into
+//    idempotency_key_mismatch on the very next tick instead of a retry.
+//    String elapsed keeps the pre-round-10 exclusion; its duration is
+//    recomputed server-side from lifecycle stamps anyway.
 //  - POST-commit (a committed service record exists) the frozen
 //    structured_notes are authoritative for both — admin-dispatch re-derives
 //    mode and duration from the record on resume and the body has no vote —
@@ -60,11 +79,17 @@ function completionRequestHashSegments(body) {
     .digest('hex');
   // Normalized so an omitted flag and an explicit false (same intent) hash
   // identically, and undefined/null duration unify; a non-backfill body's
-  // duration is timer noise and never enters the hash (see above).
+  // TIMER-string duration is noise and never enters the hash, while every
+  // operator statement — numbers AND non-timer strings, the exact rule the
+  // route's intake gate applies — binds in any mode (see above; codex P2
+  // #3152 round 14). Operator strings are canonicalized via String() so
+  // "45" and a later " 45 " still compare by content.
   const mode = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys({
       backfill: backfill === true,
-      timeOnSite: backfill === true ? (timeOnSite ?? null) : null,
+      timeOnSite: backfill === true || isOperatorTimeOnSite(timeOnSite)
+        ? (timeOnSite == null ? null : (typeof timeOnSite === 'number' ? timeOnSite : String(timeOnSite).trim()))
+        : null,
     })))
     .digest('hex');
   return { core, mode };
@@ -669,6 +694,12 @@ async function storeResolvedSnapshot(
 module.exports = {
   claimCompletionAttempt,
   hashCompletionRequest,
+  // The single timer-vs-operator classification rule, shared with the
+  // completion route's intake gate (liveTimeOnSitePlan) so the idempotency
+  // hash and the authorization gate can never disagree about what counts
+  // as an operator-entered duration.
+  TIMER_ELAPSED_STRING,
+  isOperatorTimeOnSite,
   // Exported for the contract tests: the pre-commit strict matcher, the
   // committed-resume core matcher, and the segment reader they share.
   requestHashMatches,

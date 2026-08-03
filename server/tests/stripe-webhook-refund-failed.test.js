@@ -52,6 +52,13 @@ jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest
 jest.mock('../services/receipt-delivery-queue', () => ({}));
 jest.mock('../services/annual-prepay-renewals', () => ({ syncTermForInvoicePayment: jest.fn() }));
 jest.mock('../services/estimate-deposits', () => ({ handleDepositChargeReversed: jest.fn(async () => ({ handled: false })) }));
+// Fee-lane detection's guarded fallback retrieves the PI when no local
+// pointer row exists; model Stripe answering "not a fee PI" so the
+// unlocked fence path stays exercisable (detection failures now throw).
+jest.mock('../services/stripe', () => ({
+  ...jest.requireActual('../services/stripe'),
+  retrievePaymentIntent: jest.fn(async (piId) => ({ id: piId, metadata: {} })),
+}));
 
 const db = require('../models/db');
 const AnnualPrepay = require('../services/annual-prepay-renewals');
@@ -85,6 +92,7 @@ describe('resolveOrphanSucceededPaymentIntentIfSettled', () => {
       if (table === 'invoices') return invoiceQuery;
       if (table === 'payments') return paymentQuery;
       if (table === 'stripe_orphan_charges') return orphanQuery;
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
 
@@ -102,6 +110,7 @@ describe('resolveOrphanSucceededPaymentIntentIfSettled', () => {
     };
     db.mockImplementation((table) => {
       if (table === 'invoices') return invoiceQuery;
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
 
@@ -141,7 +150,10 @@ describe('handleRefundFailed', () => {
       metadata: null,
     };
     trxUpdate = jest.fn().mockResolvedValue(1);
-    notificationInsert = jest.fn().mockResolvedValue([1]);
+    // Builder-shaped: the bounce notification now lands via
+    // NotificationService.create (bell-policy chokepoint), which chains
+    // .insert(row).returning('*').
+    notificationInsert = jest.fn((row) => ({ returning: jest.fn(async () => [{ id: 'notif-1', ...row }]) }));
 
     const trxPaymentsQuery = {
       where: jest.fn(() => trxPaymentsQuery),
@@ -180,6 +192,7 @@ describe('handleRefundFailed', () => {
       if (table === 'invoices') return dbInvoices;
       if (table === 'annual_prepay_terms') return dbPrepayTerms;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.transaction.mockImplementation(async (cb) => cb(trx));
@@ -408,6 +421,7 @@ describe('handleRefundFailed', () => {
       if (table === 'payments') return emptyQuery;
       if (table === 'estimate_deposits') return depQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     // Fence + notification commit in ONE transaction — the trx routes
@@ -456,6 +470,7 @@ describe('handleRefundFailed', () => {
       if (table === 'payments') return emptyQuery;
       if (table === 'estimate_deposits') return depQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.transaction.mockImplementation(async (cb) => cb(db));
@@ -482,11 +497,17 @@ describe('handleRefundFailed', () => {
       where: jest.fn(() => emptyQuery),
       first: jest.fn(async () => undefined),
     };
-    notificationInsert.mockRejectedValue(new Error('insert failed'));
+    // NotificationService.create swallows the DB error into null; the
+    // webhook's wrapper converts that back into a throw so the fence
+    // transaction still rolls back and Stripe retries.
+    notificationInsert.mockImplementation(() => ({
+      returning: jest.fn(async () => { throw new Error('insert failed'); }),
+    }));
     db.mockImplementation((table) => {
       if (table === 'payments') return emptyQuery;
       if (table === 'estimate_deposits') return depQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.transaction.mockImplementation(async (cb) => cb(db));
@@ -508,6 +529,7 @@ describe('handleRefundFailed', () => {
     };
     db.mockImplementation((table) => {
       if (table === 'payments') return emptyQuery;
+      if (table === 'appointment_card_requests') return emptyQuery;
       if (table === 'stripe_failed_refunds') return fenceQuery;
       if (table === 'notifications') return { insert: notificationInsert };
       throw new Error(`Unexpected db table: ${table}`);
@@ -547,6 +569,7 @@ describe('handleRefundFailed', () => {
     };
     db.mockImplementation((table) => {
       if (table === 'stripe_failed_refunds') return fenceQuery;
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
     db.schema = { hasTable: jest.fn(async () => true) };
@@ -564,6 +587,49 @@ describe('handleRefundFailed', () => {
     expect(notificationInsert).not.toHaveBeenCalled();
   });
 
+  test('fee charge.refunded fenced while waiting for the lock → no stamp, no refund comms (r26)', async () => {
+    // The unlocked probes see nothing, refund.failed commits its fence
+    // while this handler waits for the fee lock — the in-lock re-read must
+    // catch it and skip the stamp + side effects entirely.
+    let fenceReads = 0;
+    const fenceQuery = {
+      where: jest.fn(() => fenceQuery),
+      first: jest.fn(async () => (++fenceReads >= 2 ? { stripe_refund_id: 're_fail' } : undefined)),
+    };
+    const paymentUpdates = [];
+    const paymentsQuery = {
+      where: jest.fn(() => paymentsQuery),
+      first: jest.fn(async () => ({ id: 'pay-1', metadata: null, statement_id: null, customer_id: 'cust-1' })),
+      update: jest.fn(async (patch) => { paymentUpdates.push(patch); return 1; }),
+    };
+    const emptyQuery = { where: jest.fn(() => emptyQuery), first: jest.fn(async () => undefined) };
+    db.mockImplementation((table) => {
+      if (table === 'stripe_failed_refunds') return fenceQuery;
+      if (table === 'payments') return paymentsQuery;
+      if (table === 'payer_statements') return emptyQuery;
+      if (table === 'appointment_card_requests') return emptyQuery;
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+    db.schema = { hasTable: jest.fn(async () => true) };
+    db.raw = jest.fn(async () => ({}));
+    db.transaction.mockImplementation(async (cb) => cb(db));
+
+    await handleChargeRefunded({
+      id: 'ch_1',
+      payment_intent: 'pi_1',
+      metadata: { purpose: 'appointment_card_no_show_fee' },
+      amount: 4900,
+      amount_refunded: 4900,
+      refunded: true,
+      refunds: { data: [{ id: 're_fail', amount: 4900, created: 1751000000 }] },
+    });
+    expect(db.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['appointment_card_no_show_fee:pi_1']);
+    expect(paymentUpdates).toHaveLength(0);
+    expect(notificationInsert).not.toHaveBeenCalled();
+    expect(require('../services/payment-lifecycle-email').sendRefundIssued).not.toHaveBeenCalled();
+    expect(require('../services/notification-triggers').triggerNotification).not.toHaveBeenCalled();
+  });
+
   test('no payments row (estimate-deposit refund) still notifies with the deposit hint', async () => {
     const emptyQuery = {
       where: jest.fn(() => emptyQuery),
@@ -572,6 +638,7 @@ describe('handleRefundFailed', () => {
     db.mockImplementation((table) => {
       if (table === 'payments') return emptyQuery;
       if (table === 'notifications') return { insert: notificationInsert };
+      if (table === 'appointment_card_requests') return { where: () => ({ first: async () => undefined }) };
       throw new Error(`Unexpected db table: ${table}`);
     });
 

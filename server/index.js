@@ -547,6 +547,10 @@ app.use('/api/public/track', require('./routes/track-public'));
 // GATE_GROWTHBOOK inside the route (404 when off), own per-route rate limit.
 app.use('/api/public/experiments', require('./routes/experiments-public'));
 app.use('/api/public/reschedule', require('./routes/reschedule-public'));
+// Customer appointment page (24h reminder + booking confirmation link
+// target). Token-gated on the same reschedule_token; every route 404s
+// until GATE_APPOINTMENT_PAGE is on.
+app.use('/api/public/appointment', require('./routes/appointment-public'));
 // "Secure your appointment" card-on-file capture page (appointment-card-
 // request funnel). Token-gated; unreachable until the funnel sends links.
 app.use('/api/public/secure-card', require('./routes/secure-card-public'));
@@ -952,7 +956,7 @@ httpServer.listen(PORT, () => {
           const { processDuePdfRenderJobs } = require('./services/service-report/pdf-queue');
           const summary = await processDuePdfRenderJobs();
           if (summary.claimed || summary.recovered) {
-            logger.info(`[service-report-pdf-queue] processed ${summary.claimed} job(s): ${summary.succeeded} succeeded, ${summary.requeued} requeued, ${summary.failed} failed, ${summary.recovered} recovered`);
+            logger.info(`[service-report-pdf-queue] processed ${summary.claimed} job(s): ${summary.succeeded} succeeded, ${summary.requeued} requeued, ${summary.deferred} deferred, ${summary.failed} failed, ${summary.recovered} recovered`);
           }
         } catch (err) {
           logger.error(`[service-report-pdf-queue] processor failed: ${err.message}`);

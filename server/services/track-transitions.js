@@ -634,6 +634,60 @@ async function markComplete(serviceId, opts = {}) {
     return { ok: false, reason: 'future_scheduled_date' };
   }
   if (svc.track_state === 'complete') {
+    // A supplied finite instant is honored on the already-complete path too
+    // (codex P2 #3152 round 12): a visit completed earlier through the
+    // status route and finalized later with a live time correction takes
+    // this early return — completed_at must still move to the corrected end
+    // or date-window readers keep the late-closeout day. Idempotent on
+    // retries: the supplied instant is deterministic (start + typed
+    // minutes, or the backdated service-day instant), so a re-run writes
+    // the same value or nothing. Callers that pass none are unchanged.
+    const suppliedCompletedAt = finiteDate(opts.completedAt);
+    // Fenced against newer corrections (codex P2 #3152 round 13): the
+    // finalization's SECOND tracker refresh can run after an admin saved a
+    // newer duration through the time-on-site PATCH — restoring the older
+    // instant here would split completed_at from the newer end fields. When
+    // the caller states which correction revision its instant belongs to
+    // (expectedCorrectionSeq; undefined = legacy caller, no fence; null =
+    // never corrected), the rewrite only lands while the row's monotonic
+    // seq still matches — the seq, not the minutes value, because a
+    // same-minutes re-save that repairs clamped end fields is a NEW
+    // correction the value comparison cannot see (codex P2 round 17). The
+    // UPDATE is additionally conditional on the completed_at this call
+    // observed, so a move between read and write skips instead of clobbers.
+    const normSeq = (v) => (v == null ? null : Number(v));
+    const stampMatchesCaller = opts.expectedCorrectionSeq === undefined
+      || normSeq(svc.time_on_site_correction_seq) === normSeq(opts.expectedCorrectionSeq);
+    if (suppliedCompletedAt
+      && stampMatchesCaller
+      && (!svc.completed_at || new Date(svc.completed_at).getTime() !== suppliedCompletedAt.getTime())) {
+      const moved = await db('scheduled_services')
+        .where({ id: serviceId })
+        .modify((q) => {
+          if (svc.completed_at == null) q.whereNull('completed_at');
+          else q.where('completed_at', svc.completed_at);
+          // completed_at alone is not a version token for every correction
+          // (codex P2 #3152 round 14): a newer clamped correction moves the
+          // durable stamp and duration but deliberately leaves completed_at
+          // untouched, so this write must ALSO be conditional on the
+          // correction revision the caller's instant belongs to — the
+          // monotonic seq since round 17 (minutes equality misses a
+          // same-value re-save). Guarded on the column existing in the
+          // loaded row so pre-migration environments skip the predicate
+          // (no corrections can exist there).
+          if (opts.expectedCorrectionSeq !== undefined
+            && Object.prototype.hasOwnProperty.call(svc, 'time_on_site_correction_seq')) {
+            q.whereRaw('time_on_site_correction_seq IS NOT DISTINCT FROM ?', [
+              opts.expectedCorrectionSeq == null ? null : Number(opts.expectedCorrectionSeq),
+            ]);
+          }
+        })
+        .update({
+          completed_at: suppliedCompletedAt,
+          updated_at: new Date(),
+        });
+      if (moved > 0) svc.completed_at = suppliedCompletedAt;
+    }
     emitCustomerTrackRefresh(svc, 'complete', svc.completed_at || new Date());
     return { ok: true, state: 'complete', completedAt: svc.completed_at };
   }
@@ -643,17 +697,95 @@ async function markComplete(serviceId, opts = {}) {
 
   const now = new Date();
   // Untrusted span: caller-supplied backdated instant or nothing (see the
-  // function comment). Normal path: the wall clock, as always.
-  const completedAtStamp = opts.untrustedLifecycleSpan ? finiteDate(opts.completedAt) : now;
-  const updated = await db('scheduled_services')
+  // function comment). Trusted path: a caller-supplied finite instant is
+  // honored (the live admin time-on-site override passes its corrected end
+  // so date-window readers that prefer completed_at attribute the visit to
+  // the corrected day — codex P2 #3152 round 11), else the wall clock, as
+  // always for every caller that passes none.
+  //
+  // The correction-stamp fence applies on THIS branch too (codex P2 #3152
+  // round 15): a correction can land between the completion transaction's
+  // commit and this first tracker transition — its completed_at is already
+  // on the row, and stamping `now` (or this caller's stale instant) over it
+  // would split completed_at from the corrected end fields. When the caller
+  // states which correction revision its instant belongs to and the row's
+  // monotonic seq disagrees, completed_at is left exactly as the row
+  // carries it — and so are the lifecycle end/duration columns the
+  // correction owns: the write degrades to a transition-only flip of
+  // track_state. The seq, not the minutes value, is the fence (codex P2
+  // round 17): a same-minutes re-save is a new correction too.
+  //
+  // The fence is atomic, not just in-memory (codex P2 #3152 round 16): a
+  // correction that commits between loadService and the UPDATE would pass
+  // the in-memory check on the stale row, so the full write also carries
+  // the seq predicate. Zero rows with the predicate on is ambiguous —
+  // state moved or seq moved — and the transition-only retry resolves it:
+  // it matches only while the state is still transitionable, meaning the
+  // correction (not the state) moved mid-flight.
+  const normStamp = (v) => (v == null ? null : Number(v));
+  const transitionStampMatches = opts.expectedCorrectionSeq === undefined
+    || normStamp(svc.time_on_site_correction_seq) === normStamp(opts.expectedCorrectionSeq);
+  // The atomic predicate is on by DEFAULT (codex P2 #3152 round 18): the
+  // ordinary status-route completions pass no expectation, but their
+  // loadService→UPDATE window races the correction PATCH all the same — a
+  // caller with no stated revision fences against the revision THIS call
+  // observed at load, so a correction committing inside the window turns
+  // the full lifecycle write into the transition-only retry instead of a
+  // stale overwrite. A caller-stated revision keeps precedence.
+  const fenceSeq = opts.expectedCorrectionSeq !== undefined
+    ? opts.expectedCorrectionSeq
+    : (svc.time_on_site_correction_seq ?? null);
+  // A correction that committed BEFORE this load owns the row exactly as
+  // much as one that commits after it — and the seq predicate only detects
+  // post-load movement (codex P2 #3152 round 20). When the caller states no
+  // revision (an ordinary status-route completion) and the loaded row
+  // already carries ANY correction revision, the flip degrades to
+  // transition-only. Unconditional on completed_at (codex P2 round 26): a
+  // clamped or no-start correction bumps the seq while deliberately
+  // stamping NO end — the unknown-end posture — and a full update here
+  // would write wall-clock end stamps beside the corrected duration,
+  // exactly the pairing the correction chose not to make.
+  const priorCorrectionOwnsRow = opts.expectedCorrectionSeq === undefined
+    && normStamp(svc.time_on_site_correction_seq) != null;
+  let completedAtStamp = (!transitionStampMatches || priorCorrectionOwnsRow)
+    ? null // the correction owns completed_at — the row's value stands
+    : (opts.untrustedLifecycleSpan
+      ? finiteDate(opts.completedAt)
+      : (finiteDate(opts.completedAt) || now));
+  const transitionableStates = ['scheduled', 'en_route', 'on_property'];
+  // Guarded on the column existing in the loaded row so pre-migration
+  // environments skip the predicate (no stamps can exist there) — same
+  // contract as the already-complete branch above.
+  const stampFenceActive = Object.prototype.hasOwnProperty.call(svc, 'time_on_site_correction_seq');
+  const transitionOnlyFlip = () => db('scheduled_services')
     .where({ id: serviceId })
-    .whereIn('track_state', ['scheduled', 'en_route', 'on_property'])
-    .update({
-      track_state: 'complete',
-      ...(completedAtStamp ? { completed_at: completedAtStamp } : {}),
-      ...(opts.untrustedLifecycleSpan ? {} : buildCompletionLifecycleUpdates(svc, now)),
-      updated_at: now,
-    });
+    .whereIn('track_state', transitionableStates)
+    .update({ track_state: 'complete', updated_at: now });
+  let updated;
+  if (!transitionStampMatches || priorCorrectionOwnsRow) {
+    updated = await transitionOnlyFlip();
+  } else {
+    updated = await db('scheduled_services')
+      .where({ id: serviceId })
+      .whereIn('track_state', transitionableStates)
+      .modify((q) => {
+        if (stampFenceActive) {
+          q.whereRaw('time_on_site_correction_seq IS NOT DISTINCT FROM ?', [
+            fenceSeq == null ? null : Number(fenceSeq),
+          ]);
+        }
+      })
+      .update({
+        track_state: 'complete',
+        ...(completedAtStamp ? { completed_at: completedAtStamp } : {}),
+        ...(opts.untrustedLifecycleSpan ? {} : buildCompletionLifecycleUpdates(svc, now)),
+        updated_at: now,
+      });
+    if (updated === 0 && stampFenceActive) {
+      updated = await transitionOnlyFlip();
+      if (updated > 0) completedAtStamp = null;
+    }
+  }
   if (updated === 0) {
     const fresh = await loadService(serviceId);
     return { ok: true, state: fresh?.track_state || 'complete', completedAt: fresh?.completed_at || null };

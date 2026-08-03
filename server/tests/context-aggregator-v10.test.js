@@ -92,3 +92,134 @@ describe('lawnOverall — canonical scoring mirror', () => {
       .toBe(Math.round(80 * 0.30 + 60 * 0.25 + 80 * 0.25 + 50 * 0.20));
   });
 });
+
+// The billing lane travels into the managed agent's context snapshot verbatim
+// (managed-assistant.js stores ctx.summary), so what buildSummary writes is
+// authoritative grounding — codex #3128 r9.
+describe('buildSummary billing-lane fact', () => {
+  const ContextAggregator = require('../services/context-aggregator');
+  const { resolveBillingLaneFacts, resolveMonthlyDuesFact } = ContextAggregator;
+  // The real production shape: getContextForCustomer resolves the lane, then
+  // prices the dues against the method the charge will actually run on.
+  const summaryFor = (customer, { collection = 'autopay_off', methods = null, annualCoverage } = {}) => {
+    const c = { first_name: 'Pat', last_name: 'Tester', pipeline_stage: 'active_customer', ...customer };
+    const lane = resolveBillingLaneFacts(c, annualCoverage);
+    if (lane.monthlyBilled) {
+      lane.monthlyDues = resolveMonthlyDuesFact({ monthlyRate: c.monthly_rate, collection, methods });
+    }
+    return ContextAggregator.buildSummary(c, [], null, [], 0, lane);
+  };
+
+  test('an invoice-on-complete customer is described per application, never "per visit"', () => {
+    // per_visit is an internal billing mechanism; the house voice forbids the
+    // phrase, so the raw mode must never reach the snapshot.
+    const s = summaryFor({ billing_mode: 'per_visit', waveguard_tier: 'None', monthly_rate: 0 });
+    expect(s).toContain('Billing lane: per application');
+    expect(s).not.toMatch(/per visit/i);
+  });
+
+  test('a monthly member carries the dues amount — the lane alone cannot be quoted', () => {
+    // The house voice forbids computing or inventing figures, so "state it
+    // plainly" without the number just produces a deferral.
+    const s = summaryFor({ billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 });
+    expect(s).toContain('Billing lane: monthly membership');
+    expect(s).toContain('$98.50/mo dues');
+  });
+
+  test('the exact surcharged charge stays OUT of the long-lived snapshot', () => {
+    // This string is sent once, at session creation, and the session lives
+    // ~30 minutes — long enough for the customer to switch between a debit
+    // and a credit method, at which point a frozen total is the wrong number
+    // (codex #3141 r4). The dues stay; the exact charge belongs to the
+    // drafter's facts block, which is rebuilt for every message.
+    const s = summaryFor(
+      { billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
+      { collection: 'active', methods: [{ method_type: 'card', card_funding: 'credit' }] },
+    );
+    expect(s).toContain('$98.50/mo dues');
+    expect(s).not.toContain('101.35');
+    expect(s).toMatch(/card fee applies at charge — state dues only/);
+  });
+
+  test('a suppressed collection carries its reason into the snapshot', () => {
+    // The managed agent gets ONLY this string — never the drafter's facts
+    // block — so "monthly membership, $98.50" with the reason dropped let it
+    // answer a current-charge question from a rate alone (codex #3141 r3).
+    for (const [collection, phrase] of [
+      ['autopay_paused', /autopay paused, not collecting/],
+      ['service_paused', /billing paused, not collecting/],
+      ['account_inactive', /account not active, not collecting/],
+      ['annual_prepay_pending', /annual prepay invoice open, not collecting/],
+      ['unknown', /collection state unconfirmed/],
+    ]) {
+      const s = summaryFor(
+        { billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
+        { collection },
+      );
+      expect(s).toContain('$98.50/mo dues');
+      expect(s).toMatch(phrase);
+    }
+  });
+
+  test('a collecting lane with no card fee carries the amount with no caveat', () => {
+    const s = summaryFor(
+      { billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
+      { collection: 'active', methods: [{ method_type: 'us_bank_account', card_funding: null }] },
+    );
+    expect(s).toContain('($98.50/mo dues)');
+  });
+
+  test('an UNPRICED membership carries no amount and is not called monthly-billed', () => {
+    // No rate = the dues cron never selects the row and chargeMonthly refuses
+    // it, so nothing is charged monthly at all.
+    const s = summaryFor({ billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 0 });
+    expect(s).toContain('no rate set');
+    expect(s).not.toMatch(/dues|\$/);
+  });
+
+  test('an INFERRED monthly member is marked inferred but still quotable', () => {
+    // NULL mode + real tier + rate is what MONTHLY_LANE_SQL bills, so this
+    // account genuinely is charged monthly (codex #3128 r8).
+    const s = summaryFor({ billing_mode: null, waveguard_tier: 'Bronze', monthly_rate: 45 });
+    expect(s).toContain('Billing lane: monthly membership (inferred)');
+    expect(s).toContain('$45.00/mo dues');
+  });
+
+  test('a per-application customer never carries a monthly figure', () => {
+    const s = summaryFor({ billing_mode: 'per_application', waveguard_tier: 'Silver', monthly_rate: 117 });
+    expect(s).toContain('Billing lane: per application');
+    expect(s).not.toMatch(/dues|117/);
+  });
+
+  test('an annual-prepay customer with live coverage is named as prepaid', () => {
+    const s = summaryFor(
+      { billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 },
+      { annualCoverage: 'covered' },
+    );
+    expect(s).toContain('paid for the year');
+    expect(s).not.toMatch(/dues/);
+  });
+
+  test('an annual-prepay customer without live coverage is never named as paid up', () => {
+    // A naturally expired term keeps billing_mode 'annual_prepay' while the
+    // renewal flow owns collection (codex #3141 r4).
+    expect(summaryFor(
+      { billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 },
+      { annualCoverage: 'not_covered' },
+    )).toContain('coverage not current');
+    // Unresolved coverage fails closed the same way.
+    expect(summaryFor({ billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 }))
+      .toContain('coverage unconfirmed');
+  });
+
+  test('a direct caller that resolves no lane fact states no amount', () => {
+    // buildSummary's own fallback cannot price dues (no DB), so it must not
+    // reach for the raw rate — no amount is the fail-closed answer.
+    const s = ContextAggregator.buildSummary(
+      { first_name: 'Pat', last_name: 'Tester', pipeline_stage: 'active_customer', billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
+      [], null, [], 0,
+    );
+    expect(s).toContain('Billing lane: monthly membership');
+    expect(s).not.toContain('98.50');
+  });
+});

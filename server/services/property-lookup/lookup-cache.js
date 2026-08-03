@@ -29,7 +29,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
-const { buildPropertyDataQuality, detectUnassessedVacantParcel, hasCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
+const { buildPropertyDataQuality, detectUnassessedVacantParcel, detectStaleImageryTurfConflict, hasCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
 
 const DEFAULT_TTL_DAYS = 180;
 // Unassessed vacant parcel (vacant roll parcel, no building record — often
@@ -215,11 +215,21 @@ async function getCachedLookup(address) {
     // shipped carry the base 180-day expiry, which would pin exactly the
     // records this exists to refresh (codex P1). Rows without a data
     // timestamp can't prove freshness — fail toward the live lookup.
-    if (detectUnassessedVacantParcel(row.property_record)) {
+    // Stale-imagery-conflict rows (county assesses a home, vision measured
+    // an empty lot — see detectStaleImageryTurfConflict) get the same
+    // read-side short TTL for the same reason: fresher tiles are the only
+    // real fix, and the rows poisoned before this shipped carry the 180-day
+    // expiry.
+    const shortTtlReason = detectUnassessedVacantParcel(row.property_record)
+      ? 'vacant-parcel'
+      : (detectStaleImageryTurfConflict(row.property_record, row.ai_analysis)
+        ? 'stale-imagery-conflict'
+        : null);
+    if (shortTtlReason) {
       const savedAt = row.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
       const maxAgeMs = vacantParcelTtlDays() * 24 * 60 * 60 * 1000;
       if (!savedAt || Date.now() - savedAt > maxAgeMs) {
-        logger.info('[lookup-cache] vacant-parcel row past the short TTL — treating as miss');
+        logger.info(`[lookup-cache] ${shortTtlReason} row past the short TTL — treating as miss`);
         return null;
       }
     }
@@ -343,8 +353,11 @@ async function saveLookup(address, result) {
     // compare as newer than the data so the next hit invalidates.
     const dataAsOf = result.meta?.timestamp ? new Date(result.meta.timestamp) : new Date();
     const vacantParcel = Boolean(detectUnassessedVacantParcel(record));
+    // Stale-imagery conflicts share the vacant-parcel short TTL: both are
+    // "the imagery/roll will catch up" windows, not stable property facts.
+    const staleImagery = Boolean(detectStaleImageryTurfConflict(record, result.aiAnalysis));
     const rollMiss = !hasCountyEvidence(record);
-    const ttlDays = vacantParcel ? vacantParcelTtlDays()
+    const ttlDays = (vacantParcel || staleImagery) ? vacantParcelTtlDays()
       : rollMiss ? rollMissTtlDays()
       : cacheTtlDays();
     const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
@@ -375,6 +388,7 @@ async function saveLookup(address, result) {
       hasParcel: Boolean(record._parcel),
       ttlDays,
       vacantParcel: vacantParcel || undefined,
+      staleImageryConflict: staleImagery || undefined,
     });
   } catch (err) {
     logger.warn('[lookup-cache] write failed', { error: err.message });

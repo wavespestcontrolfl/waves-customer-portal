@@ -67,18 +67,97 @@ function pickCustomerMatch(rows, extraction) {
   return { customer: byName[0] || rows[0], ambiguous: true };
 }
 
-async function loadCustomerByPhone(phone, extraction) {
+// How fresh a row must be to count as the Twilio webhook's first-contact
+// shell. The webhook inserts it seconds before the estimator runs in the
+// same request; the generous window only has to survive queue/retry delay,
+// while staying far short of any real lead's age.
+const WEBHOOK_SHELL_MAX_AGE_MS = 15 * 60 * 1000;
+
+// opts (both consumed by the scope-guards triage; composer callers omit
+// them and keep today's behavior exactly):
+//  - timeoutMs: knex cancel-timeout so the triage deadline bounds the WORK.
+//  - includeServiceContacts: also match the configured service-contact
+//    phone slots — a spouse/tenant/manager texting from
+//    service_contact*_phone is an established customer identity elsewhere
+//    (customer-contact.js, call-spam-classifier.js) and must ground.
+async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includeServiceContacts = false } = {}) {
   const digits = last10(phone);
   if (!digits) return { customer: null, ambiguous: false };
   try {
-    const rows = await db('customers')
+    let q = db('customers')
       .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
         'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
-        'property_type', 'company_name')
-      .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
+        // active: consumed by the scope-guards triage (an inactive/former
+        // customer texting a NEW quote must read as a prospect there).
+        // created_at: the webhook-shell recency marker below.
+        // created_via: the webhook shell's PROVENANCE stamp (below).
+        'property_type', 'company_name', 'active', 'created_at', 'created_via')
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
       .limit(5);
+    const like = `%${digits}`;
+    if (includeServiceContacts) {
+      q = q.where(function orPhones() {
+        this.whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [like])
+          .orWhereRaw("regexp_replace(coalesce(service_contact_phone, ''), '\\D', '', 'g') LIKE ?", [like])
+          .orWhereRaw("regexp_replace(coalesce(service_contact2_phone, ''), '\\D', '', 'g') LIKE ?", [like])
+          .orWhereRaw("regexp_replace(coalesce(service_contact3_phone, ''), '\\D', '', 'g') LIKE ?", [like]);
+      });
+    } else {
+      q = q.whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [like]);
+    }
+    if (timeoutMs) q = q.timeout(timeoutMs, { cancel: true });
+    const rows = await q;
+    // Prospect-shell resolution — includeServiceContacts callers ONLY (the
+    // scope-guards triage and the gate-on SMS context build; the call path
+    // and every ungated caller skip this entirely and keep today's
+    // behavior byte-for-byte). When an on-file service contact first texts
+    // a domain/van tracking number, the Twilio webhook does not recognize
+    // contact-slot phones and mints a NEW primary-phone row. The combined
+    // lookup then returns that shell alongside the real customer's
+    // contact-slot match, pickCustomerMatch calls it ambiguous, and the SMS
+    // build red-lanes a perfectly valid add-on request.
+    //
+    // The shortcut applies ONLY to rows the webhook itself STAMPED as that
+    // placeholder (customers.created_via, written by the domain/van
+    // tracking branch moments before this runs). Row shape is not proof: a
+    // phone can legitimately carry an established customer AND a real
+    // separate lead, and silently handing that lead's quote the
+    // established customer's id, saved property, and membership pricing is
+    // exactly the failure this guard must not create. Anything unstamped
+    // keeps today's ambiguity.
+    if (includeServiceContacts && rows.length > 1) {
+      const { CUSTOMER_STAGES, CREATED_VIA } = require('../customer-stages');
+      const isReal = (r) => r.active === true && CUSTOMER_STAGES.includes(r.pipeline_stage);
+      // PROVENANCE, not row shape. The shell is identified by the stamp the
+      // Twilio webhook writes on the row it mints (customers.created_via —
+      // see routes/twilio-webhook.js domain/van branch and the CREATED_VIA
+      // constant). Shape cannot carry this decision: routes/lead-webhook.js
+      // creates an active new_lead with a blank address_line1 AND blank zip
+      // when a form arrives without an address, so an address-less recent
+      // new_lead is NOT proof of a webhook shell — and misreading a genuine
+      // lead as one discards real ambiguity and attaches the established
+      // customer's id, property, and membership pricing to the lead's quote.
+      // The remaining conditions are not provenance tests, they are
+      // conservatism: an unstamped row (created before the stamp shipped,
+      // or by any other path) never qualifies, a row that has since become
+      // a real customer or acquired an address/ZIP is no longer a bare
+      // placeholder, and the recency window keeps the shortcut to the
+      // webhook's own request. Anything else keeps today's ambiguity, which
+      // red-lanes for a human.
+      const isWebhookShell = (r) => r.created_via === CREATED_VIA.TWILIO_TRACKING_SHELL
+        && !isReal(r)
+        && !CUSTOMER_STAGES.includes(r.pipeline_stage)
+        && !String(r.address_line1 || '').trim()
+        && !String(r.zip || '').trim()
+        && !!r.created_at
+        && Date.now() - new Date(r.created_at).getTime() <= WEBHOOK_SHELL_MAX_AGE_MS;
+      const real = rows.filter(isReal);
+      const others = rows.filter((r) => !isReal(r));
+      if (real.length === 1 && others.every(isWebhookShell)) {
+        return { customer: real[0], ambiguous: false };
+      }
+    }
     return pickCustomerMatch(rows, extraction);
   } catch (err) {
     logger.warn(`[estimator-engine] customer load failed: ${err.message}`);
@@ -86,6 +165,35 @@ async function loadCustomerByPhone(phone, extraction) {
     // behind the error, so callers that gate member pricing on this result
     // must be able to fail closed instead of quoting them as a new prospect.
     return { customer: null, ambiguous: false, unavailable: true };
+  }
+}
+
+// Address-grounded customer load (SMS scope-guards path only): triage
+// confirmed the thread names exactly one existing customer's property, but
+// the sender's phone is off file. Load that customer BY ID with the same
+// real-customer gates triage applied (not deleted, active === true,
+// established pipeline stage) and the same column set as loadCustomerByPhone
+// so downstream consumers see an identical shape. Returns null on a genuine
+// no-match / gate failure (draft proceeds as a prospect); a QUERY error
+// returns { unavailable: true } — same contract as loadCustomerByPhone. A
+// transient DB error is NOT a no-match: the grounded customer's membership
+// could be hiding behind it, so callers must be able to fail closed instead
+// of silently drafting a prospect with the wrong (or absent) customer.
+async function loadGroundedCustomerById(customerId) {
+  try {
+    const row = await db('customers')
+      .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
+        'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
+        'property_type', 'company_name', 'active')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first();
+    const { CUSTOMER_STAGES } = require('../customer-stages');
+    if (row && row.active === true && CUSTOMER_STAGES.includes(row.pipeline_stage)) return row;
+    return null;
+  } catch (err) {
+    logger.warn(`[estimator-engine] grounded customer load failed: ${err.message}`);
+    return { unavailable: true };
   }
 }
 
@@ -396,22 +504,178 @@ async function buildCallContext(callLogId) {
 // error out entirely: unlike a call, there is no independent transcript —
 // the thread history itself cannot be attributed to one profile, and no
 // caller-name extraction exists to disambiguate.
-async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBody = '' }) {
+async function buildSmsThreadContext({
+  phone, triggerAt = new Date(), triggerBody = '',
+  groundedCustomerId = null, groundedConflict = false, groundedScope = null,
+  groundedMultiScope = false, groundedOvercap = false,
+  groundedUnverifiableLocality = false,
+}) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
-  const customerMatch = await loadCustomerByPhone(phone, null);
+  // SMS path only: a service-contact sender (spouse/tenant/manager on the
+  // configured contact slots) is an established identity — without the
+  // contact-slot match their DRAFT context loses the customer and the
+  // estimate persists customer_id null even though triage grounded them.
+  // Gated behind GATE_ESTIMATOR_SCOPE_GUARDS (lazy require avoids a module
+  // cycle) so gate-off behavior stays byte-identical. Call-path
+  // loadCustomerByPhone callers are intentionally unchanged.
+  const { scopeGuardsEnabled, VETO_BURST_MINUTES } = require('./scope-guards');
+  const guardsOn = scopeGuardsEnabled();
+  // AMBIGUOUS GROUNDING is a red lane, never a guess. Two shapes reach
+  // here, and both mean the thread named more than one candidate answer:
+  //  - groundedConflict: the matches span MORE than one customer (the
+  //    sender's phone is customer A while the text names B's property, or
+  //    an off-file sender names an address that two active customers
+  //    share — the latter has no phone customer at all, so the earlier
+  //    "downgrade the phone profile" posture silently drafted an UNLINKED
+  //    prospect on an existing customer's parcel);
+  //  - groundedMultiScope: one customer, but the text named several of
+  //    their confirmed properties — linking them would price the primary
+  //    parcel and silently pick one of the properties named;
+  //  - groundedOvercap: too many same-street rows to attribute the named
+  //    address to one of them (a large condo, a prefix spanning cities);
+  //  - groundedUnverifiableLocality: a same-street row whose city/ZIP could
+  //    not be checked against the locality the sender stated (blank stored
+  //    locality) — the street alone cannot prove it is the same parcel, so
+  //    linking that customer could hand a stranger's id, parcel data and
+  //    membership pricing to the draft.
+  // One unified exit for all three: a machine-readable error the caller
+  // bells red on (runThreadDraft red-lanes any context.error and names it
+  // in the bell body), so a human resolves which property/customer is
+  // meant. Gate off, no signal ever flows and this is unreachable.
+  if (guardsOn && (groundedConflict === true || groundedMultiScope === true
+    || groundedOvercap === true || groundedUnverifiableLocality === true)) {
+    return { error: 'ambiguous_grounding' };
+  }
+  const customerMatch = await loadCustomerByPhone(
+    phone, null, guardsOn ? { includeServiceContacts: true } : {},
+  );
   if (customerMatch.ambiguous) return { error: 'ambiguous_phone' };
   // A FAILED lookup is not a no-match: an existing member could be hiding
   // behind the error, and pricing them as a prospect would drop membership
   // discounts and fee waivers. Red out; the bell owns the manual path.
   if (customerMatch.unavailable) return { error: 'customer_lookup_unavailable' };
-  const customer = customerMatch.customer;
+  let customer = customerMatch.customer;
+  // Triage grounding fallback (gate-on only): the thread provably named
+  // exactly one existing customer's property — link that customer so the
+  // draft carries membership context and persists customer_id, with a
+  // provenance flag so review can see the link came from the address, not
+  // the phone. It applies when the phone lookup found nothing, AND when it
+  // found only a NON-real customer: the Twilio webhook mints an active
+  // pipeline_stage='new_lead' customers row for first contacts BEFORE this
+  // build runs, so a first-contact coordinator's prospect shell would
+  // otherwise win over the real customer triage matched — persisting the
+  // prospect's customer_id and losing the membership context. A REAL
+  // phone-matched customer (active, established stage — the same gates
+  // triage applies) always wins; a distinct-customer conflict never
+  // grounds; gate off, groundedCustomerId never flows here at all.
+  const { CUSTOMER_STAGES } = require('../customer-stages');
+  const isRealCustomer = (c) => !!c && c.active === true && CUSTOMER_STAGES.includes(c.pipeline_stage);
+  // The triage match carries WHICH property the thread is about. When it
+  // is not the primary profile address, or names a unit, keeping the
+  // profile's address would price the WRONG parcel (Apt 6 quoting as
+  // Apt 1; the rental quoting as the primary home) — and the later
+  // address-compare treats explicit-unit vs unitless as conservatively
+  // equal, so no re-gather would catch it. Override the address with the
+  // matched property's stamp and NULL the profile measurements:
+  // property_sqft/lot_sqft describe the primary parcel, and nulling forces
+  // the property-facts lookup to gather the quoted property instead. A
+  // primary-scope match without a unit keeps the profile as-is.
+  const applyGroundedScope = (profile) => {
+    if (!groundedScope || !(groundedScope.isPrimary === false || groundedScope.line2)) return profile;
+    // The unit rides INSIDE address_line1, not only in address_line2: every
+    // downstream consumer builds the address from line1 + city + zip and
+    // ignores line2 — addressFromContext (index.js customerAddress), the
+    // composer profile block (intent-composer buildUserContent), and the
+    // customerSavedAddress comparison that decides whether the profile's
+    // saved measurements may backfill. A line2-only unit leaves all three
+    // holding a UNITLESS street, and sameStreetAddress treats
+    // known-vs-unknown units as conservatively equal — so the composer's
+    // explicit "Apt 6" would match the unitless profile address and skip
+    // the re-gather this override exists to force. line2 is still set (the
+    // schema-correct home for the unit) for any consumer that reads it.
+    const line1 = groundedScope.address || profile.address_line1;
+    const unit = groundedScope.line2 || null;
+    const line1WithUnit = unit && line1
+      && !String(line1).toLowerCase().includes(String(unit).toLowerCase())
+      ? `${line1} ${unit}`
+      : line1;
+    return {
+      ...profile,
+      address_line1: line1WithUnit,
+      address_line2: unit,
+      city: groundedScope.city || null,
+      zip: groundedScope.zip || null,
+      // EVERY parcel-descriptive column on the customers select is cleared,
+      // not just the measurements. Rewriting the address makes
+      // profileDescribesQuotedProperty (index.js) read TRUE for the quoted
+      // property, and draft-builder then falls back to these fields — so a
+      // retained primary-parcel property_type re-prices a condo as detached
+      // and a retained lawn_type feeds the composer the wrong turf. Audited
+      // against the selected columns in loadCustomerByPhone /
+      // loadGroundedCustomerById: address_line1/city/zip (rewritten above),
+      // property_sqft, lot_sqft, property_type, lawn_type describe the
+      // PARCEL; state is locality-invariant ('FL'). No other parcel traits
+      // (bed_sqft, linear_ft_perimeter, palm_count, canopy_type) are
+      // selected, so none reach the context. Person-level fields — name,
+      // phone, email, waveguard_tier, member_since, company_name — stay:
+      // they describe the customer, not the property.
+      property_sqft: null,
+      lot_sqft: null,
+      property_type: null,
+      lawn_type: null,
+    };
+  };
+  // Ambiguous grounding already returned above, so every branch here is
+  // working from a SINGLE candidate customer/property.
+  let customerGroundedByAddress = false;
+  if (guardsOn && groundedCustomerId && !isRealCustomer(customer)) {
+    const grounded = await loadGroundedCustomerById(groundedCustomerId);
+    // Fail CLOSED on a transient reload error, exactly like the phone
+    // lookup above — the grounded customer's membership could be hiding
+    // behind the error; the red bell owns the manual path.
+    if (grounded?.unavailable) return { error: 'customer_lookup_unavailable' };
+    if (grounded) {
+      customer = applyGroundedScope(grounded);
+      customerGroundedByAddress = true;
+    }
+  } else if (guardsOn && customer && customer.id === groundedCustomerId) {
+    // A REAL phone-matched customer texting about their OWN secondary
+    // property/unit (triage matched the same customer by address): the
+    // identity needs no grounding, but the quoted PROPERTY still does —
+    // without the override their primary profile's address and
+    // measurements would price the wrong parcel.
+    customer = applyGroundedScope(customer);
+  }
+  // Phone-scoped history belongs to whoever OWNS the sending number, so it
+  // is only this draft's history when the customer link came from that
+  // number. On the ADDRESS-GROUNDED path an off-file coordinator texts
+  // about customer B, yet the coordinator's own number can still carry a
+  // stale lead and prior estimates for ANOTHER client — exposing that
+  // client's address (via addressFromContext) and services to the composer
+  // on B's draft. Suppress both; the SMS thread stays, it IS the
+  // conversation being answered. (The distinct-customer conflict that used
+  // to share this suppression now red-lanes before any of this runs.)
+  const suppressPhoneHistory = customerGroundedByAddress;
   const before = new Date(triggerAt);
-  const smsSince = new Date(before.getTime() - 30 * 86400000);
+  // Transcript scope follows the customer-link provenance. A phone-matched
+  // customer's 30-day thread is THEIR OWN history. An ADDRESS-GROUNDED
+  // draft is built off a coordinator's number, and that number's 30-day
+  // thread can carry OTHER clients' conversations — handing it wholesale
+  // to the composer leaks them into customer B's estimate. Grounded
+  // transcripts scope to the CURRENT exchange — the same VETO_BURST_MINUTES
+  // window triage grounded from — and when that burst alone is unreadable
+  // the short-transcript floor below red-errors (no_usable_thread), which
+  // is the wanted outcome: a human reads the thread instead.
+  const smsSince = customerGroundedByAddress
+    ? new Date(before.getTime() - VETO_BURST_MINUTES * 60 * 1000)
+    : new Date(before.getTime() - 30 * 86400000);
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
     // call=null: skips the sid + reused-lead branches; pure phone fallback.
-    loadLeadForCall(null, phone, { phoneFallback: true }),
+    suppressPhoneHistory
+      ? Promise.resolve({ lead: null, forThisCall: false })
+      : loadLeadForCall(null, phone, { phoneFallback: true }),
     loadSmsThread(phone, { limit: 40, before, since: smsSince }),
-    loadPriorEstimates(phone),
+    suppressPhoneHistory ? Promise.resolve([]) : loadPriorEstimates(phone),
   ]);
   // The webhook records the TRIGGERING inbound message to sms_log after the
   // handlers run, so the thread read here can miss exactly the text that
@@ -439,13 +703,22 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBod
     extractionSource: 'none',
     phone,
     customer: customer || null,
+    // Ambiguous grounding red-lanes above, so anything reaching here has a
+    // single unambiguous candidate.
     customerPhoneAmbiguous: false,
     lead: leadMatch.lead || null,
     leadIsForThisCall: false,
     smsThread: [],
     priorEstimates,
+    ...(customerGroundedByAddress ? { customerGroundedByAddress: true } : {}),
+    // Gate on, mirror triage's posture: an inactive former customer (matched
+    // via the contact-slot lookup or otherwise) keeps their profile as
+    // history but must not unlock existing-customer pricing context —
+    // active === true is required, same as the triage grounding gates. The
+    // legacy stage-only predicate is preserved byte-identical gate-off.
     isExistingCustomer: !!(customer
-      && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)),
+      && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
+      && (!guardsOn || customer.active === true)),
   };
 }
 

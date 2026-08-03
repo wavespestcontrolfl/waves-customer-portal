@@ -705,4 +705,60 @@ describe('estimate v2 service toggle adapter', () => {
     const item = estimate.lineItems.find((line) => line.service === 'rodent_guarantee');
     expect(item).toBeUndefined();
   });
+
+  // The admin form re-derives profile.footprint from the operator's typed Home
+  // Sq Ft / Stories on every calculate, but profile.footprintSqFt is spread in
+  // from the property-lookup response and is never recleared. Reading
+  // footprintSqFt first made the typed square footage silently inert on pest
+  // pricing — the engine's resolvePestFootprint takes footprintSqFt before
+  // homeSqFt, and this translator never forwards `footprint` (owner ruling
+  // 2026-08-01: the typed value wins).
+  describe('typed footprint beats a stale lookup footprintSqFt', () => {
+    function typedProfile(overrides = {}) {
+      return {
+        ...baseProfile(),
+        homeSqFt: 1442,
+        stories: 1,
+        footprint: 1442,        // re-derived by the form from homeSqFt / stories
+        footprintSqFt: 1925,    // stale, carried over from the property lookup
+        lotSqFt: 43960,
+        shrubDensity: 'LIGHT',
+        treeDensity: 'LIGHT',
+        landscapeComplexity: 'SIMPLE',
+        ...overrides,
+      };
+    }
+
+    test('forwards the operator-typed footprint, not the lookup value', () => {
+      const input = translateV2CallToV1Input(typedProfile(), [], {});
+      expect(input.footprintSqFt).toBe(1442);
+    });
+
+    test('prices pest off the typed footprint', () => {
+      const input = translateV2CallToV1Input(typedProfile(), [], {});
+      const estimate = generateEstimate({
+        ...input,
+        services: { pest: { frequency: 'quarterly' } },
+      });
+      const pest = estimate.lineItems.find((line) => line.service === 'pest_control');
+      expect(pest.footprintUsed).toBe(1442);
+    });
+
+    test('footprintUnknown still zeroes the footprint ahead of both (codex P1 #2721)', () => {
+      const input = translateV2CallToV1Input(
+        typedProfile({ footprintUnknown: true }),
+        [],
+        {}
+      );
+      expect(input.footprintSqFt).toBe(0);
+      expect(input.footprintUnknown).toBe(true);
+    });
+
+    test('falls back to the lookup footprintSqFt when nothing was typed', () => {
+      const profile = typedProfile();
+      delete profile.footprint;
+      const input = translateV2CallToV1Input(profile, [], {});
+      expect(input.footprintSqFt).toBe(1925);
+    });
+  });
 });

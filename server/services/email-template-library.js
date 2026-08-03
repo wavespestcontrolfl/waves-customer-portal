@@ -4,6 +4,7 @@ const sendgrid = require('./sendgrid-mail');
 const {
   wrapServiceEmail,
   wrapNewsletter,
+  bodyIsDarkAware,
   ensureLegalTextFooter,
   ctaButton,
   ctaChip,
@@ -98,9 +99,66 @@ function textFor(payload, key) {
   return String(value);
 }
 
+// Markdown links inside block prose: [label](https://…).
+//
+// Block content is escaped, so an authored <a> tag would render as literal
+// text — until now the ONLY way to put a link in a template was a cta block,
+// which renders as a full-width gold bar. That is right for the primary
+// action and much too heavy for "here's the background reading". This adds
+// the inline option without loosening escaping.
+//
+// CRITICAL ORDERING (codex #3167 P1): links are extracted from the RAW
+// TEMPLATE text BEFORE {{variable}} substitution, so ONLY author-authored
+// markdown can become an anchor. Payload values are customer-influenced — a
+// name, a note, a service label — and if substitution ran first, a value
+// containing [x](https://evil) would inject a live link into an outgoing
+// email. Payload text is escaped and stays inert no matter what it contains.
+//
+// The href likewise comes from the template, never from a substituted value,
+// and still goes through safeUrl so javascript:/data: collapse. Anchors carry
+// dm-link so they stay legible on the dark card. The plain-text arm renders
+// "label (url)" — a text-part reader needs the destination, not a bare label.
+const MD_LINK_RE = /\[([^\]\n]+)\]\((\S+?)\)/g;
+// U+0000 cannot appear in template or payload text, so it is a safe fence.
+const LINK_SLOT = (i) => `\u0000L${i}\u0000`;
+
 function renderInline(text, payload, { html = true } = {}) {
-  const rendered = String(text || '').replace(VARIABLE_RE, (_, key) => textFor(payload, key));
-  return html ? escapeHtml(rendered) : rendered;
+  const raw = String(text || '');
+
+  // 1. Lift author-authored links out of the raw template, leaving fences.
+  const links = [];
+  const fenced = raw.replace(MD_LINK_RE, (whole, label, href) => {
+    const safe = safeUrl(href);
+    if (!safe || safe === '#') return whole; // unusable scheme → inert text
+    links.push({ label, href: safe });
+    return LINK_SLOT(links.length - 1);
+  });
+
+  // 2. Substitute variables and escape. Anything a payload contributes is
+  //    escaped here and can no longer be re-read as link syntax.
+  const substituted = fenced.replace(VARIABLE_RE, (_, key) => textFor(payload, key));
+  if (!html) {
+    return substituted.replace(/\u0000L(\d+)\u0000/g, (_m, i) => {
+      const l = links[Number(i)];
+      if (!l) return '';
+      const label = String(l.label).replace(VARIABLE_RE, (_x, key) => textFor(payload, key));
+      return `${label} (${l.href})`;
+    });
+  }
+  const escaped = escapeHtml(substituted);
+
+  // 3. Put the anchors back. The LABEL still needs {{variable}} substitution —
+  //    it was lifted out before step 2, so an authored `[Hi {{first_name}}](…)`
+  //    would otherwise ship the literal token to a customer (codex #3167 P1).
+  //    Substituting here is safe: the result is escaped and inserted as anchor
+  //    TEXT, so a payload value cannot introduce markup and cannot open a new
+  //    link — the href is still template-derived and already validated.
+  return escaped.replace(/\u0000L(\d+)\u0000/g, (_m, i) => {
+    const l = links[Number(i)];
+    if (!l) return '';
+    const label = escapeHtml(String(l.label).replace(VARIABLE_RE, (_x, key) => textFor(payload, key)));
+    return `<a class="dm-link" href="${escapeHtml(l.href)}" target="_blank" rel="noopener" style="color:#0A7EC2;text-decoration:underline;">${label}</a>`;
+  });
 }
 
 function extractVariables(input, out = new Set()) {
@@ -301,13 +359,13 @@ function renderBlocks(blocks, payload) {
     if (block.type === 'heading') {
       const content = renderInline(block.content, payload);
       if (content) {
-        htmlParts.push(`<h2 style="margin:0 0 12px 0;font-family:${B.font};font-size:18px;line-height:1.3;color:${B.heading};font-weight:700;">${content}</h2>`);
+        htmlParts.push(`<h2 class="dm-ink" style="margin:0 0 12px 0;font-family:${B.font};font-size:18px;line-height:1.3;color:${B.heading};font-weight:700;">${content}</h2>`);
         textParts.push(renderInline(block.content, payload, { html: false }).toUpperCase());
       }
     } else if (block.type === 'callout') {
       const content = renderInline(block.content, payload);
       if (content) {
-        htmlParts.push(`<div style="margin:18px 0;padding:14px 16px;border-left:4px solid ${B.calloutBorder};background:${B.calloutBg};color:${B.calloutText};font-family:${B.font};font-size:14px;line-height:1.55;">${content}</div>`);
+        htmlParts.push(`<div class="dm-box" style="margin:18px 0;padding:14px 16px;border-left:4px solid ${B.calloutBorder};background:${B.calloutBg};color:${B.calloutText};font-family:${B.font};font-size:14px;line-height:1.55;">${content}</div>`);
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     } else if (block.type === 'details') {
@@ -328,19 +386,19 @@ function renderBlocks(blocks, payload) {
         htmlParts.push(`
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;">
             ${rows.map((row) => `
-              <tr><td style="padding:7px 0 1px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.labelHtml}</td></tr>
-              <tr><td style="padding:0 0 7px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.text};">${row.valueHtml}</td></tr>
+              <tr><td class="dm-ink" style="padding:7px 0 1px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.labelHtml}</td></tr>
+              <tr><td class="dm-text" style="padding:0 0 7px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.text};">${row.valueHtml}</td></tr>
             `).join('')}
           </table>
         `);
         textParts.push(rows.map((row) => `${row.labelText}\n${row.valueText}`).join('\n\n'));
       } else if (rows.length) {
         htmlParts.push(`
-          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:18px 0;border-top:1px solid ${B.rule};border-bottom:1px solid ${B.rule};">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="dm-rule" style="margin:18px 0;border-top:1px solid ${B.rule};border-bottom:1px solid ${B.rule};">
             ${rows.map((row) => `
               <tr>
-                <td style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.mutedText};">${row.labelHtml}</td>
-                <td align="right" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.valueHtml}</td>
+                <td class="dm-muted" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.mutedText};">${row.labelHtml}</td>
+                <td align="right" class="dm-ink" style="padding:8px 0;font-family:${B.font};font-size:14px;color:${B.heading};font-weight:700;">${row.valueHtml}</td>
               </tr>
             `).join('')}
           </table>
@@ -395,8 +453,8 @@ function renderBlocks(blocks, payload) {
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin:14px 0;">
             ${items.map((item) => `
               <tr>
-                <td valign="top" width="22" style="padding:5px 8px 5px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.heading};font-weight:700;">&#10003;</td>
-                <td style="padding:5px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.text};">${item.html}</td>
+                <td valign="top" width="22" class="dm-ink" style="padding:5px 8px 5px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.heading};font-weight:700;">&#10003;</td>
+                <td class="dm-text" style="padding:5px 0;font-family:${B.font};font-size:14px;line-height:1.55;color:${B.text};">${item.html}</td>
               </tr>
             `).join('')}
           </table>
@@ -404,7 +462,7 @@ function renderBlocks(blocks, payload) {
         textParts.push(items.map((item) => `- ${item.text}`).join('\n'));
       }
     } else if (block.type === 'divider') {
-      htmlParts.push(`<hr style="border:none;border-top:1px solid ${B.rule};margin:22px 0;" />`);
+      htmlParts.push(`<hr class="dm-rule" style="border:none;border-top:1px solid ${B.rule};margin:22px 0;" />`);
       textParts.push('---');
     } else if (block.type === 'signature') {
       // Default sign-off is "— The Waves Team" (owner call 2026-07-21) —
@@ -415,13 +473,13 @@ function renderBlocks(blocks, payload) {
       // ("We look forward to servicing your home.\n— The Waves Team")
       // without HTML in block content; single-line signatures render
       // exactly as before.
-      htmlParts.push(`<p style="margin:18px 0 0 0;font-family:${B.font};font-size:15px;line-height:1.58;color:${B.text};white-space:pre-line;">${content}</p>`);
+      htmlParts.push(`<p class="dm-text" style="margin:18px 0 0 0;font-family:${B.font};font-size:15px;line-height:1.58;color:${B.text};white-space:pre-line;">${content}</p>`);
       textParts.push(renderInline(block.content || '— The Waves Team', payload, { html: false }));
     } else {
       const content = renderInline(block.content, payload);
       if (content) {
         const small = block.type === 'small_note';
-        htmlParts.push(`<p style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:${B.font};font-size:${small ? '13' : '15'}px;line-height:1.58;color:${small ? B.mutedText : B.text};">${content}</p>`);
+        htmlParts.push(`<p class="${small ? 'dm-muted' : 'dm-text'}" style="margin:0 0 ${small ? '10' : '16'}px 0;font-family:${B.font};font-size:${small ? '13' : '15'}px;line-height:1.58;color:${small ? B.mutedText : B.text};">${content}</p>`);
         textParts.push(renderInline(block.content, payload, { html: false }));
       }
     }
@@ -641,13 +699,17 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
   const footerNote = mode === 'marketing'
     ? null
     : [serviceFooter, unsubFooterHtml].filter(Boolean).join(' ') || null;
+  // renderBlocks now tags every block with the dm-* hooks the dark sheet keys
+  // off, so both wrappers can put the content on the designed dark card
+  // instead of pinning it to an opaque white slab on a dark page. Decided by
+  // SNIFFING the assembled body rather than by a constant: bodyIsDarkAware is
+  // the same guard the newsletter path uses, so a body assembled elsewhere —
+  // or a persisted one written before the hooks existed — still falls back to
+  // the light card and keeps its contrast.
+  const darkAwareBody = bodyIsDarkAware(bodyHtml);
   const html = mode === 'marketing'
-    // darkAwareBody:false — renderBlocks markup carries light-theme
-    // inline colors (like transactional emails), so marketing templates
-    // keep the opaque light card in dark mode instead of the dark
-    // newsletter card their cells can't survive on.
-    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined, darkAwareBody: false })
-    : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
+    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined, darkAwareBody })
+    : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote, darkAwareBody });
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText].filter(Boolean).join('\n\n')
     : bodyText;

@@ -129,13 +129,13 @@ async function runSelfAudit(depsIn = {}) {
   if (breaches.length) {
     logger.error(`[self-audit] DRIFT ALERT: ${breaches.join('; ')} (sample ${audited})`);
     try {
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'call_pipeline_drift',
-        title: 'Call pipeline drift alert',
-        body: `Nightly self-audit breached thresholds: ${breaches.join('; ')}. Sample: ${audited} calls. See call_audit_findings (audit_source='self_audit').`,
-        created_at: new Date(),
-      });
+      // Through NotificationService (not a raw insert) so the
+      // GATE_ADMIN_BELL_POLICY chokepoint covers this category.
+      await require('./notification-service').notifyAdmin(
+        'call_pipeline_drift',
+        'Call pipeline drift alert',
+        `Nightly self-audit breached thresholds: ${breaches.join('; ')}. Sample: ${audited} calls. See call_audit_findings (audit_source='self_audit').`,
+      );
     } catch (err) {
       logger.error(`[self-audit] alert write failed: ${err.message}`);
     }

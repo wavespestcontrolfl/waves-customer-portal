@@ -218,7 +218,7 @@ export default function PaymentPreferenceButtons({
     // an orthogonal saved card, captured at confirm time, not a new payment
     // method preference.
     const holdRequired = !!cardHold?.requiredForOneTime;
-    const feeText = fmtMoney(cardHold?.noShowFeeAmount != null ? cardHold.noShowFeeAmount : 49);
+    const feeText = fmtMoney(cardHold?.noShowFeeAmount != null ? cardHold.noShowFeeAmount : 75);
     const windowText = `${cardHold?.cancelWindowHours != null ? cardHold.cancelWindowHours : 24} hours`;
     return (
       <div style={estimateCard()}>

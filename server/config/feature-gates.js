@@ -32,7 +32,10 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
+ *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
+ *   GATE_APPT_CARD_NO_SHOW_FEE=true (auto-charge the disclosed no-show/late-cancel fee on /secure-secured visits)
+ *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -66,6 +69,58 @@ const gates = {
   // carries no planContext and /secure renders exactly the card-only
   // experience; the select-plan endpoint 404s (unobservable while dark).
   securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
+
+  // Appointment-card fee rail (owner-approved 2026-08-01): auto-charge the
+  // no-show/late-cancel fee the /secure lane DISCLOSES against the card it
+  // captured, for visits with frozen fee terms on the appointment_card_
+  // requests row. Money surface — fail-closed ==='true' in EVERY
+  // environment. Gate off: chargeAppointmentNoShowFee returns
+  // feature_disabled, cancel previews report feeApplies:false, and every
+  // no_show/cancel path behaves byte-identically to today (the fee stays a
+  // manual office decision). Frozen terms still stamp while dark so the
+  // disclosed amount is enforceable the day the gate lights. Kill switch:
+  // unset or any non-'true' value.
+  apptCardNoShowFee: process.env.GATE_APPT_CARD_NO_SHOW_FEE === 'true',
+
+  // Completion auto-charge for one-time visits whose card came through the
+  // /secure lane (owner-approved 2026-08-01): the lane's SMS promises "your
+  // card is only charged after service is completed" — this gate makes that
+  // charge automatic (dispatch /complete AND the pest-recap closeout path),
+  // hard-capped at the accepted_amount FROZEN on the lane row at consent
+  // (+ disclosed tax/surcharge; never the live estimated_price, which
+  // appointment editors rewrite — Codex #3153 r1) with the same above-quote
+  // review routing as the per-application rail. Page-secured rows only get
+  // an accepted_amount when the /secure page DISPLAYED the price, which
+  // requires GATE_SECURE_PLAN_CHOICE — flip that gate first or completions
+  // route to office review instead of charging (Codex #3153 r2). Money
+  // surface — fail-closed ==='true' in EVERY environment. Gate off:
+  // completion invoices go out as pay links exactly as today. Kill switch:
+  // unset or any non-'true' value.
+  apptCardCompletionCharge: process.env.GATE_APPT_CARD_COMPLETION_CHARGE === 'true',
+
+  // Report-lane completion text for a visit that DOES have a bill. The
+  // service_report_v1_with_invoice template ("Your {service_type} report is
+  // ready … Invoice for today's visit: {pay_url}") has been unreachable since
+  // it was written: admin-dispatch computed its pay link but the branch that
+  // consumes it required !invoiceCreated, so every report-v1 line with an
+  // invoice fell through to the generic service_complete_with_invoice instead.
+  // #3166 rewrote the copy of a template nothing could render.
+  // Customer-facing copy change on a billed visit — ships dark. Gate off: the
+  // report lane keeps standing down whenever an invoice exists and the generic
+  // invoice text sends exactly as today. Kill switch: unset or any non-'true'
+  // value. The template must ALSO be present and active (probed per send) —
+  // gate on, row missing/inactive = unchanged behavior.
+  reportV1InvoiceSms: process.env.GATE_REPORT_V1_INVOICE_SMS === 'true',
+
+  // Annual prepay sold from the New Appointment modal on a booking with NO
+  // linked quote. Operator-initiated, but it invoices a customer for a full
+  // year and sends the pay link, so it ships dark and opt-in in EVERY
+  // environment. Gate off: the availability probe answers false, the modal
+  // renders no Billing control at all (never an offered choice that silently
+  // no-ops — Codex #2921 P2), and the preview endpoint 404s, so the mint can
+  // only be reached from Customer 360 as before. Kill switch: unset or any
+  // non-'true' value; nothing is minted retroactively when it flips.
+  prepayOnBook: process.env.GATE_PREPAY_ON_BOOK === 'true',
 
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
@@ -112,6 +167,15 @@ const gates = {
   // the scheduler tick no-ops and nothing else changes.
   bookingFunnelCanary: process.env.GATE_BOOKING_FUNNEL_CANARY === 'true',
 
+  // LLM dispatch observability (2026-07-31): every dispatchWithFallback chain
+  // logs one llm_dispatch_log row, and a daily cron emails ONLY exceptions
+  // (all-providers-failed, fallback-rate spike, policy gone silent) to the
+  // company inbox. Opt-in in EVERY environment (dev/test must not email or
+  // write metrics rows by accident). Kill switch: unset — recording and the
+  // digest email no-op instantly; the daily retention prune keeps running so
+  // existing rows still age out.
+  llmDispatchMetrics: process.env.GATE_LLM_DISPATCH_METRICS === 'true',
+
   // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
   // IB's search_field_intelligence, plus the nightly knowledge-index sync
   // that embeds corpus chunks (paid OpenAI embedding calls — pennies/run,
@@ -140,12 +204,27 @@ const gates = {
   techArrivedSms: process.env.GATE_TECH_ARRIVED_SMS === 'true',
 
   // Multi-touch review-request cadence (Review Outreach tab). When on, the
-  // processReviewSequences cron advances operator-started Day 0/3/7 SMS+email
+  // processReviewSequences cron advances Day 0/3/4 SMS+email
   // sequences. Customer-facing auto-send → explicit opt-in in EVERY env (off in
   // dev/preview too) so a preview env with real Twilio/SendGrid creds can't
   // text/email real customers. Still subject to twilioSms + per-customer pref.
   // One-off manual sends from the same tab are NOT gated by this.
   reviewSequences: process.env.GATE_REVIEW_SEQUENCES === 'true',
+
+  // Personalized review-ask bodies: cadence SMS touches are drafted from the
+  // customer's own call/SMS history (review-ask-drafter.js) and AUTO-SEND
+  // after deterministic verification, per owner ruling 2026-07-30 (scoped to
+  // this lane — inbound-reply drafts stay approval-gated). Off = cadence
+  // touches send the standard outreach templates. Customer-facing generated
+  // text → explicit opt-in in EVERY env.
+  reviewAskPersonalized: process.env.GATE_REVIEW_ASK_PERSONALIZED === 'true',
+
+  // Review asks link STRAIGHT to the Google review form (via the tracked
+  // /api/rate/:token/go redirect) instead of the 1-10 rate page. Kill switch
+  // for the direct-link rollout: off = every ask body resolves {review_url}
+  // to the tokenized /rate/<token> NPS page exactly as before. The /rate page
+  // itself stays live either way (old links, fallback for unknown locations).
+  reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
 
   // Digital business card — the card.issued email a customer gets after their
   // FIRST completed visit (services/customer-card.js). The card row and the
@@ -621,6 +700,16 @@ const gates = {
   // link.
   // Off → cron ticks are no-ops.
   callLogRelink: process.env.GATE_CALL_LOG_RELINK === 'true',
+  // Triage dead-letter drain: a nightly sweep that auto-resolves OPEN
+  // triage_items whose condition is provably moot (customer now has the
+  // address/name the card asked for; the call verifiably produced a booking
+  // via source_call_log_id) and auto-dismisses aged informational flags
+  // (spam 7d, listed advisory codes 30d). Explicit reason-code allowlist —
+  // owed-work cards (quote_promised, cancellation_request, booking holds,
+  // email_bounce_reverify, …) and in_progress cards are NEVER touched.
+  // Born from the 2026-07 backlog: ~1,800 open vs 32 ever resolved.
+  // Off → cron ticks are no-ops.
+  triageAutoResolve: process.env.GATE_TRIAGE_AUTO_RESOLVE === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate
@@ -640,6 +729,15 @@ const gates = {
   // Owner sets GATE_VOICEMAIL_LEAD_SMS=true on prod to go live. Off → the
   // voicemail still becomes a Needs-Review lead; only the SMS is skipped.
   voicemailLeadSms: process.env.GATE_VOICEMAIL_LEAD_SMS === 'true',
+
+  // Dropped-call address-request text (services/dropped-call-sms.js): a NEW
+  // prospect whose intake call died mid-conversation before the service
+  // address was captured gets ONE text asking for it. Same fail-CLOSED rule
+  // as voicemailLeadSms — customer-facing auto-send, explicit opt-in in
+  // every environment. Owner sets GATE_DROPPED_CALL_SMS=true to go live.
+  // Off → the dropped call still opens its call-back triage card; only the
+  // SMS is skipped.
+  droppedCallSms: process.env.GATE_DROPPED_CALL_SMS === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
@@ -980,6 +1078,21 @@ const gates = {
   // switch: unset (or any non-'true' value) — the field is omitted from
   // every payload and the chips disappear.
   bookingRainChips: process.env.GATE_BOOKING_RAIN_CHIPS === 'true',
+
+  // Admin bell policy — the shared admin bell rings ONLY for new leads,
+  // inbound SMS, voicemail callbacks, accepted estimates, and money failures
+  // (payment failures, billing exceptions, disputes, refund failures, PCI
+  // events) plus twilio_failure; everything else is silenced at the
+  // NotificationService chokepoint with a per-category owner override in
+  // Settings → Notifications, and the live dashboard-alert overlay stops
+  // merging into the bell (the dashboard banner is untouched). Changes what
+  // the owner SEES for operational exceptions, so explicit opt-in in EVERY
+  // environment (dev too — a dev bell that silently drops categories would
+  // mask notification regressions during testing). Kill switch: unset (or
+  // any non-'true' value) — every insert and the live overlay revert to
+  // today's behavior byte-for-byte; override rows stay inert in
+  // notification_preferences.
+  adminBellPolicy: process.env.GATE_ADMIN_BELL_POLICY === 'true',
 
   // WaveGuard auto-tier from recurring coverage (owner directive 2026-07-28),
   // BOTH directions: a customer with upcoming recurring qualifying services

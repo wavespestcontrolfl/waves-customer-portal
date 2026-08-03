@@ -24,6 +24,53 @@ describe('CreateAppointmentModal won estimate helpers', () => {
     expect(formatScheduleEstimateAmount({ monthlyTotal: '94.08' })).toBe('$94.08/mo');
   });
 
+  it('recurring quotes read per-application, never a normalized monthly (owner ruling 2026-08-02)', () => {
+    // Real quote line → per-application framing, with the one-time setup split out.
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 36.30,
+      onetimeTotal: 99,
+      lines: [{ cadence: 'quarterly', price: 121, perApplicationPrice: 121 }],
+    })).toBe('$121.00/application + $99.00 one-time');
+    // Multiple recurring lines join without summing across cadences.
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 116.55,
+      lines: [{ cadence: 'monthly', price: 114, perApplicationPrice: 114 }, { cadence: 'quarterly', price: 132, perApplicationPrice: 132 }],
+    })).toBe('$114.00 + $132.00/application');
+    // A line without explicit per-application provenance (synthesized
+    // monthly fallback, genuinely monthly-billed plan, list-only data)
+    // keeps the legacy /mo copy — the server only stamps
+    // perApplicationPrice via the canonical discount-aware derivation.
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 24,
+      lines: [{ cadence: 'quarterly', price: 24, derived: 'estimate_totals_fallback' }],
+    })).toBe('$24.00/mo');
+    // A MIXED quote keeps EACH billing unit — collapsing to one aggregate
+    // monthly is the exact flat-monthly copy this removes (Codex #3173 r2).
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 64.33,
+      lines: [
+        { cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
+        { cadence: 'monthly', price: 24, monthlyPrice: 24, derived: 'estimate_totals_fallback' },
+      ],
+    })).toBe('$121.00/application + $24.00/mo');
+    // A mixed quote whose monthly line has NO proven unit at all falls back
+    // to the legacy aggregate — never a partial label.
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 64.33,
+      lines: [
+        { cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
+        { cadence: 'monthly', price: 24 },
+      ],
+    })).toBe('$64.33/mo');
+    // An ALL-monthly proven set (rodent-bait-only quote) still renders its
+    // unit — and keeps the recurring charge next to one-time work.
+    expect(formatScheduleEstimateAmount({
+      monthlyTotal: 39,
+      onetimeTotal: 250,
+      lines: [{ cadence: 'quarterly', price: 117, monthlyPrice: 39 }],
+    })).toBe('$39.00/mo + $250.00 one-time');
+  });
+
   it('auto-selects exactly one unlinked accepted estimate for an empty schedule form', () => {
     expect(pickAutoScheduleEstimate({
       customerId: 7,

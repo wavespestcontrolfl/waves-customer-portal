@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 const TRAINING_TABLE = 'reply_training_examples';
 const CONTEXT_MESSAGE_LIMIT = 20;
@@ -24,6 +25,19 @@ function parseJson(value, fallback = {}) {
 
 function normalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+// For OUTBOUND/DRAFT text only — never inbound. GSM punctuation
+// normalization keeps the agent_draft_edited comparison honest: the send
+// path normalizes the delivered body (curly quotes → straight, em dash →
+// hyphen), so an operator who sends an AI draft UNCHANGED would otherwise
+// byte-differ from what actually sent and be falsely captured as a human
+// edit, contaminating the training corpus. Inbound customer text never
+// passes through the outbound normalizer and must be persisted verbatim
+// (whitespace-fold only) — rewriting it would corrupt the source side of
+// the training example.
+function canonicalizeOutboundText(value) {
+  return normalizeGsmPunctuation(String(value || '')).replace(/\s+/g, ' ').trim();
 }
 
 function classifyScenario({ inboundBody = '', outboundBody = '', metadata = {} } = {}) {
@@ -276,8 +290,17 @@ async function captureReplyExampleForMessage(outboundMessage, options = {}) {
       customerId,
     });
 
-    const agentDraft = normalizeText(metadata.agentDraft || metadata.suggestedReply || '');
-    const outboundBody = normalizeText(outboundMessage.body);
+    // MMS captions are delivered verbatim (both send paths skip GSM
+    // normalization for authorized media sends), so canonicalizing here
+    // would make the training row misrepresent what the customer received
+    // and could mislabel a punctuation-only human edit as unedited. Media
+    // messages keep the whitespace-only fold on both comparison operands.
+    const outboundMedia = parseJson(outboundMessage.media, outboundMessage.media);
+    const normalizeOutbound = Array.isArray(outboundMedia) && outboundMedia.length > 0
+      ? normalizeText
+      : canonicalizeOutboundText;
+    const agentDraft = normalizeOutbound(metadata.agentDraft || metadata.suggestedReply || '');
+    const outboundBody = normalizeOutbound(outboundMessage.body);
     const payload = {
       channel: outboundMessage.channel,
       conversation_id: outboundMessage.conversation_id,
@@ -352,11 +375,12 @@ async function upsertReplyExampleFromAgentReview({
 
     const normalizedVerdict = String(replyVerdict || 'edited').trim() || 'edited';
     const noReplyNeeded = normalizedVerdict === 'no_reply_needed';
-    const outboundBody = noReplyNeeded ? null : normalizeText(finalReply || idealReply || actualReply || '');
+    const outboundBody = noReplyNeeded ? null : canonicalizeOutboundText(finalReply || idealReply || actualReply || '');
     if (!noReplyNeeded && !outboundBody) return null;
 
+    // Inbound stays whitespace-fold only — customer text is source data.
     const inboundBody = normalizeText(decision.inboundMessage || decision.inputSnapshot?.sms?.body || '');
-    const agentDraft = normalizeText(decision.suggestedMessage || '');
+    const agentDraft = canonicalizeOutboundText(decision.suggestedMessage || '');
     const resolvedScenario = classifyScenario({
       inboundBody,
       outboundBody: outboundBody || '',

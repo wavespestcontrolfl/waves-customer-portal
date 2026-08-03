@@ -41,7 +41,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     const res = await checkConsentForPurpose(
       { ...smsInput('billing'), hasEmailLeg: true },
       policy,
-      contactState({ sms_enabled: true, billing_reminder: true, billing_channel: 'email', billing_email: 'ap@example.com' }),
+      contactState({ sms_enabled: true, billing_channel: 'email', billing_email: 'ap@example.com' }),
     );
     expect(res.ok).toBe(false);
     expect(res.code).toBe('CHANNEL_EMAIL_ONLY');
@@ -52,7 +52,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     const res = await checkConsentForPurpose(
       smsInput('billing'),
       policy,
-      contactState({ sms_enabled: true, billing_reminder: true, billing_channel: channel }),
+      contactState({ sms_enabled: true, billing_channel: channel }),
     );
     expect(res.ok).toBe(true);
   });
@@ -118,7 +118,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     const res = await checkConsentForPurpose(
       smsInput('billing'),
       policy,
-      contactState({ sms_enabled: true, billing_reminder: true, billing_channel: 'email', billing_email: 'ap@example.com' }),
+      contactState({ sms_enabled: true, billing_channel: 'email', billing_email: 'ap@example.com' }),
     );
     expect(res.ok).toBe(true);
   });
@@ -132,7 +132,7 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     const res = await checkConsentForPurpose(
       smsInput('billing'),
       policy,
-      contactState({ sms_enabled: true, billing_reminder: true, billing_channel: 'email', billing_email: 'ap@example.com', email_enabled: false }),
+      contactState({ sms_enabled: true, billing_channel: 'email', billing_email: 'ap@example.com', email_enabled: false }),
     );
     expect(res.ok).toBe(true);
   });
@@ -172,21 +172,35 @@ describe('billing / payment-confirmation delivery channel (SMS leg gating)', () 
     expect(res.code).toBe('SMS_OPTED_OUT');
   });
 
-  test("a purpose toggle OFF outranks the email-channel redirect — the customer opted out of the notice, not just the text", async () => {
-    // billing_reminder=false + channel='email' must read PURPOSE_OPTED_OUT:
-    // the Comms path turns CHANNEL_EMAIL_ONLY into a send-it-by-email
-    // instruction, which would bypass an explicit opt-out (codex P1 on
-    // 5806621e). The receipt queue is indifferent — PURPOSE_OPTED_OUT maps
-    // to receipt_texts_opted_out, a non-actionable skip that also stamps
-    // off a delivered email, same as channel_email_only.
-    const billing = await checkConsentForPurpose(
+  test("purpose 'billing' has NO opt-out toggle — a stale billing_reminder=false row cannot block it", async () => {
+    // Owner ruling 2026-08-01: billing notices are account-operational, so
+    // the billing purpose carries no prefsColumn and the DB column is
+    // dropped. A leftover false value (every pre-drop row defaulted false)
+    // must be inert even if it somehow reaches contactState.
+    const policy = resolvePolicy('customer', 'billing');
+    expect(policy.prefsColumn).toBeUndefined();
+    const res = await checkConsentForPurpose(
+      smsInput('billing'),
+      policy,
+      contactState({ sms_enabled: true, billing_reminder: false }),
+    );
+    expect(res.ok).toBe(true);
+  });
+
+  test("purpose 'billing' still honors STOP — sms_enabled stays the master kill switch", async () => {
+    const res = await checkConsentForPurpose(
       smsInput('billing'),
       resolvePolicy('customer', 'billing'),
-      contactState({ sms_enabled: true, billing_reminder: false, billing_channel: 'email', billing_email: 'ap@example.com' }),
+      contactState({ sms_enabled: false }),
     );
-    expect(billing.ok).toBe(false);
-    expect(billing.code).toBe('PURPOSE_OPTED_OUT');
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('SMS_OPTED_OUT');
+  });
 
+  test("a purpose toggle OFF outranks the email-channel redirect — the customer opted out of the notice, not just the text", async () => {
+    // payment_receipt keeps its toggles; PURPOSE_OPTED_OUT maps to
+    // receipt_texts_opted_out, a non-actionable skip that also stamps off a
+    // delivered email, same as channel_email_only.
     const receipt = await checkConsentForPurpose(
       { ...smsInput('payment_receipt'), hasEmailLeg: true },
       resolvePolicy('customer', 'payment_receipt'),
@@ -286,8 +300,8 @@ describe('notifications route mapping for the billing channels', () => {
 
   test('billing channels stay per-row — they are NOT account-level channel columns', () => {
     // Billing sends target the charged customer row, so these live next to
-    // the billing_reminder / payment_confirmation_sms toggles rather than on
-    // the primary profile like the appointment channels.
+    // the payment_confirmation_sms toggle rather than on the primary
+    // profile like the appointment channels.
     expect(CHANNEL_DB_COLUMNS).not.toContain('billing_channel');
     expect(CHANNEL_DB_COLUMNS).not.toContain('payment_receipt_channel');
   });

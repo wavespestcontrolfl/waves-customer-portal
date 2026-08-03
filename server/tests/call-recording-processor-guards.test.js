@@ -908,7 +908,6 @@ describe('call recording appointment guardrails', () => {
     expect(incomplete.ok).toBe(false);
     expect(incomplete.missing).toEqual(expect.arrayContaining([
       'last_name',
-      'email',
       'street_address',
       'zip',
     ]));
@@ -928,7 +927,41 @@ describe('call recording appointment guardrails', () => {
       null
     );
 
-    expect(complete).toMatchObject({ ok: true, missing: [] });
+    expect(complete).toMatchObject({ ok: true, missing: [], advisory: [] });
+  });
+
+  test('missing or garbled email is ADVISORY — the booking proceeds (owner ruling 2026-07-31)', () => {
+    const base = {
+      first_name: 'Jesse',
+      last_name: 'Smith',
+      phone: '+19417308491',
+      address_line1: '123 Main St',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34205',
+    };
+
+    // No email anywhere → books, advisory card requested.
+    const noEmail = validatePhoneCallAppointmentCustomer(base, {}, null);
+    expect(noEmail.ok).toBe(true);
+    expect(noEmail.missing).toEqual([]);
+    expect(noEmail.advisory).toEqual(['email']);
+
+    // Garbled capture counts the same as no capture.
+    const garbled = validatePhoneCallAppointmentCustomer({ ...base, email: 'not-an-email' }, {}, null);
+    expect(garbled.ok).toBe(true);
+    expect(garbled.advisory).toEqual(['email']);
+
+    // A service-contact slot email still satisfies the advisory (realtor-books-for-buyer flow).
+    const slot = validatePhoneCallAppointmentCustomer({ ...base, service_contact_email: 'buyer@example.com' }, {}, null);
+    expect(slot.ok).toBe(true);
+    expect(slot.advisory).toEqual([]);
+
+    // Email absence never masks a REAL missing field.
+    const alsoMissingZip = validatePhoneCallAppointmentCustomer({ ...base, zip: '' }, {}, null);
+    expect(alsoMissingZip.ok).toBe(false);
+    expect(alsoMissingZip.missing).toEqual(['zip']);
+    expect(alsoMissingZip.advisory).toEqual(['email']);
   });
 });
 

@@ -366,6 +366,17 @@ async function processCancellationRequest({ customerId, reason, requestId } = {}
         errors.push(`card_hold:${svc.id}`);
         logger.error(`[cancellation-processor] card hold for ${svc.id} needs review: ${holdResult.reason}`);
       }
+      // Appointment-card fee rail fallback for visits with no hold row
+      // (mutually exclusive lanes — the rail re-checks). Customer-initiated
+      // cancel: no waive. Same review-reason surfacing.
+      if (holdResult?.reason === 'no_hold') {
+        const ApptCardRequests = require('./appointment-card-request');
+        const apptResult = await ApptCardRequests.handleAppointmentCardCancellation({ scheduledServiceId: svc.id });
+        if (apptResult && CARD_HOLD_REVIEW_REASONS.has(apptResult.reason)) {
+          errors.push(`appt_card_fee:${svc.id}`);
+          logger.error(`[cancellation-processor] appointment-card fee for ${svc.id} needs review: ${apptResult.reason}`);
+        }
+      }
     } catch (err) {
       errors.push(`card_hold:${svc.id}`);
       logger.error(`[cancellation-processor] card-hold handling failed for ${svc.id}: ${err.message}`);

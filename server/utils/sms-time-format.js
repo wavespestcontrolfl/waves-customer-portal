@@ -41,6 +41,23 @@ function arrivalWindowRange(start) {
   return `${pad(parsed.hour)}:${pad(parsed.minute)}-${pad(Math.floor(endTotal / 60))}:${pad(endTotal % 60)}`;
 }
 
+// '09:00' -> 'between 9:00 AM and 11:00 AM' — the arrival range phrased for
+// the {window} placeholder in the 72h/24h reminders, which read
+// "...is tomorrow, {window}." The preposition lives INSIDE the value so the
+// no-window fallback stays grammatical ("at a time we'll confirm") without
+// needing a second template. Every reminder sender must use this one helper:
+// getTemplate suppresses the entire SMS on an unresolved placeholder, so a
+// sender that forgets {window} silently sends nothing.
+const UNKNOWN_ARRIVAL_WINDOW = "at a time we'll confirm";
+
+function spokenArrivalWindow(start) {
+  const range = arrivalWindowRange(start);
+  if (!range) return UNKNOWN_ARRIVAL_WINDOW;
+  const formatted = formatSmsTimeRange(range);
+  if (formatted === range) return UNKNOWN_ARRIVAL_WINDOW;
+  return `between ${formatted.replace(' - ', ' and ')}`;
+}
+
 function formatSmsTimeValue(value) {
   if (typeof value !== 'string') return value;
   if (parseHHMM(value)) return formatSmsTime(value);
@@ -56,6 +73,8 @@ function formatSmsTemplateVars(vars = {}) {
 module.exports = {
   ARRIVAL_WINDOW_MINUTES,
   arrivalWindowRange,
+  spokenArrivalWindow,
+  UNKNOWN_ARRIVAL_WINDOW,
   formatSmsTime,
   formatSmsTimeRange,
   formatSmsTimeValue,

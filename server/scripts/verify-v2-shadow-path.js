@@ -9,7 +9,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const fs = require('fs');
 const CRP = require('../services/call-recording-processor');
-const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags } = require('../services/call-triage-flags');
+const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, streetCompareKey } = require('../services/call-triage-flags');
 
 function dbConn() {
   const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
@@ -30,7 +30,26 @@ async function main() {
       .where('processing_status', 'processed')
       .orderBy('created_at', 'desc')
       .limit(N)
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at');
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'ai_extraction', 'customer_id',
+        // The linked customer's fail-open inputs (codex round-21 P2 + the
+        // local pre-push audit P1). An established customer who confirms
+        // without restating their address normally has a `not_attempted`
+        // verdict — production dispatches to the address verified when it was
+        // saved, so a verifier without this context reports
+        // address_not_validated for a call production auto-created. The row
+        // goes through production's OWN summarizeKnownCaller, so the pipeline
+        // stage governs eligibility exactly as it does live; only the fields
+        // that helper reads are carried, no names.
+        db.raw("(select json_build_object('pipeline_stage', c.pipeline_stage, 'address_line1', c.address_line1,"
+          + " 'address_line2', c.address_line2, 'city', c.city, 'state', c.state, 'zip', c.zip)"
+          + ' from customers c where c.id = call_log.customer_id) as linked_customer'),
+        // Scoped to the CURRENT extraction pass (codex final-round P2) — a
+        // card left from an earlier pass must not vouch for a reprocess where
+        // recovery failed. NULL on either side yields NULL (not true), so an
+        // unstamped pre-2026-08-01 card reconstructs nothing: fail-closed.
+        db.raw("exists(select 1 from triage_items ti where ti.call_log_id = call_log.id and ti.reason_code = 'address_recovered'"
+          + " and ti.payload->>'extraction_model' = call_log.ai_extraction_model"
+          + " and ti.payload->>'extraction_prompt_version' = call_log.ai_extraction_prompt_version) as has_address_recovered"));
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);
@@ -60,8 +79,43 @@ async function main() {
     if (res.status === 'valid') {
       valid++;
       const e = res.extraction;
-      const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e, { contactPhone }));
-      const route = canAutoRoute(e, { contactPhone });
+      // Stored AV verdict rides along (codex round-10 P1): without it the
+      // central address-trust gate (2026-08-01) reports address_not_validated
+      // for every call and this verifier exercises none of the approved path.
+      // But the verdict was computed for the HISTORICAL extraction's address —
+      // it transfers to this fresh re-extraction only when the stated address
+      // is unchanged (codex round-11 P1); a changed street degrades to null
+      // rather than riding on a stale validated_accept.
+      const pj = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : (v || null); } catch { return null; } };
+      const rawAv = pj(r.ai_address_validation);
+      const priorEnriched = pj(r.ai_extraction_enriched);
+      const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.street_line_2 || '').toLowerCase().trim(), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
+      // Recovery reconstruction (codex round-12 P2): a recovered call routed
+      // on the recovery's accepting verdict, not the persisted unresolvable
+      // one — the address_recovered card marks it (flag rode in on the dump).
+      const effectiveAv = (r.has_address_recovered && rawAv)
+        ? { status: 'corrected', inServiceArea: true, county: rawAv.county || null, normalized: rawAv.normalized || null, reconstructed_from: 'address_recovered' }
+        : rawAv;
+      const storedAv = (effectiveAv && priorEnriched
+        && addrKey(priorEnriched.property?.service_address) === addrKey(e.property?.service_address))
+        ? effectiveAv : null;
+      const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e, { contactPhone, addressValidation: storedAv }));
+      // Mirror the live routing contract, not a subset (codex round-21 P2 +
+      // local pre-push audit P1): production's own context builder, and the
+      // V1-conflict demotion that always follows canAutoRoute on the live
+      // path — a fail-open allow whose V1 address conflicts with the on-file
+      // one is a NEW address and goes back to review.
+      const { knownCaller, options: failOpenOptions } = CRP.buildFailOpenRoutingContext({
+        call: r,
+        customer: pj(r.linked_customer),
+        contactPhone,
+        failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+      });
+      const route = CRP.demoteFailOpenOnV1AddressConflict(
+        canAutoRoute(e, { contactPhone, addressValidation: storedAv, ...failOpenOptions }),
+        pj(r.ai_extraction) || {},
+        knownCaller
+      );
       // No customer PII (names/addresses) in logs — non-PII signals only.
       const hasName = !!(e.caller.first_name || e.caller.last_name);
       console.log(`[${i + 1}] ${r.id}  status=valid (${ms}ms)`);

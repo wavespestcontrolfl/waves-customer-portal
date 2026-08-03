@@ -1481,6 +1481,7 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
   return results;
 }
 
+
 // ---------------------------------------------------------------------------
 // Red-pair auto-dismiss sweep (cron entry point — caller owns the gate)
 // ---------------------------------------------------------------------------

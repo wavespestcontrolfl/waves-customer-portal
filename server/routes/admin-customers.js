@@ -126,6 +126,12 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'nextFollowUp', 'followUpNotes',
   'crmNotes', 'referralCode', 'hasLeftGoogleReview', 'reviewMarkedAt',
+  // Billing pause: a failed-autopay state and its reason. Same class as
+  // monthlyRate/billingMode — office-only. A technician opening Customer 360
+  // for a visit they're assigned must not see "autopay failed three times"
+  // (and the Resume control is admin-gated in the client anyway, so the
+  // fields would only render an alert they cannot act on).
+  'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
 function techSafe360Payload(payload) {
@@ -376,10 +382,14 @@ function isSchedulableOneTimeEstimateLine(line) {
   return !(text.includes('waveguard') && (text.includes('setup') || text.includes('membership')));
 }
 
-function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
+function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurringDiscounted = false }) {
   const name = String(line?.displayName || line?.label || line?.name || line?.serviceName || line?.service || '').trim();
   if (!name) return null;
-  const price = kind === 'recurring'
+  // Per-VISIT fields first; the monthly fields are a last resort and carry
+  // provenance (Codex P1): a price recovered from `mo`/`monthly` is a
+  // normalized monthly figure, and client copy labeling it "/application"
+  // would misstate the charge (per-month copy audit rule).
+  const perVisitPrice = kind === 'recurring'
     ? moneyOrNull(
         line?.perTreatment,
         line?.perApp,
@@ -391,10 +401,12 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
         line?.price,
         line?.amount,
         line?.total,
-        line?.mo,
-        line?.monthly,
       )
     : moneyOrNull(line?.priceAfterDiscount, line?.amountAfterDiscount, line?.totalAfterDiscount, line?.price, line?.amount, line?.total);
+  const monthlyFallbackPrice = kind === 'recurring' && perVisitPrice == null
+    ? moneyOrNull(line?.mo, line?.monthly)
+    : null;
+  const price = perVisitPrice != null ? perVisitPrice : monthlyFallbackPrice;
   if (kind !== 'recurring' && price == null) return null;
 
   const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
@@ -413,6 +425,24 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
   // carried on the line because the modal's own inference can't recover it
   // once the catalog match rewrites `frequency`.
   const schedulerCadence = cadence === 'every_6_weeks' ? 'custom' : cadence;
+  // Canonical service identity for the billing-unit gates (Codex #3173 r3):
+  // legacy/name-only rows carry no `service` key, but the catalog match
+  // resolves one — a name-only "Termite Station Rental" must still hit the
+  // monthly-billed exemption, never stamp $31/application.
+  // Engine key wins; the catalog key is the fallback for name-only legacy
+  // rows — but catalog keys are ALIASES of engine keys (a rodent-bait line
+  // matches the catalog's `rodent_bait_quarterly`, Codex #3173 r5), so they
+  // are normalized back before any billing-unit decision. Unknown catalog
+  // keys pass through unchanged.
+  const CATALOG_TO_ENGINE_KEY = {
+    rodent_bait_quarterly: 'rodent_bait',
+    rodent_bait_monthly: 'rodent_bait',
+    commercial_rodent_bait_quarterly: 'commercial_rodent_bait',
+    termite_station_rental_quarterly: 'termite_station_rental',
+    commercial_termite_bait_quarterly: 'commercial_termite_bait',
+  };
+  const rawServiceKey = String(line?.service || matched?.service_key || '').trim();
+  const resolvedServiceKey = CATALOG_TO_ENGINE_KEY[rawServiceKey] || rawServiceKey;
   return {
     serviceId: matched?.id || null,
     serviceKey: matched?.service_key || line?.service || null,
@@ -428,6 +458,115 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     intervalDays: cadence === 'every_6_weeks' ? 42 : null,
     source: kind,
     estimateId: estimate.id,
+    ...(monthlyFallbackPrice != null ? { derived: 'estimate_totals_fallback' } : {}),
+    // Accepted NET one-time price (Codex #3173 r4): a manual discount
+    // allocated to one-time work leaves the row's price/priceAfterDiscount
+    // GROSS and stores the accepted net in manualFinalOneTime — display
+    // copy and comparisons must use the net; `price` keeps its pre-fill
+    // semantics.
+    ...(kind !== 'recurring' && moneyOrNull(line?.manualFinalOneTime) != null
+      ? { acceptedOneTimePrice: moneyOrNull(line?.manualFinalOneTime) } : {}),
+    // EXPLICIT per-application provenance (Codex P1): the canonical
+    // public-quote derivation owns the rules — explicit per-app signal +
+    // visit count, DISCOUNTED annual preferred over the list rate, and
+    // genuinely monthly-billed keys (rodent bait, station rental) excluded
+    // by design. These are ENGINE result rows, not wizard lineItems, so a
+    // thin field adapter feeds the one shared derivation (never a second
+    // parser): perTreatment is the engine's explicit per-application
+    // signal, and priceAfterDiscount is its per-treatment-after-discount.
+    // Display copy keys off THIS field; `price` above keeps its historical
+    // pre-fill semantics untouched. Absent = no provable per-application
+    // charge, and clients keep legacy copy.
+    // Explicit MONTHLY provenance ONLY for genuinely monthly-billed service
+    // keys (Codex #3173 r4): every per-application row also carries `mo` as
+    // a normalized list figure — stamping it would let a discount-suppressed
+    // pest row fall through to an undiscounted "$X/mo". The canonical key
+    // set is public-quote's (the same one that refuses per-app for them).
+    ...(kind === 'recurring' && moneyOrNull(line?.mo, line?.monthly) != null && (() => {
+      try {
+        // Commercial recurring bills MONTHLY by rule (AGENTS.md: commercial
+        // is exempt from the per-application unit — Codex #3173 r2), on top
+        // of the canonical monthly-billed key set. Resolved key covers
+        // name-only legacy rows (r3).
+        if (resolvedServiceKey.startsWith('commercial_')) return true;
+        const { MONTHLY_BILLED_SERVICE_KEYS } = require('./public-quote')._internals;
+        return MONTHLY_BILLED_SERVICE_KEYS.has(resolvedServiceKey);
+      } catch { return false; }
+    })()
+      ? { monthlyPrice: moneyOrNull(line?.mo, line?.monthly) } : {}),
+    ...(kind === 'recurring' ? (() => {
+      try {
+        // V1-legacy-mapper rows are PRE-discount by convention and carry no
+        // discounted fields — stamping their list perTreatment would
+        // overstate what a discounted customer accepted (Codex #3173 r2).
+        // Refuse per-application provenance for such lines; legacy totals
+        // (which ARE net) tell the truth until the mapper carries net
+        // per-service amounts.
+        // Commercial recurring is EXEMPT from the per-application unit rule
+        // (AGENTS.md; the public quote path gates on commercialDetected the
+        // same way — Codex #3173 r2): it bills monthly, so its perTreatment
+        // must never stamp per-application provenance. Resolved key covers
+        // name-only legacy rows (r3).
+        if (resolvedServiceKey.startsWith('commercial_')) return {};
+        const appliedPct = Number(line?.discount?.appliedDiscountPercent
+          ?? line?.discount?.effectiveDiscount ?? 0);
+        // Line-level OR parent-level (result.recurring.discount /
+        // manualDiscount — Codex #3173 r3) discount with only list figures
+        // on the row: refuse provenance rather than overstate.
+        if ((appliedPct > 0 || parentRecurringDiscounted)
+          && moneyOrNull(line?.priceAfterDiscount) == null
+          && !(Number.isFinite(Number(line?.manualFinalAnnual)) && Number(line.manualFinalAnnual) >= 0)
+          && !(Number(line?.annualAfterDiscount) > 0)
+          && !(Number(line?.finalAnnual) > 0)) {
+          return {};
+        }
+        const { perApplicationForLine } = require('./public-quote')._internals;
+        const cadenceFields = {
+          visitsPerYear: line?.visitsPerYear,
+          visits: line?.visits,
+          appsPerYear: line?.appsPerYear,
+          frequency: line?.frequency,
+        };
+        // priceAfterDiscount IS per-treatment-after-discount — when present
+        // it must win outright, so the LIST annual is withheld (the
+        // canonical fn would otherwise prefer annual/visits and resurrect
+        // the undiscounted rate).
+        const discountedPerApp = moneyOrNull(line?.priceAfterDiscount);
+        // manualFinalAnnual is the accepted POST-manual-discount annual —
+        // annualAfterDiscount is only pre-manual/WaveGuard (Codex #3173
+        // r4). It outranks every other annual in both branches.
+        // PRESENCE, not positivity (Codex #3173 r5): a fixed/100% manual
+        // discount that consumes the whole base stamps manualFinalAnnual: 0
+        // — an accepted ZERO must win over the pre-manual annual, not be
+        // rejected into it.
+        const acceptedAnnual = Number.isFinite(Number(line?.manualFinalAnnual))
+          && Number(line.manualFinalAnnual) >= 0
+          ? Number(line.manualFinalAnnual)
+          : (Number(line?.annualAfterDiscount) > 0 ? Number(line.annualAfterDiscount) : undefined);
+        // An accepted annual of ZERO means the discount consumed the whole
+        // base — there is no per-application CHARGE to quote, and the
+        // canonical helper would fall back to the LIST rate here (its
+        // discountedAnnual > 0 test). Refuse: the net totals tell the truth.
+        if (acceptedAnnual === 0) return {};
+        const pa = perApplicationForLine(discountedPerApp != null
+          ? {
+            service: resolvedServiceKey,
+            perApp: discountedPerApp,
+            ...cadenceFields,
+            annualAfterDiscount: acceptedAnnual,
+          }
+          : {
+            service: resolvedServiceKey,
+            perApp: moneyOrNull(line?.perApp, line?.perTreatment) || undefined,
+            perVisit: line?.perVisit,
+            ...cadenceFields,
+            annualAfterDiscount: acceptedAnnual,
+            finalAnnual: line?.finalAnnual,
+            annual: line?.annual ?? line?.ann,
+          });
+        return pa?.amount > 0 ? { perApplicationPrice: pa.amount } : {};
+      } catch { return {}; }
+    })() : {}),
   };
 }
 
@@ -443,6 +582,33 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
     recurringSvcList = [];
     oneTimeList = [];
   }
+  // Parent-level recurring discount (Codex #3173 r3): persisted engine
+  // estimates commonly store the WaveGuard/manual discount at
+  // result.recurring.discount while service rows keep LIST perTreatment
+  // values — per-application provenance must be refused for those rows or
+  // the UI would present undiscounted figures as the accepted price.
+  let parentRecurringDiscounted = false;
+  try {
+    const rec = estData?.result?.recurring || estData?.recurring || {};
+    // Manual discounts persist at result.manualDiscount /
+    // result.totals.manualDiscount / summary.manualDiscount (Codex #3173
+    // r4) — resolve them through the SAME normalizer the estimate page
+    // uses, plus the recurring-scoped legacy spots.
+    const { normalizeManualDiscountSummary } = require('./estimate-public');
+    const recManual = rec?.manualDiscount || null;
+    // Only the discount's RECURRING slice suppresses recurring provenance
+    // (Codex #3173 r3): a fixed discount redirected entirely to one-time
+    // work persists amount > 0 with recurringAmount: 0, and the recurring
+    // lines' charges are unchanged. Same fallback rule as
+    // manualDiscountMonthlyAmount: recurringAmount ?? amount.
+    const manual = normalizeManualDiscountSummary(estData);
+    const manualHitsRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
+    const recManualHitsRecurring = !!recManual
+      && Number(recManual.recurringAmount ?? recManual.amount ?? recManual.value) > 0;
+    parentRecurringDiscounted = Number(rec?.discount) > 0
+      || manualHitsRecurring
+      || recManualHitsRecurring;
+  } catch { parentRecurringDiscounted = false; }
   const schedulableOneTimeList = oneTimeList.filter(isSchedulableOneTimeEstimateLine);
   const monthlyTotal = Number(estimate.monthly_total || 0);
   const annualTotal = Number(estimate.annual_total || 0);
@@ -453,12 +619,22 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
   const suppressFallback = onlyFilteredBillingRows && !hasRecurringEstimateTotal;
 
   const lines = [
-    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex })),
+    ...recurringSvcList.map((line) => formatEstimateLine(line, { kind: 'recurring', estimate, serviceIndex, parentRecurringDiscounted })),
     ...schedulableOneTimeList.map((line) => formatEstimateLine(line, { kind: 'one_time', estimate, serviceIndex })),
   ].filter(Boolean);
 
   if (lines.length === 1 && lines[0].price == null) {
     lines[0].price = moneyOrNull(estimate.onetime_total, estimate.monthly_total);
+    // Same provenance rule as the zero-line fallback below: this price came
+    // from the estimate's bare totals, not a per-visit quote line.
+    if (lines[0].price != null) {
+      lines[0].derived = 'estimate_totals_fallback';
+      // The recovered figure is monthly when it came from monthly_total —
+      // explicit monthly provenance keeps mixed-unit labels honest.
+      if (lines[0].source === 'recurring' && Number(estimate.monthly_total) > 0 && lines[0].monthlyPrice == null) {
+        lines[0].monthlyPrice = Number(estimate.monthly_total);
+      }
+    }
   }
 
   if (lines.length === 0 && !suppressFallback) {
@@ -485,6 +661,11 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
       cadence: fallbackIsRecurring ? 'quarterly' : 'one_time',
       source: fallbackIsRecurring ? 'recurring' : 'one_time',
       estimateId: estimate.id,
+      // This price came from the estimate's MONTHLY/one-time totals, not a
+      // real per-visit quote line — client copy must not label it
+      // "/application" (the per-month audit rule).
+      derived: 'estimate_totals_fallback',
+      ...(fallbackIsRecurring && monthlyTotal > 0 ? { monthlyPrice: monthlyTotal } : {}),
     });
   }
 
@@ -2328,6 +2509,16 @@ router.get('/:id', async (req, res, next) => {
         property: { type: c.property_type, lawnType: c.lawn_type, sqft: c.property_sqft, lotSqft: c.lot_sqft, palmCount: c.palm_count },
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
         billingMode: c.billing_mode || null,
+        // Billing pause. Set when autopay's 3-retry ladder exhausts
+        // (billing-cron); until now nothing in the product ever showed it on
+        // the customer record or cleared it, so a paused customer's dues
+        // stopped permanently and the only fix was editing the row by hand.
+        servicePausedAt: c.service_paused_at || null,
+        // The ET calendar date the pause landed on. The raw timestamp above
+        // renders in the BROWSER's timezone, which puts an evening pause on
+        // the wrong day for anyone west of ET; this is the one the UI shows.
+        servicePausedOn: c.service_paused_at ? etDateString(new Date(c.service_paused_at)) : null,
+        servicePauseReason: c.service_pause_reason || null,
         memberSince: c.member_since, active: c.active,
         pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
         leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
@@ -3044,6 +3235,107 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+/**
+ * POST /api/admin/customers/:id/resume-service — clear a billing pause.
+ *
+ * billing-cron sets customers.service_paused_at + service_pause_reason when
+ * autopay's 3-retry ladder exhausts, and the monthly cron then skips that
+ * customer (.whereNull('service_paused_at')). Migration 20260418000002
+ * described an admin action to unset it — that action was never built, so
+ * the pause was permanent: dues stopped for good even after the customer
+ * paid and fixed their card, and the only remedy was a hand-edited row.
+ *
+ * Resuming does NOT bill arrears. processMonthlyBilling charges only on the
+ * customer's billing_day (isBillingDayMatch) and skips anyone already
+ * charged for the current month key, so a customer paused for three months
+ * is charged exactly once, on their next billing day. The unpaid obligation
+ * from the original failure stays where it is — dunning owns that, not this.
+ *
+ * Deliberately manual: no automatic resume-on-payment. Whether a payment
+ * should silently restart recurring billing is an owner policy call, not a
+ * default this endpoint gets to make.
+ *
+ * Scope: this clears the pause and says NOTHING about whether dues will now
+ * collect. An earlier revision returned a `blockers` array enumerating the
+ * cron's other guards (autopay, lane, annual-prepay coverage...). That was a
+ * second implementation of processMonthlyBilling's guard chain, and review
+ * found a further missed guard on three consecutive rounds — evidence about
+ * the approach, not just the code. The response no longer claims anything
+ * about future collection, so it cannot be wrong about it; the cron's own
+ * autopay_log skip reasons remain the authority on why a customer was not
+ * charged.
+ */
+router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Idempotent: clicking twice, or racing another admin, is a no-op rather
+    // than a spurious audit entry.
+    if (!customer.service_paused_at) {
+      return res.json({ success: true, resumed: false, reason: 'not_paused', servicePausedAt: null });
+    }
+
+    const pausedAt = customer.service_paused_at;
+    const pauseReason = customer.service_pause_reason || null;
+    // ET, not UTC: toISOString() would file a pause applied at 8pm ET on the
+    // FOLLOWING business day, and this date is what the audit trail and the
+    // UI both read.
+    const pausedSince = etDateString(new Date(pausedAt));
+
+    // Clear the state and write its audit trail atomically. A money-affecting
+    // admin action that succeeds with no durable record is worse than one
+    // that fails loudly, so a failed insert rolls the resume back rather than
+    // being swallowed.
+    const resumed = await db.transaction(async (trx) => {
+      // Compare-and-swap on THIS pause, not merely "some pause": billing-cron
+      // runs on its own schedule, so between the SELECT above and this UPDATE
+      // the original pause can be cleared and a NEWER failure applied. A
+      // whereNotNull guard would silently wipe that new pause and quietly put
+      // a customer with a dead card back into the billing run.
+      const cleared = await trx('customers')
+        .where({ id: req.params.id, service_paused_at: pausedAt })
+        .whereNull('deleted_at')
+        .update({ service_paused_at: null, service_pause_reason: null });
+      if (!cleared) return false;
+
+      await trx('customer_interactions').insert({
+        customer_id: req.params.id,
+        interaction_type: 'note',
+        subject: 'Billing pause cleared',
+        body: `Billing pause cleared (paused ${pausedSince}${pauseReason ? `, reason: ${pauseReason}` : ''}). `
+          + 'This removes the pause block only — other billing guards (autopay state, '
+          + 'plan type, prepaid coverage) still apply. The paused months are not back-billed.',
+        admin_user_id: req.technicianId,
+      });
+
+      await recordAuditEvent({
+        actor_type: 'admin',
+        actor_id: req.technicianId || null,
+        action: 'customer.billing_pause_cleared',
+        resource_type: 'customer',
+        resource_id: req.params.id,
+        metadata: { paused_since: pausedSince, pause_reason: pauseReason },
+        critical: true,
+        trx,
+      });
+
+      return true;
+    });
+
+    if (!resumed) {
+      // Either another admin got there first, or billing-cron re-paused this
+      // customer. Both mean "the pause you saw is gone" — re-read before
+      // acting again.
+      return res.json({ success: true, resumed: false, reason: 'pause_changed' });
+    }
+
+    logger.info(`[customers] Billing pause cleared for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`);
+
+    res.json({ success: true, resumed: true, pausedSince, pauseReason, servicePausedAt: null });
+  } catch (err) { next(err); }
+});
+
 // POST /api/admin/customers/:id/tags
 router.post('/:id/tags', requireAdmin, async (req, res, next) => {
   try {
@@ -3197,6 +3489,66 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         activeTermId: activeTerm.id,
         activeTermEnd,
       });
+    }
+
+    // Optional first-visit intent — the date/time already promised to the
+    // customer (e.g. booked on the phone). Anchors the generated coverage
+    // series and gives visit 1 a real arrival window instead of the windowless
+    // term_start-anchored default. Must land inside the coverage window.
+    const AnnualPrepayTimes = require('../services/annual-prepay-renewals');
+    const firstVisitDateInput = parseDateOnlyInput(req.body?.firstVisitDate, 'firstVisitDate');
+    if (firstVisitDateInput.error) return res.status(400).json({ error: firstVisitDateInput.error });
+    const firstVisitDate = firstVisitDateInput.date || null;
+    if (firstVisitDate && (firstVisitDate < termStart || firstVisitDate > termEnd)) {
+      return res.status(400).json({ error: `firstVisitDate must fall between ${termStart} and ${termEnd}` });
+    }
+    // A promised first visit anchors the whole series and is never moved
+    // afterwards, so refuse one that leaves no room for the visits sold — the
+    // tail would fall outside the term window and never be stamped prepaid.
+    if (firstVisitDate) {
+      const lastVisitDate = AnnualPrepayTimes._private.coverageScheduleDates(
+        firstVisitDate, visitCount, coverageCadence, null,
+      ).slice(-1)[0];
+      if (lastVisitDate && lastVisitDate > termEnd) {
+        return res.status(400).json({
+          error: `A first visit on ${firstVisitDate} pushes visit ${visitCount} to ${lastVisitDate}, past the term end (${termEnd}). Pick an earlier first visit or extend the term.`,
+        });
+      }
+    }
+    const firstVisitWindowStartRaw = cleanOptionalText(req.body?.firstVisitWindowStart);
+    const firstVisitWindowStart = firstVisitWindowStartRaw
+      ? AnnualPrepayTimes.normalizeWindowStart(firstVisitWindowStartRaw)
+      : null;
+    if (firstVisitWindowStartRaw && !firstVisitWindowStart) {
+      return res.status(400).json({ error: 'firstVisitWindowStart must be an on-the-hour 24-hour time like 08:00' });
+    }
+    if (firstVisitWindowStart && !firstVisitDate) {
+      return res.status(400).json({ error: 'firstVisitWindowStart requires firstVisitDate' });
+    }
+    // window_end is duration-driven, so a start with no room for the visit
+    // before midnight is refused rather than shortened.
+    if (firstVisitWindowStart && !AnnualPrepayTimes._private.addMinutesHHMM(firstVisitWindowStart, 60)) {
+      return res.status(400).json({ error: 'firstVisitWindowStart is too late in the day to fit a service visit' });
+    }
+    // Reject a promised time that already collides, so the operator picks
+    // another one while the customer is still on the phone. The seeder
+    // re-checks at payment time (the board can move in between) and drops the
+    // window rather than materializing an overlap.
+    if (firstVisitDate && firstVisitWindowStart) {
+      const conflict = await AnnualPrepayTimes.findVisitWindowConflict(db, {
+        scheduledDate: firstVisitDate,
+        windowStart: firstVisitWindowStart,
+        // A visit of this same coverage service already sitting at that hour is
+        // the one coverage will adopt, not a clash. The customer's OTHER
+        // services still count — they can't be performed simultaneously.
+        adoptableFor: { customerId: customer.id, coverageServiceType },
+      });
+      if (conflict) {
+        return res.status(409).json({
+          error: `${firstVisitWindowStart} on ${firstVisitDate} overlaps an existing visit. Pick another time.`,
+          conflictId: conflict.id,
+        });
+      }
     }
 
     const note = cleanOptionalText(req.body?.note);
@@ -3403,6 +3755,8 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
         coverageServiceType,
         coverageVisitCount: visitCount,
         coverageCadence,
+        firstVisitDate,
+        firstVisitWindowStart,
         conn: trx,
       });
       if (!term) throw new Error('Annual prepay term could not be created');
@@ -3666,6 +4020,21 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
       result = { invoice: updatedInvoice, term, payment };
     });
 
+    // A cash/check annual prepay is the customer paying — same automatic-
+    // clear contract as every other receipt path. The helper owns the rules
+    // (reason gate, causality, locking); settlement moment is NOW (a human
+    // is holding the money). Failure logs — the operator has the button.
+    try {
+      const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+      await maybeResumeBillingPauseOnPayment(customer.id, {
+        paymentIntentId: null,
+        source: 'customer360_annual_prepay',
+        settledAt: new Date(),
+      });
+    } catch (pauseErr) {
+      logger.warn(`[customers:annual-prepay] billing-pause auto-clear failed: ${pauseErr.message}`);
+    }
+
     await auditCustomerMutation(req, 'customer.annual_prepay.record', customer.id, {
       invoiceId: result.invoice.id,
       invoiceNumber: result.invoice.invoice_number,
@@ -3866,6 +4235,22 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
     } catch (err) {
       if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
       throw err;
+    }
+
+    // A cash-backed PREPAYMENT is real money received — same automatic-
+    // clear contract. Adjustments/corrections (other kinds) move no cash
+    // and must not clear anything.
+    if (kind === 'prepayment') {
+      try {
+        const { maybeResumeBillingPauseOnPayment } = require('../services/billing-pause');
+        await maybeResumeBillingPauseOnPayment(req.params.id, {
+          paymentIntentId: null,
+          source: 'account_credit_prepayment',
+          settledAt: new Date(),
+        });
+      } catch (pauseErr) {
+        logger.warn(`[admin-customers] billing-pause auto-clear failed: ${pauseErr.message}`);
+      }
     }
 
     await db('activity_log').insert({

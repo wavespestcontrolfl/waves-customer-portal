@@ -135,6 +135,29 @@ export default function SecureAppointmentPage() {
     }
   }, [token]);
 
+  // Post-capture refresh with a SECURED fallback (Codex #3153 r21): once
+  // the server confirmed completion, the save IS done — a transient
+  // refetch failure must render the secured state, never an error message
+  // or the card form again.
+  const refreshOrSecured = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
+      if (res.ok) {
+        const payload = await res.json();
+        setData(payload);
+        setSelectedPlan(payload.planContext?.selected || null);
+        setState(payload.state === 'ready' ? 'ready' : payload.state);
+        return;
+      }
+    } catch { /* fall through to the secured fallback */ }
+    // Suppress term-specific copy in the fallback (Codex #3153 r21 P2):
+    // the pre-completion note may be stale (a concurrent tab can have
+    // monotonically lowered/cleared the frozen terms) — secured posture
+    // without quoting terms we could not refresh.
+    setData((d) => (d ? { ...d, cancelFeeNote: null } : d));
+    setState('secured');
+  }, [token]);
+
   const complete = useCallback(async (setupIntentId) => {
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
       method: 'POST',
@@ -198,7 +221,12 @@ export default function SecureAppointmentPage() {
         return;
       }
       await complete(confirmed.setupIntentId);
-      setState('secured');
+      // Re-pull the payload so the secured confirmation renders the FROZEN
+      // row terms, never this render's pre-completion disclosure (Codex
+      // #3153 r16 — a concurrent tab or a monotonic-down stamp can make
+      // the stale note wrong in either direction). Secured fallback on a
+      // refetch hiccup — the save already succeeded (r21).
+      await refreshOrSecured();
     } catch (err) {
       // The visit was cancelled / became payer-billed since the page
       // loaded — nothing to save; show the "nothing needed" state.
@@ -208,9 +236,10 @@ export default function SecureAppointmentPage() {
       }
       // The Stripe webhook (or another tab) won the completion claim and
       // is saving this card right now — the SetupIntent already succeeded,
-      // so the durable webhook path finishes it. Not a failure.
+      // so the durable webhook path finishes it. Not a failure. Re-pull so
+      // the secured render carries the frozen row terms (Codex #3153 r16).
       if (err?.code === 'completion_in_progress') {
-        setState('secured');
+        await refreshOrSecured();
         return;
       }
       // The server requires a recorded plan selection before the capture
@@ -225,7 +254,7 @@ export default function SecureAppointmentPage() {
     } finally {
       setBusy(false);
     }
-  }, [busy, complete, refresh]);
+  }, [busy, complete, refresh, refreshOrSecured]);
 
   const selectPlan = useCallback(async (plan) => {
     if (planBusy) return;
@@ -320,6 +349,15 @@ export default function SecureAppointmentPage() {
             charged today — your card is only charged after your service is
             completed.
           </p>
+          {/* Frozen fee terms ride the secured payload for page-consented
+              rows (Codex #3153 r9): the confirmation must not read as an
+              unqualified "only after completion" when a no-show/late-cancel
+              fee was agreed to. Absent for auto-secured visits (no fee). */}
+          {data?.cancelFeeNote ? (
+            <p style={{ fontSize: 14, color: S.muted, lineHeight: 1.5, marginTop: 6 }}>
+              {data.cancelFeeNote}
+            </p>
+          ) : null}
           {data ? <VisitSummary data={data} /> : null}
           <ContactRow />
         </Card>

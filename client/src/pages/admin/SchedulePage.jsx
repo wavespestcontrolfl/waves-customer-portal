@@ -172,6 +172,21 @@ const AREAS_BY_SERVICE = {
     "Fence line",
     "Trash area",
   ],
+  // Bed bug is an interior treatment — yard/fence chips read wrong on its
+  // closeout (owner 2026-07-31, untype lane). Vocabulary carries over the
+  // retired typed form's treatment surfaces. Labels never contain commas
+  // (the per-product area field comma-joins selections).
+  bed_bug: [
+    "Primary bedroom",
+    "Guest bedroom",
+    "Living room",
+    "Mattress & box spring",
+    "Bed frame & headboard",
+    "Baseboards",
+    "Furniture & upholstery",
+    "Closets",
+    "Adjacent rooms",
+  ],
   lawn: [
     "Front yard",
     "Back yard",
@@ -530,6 +545,7 @@ export function completionPreferencesNeedDraft({
   backfillCloseout = false,
   backfillCloseoutDefault = false,
   backfillTimeOnSite = "",
+  adjustedTimeOnSite = "",
 } = {}) {
   return sendSms !== true
     || includePayLink !== true
@@ -541,7 +557,10 @@ export function completionPreferencesNeedDraft({
     // is drift from the panel default — either direction — that needs a
     // draft. Typed minutes ride along like any other text field.
     || backfillCloseout !== backfillCloseoutDefault
-    || String(backfillTimeOnSite || "").trim() !== "";
+    || String(backfillTimeOnSite || "").trim() !== ""
+    // The live admin override rides along the same way: losing typed
+    // minutes across a reload silently records the inflated timer instead.
+    || String(adjustedTimeOnSite || "").trim() !== "";
 }
 
 // timeOnSite fragment of the completion POST body. The panel's running
@@ -550,9 +569,22 @@ export function completionPreferencesNeedDraft({
 // as explicit operator input (persisted service duration + job-costing
 // labor). Under a backdated closeout only an operator-TYPED positive number
 // of minutes may travel; blank/invalid omits the key so the duration stays
-// unknown. Non-backfill submits keep today's auto-elapsed exactly.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed }) {
-  if (!backfill) return { timeOnSite: elapsed };
+// unknown. On a live completion the wire contract is TYPE-based: a NUMBER
+// is an admin-typed override of the running timer (validated 1..720 —
+// out-of-range falls back to the elapsed string so a stray value never
+// ships as operator input; handleSubmit blocks it with an alert first), a
+// string is the auto-elapsed timer, recorded exactly as before.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "" }) {
+  if (!backfill) {
+    const trimmed = String(adjustedMinutes ?? "").trim();
+    if (trimmed !== "") {
+      const minutes = Math.round(Number(trimmed));
+      if (Number.isFinite(minutes) && minutes >= 1 && minutes <= 720) {
+        return { timeOnSite: minutes };
+      }
+    }
+    return { timeOnSite: elapsed };
+  }
   const minutes = Math.round(Number(typedMinutes));
   return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
 }
@@ -575,6 +607,10 @@ export function restoredBackfillChoices(savedDraft, backfillCloseoutDefault = fa
       typeof savedDraft?.backfillTimeOnSite === "string"
         ? savedDraft.backfillTimeOnSite
         : "",
+    adjustedTimeOnSite:
+      typeof savedDraft?.adjustedTimeOnSite === "string"
+        ? savedDraft.adjustedTimeOnSite
+        : "",
   };
 }
 
@@ -588,7 +624,6 @@ export function completionReviewSuppressionReason({
   backfillQuietCloseout = false,
   visitOutcome = "completed",
   customerConcernInteraction = false,
-  willInvoice = false,
 } = {}) {
   if (isIncompleteVisit) return "incomplete";
   if (backfillQuietCloseout) return "backfill";
@@ -596,20 +631,22 @@ export function completionReviewSuppressionReason({
   if (visitOutcome === "customer_concern" || customerConcernInteraction) {
     return "customer_concern";
   }
-  return willInvoice ? "invoice_created" : null;
+  // NOTE (coverage fix, 2026-07-30): an invoiced completion is deliberately
+  // NOT a client-side suppression anymore. The server owns the invoice rule —
+  // a completion-time ask is blocked only while the invoice is UNPAID
+  // (admin-dispatch effectiveRequestReview), and the paid-invoice webhook
+  // queues the ask when payment lands. The old blanket willInvoice=false here
+  // posted requestReview=false, which killed the ask on BOTH sides — including
+  // completions paid on the spot — and drove review coverage to near zero.
+  return null;
 }
 
 export function completionWillReview({
   oneTimeRecapOnly = false,
   requestReview = true,
-  willInvoice = false,
   reviewSuppressionReason = null,
 } = {}) {
-  return (
-    (oneTimeRecapOnly || !!requestReview) &&
-    !willInvoice &&
-    !reviewSuppressionReason
-  );
+  return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
 }
 
 function completionDraftKey(serviceId) {
@@ -1011,6 +1048,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     })(),
   });
   const [saving, setSaving] = useState(false);
+  // Recorded time on-site for a COMPLETED visit (forgotten-closeout fix,
+  // after-the-fact leg): admin-only correction of an inflated recorded
+  // duration. Deliberately OUTSIDE `form` — it saves through the dedicated
+  // PATCH /admin/dispatch/:id/time-on-site endpoint, never update-details
+  // (whose allowlist stays timing-free). Seeded from whichever recorded
+  // field the payload carries (dispatch rows: serviceTimeMinutes; schedule
+  // rows: actualDuration); the seed doubles as the dirty check so an
+  // untouched field never PATCHes.
+  const timeOnSiteSeed = (() => {
+    const v = service.serviceTimeMinutes ?? service.actualDuration ?? null;
+    return v != null && Number(v) > 0 ? String(Math.round(Number(v))) : "";
+  })();
+  const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
+  const isCompletedVisit =
+    String(service.status || "").toLowerCase() === "completed";
   // Immediate reschedule text when this save moves the visit's date or
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
@@ -1416,6 +1468,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   const handleSave = async ({ takePayment = false } = {}) => {
     setSaving(true);
+    // Time-on-site correction rides the same Save button but its own
+    // endpoint: validate before anything writes so a typo aborts the whole
+    // save rather than landing the update-details half only. The PATCH
+    // itself runs AFTER update-details succeeds (codex P2 #3152 round 2):
+    // its server-side job-costing recalculation must see the saved service
+    // type/price/assignment, and a rejected details save must not leave the
+    // correction half-committed behind a "Save failed" alert.
+    const timeOnSiteDirty =
+      isCompletedVisit &&
+      isAdminUser &&
+      String(timeOnSiteMinutes || "").trim() !== "" &&
+      String(timeOnSiteMinutes || "").trim() !== timeOnSiteSeed;
+    if (timeOnSiteDirty) {
+      const minutes = Math.round(Number(String(timeOnSiteMinutes).trim()));
+      if (!Number.isFinite(minutes) || minutes < 1 || minutes > 720) {
+        alert("Time on site must be 1–720 minutes.");
+        setSaving(false);
+        return;
+      }
+    }
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -1546,6 +1618,90 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         alert(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
+      }
+      // Details are saved — now the duration correction, so its server-side
+      // job-costing recalc prices against the values just persisted. A
+      // failure here is a PARTIAL save (details landed, correction didn't):
+      // say exactly that, matching the notification partial-failure above.
+      if (timeOnSiteDirty) {
+        try {
+          const correctionMinutes = Math.round(
+            Number(String(timeOnSiteMinutes).trim()),
+          );
+          const patchResult = await adminFetch(
+            `/admin/dispatch/${service.id}/time-on-site`,
+            {
+              method: "PATCH",
+              body: JSON.stringify({ minutes: correctionMinutes }),
+            },
+          );
+          // The record leg can be skipped server-side (ambiguous legacy
+          // match, or no report record found) — the appointment's duration
+          // still corrected, but the customer report did not. Silence here
+          // would read as a full success (codex P2 round 3).
+          if (patchResult?.recordUpdated === false) {
+            alert(
+              patchResult?.recordAmbiguous
+                ? "Duration corrected on the appointment, but several legacy report records match this visit — the customer report was NOT changed and needs a manual fix."
+                : "Duration corrected on the appointment, but no report record was found for this visit — the customer report was not changed.",
+            );
+          }
+          // The costing refresh is derived state — a failure there must not
+          // read as full success (codex P2 round 9). "Re-save this
+          // correction" as advice was a dead end (codex P2 round 17): after
+          // the refresh the corrected value becomes the seed, the dirty flag
+          // clears, and Save never re-invokes this PATCH — so the retry
+          // happens HERE, while the correction is still in hand.
+          if (patchResult?.costingUpdated === false) {
+            const retryNow = window.confirm(
+              "Duration corrected, but the job-cost refresh failed — costs may show the old labor until the next recalculation. Retry the refresh now?",
+            );
+            let retried = null;
+            if (retryNow) {
+              try {
+                retried = await adminFetch(
+                  `/admin/dispatch/${service.id}/time-on-site`,
+                  {
+                    method: "PATCH",
+                    body: JSON.stringify({ minutes: correctionMinutes }),
+                  },
+                );
+              } catch {
+                retried = null;
+              }
+            }
+            if (retryNow && retried?.costingUpdated !== true) {
+              alert(
+                "The job-cost refresh failed again — the corrected duration itself is saved; use Job Costs → Recalculate to refresh the labor cost.",
+              );
+            }
+          }
+          // The linked technician job timer feeds timesheets and
+          // utilization — when the server couldn't route it through the
+          // audited edit (approved week, several linked entries), the
+          // inflated span survives there until corrected by hand.
+          if (patchResult?.timeEntryCorrected === false) {
+            const timerReason =
+              patchResult?.timeEntryCorrectionBlocked === "exceeds_elapsed"
+                ? "the corrected minutes exceed the time elapsed since its clock-in"
+                : patchResult?.timeEntryCorrectionBlocked === "entry_conflict"
+                  ? "it was edited by someone else at the same moment"
+                : patchResult?.timeEntryCorrectionBlocked === "entry_open"
+                  ? "its timer is still running"
+                : patchResult?.timeEntryCorrectionBlocked === "approved_week"
+                  ? "its week is already approved"
+                  : patchResult?.timeEntryCorrectionBlocked === "multiple_job_entries"
+                    ? "several timer entries are linked to this visit"
+                    : "it could not be edited automatically";
+            alert(
+              `Duration corrected, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
+            );
+          }
+        } catch (patchErr) {
+          alert(
+            `Appointment saved, but the time-on-site correction failed: ${patchErr.message}. Reopen the appointment to retry it.`,
+          );
+        }
       }
       onSaved?.();
     } catch (e) {
@@ -2522,7 +2678,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               {estimateSource && (
                 <EstimateProvenanceCard
                   quotedTotal={estimateSource.quotedTotal}
-                  currentPrice={appointmentTotal}
+                  onetimeTotal={estimateSource.onetimeTotal}
+                  // Same rule as the mobile sheet: the comparison stands for
+                  // the common one-group booking; only a genuinely split
+                  // quote (multiple series anchors, counted server-side)
+                  // suppresses it.
+                  currentPrice={Number(estimateSource.linkedSeriesCount) > 1
+                    ? null : appointmentTotal}
+                  compareScope="visit"
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
                   lines={estimateSource.lines}
@@ -2796,6 +2959,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
+              {isCompletedVisit && isAdminUser && (
+                <div style={{ marginBottom: 14 }}>
+                  {" "}
+                  <label style={labelStyle}>Time on site (minutes)</label>{" "}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="720"
+                    step="1"
+                    value={timeOnSiteMinutes}
+                    onChange={(e) => setTimeOnSiteMinutes(e.target.value)}
+                    placeholder="Not recorded"
+                    className="font-medium"
+                    style={inputStyle}
+                  />{" "}
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                    Recorded duration for this completed visit — correct it
+                    here if the on-site timer wasn&rsquo;t closed out on time.
+                    Saving updates the report and job costing; no customer
+                    messages are sent, and the report PDF regenerates.
+                  </div>{" "}
+                </div>
+              )}{" "}
               {scheduleMoved && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
@@ -4982,7 +5169,70 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
 
   const notifyCustomer = notificationType === "sms";
 
+  // window_end is the visit's SCHEDULING block — it must carry the visit's
+  // own duration, never a flat 2-hour span (that inflates occupancy and
+  // blocks real slots). The 2-hour arrival range is customer-facing copy
+  // only. Duration: the service's estimate, else the original window span,
+  // else 60 minutes.
+  const durationMinutes = (() => {
+    // Stored window span FIRST — the feeds fabricate defaults for
+    // null-duration rows (Day: ||60, Month: ||30), so metadata can lie
+    // while the persisted span cannot. Metadata (estimatedDuration on
+    // day/week payloads, duration on month payloads) is the fallback for
+    // windowless rows, then 60.
+    const [ws, we] = [service.windowStart, service.windowEnd];
+    if (ws && we) {
+      const [h1, m1] = String(ws).split(":").map(Number);
+      const [h2, m2] = String(we).split(":").map(Number);
+      const span = h2 * 60 + (m2 || 0) - (h1 * 60 + (m1 || 0));
+      if (span > 0) return span;
+    }
+    const d = parseInt(service.estimatedDuration ?? service.duration, 10);
+    if (Number.isInteger(d) && d > 0) return d;
+    return 60;
+  })();
+
+  const windowFor = (startHHMM) => {
+    const [h, m] = String(startHHMM).split(":").map(Number);
+    if (Number.isNaN(h)) return null;
+    const endTotal = h * 60 + (m || 0) + durationMinutes;
+    // A start whose full duration crosses midnight would truncate the
+    // visit's occupancy block and let another booking land inside time the
+    // job still needs — reject instead of clamping.
+    if (endTotal > 23 * 60 + 59) return null;
+    const end = `${String(Math.floor(endTotal / 60)).padStart(2, "0")}:${String(endTotal % 60).padStart(2, "0")}`;
+    const start = `${String(h).padStart(2, "0")}:${String(m || 0).padStart(2, "0")}`;
+    return {
+      start,
+      end,
+      display: `${formatTimeDisplay(start)} - ${formatTimeDisplay(end)}`,
+    };
+  };
+
+  const currentDateOnly = service.scheduledDate
+    ? String(service.scheduledDate).split("T")[0]
+    : "";
+  const currentStart = service.windowStart
+    ? String(service.windowStart).slice(0, 5)
+    : "";
+
   const handleReschedule = async (opt) => {
+    // Suggested starts are morning slots, but stay consistent with the
+    // manual path: never submit a midnight-truncated block.
+    const suggestedBlock = windowFor(opt.suggestedWindow?.start);
+    if (!suggestedBlock) {
+      alert(
+        "That start time would run past midnight for this visit's duration — pick another slot.",
+      );
+      return;
+    }
+    // Same no-op guard as the manual path: a suggestion can equal the
+    // current slot (the visit excludes itself from conflict checks), and
+    // submitting it would log a reschedule and text an unchanged customer.
+    if (opt.date === currentDateOnly && suggestedBlock.start === currentStart) {
+      alert("The appointment is already scheduled at that date and time.");
+      return;
+    }
     setSending(true);
     try {
       const result = await adminFetch(
@@ -4991,7 +5241,12 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           method: "POST",
           body: JSON.stringify({
             newDate: opt.date,
-            newWindow: opt.suggestedWindow,
+            // Re-derive the block from the visit's own duration — the
+            // suggested window's 2-3h span is arrival copy, not occupancy.
+            newWindow: suggestedBlock,
+            // Server re-derives window_end from the CURRENT row, so a stale
+            // board snapshot can't shrink or expand the visit's block.
+            deriveWindowFromCurrentVisit: true,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5007,20 +5262,30 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       onClose();
     } catch (e) {
       console.error(e);
+      alert(
+        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+      );
     }
     setSending(false);
   };
 
   const handleManualReschedule = async () => {
     if (!manualDate) return;
+    // No-op guard: submitting the visit's existing slot would log a
+    // reschedule and (with Text selected) tell the customer their
+    // appointment moved when nothing changed.
+    if (manualDate === currentDateOnly && manualTime === currentStart) {
+      alert("The appointment is already scheduled at that date and time.");
+      return;
+    }
+    const window = windowFor(manualTime);
+    if (!window) {
+      alert(
+        "That start time would run past midnight for this visit's duration — pick an earlier hour.",
+      );
+      return;
+    }
     setSending(true);
-    const [h, m] = manualTime.split(":");
-    const endH = String(Math.min(23, parseInt(h) + 2)).padStart(2, "0");
-    const window = {
-      start: manualTime,
-      end: `${endH}:${m}`,
-      display: `${formatTimeDisplay(manualTime)} - ${formatTimeDisplay(`${endH}:${m}`)}`,
-    };
     try {
       const result = await adminFetch(
         `/admin/dispatch/${service.id}/reschedule`,
@@ -5029,6 +5294,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           body: JSON.stringify({
             newDate: manualDate,
             newWindow: window,
+            // Server re-derives window_end from the CURRENT row, so a stale
+            // board snapshot can't shrink or expand the visit's block.
+            deriveWindowFromCurrentVisit: true,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5044,6 +5312,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       onClose();
     } catch (e) {
       console.error(e);
+      alert(
+        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+      );
     }
     setSending(false);
   };
@@ -5239,7 +5510,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     {opt.displayDate}
                   </div>{" "}
                   <div style={{ fontSize: 12, color: D.muted }}>
-                    {opt.suggestedWindow?.display} · {opt.currentLoad} jobs ·{" "}
+                    {/* Show the block Select actually books (duration-derived),
+                        not the server's wider 2-3h span. */}
+                    {windowFor(opt.suggestedWindow?.start)?.display ||
+                      opt.suggestedWindow?.display}{" "}
+                    · {opt.currentLoad} jobs ·{" "}
                     {opt.sameAreaServices} same area
                   </div>{" "}
                 </div>{" "}
@@ -5310,12 +5585,25 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
                   Start Time
                 </div>{" "}
-                <input
-                  type="time"
+                {/* Appointment windows ALWAYS start on the hour (owner
+                    directive) — an hour select instead of a free time input
+                    so an off-hour start can't be submitted. */}
+                <select
                   value={manualTime}
                   onChange={(e) => setManualTime(e.target.value)}
                   style={inputSt}
-                />{" "}
+                >
+                  {Array.from({ length: 13 }, (_, i) => {
+                    const h = i + 6;
+                    const value = `${String(h).padStart(2, "0")}:00`;
+                    const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
+                    return (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>{" "}
               </div>{" "}
               <div style={{ display: "flex", alignItems: "flex-end" }}>
                 {" "}
@@ -6769,7 +7057,7 @@ function normalizeApplicationMethod(value = "") {
   return normalized;
 }
 
-export function defaultApplicationMethod(product = {}, serviceType = "") {
+export function defaultApplicationMethod(product = {}, serviceType = "", { interiorLane = false } = {}) {
   const category = String(product.category || product.product_category || "").toLowerCase();
   const explicit = product.application_method || product.method;
   if (explicit) return normalizeApplicationMethod(explicit);
@@ -6789,6 +7077,13 @@ export function defaultApplicationMethod(product = {}, serviceType = "") {
   if (serviceLine === "lawn") return category.includes("herb") ? "spot_treatment" : "broadcast_spray";
   if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
   if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
+  // Bed bug is an interior treatment: the pest perimeter_spray fallback
+  // recorded interior work as exterior AND demanded perimeter footage the
+  // (hidden) zone tracer would have prefilled, blocking a routine closeout
+  // — default methodless products to an interior spot application instead
+  // (codex P1 on the bed-bug untype). interiorLane comes from the STABLE
+  // profile key; the name regex is the fallback for callers without it.
+  if (interiorLane || /\bbed\s*bugs?\b/i.test(String(serviceType || ""))) return "spot_treatment";
   return "perimeter_spray";
 }
 
@@ -8318,12 +8613,22 @@ export function CompletionPanel({
   // must never inherit it — blank submits no timeOnSite and the duration
   // stays unknown (see completionTimeOnSiteBody).
   const [backfillTimeOnSite, setBackfillTimeOnSite] = useState("");
+  // Admin-typed minutes overriding the running timer on a LIVE completion
+  // (forgotten-closeout fix: the timer kept running, so the auto-elapsed is
+  // inflated). Starts EMPTY — blank records the timer exactly as before.
+  // Admin-only server-side (403 for a tech token), so like backfill the
+  // input never renders for technician users.
+  const [adjustedTimeOnSite, setAdjustedTimeOnSite] = useState("");
   // A backdated quiet closeout suppresses every customer send server-side —
   // the client-side flags must agree, or the success overlay and CTA
   // sub-label claim sends for a completion that texted nobody. Derived here,
   // above the recap/review state, so recap eligibility and the review
   // suppression chain can fold it in.
   const backfillQuietCloseout = backfillEligible && backfillCloseout;
+  // The live override input hides while the backfill checkbox is checked —
+  // that mode has its own minutes input with different blank semantics
+  // (blank = unknown, not "use timer").
+  const liveAdjustEligible = panelIsAdmin && !backfillQuietCloseout;
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
   const [recapSource, setRecapSource] = useState("template");
@@ -8820,6 +9125,14 @@ export function CompletionPanel({
   const hideServicePhotos = isLawn && companionSchemas.length === 0;
   const serviceTypeForArea = service?.serviceType || service?.service_type || "";
   const calibrationRequired = isLawn && !!service.waveguardTier;
+  // Advisory inventory posture is member-tier only — mirrors the server's
+  // isWaveGuardLawnCompletion. A One-Time/Commercial lawn visit still gets
+  // the hard inventory gate client-side, because the server passes
+  // allowNegative: false for it and would 400 the closeout with the original
+  // inventory lockout (codex P2 r3 on #3179).
+  const inventoryAdvisoryTier = ["Bronze", "Silver", "Gold", "Platinum"].includes(
+    service?.waveguardTier,
+  );
   const currentAdminUser = (() => {
     try {
       return JSON.parse(localStorage.getItem("waves_admin_user") || "null");
@@ -8829,6 +9142,14 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
+  // Bed bug closeouts get interior-specific treated-area chips, skip the
+  // satellite spray-trace (a perimeter trace has no meaning for an interior
+  // treatment), and hide the no-invoice recap — owner 2026-07-31, bed-bug
+  // untype lane. The STABLE profile key is authoritative (display labels
+  // are admin-editable); the name regex is only a fallback for rows whose
+  // profile did not resolve (codex P2 r8).
+  const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
+    || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
@@ -8928,7 +9249,9 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const areaOptions = [
-    ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
+    ...(isBedBugVisit
+      ? AREAS_BY_SERVICE.bed_bug
+      : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest)),
   ];
   const onSiteEntry = (service.statusLog || []).find(
     (e) => e.status === "on_site",
@@ -9014,12 +9337,10 @@ export function CompletionPanel({
     visitOutcome,
     customerConcernInteraction:
       isCustomerConcernInteraction(customerInteraction),
-    willInvoice,
   });
   const willReview = completionWillReview({
     oneTimeRecapOnly,
     requestReview,
-    willInvoice,
     reviewSuppressionReason,
   });
   const effectiveSendSms =
@@ -9123,14 +9444,26 @@ export function CompletionPanel({
   // and default-product-disposition no longer gate completion. Real safeguards
   // stay: a WaveGuard lawn completion must record at least one applied product
   // (an empty list would write a protocol completion with no actuals or
-  // inventory deductions), every applied product needs actual amounts, and
-  // inventory blocks still hold.
+  // inventory deductions) and every applied product needs actual amounts.
+  // Inventory shortfalls no longer gate MEMBER-tier closeouts (owner
+  // directive 2026-08-03): the plan banner still shows them, and the server
+  // records them as an advisory and lets stock go negative. Non-member lawn
+  // tiers keep the full gate — the server hard-fails their deductions.
+  // Inactive products stay a hard gate for EVERY tier: the completion route
+  // rejects them product-by-product regardless of the advisory posture, so
+  // letting the submit through would trap the tech on a closeout error
+  // (codex P2 r4 on #3179).
+  const treatmentPlanGatingInventoryBlocks = inventoryAdvisoryTier
+    ? treatmentPlanInventoryBlocks.filter(
+        (block) => block?.code === "inventory_product_inactive",
+      )
+    : treatmentPlanInventoryBlocks;
   const protocolActualsCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
     (selectedProducts.length === 0 ||
       selectedProductsMissingActualAmount.length > 0 ||
-      treatmentPlanInventoryBlocks.length > 0);
+      treatmentPlanGatingInventoryBlocks.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -9574,6 +9907,7 @@ export function CompletionPanel({
         backfillCloseout,
         backfillCloseoutDefault,
         backfillTimeOnSite,
+        adjustedTimeOnSite,
       }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) {
@@ -9607,6 +9941,9 @@ export function CompletionPanel({
         // any panel reload, or the restored submit silently turns LOUD.
         backfillCloseout,
         backfillTimeOnSite,
+        // Live-override minutes are operator input the same way: losing
+        // them across a reload records the inflated timer instead.
+        adjustedTimeOnSite,
         visitOutcome,
         customerRecap,
         recapSource,
@@ -9688,6 +10025,7 @@ export function CompletionPanel({
     oneTimeRecapOnly,
     backfillCloseout,
     backfillTimeOnSite,
+    adjustedTimeOnSite,
     visitOutcome,
     customerRecap,
     recapSource,
@@ -9727,9 +10065,21 @@ export function CompletionPanel({
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
-        ? savedDraft.selectedProducts.map((product) =>
-            normalizeProductArea(product, serviceTypeForArea),
-          )
+        ? savedDraft.selectedProducts.map((product) => {
+            const normalized = normalizeProductArea(product, serviceTypeForArea);
+            // Bed bug: a pre-migration draft carries the old inferred
+            // perimeter default — reclassify it to the interior default so
+            // a restored draft can't demand perimeter footage or record
+            // interior work as exterior (codex P2 r10).
+            if (
+              isBedBugVisit &&
+              effectiveApplicationMethod(normalized.applicationMethod) ===
+                "perimeter_spray"
+            ) {
+              return { ...normalized, applicationMethod: "spot_treatment" };
+            }
+            return normalized;
+          })
         : [],
     );
     setSendSms(savedDraft.sendSms !== false);
@@ -9742,7 +10092,11 @@ export function CompletionPanel({
     );
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
-    setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
+    // Bed bug hides the recap-only control (typed-era billing parity) — a
+    // pre-migration draft must not restore the flag into invisible state
+    // where the server's recap_only_not_allowed 409 becomes unclearable
+    // (codex P2 r9).
+    setOneTimeRecapOnly(isBedBugVisit ? false : !!savedDraft.oneTimeRecapOnly);
     // Quiet/loud choice + typed minutes come back exactly as saved; a legacy
     // draft without the fields falls back to the panel default. Consumers all
     // gate on backfillEligible, so this stays inert if the visit is somehow
@@ -9753,6 +10107,7 @@ export function CompletionPanel({
     );
     setBackfillCloseout(restoredBackfill.backfillCloseout);
     setBackfillTimeOnSite(restoredBackfill.backfillTimeOnSite);
+    setAdjustedTimeOnSite(restoredBackfill.adjustedTimeOnSite);
     setVisitOutcome(savedDraft.visitOutcome || "completed");
     setCustomerRecap(savedDraft.customerRecap || "");
     setRecapSource(savedDraft.recapSource || "draft");
@@ -9869,23 +10224,48 @@ export function CompletionPanel({
         : {};
     if (typedFindingsSchema?.fields) {
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
+      setFindingsValues(restoredFindings);
+      setTypedActivityScore(
+        Number.isInteger(savedDraft.typedActivityScore)
+          ? savedDraft.typedActivityScore
+          : null,
+      );
+      setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+      const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
+        ? savedDraft.typedNextStepChips
+        : [];
+      setTypedNextStepChips(
+        typedFindingsSchema?.nextStepChips
+          ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
+          : restoredChips,
+      );
+      setTypedRecommendations(savedDraft.typedRecommendations || "");
+    } else {
+      // The profile untyped since this draft was saved (bed_bug,
+      // 20260731400000): the typed controls no longer render and the submit
+      // path would silently drop EVERY retired typed field as invisible
+      // state — findings values, activity score, next-step chips, and the
+      // typed recommendation all count (codex P2 r1 + r4). Discard them
+      // LOUDLY so the tech re-enters what still matters; generic fields
+      // (notes, products, rating…) still restore normally.
+      const draftHadTypedEntries =
+        Object.values(restoredFindings).some((v) =>
+          Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "",
+        )
+        || Number.isInteger(savedDraft.typedActivityScore)
+        || (Array.isArray(savedDraft.typedNextStepChips) && savedDraft.typedNextStepChips.length > 0)
+        || String(savedDraft.typedRecommendations || "").trim() !== "";
+      if (draftHadTypedEntries) {
+        alert(
+          "This service now completes with the standard form. The typed findings saved in this draft (rooms, evidence, treatment, activity, next steps…) can't be restored — re-enter anything still needed in the notes or observations.",
+        );
+      }
+      setFindingsValues({});
+      setTypedActivityScore(null);
+      setTypedActivityTouched(false);
+      setTypedNextStepChips([]);
+      setTypedRecommendations("");
     }
-    setFindingsValues(restoredFindings);
-    setTypedActivityScore(
-      Number.isInteger(savedDraft.typedActivityScore)
-        ? savedDraft.typedActivityScore
-        : null,
-    );
-    setTypedActivityTouched(!!savedDraft.typedActivityTouched);
-    const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
-      ? savedDraft.typedNextStepChips
-      : [];
-    setTypedNextStepChips(
-      typedFindingsSchema?.nextStepChips
-        ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
-        : restoredChips,
-    );
-    setTypedRecommendations(savedDraft.typedRecommendations || "");
     // Companion draft state — the same type-aware pruning per companion
     // schema; saved types the profile no longer declares are dropped, and
     // chips are filtered to the schema's current allowlist.
@@ -10373,7 +10753,7 @@ export function CompletionPanel({
     // the response is about to write (built from the pre-draft snapshot).
     if (generating) return;
     if (selectedProducts.find((p) => p.productId === product.id)) return;
-    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea);
+    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
       serviceTypeForArea,
@@ -10495,19 +10875,23 @@ export function CompletionPanel({
         // control and trims rather than typing from scratch. Editable as before.
         // Protocol-added products (addProduct(action.product)) are serialized
         // without target_pests, so fall back to the loaded catalog row by id.
-        // Broad-label products (Bifen etc.) carry turf pests on the label —
-        // on a non-lawn visit those prefills read wrong on the report (owner
-        // 2026-07-30), so they're dropped here; the tech can still add any
-        // target by hand. Keyed to the detected service CATEGORY, not the
-        // panel's `isLawn` (which is false for typed lawn visits — codex P2:
-        // a typed lawn treatment must keep its turf targets).
+        // Only targets belonging to THIS visit's service line(s) prefill,
+        // capped at MAX_LABEL_TARGET_PREFILL (owner 2026-08-01) — a pest
+        // visit drops Talstar's chinch bugs, a lawn visit drops its ants and
+        // roaches; the tech can still add any target by hand. Keyed to the
+        // detected service lines, not the panel's `isLawn` (false for typed
+        // lawn visits — codex P2). The lines come from the whole visit, not
+        // just its primary name: serviceTypeRaw survives the normalization
+        // that collapses "Lawn + Tree & Shrub" to "Tree & Shrub Care" (codex
+        // P1 r1), and scheduled add-ons contribute their own lines (codex P2
+        // r2) so a pest visit with a mosquito add-on keeps In2Care's targets.
         targets: filterLabelTargetsForLine(
           normalizeLabelTargets(
             product.target_pests
               ?? product.targetPests
               ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
           ),
-          { isLawn: detectServiceCategory(service.serviceType) === "lawn" },
+          allowedTargetLinesForVisit(service),
         ),
       },
     ]);
@@ -10685,6 +11069,17 @@ export function CompletionPanel({
           .join(" ")}`,
       );
       return;
+    }
+    // A typo in the live time-on-site override must never silently fall
+    // back to the inflated timer — the whole point of the field is that the
+    // timer is wrong. Block here; completionTimeOnSiteBody's range check is
+    // only the belt-and-suspenders for a stale draft restore.
+    if (liveAdjustEligible && String(adjustedTimeOnSite || "").trim() !== "") {
+      const adjusted = Math.round(Number(adjustedTimeOnSite));
+      if (!Number.isFinite(adjusted) || adjusted < 1 || adjusted > 720) {
+        alert("Adjusted time on site must be 1–720 minutes.");
+        return;
+      }
     }
     // The server normalizer silently trims each observation/recommendation
     // line to 240 chars and keeps at most 20 entries — reject oversized
@@ -10920,10 +11315,10 @@ export function CompletionPanel({
     if (
       calibrationRequired &&
       !isIncompleteVisit &&
-      treatmentPlanInventoryBlocks.length
+      treatmentPlanGatingInventoryBlocks.length
     ) {
       alert(
-        `Resolve inventory blocks before closeout: ${treatmentPlanInventoryBlocks
+        `Resolve inventory blocks before closeout: ${treatmentPlanGatingInventoryBlocks
           .map((block) => block.message)
           .filter(Boolean)
           .join(" ")}`,
@@ -11066,11 +11461,13 @@ export function CompletionPanel({
           ? null
           : selectedReviewScheduledFor,
         // Backfill: never the auto-elapsed (it spans the stale gap) — only
-        // what the operator typed, or nothing. See completionTimeOnSiteBody.
+        // what the operator typed, or nothing. Live: an admin-typed number
+        // overrides the running timer. See completionTimeOnSiteBody.
         ...completionTimeOnSiteBody({
           backfill: backfillEligible && backfillCloseout,
           typedMinutes: backfillTimeOnSite,
           elapsed,
+          adjustedMinutes: liveAdjustEligible ? adjustedTimeOnSite : "",
         }),
         // Single source of truth for the treated areas. The server reads
         // areasServiced (falling back to a legacy areasTreated only if present),
@@ -11233,6 +11630,27 @@ export function CompletionPanel({
           `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
         );
       }
+      // A live time-on-site override syncs the technician's linked job
+      // timer server-side; when that sync is blocked the inflated span
+      // survives in Timesheets/utilization — say so, since the corrected
+      // value seeds the edit modal and no later save will retry it.
+      if (result?.timeEntryCorrected === false) {
+        const timerReason =
+          result?.timeEntryCorrectionBlocked === "exceeds_elapsed"
+            ? "the corrected minutes exceed the time elapsed since its clock-in"
+            : result?.timeEntryCorrectionBlocked === "entry_conflict"
+              ? "it was edited by someone else at the same moment"
+            : result?.timeEntryCorrectionBlocked === "entry_open"
+              ? "its timer is still running"
+            : result?.timeEntryCorrectionBlocked === "approved_week"
+              ? "its week is already approved"
+              : result?.timeEntryCorrectionBlocked === "multiple_job_entries"
+                ? "several timer entries are linked to this visit"
+                : "it could not be edited automatically";
+        alert(
+          `Service completed with the corrected duration, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
+        );
+      }
       localStorage.removeItem(completionDraftKey(service.id));
       try {
         localStorage.removeItem(completionResumeOwedKey(service.id));
@@ -11247,7 +11665,17 @@ export function CompletionPanel({
       // Keep the panel open when a pest recap is pending — it renders async and the
       // tech approves/sends it from the success overlay (the approve UI is otherwise
       // unreachable once the panel auto-closes).
-      if (!result?.followupSuggestion?.required && !recapEligible) {
+      // Completion advisories also hold the overlay open (codex P2 r2 on
+      // #3179): the 1.2s auto-dismiss isn't enough to read even one
+      // shortfall message — the tech dismisses via the Done button instead.
+      const advisoriesNeedReading =
+        Array.isArray(result?.completionAdvisories) &&
+        result.completionAdvisories.length > 0;
+      if (
+        !result?.followupSuggestion?.required &&
+        !recapEligible &&
+        !advisoriesNeedReading
+      ) {
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
@@ -11752,21 +12180,48 @@ export function CompletionPanel({
                   textAlign: "center",
                 }}
               >
-                {completionResult?.completionSmsStatus === "sent"
-                  ? "SMS + report sent"
-                  : completionResult?.completionSmsStatus === "blocked"
-                    ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                    : completionResult?.completionSmsStatus === "failed"
-                      ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                      : effectiveSendSms
-                        ? "Report saved"
-                        : "Report saved"}{" "}
+                {completionResult?.typedDeliveryMode === "disabled"
+                  ? "Completion recorded"
+                  : completionResult?.typedDeliveryMode === "internal_only"
+                    ? "Report stored internally"
+                    : completionResult?.completionSmsStatus === "sent"
+                      ? "SMS + report sent"
+                      : completionResult?.completionSmsStatus === "blocked"
+                        ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                        : completionResult?.completionSmsStatus === "failed"
+                          ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                          : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
-              {/* completionAdvisories are deliberately NOT rendered here —
-                  the success screen stays minimal (owner 2026-07-29); they
-                  are recorded server-side and surface in Customer 360. */}
-              {completionResult?.typedDeliveryMode === "internal_only" && (
+              {/* Advisories recorded on the completion (inventory shortfall,
+                  blackout, annual-N, …) — surfaced here per owner 2026-08-03,
+                  reversing the 2026-07-29 minimal-success-screen call; they
+                  are also recorded server-side and surface in Customer 360. */}
+              {Array.isArray(completionResult?.completionAdvisories) &&
+                completionResult.completionAdvisories.length > 0 && (
+                  <div
+                    style={{
+                      fontFamily: font,
+                      fontSize: 14,
+                      color: M.warn,
+                      background: M.warn + "14",
+                      border: `1px solid ${M.warn}`,
+                      borderRadius: 10,
+                      padding: "10px 12px",
+                      marginTop: 10,
+                      maxWidth: 360,
+                      textAlign: "left",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {completionResult.completionAdvisories.map((msg, i) => (
+                      <div key={i} style={{ marginTop: i ? 6 : 0 }}>
+                        {msg}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
                 <div
                   style={{
                     fontFamily: font,
@@ -11776,8 +12231,9 @@ export function CompletionPanel({
                     textAlign: "center",
                   }}
                 >
-                  Report stored — customer delivery is off for this service
-                  type.
+                  {completionResult.typedDeliveryMode === "internal_only"
+                    ? "Report stored — customer delivery is off for this service type."
+                    : "Customer delivery is off for this service — no report or SMS was sent."}
                 </div>
               )}
               {recapEligible && (
@@ -11785,7 +12241,9 @@ export function CompletionPanel({
                   <PestRecapCard serviceId={service.id} />
                 </div>
               )}
-              {recapEligible && !completionResult?.followupSuggestion?.required && (
+              {(recapEligible ||
+                (completionResult?.completionAdvisories?.length ?? 0) > 0) &&
+                !completionResult?.followupSuggestion?.required && (
                 <button
                   type="button"
                   onClick={() => onClose(true)}
@@ -12465,7 +12923,11 @@ export function CompletionPanel({
                 Lawn Assessment block above, which flow into the report gallery,
                 so this redundant second upload is hidden. Combined visits keep
                 it (companions have their own completion-photo gates). */}
-            {!quickComplete && (
+            {/* Interior-only treatments (bed bug) skip the tracer: it is a
+                SATELLITE perimeter tool, and an exterior spray outline on an
+                interior treatment's report would be wrong. Photos carry the
+                visual story; a room-level interior marker is its own lane. */}
+            {!quickComplete && !isBedBugVisit && (
               <Field label="Treatment zone map">
                 <button
                   type="button"
@@ -13248,6 +13710,10 @@ export function CompletionPanel({
                   {payerBanner}
                 </div>
               )}{" "}
+              {/* Bed bug never offers the no-invoice recap: a performed
+                  treatment must mint its invoice (typed-era parity; the
+                  server 409s this too — codex P1 r7). */}
+              {!isBedBugVisit && (
               <label
                 style={{
                   display: "flex",
@@ -13275,7 +13741,8 @@ export function CompletionPanel({
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
                   One-time recap + review only (no invoice)
                 </span>{" "}
-              </label>{" "}
+              </label>
+              )}{" "}
               {backfillEligible && (
                 <label
                   style={{
@@ -13364,6 +13831,54 @@ export function CompletionPanel({
                   >
                     The running timer spans the missed days and is not
                     submitted — leave blank to record no duration.
+                  </span>{" "}
+                </div>
+              )}{" "}
+              {liveAdjustEligible && (
+                <div
+                  style={{
+                    padding: "14px 16px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    marginBottom: 8,
+                  }}
+                >
+                  {" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 15,
+                      color: M.ink,
+                      marginBottom: 8,
+                    }}
+                  >
+                    Adjust time on site (minutes)
+                  </span>{" "}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="720"
+                    step="1"
+                    value={adjustedTimeOnSite}
+                    onChange={(e) => setAdjustedTimeOnSite(e.target.value)}
+                    placeholder="Use timer"
+                    style={mInput}
+                  />{" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 14,
+                      color: M.ink3,
+                      marginTop: 6,
+                    }}
+                  >
+                    Overrides the running timer ({elapsed}) in the recorded
+                    duration — use it when the visit wasn't closed out on
+                    time. Leave blank to record the timer.
                   </span>{" "}
                 </div>
               )}{" "}
@@ -13655,12 +14170,25 @@ export function CompletionPanel({
               inset: 0,
               background: D.bg + "ee",
               display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              zIndex: 10,
               flexDirection: "column",
+              // Scrollable, with margin-auto centering on the inner wrapper —
+              // centered flex overflow clips the top unreachably once the
+              // advisories/follow-up CTAs make the content taller than the
+              // panel (codex P2 r3 on #3179; mirrors the mobile overlay).
+              overflowY: "auto",
+              zIndex: 10,
+              padding: 24,
             }}
           >
+            <div
+              style={{
+                margin: "auto",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                width: "100%",
+              }}
+            >
             {" "}
             <div style={{ fontSize: 64, marginBottom: 16, color: D.green }}>
               &#10003;
@@ -13669,16 +14197,20 @@ export function CompletionPanel({
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
-              {!effectiveSendSms
-                ? "Report saved"
-                : completionResult?.completionSmsStatus === "blocked"
-                  ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                  : completionResult?.completionSmsStatus === "failed"
-                    ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                    : "SMS + Report sent"}{" "}
+              {completionResult?.typedDeliveryMode === "disabled"
+                ? "Completion recorded"
+                : completionResult?.typedDeliveryMode === "internal_only"
+                  ? "Report stored internally"
+                  : !effectiveSendSms
+                    ? "Report saved"
+                    : completionResult?.completionSmsStatus === "blocked"
+                      ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                      : completionResult?.completionSmsStatus === "failed"
+                        ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                        : "SMS + Report sent"}{" "}
               for {service.customerName}
             </div>{" "}
-            {completionResult?.typedDeliveryMode === "internal_only" && (
+            {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
               <div
                 style={{
                   fontSize: 13,
@@ -13687,10 +14219,39 @@ export function CompletionPanel({
                   textAlign: "center",
                 }}
               >
-                Report stored — customer delivery is off for this service type.
+                {completionResult.typedDeliveryMode === "internal_only"
+                  ? "Report stored — customer delivery is off for this service type."
+                  : "Customer delivery is off for this service — no report or SMS was sent."}
               </div>
             )}
-            {recapEligible && !completionResult?.followupSuggestion?.required && (
+            {/* Completion advisories (inventory shortfall, blackout, annual-N,
+                …) — surfaced per owner 2026-08-03; also in Customer 360. */}
+            {Array.isArray(completionResult?.completionAdvisories) &&
+              completionResult.completionAdvisories.length > 0 && (
+                <div
+                  style={{
+                    fontSize: 14,
+                    color: D.amber,
+                    background: D.amber + "14",
+                    border: `1px solid ${D.amber}`,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    marginTop: 12,
+                    maxWidth: 360,
+                    textAlign: "left",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {completionResult.completionAdvisories.map((msg, i) => (
+                    <div key={i} style={{ marginTop: i ? 6 : 0 }}>
+                      {msg}
+                    </div>
+                  ))}
+                </div>
+              )}
+            {(recapEligible ||
+              (completionResult?.completionAdvisories?.length ?? 0) > 0) &&
+              !completionResult?.followupSuggestion?.required && (
               <button
                 type="button"
                 onClick={() => onClose(true)}
@@ -13748,6 +14309,7 @@ export function CompletionPanel({
                 </button>
               </div>
             )}
+            </div>
           </div>
         )}
         {/* Header */}
@@ -15103,6 +15665,9 @@ export function CompletionPanel({
               {payerBanner}
             </div>
           )}{" "}
+          {/* Bed bug never offers the no-invoice recap (typed-era parity;
+              server 409s this too — codex P1 r7). */}
+          {!isBedBugVisit && (
           <label
             style={{
               ...checkboxRow,
@@ -15118,7 +15683,8 @@ export function CompletionPanel({
               onChange={(e) => handleOneTimeRecapOnlyChange(e.target.checked)}
             />{" "}
             <span>One-time recap + review only (no invoice)</span>{" "}
-          </label>{" "}
+          </label>
+          )}{" "}
           {backfillEligible && (
             <label
               style={{
@@ -15173,6 +15739,30 @@ export function CompletionPanel({
               <div style={{ fontSize: 14, color: D.muted }}>
                 The running timer spans the missed days and is not submitted —
                 leave blank to record no duration.
+              </div>{" "}
+            </div>
+          )}{" "}
+          {liveAdjustEligible && (
+            <div style={{ marginBottom: 8 }}>
+              {" "}
+              <div style={{ fontSize: 14, color: D.text, marginBottom: 4 }}>
+                Adjust time on site (minutes)
+              </div>{" "}
+              <input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                max="720"
+                step="1"
+                value={adjustedTimeOnSite}
+                onChange={(e) => setAdjustedTimeOnSite(e.target.value)}
+                placeholder="Use timer"
+                style={{ ...inputStyle, fontSize: 14, marginBottom: 4 }}
+              />{" "}
+              <div style={{ fontSize: 14, color: D.muted }}>
+                Overrides the running timer ({elapsed}) in the recorded
+                duration — use it when the visit wasn't closed out on time.
+                Leave blank to record the timer.
               </div>{" "}
             </div>
           )}{" "}
@@ -15433,16 +16023,202 @@ function normalizeLabelTargets(value) {
   return v.map((t) => String(t).trim()).filter(Boolean);
 }
 
+// Every service line a label target can be classified onto.
+export const ALL_TARGET_LINES = ["pest", "lawn", "tree_shrub", "termite", "mosquito"];
+
 // Turf-only label targets that must not prefill on a structural-pest (or any
 // non-lawn) visit: turf insects, turf diseases, and weeds. Matching is
 // substring-loose because catalog target_pests values are free text pulled
 // from labels ("Southern Chinch Bugs", "sod webworm", "chinch bug (southern)").
 const LAWN_ONLY_TARGET_RE =
-  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|kyllinga|dollarweed|doveweed|chamberbitter|spurge|clover|nutsedge|\bsedge\b|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|gray leaf spot|take-?all|fairy ring|pythium|turf/i;
+  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|bahiagrass|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|burweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|yellow tuft|turf/i;
 
-function filterLabelTargetsForLine(targets, { isLawn } = {}) {
-  if (isLawn) return targets;
-  return targets.filter((t) => !LAWN_ONLY_TARGET_RE.test(t));
+// Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
+// borers, and foliar issues. Checked BEFORE the structural set so "Spider
+// mites" classifies as ornamental instead of matching the spider pattern.
+const ORNAMENTAL_ONLY_TARGET_RE =
+  /whitefl|spiraling|scale insect|soft scale|mealybug|aphid|thrips|\bmites?\b|leafminer|\bborer|weevil|sooty mold|powdery mildew|fungal leaf spot/i;
+
+// Targets NOTHING controls. UF/IFAS is explicit that Ganoderma butt rot has no
+// chemical control and Thielaviopsis trunk rot has no prevention or cure, so
+// they must never prefill: a chip on a completed visit reads as "this product
+// treated it", which would be a claim no product can support. A tech can still
+// type either by hand as an observation — this only blocks the automatic fill.
+const NO_CONTROL_TARGET_RE = /ganoderma|thielaviopsis/i;
+
+// Palm and ornamental diseases. Checked BEFORE the turf pattern because the
+// lawn regex claims a bare "leaf spot" — without this, "Palm leaf spot" files
+// as turf. Palm disease tokens carry an explicit "(palm)" marker so the intent
+// is legible in the catalog as well as here; turf oomycetes keep their own
+// "Pythium ..." wording and stay on the lawn line.
+// NOTE: no bare "downy mildew" here. Yellow tuft — a St. Augustine turf
+// disease — is written "Yellow tuft (downy mildew)" on the Subdue Maxx turf
+// directions, so a generic downy-mildew rule would steal a turf target and
+// drop it from lawn visits. The turf form is claimed by the lawn pattern below.
+const ORNAMENTAL_DISEASE_RE =
+  /fungal leaf spot|\(palm\)|palm leaf spot|palm bud rot|lethal bronzing|lethal yellowing|fusarium wilt/i;
+
+// Nutrition goals, not pests: what a feeding is meant to correct or stimulate.
+// Fertilizer-family products get applied on turf AND on palms/ornamentals, so
+// these read on every line. Checked AFTER the turf pattern so an explicitly
+// turf-worded goal ("Iron chlorosis (yellowing turf)") stays a lawn target.
+const NUTRITION_TARGET_RE =
+  /deficiency|green-?up|deep green|color & density|root support|root strength|balanced feeding|slow-release|micronutrient|winter hardiness|chlorosis/i;
+
+// Caterpillars feed on both turf (sod webworms, armyworms are caterpillars —
+// Conserve SC is labeled for all three) and ornamentals, so a bare
+// "Caterpillars" target belongs on either line.
+const CATERPILLAR_TARGET_RE = /caterpillar/i;
+
+// Wood-destroying-organism targets: pass on termite/WDO visits, and carpenter
+// ants also read fine on a general pest visit.
+// "Wood borers" alone stays ornamental (the pattern above claims it — Tree-Age
+// and Ima-Jet are injection products), but the wood-DESTROYING organisms off a
+// Bora-Care label are WDO work.
+const TERMITE_TARGET_RE = /termite|wood-?boring|wood borer|wood-?destroying|wood-? ?decay/i;
+const CARPENTER_ANT_RE = /carpenter ant/i;
+
+const MOSQUITO_TARGET_RE = /mosquito/i;
+
+// Fleas and ticks are yard pests as much as indoor ones — the turf insecticides
+// carry them on the label right alongside mole crickets (Topchoice Granular:
+// fire ants, tawny mole crickets, fleas, ticks), and the yard is where the
+// life cycle actually breaks. So they read on both lines, like fire ants
+// (codex P2 r2).
+const FLEA_TICK_TARGET_RE = /\bfleas?\b|\bticks?\b/i;
+
+// Structural/household pests — the general-pest line. Broad on purpose: any
+// ant species, roaches, spiders (mites already claimed above), the usual
+// occasional invaders, stingers, biters, and vertebrates. `\bmoles?\b` is safe
+// here only because the turf pattern claims "Tawny mole crickets" first, the
+// same way it claims them ahead of the bare `cricket` alternative.
+const STRUCTURAL_ONLY_TARGET_RE =
+  /\bants?\b|roach|spider|silverfish|earwig|centipede|millipede|springtail|booklice|cricket|wasp|mud dauber|yellowjacket|hornet|\bfl(y|ies)\b|flea|tick|bed bug|pantry|darkling beetle|scorpion|\brats?\b|\bmouse\b|\bmice\b|rodent|\bmoles?\b/i;
+
+// Every service line a label target belongs on. Precedence matters: turf
+// before structural ("Tawny mole crickets" is a lawn pest, not a cricket),
+// ornamental before structural ("Spider mites" is not a spider),
+// termite/carpenter-ant before the generic ant pattern.
+//
+// Returns [] for a target no pattern claims, which drops it from the prefill
+// (codex P2 r2). This used to fail OPEN — an unclassified target passed on
+// every line, which recreated exactly the cross-line prefills this filtering
+// exists to remove: "Chickweed" is a lawn weed no pattern matched, so a pest
+// visit dropped SpeedZone's three recognized weeds and prefilled Chickweed
+// alone. Failing closed can only ever under-fill, and the picker stays
+// free-text, so the tech can add anything by hand. Every target the catalog
+// carries AND every target the seed migrations write classifies — the contract
+// test fixture covers both, since a value can be seeded (Talpirid's "Moles")
+// without appearing in the prod catalog snapshot.
+export function labelTargetLines(target) {
+  // Nothing controls these, so nothing may prefill them — checked first so no
+  // later pattern can claim them onto a line.
+  if (NO_CONTROL_TARGET_RE.test(target)) return [];
+  if (/fire ant/i.test(target)) return ["pest", "lawn"];
+  if (ORNAMENTAL_DISEASE_RE.test(target)) return ["tree_shrub"];
+  if (LAWN_ONLY_TARGET_RE.test(target)) return ["lawn"];
+  if (CATERPILLAR_TARGET_RE.test(target)) return ["tree_shrub", "lawn"];
+  if (ORNAMENTAL_ONLY_TARGET_RE.test(target)) return ["tree_shrub"];
+  if (TERMITE_TARGET_RE.test(target)) return ["termite"];
+  if (CARPENTER_ANT_RE.test(target)) return ["termite", "pest"];
+  if (MOSQUITO_TARGET_RE.test(target)) return ["mosquito"];
+  if (FLEA_TICK_TARGET_RE.test(target)) return ["pest", "lawn"];
+  if (STRUCTURAL_ONLY_TARGET_RE.test(target)) return ["pest"];
+  // Nutrition goals apply wherever a fertilizer does — turf and palms alike.
+  if (NUTRITION_TARGET_RE.test(target)) return ALL_TARGET_LINES;
+  return [];
+}
+
+// The service lines whose targets may prefill on this visit. The primary line
+// comes from the classifier, but a combined display name carries companion
+// sections whose targets are just as legitimate — "Lawn + Tree & Shrub"
+// classifies lawn yet must keep ornamental prefills (and the day view
+// normalizes that name to "Tree & Shrub Care", so callers pass serviceTypeRaw
+// when present). Companion token rules mirror detectServiceCategory's own
+// exclusions ("Tree Line Mosquito Treatment" adds mosquito, not tree_shrub;
+// "Palmetto" never reads as palm work).
+export function allowedTargetLinesForServiceType(rawServiceType) {
+  const lines = new Set([detectServiceCategory(rawServiceType)]);
+  const s = String(rawServiceType || "").toLowerCase();
+  if (
+    !s.includes("mosquito") &&
+    !s.includes("termite") &&
+    !s.includes("wdo") &&
+    (s.includes("tree") ||
+      s.includes("shrub") ||
+      s.includes("ornamental") ||
+      s.includes("arborjet") ||
+      /\bpalm(s)?\b/.test(s))
+  ) {
+    lines.add("tree_shrub");
+  }
+  if (
+    s.includes("lawn") ||
+    s.includes("turf") ||
+    s.includes("grass") ||
+    s.includes("sod")
+  ) {
+    lines.add("lawn");
+  }
+  if (s.includes("mosquito")) lines.add("mosquito");
+  // Termite tokens mirror the classifier's aliases — a pest-primary combined
+  // name ("Quarterly Pest + Termite Bait Station") classifies pest but must
+  // keep its termite targets (codex P1 r2).
+  if (
+    s.includes("termite") ||
+    s.includes("wdo") ||
+    s.includes("bora") ||
+    s.includes("trelona") ||
+    s.includes("termidor") ||
+    /\badvance\b/.test(s)
+  ) {
+    lines.add("termite");
+  }
+  if (/\bpest\b/.test(s)) lines.add("pest");
+  return lines;
+}
+
+// Same question, asked of the whole visit rather than one name. A scheduled
+// add-on is a real service line on the appointment — a quarterly pest visit
+// with a One-Time Mosquito Treatment add-on genuinely treats for mosquitoes,
+// so In2Care must keep its mosquito targets there. The schedule payloads carry
+// those companion lines in serviceAddons/extraServiceTypes; union them into
+// the allowed set (codex P2 r2).
+export function allowedTargetLinesForVisit(service) {
+  const lines = allowedTargetLinesForServiceType(
+    service?.serviceTypeRaw || service?.serviceType,
+  );
+  const addonNames = [
+    ...(Array.isArray(service?.extraServiceTypes) ? service.extraServiceTypes : []),
+    ...(Array.isArray(service?.serviceAddons)
+      ? service.serviceAddons.map((a) => a?.serviceName)
+      : []),
+  ].filter(Boolean);
+  addonNames.forEach((name) => {
+    allowedTargetLinesForServiceType(name).forEach((line) => lines.add(line));
+  });
+  return lines;
+}
+
+// A prefill is a starting point, not a transcription of the label — cap it at
+// the few most popular targets (catalog arrays are ordered most-common-first)
+// and let the tech add the rest by hand (owner 2026-08-01: "3 at most, and
+// popular SWFL pests").
+export const MAX_LABEL_TARGET_PREFILL = 3;
+
+// Keep only the label targets that belong on one of the visit's service lines
+// (a Set from allowedTargetLinesForServiceType), then cap. Filtering runs in
+// BOTH directions now — a lawn visit drops Talstar's ants/roaches just like a
+// pest visit drops its chinch bugs (owner 2026-08-01: targets must populate
+// for the service at hand).
+export function filterLabelTargetsForLine(targets, allowedLines) {
+  const allowed =
+    allowedLines instanceof Set && allowedLines.size
+      ? allowedLines
+      : new Set(["pest"]);
+  return targets
+    .filter((t) => labelTargetLines(t).some((line) => allowed.has(line)))
+    .slice(0, MAX_LABEL_TARGET_PREFILL);
 }
 
 // Species-specific, not category-broad (owner request 2026-07-23): the chips
@@ -15513,7 +16289,7 @@ const LAWN_TARGET_SUGGESTIONS = [
   "Tawny mole crickets",
   "Fire ants",
   "Nematodes",
-  "Brown patch / large patch",
+  "Large patch",
   "Dollar spot",
   "Gray leaf spot",
   "Take-all root rot",
@@ -15807,8 +16583,8 @@ const MONTH_NAMES = [
 const PRODUCT_DESCRIPTIONS = {
   "acelepryn xtra": "prevents chinch bugs, webworms, and grubs for 2-3 months",
   acelepryn: "prevents chinch bugs, webworms, and grubs for 2-3 months",
-  "speedzone southern": "kills broadleaf weeds without harming St. Augustine",
-  speedzone: "kills broadleaf weeds without harming St. Augustine",
+  "speedzone southern": "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
+  speedzone: "kills broadleaf weeds — NOT for Floratam/Bitterblue St. Augustine; 50-85\u00b0F only",
   "celsius wg": "selective weed killer for warm-season grass (max 3x/year)",
   celsius: "selective weed killer for warm-season grass (max 3x/year)",
   "k-flow 0-0-25":
@@ -15896,35 +16672,37 @@ const PRODUCT_DESCRIPTIONS = {
 const TRACK_SAFETY_RULES = {
   st_augustine: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar and do NOT apply >90\u00b0F",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   A_St_Aug_Sun: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar and do NOT apply >90\u00b0F",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   B_St_Aug_Shade: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: verify cultivar and do NOT apply >90\u00b0F",
+    "SpeedZone: verify cultivar; apply only 50\u201385\u00b0F; NOT during spring green-up or fall transition",
     "Hold PGR/hot herbicide on stressed turf",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   C1_Bermuda: [
     "Celsius WG: MAX 3 apps/year/property",
     "No Atrazine on Bermuda \u2014 EVER",
+    "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   C2_Zoysia: [
     "Celsius WG: MAX 3 apps/year/property",
     "No Atrazine on Zoysia \u2014 EVER",
+    "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
   D_Bahia: [
     "Celsius WG: MAX 3 apps/year/property",
-    "SpeedZone: do NOT apply >90\u00b0F",
+    "SpeedZone: apply only 50\u201385\u00b0F",
     "N blackout Jun 1 \u2013 Sep 30",
   ],
 };

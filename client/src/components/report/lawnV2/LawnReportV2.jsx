@@ -242,7 +242,11 @@ export function LawnSnapshotHero({ snapshot = {} }) {
         <div style={{ flex: 'none' }}>
           <ScoreRing value={overallScore} status={status} size={116} />
         </div>
-        <div style={{ flex: 1, minWidth: 220 }}>
+        {/* flex-basis 220 (not min-width 220) keeps the "wrap under the ring
+            below ~220px of room" behavior while letting the column shrink once
+            it HAS wrapped — a hard 220px floor overflowed the card on a 320px
+            phone. */}
+        <div style={{ flex: '1 1 220px', minWidth: 0 }}>
           <div data-gt="eyebrow" style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Lawn Status
           </div>
@@ -460,7 +464,13 @@ export function VisualDiagnosisCards({ categories = [] }) {
       <CardTitle sub="Five diagnostic categories scored from today’s field photos with AI-assisted image analysis and verified by your technician. Tap a row for details.">Turf Health Analysis</CardTitle>
       {/* Visual-primary rows: the score ring + bar + status carry the read at a glance;
           the plain-language detail lives in the dropdown. */}
-      <div ref={barsRef} style={{ display: 'grid', gap: 8 }}>
+      {/* minmax(0, 1fr), not the implicit auto track: an auto track is sized to
+          its items' MIN-CONTENT width, and the header row's floor (ring + the
+          label's longest word + the nowrap status pill) is ~255px — wider than
+          the ~229px a phone-width card offers. The track won the sizing, so the
+          rows overflowed the card's right padding and the whole block read as
+          shoved right (owner iPhone report 2026-08-02). */}
+      <div ref={barsRef} style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 8 }}>
         {cats.map((c, i) => {
           const status = c.status || scoreStatus(c.score);
           const meta = statusMeta(status);
@@ -478,8 +488,8 @@ export function VisualDiagnosisCards({ categories = [] }) {
                 <ScoreRing value={c.score} status={status} size={54} stroke={6} />
               </div>
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
-                  <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT, lineHeight: 1.15 }}>{c.label}</div>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+                  <div style={{ flex: '1 1 auto', minWidth: 0, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT, lineHeight: 1.15 }}>{c.label}</div>
                   <div style={{ flex: 'none' }}><StatusPill status={status} small /></div>
                 </div>
                 {/* score bar — the primary visual read of where this sits 0–100 */}
@@ -540,13 +550,16 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
   return (
     <Card>
       <CardTitle sub="Your technician’s key findings from today’s inspection, ranked by priority — what we found, why it matters, and the treatment plan for each.">Priority Findings & Action Plan</CardTitle>
-      <div style={{ display: 'grid', gap: 12 }}>
+      {/* minmax(0, 1fr) for the same reason as the diagnosis rows: an auto track
+          sized to the headline's longest word + the status pill blew past the
+          card on a 320px phone. */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12 }}>
         {top.map((it, i) => {
           const meta = statusMeta(it.status || 'tracking');
           return (
             <div key={i} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD, padding: '14px 16px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', marginBottom: 6 }}>
-                <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15.5, color: TEXT, lineHeight: 1.25 }}>{it.headline}</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap' }}>
+                <div style={{ flex: '1 1 auto', minWidth: 0, fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15.5, color: TEXT, lineHeight: 1.25 }}>{it.headline}</div>
                 <StatusPill status={it.status || 'tracking'} small />
               </div>
               <div style={{ display: 'grid', gap: 6 }}>
@@ -613,7 +626,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
         ) : null}
       </div>
-      <div style={{ display: 'flex', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
         {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
         {hasIrr ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
         {Number.isFinite(target) ? <Legend color={TEXT} label="Target" /> : null}
@@ -682,7 +695,19 @@ function ConfidenceTag({ confidence }) {
 }
 
 // ── 4. Rain in your area — last 7 days ───────────────────────────────────────────
-export function RainLast7DaysChart({ days = [], confidence = null }) {
+// Attribution for a radar/gauge-measured week. Shown ONLY for an MRMS-sourced
+// series: NOAA's gauge-corrected radar resolves rain at the property rather
+// than at a city cell, but a summer cell can still drop an inch more on one
+// yard than the next — measured 2026-08-01 against a volunteer rain gauge a
+// few miles from one SWFL property, where the week's totals differed by ~2".
+// The customer is told where the number comes from and that their own yard can
+// differ, instead of a bare figure implying gauge-in-the-lawn precision.
+function measuredSourceNote(source) {
+  if (!source || !String(source).startsWith('mrms')) return null;
+  return 'Based on NOAA radar and rain-gauge data — local totals may vary.';
+}
+
+export function RainLast7DaysChart({ days = [], confidence = null, source = null }) {
   const mounted = useMounted();
   const [active, setActive] = useState(null);
   const data = (days || []).filter((d) => d && Number.isFinite(Number(d.in)));
@@ -727,6 +752,11 @@ export function RainLast7DaysChart({ days = [], confidence = null }) {
           be honest that this is an area estimate, not a precise per-address reading. */}
       {confidence === 'low' ? (
         <div style={{ marginTop: 10 }}><ConfidenceTag confidence="low" /></div>
+      ) : null}
+      {measuredSourceNote(source) ? (
+        <div style={{ marginTop: 10, fontSize: 12, color: MUTED, fontStyle: 'italic' }}>
+          {measuredSourceNote(source)}
+        </div>
       ) : null}
     </Card>
   );
@@ -1191,7 +1221,9 @@ export function LawnTrends({ trends = {} }) {
           footnote={seasonalNote} />
       ) : null}
       {minis.length ? (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginBottom: 16 }}>
+        /* min(220px, 100%) so the 220px track floor can't exceed the card on a
+           narrow phone — a bare minmax(220px, 1fr) overflowed at 320px. */
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 16, marginBottom: 16 }}>
           {minis.map((m) => (
             <LawnTrendChart key={m.key} compact title={m.title} sub={m.sub} points={m.points}
               domain={m.domain} unit={m.unit} zeroLine={m.zeroLine} band={m.band} accent={m.accent} />

@@ -69,6 +69,12 @@ jest.mock('../services/estimate-card-holds', () => ({
   handleCardHoldCancellation: jest.fn().mockResolvedValue({ handled: false, reason: 'no_hold' }),
 }));
 
+// Appointment-card fee lane — consulted only when the hold rail reports
+// no_hold (mutually exclusive lanes). Default: no fee lane on the visit.
+jest.mock('../services/appointment-card-request', () => ({
+  handleAppointmentCardCancellation: jest.fn().mockResolvedValue({ handled: false, released: true, reason: 'no_card_request' }),
+}));
+
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -509,6 +515,32 @@ describe('processCancellationRequest', () => {
     expect(result.cancelledCount).toBe(3);
     expect(result.errors).toEqual(['card_hold:s1', 'card_hold:s2']);
     expect(result.ok).toBe(false);
+  });
+
+  test('appointment-card fee outcomes surface the same money-unresolved reasons (hold-less visits)', async () => {
+    db.__tables.scheduled_services = [
+      { id: 's1', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+      { id: 's2', customer_id: 'c1', status: 'pending', scheduled_date: FUTURE, track_state: 'scheduled', cancelled_at: null, recurring_ongoing: false },
+    ];
+    db.__tables.customers = [{ id: 'c1', pipeline_stage: 'active_customer', active: true }];
+    db.__tables.payments = [];
+    db.__tables.customer_interactions = [];
+
+    // Hold rail reports no_hold (default) → the appointment rail is
+    // consulted; a declined fee parks money unresolved, a clean outside-
+    // window cancel is benign.
+    const ApptCardRequests = require('../services/appointment-card-request');
+    ApptCardRequests.handleAppointmentCardCancellation
+      .mockResolvedValueOnce({ charged: false, reason: 'charge_review', error: 'ambiguous' })
+      .mockResolvedValueOnce({ handled: true, released: true, reason: 'cancel_outside_window' });
+
+    const result = await processCancellationRequest({ customerId: 'c1', requestId: 'req8' });
+
+    expect(result.cancelledCount).toBe(2);
+    expect(result.errors).toEqual(['appt_card_fee:s1']);
+    expect(result.ok).toBe(false);
+    // Customer-initiated cancel: the fallback never passes a waive flag.
+    expect(ApptCardRequests.handleAppointmentCardCancellation).toHaveBeenCalledWith({ scheduledServiceId: 's1' });
   });
 
   test('an in-progress visit is never auto-cancelled but is flagged for manual review; churn still proceeds', async () => {

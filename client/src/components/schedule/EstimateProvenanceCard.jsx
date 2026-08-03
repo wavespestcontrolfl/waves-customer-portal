@@ -324,7 +324,7 @@ function cardOnFileRow(cardsOnFile) {
   };
 }
 
-export default function EstimateProvenanceCard({ quotedTotal, currentPrice, deposit, payment, lines, estimateRef, cardsOnFile, style }) {
+export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onetimeTotal, deposit, payment, lines, estimateRef, cardsOnFile, style, compareScope = 'group' }) {
   const quoted = Number(quotedTotal) || 0;
   const refLabel = String(estimateRef || '').trim();
   const price = currentPrice != null ? Number(currentPrice) : null;
@@ -334,8 +334,55 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
     .map((line) => ({
       name: String(line?.estimateLabel || line?.name || '').trim(),
       cadence: cadenceLabel(line?.cadence, line?.intervalDays),
+      recurring: !!line?.cadence && line.cadence !== 'one_time',
+      rawCadence: line?.cadence || null,
+      // perApplicationPrice / monthlyPrice are EXPLICIT provenance from the
+      // server (discount-aware canonical derivation; the engine's true
+      // normalized monthly) — `price` can be a list rate or a synthesized
+      // monthly figure, so it is never trusted for unit copy.
+      perAppPrice: line?.cadence && line.cadence !== 'one_time'
+        && Number(line?.perApplicationPrice) > 0
+        ? Number(line.perApplicationPrice) : null,
+      monthlyPrice: line?.cadence && line.cadence !== 'one_time'
+        && !(Number(line?.perApplicationPrice) > 0) && Number(line?.monthlyPrice) > 0
+        ? Number(line.monthlyPrice) : null,
+      // acceptedOneTimePrice is the NET after a manual discount allocated
+      // to one-time work — the row's price stays gross (Codex #3173 r4).
+      // PRESENCE, not positivity (r5): the server legitimately emits 0 when
+      // a discount fully covers the line, and a $0 accepted line must not
+      // fall back to the gross price.
+      oneTimePrice: line?.cadence === 'one_time'
+        ? (Number.isFinite(Number(line?.acceptedOneTimePrice)) && Number(line?.acceptedOneTimePrice) >= 0
+          ? Number(line.acceptedOneTimePrice)
+          : (Number(line?.price) > 0 ? Number(line.price) : null))
+        : null,
     }))
     .filter((line) => line.name);
+  // Honest quoted framing (owner ruling 2026-08-02): a blended
+  // "monthly + one-time" total matches nothing the customer ever pays at
+  // once. When real per-application prices exist, the header reads
+  // "$121/application + $99 one-time"; otherwise it keeps the legacy total.
+  const perAppPrices = serviceLines.map((l) => l.perAppPrice).filter((p) => p != null);
+  const perAppSum = perAppPrices.reduce((s, p) => s + p, 0);
+  const monthlyPrices = serviceLines.map((l) => l.monthlyPrice).filter((p) => p != null);
+  const oneTime = Number(onetimeTotal) || 0;
+  // EVERY recurring line must carry a proven unit, and a mixed quote keeps
+  // EACH billing unit ("$121.00/application + $24.00/mo") — collapsing to
+  // one aggregate monthly is the exact flat-monthly copy this removes
+  // (Codex #3173 r2). Unprovable lines → legacy total tells the whole truth.
+  const recurringLineCount = serviceLines.filter((l) => l.recurring).length;
+  const allRecurringPerApp = perAppPrices.length > 0 && perAppPrices.length === recurringLineCount;
+  // All-monthly proven sets qualify too (rodent-bait-only quotes —
+  // Codex #3173 r2): each line just renders its own true unit.
+  const allRecurringProven = recurringLineCount > 0
+    && perAppPrices.length + monthlyPrices.length === recurringLineCount;
+  const quotedLabel = allRecurringProven
+    ? [
+      ...(perAppPrices.length ? [`${perAppPrices.map((p) => money(p)).join(' + ')}/application`] : []),
+      ...monthlyPrices.map((m) => `${money(m)}/mo`),
+      ...(oneTime > 0 ? [`${money(oneTime)} one-time`] : []),
+    ].join(' + ')
+    : money(quoted);
   const rows = paymentRows(payment);
   const dep = depositRow(deposit);
   if (dep) rows.push(dep);
@@ -346,8 +393,49 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
   // Backed by summary.payerBilled (always resolved, gate-independent); fall back
   // to the deposit exemptReason for older payloads.
   const payerBilled = !!(deposit && (deposit.payerBilled || deposit.exemptReason === 'payer_billed'));
-  const showVsQuoted = price != null && quoted > 0 && price > 0 && Math.abs(quoted - price) > 0.01;
-  const deltaPct = showVsQuoted ? Math.round(((price - quoted) / quoted) * 100) : 0;
+  // Compare the visit's charge against the quoted VISIT total when one can
+  // be established — measuring a per-visit price against the blended
+  // monthly+one-time total manufactured phantom deltas (a $121/application
+  // booking read as "-11% vs quoted $135.30"). The booked visit carries the
+  // recurring lines PLUS any schedulable one-time lines (the modal books
+  // them together), so both sides must count both — and if any line lacks a
+  // real price, no like-for-like total exists, so the comparison is
+  // suppressed rather than guessed (Codex P1).
+  const oneTimeLineSum = serviceLines.reduce((s, l) => s + (l.oneTimePrice || 0), 0);
+  const everyLinePriced = serviceLines.length > 0
+    && serviceLines.every((l) => l.perAppPrice != null || l.oneTimePrice != null);
+  // compareScope='group' (create modal): the price covers EVERY quoted line
+  // booked together, so the whole-quote sum is the right frame.
+  // compareScope='visit' (detail sheet / SchedulePage row): a child visit
+  // carries only the add-ons due on its date — cadence mixes differ month
+  // to month (Codex #3173 r2) and even SAME-cadence bundles break on
+  // off-cycle booster visits, which carry only the primary line (r3). The
+  // comparison therefore stands only for a SINGLE-recurring-line quote with
+  // no one-time work: the one shape where every visit provably IS the plan.
+  // A one-time-only quote IS its visit — the accepted one-time total is
+  // directly comparable, and suppressing it hid real operator price changes
+  // (Codex #3173 r5).
+  const oneTimeLineCount = serviceLines.filter((l) => l.oneTimePrice != null).length;
+  // A fully-discounted (accepted-$0) one-time quote is still comparable
+  // (Codex #3173 r5): an operator editing that visit to a nonzero price is
+  // exactly the drift the warning exists for, so the sum may be zero — only
+  // the ABSENCE of priced lines disqualifies it.
+  const visitComparable = allRecurringPerApp && recurringLineCount === 1 && oneTimeLineSum === 0
+    ? perAppSum
+    : (recurringLineCount === 0 && oneTimeLineCount > 0
+      && serviceLines.length === oneTimeLineCount
+      ? oneTimeLineSum : null);
+  const groupComparable = allRecurringPerApp
+    ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)
+    : (perAppPrices.length || monthlyPrices.length ? null : quoted);
+  const quotedComparable = compareScope === 'visit' ? visitComparable : groupComparable;
+  // An accepted-$0 quote still warns when the visit now charges something
+  // (Codex #3173 r5) — the percentage is meaningless against a zero base,
+  // so the delta chip is suppressed while the comparison itself stands.
+  const showVsQuoted = price != null && quotedComparable != null && quotedComparable >= 0
+    && price > 0 && Math.abs(quotedComparable - price) > 0.01;
+  const deltaPct = showVsQuoted && quotedComparable > 0
+    ? Math.round(((price - quotedComparable) / quotedComparable) * 100) : 0;
 
   const lineStyle = {
     display: 'flex',
@@ -371,8 +459,11 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
             </span>
           )}
           <span style={{ flex: 1 }} />
-          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}>
-            Quoted {money(quoted)}
+          {/* Wrapping allowed (Codex #3173 r2 P2): a multi-service breakdown
+              is wider than a phone-width card — nowrap forced horizontal
+              page overflow on the exact surface this targets. */}
+          <span style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, fontVariantNumeric: 'tabular-nums', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>
+            Quoted {quotedLabel}
           </span>
         </div>
 
@@ -412,9 +503,15 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
             {serviceLines.map((line, i) => (
               <div key={`${line.name}-${i}`} style={lineStyle}>
                 <div style={{ fontSize: 13, fontWeight: 500, color: INK, minWidth: 0 }}>{line.name}</div>
-                {line.cadence && (
+                {(line.cadence || line.perAppPrice != null || line.oneTimePrice != null) && (
                   <div style={{ fontSize: 12, fontWeight: 600, color: BLUE.ink, whiteSpace: 'nowrap' }}>
-                    {line.cadence}
+                    {line.perAppPrice != null
+                      ? `${money(line.perAppPrice)}/application${line.cadence ? ` · ${line.cadence}` : ''}`
+                      : line.monthlyPrice != null
+                        ? `${money(line.monthlyPrice)}/mo${line.cadence ? ` · ${line.cadence}` : ''}`
+                        : line.oneTimePrice != null
+                          ? `${money(line.oneTimePrice)} one-time`
+                          : line.cadence}
                   </div>
                 )}
               </div>
@@ -441,7 +538,11 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, depo
 
       {showVsQuoted && (
         <div style={{ fontSize: 11, color: MUTED, marginTop: 4, paddingLeft: 2 }}>
-          Current price {money(price)} ({deltaPct > 0 ? '+' : ''}{deltaPct}% vs quoted)
+          {/* A percentage against an accepted $0 is meaningless — name the
+              quoted amount instead so the drift is still visible. */}
+          {quotedComparable > 0
+            ? `Current price ${money(price)} (${deltaPct > 0 ? '+' : ''}${deltaPct}% vs quoted)`
+            : `Current price ${money(price)} (quoted ${money(quotedComparable)})`}
         </div>
       )}
     </div>

@@ -77,13 +77,25 @@ function isContractPath(reqPath = '') {
   return /^\/contract\/[A-Za-z0-9_-]{32,160}\/?$/.test(String(reqPath || ''));
 }
 
+// Public appointment page (/appointment/<64-hex>) — the token is
+// scheduled_services.reschedule_token, a bearer credential that lets the
+// holder CONFIRM or reschedule the visit, and the page renders the
+// customer's date, arrival window and technician. Same contract as the card
+// and secure-card shells: the API routes already send the full noStore set
+// (appointment-public.js), but the SPA HTML document itself shipped with
+// none of it, so an indexed page or a Referer header could hand the token
+// to a third party.
+function isAppointmentPath(reqPath = '') {
+  return /^\/appointment\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+}
+
 function applySensitiveSpaHeaders(reqPath, res) {
   if (isServiceOutlinePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -101,4 +113,5 @@ module.exports = {
   isSecureCardPath,
   isPriceChangeNoticePath,
   isContractPath,
+  isAppointmentPath,
 };

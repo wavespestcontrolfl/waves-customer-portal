@@ -87,6 +87,9 @@ export default function ScheduleCustomerSidebar({
   onBookNext,
   onSavedNote,
   onCancel,
+  // Optional: opens the smart-slot Reschedule modal (suggested on-route
+  // dates). Menu item renders only when the host page wires it.
+  onReschedule,
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -158,6 +161,17 @@ export default function ScheduleCustomerSidebar({
   const customerDisplayName = service?.customerName || `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Customer';
   const canCancelSeries = !!service?.isRecurring;
   const canCancelAppointment = !['completed', 'skipped', 'cancelled'].includes(String(service?.status || '').toLowerCase());
+  // Stricter than the cancel gate: SmartRebooker.reschedule 409s a no_show
+  // (terminal), and the dispatch route 409s an unreviewed outbound-callback
+  // booking (outbound_review_unconfirmed) — the menu must not offer a
+  // reschedule that can never work.
+  const unreviewedCallbackBooking =
+    service?.sourceAction === 'ai_call_outbound_review'
+    && String(service?.status || '').toLowerCase() === 'pending'
+    && !service?.customerConfirmed;
+  const canRescheduleAppointment =
+    !['completed', 'skipped', 'cancelled', 'no_show'].includes(String(service?.status || '').toLowerCase())
+    && !unreviewedCallbackBooking;
 
   const appointmentHistory = useMemo(() => {
     const currentId = service?.id;
@@ -265,6 +279,18 @@ export default function ScheduleCustomerSidebar({
             )}
             {canCancelAppointment && menuOpen && (
               <div className="absolute right-11 top-10 z-20 w-56 rounded-sm border-hairline border-zinc-200 bg-white py-1 shadow-xl">
+                {typeof onReschedule === 'function' && canRescheduleAppointment && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onReschedule(service);
+                    }}
+                    className="w-full px-3 py-2 text-left text-13 font-medium text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Reschedule appointment
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {

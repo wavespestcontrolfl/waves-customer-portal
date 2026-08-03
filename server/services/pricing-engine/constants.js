@@ -1998,7 +1998,7 @@ const DEPOSIT = {
 // never a percentage. DB-authoritative via pricing_config key
 // `estimate_card_hold`.
 const CARD_HOLD = {
-  noShowFeeAmount: 49,
+  noShowFeeAmount: 75,
   cancelWindowHours: 24,
 };
 

@@ -170,6 +170,25 @@ const FACTS_GATED_ACTIONS = new Set([
   'new_supporting_blog',
 ]);
 
+// A brief may forbid dollar amounts even though it IS a competitor intercept.
+// Scans every string in the brief payload for that instruction; anything
+// unreadable is treated as forbidding (fail closed).
+// Tight on purpose: "no" must directly negate the noun. A looser window
+// matched "no-cost retreatments; large price" in an unrelated brief, which
+// would have silently withheld a permission that brief never forbade.
+const BRIEF_PRICE_PROHIBITION_RE = /\bno\s+(?:[\w-]+\s+){0,3}(?:dollar amounts?|prices|pricing)\b/i;
+function briefForbidsCompetitorPrices(...sources) {
+  let forbids = false;
+  const walk = (v) => {
+    if (forbids) return;
+    if (typeof v === 'string') { if (BRIEF_PRICE_PROHIBITION_RE.test(v)) forbids = true; return; }
+    if (Array.isArray(v)) { v.forEach(walk); return; }
+    if (v && typeof v === 'object') Object.values(v).forEach(walk);
+  };
+  try { sources.forEach(walk); } catch { return true; }
+  return forbids;
+}
+
 class AutonomousRunner {
   /**
    * runNext({ minScore, dryRun })
@@ -641,9 +660,13 @@ class AutonomousRunner {
       run.content_guardrails_result = guardResult;
       if (!guardResult.pass) {
         const blocking = guardResult.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+        // P2 nudges (BLOG_META_MISSING_SOFT_CTA) ride the same redraft
+        // feedback so the second attempt hears them too (Codex r3 P2) —
+        // pass/fail stays P0/P1-only.
+        const advisory = guardResult.findings.filter((f) => f.severity === 'P2').slice(0, 2);
         const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
-          claimToken, skipReason: 'content_guardrails_failed', notes, blocking,
+          claimToken, skipReason: 'content_guardrails_failed', notes, blocking: [...blocking, ...advisory],
         });
       }
     }
@@ -964,11 +987,20 @@ class AutonomousRunner {
         || seoCompletionResult?.error || prePublishVisibilityResult?.error) || qualityInfraFailure;
       if (!gatesPass && !brief.human_review_required && !gateInfraError) {
         const summary = this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief);
+        // Guardrails P2 nudges from the PASSING guardrails run still ride
+        // this redraft's feedback — the refresh quality bundle has no
+        // blog_meta_soft_cta check, so without this a refresh draft's CTA
+        // nudge (BLOG_META_MISSING_SOFT_CTA) never reaches the writer
+        // (Codex r5 P2). Pass/fail semantics unchanged.
+        const guardAdvisory = (run.content_guardrails_result?.findings || []).filter((f) => f.severity === 'P2').slice(0, 2);
+        const notes = guardAdvisory.length
+          ? `${summary} | guardrail nudges (non-blocking): ${guardAdvisory.map((f) => f.code).join(', ')}`
+          : summary;
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken,
           skipReason: autoPublish ? 'auto_publish_gate_fail' : 'gate_fail',
-          notes: summary,
-          blocking: aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }),
+          notes,
+          blocking: [...aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }), ...guardAdvisory],
         });
       }
       // Remaining combinations are genuine human decisions (gate infra
@@ -3004,8 +3036,38 @@ class AutonomousRunner {
       primaryKeyword: brief.target_keyword || null,
       domains: guardDomains,
       operatorFaqException,
-      requiredSourceUrls: Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : [],
-      operatorCitations: Array.isArray(operatorBrief?.source_notes) && operatorBrief.source_notes.length > 0,
+      // The brief's NAMED sources are the citation allowance now that the
+      // broad .gov/.edu TLD rule is gone (owner ruling 2026-08-01, third).
+      // Both shapes count: `required_sources` (must-link instructions) and
+      // the manifest's own `sources` list. Non-URL entries — the briefs
+      // carry prose instructions in there too — are skipped downstream.
+      requiredSourceUrls: [
+        ...(Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : []),
+        ...(Array.isArray(operatorBrief?.sources) ? operatorBrief.sources : []),
+        ...(Array.isArray(opp?.signal_metadata?.intercept_brief?.sources) ? opp.signal_metadata.intercept_brief.sources : []),
+      ],
+      // Operator provenance is the OPERATOR BRIEF itself (it only exists for
+      // operator_intercept rows). The old source_notes-only test missed
+      // briefs that mandate sourcing via verify_notes/required_sources —
+      // the B1 cancellation brief cites the Florida statute through
+      // verify_notes and got no citation allowance (Codex P1, 2026-08-01).
+      operatorCitations: Boolean(operatorBrief),
+      // Competitor-price citations are STRICTER: category/spoke seeds share
+      // the operator_intercept bucket (and get citation hosts above) but
+      // auto-publish informational posts — only a true competitor-intercept
+      // brief (signal_metadata.intercept_brief) may cite competitor prices
+      // (Codex P0, 2026-08-01).
+      // …and the brief must not FORBID them. B2/B4 carry "GATE RULE … NO
+      // TruGreen dollar amounts anywhere in the post", so treating every
+      // intercept as price-authorized overrode the brief's own instruction
+      // (Codex). Fail closed: an unreadable brief keeps the full guard.
+      competitorPriceCitations: Boolean(opp?.signal_metadata?.intercept_brief)
+        && !briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
+      // A ban is stronger than "no permission": it must also outrank the
+      // generic calculator/quote/"pricing varies" framing exemption, which
+      // the seeder's own writer instruction steers drafts straight into
+      // (Codex).
+      forbidAllPrices: briefForbidsCompetitorPrices(opp?.signal_metadata?.intercept_brief, operatorBrief),
       allowedInternalLinks,
       isRefresh,
       priorBody,
@@ -3033,6 +3095,27 @@ class AutonomousRunner {
     const out = { ...row };
     for (const k of JSONB_COLS) {
       if (typeof out[k] === 'string') { try { out[k] = JSON.parse(out[k]); } catch (_) { /* leave as-is */ } }
+    }
+    // Briefs persisted BEFORE the intercept marker existed carry no
+    // gsc_signal.intercept, but remediation's SEO-completion gate reads it —
+    // so on deploy an IN-FLIGHT sourced-price run would park as
+    // P0_HARDCODED_PRICE_NOT_APPROVED even though the run-context guardrail
+    // had already authorized it. Derive the provenance from the owning
+    // opportunity instead of requiring a backfill migration (Codex r8 P0).
+    // Only fills an ABSENT marker: a persisted false is authoritative, and an
+    // unreadable opportunity leaves it absent, so this stays fail-closed.
+    if (out.gsc_signal && typeof out.gsc_signal === 'object' && out.gsc_signal.intercept === undefined) {
+      const oppId = out.opportunity_id || run?.opportunity_id;
+      if (oppId) {
+        try {
+          const opp = await db('opportunity_queue').where('id', oppId).first('signal_metadata');
+          let meta = opp?.signal_metadata;
+          if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch (_) { meta = null; } }
+          if (meta) out.gsc_signal = { ...out.gsc_signal, intercept: Boolean(meta.intercept_brief) };
+        } catch (err) {
+          logger.warn(`[autonomous-runner] intercept-provenance backfill skipped for brief ${out.id}: ${err.message}`);
+        }
+      }
     }
     return out;
   }
@@ -3178,6 +3261,13 @@ class AutonomousRunner {
       const hard = (qualityResult.hard_failures || []).map((f) => f.name).join(', ');
       const soft = (qualityResult.soft_failures || []).slice(0, 3).map((f) => f.name).join(', ');
       lines.push(`quality: hard=${hard || 'none'} soft=${soft || 'none'} score=${qualityResult.total_score}/${qualityResult.min_total_score}`);
+    } else if ((qualityResult.soft_failures || []).length) {
+      // Weight-0 nudges (blog_meta_soft_cta) ride along even when quality
+      // passes, so a redraft triggered by ANOTHER gate still feeds them to
+      // the writer and the review queue sees them (Codex r3 P2). The
+      // quality gate itself never blocks on these.
+      const soft = qualityResult.soft_failures.slice(0, 3).map((f) => f.name).join(', ');
+      lines.push(`quality nudges (non-blocking): ${soft}`);
     }
     if (seoCompletionResult?.passed === false || seoCompletionResult?.summary?.needs_review) {
       const summary = seoCompletionResult.summary || {};

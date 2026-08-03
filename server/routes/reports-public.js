@@ -28,7 +28,12 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
-const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+
+// lawn_assessments.id is a Postgres uuid — anything else must be refused
+// before it reaches a query (#3168).
+const ASSESSMENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const { verifyAssessmentPin } = require('../services/service-report/assessment-pin');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
@@ -129,10 +134,12 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
   reportPdfStorageKey,
+  timeOnSiteAdjustedPdfSignature,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
@@ -259,7 +266,12 @@ async function recordServiceReportEvent(service, eventName, channel, req, metada
   });
 }
 
-async function buildServiceReportV1ResponseData(service, token, { mode = 'live', pestPressureConfig, staffViewer = false } = {}) {
+async function buildServiceReportV1ResponseData(service, token, {
+  mode = 'live',
+  pestPressureConfig,
+  staffViewer = false,
+  pinnedLawnAssessmentId = null,
+} = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
   // Only the /data route resolves it (staffCanViewSuppressed — the same
@@ -268,7 +280,9 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // mode rides into the builder so mode-sensitive copy (the pest Visit
   // Summary narrative) can exclude the live-only next appointment from
   // pdf/static text — the field-level strip below can't reach prose.
-  const data = await buildReportV1Data(service, token, db, { pestPressureConfig, staffViewer, mode });
+  const data = await buildReportV1Data(service, token, db, {
+    pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId,
+  });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
   // nextAppointment + the V2 snapshot's nextVisit are LIVE-VIEW ONLY — the
@@ -1207,6 +1221,25 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Attachment filename the customer sees on download/share/email, e.g.
+// "Waves-Service-Report-123-Main-St-2026-08-02.pdf". service_date is a
+// hydrated pg DATE — naive template interpolation printed the entire
+// Date.toString() ("Sun Aug 02 2026 00:00:00 GMT+0000 (Coordinated
+// Universal Time)") into the filename (and, via the share sheet, into the
+// customer's email subject).
+function reportPdfFileName(service, { prefix = 'Waves-Service-Report' } = {}) {
+  const datePart = dateOnlyStamp(service.service_date);
+  const addressPart = String(service.address_line1 || '')
+    .normalize('NFKD')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/[\s_]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 60)
+    .replace(/^-+|-+$/g, '');
+  return `${[prefix, addressPart, datePart].filter(Boolean).join('-')}.pdf`;
+}
+
 // GET /api/reports/:token — public PDF access (no auth)
 router.get('/:token', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -1274,8 +1307,18 @@ router.get('/:token', async (req, res, next) => {
       const tzSignature = await treatmentZonePdfSignature(service, db);
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
       const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
+      // Assessment identity + copy version, computed ONCE before the render and
+      // reused for both the expected-key check and the store, so the key always
+      // describes the same assessment on both sides (#3168).
+      // CACHE-LOOKUP side uses the non-throwing entry point: deciding whether a
+      // stored object is current must never 500 a report view, and a
+      // non-matching value here only costs a re-render. The RENDER side takes
+      // the throwing canonical snapshot inside the try below, where a failure
+      // reaches the existing 503 + enqueue recovery path (#3172 r2) instead of
+      // bypassing it into a generic 500.
+      const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1283,7 +1326,7 @@ router.get('/:token', async (req, res, next) => {
       if (storedPdf) {
         await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+        res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service)}"`);
         res.setHeader('Cache-Control', 'no-store');
         return res.send(storedPdf);
       }
@@ -1293,16 +1336,40 @@ router.get('/:token', async (req, res, next) => {
       // signature attached to the payload — the narrative state the PDF was
       // rendered FROM — never a DB re-read.
       let tnRenderedSignature = '-tn0';
+      // The canonical snapshot the render is pinned to. Declared out here so
+      // the storage block below keys the object by what was RENDERED, not by
+      // the cache-lookup value; assigned inside the try so an unreadable
+      // lookup fails closed through the retry path.
+      let laRenderSignature = null;
+      // The payload the render was produced from — its flags decide whether
+      // this output may be cached.
+      let renderedData = null;
       try {
+        // ONE canonical lookup feeds BOTH the pin and the storage-key component
+        // (#3172 r1) — two lookups can straddle a selection change and cache a
+        // B-pinned PDF under A's key, which is the race this closes.
+        const canonical = await resolveCanonicalLawnRender(service, db);
+        const canonicalPin = canonical.pin;
+        laRenderSignature = canonical.signature;
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
-          const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', pestPressureConfig });
+          const data = await buildServiceReportV1ResponseData(service, req.params.token, {
+            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin,
+          });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+          renderedData = data;
           pdf = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
             logger,
             serviceRecordId: service.id,
+            // Pinned to the CANONICAL answer (#3172). Unpinned, the browser
+            // resolves its own assessment, so a selection moving away and back
+            // during the render defeats the pre/post check below — the same
+            // A-to-B-to-A limitation that created #3168. Pinning removes the
+            // page's freedom to choose; the key already carries assessment
+            // identity, so this render stays cacheable.
+            pinnedLawnAssessmentId: canonicalPin,
           });
 
           const latestPestPressureConfig = await loadActiveConfig(db).catch(() => null);
@@ -1333,16 +1400,34 @@ router.get('/:token', async (req, res, next) => {
         });
       }
       try {
-        const key = await putReportPdf(service.id, pdf, {
-          visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature,
-        });
-        await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
+        // Re-read the assessment component AFTER the render and require it to
+        // match the pre-render value. The browser fetches its own data, so a
+        // selection that moved mid-render would otherwise store the PDF of
+        // assessment A under B's key, where it reads as current forever. Same
+        // shape as the Pest Pressure config re-check above: if it moved, skip
+        // the store and let the next view render cleanly.
+        // Compare against what the render was PINNED to, not the cache-lookup
+        // value — the object must be keyed by the assessment it contains.
+        const laAfter = await lawnAssessmentPdfSignature(service, db);
+        // Same rule as pdf-queue: a render whose week could not be FROZEN is
+        // not reproducible, so serve it but cache nothing — otherwise a later
+        // view freezes different data while this object keeps these numbers.
+        if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
+          logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
+        } else if (laAfter !== laRenderSignature) {
+          logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else {
+          const key = await putReportPdf(service.id, pdf, {
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laRenderSignature,
+          });
+          await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
+        }
       } catch (storageErr) {
         logger.warn(`[reports-public] PDF storage skipped for ${service.id}: ${storageErr.message}`);
       }
       await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+      res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service)}"`);
       res.setHeader('Cache-Control', 'no-store');
       return res.send(pdf);
     }
@@ -1412,6 +1497,10 @@ router.get('/:token/data', async (req, res, next) => {
     return res.status(404).json({ error: 'Report not found' });
   }
   res.setHeader('Cache-Control', 'no-store');
+  // Hoisted so the catch can identify the visit WITHOUT logging the report
+  // token — that token is a bearer credential for a customer-facing report
+  // carrying their address (#3168).
+  let serviceRecordId = null;
   try {
     const mode = ['pdf', 'static', 'sms_preview'].includes(req.query.mode)
       ? req.query.mode
@@ -1446,6 +1535,7 @@ router.get('/:token/data', async (req, res, next) => {
       .first();
 
     if (!service) return res.status(404).json({ error: 'Report not found' });
+    serviceRecordId = service.id;
 
     // Staff browsers attach their portal JWT on this fetch (ReportViewPage)
     // — the same signal that opens suppressed shadow reports also unlocks
@@ -1465,7 +1555,43 @@ router.get('/:token/data', async (req, res, next) => {
     const products = await db('service_products').where({ service_record_id: service.id });
 
     if (service.report_template_version === 'service_report_v1') {
-      const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, { mode, staffViewer });
+      // ?assessment=<id> pins which lawn assessment this render shows (#3168).
+      // The headless PDF render passes it so the attachment provably carries
+      // the copy the send fence sealed — the renderer navigates to this page
+      // and the page fetches its own data, so pinning is the only way to make
+      // that deterministic. Validated in report-data against the assessments
+      // this token already exposes (same customer, confirmed, linked to this
+      // visit); an id outside that set throws rather than widening what the
+      // token can see. Ignored on non-lawn reports.
+      // Format-validate BEFORE the builder: lawn_assessments.id is a Postgres
+      // uuid, so a junk value like ?assessment=invalid raises an invalid-uuid
+      // syntax error and surfaces as a 500 instead of the fixed 409 refusal
+      // this route promises. A malformed pin is refused exactly like an
+      // unauthorized one — same status, same fixed copy, nothing echoed back.
+      const requestedAssessment = typeof req.query.assessment === 'string' && req.query.assessment.trim()
+        ? req.query.assessment.trim()
+        : null;
+      if (requestedAssessment
+        && requestedAssessment !== PIN_NO_ASSESSMENT
+        && !ASSESSMENT_UUID_RE.test(requestedAssessment)) {
+        logger.warn(`[reports-public] malformed assessment pin refused for service_record ${serviceRecordId || 'unknown'}`);
+        return res.status(409).json({ error: 'Requested assessment is not available for this report' });
+      }
+      // A pin must be SIGNED by this server. The pin narrows what the report
+      // says — `assessment=none` suppresses the lawn section outright — so an
+      // unsigned one would let anyone holding a report token produce an
+      // official, share-able portal report with an unfavourable assessment
+      // removed. Only the renderer can sign, so only the renderer can pin.
+      // Refused exactly like an unauthorized pin: same status, same fixed copy.
+      if (requestedAssessment
+        && !verifyAssessmentPin(req.params.token, requestedAssessment, req.query.asig, req.query.aexp)) {
+        logger.warn(`[reports-public] unsigned assessment pin refused for service_record ${serviceRecordId || 'unknown'}`);
+        return res.status(409).json({ error: 'Requested assessment is not available for this report' });
+      }
+      const pinnedLawnAssessmentId = requestedAssessment;
+      const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
+        mode, staffViewer, pinnedLawnAssessmentId,
+      });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was
       // retired 2026-07-09 — the report is now the only surface). Pest reports
@@ -1522,13 +1648,29 @@ router.get('/:token/data', async (req, res, next) => {
       irrigation: service.irrigation_recommendation,
       pdfUrl: `/api/reports/${req.params.token}`,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    // A pin this report cannot legitimately show FAILS the request — never a
+    // quiet fallback to normal resolution (#3168). The pin is how a pinned
+    // render proves the attachment carries the sealed copy; answering with a
+    // different assessment would produce exactly the divergence it prevents,
+    // and the caller could not tell. 409 so the render errors and the delivery
+    // defers retryably. The message names no ids — the caller supplied it.
+    if (err?.code === 'pinned_assessment_unavailable') {
+      // NEVER log the report token — it is a bearer credential for a
+      // customer-facing report carrying their address, so plain-text logs
+      // would become a credential store. The service-record id identifies the
+      // visit for debugging and grants nothing.
+      logger.warn(`[reports-public] pinned assessment refused for service_record ${serviceRecordId || 'unknown'}`);
+      return res.status(409).json({ error: 'Requested assessment is not available for this report' });
+    }
+    return next(err);
+  }
 });
 
 function generateReportPDF(service, products, weather, dryTimes, irrigation, res) {
   const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service, { prefix: 'Waves-Report' })}"`);
   doc.pipe(res);
 
   // Header — logo (centered) with license + contact lines beneath. Falls
