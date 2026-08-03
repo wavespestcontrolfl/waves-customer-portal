@@ -1995,8 +1995,17 @@ const PIN_NO_ASSESSMENT = 'none';
 //
 // Best-effort by design. A failed freeze must not fail a report view; the next
 // render simply tries again.
+// Returns the week the record is CANONICALLY frozen to — this render's value if
+// it won the write, the existing one if another render got there first, or null
+// when nothing could be established.
+//
+// Returning the winner's value (not a boolean) is the point. Losing the race and
+// then carrying on with our own independently fetched numbers would emit a
+// second, different version of a report that is supposed to be permanent —
+// which is the drift this whole mechanism exists to stop, reappearing in the
+// mechanism itself.
 async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
-  if (!serviceRecordId || !weekWeather) return false;
+  if (!serviceRecordId || !weekWeather) return null;
   try {
     const updated = await knex('service_records')
       .where({ id: serviceRecordId })
@@ -2007,10 +2016,16 @@ async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
           [JSON.stringify({ lawnWeekWeather: weekWeather })],
         ),
       });
-    return updated > 0;
+    if (updated > 0) return weekWeather;
+
+    // Lost the race: adopt whatever the winner stored, so both renders agree.
+    const row = await knex('service_records')
+      .where({ id: serviceRecordId })
+      .first('structured_notes');
+    return parseJsonObject(row?.structured_notes).lawnWeekWeather || null;
   } catch (err) {
     logger.warn(`[report-data] lawn week-weather freeze failed for ${serviceRecordId}: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
@@ -2223,7 +2238,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // "no rainfall known" forever, turning a transient provider outage into a
       // permanently blank water card.
       if (completionRainfall7dInches != null) {
-        await freezeLawnWeekWeather(service.id, {
+        const canonicalWeek = await freezeLawnWeekWeather(service.id, {
           rainInches: completionRainfall7dInches,
           et0Inches: completionEt0Inches,
           dailyRain: completionDailyRain,
@@ -2231,6 +2246,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
           rainSource: completionRainSource,
           frozenAt: new Date().toISOString(),
         }, knex);
+        // Adopt the canonical week even when THIS render lost the race —
+        // carrying on with our own numbers would publish a second, different
+        // version of a report that is meant to be permanent.
+        if (canonicalWeek) {
+          completionRainfall7dInches = canonicalWeek.rainInches ?? completionRainfall7dInches;
+          completionEt0Inches = canonicalWeek.et0Inches ?? completionEt0Inches;
+          completionDailyRain = Array.isArray(canonicalWeek.dailyRain) ? canonicalWeek.dailyRain : completionDailyRain;
+          completionRainConfidence = canonicalWeek.rainConfidence ?? completionRainConfidence;
+          completionRainSource = canonicalWeek.rainSource ?? completionRainSource;
+        }
       }
     } catch (e) { /* non-blocking */ }
   }

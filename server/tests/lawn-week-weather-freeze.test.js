@@ -21,15 +21,20 @@ const WEEK = {
   frozenAt: '2026-08-03T04:00:00.000Z',
 };
 
-// knex stub capturing the UPDATE and its predicate.
-function makeKnex({ matched = 1 } = {}) {
-  const state = { wheres: [], raws: [], patches: [] };
+// knex stub capturing the UPDATE and its predicate. `stored` is what a
+// read-back finds when this writer LOSES the conditional update.
+function makeKnex({ matched = 1, stored = null } = {}) {
+  const state = { wheres: [], raws: [], patches: [], reads: 0 };
   const knex = jest.fn((table) => {
     expect(table).toBe('service_records');
     const chain = {
       where: jest.fn((c) => { state.wheres.push(c); return chain; }),
       whereRaw: jest.fn((sql) => { state.raws.push(sql); return chain; }),
       update: jest.fn(async (patch) => { state.patches.push(patch); return matched; }),
+      first: jest.fn(async () => {
+        state.reads += 1;
+        return stored ? { structured_notes: { lawnWeekWeather: stored } } : { structured_notes: {} };
+      }),
     };
     return chain;
   });
@@ -40,7 +45,8 @@ function makeKnex({ matched = 1 } = {}) {
 describe('freezeLawnWeekWeather', () => {
   test('writes the week under lawnWeekWeather via an ATOMIC jsonb merge', async () => {
     const { knex, state } = makeKnex();
-    await expect(freezeLawnWeekWeather('svc-1', WEEK, knex)).resolves.toBe(true);
+    // Winning returns OUR week — the value the record is now frozen to.
+    await expect(freezeLawnWeekWeather('svc-1', WEEK, knex)).resolves.toEqual(WEEK);
 
     expect(state.wheres[0]).toEqual({ id: 'svc-1' });
     const patch = state.patches[0];
@@ -67,9 +73,24 @@ describe('freezeLawnWeekWeather', () => {
     expect(state.wheres).toHaveLength(1);
   });
 
-  test('reports false when another render already froze the week', async () => {
-    const { knex } = makeKnex({ matched: 0 });
-    await expect(freezeLawnWeekWeather('svc-1', WEEK, knex)).resolves.toBe(false);
+  // THE race this exists to close, appearing inside the mechanism itself: a
+  // live view and a PDF render resolve DIFFERENT weeks mid provider-flip. The
+  // loser must adopt the winner's value, not carry on with its own — otherwise
+  // two different versions of a supposedly permanent report go out.
+  test('LOSING the race returns the WINNER\'s week, not ours', async () => {
+    const WINNER = { ...WEEK, rainInches: 1.15, rainSource: 'open_meteo' };
+    const { knex, state } = makeKnex({ matched: 0, stored: WINNER });
+
+    const canonical = await freezeLawnWeekWeather('svc-1', WEEK, knex);
+
+    expect(canonical).toEqual(WINNER);
+    expect(canonical.rainInches).not.toBe(WEEK.rainInches);
+    expect(state.reads).toBe(1); // read back only after losing
+  });
+
+  test('losing with nothing readable yields null rather than a wrong week', async () => {
+    const { knex } = makeKnex({ matched: 0, stored: null });
+    await expect(freezeLawnWeekWeather('svc-1', WEEK, knex)).resolves.toBeNull();
   });
 
   // A failed freeze must never fail a report view; the next render retries.
@@ -78,14 +99,14 @@ describe('freezeLawnWeekWeather', () => {
       where: () => ({ whereRaw: () => ({ update: async () => { throw new Error('deadlock'); } }) }),
     }));
     knex.raw = jest.fn(() => ({}));
-    await expect(freezeLawnWeekWeather('svc-1', WEEK, knex)).resolves.toBe(false);
+    await expect(freezeLawnWeekWeather('svc-1', WEEK, knex)).resolves.toBeNull();
     expect(require('../services/logger').warn).toHaveBeenCalled();
   });
 
   test('nothing to freeze is a no-op', async () => {
     const { knex, state } = makeKnex();
-    await expect(freezeLawnWeekWeather(null, WEEK, knex)).resolves.toBe(false);
-    await expect(freezeLawnWeekWeather('svc-1', null, knex)).resolves.toBe(false);
+    await expect(freezeLawnWeekWeather(null, WEEK, knex)).resolves.toBeNull();
+    await expect(freezeLawnWeekWeather('svc-1', null, knex)).resolves.toBeNull();
     expect(state.patches).toHaveLength(0);
   });
 });
@@ -102,9 +123,16 @@ describe('freeze contract in the render path', () => {
     expect(source).toMatch(/const frozenWeekWeather = parseJsonObject\(service\.structured_notes\)\.lawnWeekWeather/);
   });
 
+  test('the render ADOPTS the canonical week, winner or loser', () => {
+    // Ignoring the return value would let a losing render publish its own
+    // numbers — a second version of a permanent report.
+    expect(source).toMatch(/const canonicalWeek = await freezeLawnWeekWeather\(/);
+    expect(source).toMatch(/if \(canonicalWeek\) \{[\s\S]{0,600}?completionRainfall7dInches = canonicalWeek\.rainInches/);
+  });
+
   test('only a RESOLVED week is frozen', () => {
     // Persisting a null would lock in "no rainfall known" forever, turning a
     // transient provider outage into a permanently blank water card.
-    expect(source).toMatch(/if \(completionRainfall7dInches != null\) \{\s*\n\s*await freezeLawnWeekWeather\(/);
+    expect(source).toMatch(/if \(completionRainfall7dInches != null\) \{\s*\n\s*const canonicalWeek = await freezeLawnWeekWeather\(/);
   });
 });
