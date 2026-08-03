@@ -1063,14 +1063,20 @@ export function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') 
 
   if (method.includes('bait') || product.includes('bait') || product.includes('gel')) {
     const family = applicationPestFamily(app);
-    // Bait-sharing is an insect claim (transfer within the nest or harborage);
-    // rodent bait placements get travel-route copy instead.
+    // The transfer/sharing mechanism is only documented for social or
+    // aggregating insects (ants, cockroaches, termites); rodents get
+    // travel-route copy, and every other or unknown target gets feeding-only
+    // copy — the fail-closed path must not invent a treatment mechanism
+    // either (pre-push P1, 2026-08-03).
     if (family?.noun === 'rodent') {
       details.push(`${productName} is a targeted bait placement, positioned along documented travel routes and activity points so rodents encounter it where they already move.`);
+    } else if (['ant', 'cockroach', 'termite'].includes(family?.noun)) {
+      details.push(`${productName} is a targeted bait placement. Foraging ${family.plural} feed on the bait and can share it with others in the nest or harborage, which helps reduce activity at the source instead of only where it is visible.`);
+      details.push(`Bait depends on foraging behavior, so some activity near the placement for a short period can be normal while ${family.plural} find and feed on the bait.`);
     } else {
-      const feeders = family ? family.plural : 'target pests';
-      details.push(`${productName} is a targeted bait placement. Foraging ${feeders} feed on the bait and can share it with others in the nest or harborage, which helps reduce activity at the source instead of only where it is visible.`);
-      details.push(`Bait depends on foraging behavior, so some activity near the placement for a short period can be normal while ${feeders} find and feed on the bait.`);
+      const feeders = family ? family.plural : 'the target pests';
+      details.push(`${productName} is a targeted bait placement. It works as ${feeders} feed on it at the placement points, which helps reduce activity at the source instead of only where it is visible.`);
+      details.push(`Bait depends on feeding behavior, so some activity near the placement for a short period can be normal while ${feeders} find and feed on the bait.`);
     }
     details.push(...productIdentifierDetails(app));
     return details;

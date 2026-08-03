@@ -828,6 +828,15 @@ describe('product purpose follows recorded pest identity', () => {
     expect(detail).not.toMatch(/share|nest|foraging/i);
   });
 
+  it('limits the bait-sharing mechanism to social insects — unknown targets get feeding-only copy', () => {
+    const silverfishBait = { method: 'bait_placement', targets: ['Silverfish'], product: { name: 'Dekko Silverfish Paks', category: 'bait' } };
+    const detail = applicationTechnicalExplanation(silverfishBait, 'pest').join(' ');
+    expect(detail).toMatch(/targeted bait placement/i);
+    expect(detail).not.toMatch(/share|nest|harborage|foraging/i);
+    const roachDetail = applicationTechnicalExplanation(roachGel, 'pest').join(' ');
+    expect(roachDetail).toMatch(/share it with others/);
+  });
+
   it('keeps termite and rodent station/bait purposes unchanged', () => {
     expect(applicationPurpose({ method: 'station_check', product: { name: 'Trelona ATBS' } }, 'termite')).toBe('Station service');
     expect(applicationPurpose({ method: 'bait_placement', product: { name: 'Contrac Blox' } }, 'rodent')).toBe('Bait placement');
