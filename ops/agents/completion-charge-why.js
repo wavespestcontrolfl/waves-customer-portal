@@ -64,10 +64,21 @@
  * An unresolved orphaned / reconciliation_required failure outranks even that:
  * money and records disagree, and a later success does not clear it.
  *
- * Exit codes:  0 = charge confirmed, or every condition verified and passing
+ * Charge outcomes are bound to the RESOLVED invoice (details.invoice_id) — a
+ * success for a refunded or replaced invoice is not evidence about this one.
+ * An ACH row logs charge_success at INITIATION and keeps ach_processing after
+ * settlement, so in-flight vs settled is decided by the invoice's current
+ * status, never by the flag alone. A settled invoice with no charge event at
+ * all is left INCONCLUSIVE: it fits both "the lane charged it and the
+ * best-effort audit insert failed" and "the customer paid the pay link later" —
+ * the second being the very scenario this tool diagnoses.
+ *
+ * Exit codes:  0 = charge confirmed (card or settled ACH), ACH in flight, or
+ *                  every condition verified and passing
  *              1 = a blocker, a recorded charge failure, or a ledger
  *                  reconciliation problem
- *              2 = inconclusive (something could not be verified)
+ *              2 = inconclusive (something could not be verified, or a
+ *                  settlement that cannot be attributed to this lane)
  *
  * Run:  railway run --service Postgres node ops/agents/completion-charge-why.js --visit=<scheduled_service_id>
  *
@@ -500,6 +511,8 @@ async function main() {
     let chargeFailure = null;
     let chargeSuccess = null;
     let achInFlight = null;
+    let achSettled = null;
+    let achFailedToSettle = null;
     let supersededFlags = [];
     let otherInvoiceOutcomes = [];
     let logUnreadable = false;
@@ -536,9 +549,16 @@ async function main() {
           // An ACH debit logs charge_success the moment it is INITIATED, with
           // ach_processing and the invoice left 'processing' — the debit can
           // still fail asynchronously. That is money in flight, not a settled
-          // card charge, and must never be reported as one.
-          if (parseNotes(latest.details).ach_processing === true) achInFlight = latest;
-          else chargeSuccess = latest;
+          // card charge. The flag STAYS on the row after the webhook settles,
+          // so "in flight" is decided by the invoice's CURRENT status, not by
+          // the flag alone.
+          if (parseNotes(latest.details).ach_processing === true) {
+            if (invStatus === 'processing') achInFlight = latest;
+            else if (invSettled) achSettled = latest;
+            else achFailedToSettle = latest;
+          } else {
+            chargeSuccess = latest;
+          }
         }
         supersededFlags = mine
           .filter((l) => l !== latest && String(l.event_type).includes('failed'))
@@ -551,12 +571,18 @@ async function main() {
         'a recorded charge failure cannot be ruled out.');
     }
 
-    // The charge_success insert is best-effort and its failure is swallowed
-    // (:8420-8424) AFTER the invoice has already become paid — so the absence
-    // of a success row is not evidence that no charge happened. Durable state
-    // on the invoice itself is the fallback: settled + a PaymentIntent.
-    const durableChargeEvidence = !chargeSuccess && !chargeFailure && !achInFlight && !logUnreadable
-      && invSettled && !!inv?.stripe_payment_intent_id;
+    // A settled invoice with NO lane-bound audit row is genuinely ambiguous and
+    // must not be read either way. The charge_success insert is best-effort and
+    // its failure is swallowed after the invoice is already paid (:8420-8424),
+    // so the charge MAY have happened with a lost audit row. But `paid` + a
+    // PaymentIntent is equally consistent with the customer paying the
+    // generated pay link later, or an operator collecting — which is the exact
+    // scenario this tool exists to diagnose. Claiming "charged" here would bury
+    // the real blocker; claiming "not charged" would invent one. So it only
+    // downgrades a would-be CLEAN verdict, and never overrides a blocker the
+    // replay found.
+    const unattributedSettlement = !chargeSuccess && !chargeFailure && !achInFlight
+      && !achSettled && !achFailedToSettle && !logUnreadable && invSettled;
     if (chargeFailure) {
       const d = parseNotes(chargeFailure.details);
       say(BLOCK, `charge ATTEMPTED and FAILED (${chargeFailure.event_type}, ${chargeFailure.created_at.toISOString()})`,
@@ -672,14 +698,19 @@ async function main() {
       process.exitCode = 0;
       return;
     }
-    if (chargeSuccess || durableChargeEvidence) {
+    if (achFailedToSettle) {
+      console.log(`  An ACH debit was initiated (${achFailedToSettle.created_at.toISOString()}) but the invoice is`);
+      console.log(`  now '${invStatus}' — neither processing nor settled, so the debit did NOT complete.`);
+      console.log('  The replay below is the state after that failure:\n');
+      // fall through to the state replay rather than returning — the invoice is
+      // collectible again and its blockers are the live answer.
+    }
+    if (chargeSuccess || achSettled) {
       if (chargeSuccess) {
         console.log(`  ANSWERED: the card WAS charged (${chargeSuccess.event_type}, ${chargeSuccess.created_at.toISOString()}).`);
       } else {
-        console.log(`  ANSWERED: the invoice is ${invStatus} with PaymentIntent ${inv.stripe_payment_intent_id}.`);
-        console.log('  No charge_success audit row exists, but that insert is best-effort and its failure');
-        console.log('  is swallowed AFTER the invoice is already paid — durable invoice state is the');
-        console.log('  stronger evidence here, so this counts as charged.');
+        console.log(`  ANSWERED: an ACH debit initiated ${achSettled.created_at.toISOString()} has SETTLED —`);
+        console.log(`  the invoice is now ${invStatus}. Paid by bank debit, not a card.`);
       }
       console.log('  The premise of the question does not hold for this visit.');
       const stale = findings.filter((f) => f.level === BLOCK);
@@ -726,6 +757,18 @@ async function main() {
       console.log('  INCONCLUSIVE — nothing blocked among the conditions this script could check,');
       console.log('  but the following could not be verified, so the lane is NOT cleared:');
       for (const u of unknowns) console.log(`    - ${u.label}`);
+      process.exitCode = 2;
+    } else if (unattributedSettlement) {
+      console.log('  INCONCLUSIVE — every lane condition passed and the invoice is now');
+      console.log(`  ${invStatus}, but NO charge event is recorded against it, so the payment`);
+      console.log('  cannot be attributed. Both of these fit the evidence equally:');
+      console.log('    - the lane charged the card and the best-effort audit insert failed');
+      console.log('      (its error is swallowed after the invoice is already paid), or');
+      console.log('    - the customer paid the generated pay link, or an operator collected.');
+      console.log(`  Settle it in Stripe: ${inv?.stripe_payment_intent_id
+        ? `PaymentIntent ${inv.stripe_payment_intent_id}`
+        : 'no PaymentIntent on the invoice'} — an off-session charge from this lane`);
+      console.log('  is distinguishable there from a customer-initiated payment.');
       process.exitCode = 2;
     } else {
       console.log('  Every lane condition was verified and passed, and no charge failure is recorded.');
