@@ -2,7 +2,8 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
+const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
@@ -32,6 +33,12 @@ const RETRY_DELAYS_MINUTES = [5, 30, 240];
 function isMissingQueueError(err) {
   return err?.code === '42P01' || err?.code === '42703';
 }
+
+// How long a job may keep waiting on a PENDING weather state before it is
+// treated as a failure. Three days clears an open window many times over and
+// gives the hourly geocode backstop ample room, while bounding the records it
+// can never repair.
+const PENDING_DEFER_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
 
 function nextPdfRenderAttemptAt(now = new Date(), attempts = 0) {
   const index = Math.min(Math.max(Number(attempts || 0), 0), RETRY_DELAYS_MINUTES.length - 1);
@@ -87,6 +94,11 @@ async function renderAndStoreServiceReportPdf(recordId, {
   knex = db,
   allowUnstoredPdf = false,
   pestPressureConfig: providedPestPressureConfig,
+  // #3168: pin which lawn assessment this render shows, so a send fence can
+  // prove the attachment carries the copy it sealed. Rides to the page on the
+  // URL; also pinned on this function's own data build so the storage-key
+  // signature describes the same render.
+  pinnedLawnAssessmentId = null,
 } = {}) {
   const service = await loadServiceRecordForPdf(recordId, knex);
   if (!service) throw new Error('Service record not found');
@@ -120,7 +132,29 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
   const smSignature = await stationMapPdfSignature(service, knex);
+  // Assessment identity + copy version in the key, so a stale in-flight render
+  // cannot republish over a newer one (#3168).
+  // ONE canonical lookup feeds BOTH the pin and the storage-key component
+  // (#3172 r1). Two lookups can straddle a selection change, pinning the
+  // render to B while caching it under A's key — the race this closes,
+  // reintroduced by resolving twice.
+  const canonical = await resolveCanonicalLawnRender(service, knex);
+  const laSignature = canonical.signature;
+  // DELIVERY pin vs CANONICAL pin (#3172).
+  //
+  // `pinnedLawnAssessmentId` is a delivery's SEALED assessment — it may
+  // deliberately differ from the canonical answer, so that render is never
+  // cached. Every other render was previously UNPINNED, which left the page
+  // free to resolve its own assessment and reopened the A-to-B-to-A race in the
+  // cache path. Ordinary renders are now pinned to the canonical answer, which
+  // makes them deterministic AND still cacheable, because the pin and the key
+  // describe the same assessment.
+  const isDeliveryPin = !!pinnedLawnAssessmentId;
+  const effectivePin = pinnedLawnAssessmentId || canonical.pin;
   let pdf;
+  // The payload the render was produced from — its flags decide whether this
+  // output may be cached.
+  let renderedData = null;
   // The signature of the narrative text actually rendered travels ON the
   // payload (attached by report-data at the moment the text was chosen) —
   // never re-read from the DB, so a background generation landing mid-render
@@ -129,8 +163,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   let tnRenderedSignature = '-tn0';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+    renderedData = data;
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
     // into them (codex P2 r2: this path bypasses the route helper's strip).
@@ -146,6 +181,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       req,
       logger,
       serviceRecordId: recordId,
+      pinnedLawnAssessmentId: effectivePin,
     });
 
     const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
@@ -160,9 +196,73 @@ async function renderAndStoreServiceReportPdf(recordId, {
     pestPressureConfig = latestPestPressureConfig;
     visibilitySignature = latestVisibilitySignature;
   }
+  // A PINNED render never joins the shared cache (#3168). The storage key is
+  // assessment-agnostic, so persisting one would let a later UNPINNED download
+  // serve a PDF built for a specific assessment — and the pinned path exists
+  // precisely for the case where the pin and the current selection disagree.
+  //
+  // Deliberately OUTSIDE the storage try/catch below: that catch exists to let
+  // an ordinary render degrade to an unstored PDF, and swallowing this failure
+  // there would mark the delivery sent while Download PDF kept serving the
+  // known-stale object. A failed clear must fail the render so the delivery
+  // defers and retries.
+  // Checked BEFORE the delivery branch: an emailed attachment is the one copy
+  // that can never be corrected, so a render whose week could not be FROZEN
+  // must not reach a customer's inbox. A later view would freeze different
+  // provider data and the attachment would disagree with the permanent report
+  // forever — the divergence this whole lane exists to prevent, arriving by
+  // email. Retryable, so email-delivery defers the send rather than dropping
+  // it; the next attempt tries the freeze again.
+  if (renderedData?.lawnAssessment?.weekWeatherUnfrozen && isDeliveryPin) {
+    const err = new Error('lawn week weather could not be frozen — deferring pinned render');
+    err.code = 'lawn_week_weather_unfrozen';
+    err.retryable = true;
+    throw err;
+  }
+  if (isDeliveryPin) {
+    // The delivery forced a fresh render precisely because the cached object
+    // may hold an older assessment or recommendation version, so leaving that
+    // key in place would hand the recipient a document different from the
+    // attachment they were just emailed. The next unpinned request re-renders
+    // canonically; nothing reads a null key as an error.
+    await knex('service_records')
+      .where({ id: recordId })
+      .update({ pdf_storage_key: null });
+    return { key: null, pdf, rendered: true, token: reportToken, pinned: true };
+  }
   try {
+    // An UNPINNED cache render opens the report page without a pin, so the
+    // page's own fetch chooses the assessment — and a selection that moved
+    // away and back during the render would otherwise store that PDF under
+    // the pre-render signature, where it reads as current forever. Re-read and
+    // require stability before publishing; if it moved, skip the store and let
+    // the next view render cleanly. (Pinned renders never reach here.)
+    // A render whose week's weather could not be FROZEN is not reproducible —
+    // a later view may freeze different provider data while this cached object
+    // kept these numbers forever, and no future PDF request would retry the
+    // freeze. Serve the bytes, cache nothing.
+    // The CACHE gate takes the superset: a failed freeze AND a week that has
+    // not settled yet. Delivery above gates on the failure alone.
+    if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
+      // WHY it was uncacheable decides what the queue does with it. A merely
+      // PENDING week — the day still accumulating, or the property not geocoded
+      // yet — is not a failure, and no amount of retrying inside the ladder can
+      // resolve it; only elapsed time can. Those wait. A genuine failure keeps
+      // the ladder.
+      const reason = renderedData.lawnAssessment.weekWeatherPendingReason || 'unfrozen';
+      logger.warn(`[service-report-pdf] week weather not cacheable for ${recordId} (${reason}) — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: reason,
+      };
+    }
+    const laAfter = await lawnAssessmentPdfSignature(service, knex);
+    if (laAfter !== laSignature) {
+      logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
+      return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
+    }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -240,7 +340,9 @@ async function clearLawnPdfCorrectionMarker(recordId, knex = db) {
 // deliveries must attach a render produced AFTER final copy settled, and no
 // fence can cover every render path (the public report route renders
 // synchronously without a job row — codex P1 #3093 r23).
-async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, forceFresh = false } = {}) {
+async function getOrRenderServiceReportPdf(recordId, {
+  token, req, knex = db, forceFresh = false, pinnedLawnAssessmentId = null,
+} = {}) {
   // technician_notes + service_data ride along for the summary-copy key
   // component, service_type/service_line for the mosquito-V2 component —
   // the expected key must match what renderAndStore writes.
@@ -250,7 +352,13 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     // signature silently returns '' here while renderAndStore (which loads
     // service_records.*) writes a key containing -sm..., so expected and
     // stored keys could never match and every email would re-render.
-    .first('id', 'customer_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
+    // customer_id + service_id also ride along for the lawn-assessment
+    // component (#3168): loadLinkedLawnAssessment filters on customer_id and
+    // falls back through the scheduled service, so omitting them makes this
+    // side compute "no assessment" while renderAndStore — which uses the
+    // full record — computes the real hash. The keys would never match and
+    // every lawn PDF would re-render on every lookup.
+    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public
@@ -263,7 +371,13 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
       ? JSON.parse(service.structured_notes) : (service?.structured_notes || {});
     correctionPending = notes && notes.lawnPdfCorrectionPending === true;
   } catch { correctionPending = false; }
-  const mustRenderFresh = forceFresh || correctionPending;
+  // A DELIVERY-pinned render can never be served from storage: a cached object
+  // may have been built for a different assessment than the one the delivery
+  // sealed (#3168). Ordinary renders are pinned to the CANONICAL answer now
+  // (#3172), and the storage key carries assessment identity, so those stay
+  // fully cacheable — gating on the delivery pin only is what keeps caching
+  // alive.
+  const mustRenderFresh = forceFresh || correctionPending || !!pinnedLawnAssessmentId;
   // Version captured BEFORE the render: the marker may only be cleared when
   // the recommendation copy did not change during the render AND no
   // generation is in flight afterwards — otherwise this render may have
@@ -284,7 +398,7 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
@@ -298,10 +412,17 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     knex,
     allowUnstoredPdf: true,
     pestPressureConfig,
+    pinnedLawnAssessmentId,
   });
   // A completed fresh render satisfies the pending correction — but only
   // once the copy can no longer change (no generation in flight).
-  if (correctionPending && !rendered.storageFailed && fenceReadOk) {
+  // A PINNED render must not clear the correction marker: it stored nothing, so
+  // the canonical cached PDF is still whatever it was. Clearing here would
+  // retire the marker while a stale object remains the one customers download.
+  // …and not on an UNCACHED render either: it stored nothing, so the canonical
+  // cached PDF is still whatever it was. Clearing would retire the marker while
+  // a stale object remains the one customers download.
+  if (correctionPending && !rendered.storageFailed && !rendered.pinned && !rendered.uncached && fenceReadOk) {
     try {
       if (!lawnAssessmentId) {
         // No linked assessment (stray marker on a non-lawn record) —
@@ -353,6 +474,13 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     storageFailed: !!rendered.storageFailed,
     storageError: rendered.storageError || null,
     token: rendered.token,
+    // Pinned renders are deliberately unstored (#3168) — surfaced so a caller
+    // can tell "no key because storage failed" from "no key by design".
+    pinned: !!rendered.pinned,
+    // Likewise for a render that completed but was not cacheable (unfrozen
+    // week, or a selection that moved during the render).
+    uncached: !!rendered.uncached,
+    uncachedReason: rendered.uncachedReason || null,
   };
 }
 
@@ -473,6 +601,23 @@ async function markPdfRenderJobSucceeded(job, key, knex = db) {
   });
 }
 
+// Reschedule a job WITHOUT consuming an attempt. For conditions that are not
+// failures and that time alone resolves — the retry ladder is for transient
+// errors, and spending it here would exhaust the job before the condition
+// clears and fire a terminal-failure alert for a healthy record.
+async function deferPdfRenderJob(job, until, reason, knex = db) {
+  await knex('service_report_pdf_jobs').where({ id: job.id }).update({
+    status: 'queued',
+    next_attempt_at: until,
+    // Hand back the attempt the claim consumed.
+    attempts: Math.max(0, Number(job.attempts || 1) - 1),
+    locked_at: null,
+    last_error: reason,
+    updated_at: new Date(),
+  });
+  logger.info(`[service-report-pdf-queue] deferred ${job.service_record_id} until ${until.toISOString()}: ${reason}`);
+}
+
 async function markPdfRenderJobFailed(job, err, knex = db) {
   const now = new Date();
   const attempts = Number(job.attempts || 0);
@@ -506,6 +651,36 @@ async function markPdfRenderJobFailed(job, err, knex = db) {
 async function processPdfRenderJob(job, knex = db) {
   try {
     const result = await renderAndStoreServiceReportPdf(job.service_record_id, { knex });
+    // A render that deliberately stored NOTHING has not done this job's work —
+    // the job exists to populate the cache. Marking it succeeded would retire
+    // it with no cached PDF and no retry, so the condition that made the render
+    // unstorable (an unfrozen week, a selection that moved) never gets another
+    // attempt. Fail it so the queue backs off and tries again.
+    if (result?.uncached) {
+      // A PENDING week is not a failure and no amount of retrying inside the
+      // ladder can resolve it — the delays run out roughly half an hour in,
+      // hours before the ET day ends or the geocode backstop next sweeps.
+      // Failing it would retire the job before the freeze it exists to perform
+      // is even possible, and page someone about a terminal failure that was
+      // really just "not yet". Wait instead, and give the attempt back.
+      // BOUNDED, because not every pending state resolves. The geocode backstop
+      // deliberately excludes blank streets and addresses that returned
+      // ZERO_RESULTS, and it only repairs `customers` — a stamped service
+      // address with null coordinates is never swept. Deferring those on a free
+      // attempt each time would leave a job queued forever, re-deferring
+      // nightly and never surfacing. After the grace window it takes the normal
+      // failure path, so it retires loudly with the reason in last_error.
+      const queuedSinceMs = job.created_at ? Date.now() - new Date(job.created_at).getTime() : 0;
+      if (result.uncachedReason && result.uncachedReason !== 'unfrozen' && queuedSinceMs < PENDING_DEFER_GRACE_MS) {
+        const until = nextEtMidnight();
+        await deferPdfRenderJob(job, until, `weather not freezable yet (${result.uncachedReason}) — deferred`, knex);
+        return { status: 'deferred', nextAttemptAt: until.toISOString() };
+      }
+      const err = new Error(`render completed but was not cacheable (${result.uncachedReason || 'unfrozen'})`);
+      err.code = 'pdf_render_uncacheable';
+      const status = await markPdfRenderJobFailed(job, err, knex);
+      return { status, error: err.message };
+    }
     await markPdfRenderJobSucceeded(job, result.key, knex);
     return { status: 'succeeded', key: result.key };
   } catch (err) {
@@ -520,6 +695,11 @@ async function processDuePdfRenderJobs({ now = new Date(), limit = CLAIM_LIMIT }
     succeeded: 0,
     failed: 0,
     requeued: 0,
+    // Jobs waiting on a weather state that only time resolves. Counted
+    // separately from `requeued`: a deferral is not a retry, and folding the
+    // two would make a healthy nightly wait indistinguishable from a job that
+    // keeps erroring.
+    deferred: 0,
     recovered: 0,
   };
   const recovered = await recoverStalePdfRenderClaims(now, knex);
@@ -532,6 +712,7 @@ async function processDuePdfRenderJobs({ now = new Date(), limit = CLAIM_LIMIT }
     if (result.status === 'succeeded') summary.succeeded += 1;
     else if (result.status === 'failed') summary.failed += 1;
     else if (result.status === 'queued') summary.requeued += 1;
+    else if (result.status === 'deferred') summary.deferred += 1;
   }
   return summary;
 }

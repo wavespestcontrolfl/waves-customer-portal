@@ -7722,6 +7722,27 @@ router.get('/:id/estimate-source', async (req, res, next) => {
     // any one-time. annual_total is monthly annualized — summing both would
     // double-count the recurring plan against a single visit's price.
     const quotedTotal = (Number(est.monthly_total || 0) || Number(est.annual_total || 0)) + Number(est.onetime_total || 0);
+    // How many SEPARATE series/singles this estimate booked into (Codex P1
+    // on the provenance price comparison): most quotes book every line as
+    // ONE appointment (primary + add-ons), whose price IS the whole-visit
+    // charge and compares cleanly against the summed quote — but a
+    // seasonal + year-round split books multiple series, and comparing one
+    // row against the whole quote manufactures deltas. Distinct SERVICE
+    // TYPES across ALL statuses: cancelling one split series never un-splits
+    // the quote (its line is still on the accepted estimate — Codex r2),
+    // and a reschedule re-anchors the SAME service type, so it can't read
+    // as a split. Series anchors only (children inherit source_estimate_id);
+    // fail-soft to 1 so the common single-group comparison never disappears
+    // on a count hiccup.
+    let linkedSeriesCount = 1;
+    try {
+      const anchorCount = await db('scheduled_services')
+        .where({ source_estimate_id: est.id })
+        .whereNull('recurring_parent_id')
+        .countDistinct({ n: 'service_type' })
+        .first();
+      linkedSeriesCount = Math.max(1, Number(anchorCount?.n) || 1);
+    } catch { linkedSeriesCount = 1; }
     let deposit = null;
     try {
       const { summarizeEstimateDeposit } = require('../services/estimate-deposits');
@@ -7767,6 +7788,7 @@ router.get('/:id/estimate-source', async (req, res, next) => {
       // cite it. Trigger-stamped on insert; null only for pre-backfill rows.
       estimateSlug: est.estimate_slug || null,
       quotedTotal,
+      linkedSeriesCount,
       monthlyTotal: Number(est.monthly_total || 0),
       annualTotal: Number(est.annual_total || 0),
       onetimeTotal: Number(est.onetime_total || 0),

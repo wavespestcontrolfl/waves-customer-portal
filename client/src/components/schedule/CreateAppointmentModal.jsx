@@ -111,10 +111,10 @@ const HOURLY_TIME_OPTIONS = Array.from({ length: 24 }, (_, h) => {
 // Booster months — extra visits on top of a recurring base. Common pattern:
 // quarterly pest + boosters in Jun/Aug. Months are 1-indexed.
 const MONTH_CHIPS = [
-  { value: 1, label: 'J' }, { value: 2, label: 'F' }, { value: 3, label: 'M' },
-  { value: 4, label: 'A' }, { value: 5, label: 'M' }, { value: 6, label: 'J' },
-  { value: 7, label: 'J' }, { value: 8, label: 'A' }, { value: 9, label: 'S' },
-  { value: 10, label: 'O' }, { value: 11, label: 'N' }, { value: 12, label: 'D' },
+  { value: 1, label: 'Jan' }, { value: 2, label: 'Feb' }, { value: 3, label: 'Mar' },
+  { value: 4, label: 'Apr' }, { value: 5, label: 'May' }, { value: 6, label: 'Jun' },
+  { value: 7, label: 'Jul' }, { value: 8, label: 'Aug' }, { value: 9, label: 'Sep' },
+  { value: 10, label: 'Oct' }, { value: 11, label: 'Nov' }, { value: 12, label: 'Dec' },
 ];
 
 const inputStyle = { width: '100%', padding: '10px 12px', background: D.input, border: `1px solid ${D.border}`, borderRadius: 6, color: D.text, fontSize: 16, fontFamily: 'inherit', fontWeight: 400, outline: 'none', boxSizing: 'border-box', minHeight: 44, colorScheme: 'light' };
@@ -310,7 +310,39 @@ function prepayCadenceKey(cadence, intervalDays) {
 }
 
 export function formatScheduleEstimateAmount(estimate) {
+  // Per-application framing (owner ruling 2026-08-02, same rule as the
+  // per-month copy audit): recurring plans read "$X/application" — the
+  // amount the customer is actually billed per visit — never a normalized
+  // "$X/mo" nobody is charged as. Only REAL quote lines qualify: the server
+  // marks lines it synthesized from bare totals (derived:
+  // 'estimate_totals_fallback'), whose price is a monthly figure that would
+  // mislabel as per-application.
+  const lines = Array.isArray(estimate?.lines) ? estimate.lines : [];
+  const recurringLines = lines.filter((l) => l && l.cadence && l.cadence !== 'one_time');
+  // perApplicationPrice / monthlyPrice are EXPLICIT provenance from the
+  // server (discount-aware canonical derivation; the engine's true
+  // normalized monthly) — never inferred from `price`, whose fields can be
+  // list rate. EVERY recurring line must carry a proven unit or the legacy
+  // total tells the whole truth; a mixed quote keeps EACH billing unit
+  // ("$121.00/application + $24.00/mo") — collapsing it to one aggregate
+  // monthly is the exact flat-monthly copy this removes (Codex #3173 r2).
+  const perApp = recurringLines
+    .filter((l) => Number(l.perApplicationPrice) > 0)
+    .map((l) => Number(l.perApplicationPrice));
+  const monthlyOnly = recurringLines
+    .filter((l) => !(Number(l.perApplicationPrice) > 0) && Number(l.monthlyPrice) > 0)
+    .map((l) => Number(l.monthlyPrice));
   const onetime = Number(estimate?.onetimeTotal);
+  // A fully-proven set qualifies even when ALL lines are genuinely monthly
+  // (rodent-bait-only quotes — Codex #3173 r2): requiring a per-app line
+  // dropped their recurring charge from the label entirely.
+  if (recurringLines.length && perApp.length + monthlyOnly.length === recurringLines.length) {
+    const parts = [];
+    if (perApp.length) parts.push(`${perApp.map((p) => formatMoney(p)).join(' + ')}/application`);
+    for (const m of monthlyOnly) parts.push(`${formatMoney(m)}/mo`);
+    if (Number.isFinite(onetime) && onetime > 0) parts.push(`${formatMoney(onetime)} one-time`);
+    return parts.join(' + ');
+  }
   if (Number.isFinite(onetime) && onetime > 0) return `${formatMoney(onetime)} one-time`;
   const monthly = Number(estimate?.monthlyTotal);
   if (Number.isFinite(monthly) && monthly > 0) return `${formatMoney(monthly)}/mo`;
@@ -576,6 +608,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const [discountPresets, setDiscountPresets] = useState([]);
   const [lineDiscountQueries, setLineDiscountQueries] = useState({});
   const [lineDiscountOpenIdx, setLineDiscountOpenIdx] = useState(null);
+  // Booster-months dropdown (owner request 2026-08-02): which service line's
+  // month checklist is open. One open at a time, like the discount popover.
+  // Keyed by STABLE lineId, never array index (Codex #3173 r2): removing an
+  // earlier service reindexes the array, and an index-keyed open menu would
+  // jump lines and assign boosters to the wrong series.
+  const [boosterOpenKey, setBoosterOpenKey] = useState(null);
 
   const lineDiscountPresets = useMemo(() => {
     return discountPresets.filter((d) => (
@@ -638,6 +676,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const removeServiceAt = (idx) => {
     setServices((arr) => arr.filter((_, i) => i !== idx));
     setLineDiscountOpenIdx((current) => (current === idx ? null : current));
+    // The booster menu is keyed by stable lineId, but manual lines fall back
+    // to an index key — close it outright on any removal so a reindex can
+    // never leave it pointing at a different line.
+    setBoosterOpenKey(null);
   };
   const addServiceFromCatalog = (svc) => {
     // One-time mosquito is priced by the lot-based ladder on the server when
@@ -2086,6 +2128,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                           charge. */}
                       <EstimateProvenanceCard
                         quotedTotal={linkedEstimate.quotedTotal}
+                        onetimeTotal={linkedEstimate.onetimeTotal}
                         currentPrice={netSubtotal}
                         deposit={linkedEstimate.deposit}
                         payment={linkedEstimate.payment}
@@ -2194,7 +2237,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                         <button
                           type="button"
                           onClick={() => setLinkedEstimate(null)}
-                          style={{ border: 'none', background: 'transparent', color: D.text, cursor: 'pointer', fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap', padding: '4px 0' }}
+                          style={{
+                            // Real tap target (owner report 2026-08-02: the
+                            // 12px text button was near-untappable on iPhone).
+                            border: `1px solid ${D.border}`, borderRadius: 6,
+                            background: 'transparent', color: D.text, cursor: 'pointer',
+                            fontSize: isMobile ? 14 : 12, fontWeight: 500, whiteSpace: 'nowrap',
+                            padding: isMobile ? '10px 14px' : '6px 10px',
+                            minHeight: isMobile ? 40 : undefined,
+                          }}
                         >
                           {linkedEstimate.status === 'accepted' ? 'Unlink' : 'Clear'}
                         </button>
@@ -2353,32 +2404,73 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                   </div>
                 )}
 
-                {svc.cadence && svc.cadence !== 'one_time' && (
-                  <div style={{ gridColumn: '1 / -1' }}>
-                    {serviceFieldLabel('Booster months (optional)')}
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                      {MONTH_CHIPS.map((m) => {
-                        const on = (svc.boosterMonths || []).includes(m.value);
-                        return (
+                {svc.cadence && svc.cadence !== 'one_time' && (() => {
+                  const selected = Array.isArray(svc.boosterMonths) ? svc.boosterMonths : [];
+                  const summary = selected.length
+                    ? MONTH_CHIPS.filter((m) => selected.includes(m.value)).map((m) => m.label).join(', ')
+                    : 'None';
+                  const boosterKey = svc.lineId || `line_${idx}`;
+                  const open = boosterOpenKey === boosterKey;
+                  return (
+                    <div style={{ gridColumn: '1 / -1', position: 'relative' }}>
+                      {serviceFieldLabel('Booster months (optional)')}
+                      <button
+                        type="button"
+                        onClick={() => setBoosterOpenKey(open ? null : boosterKey)}
+                        aria-label="Booster months"
+                        aria-expanded={open}
+                        style={{
+                          ...inputStyle,
+                          fontSize: isMobile ? 15 : 12,
+                          minHeight: isMobile ? 42 : 36,
+                          padding: isMobile ? '10px 12px' : '8px 10px',
+                          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                          cursor: 'pointer', textAlign: 'left', width: '100%',
+                          color: selected.length ? D.text : D.muted,
+                        }}
+                      >
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{summary}</span>
+                        <span style={{ color: D.muted, marginLeft: 8 }}>{open ? '▴' : '▾'}</span>
+                      </button>
+                      {open && (
+                        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, background: D.card, border: `1px solid ${D.border}`, borderRadius: 8, zIndex: 18, maxHeight: 260, overflow: 'auto', marginTop: 4, boxShadow: '0 4px 12px rgba(0,0,0,0.08)' }}>
+                          {MONTH_CHIPS.map((m) => {
+                            const on = selected.includes(m.value);
+                            return (
+                              <button
+                                key={m.value}
+                                type="button"
+                                onClick={() => toggleBoosterMonth(idx, m.value)}
+                                aria-label={`Booster month ${m.value}`}
+                                aria-pressed={on}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                                  padding: isMobile ? '10px 12px' : '8px 10px',
+                                  fontSize: isMobile ? 15 : 12, fontWeight: 500,
+                                  background: 'transparent', border: 'none', cursor: 'pointer',
+                                  color: on ? D.teal : D.text, textAlign: 'left',
+                                }}
+                              >
+                                <span style={{ width: 14, display: 'inline-block' }}>{on ? '✓' : ''}</span>
+                                {m.label}
+                              </button>
+                            );
+                          })}
                           <button
-                            key={m.value}
                             type="button"
-                            onClick={() => toggleBoosterMonth(idx, m.value)}
-                            aria-label={`Booster month ${m.value}`}
+                            onClick={() => setBoosterOpenKey(null)}
                             style={{
-                              width: 32, height: 32, borderRadius: 6, fontSize: 12,
-                              fontWeight: 500, cursor: 'pointer',
-                              background: on ? D.teal : 'transparent',
-                              color: on ? '#fff' : D.muted,
-                              border: `1px solid ${on ? D.teal : D.border}`,
-                              padding: 0,
+                              width: '100%', padding: isMobile ? '10px 12px' : '8px 10px',
+                              fontSize: isMobile ? 14 : 12, fontWeight: 500, cursor: 'pointer',
+                              background: 'transparent', color: D.muted, border: 'none',
+                              borderTop: `1px solid ${D.border}`, textAlign: 'center',
                             }}
-                          >{m.label}</button>
-                        );
-                      })}
+                          >Done</button>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
 
                 {!svc.lineDiscount && (
                   <div style={{ gridColumn: '1 / -1', position: 'relative', padding: '0 0 2px' }}>

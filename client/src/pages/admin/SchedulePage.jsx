@@ -2678,7 +2678,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               {estimateSource && (
                 <EstimateProvenanceCard
                   quotedTotal={estimateSource.quotedTotal}
-                  currentPrice={appointmentTotal}
+                  onetimeTotal={estimateSource.onetimeTotal}
+                  // Same rule as the mobile sheet: the comparison stands for
+                  // the common one-group booking; only a genuinely split
+                  // quote (multiple series anchors, counted server-side)
+                  // suppresses it.
+                  currentPrice={Number(estimateSource.linkedSeriesCount) > 1
+                    ? null : appointmentTotal}
+                  compareScope="visit"
                   deposit={estimateSource.deposit}
                   payment={estimateSource.payment}
                   lines={estimateSource.lines}
@@ -9118,6 +9125,14 @@ export function CompletionPanel({
   const hideServicePhotos = isLawn && companionSchemas.length === 0;
   const serviceTypeForArea = service?.serviceType || service?.service_type || "";
   const calibrationRequired = isLawn && !!service.waveguardTier;
+  // Advisory inventory posture is member-tier only — mirrors the server's
+  // isWaveGuardLawnCompletion. A One-Time/Commercial lawn visit still gets
+  // the hard inventory gate client-side, because the server passes
+  // allowNegative: false for it and would 400 the closeout with the original
+  // inventory lockout (codex P2 r3 on #3179).
+  const inventoryAdvisoryTier = ["Bronze", "Silver", "Gold", "Platinum"].includes(
+    service?.waveguardTier,
+  );
   const currentAdminUser = (() => {
     try {
       return JSON.parse(localStorage.getItem("waves_admin_user") || "null");
@@ -9429,14 +9444,26 @@ export function CompletionPanel({
   // and default-product-disposition no longer gate completion. Real safeguards
   // stay: a WaveGuard lawn completion must record at least one applied product
   // (an empty list would write a protocol completion with no actuals or
-  // inventory deductions), every applied product needs actual amounts, and
-  // inventory blocks still hold.
+  // inventory deductions) and every applied product needs actual amounts.
+  // Inventory shortfalls no longer gate MEMBER-tier closeouts (owner
+  // directive 2026-08-03): the plan banner still shows them, and the server
+  // records them as an advisory and lets stock go negative. Non-member lawn
+  // tiers keep the full gate — the server hard-fails their deductions.
+  // Inactive products stay a hard gate for EVERY tier: the completion route
+  // rejects them product-by-product regardless of the advisory posture, so
+  // letting the submit through would trap the tech on a closeout error
+  // (codex P2 r4 on #3179).
+  const treatmentPlanGatingInventoryBlocks = inventoryAdvisoryTier
+    ? treatmentPlanInventoryBlocks.filter(
+        (block) => block?.code === "inventory_product_inactive",
+      )
+    : treatmentPlanInventoryBlocks;
   const protocolActualsCompletionBlocked =
     calibrationRequired &&
     !isIncompleteVisit &&
     (selectedProducts.length === 0 ||
       selectedProductsMissingActualAmount.length > 0 ||
-      treatmentPlanInventoryBlocks.length > 0);
+      treatmentPlanGatingInventoryBlocks.length > 0);
   const conditionalProtocolSelectedProducts = treatmentPlanProductIds.length
     ? selectedProducts.filter((p) => {
         const id = String(p.productId);
@@ -11288,10 +11315,10 @@ export function CompletionPanel({
     if (
       calibrationRequired &&
       !isIncompleteVisit &&
-      treatmentPlanInventoryBlocks.length
+      treatmentPlanGatingInventoryBlocks.length
     ) {
       alert(
-        `Resolve inventory blocks before closeout: ${treatmentPlanInventoryBlocks
+        `Resolve inventory blocks before closeout: ${treatmentPlanGatingInventoryBlocks
           .map((block) => block.message)
           .filter(Boolean)
           .join(" ")}`,
@@ -11638,7 +11665,17 @@ export function CompletionPanel({
       // Keep the panel open when a pest recap is pending — it renders async and the
       // tech approves/sends it from the success overlay (the approve UI is otherwise
       // unreachable once the panel auto-closes).
-      if (!result?.followupSuggestion?.required && !recapEligible) {
+      // Completion advisories also hold the overlay open (codex P2 r2 on
+      // #3179): the 1.2s auto-dismiss isn't enough to read even one
+      // shortfall message — the tech dismisses via the Done button instead.
+      const advisoriesNeedReading =
+        Array.isArray(result?.completionAdvisories) &&
+        result.completionAdvisories.length > 0;
+      if (
+        !result?.followupSuggestion?.required &&
+        !recapEligible &&
+        !advisoriesNeedReading
+      ) {
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
@@ -12156,9 +12193,34 @@ export function CompletionPanel({
                           : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
-              {/* completionAdvisories are deliberately NOT rendered here —
-                  the success screen stays minimal (owner 2026-07-29); they
-                  are recorded server-side and surface in Customer 360. */}
+              {/* Advisories recorded on the completion (inventory shortfall,
+                  blackout, annual-N, …) — surfaced here per owner 2026-08-03,
+                  reversing the 2026-07-29 minimal-success-screen call; they
+                  are also recorded server-side and surface in Customer 360. */}
+              {Array.isArray(completionResult?.completionAdvisories) &&
+                completionResult.completionAdvisories.length > 0 && (
+                  <div
+                    style={{
+                      fontFamily: font,
+                      fontSize: 14,
+                      color: M.warn,
+                      background: M.warn + "14",
+                      border: `1px solid ${M.warn}`,
+                      borderRadius: 10,
+                      padding: "10px 12px",
+                      marginTop: 10,
+                      maxWidth: 360,
+                      textAlign: "left",
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    {completionResult.completionAdvisories.map((msg, i) => (
+                      <div key={i} style={{ marginTop: i ? 6 : 0 }}>
+                        {msg}
+                      </div>
+                    ))}
+                  </div>
+                )}
               {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
                 <div
                   style={{
@@ -12179,7 +12241,9 @@ export function CompletionPanel({
                   <PestRecapCard serviceId={service.id} />
                 </div>
               )}
-              {recapEligible && !completionResult?.followupSuggestion?.required && (
+              {(recapEligible ||
+                (completionResult?.completionAdvisories?.length ?? 0) > 0) &&
+                !completionResult?.followupSuggestion?.required && (
                 <button
                   type="button"
                   onClick={() => onClose(true)}
@@ -14106,12 +14170,25 @@ export function CompletionPanel({
               inset: 0,
               background: D.bg + "ee",
               display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              zIndex: 10,
               flexDirection: "column",
+              // Scrollable, with margin-auto centering on the inner wrapper —
+              // centered flex overflow clips the top unreachably once the
+              // advisories/follow-up CTAs make the content taller than the
+              // panel (codex P2 r3 on #3179; mirrors the mobile overlay).
+              overflowY: "auto",
+              zIndex: 10,
+              padding: 24,
             }}
           >
+            <div
+              style={{
+                margin: "auto",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                width: "100%",
+              }}
+            >
             {" "}
             <div style={{ fontSize: 64, marginBottom: 16, color: D.green }}>
               &#10003;
@@ -14147,7 +14224,34 @@ export function CompletionPanel({
                   : "Customer delivery is off for this service — no report or SMS was sent."}
               </div>
             )}
-            {recapEligible && !completionResult?.followupSuggestion?.required && (
+            {/* Completion advisories (inventory shortfall, blackout, annual-N,
+                …) — surfaced per owner 2026-08-03; also in Customer 360. */}
+            {Array.isArray(completionResult?.completionAdvisories) &&
+              completionResult.completionAdvisories.length > 0 && (
+                <div
+                  style={{
+                    fontSize: 14,
+                    color: D.amber,
+                    background: D.amber + "14",
+                    border: `1px solid ${D.amber}`,
+                    borderRadius: 8,
+                    padding: "10px 12px",
+                    marginTop: 12,
+                    maxWidth: 360,
+                    textAlign: "left",
+                    lineHeight: 1.4,
+                  }}
+                >
+                  {completionResult.completionAdvisories.map((msg, i) => (
+                    <div key={i} style={{ marginTop: i ? 6 : 0 }}>
+                      {msg}
+                    </div>
+                  ))}
+                </div>
+              )}
+            {(recapEligible ||
+              (completionResult?.completionAdvisories?.length ?? 0) > 0) &&
+              !completionResult?.followupSuggestion?.required && (
               <button
                 type="button"
                 onClick={() => onClose(true)}
@@ -14205,6 +14309,7 @@ export function CompletionPanel({
                 </button>
               </div>
             )}
+            </div>
           </div>
         )}
         {/* Header */}

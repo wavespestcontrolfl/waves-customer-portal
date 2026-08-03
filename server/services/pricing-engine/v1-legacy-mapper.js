@@ -645,7 +645,22 @@ function mapV1ToLegacyShape(v1Result) {
     const mo = li.monthly || 0;
     const perTreatment = Number(li.perApp ?? li.perVisit ?? 0) || null;
     const visitsPerYear = Number(li.visitsPerYear ?? li.visits ?? li.frequency ?? 0) || null;
-    services.push({ name, mo, monthly: mo, perTreatment, visitsPerYear, ...measurementMetadataFields(li), ...extra });
+    // Accepted NET annuals ride along with the pre-discount figures: the
+    // engine stamps annualAfterDiscount (post-WaveGuard) and
+    // manualFinalAnnual (post-manual-discount) per line, and consumers that
+    // must show what the customer ACCEPTED — the schedule provenance card,
+    // the per-application copy — otherwise only see list prices here.
+    // Presence-preserving (?? not ||): an accepted ZERO is a real value.
+    const annualAfterDiscount = Number.isFinite(Number(li.annualAfterDiscount))
+      ? Number(li.annualAfterDiscount) : null;
+    const manualFinalAnnual = Number.isFinite(Number(li.manualFinalAnnual))
+      ? Number(li.manualFinalAnnual) : null;
+    services.push({
+      name, mo, monthly: mo, perTreatment, visitsPerYear,
+      ...(annualAfterDiscount != null ? { annualAfterDiscount } : {}),
+      ...(manualFinalAnnual != null ? { manualFinalAnnual } : {}),
+      ...measurementMetadataFields(li), ...extra,
+    });
   };
   svcAdd('Lawn Care', lawnLI, {
     service: 'lawn_care',
@@ -849,12 +864,21 @@ function mapV1ToLegacyShape(v1Result) {
       if (!quoteRequired && li.renewalLabel !== undefined) item.renewalLabel = li.renewalLabel;
       if (li.serviceSpecificDiscountApplied !== undefined) item.serviceSpecificDiscountApplied = !!li.serviceSpecificDiscountApplied;
       if (li.serviceSpecificDiscounts !== undefined) item.serviceSpecificDiscounts = li.serviceSpecificDiscounts;
+      // Accepted NET after a manual discount allocated to one-time work —
+      // `price` above stays GROSS, so consumers showing what the customer
+      // accepted need this alongside it. Zero is a real accepted value.
+      if (Number.isFinite(Number(li.manualFinalOneTime))) item.manualFinalOneTime = Number(li.manualFinalOneTime);
       v1OtItems.push(item);
       if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
       const mappedDetail = termiticideDetail(li, detail);
       v1SpecItems.push({
         service: li.service, name, price, det: mappedDetail,
+        // Accepted NET after a manual discount hit this specialty line —
+        // `price` stays GROSS, same contract as the ONE_TIME_SERVICES
+        // branch. Zero is a real accepted value.
+        ...(Number.isFinite(Number(li.manualFinalOneTime))
+          ? { manualFinalOneTime: Number(li.manualFinalOneTime) } : {}),
         onProg: !!li.includedOnProgram,
         quoteRequired,
         reason: li.reason,
@@ -1052,6 +1076,10 @@ function mapV1ToLegacyShape(v1Result) {
           service: s.service,
           name: s.name,
           price: s.quoteRequired ? null : s.price,
+          // Accepted NET rides with the gross price (never for a
+          // quote-required row, which has no accepted amount yet).
+          ...(!s.quoteRequired && Number.isFinite(Number(s.manualFinalOneTime))
+            ? { manualFinalOneTime: Number(s.manualFinalOneTime) } : {}),
           detail: s.det,
           exteriorDetail: s.exteriorDetail,
           warning: s.warning,

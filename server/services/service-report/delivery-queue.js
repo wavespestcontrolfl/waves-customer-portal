@@ -250,6 +250,8 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // so the held-payload fallback is covered too: null -> a newly confirmed row
   // is a change, and must defer.
   let canonicalAtResolve = null;
+  // Only lawn reports carry an assessment, so only they are worth pinning.
+  let isLawnDelivery = false;
 
   if (heldForGrounding) {
     const KnowledgeBridge = require('../knowledge-bridge');
@@ -282,11 +284,18 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // failClosed (codex P1 #3135 r2): a transient DB error must NOT read as
   // "not a lawn record". Swallowing it would dispatch an unfenced attachment;
   // defer retryably instead — only a clean query returning no row bypasses.
-  const { loadLinkedLawnAssessment } = require('./report-data');
+  const { loadLinkedLawnAssessment, PIN_NO_ASSESSMENT } = require('./report-data');
   try {
     const serviceRow = await knex('service_records')
       .where({ id: delivery.service_record_id })
-      .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
+      .first('id', 'customer_id', 'scheduled_service_id', 'service_id', 'service_line', 'service_type');
+    // Classify EXACTLY as the report builder does (report-data.js:
+    // `service.service_line || detectServiceLine(service.service_type)`).
+    // Trusting service_line alone missed legacy rows that carry a null line
+    // but still render a lawn assessment — those would render unpinned, which
+    // is the case the pin exists for.
+    const { detectServiceLine } = require('./service-line-configs');
+    isLawnDelivery = (serviceRow?.service_line || detectServiceLine(serviceRow?.service_type)) === 'lawn';
     const linked = serviceRow
       ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true })
       : null;
@@ -430,6 +439,29 @@ async function processServiceReportDelivery(delivery, knex = db) {
       // during THIS render, not that the cached object came from it. Cost is
       // one render per lawn delivery, which the held path already paid.
       forceFreshPdf: heldForGrounding || !!fencedAssessmentId,
+      // Pin the render to the assessment this delivery fences (#3168). The
+      // post-render selection re-check below catches the answer CHANGING
+      // across the render; the pin closes the case it cannot see — the
+      // selection moving away and back inside the window — by removing the
+      // page's freedom to choose. A pin the report cannot legitimately show
+      // fails the render, so the delivery defers rather than mailing an
+      // attachment whose contents nothing verified.
+      // 'none' when nothing resolved — an ABSENT pin is not the same as a pin
+      // of absence (#3168 r1). Without the sentinel a null selection renders
+      // unpinned, and a row that becomes eligible during the browser's fetch
+      // and ineligible again before the post-render check passes both checks
+      // and lands unsealed lawn copy in the attachment.
+      // LAWN deliveries only. Pinning a pest report would be meaningless (it
+      // has no lawn section to pin) while making every pest render fresh and
+      // unstored, since a pinned render deliberately bypasses the cache.
+      // Pin the CANONICAL selection, not the fence target. The held-payload
+      // fallback deliberately seals an id that canonical resolution rejected —
+      // typically an assessment not yet confirmed — and a pin of that id would
+      // be refused by design on every attempt, deterministically 409ing the
+      // render until the delivery exhausts its retries. Pinning absence is
+      // correct there: the page renders no lawn section (canonical found
+      // none), while the seal still guards the held assessment's copy.
+      pinnedLawnAssessmentId: isLawnDelivery ? (canonicalAtResolve || PIN_NO_ASSESSMENT) : null,
       verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {

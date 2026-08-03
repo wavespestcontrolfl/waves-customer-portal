@@ -17,6 +17,13 @@ jest.mock('../services/service-report/report-data', () => ({
   // Real implementation: pure, synchronous, and part of the render path
   // (queued PDFs must never fossilize live-only schedule fields).
   stripLiveOnlyScheduleFields: jest.requireActual('../services/service-report/report-data').stripLiveOnlyScheduleFields,
+  // Storage-key component (#3168). Stubbed empty here the same way
+  // timeOnSiteAdjustedPdfSignature is: this suite asserts the Pest Pressure
+  // config threading, and a non-empty component would only add noise to the
+  // expected key.
+  lawnAssessmentPdfSignature: async () => '',
+  // Non-lawn fixture: nothing to pin, empty key component (#3172).
+  resolveCanonicalLawnRender: async () => ({ pin: null, signature: '' }),
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: mockBuildServiceReportDynamicContext,
@@ -99,7 +106,7 @@ describe('service report PDF Pest Pressure cache config', () => {
       expect.objectContaining({ id: 'service-1' }),
       'token-1',
       knex,
-      { pestPressureConfig: mockActivePestPressureConfig },
+      { pestPressureConfig: mockActivePestPressureConfig, pinnedLawnAssessmentId: null },
     );
     expect(mockBuildServiceReportDynamicContext).toHaveBeenCalledWith(expect.objectContaining({
       recordId: 'service-1',
@@ -134,7 +141,7 @@ describe('service report PDF Pest Pressure cache config', () => {
       expect.objectContaining({ id: 'service-1' }),
       'token-1',
       knex,
-      { pestPressureConfig: mockActivePestPressureConfig },
+      { pestPressureConfig: mockActivePestPressureConfig, pinnedLawnAssessmentId: null },
     );
     expect(mockGetHealthyStoredReportPdf).not.toHaveBeenCalled();
     expect(result.rendered).toBe(true);
@@ -154,8 +161,8 @@ describe('service report PDF Pest Pressure cache config', () => {
     });
 
     expect(mockRenderServiceReportV1Pdf).toHaveBeenCalledTimes(2);
-    expect(mockBuildReportV1Data.mock.calls[0][3]).toEqual({ pestPressureConfig: firstConfig });
-    expect(mockBuildReportV1Data.mock.calls[1][3]).toEqual({ pestPressureConfig: secondConfig });
+    expect(mockBuildReportV1Data.mock.calls[0][3]).toEqual({ pestPressureConfig: firstConfig, pinnedLawnAssessmentId: null });
+    expect(mockBuildReportV1Data.mock.calls[1][3]).toEqual({ pestPressureConfig: secondConfig, pinnedLawnAssessmentId: null });
     expect(mockPutReportPdf).toHaveBeenCalledWith(
       'service-1',
       Buffer.from('%PDF-1.4'),

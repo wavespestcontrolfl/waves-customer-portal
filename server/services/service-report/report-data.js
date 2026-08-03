@@ -1,4 +1,6 @@
+const crypto = require('crypto');
 const db = require('../../models/db');
+const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -18,7 +20,7 @@ const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
-const { fetchServiceWeekWeather } = require('./application-conditions');
+const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -1827,6 +1829,114 @@ async function lawnPhotoUrl(photo) {
   }
 }
 
+// Raised when a render pins an assessment that this report cannot legitimately
+// show. NEVER fall back to normal resolution on a bad pin: a pinned render is
+// how a send fence proves the attachment carries the copy it sealed, and a
+// silent fallback would hand back a plausible PDF containing something else —
+// the exact divergence the pin exists to rule out (#3168). Fail the render;
+// the delivery defers and retries.
+class PinnedAssessmentUnavailable extends Error {
+  constructor(assessmentId) {
+    super(`pinned lawn assessment ${assessmentId} is not linked to this report`);
+    this.code = 'pinned_assessment_unavailable';
+    this.assessmentId = assessmentId;
+  }
+}
+
+// ONE lookup, both answers (#3172 r1).
+//
+// The pin and the storage-key component must describe the SAME assessment. Two
+// independent lookups can straddle a selection change: the render gets pinned
+// to B while the object is cached under A's key — which is the very race this
+// is meant to close, reintroduced by resolving twice.
+//
+// Returns { pin, signature }:
+//   non-lawn record          → { pin: null, signature: '' }        (nothing to pin)
+//   lawn visit, assessment   → { pin: <id>, signature: '-la<hash>' }
+//   lawn visit, none         → { pin: PIN_NO_ASSESSMENT, signature: '-la0' }
+//
+// THROWS on an unreadable lookup: a render that cannot determine the canonical
+// answer must not proceed as though there were none, and a cache key must not
+// be computed from a guess.
+// Render-strategy marker (#3172 r1). Objects cached by the PREVIOUS, unpinned
+// render path carry the same -la<hash> as a pinned render of the same
+// assessment, so without this they would keep being served after deploy —
+// including a PDF produced during the very A-to-B-to-A race this change closes,
+// accepted indefinitely because its key looks current.
+//
+// Bumping this orphans lawn PDFs rendered under an older strategy so they
+// regenerate once. Non-lawn records return '' and are untouched: no
+// fleet-wide bust. Bump it whenever the way a lawn render RESOLVES ITS INPUTS
+// changes, not when those inputs' content changes — content is already covered
+// by the hash.
+//
+// p1 → p2: the week's weather is now FROZEN at first render. A PDF cached
+// before that keeps the pre-freeze rainfall forever while /data freezes and
+// shows a different number — the emailed attachment and the live report
+// disagreeing, which is the whole failure class this lane exists to close.
+// Bumping forces those lawn PDFs through one fresh render.
+const LAWN_RENDER_STRATEGY = 'p2';
+
+async function resolveCanonicalLawnRender(service, knex = db) {
+  const line = service?.service_line || detectServiceLine(service?.service_type);
+  if (line !== 'lawn') return { pin: null, signature: '' };
+
+  const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
+  if (!assessment?.id) return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0` };
+
+  const recs = typeof assessment.recommendations === 'string'
+    ? assessment.recommendations
+    : JSON.stringify(assessment.recommendations || '');
+  const stamp = crypto.createHash('sha1')
+    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}`)
+    .digest('hex')
+    .slice(0, 12);
+  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}` };
+}
+
+// Signature-only entry point for CACHE-LOOKUP sites, which must never throw —
+// a report view should not 500 because an assessment read blipped. An
+// unreadable state yields a value nothing can match, forcing a re-render
+// instead of serving a stale object.
+async function lawnAssessmentPdfSignature(service, knex = db) {
+  try {
+    return (await resolveCanonicalLawnRender(service, knex)).signature;
+  } catch {
+    return `-laerr${crypto.randomBytes(6).toString('hex')}`;
+  }
+}
+
+// A pinned render must resolve the EXACT assessment it was asked for, and only
+// if this report could legitimately show it (#3168).
+//
+// The authorization boundary: the pin may only select among assessments the
+// report token already exposes — same customer, confirmed, and linked to THIS
+// service record or its scheduled service. That is deliberately the same
+// candidate set loadLinkedLawnAssessment picks from, so a pin can never widen
+// what a token can see. An id belonging to another customer, another visit, or
+// an unconfirmed row is refused rather than rendered.
+//
+// Refusal THROWS. Returning null would render a lawn report with no lawn
+// section, which is divergence by omission — see PinnedAssessmentUnavailable.
+async function loadPinnedLawnAssessment(service, assessmentId, knex = db) {
+  if (!service?.customer_id) throw new PinnedAssessmentUnavailable(assessmentId);
+
+  const baseCriteria = { customer_id: service.customer_id, confirmed_by_tech: true, id: assessmentId };
+  const scheduledServiceId = service.scheduled_service_id || service.service_id;
+
+  const byRecord = service.id
+    ? await knex('lawn_assessments').where({ ...baseCriteria, service_record_id: service.id }).first()
+    : null;
+  if (byRecord) return byRecord;
+
+  const byService = scheduledServiceId
+    ? await knex('lawn_assessments').where({ ...baseCriteria, service_id: scheduledServiceId }).first()
+    : null;
+  if (byService) return byService;
+
+  throw new PinnedAssessmentUnavailable(assessmentId);
+}
+
 // failClosed (issue #3135): the RENDER path treats an unreadable assessment as
 // "no assessment" and degrades the card, which is right for a page. A caller
 // that fences a SEND cannot do that — swallowing a transient error there would
@@ -1869,9 +1979,117 @@ async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false
   return null;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
+// The sentinel for "this render must show NO lawn assessment" (#3168). A fence
+// that sealed an empty selection needs to pin that too: without it the render
+// is simply unpinned, and a row that becomes eligible during the browser's
+// fetch and ineligible again before the post-render check slips past both
+// checks into the attachment.
+const PIN_NO_ASSESSMENT = 'none';
+
+// Persist the week's weather so a report token stops restating its rainfall
+// (owner ruling 2026-08-03).
+//
+// FIRST WRITER WINS, enforced in the UPDATE predicate rather than by a
+// read-then-write: a live view and a PDF render can render the same record
+// concurrently, and with a provider mid-flip they can resolve DIFFERENT weeks.
+// A read-modify-write would let the later one overwrite the value the customer
+// was already shown — the exact drift this exists to stop. The `?` guard means
+// at most one write per record, ever.
+//
+// Atomic jsonb merge, never a whole-column rewrite: structured_notes carries
+// completion SMS state and the frozen lawn synthesis, and a read-modify-write
+// here would clobber a concurrent write to those.
+//
+// Best-effort by design. A failed freeze must not fail a report view; the next
+// render simply tries again.
+// Returns the week the record is CANONICALLY frozen to — this render's value if
+// it won the write, the existing one if another render got there first, or null
+// when nothing could be established.
+//
+// Returning the winner's value (not a boolean) is the point. Losing the race and
+// then carrying on with our own independently fetched numbers would emit a
+// second, different version of a report that is supposed to be permanent —
+// which is the drift this whole mechanism exists to stop, reappearing in the
+// mechanism itself.
+// A frozen week belongs to the ASSESSMENT it was fetched for, not merely to
+// the record. The week is fetched against assessment.service_date, and a record
+// can carry more than one confirmed assessment — a re-do captured days later
+// becomes canonical and legitimately has a different date. Scoping the snapshot
+// to the record alone would replay the first assessment's rainfall and ET₀
+// underneath the new assessment's scores while its PDF signature correctly
+// changed: the report would show one visit's turf judged against another
+// visit's week.
+function ymd(value) {
+  if (!value) return '';
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function frozenWeekMatches(frozen, assessment) {
+  return !!frozen && typeof frozen === 'object'
+    && frozen.assessmentId === assessment?.id
+    && ymd(frozen.serviceDate) === ymd(assessment?.service_date);
+}
+
+// Snapshots are stored as a MAP keyed by assessment id, never as one object per
+// record. Replacing on a differing id looked equivalent and is not: canonical
+// selection can move A → B → A (a re-do, then a pinned delivery for the
+// original), and each move would destroy the other assessment's snapshot and
+// send that report back to mutable provider data — permanence defeated by the
+// mechanism meant to provide it. Keyed, every assessment keeps its own frozen
+// week and first-writer-wins applies per key.
+function storedWeekFor(structuredNotes, assessmentId) {
+  if (!assessmentId) return null;
+  const map = parseJsonObject(structuredNotes).lawnWeekWeather;
+  if (!map || typeof map !== 'object') return null;
+  const entry = map[assessmentId];
+  return entry && typeof entry === 'object' ? entry : null;
+}
+
+async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
+  if (!serviceRecordId || !weekWeather || !weekWeather.assessmentId) return null;
+  const { assessmentId } = weekWeather;
+  try {
+    const updated = await knex('service_records')
+      .where({ id: serviceRecordId })
+      // First writer wins PER ASSESSMENT — the guard is this key's absence, in
+      // the predicate, with no preceding read.
+      .whereRaw(
+        "COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather' -> ? IS NULL",
+        [assessmentId],
+      )
+      .update({
+        // Two-level merge: the inner || adds this key to the existing map
+        // (or an empty one), the outer || puts the map back. A top-level ||
+        // with the whole object would replace every other assessment's entry.
+        structured_notes: knex.raw(
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('lawnWeekWeather',"
+          + " COALESCE(COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather', '{}'::jsonb) || ?::jsonb)",
+          [JSON.stringify({ [assessmentId]: weekWeather })],
+        ),
+      });
+    if (updated > 0) return weekWeather;
+
+    // Lost the race for THIS key: adopt what the winner stored so both renders
+    // agree. Another assessment's entry is not ours to read.
+    const row = await knex('service_records')
+      .where({ id: serviceRecordId })
+      .first('structured_notes');
+    return storedWeekFor(row?.structured_notes, assessmentId);
+  } catch (err) {
+    logger.warn(`[report-data] lawn week-weather freeze failed for ${serviceRecordId}: ${err.message}`);
+    return null;
+  }
+}
+
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null } = {}) {
   if (serviceLine !== 'lawn') return null;
-  const assessment = await loadLinkedLawnAssessment(service, knex);
+  // Pinned-empty is unconditional: the attachment provably carries no lawn
+  // section, which is exactly what the fence sealed.
+  if (pinnedAssessmentId === PIN_NO_ASSESSMENT) return null;
+  const assessment = pinnedAssessmentId
+    ? await loadPinnedLawnAssessment(service, pinnedAssessmentId, knex)
+    : await loadLinkedLawnAssessment(service, knex);
   if (!assessment) return null;
 
   const allAssessments = await knex('lawn_assessments')
@@ -2033,21 +2251,144 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
   let completionDailyRain = null;
   let completionRainConfidence = null;
   let completionRainSource = null;
-  try {
-    const weekWeather = await fetchServiceWeekWeather({
-      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
-      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
-      serviceDate: assessment.service_date,
-    });
-    completionRainfall7dInches = weekWeather.rainInches;
-    completionEt0Inches = weekWeather.et0Inches;
-    completionDailyRain = weekWeather.dailyRain;
-    // 'low' when the pinpoint week was a single-cell model spike and we fell back to
-    // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
-    completionRainConfidence = weekWeather.rainConfidence;
-    // Which provider actually supplied it — drives the customer-facing Source row.
-    completionRainSource = weekWeather.rainSource;
-  } catch (e) { /* non-blocking */ }
+  // FROZEN AT FIRST RENDER (owner ruling 2026-08-03).
+  //
+  // Keying the fetch to the service date already made this stable across
+  // renders — but only while the ANSWER for that date stayed the same. Flipping
+  // GATE_RAIN_MRMS changed the provider underneath, and issued reports silently
+  // restated their rainfall: one live token went 1.15" to 3.23" for a visit that
+  // happened days earlier. A report token is a permanent, shareable customer
+  // document; a customer reopening last week's report must not find different
+  // numbers than the ones they were sent.
+  //
+  // So the first successful render freezes the week's weather onto the record
+  // and every later render replays it. Lazy rather than written at completion,
+  // because that also settles the reports already issued: each one freezes at
+  // its next view instead of continuing to drift with the provider.
+  // Set when a week was fetched but could NOT be frozen. A render in that state
+  // is not reproducible — the next one may freeze different provider data — so
+  // it must never be durably cached (see weekWeatherUnfrozen on the payload).
+  let weekWeatherUnfrozen = false;
+  // Distinct from unfrozen: nothing FAILED, the week simply cannot be frozen
+  // YET. Suppresses caching without blocking delivery — a state time resolves
+  // on its own, so the queue waits for it rather than burning retries, and the
+  // customer's report email is not held hostage to it. Carries WHY.
+  let weekWeatherPendingReason = null;
+  const storedWeekWeather = storedWeekFor(service.structured_notes, assessment?.id);
+  // Replayed ONLY for the assessment it was frozen for — see frozenWeekMatches.
+  const frozenWeekWeather = frozenWeekMatches(storedWeekWeather, assessment) ? storedWeekWeather : null;
+  if (frozenWeekWeather) {
+    completionRainfall7dInches = frozenWeekWeather.rainInches ?? null;
+    completionEt0Inches = frozenWeekWeather.et0Inches ?? null;
+    completionDailyRain = Array.isArray(frozenWeekWeather.dailyRain) ? frozenWeekWeather.dailyRain : null;
+    completionRainConfidence = frozenWeekWeather.rainConfidence ?? null;
+    completionRainSource = frozenWeekWeather.rainSource ?? null;
+  } else {
+    const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
+    const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
+    // Whether a fetch was even POSSIBLE. Without coordinates there is nothing to
+    // fetch and nothing that will ever change — a blank week is the settled,
+    // reproducible answer, so it stays cacheable. Treating it as unresolved
+    // would make every render for a property with no geocode permanently
+    // uncacheable and defer its report email forever.
+    // toCoordinate, not Number.isFinite(Number(x)): Number(null) and Number('')
+    // are 0, so an ungeocoded property would read as a valid coordinate at the
+    // equator and its blank week would be misfiled as a transient failure.
+    const latN = toCoordinate(latitude);
+    const lonN = toCoordinate(longitude);
+    const hasCoordinates = latN != null && lonN != null && !(latN === 0 && lonN === 0);
+    try {
+      const weekWeather = await fetchServiceWeekWeather({
+        latitude,
+        longitude,
+        serviceDate: assessment.service_date,
+      });
+      completionRainfall7dInches = weekWeather.rainInches;
+      completionEt0Inches = weekWeather.et0Inches;
+      completionDailyRain = weekWeather.dailyRain;
+      // 'low' when the pinpoint week was a single-cell model spike and we fell back to
+      // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
+      completionRainConfidence = weekWeather.rainConfidence;
+      // Which provider actually supplied it — drives the customer-facing Source row.
+      completionRainSource = weekWeather.rainSource;
+      if (!assessment?.id) {
+        // Nothing to scope the snapshot to, so it cannot be frozen safely.
+        weekWeatherPendingReason = 'no_assessment';
+      } else if (!weekWeather.windowClosed) {
+        // The service-day window is still ACCUMULATING. Same-day weather is a
+        // deliberately short-lived read (30-minute cache, full-day forecast for
+        // the remainder) so afternoon convection can still land — freezing it
+        // would pin a forecast as the permanent record of a week that has not
+        // happened yet. This also covers completion-time synthesis, which runs
+        // on the service day and would otherwise freeze before the customer's
+        // first view.
+        //
+        // Not "unfrozen": nothing failed, and blocking the day's report email
+        // over a window that is merely open would stop nearly every lawn
+        // delivery. It only suppresses durable CACHING, so tomorrow's first
+        // render freezes the settled week instead of a stale same-day object
+        // being served under a key that still matches.
+        weekWeatherPendingReason = 'open_window';
+      } else if (completionRainfall7dInches != null) {
+        const canonicalWeek = await freezeLawnWeekWeather(service.id, {
+          // The snapshot names the question it answers.
+          assessmentId: assessment.id,
+          serviceDate: ymd(assessment.service_date),
+          rainInches: completionRainfall7dInches,
+          et0Inches: completionEt0Inches,
+          dailyRain: completionDailyRain,
+          rainConfidence: completionRainConfidence,
+          rainSource: completionRainSource,
+          frozenAt: new Date().toISOString(),
+        }, knex);
+        // Adopt the canonical week even when THIS render lost the race —
+        // carrying on with our own numbers would publish a second, different
+        // version of a report that is meant to be permanent.
+        if (canonicalWeek) {
+          // Copied EXACTLY, nulls included. Falling back to this render's own
+          // values for a field the winner left null (MRMS supplied rain while an
+          // Open-Meteo outage left et0Inches null) would let the winner render a
+          // seasonal fallback target while the loser renders an ET₀-derived one
+          // — two different reports both claiming the same frozen week.
+          completionRainfall7dInches = canonicalWeek.rainInches ?? null;
+          completionEt0Inches = canonicalWeek.et0Inches ?? null;
+          completionDailyRain = Array.isArray(canonicalWeek.dailyRain) ? canonicalWeek.dailyRain : null;
+          completionRainConfidence = canonicalWeek.rainConfidence ?? null;
+          completionRainSource = canonicalWeek.rainSource ?? null;
+        } else {
+          // Neither wrote nor read back a canonical week. The live report still
+          // renders (fail soft — a customer should see their report), but this
+          // output is NOT reproducible, so it must not be cached: a later view
+          // could freeze different data while a stored PDF kept these numbers
+          // forever, and no future PDF request would retry the freeze.
+          weekWeatherUnfrozen = true;
+        }
+      } else if (!hasCoordinates) {
+        // No geocode YET. This is not settled — the hourly backstop sweep
+        // (services/geocoder.js sweepUngeocodedCustomers) actively retries
+        // coordinate-less customers and writes their coordinates later, after
+        // which /data resolves and freezes a real week. The PDF key encodes
+        // neither coordinates nor freeze state, so a blank-weather PDF cached
+        // now would keep being downloaded long after the live report showed
+        // real rainfall. Uncacheable — but not delivery-blocking, because an
+        // address that never geocodes would otherwise hold the report email
+        // forever.
+        weekWeatherPendingReason = 'no_coordinates';
+      } else {
+        // A closed window we DID try to resolve and got nothing for: the
+        // providers were unreachable or incomplete. Persisting the null would
+        // lock in "no rainfall known" forever, so nothing is frozen — but the
+        // blank result is transient, and caching it would serve an empty water
+        // card under a key that still matches once a later view freezes the
+        // real week.
+        weekWeatherUnfrozen = true;
+      }
+    } catch (e) {
+      // The fetch itself threw — transient by definition, and no week was
+      // resolved. Render soft, cache nothing.
+      weekWeatherUnfrozen = true;
+    }
+  }
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,
@@ -2085,6 +2426,15 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
     overwateringSignal: parseJsonObject(assessment.composite_scores).overwatering_signal === true,
     fawnSnapshot,
     waterContext,
+    // NOT reproducible: the week was fetched but could not be frozen, so a
+    // later render may show different numbers. Any caller that durably caches
+    // a render must skip storing when this is true.
+    weekWeatherUnfrozen,
+    // Why the week could not be frozen yet, when nothing actually failed.
+    weekWeatherPendingReason,
+    // What CACHE sites gate on — the superset. Delivery gates on
+    // weekWeatherUnfrozen alone, so a merely-pending week never blocks a send.
+    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {
@@ -2277,7 +2627,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     });
   }
 
-  const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
+    pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
+  });
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
   // grounded regen or stored-copy sanitize lands, and nothing shown can be
@@ -2825,7 +3177,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // and the report's photo gallery. Appended AFTER the service_photos hash chain
   // is validated below so the tamper-evident chain stays over service_photos only.
   if (serviceLine === 'lawn') {
-    const linkedAssessment = await loadLinkedLawnAssessment(service, knex);
+    // Reuse the assessment the SCORECARD resolved rather than resolving again
+    // (#3168). A second independent lookup can land on a different row mid-
+    // render, producing a report whose copy and photos come from different
+    // assessments — and a fence comparing only the selection would still pass
+    // it. The scorecard already honoured any pin, so this inherits it.
+    // Pinned ABSENCE means the render must carry no assessment content at all —
+    // including its turf photos. Falling through to the unpinned resolver here
+    // would append photos from whatever assessment is current and put unfenced
+    // content in a PDF that is supposed to have none.
+    const linkedAssessment = opts.pinnedLawnAssessmentId === PIN_NO_ASSESSMENT
+      ? null
+      : (lawnAssessment?.assessmentId
+        ? { id: lawnAssessment.assessmentId }
+        : await loadLinkedLawnAssessment(service, knex));
     if (linkedAssessment?.id) {
       // customer_visible: true == passed the quality gate. Failed-quality
       // photos are stored only for audit (customer_visible: false) and must
@@ -3719,6 +4084,15 @@ module.exports = {
   treatmentScope,
   buildLawnAssessmentReportData,
   loadLinkedLawnAssessment,
+  PinnedAssessmentUnavailable,
+  loadPinnedLawnAssessment,
+  lawnAssessmentPdfSignature,
+  resolveCanonicalLawnRender,
+  freezeLawnWeekWeather,
+  frozenWeekMatches,
+  storedWeekFor,
+  LAWN_RENDER_STRATEGY,
+  PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,
   defaultGeometry,
