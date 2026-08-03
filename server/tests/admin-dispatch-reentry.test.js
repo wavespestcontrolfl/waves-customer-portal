@@ -288,6 +288,31 @@ describe('route wiring contracts', () => {
     expect(block).toMatch(/jsonb_build_object\('reentryRev',\s*\n\s*COALESCE\(NULLIF\(COALESCE\(structured_notes::jsonb, '\{\}'::jsonb\) ->> 'reentryRev', ''\), '0'\)::int \+ 1\)/);
   });
 
+  test('the queued report email defers when a correction lands mid-build (codex P1 PR #3180 r2)', () => {
+    const emailSource = fs.readFileSync(
+      path.join(__dirname, '../services/service-report/email-delivery.js'),
+      'utf8',
+    );
+    // Version boundary captured from the same row load the body/attachment
+    // derive from…
+    const captureAt = emailSource.indexOf('const preSendReentryRev = reentryRevFromNotes(service.structured_notes);');
+    // …re-verified against a live read after the render, before dispatch —
+    // a mismatch defers retryably instead of emailing stale guidance.
+    const fenceAt = emailSource.indexOf("if (reentryRevFromNotes(liveNotesRow?.structured_notes) !== preSendReentryRev) {");
+    const deferAt = emailSource.indexOf("error: 'Re-entry guidance corrected during render — deferring send', retryable: true");
+    const renderAt = emailSource.indexOf('await getOrRenderServiceReportPdf(recordId, {');
+    const dispatchAt = emailSource.indexOf('EmailTemplateLibrary.sendTemplate(', captureAt);
+    expect(captureAt).toBeGreaterThan(-1);
+    expect(renderAt).toBeGreaterThan(captureAt);
+    expect(fenceAt).toBeGreaterThan(renderAt);
+    expect(deferAt).toBeGreaterThan(fenceAt);
+    expect(dispatchAt).toBeGreaterThan(fenceAt);
+    // The live re-read has no soft-catch — failing to prove the revision
+    // defers, never sends unverified.
+    const fenceBlock = emailSource.slice(emailSource.indexOf('const liveNotesRow ='), deferAt);
+    expect(fenceBlock).not.toMatch(/\.catch\(/);
+  });
+
   test('the re-entry PDF signature rides EVERY storage-key composition site (codex P1 PR #3180)', () => {
     // Same contract the time-on-site fence carries: pdf-queue renderAndStore
     // + getOrRender, reports-public expected-key + store-key. A site missing
@@ -350,6 +375,9 @@ function makeRecordingDb({ svc, record, recordCols, legacyRows = null, servicePr
       async insert(payload) { op.insertPayload = payload; return [1]; },
       async columnInfo() { return recordCols; },
       then(resolve, reject) {
+        if (table === 'products_catalog' && catalogRows instanceof Error) {
+          return Promise.reject(catalogRows).then(resolve, reject);
+        }
         let rows = [];
         if (table === 'service_records' && op.limited) rows = legacyRows || [];
         else if (table === 'service_products') rows = serviceProducts || [];
@@ -395,6 +423,7 @@ const COMPLETED_SVC = {
 const RECORD = {
   id: 'rec-1',
   report_template_version: 'service_report_v1',
+  status: 'completed',
   advisory: JSON.stringify({ exterior_reentry_min: 30, interior_reentry_min: 30, irrigation_hold_hr: 24 }),
 };
 
@@ -558,6 +587,49 @@ describe('PATCH /:serviceId/reentry — behavioral', () => {
       (err) => { throw err; },
     );
     expect(res.statusCode).toBe(200);
+  });
+
+  test('a catalog lookup failure fails the correction CLOSED — never a skipped floor (codex P1 PR #3180 r2)', async () => {
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      serviceProducts: [{ product_id: 'prod-1' }],
+      catalogRows: new Error('catalog timeout'),
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    let propagated = null;
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 0 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { propagated = err; },
+    );
+    expect(propagated).toBeTruthy();
+    expect(String(propagated.message)).toContain('catalog timeout');
+    expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined();
+    // Contract pins: the route calls the helper strict, and the helper's
+    // strict branch skips the fail-open .catch.
+    expect(source).toMatch(/maxProductReentryMinutes\(\s*\n\s*trx,\s*\n\s*appliedProducts\.map\(\(p\) => \(\{ productId: p\.product_id \}\)\),\s*\n\s*\{ strict: true \},\s*\n\s*\)/);
+    expect(source).toMatch(/const rows = strict \? await query : await query\.catch\(\(\) => \[\]\);/);
+  });
+
+  test('incomplete-visit record → 409 record_incomplete, nothing written (codex P2 PR #3180 r2)', async () => {
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: { ...RECORD, status: 'incomplete' },
+      recordCols: RECORD_COLS,
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 20 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('record_incomplete');
+    expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined();
   });
 
   test('legacy (pre-v1) record → 409 record_legacy, nothing written (codex P2 PR #3180)', async () => {
@@ -729,6 +801,27 @@ describe('GET /:serviceId/reentry — behavioral', () => {
     expect(res.body).toEqual({
       hasRecord: false,
       legacyRecord: true,
+      defaults: { exteriorMinutes: 30, interiorMinutes: 30 },
+    });
+  });
+
+  test('incomplete-visit record → hasRecord false so the editor stays hidden (codex P2 PR #3180 r2)', async () => {
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: { ...RECORD, status: 'incomplete' },
+      recordCols: RECORD_COLS,
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    await getHandler()(
+      { params: { serviceId: 'svc-1' }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({
+      hasRecord: false,
+      incompleteRecord: true,
       defaults: { exteriorMinutes: 30, interiorMinutes: 30 },
     });
   });

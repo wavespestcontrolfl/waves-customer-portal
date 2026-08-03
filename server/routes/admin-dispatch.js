@@ -1301,13 +1301,20 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
 // applied product carries an REI so the caller keeps the service-line default.
 // Used to make the "Exterior ready in …" countdown reflect the product label
 // instead of a flat default.
-async function maxProductReentryMinutes(knex, submittedProducts = []) {
+// opts.strict: the re-entry correction path fails CLOSED — a catalog lookup
+// failure propagates (500, the admin retries) instead of resolving to a null
+// floor that would accept a correction below the label REI (codex P1
+// PR #3180 r2). The completion path keeps the historical fail-open posture:
+// there the floor is defense-in-depth OVER the service-line defaults being
+// written anyway, and failing the whole closeout on a catalog blip would
+// block the visit.
+async function maxProductReentryMinutes(knex, submittedProducts = [], { strict = false } = {}) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return null;
-  const rows = await knex('products_catalog')
+  const query = knex('products_catalog')
     .whereIn('id', productIds)
-    .select('rei_hours')
-    .catch(() => []);
+    .select('rei_hours');
+  const rows = strict ? await query : await query.catch(() => []);
   let maxMinutes = null;
   for (const row of rows) {
     const hours = Number(row.rei_hours);
@@ -2719,6 +2726,17 @@ router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
       && String(record.report_template_version || '') !== 'service_report_v1') {
       return res.json({ hasRecord: false, legacyRecord: true, defaults });
     }
+    // An incomplete-visit closeout creates a v1 record with status
+    // 'incomplete' that report delivery excludes (same gate as
+    // shouldSendServiceReportV1Delivery) — hide the editor there too, or an
+    // edit would look successful while no customer surface shows it
+    // (codex P2 PR #3180 r2).
+    {
+      const recordStatus = String(record.status || '').toLowerCase();
+      if (recordStatus !== 'completed' && recordStatus !== 'complete') {
+        return res.json({ hasRecord: false, incompleteRecord: true, defaults });
+      }
+    }
     const advisory = parseJsonObject(record.advisory);
     const minutesOrNull = (value) => {
       const n = Number(value);
@@ -2834,6 +2852,21 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
         };
         return;
       }
+      // Incomplete-visit closeouts create a v1 record whose status
+      // ('incomplete') report delivery excludes — same rule as
+      // shouldSendServiceReportV1Delivery. A correction there would audit a
+      // change no customer surface shows (codex P2 PR #3180 r2).
+      const recordStatus = String(record.status || '').toLowerCase();
+      if (recordStatus !== 'completed' && recordStatus !== 'complete') {
+        outcome = {
+          status: 409,
+          body: {
+            error: 'This visit closed out as incomplete — its report is not delivered to the customer, so there is no re-entry guidance to correct',
+            code: 'record_incomplete',
+          },
+        };
+        return;
+      }
       // Manufacturer REI floor (codex P1 PR #3180): the completion path
       // floors the exterior window against the most restrictive label REI of
       // the products actually applied (maxProductReentryMinutes) — a
@@ -2847,9 +2880,13 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
         const appliedProducts = await trx('service_products')
           .where({ service_record_id: record.id })
           .select('product_id');
+        // strict: a catalog lookup failure aborts the correction (500 →
+        // retry) — the helper's default .catch(() => []) posture would
+        // resolve to a null floor and fail OPEN (codex P1 PR #3180 r2).
         const productFloor = await maxProductReentryMinutes(
           trx,
           appliedProducts.map((p) => ({ productId: p.product_id })),
+          { strict: true },
         );
         if (productFloor != null && plan.exterior < productFloor) {
           outcome = {

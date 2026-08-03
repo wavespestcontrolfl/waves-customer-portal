@@ -387,6 +387,21 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
   return { subject, html, text };
 }
 
+// Re-entry correction revision of a record's structured_notes (0 = never
+// corrected). Used by the pre-dispatch fence below; mirrors the parsing in
+// reentryAdjustedPdfSignature (pdf-storage.js).
+function reentryRevFromNotes(structuredNotes) {
+  try {
+    const notes = typeof structuredNotes === 'string'
+      ? JSON.parse(structuredNotes)
+      : (structuredNotes || {});
+    const rev = Number(notes.reentryRev);
+    return Number.isFinite(rev) && rev > 0 ? rev : 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function loadServiceRecord(recordId) {
   return db('service_records')
     .where({ 'service_records.id': recordId })
@@ -427,6 +442,10 @@ async function sendServiceReportV1Email(recordId, {
   if (!shouldSendServiceReportV1Delivery(service)) {
     return { ok: false, skipped: true, error: 'Not a completed service report v1 record' };
   }
+  // Version boundary for the re-entry correction fence below: the body and
+  // the attachment both derive from THIS row load, so the rev it carries is
+  // the rev of what would be dispatched.
+  const preSendReentryRev = reentryRevFromNotes(service.structured_notes);
   const prefs = await db('notification_prefs').where({ customer_id: service.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
   const recipients = getServiceReportEmailRecipients({
     id: service.customer_id,
@@ -525,6 +544,21 @@ async function sendServiceReportV1Email(recordId, {
     if (!stillSafe) {
       return { ok: false, error: 'Report copy changed during render — deferring send', retryable: true };
     }
+  }
+
+  // Re-entry correction fence (codex P1 PR #3180 r2): an admin re-entry
+  // correction landing while this email built/rendered would dispatch the
+  // pre-correction guidance in the immutable body and attachment — the
+  // reentryRev PDF-key component only fences the storage cache, not this
+  // send. Re-read the revision here, after the render and before dispatch;
+  // a mismatch defers retryably so the retry rebuilds from the corrected
+  // row. The read has no soft-catch: failing to prove the revision must
+  // defer, not send unverified.
+  const liveNotesRow = await db('service_records')
+    .where({ id: recordId })
+    .first('structured_notes');
+  if (reentryRevFromNotes(liveNotesRow?.structured_notes) !== preSendReentryRev) {
+    return { ok: false, error: 'Re-entry guidance corrected during render — deferring send', retryable: true };
   }
 
   const serviceLabel = serviceDisplayName(data);
