@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -10237,7 +10238,11 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
 
     let appointment;
     try {
-      [appointment] = await db('scheduled_services').insert(insertData).returning('*');
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): comms-lock the
+      // customer around the insert — this path had no transaction, and a
+      // bare pg_advisory_xact_lock outside one releases at statement end
+      // and fences nothing (utils/customer-comms-lock.js).
+      [appointment] = await withCustomerCommsLock(db, svc.customer_id, (trx) => trx('scheduled_services').insert(insertData).returning('*'));
     } catch (err) {
       // Partial unique index on followup_source_service_id — a concurrent
       // CTA tap lost the race; return the winner's booking idempotently.

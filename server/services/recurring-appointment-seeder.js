@@ -6,6 +6,7 @@ const {
   addETMonthsByWeekday,
   etNthWeekdayOfMonth,
 } = require('../utils/datetime-et');
+const { lockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1,
@@ -792,7 +793,15 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     };
   }
 
-  const inserted = await conn('scheduled_services').insert(rows).returning('*');
+  // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the follow-up
+  // inserts serialize against a concurrent merge-undo of this customer.
+  // Callers inside a transaction (estimate-converter, admin-schedule) have
+  // already taken this lock at their trx start — reentrant no-op; a plain
+  // connection gets a scoped transaction (a bare advisory xact lock outside
+  // one fences nothing).
+  const inserted = conn.isTransaction
+    ? await (async () => { await lockCustomerComms(conn, parent.customer_id); return conn('scheduled_services').insert(rows).returning('*'); })()
+    : await withCustomerCommsLock(conn, parent.customer_id, (trx) => trx('scheduled_services').insert(rows).returning('*'));
   const insertedRows = Array.isArray(inserted) ? inserted : [];
   await syncCustomerTierAfterSeeding(conn, parent.customer_id);
   return {

@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const EmailTemplates = require('./email-template-library');
 const logger = require('./logger');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -521,10 +522,8 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
   // runs are keyed by recipient_id — a STRING customer id with no FK — so
   // no row lock can fence this insert against that probe. Behavior is
   // otherwise identical (the lock only blocks while an undo of THIS
-  // customer is mid-transaction). KEY DERIVATION (must stay byte-identical
-  // to customer-dedupe.js and routes/booking.js — extend ALL in the same
-  // commit): pg_advisory_xact_lock(hashtextextended(
-  //   'customer-comms:' || <customer id>, 0)) — transaction-scoped.
+  // customer is mid-transaction). Key derivation + lock-order contract are
+  // centralized in utils/customer-comms-lock.js.
   // No recipient id = unlinked run, and a NON-customer id (a lead's, or an
   // explicitly typed non-customer recipient — recipientFor's idIsCustomer)
   // cannot collide with a customer-merge undo at all: the undo's probes
@@ -538,7 +537,7 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
     });
   }
   return db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${recipient.id}`]);
+    await lockCustomerComms(trx, recipient.id);
     const { recipient: lockedRecipient, blockReason } = await resolveRecipientUnderLock(trx, recipient);
     return createRunUnlocked({
       conn: trx, automation, triggerEventKey, triggerEventId, entityType, entityId,

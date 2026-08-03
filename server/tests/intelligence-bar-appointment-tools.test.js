@@ -73,6 +73,14 @@ function wireDb(queues) {
     if (!q || q.length === 0) throw new Error(`Unexpected db('${table}') call`);
     return q.shift();
   });
+  // create_appointment's insert rides withCustomerCommsLock (rung 6) — the
+  // wrapper opens a transaction and takes the advisory lock before the
+  // insert; the stub passes the same queue-backed connection through.
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    return fn(trx);
+  });
 }
 
 beforeEach(() => {

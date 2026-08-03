@@ -702,6 +702,10 @@ async function reserveSlot({
 
       // service_type stays canonical for protocol/default lookups; notes
       // carry the full accepted service mix for dispatch and tech execution.
+      // No customer-comms rung here (occupancy.js rung 6): this insert is a
+      // customer_id-NULL hold, invisible to the merge-undo's winner-scoped
+      // probes; graduation onto a customer happens in commitReservation's
+      // caller, which locks.
       const [row] = await trx('scheduled_services').insert({
         customer_id: null,
         technician_id: techId,

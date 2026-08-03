@@ -8,6 +8,7 @@
  */
 
 const db = require('../../models/db');
+const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
 const logger = require('../logger');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -1042,10 +1043,26 @@ async function updateCustomer(customerId, updates) {
       // the same commit): pg_advisory_xact_lock(hashtextextended(
       //   'customer-email:' || lower(trim(<email>)), 0)).
       if (clean.email) {
+        const emailLc = String(clean.email).trim().toLowerCase();
         await trx.raw(
           'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
-          [`customer-email:${String(clean.email).trim().toLowerCase()}`],
+          [`customer-email:${emailLc}`],
         );
+        // The lock only serializes — re-run the live-claimant probe UNDER
+        // it (r20), exactly as revertMerge and the intake guard do. An
+        // address owned by another live customer (typically a just-restored
+        // merge loser) gets an explicit refusal, never a silent write.
+        const claimant = await trx('customers')
+          .whereRaw('lower(email) = ?', [emailLc])
+          .whereNot('id', customerId)
+          .where('active', true)
+          .whereNull('deleted_at')
+          .first('id');
+        if (claimant) {
+          const err = new Error('That email address belongs to another active customer — resolve the conflict (or merge the records) before assigning it.');
+          err.code = 'email_claimed_by_live_customer';
+          throw err;
+        }
       }
       await trx('customers').where('id', customerId).update(clean);
       if (addressSubmitted) {
@@ -1083,6 +1100,9 @@ async function updateCustomer(customerId, updates) {
   } catch (e) {
     if (e && e.code === '23505') {
       return { error: 'That address already exists as another property on this customer.' };
+    }
+    if (e && e.code === 'email_claimed_by_live_customer') {
+      return { error: e.message };
     }
     throw e;
   }
@@ -1376,7 +1396,10 @@ async function createAppointment(input) {
   // 'scheduled' is not in the scheduled_services status CHECK set and threw
   // on every insert. track_token_expires_at is stamped by the INSERT trigger
   // (set_default_track_token_expiry).
-  const [appointment] = await db('scheduled_services').insert({
+  // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): comms-lock the
+  // customer around the insert — this path had no transaction, and a bare
+  // advisory xact lock outside one fences nothing.
+  const [appointment] = await withCustomerCommsLock(db, customer_id, (trx) => trx('scheduled_services').insert({
     customer_id,
     scheduled_date: dateStr,
     service_type,
@@ -1387,7 +1410,7 @@ async function createAppointment(input) {
     notes: notes || null,
     created_at: new Date(),
     updated_at: new Date(),
-  }).returning('*');
+  }).returning('*'));
 
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —

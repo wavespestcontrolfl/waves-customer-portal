@@ -485,7 +485,21 @@ const EMAIL_FANOUT_DISCLOSURE = 'an email change also updates every open send st
  *     written them before this guard existed.
  * Returns { emailApplied, emailDroppedReason } for the caller's logging.
  */
-async function applyCustomerUpdatesWithEmailClaimGuard({ customerId, updates, source = 'intake' }) {
+async function applyCustomerUpdatesWithEmailClaimGuard({
+  customerId, updates, source = 'intake',
+  // REPLACEMENT mode (the garbled-stored-email rule, call-recording-
+  // processor round-12/round-24): the caller read an EMAIL_RE-failing
+  // stored value and intends to replace it. `replaceExpectedEmail` is that
+  // pre-read value — under the row lock the write proceeds only if the
+  // stored email is STILL that exact value (anything else means someone
+  // fixed it while we waited, and the standing value wins). Because a
+  // replacement has an old address with live copies out there,
+  // `applyWithEmailInTrx(trx)` lets the caller run the customer write and
+  // the required fan-out in THIS guarded transaction, so the claim
+  // serialization, the write, and the fan-out commit or roll back as one.
+  replaceExpectedEmail = null,
+  applyWithEmailInTrx = null,
+}) {
   const emailKeyNorm = emailKey(updates.email);
   if (!updates.email || !emailKeyNorm) {
     // No email being assigned (or not an address at all) — nothing to
@@ -497,10 +511,15 @@ async function applyCustomerUpdatesWithEmailClaimGuard({ customerId, updates, so
     return await db.transaction(async (trx) => {
       const fresh = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'email');
       if (!fresh) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
-      if (fresh.email) {
-        // Filled while we waited (operator edit, merge backfill, a racing
-        // intake) — the standing value wins; automated intake never
-        // overwrites an email, only backfills an empty one.
+      const standingValueBlocks = replaceExpectedEmail == null
+        ? !!fresh.email
+        : String(fresh.email || '') !== String(replaceExpectedEmail);
+      if (standingValueBlocks) {
+        // Filled (or fixed) while we waited — operator edit, merge
+        // backfill, a racing intake. The standing value wins; automated
+        // intake never overwrites an email it did not read pre-lock, only
+        // backfills an empty one or replaces the exact garbled value it
+        // saw.
         const { email: _dropped, ...rest } = updates;
         if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
         return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
@@ -520,13 +539,20 @@ async function applyCustomerUpdatesWithEmailClaimGuard({ customerId, updates, so
         if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
         return { emailApplied: false, emailDroppedReason: 'address now belongs to another live customer' };
       }
-      await trx('customers').where({ id: customerId }).update(updates);
+      if (applyWithEmailInTrx) {
+        await applyWithEmailInTrx(trx);
+      } else {
+        await trx('customers').where({ id: customerId }).update(updates);
+      }
       return { emailApplied: true, emailDroppedReason: null };
     });
   } catch (e) {
     // The guard must never block the intake write into failure: drop the
     // email fill (the lead/quote/call record still carries the address for
-    // staff) and apply the rest exactly as the pre-guard code did.
+    // staff) and apply the rest exactly as the pre-guard code did. For a
+    // REPLACEMENT this also rolls the fan-out and the email write back
+    // together — the malformed stored value stays, which is the state a
+    // later call can retry from (round-24 semantics).
     logger.warn(`[email-fanout] email-claim guard failed for ${source} (customer ${customerId}) — applying updates without the email backfill: ${e.message}`);
     const { email: _dropped, ...rest } = updates;
     if (Object.keys(rest).length) await db('customers').where({ id: customerId }).update(rest);

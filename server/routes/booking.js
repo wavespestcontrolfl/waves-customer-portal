@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
@@ -2062,6 +2063,11 @@ async function createSelfBooking(payload = {}) {
       // (date → customer → tech → zone → day-cap — the global order in
       // scheduling/occupancy.js) so concurrent confirms can't deadlock.
       await acquireSelfBookingDayCapLock(trx, slotDateStr);
+      // Rung 6 (occupancy.js ORDERING CONTRACT): the appointment insert
+      // below resolves its comms recipients LIVE from the customer row, so
+      // it must serialize against a concurrent customer-merge undo's
+      // absence probes — after the scheduling rungs, BEFORE every row lock.
+      await lockCustomerComms(trx, custId);
 
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate.
@@ -2905,11 +2911,8 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // revertMerge email guard): this write UPDATES an existing intent in
     // place (customer_id untouched), so neither the FK nor the undo's row
     // locks fence it — both sides take the same per-customer advisory lock,
-    // like the template-run executor's insert path. KEY DERIVATION (must
-    // stay byte-identical to customer-dedupe.js and
-    // email-template-automation-executor.js — extend ALL in the same
-    // commit): pg_advisory_xact_lock(hashtextextended(
-    //   'customer-comms:' || <customer id>, 0)) — transaction-scoped.
+    // like the template-run executor's insert path. Key derivation + the
+    // lock-order contract are centralized in utils/customer-comms-lock.js.
     //
     // LOCK ORDER: the customer id IS the lock key, so it must be resolved
     // once to pick the key — and then RE-RESOLVED under the lock, because
@@ -2931,9 +2934,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
         result = await writeIntent(db, await resolveOpenIntent(db));
       } else {
         result = await db.transaction(async (trx) => {
-          const lockKey = async (id) => trx.raw(
-            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${id}`],
-          );
+          const lockKey = async (id) => lockCustomerComms(trx, id);
           await lockKey(candidateId);
           let ownerId = await resolveCustomerId();
           if (ownerId && ownerId !== candidateId) {

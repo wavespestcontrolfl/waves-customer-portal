@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
@@ -279,7 +280,10 @@ async function executeAction(alertId, actionIndex) {
       // scheduled_services has no `price` column — the visit price lives in
       // estimated_price (a 0 here is the genuine complimentary price, not a
       // missing value).
-      const [compVisit] = await db('scheduled_services').insert({
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): comms-lock the
+      // customer around the insert — this path had no transaction, and a
+      // bare advisory xact lock outside one fences nothing.
+      const [compVisit] = await withCustomerCommsLock(db, customer.id, (trx) => trx('scheduled_services').insert({
         customer_id: customer.id,
         service_type: compServiceType,
         status: 'pending',
@@ -287,7 +291,7 @@ async function executeAction(alertId, actionIndex) {
         notes: `Complimentary service — Health alert retention #${alertId}`,
         scheduled_date: compDate,
         created_at: new Date(),
-      }).returning('id');
+      }).returning('id'));
       // Register the reminder row NOW, as a windowless pre-closed
       // placeholder — the same closeReminderWindows registration the IB
       // create_appointment path uses for untimed visits. Left row-less,

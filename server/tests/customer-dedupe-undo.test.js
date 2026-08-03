@@ -26,7 +26,7 @@ function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
     'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
-    'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'sum', 'onConflict',
+    'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'sum', 'max', 'onConflict',
     'ignore', 'returning', 'first', 'increment', 'decrement', 'limit', 'leftJoin',
   ];
   for (const m of methods) {
@@ -751,6 +751,7 @@ describe('revertMerge', () => {
 
   function buildRevertTrx({
     journal, winner, loser, tables = {}, loserEmailConflict = false, emailClaimant = null,
+    newerJournal = null,
   }) {
     const state = {
       repointedBack: [], winnerPatch: null, loserRestore: null, journalUpdate: null,
@@ -763,6 +764,9 @@ describe('revertMerge', () => {
       if (q.called('select')) assertSelectableColumns(table, q);
       if (table === 'customer_merge_journal') {
         if (q.called('update')) { state.journalUpdate = q.args('update')[0]; return 1; }
+        // The r20 LIFO probe is the only journal read with an orderBy —
+        // default: no newer non-undone merge shares the winner.
+        if (q.called('orderBy')) { state.lifoProbeRan = true; return newerJournal; }
         if (q.called('first')) return journal;
         return [];
       }
@@ -1245,6 +1249,63 @@ describe('revertMerge', () => {
     expect(result.skipped).toHaveLength(0);
   });
 
+  it('refuses (409) an undo that is not the NEWEST non-undone merge for its winner — LIFO only (r20)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      newerJournal: { id: 'cccccccc-0000-0000-0000-000000000009', created_at: '2026-07-31T04:00:00Z' },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newest-first/) });
+    // Zero writes on refusal.
+    expect(state.journalUpdate).toBe(null);
+    expect(state.repointedBack).toHaveLength(0);
+  });
+
+  it('probes LIFO ordering on every undo, AFTER the customers row lock (r20)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(), winner: baseWinner(), loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.lifoProbeRan).toBe(true);
+  });
+
+  it('takes the customer-comms advisory lock as the FIRST raw acquisition of the undo transaction (r19 #4)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(), winner: baseWinner(), loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // Every appointment creator takes the same key before touching the
+    // customer row (utils/customer-comms-lock.js) — the undo must hold it
+    // before ANY of its probes so an uncommitted insert can never hide.
+    expect(state.rawCalls.length).toBeGreaterThan(0);
+    const [sql, bindings] = state.rawCalls[0];
+    expect(String(sql)).toContain('pg_advisory_xact_lock');
+    expect(bindings).toEqual([`customer-comms:${WINNER}`]);
+  });
+
+  it('restores the SNAPSHOT active/deleted state — a deliberately-deactivated loser stays deactivated (r20)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: {
+        ...baseJournal(),
+        loser_snapshot: { ...baseJournal().loser_snapshot, active: false, deleted_at: '2026-07-01T00:00:00Z' },
+      },
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.loserRestore.active).toBe(false);
+    expect(state.loserRestore.deleted_at).toBe('2026-07-01T00:00:00Z');
+  });
+
   it('refuses (409) when the merge was already undone', async () => {
     const { trx } = buildRevertTrx({
       journal: { ...baseJournal(), undone_at: '2026-07-30T05:00:00Z' },
@@ -1365,6 +1426,14 @@ describe('revertMerge', () => {
     expect(state.winnerPatch.account_credits).toBe(40);
     expect(state.loserRestore.account_credits).toBe(25.5);
     expect(state.decremented).toBe(null);
+    // r20: the winner's remaining rows carry balance_after snapshots
+    // computed while the loser's rows were folded in — the undo recomputes
+    // the running sum in the same transaction (drifted rows only).
+    const recompute = state.rawCalls.find(([sql]) =>
+      String(sql).includes('customer_credit_ledger') && String(sql).includes('SUM(delta) OVER'));
+    expect(recompute).toBeDefined();
+    expect(recompute[1]).toEqual([WINNER, WINNER]);
+    expect(String(recompute[0])).toContain('IS DISTINCT FROM');
   });
 
   it("refuses (409, zero writes) when the winner's spend consumed the moved credit — its ledger would go negative", async () => {
@@ -3023,6 +3092,67 @@ describe('revertMerge', () => {
       expect((await resLoserDerived.json()).merges[0].revertible).toBe(true);
     } finally {
       await new Promise((resolve) => { server.close(resolve); });
+    }
+  });
+
+  it('GET /merges: LIFO mirror (r20) — an older merge with a newer non-undone sibling on the same winner reads revertible:false, fail-closed on lookup error', async () => {
+    const express = require('express');
+    const journalRow = (overrides = {}) => ({
+      id: JOURNAL,
+      winner_customer_id: WINNER,
+      loser_customer_id: LOSER,
+      tier: 'manual',
+      performed_by: 'admin:test',
+      created_at: '2026-07-30T04:00:00Z',
+      undone_at: null,
+      undone_by: null,
+      loser_snapshot: JSON.stringify({ id: LOSER, first_name: 'Loser', last_name: null }),
+      repointed_ids: JSON.stringify({
+        version: 1,
+        tables: { 'leads.customer_id': ['lead-1'] },
+        stripe_transferred_id: null,
+        payment_method_flags: {},
+        collision_handlers: [],
+      }),
+      evidence: JSON.stringify({}),
+      winner_first_name: 'Winner',
+      winner_last_name: 'Testcase',
+      winner_active: true,
+      winner_deleted_at: null,
+      winner_stripe_customer_id: null,
+      loser_row_id: LOSER,
+      loser_row_deleted_at: '2026-07-30T04:40:00Z',
+      ...overrides,
+    });
+    // The newest-per-winner probe hits the UNALIASED table.
+    let newestRows = [{ winner_customer_id: WINNER, max_created: '2026-07-30T04:00:00Z' }];
+    let newestThrows = false;
+    installDb((table) => {
+      if (table === 'customer_merge_journal as j') return [journalRow()];
+      if (table === 'customer_merge_journal') {
+        if (newestThrows) throw new Error('lookup down');
+        return newestRows;
+      }
+      return [];
+    });
+    const app = express();
+    app.use('/dup', require('../routes/admin-customer-duplicates'));
+    const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+    try {
+      const base = `http://127.0.0.1:${server.address().port}`;
+      // Control: this journal IS the newest for its winner → revertible.
+      let body = await (await fetch(`${base}/dup/merges`)).json();
+      expect(body.merges[0].revertible).toBe(true);
+      // A newer non-undone merge shares the winner → greyed out, never a 409.
+      newestRows = [{ winner_customer_id: WINNER, max_created: '2026-07-31T09:00:00Z' }];
+      body = await (await fetch(`${base}/dup/merges`)).json();
+      expect(body.merges[0].revertible).toBe(false);
+      // Fail-closed: a failed newest-lookup marks the page non-revertible.
+      newestThrows = true;
+      body = await (await fetch(`${base}/dup/merges`)).json();
+      expect(body.merges[0].revertible).toBe(false);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
     }
   });
 

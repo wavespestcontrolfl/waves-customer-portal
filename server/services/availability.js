@@ -5,6 +5,7 @@
  * Finds 1-hour gaps between existing jobs with buffer enforcement.
  */
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { etParts, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
@@ -321,6 +322,11 @@ class AvailabilityEngine {
       // as createSelfBooking's date → customer → tech → zone → day-cap — so
       // concurrent confirms across both writers can never deadlock.
       await acquireSelfBookingDayCapLock(trx, dateStr);
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the
+      // scheduled_services insert below serializes against a concurrent
+      // merge-undo of this customer — after the scheduling rungs, before
+      // any row lock.
+      await lockCustomerComms(trx, customerId);
       const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
         excludeSelfBookingId: options.excludeSelfBookingId || null,
       });

@@ -253,6 +253,31 @@ router.get('/merges', async (req, res) => {
       }
       return set;
     };
+    // LIFO mirror (r20): revertMerge refuses any journal that is not the
+    // NEWEST non-undone merge for its winner — mirror it here so the page
+    // greys those entries out instead of offering a 409. One batched
+    // newest-per-winner probe (deliberately unbounded by the page's LIMIT:
+    // the newest merge for a winner may sit outside the listed 20). A
+    // failed lookup marks affected rows non-revertible (fail closed).
+    const newestByWinner = new Map();
+    let newestLookupFailed = false;
+    {
+      const liveWinners = [...new Set(rows.filter((r) => !r.undone_at).map((r) => r.winner_customer_id))];
+      if (liveWinners.length) {
+        try {
+          const newestRows = await db('customer_merge_journal')
+            .whereIn('winner_customer_id', liveWinners)
+            .whereNull('undone_at')
+            .groupBy('winner_customer_id')
+            .select('winner_customer_id')
+            .max('created_at as max_created');
+          for (const r of newestRows) newestByWinner.set(r.winner_customer_id, r.max_created);
+        } catch (newestErr) {
+          newestLookupFailed = true;
+          logger.warn(`[admin-customer-duplicates] newest-merge lookup for revertible flags failed (marking affected merges non-revertible): ${newestErr.message}`);
+        }
+      }
+    }
     const invoiceBearingRows = rows.filter((row) => !row.undone_at
       && journaledIdsOf(parse(row.repointed_ids), 'invoices').size > 0);
     const allJournaledInvoiceIds = [...new Set(
@@ -490,7 +515,12 @@ router.get('/merges', async (req, res) => {
             && !stripeDerivationRefuses
             && !postMergeCardsStrand
             && !postMergeVisitStrand
-            && !invoiceActivityRefuses,
+            && !invoiceActivityRefuses
+            // LIFO mirror (r20): only the newest non-undone merge for a
+            // winner is offered; a failed newest-lookup fails closed.
+            && !newestLookupFailed
+            && !(newestByWinner.has(row.winner_customer_id)
+              && new Date(row.created_at).getTime() < new Date(newestByWinner.get(row.winner_customer_id)).getTime()),
           ),
         };
       }),

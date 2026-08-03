@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -787,6 +788,16 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       await fileCoverageException(term, 'window_conflict',
         `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} now overlaps another job. The visit is on the schedule without a time — re-slot it with the customer.`);
     }
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — TRY-lock, same
+    // degrade posture as the occupancy try-lock above: activation already
+    // holds invoice/term row locks, and a merge-undo holds customer-comms
+    // while FOR-UPDATE-ing journaled invoices, so a blocking acquire here
+    // can deadlock. On miss, proceed unfenced and log — the residual is an
+    // undo of this exact customer mid-transaction at this instant, and it
+    // degrades comms routing only.
+    if (!(await tryLockCustomerComms(trx, term.customer_id))) {
+      logger.warn(`[annual-prepay] term ${term.id} customer-comms lock busy (merge-undo in flight?) — seeding unfenced`);
+    }
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
     return row;
   };
@@ -884,8 +895,17 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       created = conn.isTransaction
         ? await seedTimedFirstVisit(conn, scheduledDate)
         : await conn.transaction((trx) => seedTimedFirstVisit(trx, scheduledDate));
-    } else {
+    } else if (conn.isTransaction) {
+      // Same try-lock degrade as seedTimedFirstVisit: the activation trx
+      // already holds invoice/term rows (rung-6 note there).
+      if (!(await tryLockCustomerComms(conn, term.customer_id))) {
+        logger.warn(`[annual-prepay] term ${term.id} customer-comms lock busy (merge-undo in flight?) — seeding unfenced`);
+      }
       [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
+    } else {
+      // Fresh transaction holds nothing yet — a blocking rung-6 acquire is
+      // safe here (utils/customer-comms-lock.js).
+      [created] = await withCustomerCommsLock(conn, term.customer_id, (trx) => trx('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*'));
     }
     if (!created) continue;
     createdRows.push(created);

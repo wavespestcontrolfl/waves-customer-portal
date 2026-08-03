@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -3225,6 +3226,13 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the
+      // customers row lock below: every scheduled_services insert in this
+      // trx (parent, recurring children, boosters) serializes against a
+      // concurrent merge-undo of this customer. estimate-converter takes
+      // the same lock in the same position, so the #3011 customer-row →
+      // series-advisory order below is unchanged relative to it.
+      await lockCustomerComms(trx, customerId);
       // Global lock order for recurring creators: CUSTOMER ROW first, series
       // advisory lock second — the same order estimate-converter uses (it
       // updates the customer, then waits on the advisory lock). Taking the
@@ -5050,6 +5058,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     let scheduleMoveForNotice = null;
 
     await db.transaction(async (trx) => {
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
+      // spawn recurring children (scheduled_services inserts) — lock
+      // customer-comms off an unlocked peek BEFORE any row lock in the trx
+      // (assignment updates below take visit row locks).
+      const commsPeek = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+      if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
         ? await trx('scheduled_services').where({ id: req.params.id }).first()
         : null;
@@ -6735,6 +6749,11 @@ async function runRecurringSeriesMaintenance(conn, svc) {
   const parentId = svc.recurring_parent_id || svc.id;
   const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the auto-extend
+    // insert serializes against a concurrent merge-undo of this customer.
+    // Re-locked in runRecurringSeriesMaintenanceLocked if the in-lock
+    // parent re-read shows a repoint.
+    await lockCustomerComms(trx, svc.customer_id);
     return runRecurringSeriesMaintenanceLocked(trx, svc, parentId);
   };
   // Callers normally pass the plain db instance (all three completion routes
@@ -6801,6 +6820,10 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
   let spawnedVisit = null;
   const cols = await conn('scheduled_services').columnInfo();
   const parent = await conn('scheduled_services').where({ id: parentId }).first();
+  // Rung-6 re-lock (see runRecurringSeriesMaintenance): the caller locked
+  // customer-comms off svc's snapshot — if the in-lock re-read shows the
+  // series was repointed to another customer, lock that one too.
+  if (parent && parent.customer_id !== svc.customer_id) await lockCustomerComms(conn, parent.customer_id);
   if (parent && parent.is_recurring && parent.recurring_pattern) {
     // upcomingCount + latest must reflect the BASE recurring series
     // only — see countUpcomingSeriesVisits for the booster and
@@ -9465,6 +9488,12 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
 
   const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the spawn inserts
+    // below serialize against a concurrent merge-undo of this customer.
+    // Keyed off the unlocked peek; re-locked below if the in-lock re-read
+    // shows the parent was repointed (reentrant + bounded, booking.js's
+    // resolve → lock → re-resolve idiom).
+    await lockCustomerComms(trx, parentPeek.customer_id);
 
     // ——— In-lock re-checks (see the block comment above) ———
     if (alert) {
@@ -9485,6 +9514,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       outcome = { status: 404, body: { error: 'parent service not found' } };
       return;
     }
+    if (parent.customer_id !== parentPeek.customer_id) await lockCustomerComms(trx, parent.customer_id);
     if (parent.status === 'cancelled') {
       outcome = { status: 409, body: { error: 'series has been cancelled' } };
       return;

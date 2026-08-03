@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
@@ -1273,6 +1274,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
     const { appt } = await db.transaction(async (trx) => {
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the appointment
+      // insert below resolves comms recipients LIVE from the customer row —
+      // serialize against a concurrent merge-undo BEFORE this trx's
+      // customers-row update and the insert. A customer CREATED inside this
+      // trx cannot be an undo's winner, so only the reuse path locks.
+      if (!needsCustomer) await lockCustomerComms(trx, customerId);
       if (needsCustomer) {
         const account = await ensureCustomerAccount(trx, {
           firstName: fallbackName,

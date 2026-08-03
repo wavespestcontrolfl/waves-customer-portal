@@ -23,6 +23,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -1991,12 +1992,40 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     const winnerId = journal.winner_customer_id;
     const loserId = journal.loser_customer_id;
+    // FIRST lock after the journal row, BEFORE the customers rows (lock
+    // order contract in utils/customer-comms-lock.js): every appointment
+    // creator and the template-run executor take `customer-comms:<id>`
+    // before touching the customer's row, so this undo's absence probes
+    // (service contacts, identity surfaces, email queue) cannot miss a
+    // concurrent uncommitted INSERT — the READ COMMITTED phantom that
+    // parked this lane (r19 #4). Creators never lock the journal row, so
+    // the journal → comms → customers order cannot cycle. The later
+    // email/name-guard acquisitions of this same key are reentrant no-ops.
+    await lockCustomerComms(trx, winnerId);
     const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
     const winner = locked.find((r) => r.id === winnerId);
     const loserRow = locked.find((r) => r.id === loserId);
     if (!winner) refuse('The kept customer no longer exists');
     if (winner.deleted_at || winner.active === false) {
       refuse('The kept customer is inactive or deleted — reactivate it before undoing the merge');
+    }
+    // LIFO ordering (r20): undoing an OLDER merge while a newer non-undone
+    // merge shares the winner would clear/restore fields the newer merge's
+    // journal recorded against post-older-merge state (its winner_prior_*
+    // entries and backfill baselines were captured on top of this merge's
+    // writes) — the two undos would not compose. Newest-first only. Probed
+    // AFTER the customers FOR UPDATE: a concurrent merge onto this winner
+    // holds those row locks too, so it is either committed (visible here)
+    // or blocked until this undo finishes.
+    const newerActive = await trx('customer_merge_journal')
+      .where({ winner_customer_id: winnerId })
+      .whereNull('undone_at')
+      .where('created_at', '>', journal.created_at)
+      .whereNot({ id: journalId })
+      .orderBy('created_at', 'desc')
+      .first('id', 'created_at');
+    if (newerActive) {
+      refuse('A newer merge onto the kept customer has not been undone — undo merges newest-first (undo that one, then retry this one)');
     }
     if (!loserRow) refuse('The merged-away customer row was purged — cannot restore it');
     if (!loserRow.deleted_at) refuse('The merged-away customer is already live — nothing to undo');
@@ -2627,12 +2656,8 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // of the row locks above can fence its insert path; a run queued
       // between probe and commit would deliver to the email this undo is
       // clearing. Both sides take the same per-customer advisory lock.
-      // KEY DERIVATION (must stay byte-identical to
-      // email-template-automation-executor.js createRun — extend BOTH in
-      // the same commit): pg_advisory_xact_lock(hashtextextended(
-      //   'customer-comms:' || <customer id>, 0)) — transaction-scoped, so
-      // it releases with this undo's commit/rollback.
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${winnerId}`]);
+      // Key derivation + lock order live in utils/customer-comms-lock.js.
+      await lockCustomerComms(trx, winnerId); // reentrant — taken at trx start; kept for local reading
       const emailLower = String(backfills.email).trim().toLowerCase();
       const emailBlockers = await probeIdentitySurfaces({
         surfaces: EMAIL_BOUND_SURFACES,
@@ -2654,7 +2679,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     const clearingInheritedName = ['first_name', 'last_name']
       .some((f) => Object.prototype.hasOwnProperty.call(winnerPatch, f) && winnerPatch[f] === null);
     if (clearingInheritedName) {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${winnerId}`]);
+      await lockCustomerComms(trx, winnerId); // reentrant — taken at trx start; kept for local reading
       const nameBlockers = await probeIdentitySurfaces({
         surfaces: EMAIL_BOUND_SURFACES.filter((s) => s.carriesName),
         emailLower: null,
@@ -2846,6 +2871,28 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       }
       winnerPatch.account_credits = winnerLedgerSum;
       creditsMovedBack = loserCreditsAfter;
+      // Post-merge winner rows snapshot balance_after computed while the
+      // loser's rows were folded in (r20) — with those rows moved back,
+      // the snapshots disagree with the authoritative running sum and C360
+      // history would contradict the cache this undo just recomputed.
+      // Data-model call: balance_after is a DERIVED column (cache==ledger
+      // is this lane's invariant), so recompute the winner's running sum
+      // in this transaction rather than leaving stale artifacts. Touches
+      // only rows whose snapshot actually drifted; customer_credit_ledger
+      // has no updated_at, so this cannot pollute activity signals.
+      await trx.raw(
+        `UPDATE customer_credit_ledger AS l
+            SET balance_after = c.running
+           FROM (
+             SELECT id, SUM(delta) OVER (ORDER BY created_at, id) AS running
+               FROM customer_credit_ledger
+              WHERE customer_id = ?
+           ) AS c
+          WHERE l.id = c.id
+            AND l.customer_id = ?
+            AND l.balance_after IS DISTINCT FROM c.running`,
+        [winnerId, winnerId],
+      );
     } else {
       const movedCredits = round2(snapshot.account_credits);
       if (movedCredits > 0) {
@@ -2874,9 +2921,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // Un-retire the loser from the snapshot: exactly what the retire cleared.
     // Anything the merge merely folded (notes appends, pref merges, dropped
     // derived rows) is out of scope — the snapshot keeps the originals.
+    // `active`/`deleted_at` restore the SNAPSHOT values, not literals (r20):
+    // a loser an admin deliberately deactivated before the merge must come
+    // back deactivated — hardcoding active:true resurrected it.
     const restore = {
-      active: true,
-      deleted_at: null,
+      active: snapshot.active !== false,
+      deleted_at: snapshot.deleted_at || null,
       phone: snapshot.phone,
       email: snapshot.email || null,
       payer_id: snapshot.payer_id || null,

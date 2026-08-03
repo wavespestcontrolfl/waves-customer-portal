@@ -77,6 +77,13 @@ function wire({ insertChain }) {
     if (!q || q.length === 0) throw new Error(`Unexpected db('${table}') call`);
     return q.shift();
   });
+  // The comp insert now rides withCustomerCommsLock (rung 6) — the wrapper
+  // opens a transaction and takes the advisory lock on it before inserting.
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    return fn(trx);
+  });
 }
 
 beforeEach(() => {
