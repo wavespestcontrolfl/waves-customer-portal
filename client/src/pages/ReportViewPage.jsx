@@ -912,7 +912,11 @@ const APPLICATION_PEST_FAMILIES = [
 
 function matchedPestFamilies(text = '') {
   if (!text) return [];
-  return APPLICATION_PEST_FAMILIES.filter((family) => family.pattern.test(text));
+  // Live targets arrive both as display labels ("German cockroaches") and as
+  // canonical enum keys ("german_roaches", "ghost_ant") — `_` is a regex word
+  // character, so \b patterns silently miss the keys without this.
+  const normalized = String(text).replace(/[_-]+/g, ' ');
+  return APPLICATION_PEST_FAMILIES.filter((family) => family.pattern.test(normalized));
 }
 
 export function applicationPestFamily(app = {}) {
@@ -1002,9 +1006,9 @@ export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   }
   if (purpose === 'Targeted bait placement') return 'Placed at documented activity or monitoring points.';
   if (pestFamily && purpose === `Targeted ${pestFamily.noun} treatment`) {
-    return `Applied as a fine mist to reach ${pestFamily.plural} in the cracks, voids, and hiding spots within the treated areas.`;
+    return `Applied as a fine mist within the treated areas for the ${pestFamily.plural} documented on this visit.`;
   }
-  if (purpose === 'Space fog treatment') return 'Applied as a fine mist to reach pests in cracks, voids, and hiding spots within the treated areas.';
+  if (purpose === 'Space fog treatment') return 'Applied as a fine mist within the treated areas documented for this visit.';
   if (purpose === 'Targeted treatment') return 'Applied only where activity or conditions called for treatment.';
   if (purpose === 'Mosquito pressure reduction') return 'Applied to reduce resting adult mosquito pressure around target areas.';
   const targets = (Array.isArray(app.targets) ? app.targets : []).filter(Boolean);
@@ -1105,11 +1109,12 @@ export function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') 
   }
 
   if (method.includes('fog')) {
-    // A fog on a pest visit is a crack-and-void space treatment, not a
-    // mosquito application — the pest, when known, comes from the recorded
-    // identity, never from the equipment.
+    // A fog on a pest visit is not a mosquito application — the pest, when
+    // known, comes from the recorded identity, never from the equipment. The
+    // copy states only what is documented: the method, the treated areas,
+    // and the recorded target (no reach/performance claims).
     const family = applicationPestFamily(app);
-    details.push(`${productName} was applied as a fine fog so the treatment reaches into cracks, voids, and hiding spots that surface applications cannot reach — the areas where ${family ? family.plural : 'the target pests'} rest and breed.`);
+    details.push(`${productName} was applied as a fine fog, distributing the treatment as fine droplets across the areas documented for this visit${family ? ` for the recorded ${family.plural}` : ''}.`);
     details.push(...productIdentifierDetails(app));
     return details;
   }
@@ -1215,10 +1220,10 @@ function applicationGroupPurposeCopy(purpose, serviceLine = 'pest', app = {}) {
     return `These bait placements target ${family.plural} where they travel and hide.`;
   }
   if (family && purpose === `Targeted ${family.noun} treatment`) {
-    return `These products were applied to reach ${family.plural} in cracks, voids, and hiding spots within the treated areas.`;
+    return `These products were applied as a fine mist within the treated areas for the ${family.plural} documented on this visit.`;
   }
   if (purpose === 'Targeted bait placement') return 'These products were placed at documented activity or monitoring points.';
-  if (purpose === 'Space fog treatment') return 'These products were applied as a fine mist to reach pests in cracks, voids, and hiding spots.';
+  if (purpose === 'Space fog treatment') return 'These products were applied as a fine mist within the treated areas documented for this visit.';
   return applicationPurposeCopy({ method: '', product: {} }, serviceLine).replace(/^Application recorded.*$/i, 'These products were documented for this service visit.');
 }
 

@@ -807,10 +807,18 @@ describe('product purpose follows recorded pest identity', () => {
     expect(applicationTechnicalExplanation(mosquitoFog, 'pest').join(' ')).toMatch(/mosquito/i);
   });
 
+  it('resolves canonical enum target keys, not just display labels', () => {
+    const enumFog = { method: 'fog_ulv', targets: ['german_roaches'], product: { name: 'Alpine WSG', category: 'insecticide' } };
+    expect(applicationPurpose(enumFog, 'pest')).toBe('Targeted cockroach treatment');
+    const enumBait = { method: 'bait_placement', targets: ['ghost_ant'], product: { name: 'Generic Gel', category: 'bait' } };
+    expect(applicationPurpose(enumBait, 'pest')).toBe('Targeted ant bait');
+  });
+
   it('fails closed to generic copy when identity is unknown or ambiguous', () => {
     const unknownFog = { method: 'fog_ulv', targets: [], product: { name: 'CB-80', category: 'insecticide' } };
     expect(applicationPurpose(unknownFog, 'pest')).toBe('Space fog treatment');
-    expect(applicationPurposeCopy(unknownFog, 'pest')).toMatch(/pests/);
+    expect(applicationPurposeCopy(unknownFog, 'pest')).toMatch(/treated areas/);
+    expect(applicationPurposeCopy(unknownFog, 'pest')).not.toMatch(/mosquito|\bants?\b|roach/i);
     const mixedBait = { method: 'bait_placement', targets: ['Ghost ants', 'German cockroaches'], product: { name: 'Multi-Pest Bait Stations', category: 'bait' } };
     expect(applicationPestFamily(mixedBait)).toBe(null);
     expect(applicationPurpose(mixedBait, 'pest')).toBe('Targeted bait placement');
