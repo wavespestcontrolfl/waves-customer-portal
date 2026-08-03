@@ -484,17 +484,51 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toMatch(/Next service:/);
   });
 
-  it('never prints observation-category findings (they can carry raw [found] notes)', () => {
+  it('filters raw-note findings by provenance, not by category', () => {
+    // admin-dispatch.js rewrites the category to 'conducive_condition' when a
+    // raw note contains "concern", so a category-only filter is bypassed.
+    // Raw-note rows are title-only (detail/recommendation null).
     const data = {
       ...BASE_DATA,
       findings: [
-        { id: 'observation-1', category: 'observation', severity: 'medium', title: 'Gate code 4417, bill the office', detail: '' },
-        { id: 'f2', category: 'pest_activity', severity: 'high', title: 'Ant trail at the slider', detail: 'Treated and monitored.' },
+        { id: 'observation-1', category: 'observation', severity: 'medium', title: 'Gate code 4417, bill the office', detail: '', recommendation: '' },
+        { id: 'observation-2', category: 'conducive_condition', severity: 'medium', title: 'Owner concern: lockbox code is 9902', detail: null, recommendation: null },
+        { id: 'f3', category: 'pest_activity', severity: 'high', title: 'Ant trail at the slider', detail: 'Treated and monitored.' },
       ],
     };
     const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
     expect(container.textContent).not.toContain('Gate code');
+    expect(container.textContent).not.toContain('lockbox');
+    expect(container.textContent).not.toContain('9902');
     expect(container.textContent).toMatch(/Ant trail at the slider/);
+  });
+
+  it('does not print default lawn aftercare on an untreated visit', () => {
+    // buildAftercare([]) still returns treatment-worded copy with no applications
+    const aftercare = { watering: 'No special watering is needed because of today\u2019s treatment.', reentry: 'Water in per the visit notes.' };
+    const data = { ...BASE_DATA, serviceLine: 'lawn', applications: [], dynamicContext: {}, reportV2: { aftercare } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('because of today');
+    expect(container.textContent).not.toContain('Water in per the visit notes');
+  });
+
+  it('keeps a proof moment\'s tag and location alongside its caption', () => {
+    const data = {
+      ...BASE_DATA,
+      photos: [],
+      proofMoments: [{ id: 'm1', mediaUrl: 'https://cdn.example.com/seal.jpg', mediaType: 'image', tagLabel: 'Entry point sealed', locationArea: 'Garage soffit', customerCaption: 'Sealed with copper mesh and sealant.' }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/Entry point sealed/);
+    expect(container.textContent).toMatch(/Garage soffit/);
+    expect(container.textContent).toMatch(/copper mesh/);
+  });
+
+  it('does not mount an empty findings section for a photo-only mowing record', () => {
+    // buildMowingHeightContext returns a truthy object with heightIn: null
+    const data = { ...BASE_DATA, typedReport: null, activity: null, serviceLine: 'lawn', mowingHeight: { heightIn: null, photoUrl: 'https://cdn.example.com/g.jpg' } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('What we found');
   });
 
   it('uses program-specific station outcome wording and the serviced state', () => {

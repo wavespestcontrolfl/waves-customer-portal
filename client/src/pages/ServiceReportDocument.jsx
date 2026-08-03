@@ -278,7 +278,13 @@ export default function ServiceReportDocument({ data, token }) {
     .map((moment) => ({
       id: `moment-${moment.id}`,
       url: moment.mediaUrl,
-      caption: moment.customerCaption || moment.tagLabel || 'Service highlight',
+      // keep the structured context, not just the prose caption: a sealing
+      // photo should still say what it documents and where.
+      caption: [
+        moment.tagLabel,
+        moment.locationArea,
+        moment.customerCaption,
+      ].filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' · ') || 'Service highlight',
       isMoment: true,
     }));
   // The turf-height gauge shot is pulled from data.photos only when lawn V2
@@ -416,7 +422,11 @@ export default function ServiceReportDocument({ data, token }) {
   const assessRecs = data.reportV2 ? null : data.lawnAssessment?.recommendations?.recommendations;
   (Array.isArray(assessRecs) ? [...assessRecs].sort((a, b) => (a.priority ?? 99) - (b.priority ?? 99)) : [])
     .forEach((rec) => pushRec(rec?.action || rec?.text || rec));
-  pushRec(data.reportV2?.aftercare?.watering);
+  // buildAftercare([]) still returns "No special watering is needed because of
+  // today's treatment" when there were NO applications — printing it on an
+  // inspection-only lawn visit claims a treatment that didn't happen (5th
+  // variant of this class: defaults read as evidence).
+  if (hasRenderableTreatment) pushRec(data.reportV2?.aftercare?.watering);
   pushRec(v2NextMove);
   // "Your next step" — the homeowner task a V2 top issue assigns. Lives on
   // snapshot.customerAction and per-insight customerAction; omitting it drops
@@ -468,9 +478,17 @@ export default function ServiceReportDocument({ data, token }) {
   // closed — real structured findings (the findings table, which carry detail
   // and recommendation) still render. A server-side split of approved
   // observations from raw note lines would let these come back.
+  // ⛔ PROVENANCE, not category. Findings synthesized from raw technician
+  // notes are inserted title-only with detail/recommendation null (
+  // admin-dispatch.js:5850-5857, report-data.js:2266-2274) — and their
+  // category is REWRITTEN to 'conducive_condition' when the note contains
+  // "concern", which slipped straight past an earlier category filter.
+  // A finding that carries structured content (detail or recommendation)
+  // came from the findings pipeline; a bare title did not. Fail closed on
+  // the bare titles — AGENTS.md: raw technician_notes never egress.
   const recordFindings = (Array.isArray(data.findings) ? data.findings : [])
-    .filter((finding) => finding && finding.category !== 'observation')
-    .filter((finding) => String(finding?.title || finding?.detail || '').trim());
+    .filter((finding) => finding && String(finding.title || '').trim())
+    .filter((finding) => String(finding.detail || '').trim() || String(finding.recommendation || '').trim());
   // Combined-service visits carry companion sections. internalOnly ones are
   // STAFF-ONLY and must never print — the same rule the web report's print
   // stylesheet enforces via .companion-internal.
@@ -644,7 +662,7 @@ export default function ServiceReportDocument({ data, token }) {
 
         {/* Findings */}
         {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations
-          || mowing || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0
+          || mowing?.heightIn != null || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0
           || defenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
           <div className="doc-keep">
             <SectionHeader>What we found</SectionHeader>
@@ -743,7 +761,7 @@ export default function ServiceReportDocument({ data, token }) {
             {reentry?.irrigationReadyAt && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
-            {data.reportV2?.aftercare?.reentry && (
+            {hasRenderableTreatment && data.reportV2?.aftercare?.reentry && (
               <Bullet>{data.reportV2.aftercare.reentry}</Bullet>
             )}
           </div>
