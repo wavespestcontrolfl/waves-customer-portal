@@ -27,10 +27,14 @@ const TEMPLATE_KEYS = [
 ];
 
 const HUB = 'https://www.wavespestcontrol.com';
-const WATERING_URL = `${HUB}/lawn-care/overwatering-underwatering-lawn-southwest-florida/`;
+const WATERING_URL = `${HUB}/lawn-care/overwatering-lawn-vs-underwatering/`;
 const MOWING_URL = `${HUB}/lawn-care/mowing-height-by-grass-type/`;
 
-const MARKER = 'overwatering-underwatering-lawn-southwest-florida';
+// Identity is the block's EXACT content, never a separately-maintained
+// substring. An earlier version kept a MARKER slug constant here; when the
+// post was renamed, WATERING_URL moved and MARKER did not, so the idempotency
+// guard silently stopped matching and a second `up()` inserted the note twice.
+// One source of truth removes that whole class of drift.
 const BLOCK = {
   type: 'small_note',
   content: `Want the detail? [What overwatering and underwatering actually do to a Southwest Florida lawn](${WATERING_URL}) — and [the right mowing height for your grass type](${MOWING_URL}). Both cite University of Florida turf research.`,
@@ -53,7 +57,8 @@ exports.up = async function up(knex) {
 
     const blocks = asArray(version.blocks);
     if (!blocks.length) continue;
-    if (JSON.stringify(blocks).includes(MARKER)) continue; // already linked
+    // Already linked — compare against the exact block we would insert.
+    if (blocks.some((b) => b && b.type === BLOCK.type && b.content === BLOCK.content)) continue;
 
     // Sit ABOVE the standing footer note (the unsubscribe/restrictions small
     // print), so the reading suggestion reads as content rather than legal tail.
@@ -146,4 +151,4 @@ exports.down = async function down(knex) {
   }
 };
 
-exports.__private = { TEMPLATE_KEYS, BLOCK, MARKER, WATERING_URL, MOWING_URL };
+exports.__private = { TEMPLATE_KEYS, BLOCK, WATERING_URL, MOWING_URL };

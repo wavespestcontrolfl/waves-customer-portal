@@ -78,7 +78,7 @@ const fixture = () => ({
 
 describe('irrigation blog-link migration', () => {
   test('links both posts at their canonical hub URLs', () => {
-    expect(WATERING_URL).toBe('https://www.wavespestcontrol.com/lawn-care/overwatering-underwatering-lawn-southwest-florida/');
+    expect(WATERING_URL).toBe('https://www.wavespestcontrol.com/lawn-care/overwatering-lawn-vs-underwatering/');
     expect(MOWING_URL).toBe('https://www.wavespestcontrol.com/lawn-care/mowing-height-by-grass-type/');
     expect(TEMPLATE_KEYS).toHaveLength(6);
   });
