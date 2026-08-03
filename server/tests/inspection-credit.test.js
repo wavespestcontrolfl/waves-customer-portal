@@ -354,6 +354,22 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
   });
 });
 
+describe('closeout route wiring — source contracts (the completion route is too large to exercise here)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  it('the promise moment is the COMMITTED closeout instant, never the retry clock (pre-push P0)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // On a crash-resume, `record` is the previously committed service_records
+    // row; stamping the retry time instead would fail the ordering guard for
+    // any booking made between closeout and retry, permanently denying the
+    // promised credit (the offer would exist, so recovery adoption never runs).
+    expect(source).toContain("...(record?.created_at ? { now: new Date(record.created_at) } : {}),");
+    // And the expiry window stays anchored to the inspection's service date.
+    expect(source).toContain('...(inspectionMoment ? { windowAnchor: inspectionMoment } : {}),');
+  });
+});
+
 describe('kill-switch posture — what must keep working while dark', () => {
   it('records booking EVIDENCE while dark, so a later gate-on can honor it', async () => {
     mockGateOn = false;

@@ -6540,9 +6540,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           serviceRecordId: record.id,
           serviceKey: completionProfile?.serviceKey || null,
           createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,
-          // The promise is made NOW; the window is anchored to the
-          // inspection's service date (backdated closeouts must not get a
-          // fresh 30 days, but must also not back-date the ordering guard).
+          // The promise moment is when the completion COMMITTED —
+          // record.created_at — not when this code runs (pre-push P0): on a
+          // crash-resume the retry can be much later, and stamping the
+          // retry time would fail the ordering guard for any booking made
+          // in between, permanently denying the promised credit. The sweep
+          // then adopts such a booking from its in-window booking event.
+          // The window stays anchored to the inspection's service date
+          // (backdated closeouts must not get a fresh 30 days, but must
+          // also not back-date the ordering guard).
+          ...(record?.created_at ? { now: new Date(record.created_at) } : {}),
           ...(inspectionMoment ? { windowAnchor: inspectionMoment } : {}),
         });
       } catch (creditErr) {
