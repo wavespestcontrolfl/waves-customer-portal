@@ -2006,16 +2006,6 @@ const NEW_SUBJECT_LOOKAHEAD = 4;
 // object ("the snap and glue traps placed along the wall"), and the
 // passive/auxiliary forms of such clauses are already split by CLAUSE_AUX.
 const SUBJECT_PRONOUN = /^(?:we|i|they|she|he)$/i;
-// A FUTURE predicate after `and` starts its own clause even with no new
-// subject: "We checked the traps AND WILL RETURN next week" shares "we",
-// but the two halves are different tenses and only the second one is a
-// promise. Without this the clause stayed whole, and the clause-level
-// intent guard then exempted the real re-check claim sitting in front of
-// the future one — publishing "we checked the traps" on a declared setup
-// (pre-push audit P1). The scan stops at a re-check/predicate verb first,
-// so "were set and WERE CHECKED later" still stays joined and still
-// rejects — a past auxiliary continues the predicate, a modal replaces it.
-const FUTURE_SPLIT_TOKEN = /^(?:will|shall|scheduled|upcoming|planned)$/i;
 
 function splitOnPredicateAnd(piece) {
   const toks = words(piece);
@@ -2038,13 +2028,6 @@ function splitOnPredicateAnd(piece) {
     // it splits: "traps were checked and WE WILL return" must not let the
     // second clause's future marker excuse the first clause's claim.
     if (!splits && sawPronoun && CLAUSE_AUX.test(next)) splits = true;
-    // A future predicate after `and`, with or without a new subject.
-    if (!splits) {
-      for (let k = j; k < Math.min(j + 1 + NEW_SUBJECT_LOOKAHEAD, toks.length); k += 1) {
-        if (RECHECK_VERB.test(toks[k]) || PREDICATE_VERB.test(toks[k])) break;
-        if (FUTURE_SPLIT_TOKEN.test(toks[k])) { splits = true; break; }
-      }
-    }
     // With no pronoun, an auxiliary IMMEDIATELY after `and` is a
     // shared-subject verb phrase ("were set and were checked later") — that
     // window must stay joined so the participle still binds to its trap
@@ -2453,8 +2436,19 @@ function setupContradictions(text) {
   const str = String(text || '');
   const found = [];
   for (const clause of clauses(str)) {
-    if (FUTURE_INTENT_RE.test(clause)) continue; // an intention, not a claim
-    const hit = activeRecheckOnTrap(clause) || passiveRecheckOnTrap(clause);
+    // A future marker governs what comes AFTER it, so judge only the text
+    // in FRONT of it. Skipping the whole clause instead let a promise carry
+    // out a real claim standing beside it — "We checked the traps and will
+    // return next week" — and the first attempt at that (splitting the
+    // clause on a list of future tokens) held a SECOND list that had to
+    // agree with this one; "plan to" / "expect to" / "going to" were in the
+    // exemption but not the splitter, so the hole reopened one layer down
+    // (two consecutive pre-push P1s). Truncating here means there is one
+    // list and the two cannot drift.
+    const future = clause.match(FUTURE_INTENT_RE);
+    const judged = future ? clause.slice(0, future.index) : clause;
+    if (!judged.trim()) continue;
+    const hit = activeRecheckOnTrap(judged) || passiveRecheckOnTrap(judged);
     if (hit) found.push(`setup_recheck_claim:${hit.toLowerCase()}`);
     // The noun forms run per clause under the SAME intent guard as the verb
     // scans. Whole-string matching left them exposed to the tense hole the
@@ -2463,7 +2457,7 @@ function setupContradictions(text) {
     // traps next week" — a future promise, with a clean gap — would have
     // been read as a completed re-check by the pattern added for round 16.
     for (const rx of SETUP_RECHECK_NOUN_RES) {
-      const nounHit = clause.match(rx);
+      const nounHit = judged.match(rx);
       if (nounHit) found.push(`setup_recheck_claim:${nounHit[0].trim().toLowerCase()}`);
     }
   }

@@ -1604,9 +1604,19 @@ describe('completion-first `inspection of the traps` (round 16)', () => {
 describe('a future promise does not exempt the claim beside it', () => {
   const { setupContradictions } = require('../services/service-report/activity-indicators');
 
+  // EVERY FUTURE_INTENT_RE form, deliberately: the first fix carried a
+  // second list of future tokens for the splitter, and the forms present in
+  // one list but not the other reopened the same hole one layer down. The
+  // exemption is now a truncation driven by this one regex, so this loop is
+  // the contract that the two can no longer disagree.
   test('a real claim sharing a subject with a future predicate still rejects', () => {
     for (const text of [
       'We checked the traps and will return next week.',
+      'We checked the traps and plan to return next week.',
+      'We checked the traps and expect to return next week.',
+      'We checked the traps and are going to return next week.',
+      'We checked the traps and planning to return next week.',
+      'We checked the traps and due to return next week.',
       'Trap inspection completed today and follow-up scheduled next week.',
       'We inspected the traps and will be back Friday.',
       'Traps were checked and we will return next week.',
@@ -1625,6 +1635,8 @@ describe('a future promise does not exempt the claim beside it', () => {
   test('pure future promises stay legal', () => {
     for (const text of [
       'We will return to check the traps in one week.',
+      'We plan to check the traps next week.',
+      'We are going to inspect the traps on the follow-up.',
       'Traps are set and we will inspect the traps on the follow-up visit.',
       'We inspected the attic and will set traps next visit.',
       'We will complete an inspection of the traps next week.',
