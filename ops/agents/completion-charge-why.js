@@ -457,10 +457,18 @@ async function main() {
     //     itself, after the cap comparison.
     await checkLivePayer();
 
-    // 11. A recorded charge FAILURE. Every predicate can pass and the charge
-    //    still throw (processor decline, Stripe/config error, DB failure) —
-    //    the route logs charge_failed with this visit id.
+    // 11. The recorded charge OUTCOME. Every predicate can pass and the charge
+    //    still throw (processor decline, Stripe/config error, DB failure) — the
+    //    route logs charge_failed with this visit id. Only the LATEST terminal
+    //    outcome decides the verdict: a failure followed by a successful retry
+    //    is not a blocker, and reporting it as one would send an operator to
+    //    re-collect money already taken. Orphaned / reconciliation-flagged
+    //    failures are still surfaced even when superseded — they are a
+    //    bookkeeping problem a later success does not undo.
+    const TERMINAL = /^(charge|retry|manual_charge)/;
     let chargeFailure = null;
+    let chargeSuccess = null;
+    let supersededFlags = [];
     try {
       const { rows: logRows } = await client.query(
         `SELECT id, event_type, amount_cents, created_at, details
@@ -478,7 +486,15 @@ async function main() {
           const d = parseNotes(l.details);
           console.log(`  ${l.created_at.toISOString()}  ${l.event_type}  source=${d.source || '?'}  ${d.error ? `error=${d.error}` : ''}`);
         }
-        chargeFailure = logRows.find((l) => String(l.event_type).includes('failed')) || null;
+        // logRows is newest-first, so the first terminal row IS the outcome.
+        const latest = logRows.find((l) => TERMINAL.test(String(l.event_type)));
+        if (latest && String(latest.event_type).includes('failed')) chargeFailure = latest;
+        else if (latest) chargeSuccess = latest;
+        // Unresolved bookkeeping on any earlier failure still matters.
+        supersededFlags = logRows
+          .filter((l) => l !== latest && String(l.event_type).includes('failed'))
+          .map((l) => ({ l, d: parseNotes(l.details) }))
+          .filter(({ d }) => d.orphaned || d.reconciliation_required);
       }
     } catch (e) {
       say(UNKNOWN, `autopay_log not readable (${e.message})`,
@@ -490,6 +506,13 @@ async function main() {
         `every eligibility predicate passed and the charge itself failed: ${d.error || 'no error recorded'}`
         + `${d.orphaned ? ' — ORPHANED: Stripe charged but the DB write failed, reconcile immediately.' : ''}`
         + `${d.reconciliation_required ? ' — reconciliation_required flagged.' : ''}`);
+    } else if (chargeSuccess) {
+      say(INFO, `charge SUCCEEDED (${chargeSuccess.event_type}, ${chargeSuccess.created_at.toISOString()})`,
+        'the latest terminal outcome for this visit is a success — the card WAS charged. Any earlier failure above was superseded by a retry.');
+    }
+    for (const { l, d } of supersededFlags) {
+      say(INFO, `superseded failure at ${l.created_at.toISOString()} still carries an unresolved flag`,
+        `${d.orphaned ? 'ORPHANED (Stripe charged, DB write failed) ' : ''}${d.reconciliation_required ? 'reconciliation_required ' : ''}— a later success does not clear this; reconcile the ledger.`);
     }
 
     // 12. Office bells — the free discriminator between "lane never engaged"
