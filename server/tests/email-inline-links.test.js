@@ -87,6 +87,52 @@ describe('inline markdown links in blocks', () => {
     expect(out.text).not.toContain('[the guide]');
   });
 
+  test('a PAYLOAD value cannot inject a link (codex #3167 P1)', () => {
+    // Payload values are customer-influenced. If substitution ran before
+    // linkifying, a name or note containing markdown-link syntax would become
+    // a live anchor in an outgoing email.
+    const template = {
+      id: 't1', template_key: 'test.inject', mode: 'service',
+      allowed_variables: ['first_name'], required_variables: [],
+      from_name: 'Waves Pest Control', from_email: 'contact@wavespestcontrol.com',
+    };
+    const version = {
+      id: 'v1', subject: 'S', preview_text: 'P',
+      blocks: [{ type: 'paragraph', content: 'Hello {{first_name}}.' }], text_body: '',
+    };
+    const out = EmailTemplates.renderTemplate({
+      template, version,
+      payload: { first_name: '[click me](https://evil.example.com/steal)' },
+    });
+    const body = markup(out.html);
+    expect(body).not.toContain('evil.example.com/steal"');
+    expect(body).not.toMatch(/<a[^>]*evil\.example\.com/);
+    // It survives as inert escaped text.
+    expect(body).toContain('[click me]');
+  });
+
+  test('a payload value cannot smuggle a link into the TEXT part either', () => {
+    const template = {
+      id: 't1', template_key: 'test.inject2', mode: 'service',
+      allowed_variables: ['note'], required_variables: [],
+      from_name: 'Waves Pest Control', from_email: 'contact@wavespestcontrol.com',
+    };
+    const version = {
+      id: 'v1', subject: 'S', preview_text: 'P',
+      blocks: [{ type: 'paragraph', content: '{{note}}' }], text_body: '',
+    };
+    const out = EmailTemplates.renderTemplate({
+      template, version, payload: { note: '[x](https://evil.example.com/a)' },
+    });
+    // Unchanged — not rewritten into "x (url)" as an authored link would be.
+    expect(out.text).toContain('[x](https://evil.example.com/a)');
+  });
+
+  test('a variable inside an AUTHORED link label still resolves', () => {
+    const body = markup(render('Read [the {{url}} guide](https://www.wavespestcontrol.com/a/).').html);
+    expect(body).toContain('href="https://www.wavespestcontrol.com/a/"');
+  });
+
   test('content without link syntax produces no block anchor', () => {
     // Scoped to dm-link: the chrome (logo, footer, app badges) has its own
     // anchors, so a bare '<a ' assertion would always fail.

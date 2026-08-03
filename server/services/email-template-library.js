@@ -105,29 +105,52 @@ function textFor(payload, key) {
 // text — until now the ONLY way to put a link in a template was a cta block,
 // which renders as a full-width gold bar. That is right for the primary
 // action and much too heavy for "here's the background reading". This adds
-// the inline option without loosening escaping: the whole string is escaped
-// FIRST, then only this exact pattern is turned back into an anchor, and the
-// href still goes through safeUrl (so javascript:/data: collapse to '#').
-// Anchors carry dm-link so they stay legible on the dark card.
+// the inline option without loosening escaping.
 //
-// The plain-text arm renders "label (url)" — a text-part reader needs the
-// destination, not a dangling label.
+// CRITICAL ORDERING (codex #3167 P1): links are extracted from the RAW
+// TEMPLATE text BEFORE {{variable}} substitution, so ONLY author-authored
+// markdown can become an anchor. Payload values are customer-influenced — a
+// name, a note, a service label — and if substitution ran first, a value
+// containing [x](https://evil) would inject a live link into an outgoing
+// email. Payload text is escaped and stays inert no matter what it contains.
+//
+// The href likewise comes from the template, never from a substituted value,
+// and still goes through safeUrl so javascript:/data: collapse. Anchors carry
+// dm-link so they stay legible on the dark card. The plain-text arm renders
+// "label (url)" — a text-part reader needs the destination, not a bare label.
 const MD_LINK_RE = /\[([^\]\n]+)\]\((\S+?)\)/g;
-
-function linkifyEscaped(escaped) {
-  return escaped.replace(MD_LINK_RE, (whole, label, rawHref) => {
-    // The href was escaped along with everything else; undo the two entities
-    // that legitimately occur in a URL before validating it.
-    const href = safeUrl(rawHref.replace(/&amp;/g, '&').replace(/&#39;/g, "'"));
-    if (!href || href === '#') return whole;
-    return `<a class="dm-link" href="${escapeHtml(href)}" target="_blank" rel="noopener" style="color:#0A7EC2;text-decoration:underline;">${label}</a>`;
-  });
-}
+// U+0000 cannot appear in template or payload text, so it is a safe fence.
+const LINK_SLOT = (i) => `\u0000L${i}\u0000`;
 
 function renderInline(text, payload, { html = true } = {}) {
-  const rendered = String(text || '').replace(VARIABLE_RE, (_, key) => textFor(payload, key));
-  if (!html) return rendered.replace(MD_LINK_RE, (_w, label, href) => `${label} (${href})`);
-  return linkifyEscaped(escapeHtml(rendered));
+  const raw = String(text || '');
+
+  // 1. Lift author-authored links out of the raw template, leaving fences.
+  const links = [];
+  const fenced = raw.replace(MD_LINK_RE, (whole, label, href) => {
+    const safe = safeUrl(href);
+    if (!safe || safe === '#') return whole; // unusable scheme → inert text
+    links.push({ label, href: safe });
+    return LINK_SLOT(links.length - 1);
+  });
+
+  // 2. Substitute variables and escape. Anything a payload contributes is
+  //    escaped here and can no longer be re-read as link syntax.
+  const substituted = fenced.replace(VARIABLE_RE, (_, key) => textFor(payload, key));
+  if (!html) {
+    return substituted.replace(/\u0000L(\d+)\u0000/g, (_m, i) => {
+      const l = links[Number(i)];
+      return l ? `${l.label} (${l.href})` : '';
+    });
+  }
+  const escaped = escapeHtml(substituted);
+
+  // 3. Put the anchors back. Labels are escaped; hrefs came from the template.
+  return escaped.replace(/\u0000L(\d+)\u0000/g, (_m, i) => {
+    const l = links[Number(i)];
+    if (!l) return '';
+    return `<a class="dm-link" href="${escapeHtml(l.href)}" target="_blank" rel="noopener" style="color:#0A7EC2;text-decoration:underline;">${escapeHtml(l.label)}</a>`;
+  });
 }
 
 function extractVariables(input, out = new Set()) {
