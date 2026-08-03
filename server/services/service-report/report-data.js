@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
+const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -1978,6 +1979,41 @@ async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false
 // checks into the attachment.
 const PIN_NO_ASSESSMENT = 'none';
 
+// Persist the week's weather so a report token stops restating its rainfall
+// (owner ruling 2026-08-03).
+//
+// FIRST WRITER WINS, enforced in the UPDATE predicate rather than by a
+// read-then-write: a live view and a PDF render can render the same record
+// concurrently, and with a provider mid-flip they can resolve DIFFERENT weeks.
+// A read-modify-write would let the later one overwrite the value the customer
+// was already shown — the exact drift this exists to stop. The `?` guard means
+// at most one write per record, ever.
+//
+// Atomic jsonb merge, never a whole-column rewrite: structured_notes carries
+// completion SMS state and the frozen lawn synthesis, and a read-modify-write
+// here would clobber a concurrent write to those.
+//
+// Best-effort by design. A failed freeze must not fail a report view; the next
+// render simply tries again.
+async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
+  if (!serviceRecordId || !weekWeather) return false;
+  try {
+    const updated = await knex('service_records')
+      .where({ id: serviceRecordId })
+      .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather' IS NULL")
+      .update({
+        structured_notes: knex.raw(
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+          [JSON.stringify({ lawnWeekWeather: weekWeather })],
+        ),
+      });
+    return updated > 0;
+  } catch (err) {
+    logger.warn(`[report-data] lawn week-weather freeze failed for ${serviceRecordId}: ${err.message}`);
+    return false;
+  }
+}
+
 async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null } = {}) {
   if (serviceLine !== 'lawn') return null;
   // Pinned-empty is unconditional: the attachment provably carries no lawn
@@ -2147,21 +2183,57 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   let completionDailyRain = null;
   let completionRainConfidence = null;
   let completionRainSource = null;
-  try {
-    const weekWeather = await fetchServiceWeekWeather({
-      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
-      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
-      serviceDate: assessment.service_date,
-    });
-    completionRainfall7dInches = weekWeather.rainInches;
-    completionEt0Inches = weekWeather.et0Inches;
-    completionDailyRain = weekWeather.dailyRain;
-    // 'low' when the pinpoint week was a single-cell model spike and we fell back to
-    // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
-    completionRainConfidence = weekWeather.rainConfidence;
-    // Which provider actually supplied it — drives the customer-facing Source row.
-    completionRainSource = weekWeather.rainSource;
-  } catch (e) { /* non-blocking */ }
+  // FROZEN AT FIRST RENDER (owner ruling 2026-08-03).
+  //
+  // Keying the fetch to the service date already made this stable across
+  // renders — but only while the ANSWER for that date stayed the same. Flipping
+  // GATE_RAIN_MRMS changed the provider underneath, and issued reports silently
+  // restated their rainfall: one live token went 1.15" to 3.23" for a visit that
+  // happened days earlier. A report token is a permanent, shareable customer
+  // document; a customer reopening last week's report must not find different
+  // numbers than the ones they were sent.
+  //
+  // So the first successful render freezes the week's weather onto the record
+  // and every later render replays it. Lazy rather than written at completion,
+  // because that also settles the reports already issued: each one freezes at
+  // its next view instead of continuing to drift with the provider.
+  const frozenWeekWeather = parseJsonObject(service.structured_notes).lawnWeekWeather || null;
+  if (frozenWeekWeather && typeof frozenWeekWeather === 'object') {
+    completionRainfall7dInches = frozenWeekWeather.rainInches ?? null;
+    completionEt0Inches = frozenWeekWeather.et0Inches ?? null;
+    completionDailyRain = Array.isArray(frozenWeekWeather.dailyRain) ? frozenWeekWeather.dailyRain : null;
+    completionRainConfidence = frozenWeekWeather.rainConfidence ?? null;
+    completionRainSource = frozenWeekWeather.rainSource ?? null;
+  } else {
+    try {
+      const weekWeather = await fetchServiceWeekWeather({
+        latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+        longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+        serviceDate: assessment.service_date,
+      });
+      completionRainfall7dInches = weekWeather.rainInches;
+      completionEt0Inches = weekWeather.et0Inches;
+      completionDailyRain = weekWeather.dailyRain;
+      // 'low' when the pinpoint week was a single-cell model spike and we fell back to
+      // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
+      completionRainConfidence = weekWeather.rainConfidence;
+      // Which provider actually supplied it — drives the customer-facing Source row.
+      completionRainSource = weekWeather.rainSource;
+      // Freeze only a week we actually resolved. Persisting a null would lock in
+      // "no rainfall known" forever, turning a transient provider outage into a
+      // permanently blank water card.
+      if (completionRainfall7dInches != null) {
+        await freezeLawnWeekWeather(service.id, {
+          rainInches: completionRainfall7dInches,
+          et0Inches: completionEt0Inches,
+          dailyRain: completionDailyRain,
+          rainConfidence: completionRainConfidence,
+          rainSource: completionRainSource,
+          frozenAt: new Date().toISOString(),
+        }, knex);
+      }
+    } catch (e) { /* non-blocking */ }
+  }
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,
@@ -3844,6 +3916,7 @@ module.exports = {
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,
   resolveCanonicalLawnRender,
+  freezeLawnWeekWeather,
   LAWN_RENDER_STRATEGY,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
