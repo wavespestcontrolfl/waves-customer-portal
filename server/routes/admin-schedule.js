@@ -3683,6 +3683,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
       }
     } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
 
+    // Inspection credit redemption (dark behind GATE_INSPECTION_CREDIT).
+    // This is the "booked within N days" half of the promise: an open,
+    // unexpired offer mints account credit now, which the normal auto-apply
+    // machinery puts against this booking's invoice. Runs on the FIRST
+    // created appointment only — a recurring series is one booking, not one
+    // redemption per visit. Best-effort: a booking must never fail because
+    // crediting failed, and the service never throws.
+    if (createdAppointments.length) {
+      try {
+        const InspectionCredit = require('../services/inspection-credit');
+        const first = createdAppointments[0];
+        await InspectionCredit.redeemInspectionCreditForBooking({
+          customerId,
+          scheduledServiceId: first.id,
+          createdBy: `admin:${req.technician?.name || req.technicianId || 'unknown'}`,
+        });
+      } catch (e) {
+        logger.error(`[schedule] inspection credit redemption failed: ${e.message}`);
+      }
+    }
+
     // The appointment(s), any prepayment, and all reminder rows are committed at
     // this point — respond immediately so the admin UI isn't held on "Saving…"
     // while the remaining best-effort side-effects run. Everything in the

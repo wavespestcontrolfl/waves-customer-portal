@@ -3566,7 +3566,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       typedPhotoSummary = null,
       zoneShapes = null,            // satellite zone marks [{ areaLabel, shape }] — OPTIONAL
       termiteStations = null,       // bait station pins/status [{ id?, shape?, status?, retire? }] — OPTIONAL
+      // Inspection credit — DEFAULT ON (owner ruling): an inspection closes
+      // out carrying the credit promise unless the tech explicitly clears
+      // the box. Absent/undefined therefore means ON, and only an explicit
+      // `false` opts out; the rail itself still checks the gate and that
+      // the visit is actually an inspection.
+      offerInspectionCredit = true,
     } = req.body;
+    if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
+      return res.status(400).json({ error: 'offerInspectionCredit must be a boolean' });
+    }
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
         error: `visitOutcome must be one of: ${Array.from(VALID_VISIT_OUTCOMES).join(', ')}`,
@@ -7094,6 +7103,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let invoiceCreated = false;
     let payUrl = null;
     let invoice = null;
+    // Recorded inspection-credit promise (null unless this closeout made
+    // one) — carried to the receipt so the customer is told the terms that
+    // were actually frozen, never a re-derived guess.
+    let inspectionCreditOffer = null;
     let alreadyPaid = false;
     let paymentCollectionSuppressed = false;
     let paymentReconciliationRequired = false;
@@ -7848,6 +7861,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           adoptedConcurrentInvoice = minted.reused === true;
         } else {
           invoice = await InvoiceService.createFromService(record.id, mintOptions);
+        }
+        // Inspection credit promise (dark behind GATE_INSPECTION_CREDIT).
+        // Recorded here, beside the invoice that carries its receipt copy —
+        // and it records the PROMISE only: no money moves until the customer
+        // actually books. Best-effort by contract: the service never throws,
+        // so a credit hiccup can't fail a completion the tech already did.
+        if (offerInspectionCredit && String(completionProfile?.category || '') === 'inspection') {
+          try {
+            const InspectionCredit = require('../services/inspection-credit');
+            inspectionCreditOffer = await InspectionCredit.recordInspectionCreditOffer({
+              customerId: svc.customer_id,
+              scheduledServiceId: svc.id,
+              serviceRecordId: record.id,
+              serviceKey: completionProfile?.serviceKey || null,
+              createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,
+            });
+          } catch (creditErr) {
+            logger.error(`[dispatch] inspection credit offer failed for ${svc.id}: ${creditErr.message}`);
+          }
         }
         // An adopted concurrent invoice was minted by another writer — the
         // claimed setup fee did NOT ride it; restore the claim (guarded on
