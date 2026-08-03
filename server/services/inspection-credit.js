@@ -35,10 +35,26 @@ const NON_LIVE_APPOINTMENT_STATUSES = Object.freeze([
   'cancelled', 'canceled', 'rescheduled', 'skipped', 'no_show',
 ]);
 
-// Owner ruling 2026-08-02. Per-service overrides come from pricing_config
+// Owner ruling 2026-08-03. Per-service overrides come from pricing_config
 // (rodent_inspection.creditable_within_days is the existing precedent at 14)
 // — this is only the fallback when a service carries no window of its own.
 const DEFAULT_CREDIT_WINDOW_DAYS = 30;
+
+/**
+ * The FLAT credit an inspection earns — owner ruling 2026-08-03: worth this
+ * amount whatever the inspection was actually billed at, so a comped or
+ * discounted inspection still earns the full credit. pricing_config is
+ * authoritative (db-bridge overlays constants.INSPECTION_CREDIT); the
+ * in-code default only covers a fresh env with no row.
+ */
+function configuredCreditAmount() {
+  try {
+    const { INSPECTION_CREDIT } = require('./pricing-engine/constants');
+    const amount = Number(INSPECTION_CREDIT?.amount);
+    if (Number.isFinite(amount) && amount > 0) return round2(amount);
+  } catch { /* fall through */ }
+  return 75;
+}
 
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
@@ -62,11 +78,15 @@ function gateOn() {
  */
 function creditWindowDaysForServiceKey(serviceKey) {
   try {
-    const { RODENT } = require('./pricing-engine/constants');
+    const { RODENT, INSPECTION_CREDIT } = require('./pricing-engine/constants');
+    // A service with its own creditable window keeps it (rodent's 14 days
+    // is the existing live precedent).
     if (String(serviceKey || '') === 'rodent_inspection') {
       const days = Number(RODENT?.inspection?.creditableWithinDays);
       if (Number.isFinite(days) && days > 0) return Math.round(days);
     }
+    const configured = Number(INSPECTION_CREDIT?.creditableWithinDays);
+    if (Number.isFinite(configured) && configured > 0) return Math.round(configured);
   } catch { /* fall through to the default */ }
   return DEFAULT_CREDIT_WINDOW_DAYS;
 }
@@ -76,17 +96,19 @@ function creditWindowDaysForServiceKey(serviceKey) {
  * failure here must NEVER fail the completion — the visit is done and the
  * tech is standing in the driveway. Returns a result object, never throws.
  *
- * `amount` is what the customer is actually being charged for the
- * inspection. A zero/absent amount records NO offer: crediting money we
- * never billed would mint real dollars out of nothing (same fail-closed
- * posture as the fee rails).
+ * The credit is the FLAT configured amount (owner ruling 2026-08-03) — NOT
+ * what the inspection was billed at, so a comped or discounted inspection
+ * still earns the full credit. `amount` is an explicit override for callers
+ * that need one; everything else takes the configured value. It is frozen
+ * onto the row here, so a later config change never moves a promise that
+ * has already been made to a customer.
  */
 async function recordInspectionCreditOffer({
   customerId,
   scheduledServiceId,
   serviceRecordId = null,
   serviceKey = null,
-  amount,
+  amount = null,
   createdBy = 'system:inspection_closeout',
   now = new Date(),
 }) {
@@ -94,9 +116,11 @@ async function recordInspectionCreditOffer({
   if (!customerId || !scheduledServiceId) {
     return { recorded: false, reason: 'missing_identifiers' };
   }
-  const frozenAmount = round2(amount);
+  const frozenAmount = amount != null ? round2(amount) : configuredCreditAmount();
   if (!(frozenAmount > 0)) {
-    return { recorded: false, reason: 'no_billable_amount' };
+    // Only reachable if the configured amount is misconfigured to 0 — a
+    // zero credit is not a promise worth recording.
+    return { recorded: false, reason: 'no_credit_amount' };
   }
 
   const windowDays = creditWindowDaysForServiceKey(serviceKey);
@@ -247,6 +271,7 @@ function inspectionCreditReceiptMemo({ amount, windowDays } = {}) {
 
 module.exports = {
   recordInspectionCreditOffer,
+  configuredCreditAmount,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
   creditWindowDaysForServiceKey,

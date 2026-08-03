@@ -68,26 +68,27 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
   it('is inert while the gate is dark', async () => {
     mockGateOn = false;
     const res = await recordInspectionCreditOffer({
-      customerId: 'cust-1', scheduledServiceId: 'svc-1', amount: 75,
+      customerId: 'cust-1', scheduledServiceId: 'svc-1',
     });
     expect(res).toEqual({ recorded: false, reason: 'feature_disabled' });
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
-  it('records NO offer without a billable amount — never credit money we did not bill', async () => {
-    for (const amount of [0, null, undefined, -75, 'free']) {
-      const res = await recordInspectionCreditOffer({
-        customerId: 'cust-1', scheduledServiceId: 'svc-1', amount,
-      });
-      expect(res.recorded).toBe(false);
-      expect(res.reason).toBe('no_billable_amount');
-    }
+  it('credits the FLAT configured amount, not what the inspection was billed (owner ruling 2026-08-03)', async () => {
+    // A comped or discounted inspection still earns the full credit — the
+    // promise is "the inspection is worth $75 toward service", not a refund
+    // of what was paid. No amount is passed: config decides.
+    const res = await recordInspectionCreditOffer({
+      customerId: 'cust-1', scheduledServiceId: 'svc-1',
+    });
+    expect(res.recorded).toBe(true);
+    expect(res.amount).toBe(75);
   });
 
   it('freezes the amount and expiry, and mints NOTHING at closeout', async () => {
     const now = new Date('2026-08-03T12:00:00Z');
     const res = await recordInspectionCreditOffer({
-      customerId: 'cust-1', scheduledServiceId: 'svc-1', amount: 75, now,
+      customerId: 'cust-1', scheduledServiceId: 'svc-1', now,
     });
     expect(res.recorded).toBe(true);
     expect(res.amount).toBe(75);
@@ -102,7 +103,7 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
     mockInsertResult = []; // unique conflict → ignored
     mockOffers = [{ id: 'offer-existing', amount: '75.00', expires_at: new Date('2026-09-01'), status: 'offered' }];
     const res = await recordInspectionCreditOffer({
-      customerId: 'cust-1', scheduledServiceId: 'svc-1', amount: 999,
+      customerId: 'cust-1', scheduledServiceId: 'svc-1',
     });
     expect(res.recorded).toBe(false);
     expect(res.reason).toBe('already_offered');
@@ -114,7 +115,7 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
     const db = require('../models/db');
     db.mockImplementationOnce(() => { throw new Error('db down'); });
     const res = await recordInspectionCreditOffer({
-      customerId: 'cust-1', scheduledServiceId: 'svc-1', amount: 75,
+      customerId: 'cust-1', scheduledServiceId: 'svc-1',
     });
     expect(res.recorded).toBe(false);
     expect(res.reason).toBe('error');
@@ -181,6 +182,17 @@ describe('window + receipt copy', () => {
     expect(creditWindowDaysForServiceKey('rodent_inspection')).toBeGreaterThan(0);
     expect(creditWindowDaysForServiceKey('wdo_inspection')).toBe(DEFAULT_CREDIT_WINDOW_DAYS);
     expect(creditWindowDaysForServiceKey(null)).toBe(DEFAULT_CREDIT_WINDOW_DAYS);
+  });
+
+  it('validates the admin-editable credit like every other money config', () => {
+    const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+    expect(validatePricingConfigData('inspection_credit', { amount: 75, creditableWithinDays: 30 }).ok).toBe(true);
+    expect(validatePricingConfigData('inspection_credit', { amount: 750, creditableWithinDays: 30 }).ok).toBe(false);
+    expect(validatePricingConfigData('inspection_credit', { amount: 0, creditableWithinDays: 30 }).ok).toBe(false);
+    expect(validatePricingConfigData('inspection_credit', { amount: 75.001, creditableWithinDays: 30 }).ok).toBe(false);
+    expect(validatePricingConfigData('inspection_credit', { amount: 75, creditableWithinDays: 0 }).ok).toBe(false);
+    expect(validatePricingConfigData('inspection_credit', { amount: 75, creditableWithinDays: 400 }).ok).toBe(false);
+    expect(validatePricingConfigData('inspection_credit', { amount: 75, creditableWithinDays: 1.5 }).ok).toBe(false);
   });
 
   it('states the exact promise, and says nothing when there is nothing to promise', () => {
