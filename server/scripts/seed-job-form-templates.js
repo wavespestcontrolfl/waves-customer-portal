@@ -112,7 +112,11 @@ const TEMPLATES = [
           sel('density', 'Turf density', ['Thick', 'Medium', 'Thin — overseed recommended', 'Bare spots']),
           sel('weed_pressure', 'Weed pressure', ['None', 'Light', 'Moderate', 'Heavy']),
           ms('disease_symptoms', 'Disease / issues',
-            ['None', 'Brown patch', 'Dollar spot', 'Gray leaf spot', 'Take-all root rot', 'Chinch bug damage', 'Sod webworm', 'Mole cricket activity']),
+            // Large patch is the warm-season name for this disease and the
+            // standard token across the catalog and completion chips. This
+            // seed upserts on every re-run, so the retired cool-season
+            // spelling here would keep reappearing in service reports.
+            ['None', 'Large patch', 'Dollar spot', 'Gray leaf spot', 'Take-all root rot', 'Chinch bug damage', 'Sod webworm', 'Mole cricket activity']),
           sel('soil_moisture_level', 'Soil moisture', ['Dry', 'Moderate', 'Wet — hold off irrigation']),
         ],
       },
