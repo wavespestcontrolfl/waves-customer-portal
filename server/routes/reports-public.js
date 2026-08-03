@@ -129,6 +129,9 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const { stripFixedReentryTiming } = require('../services/social-media');
+// The approved idiom that replaces a stripped fixed-timing clause.
+const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -287,6 +290,32 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // precedent of PDFs keeping the plain recap.
   if (mode !== 'live') data.techVisitCard = false;
 
+  // COMPLIANCE, applied ONCE at the payload boundary for the printed record.
+  // AGENTS.md bans fixed drying/re-entry figures on customer surfaces, and
+  // label-derived catalog copy is unconstrained free text that can carry
+  // them. Reuses stripFixedReentryTiming — the SAME clause-level rule (and
+  // regression matrix) validateContent enforces for social copy — so this
+  // has one definition instead of a second, weaker one per renderer. It is
+  // clause-level on purpose: "keep pets off treated areas for 30 minutes and
+  // avoid watering for 24 hours" loses the re-entry clause and KEEPS the
+  // agronomic one.
+  //
+  // Scoped to non-live modes deliberately: the interactive report's own
+  // re-entry copy is a separate remediation item for the owner to rule on,
+  // and changing shipped customer-facing copy is not this PR's call.
+  if (mode !== 'live') {
+    const strip = (value) => stripFixedReentryTiming(value, REENTRY_SAFE_COPY).text;
+    (data.applications || []).forEach((app) => {
+      if (!app?.product) return;
+      if (app.product.precaution_summary) app.product.precaution_summary = strip(app.product.precaution_summary);
+      if (app.product.reentry_summary) app.product.reentry_summary = strip(app.product.reentry_summary);
+    });
+    if (data.reportV2?.aftercare?.reentry) {
+      data.reportV2.aftercare.reentry = strip(data.reportV2.aftercare.reentry);
+    }
+    if (data.advisory?.pet_advisory) data.advisory.pet_advisory = strip(data.advisory.pet_advisory);
+  }
+
   // buildPestPressureCustomerView returns null only when Pest Pressure
   // is hidden from the customer (feature disabled, showOnCustomerReport
   // off, service_line outside allow list, or requireRecurringFrequency
@@ -437,6 +466,19 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
       });
       if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
     } catch { /* best-effort — never block the report */ }
+  }
+
+  // The re-entry context is assembled after the block above, so its
+  // persisted free text (customerSummary, petAdvisory) gets the same
+  // clause-level compliance pass here — same rule, one definition.
+  if (mode !== 'live' && dynamicContext?.reentry) {
+    const strip = (value) => stripFixedReentryTiming(value, REENTRY_SAFE_COPY).text;
+    if (dynamicContext.reentry.customerSummary) {
+      dynamicContext.reentry.customerSummary = strip(dynamicContext.reentry.customerSummary);
+    }
+    if (dynamicContext.reentry.petAdvisory) {
+      dynamicContext.reentry.petAdvisory = strip(dynamicContext.reentry.petAdvisory);
+    }
   }
 
   if (suppressedTypedReport(service)) {

@@ -447,6 +447,50 @@ function complianceOverclaims(text) {
   }
   return issues;
 }
+/**
+ * Strips fixed drying/re-entry timing from label-derived copy, reusing the
+ * SAME clause-level rule validateContent enforces (and the same regression
+ * matrix in social-validate-safety-claims.test.js) so compliance copy has one
+ * definition rather than a second, weaker one per surface.
+ *
+ * Clause-level on purpose: "keep pets off treated areas for 30 minutes, and
+ * avoid watering for 24 hours" must lose the first clause and KEEP the
+ * agronomic second. Clauses exempt under AGRONOMIC_EXEMPT_RE (watering,
+ * mowing, fertilizing windows) are always preserved.
+ *
+ * Returns { text, changed }. `text` is '' only when every clause was stripped
+ * and no replacement was supplied.
+ */
+function stripFixedReentryTiming(value, replacement = '') {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return { text: '', changed: false };
+  let changed = false;
+  const keptSentences = [];
+  for (const sentence of raw.split(/(?<=[.!?])\s+/)) {
+    if (!sentence.trim()) continue;
+    const parts = sentence.split(/([,;]+|\s+(?:and|but|while|then)\s+)/i);
+    const keptClauses = [];
+    for (let i = 0; i < parts.length; i += 2) {
+      const clause = parts[i];
+      if (clause == null || !clause.trim()) continue;
+      if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
+        && !AGRONOMIC_EXEMPT_RE.test(clause)) {
+        changed = true;
+        continue;
+      }
+      keptClauses.push(clause.trim());
+    }
+    if (keptClauses.length) {
+      let rebuilt = keptClauses.join('. ').replace(/\s+/g, ' ').trim();
+      if (rebuilt && !/[.!?]$/.test(rebuilt)) rebuilt += '.';
+      keptSentences.push(rebuilt.charAt(0).toUpperCase() + rebuilt.slice(1));
+    }
+  }
+  const kept = keptSentences.join(' ').trim();
+  if (!changed) return { text: raw, changed: false };
+  return { text: [replacement, kept].filter(Boolean).join(' ').trim(), changed: true };
+}
+
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
 const KNOWN_PHONES = new Set();
@@ -2406,6 +2450,10 @@ function isImageHostingConfigured() {
 
 module.exports = SocialMediaService;
 module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
+// Shared compliance stripper (defined above). Must be assigned AFTER the
+// `module.exports = SocialMediaService` reassignment on the line above, which
+// discards any property set earlier in the file.
+module.exports.stripFixedReentryTiming = stripFixedReentryTiming;
 module.exports.isPausedByAdmin = isPausedByAdmin;
 module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
 module.exports.validateContent = validateContent;

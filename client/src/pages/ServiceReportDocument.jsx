@@ -228,9 +228,13 @@ const REENTRY_CLAIM_RX = new RegExp(
 );
 const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 
-// Sanitizes per SENTENCE so one offending clause never costs the rest of a
-// label's instructions. Runs ONLY on re-entry fields; agronomic guidance in
-// aftercare.watering and the recommendations list is never touched.
+// DEFENCE IN DEPTH ONLY. Compliance is now enforced server-side at the
+// payload boundary (reports-public.js) with stripFixedReentryTiming — the
+// same clause-level rule and regression matrix validateContent uses for
+// social copy. Five rounds of tuning a second, weaker rule here is what made
+// that consolidation necessary; this local pass stays as a backstop for any
+// path that reaches the document without going through that boundary, and
+// must never become the primary enforcement point again.
 function sanitizeReentryCopy(value) {
   const text = String(value || '').trim();
   if (!text) return '';
