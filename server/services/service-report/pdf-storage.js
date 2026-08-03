@@ -25,7 +25,11 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // mode, accordion "Details" chrome and the shell skip-link are print-hidden,
 // product cards keep together across page breaks; cached PDFs would keep the
 // old junk chrome without a re-render.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p2-print-clean-20260802';
+// 20260803: product-purpose copy now follows the recorded pest identity
+// (product name / technician targets) instead of equipment keywords — cached
+// PDFs would keep captioning cockroach gel as ant bait and fogged roach
+// products as mosquito applications without a re-render.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p3-product-purpose-20260803';
 
 const s3 = new S3Client({
   region: config.s3?.region,
