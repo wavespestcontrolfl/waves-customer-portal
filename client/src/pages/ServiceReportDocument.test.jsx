@@ -708,6 +708,23 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain('—');
   });
 
+  it('sanitizes a ready-at clock time coming through the re-entry summary', () => {
+    // buildReentrySummary emits "<area> ready at 7:03 PM" while the window is open
+    const data = {
+      ...BASE_DATA,
+      dynamicContext: { reentry: { customerSummary: 'Exterior ready at 7:03 PM.', targets: [{ key: 'exterior', label: 'Exterior', durationMin: 30, readyAt: '2026-08-02T23:03:00.000Z' }] } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toMatch(/7:03 PM/);
+    expect(container.textContent).not.toMatch(/ready at \d/i);
+    expect(container.textContent).toMatch(/ready once dry/);
+    cleanup();
+
+    // the no-pending variant carries no time and passes through unchanged
+    const done = render(<ServiceReportDocument data={{ ...BASE_DATA, dynamicContext: { reentry: { customerSummary: 'Treated areas are ready for normal use.', targets: [] } } }} token="t" />);
+    expect(done.container.textContent).toMatch(/ready for normal use/);
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();

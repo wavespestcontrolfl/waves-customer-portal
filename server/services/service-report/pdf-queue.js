@@ -246,7 +246,11 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   // the expected key must match what renderAndStore writes.
   const service = await knex('service_records')
     .where({ id: recordId })
-    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
+    // customer_id is REQUIRED by stationMapPdfSignature — without it the
+    // signature silently returns '' here while renderAndStore (which loads
+    // service_records.*) writes a key containing -sm..., so expected and
+    // stored keys could never match and every email would re-render.
+    .first('id', 'customer_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public

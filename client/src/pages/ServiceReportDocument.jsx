@@ -500,6 +500,13 @@ export default function ServiceReportDocument({ data, token }) {
     && data.pestPressure.label
     ? data.pestPressure : null;
 
+  // COMPLIANCE: never let a computed ready-at clock time through, whatever
+  // field carries it (see reentryTargetLine).
+  const rawReentrySummary = String(reentry?.customerSummary || '').trim();
+  const reentrySummary = rawReentrySummary && !/\d{1,2}:\d{2}\s*(am|pm)/i.test(rawReentrySummary)
+    ? rawReentrySummary
+    : (rawReentrySummary ? 'Treated areas are ready once dry — your technician confirms timing.' : '');
+
   const concern = data.customerConcernCard || v2Concern || null;
   const isWaveGuard = Boolean(data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard);
 
@@ -791,7 +798,12 @@ export default function ServiceReportDocument({ data, token }) {
         {(reentry || (data.advisory?.pet_advisory && hasActualTreatment)) && (
           <div className="doc-keep">
             <SectionHeader>Re-entry &amp; precautions</SectionHeader>
-            {reentry?.customerSummary && <Bullet>{reentry.customerSummary}</Bullet>}
+            {/* buildReentrySummary emits "<area> ready at 7:03 PM" while the
+                window is still open (reentry.js:39-44) — the same fixed
+                re-entry claim the target rows were just sanitized of, through
+                a different field. Print the summary only when it asserts no
+                clock time; otherwise use the approved idiom. */}
+            {reentrySummary && <Bullet>{reentrySummary}</Bullet>}
             {(reentry?.targets || []).map((target) => (
               <Bullet key={target.key || target.label}>{reentryTargetLine(target)}</Bullet>
             ))}
