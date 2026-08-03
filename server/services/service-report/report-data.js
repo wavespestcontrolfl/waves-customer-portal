@@ -2839,6 +2839,39 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     })(),
   });
 
+  // Does the narrative's own count disagree with the map it sits beside?
+  //
+  // The map's `setupCountVerified` cannot be the only source (codex P1
+  // round 15). It is only emitted when at least one pin carries a per-visit
+  // status, and the post-completion station sync is deliberately fail-soft
+  // — so a declared setup whose check rows never landed produces a standing
+  // registry map with NO dispute flag, and a typed count of 6 beside an
+  // 8-pin fallback map licensed the model to say 8 traps were set. For an
+  // auto-sent trapping COMPANION nothing else could catch it either: the
+  // facts carry the PRIMARY's findings, so the typed 6 never reaches the
+  // grounded number set.
+  //
+  // So the comparison is made here, from the same viewer-visible snapshot
+  // the stage came from. `checked` and `total` are both acceptable matches:
+  // a synced setup agrees with checked, an unsynced one agrees with total.
+  const narrativeTrapCount = (() => {
+    const snap = [
+      typedSnapshot,
+      ...companionSnapshots.filter((s) => staffViewer || s.delivery === 'auto_send'),
+    ].find((s) => s?.type === 'rodent_trapping');
+    const n = Number(snap?.values?.traps_checked);
+    return Number.isInteger(n) ? n : null;
+  })();
+  const stationCountDisputed = (stationMap?.initialSetup === true && stationMap?.setupCountVerified === false)
+    || Boolean(
+      narrativeTrapSetupSnapshot
+      && stationMap?.program === 'trapping'
+      && stationMap?.summary
+      && narrativeTrapCount != null
+      && narrativeTrapCount !== (stationMap.summary.checked || 0)
+      && narrativeTrapCount !== (stationMap.summary.total || 0),
+    );
+
   const onSiteMin = computeOnSiteMin({
     ...service,
     started_at: arrivalTime || service.started_at,
@@ -3516,8 +3549,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       // The map card suppresses its own count line when the tech's typed
       // trap count disagrees with the pinned roster; the narrative must not
       // resurrect the disputed number from stationSummary (codex P1 r12).
-      stationCountDisputed: stationMap?.initialSetup === true
-        && stationMap?.setupCountVerified === false,
+      stationCountDisputed,
       applications,
       photos: photoPayload,
       nextAppointment,
@@ -3578,8 +3610,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       activity,
       stationSummary: stationMap?.summary || null,
       stationProgram: stationMap?.program || null,
-      stationCountDisputed: stationMap?.initialSetup === true
-        && stationMap?.setupCountVerified === false,
+      stationCountDisputed,
       applications,
       photos: photoPayload,
       nextAppointment,

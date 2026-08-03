@@ -5869,8 +5869,19 @@ export function typedFieldValueConflicts(schemaType, values) {
         `Trap actions ${followUpOnly.map((a) => `"${a}"`).join(", ")} describe traps that were already out — either clear them or set this visit to "Follow-up check"`,
       );
     }
-    const trapsPlaced = Number(values?.traps_checked);
-    if (!Number.isInteger(trapsPlaced) || trapsPlaced < 1) {
+    // Shape FIRST, exactly as validateTypedFindings checks a count field:
+    // Number("1.0") and Number("1e1") are positive integers here but the
+    // server rejects both, so a coercion-only mirror still let the 422 it
+    // exists to prevent through (codex P2 round 15).
+    const rawCount = values?.traps_checked;
+    const countStr = typeof rawCount === "number"
+      ? String(rawCount)
+      : (typeof rawCount === "string" ? rawCount.trim() : null);
+    if (countStr == null || !/^\d{1,4}$/.test(countStr)) {
+      conflicts.push(
+        'An initial setup must record how many traps were set — enter the count as a whole number, or set this visit to "Follow-up check"',
+      );
+    } else if (Number(countStr) < 1) {
       conflicts.push(
         'An initial setup must record how many traps were set — enter the count, or set this visit to "Follow-up check"',
       );
@@ -8927,7 +8938,15 @@ export function CompletionPanel({
   // (codex P2 round 12). While set, station marking is disabled and the
   // completion posts no station entries at all — an unloaded registry is
   // unavailable, not empty.
-  const [stationRegistryFailed, setStationRegistryFailed] = useState(false);
+  // "loading" until the property-map request settles, so the surface fails
+  // CLOSED for the whole in-flight window too (codex P2 round 15): a
+  // billing-detour draft can restore moves, retirements, and new pins
+  // before the fetch resolves, and an already-complete form submitted in
+  // that window would serialize them — against a registry never confirmed
+  // — using the restored zoneMapImageFallback ref. Only a settled,
+  // available response with a loaded station query re-arms it.
+  const [stationRegistryState, setStationRegistryState] = useState("loading");
+  const stationRegistryFailed = stationRegistryState !== "ready";
   // Image params restored from a saved draft (checkout detour) — lets a
   // restored station submit stamp the drift ref for pins placed pre-detour
   // even if the live /property-map refetch hasn't resolved yet.
@@ -9017,12 +9036,11 @@ export function CompletionPanel({
           // the registry unconfirmed, and a billing-detour draft restore
           // may already hold station edits plus a zoneMapImageFallback ref
           // that the submit path would serialize against a roster we could
-          // not reload. Only a resolved, available response with a loaded
-          // station query re-arms the surface.
-          setStationRegistryFailed(true);
+          // not reload.
+          setStationRegistryState("failed");
           return;
         }
-        setStationRegistryFailed(res.stationsLoaded === false);
+        setStationRegistryState(res.stationsLoaded === false ? "failed" : "ready");
         setStationPreloads((Array.isArray(res.stations) ? res.stations : [])
           .filter((station) => (station.program || "termite") === stationProgram)
           .map((station) => ({
@@ -9066,7 +9084,7 @@ export function CompletionPanel({
         if (cancelled) return;
         setPropertyMap(null);
         // Same fail-closed rule as the available:false branch above.
-        setStationRegistryFailed(true);
+        setStationRegistryState("failed");
       });
     return () => { cancelled = true; };
   }, [stationFeatureOn, service?.id]);
@@ -9103,7 +9121,10 @@ export function CompletionPanel({
   // rejected/unavailable refetch left unconfirmed. A property that simply
   // has no map yet fails closed silently — there is no editor and nothing
   // to submit, so an orange warning on every mapless completion is noise.
-  const stationRegistryNoteVisible = stationRegistryFailed
+  // The note is a FAILURE message, so the in-flight window never shows it —
+  // that state is transient and the editor simply stays inert until the
+  // fetch settles.
+  const stationRegistryNoteVisible = stationRegistryState === "failed"
     && (propertyMap?.available === true || stationPreloads.length > 0 || stationNew.length > 0);
   const stationDisplay = stationFeatureOn
     ? [

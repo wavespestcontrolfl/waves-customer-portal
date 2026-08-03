@@ -2058,6 +2058,34 @@ const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
   'Bait/lure refreshed',
   'Damaged or missing traps found',
 ];
+// Hoisted above the setup guards because BOTH families use them: the
+// count claims below and the noun-form re-check patterns that follow
+// share one definition of "what ends a trap noun phrase" rather than
+// keeping two that can drift.
+const TRAP_PHRASE_TERMINATORS = [
+  // 1. rival head nouns + partitives/articles
+  'rats?', 'mice', 'mouse', 'rodents?', 'animals?', 'captures?', 'catches',
+  'droppings', 'burrows?', 'holes?', 'gaps?', 'marks?', 'signs?', 'samples?',
+  'of', 'the', 'a', 'an', 'and', 'or', 'nor', 'but',
+  // 2. prepositions
+  'with', 'without', 'near', 'at', 'in', 'on', 'for', 'from', 'around',
+  'along', 'inside', 'outside', 'behind', 'beneath', 'under', 'over', 'by',
+  'to', 'between', 'through', 'beyond', 'across', 'past', 'into', 'onto',
+  'above', 'below', 'beside', 'toward', 'towards', 'against', 'off',
+  // 3. clause connectors, auxiliaries, and unambiguous predicate verbs
+  'then', 'thus', 'plus', 'also', 'while', 'before', 'after', 'so',
+  'because', 'which', 'that', 'where', 'when', 'though', 'although',
+  'was', 'were', 'is', 'are', 'be', 'been', 'being', 'has', 'have', 'had',
+  'will', 'would', 'did', 'do', 'does', 'can', 'could', 'should', 'may',
+  'might', 'must',
+  're-?checked', 're-?check', 're-?inspected', 're-?inspect', 'examined',
+  'serviced', 'completed', 'performed', 'documented', 'recorded',
+  'observed', 'noted', 'counted', 'found', 'saw', 'removed', 'replaced',
+  're-?set', 'swapped', 'moved',
+];
+const TRAP_MODIFIER_RUN = `(?:\\s+(?!(?:${TRAP_PHRASE_TERMINATORS.join('|')})\\b)[a-z-]+)*?`;
+const TRAP_PARTITIVE_DET = '(?:the|our|these|those|all|its)';
+
 const SETUP_EMPTY_CAPTURE_RES = [
   /\bno\s+(?:new\s+)?captures?\b/i,
   /\bcaptures?\s+(?:were|was)\s+not\s+recorded\b/i,
@@ -2081,6 +2109,25 @@ const SETUP_EMPTY_CAPTURE_RES = [
   /\bno\s+(?:[a-z-]+\s+){0,2}?(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed|trapped)\b/i,
   /\b(?:(?:did|do|does|have|has|had)\s+not|didn['’]t|don['’]t|doesn['’]t|haven['’]t|hasn['’]t|hadn['’]t)\s+(?:yet\s+)?(?:catch|caught|capture[ds]?|trap(?:ped)?)\b/i,
   /\bnothing\s+(?:was\s+|has\s+been\s+|had\s+been\s+)?(?:caught|captured|trapped)\b/i,
+];
+
+// NOUN-form re-check claims: "Trap inspection completed today", "We
+// completed a full trap inspection". The verb scans never see these —
+// there is no verb bound to a trap noun at all (codex P1 round 15).
+//
+// A completion word is REQUIRED, and that is the whole safety margin: the
+// setup's own ratified next-step sentence is "We will return for the
+// scheduled trap check", and the setup prompt explicitly asks the model to
+// say we return to check them. A bare "trap check" matcher would reject
+// exactly the copy this stage is supposed to produce. The trap noun must
+// also sit directly on the inspection noun (or be its `of` object), so
+// "exterior inspection completed" and "attic inspection" stay legal.
+const RECHECK_NOUN = '(?:re-?)?(?:inspections?|checks?|checkups?)';
+const COMPLETION_WORD = '(?:completed|complete|performed|done|finished|conducted)';
+const SETUP_RECHECK_NOUN_RES = [
+  new RegExp(`\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b[^.!?]{0,20}?\\b${COMPLETION_WORD}\\b`, 'i'),
+  new RegExp(`\\b${COMPLETION_WORD}\\b[^.!?]{0,30}?\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b`, 'i'),
+  new RegExp(`\\b${RECHECK_NOUN}\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b[^.!?]{0,20}?\\b${COMPLETION_WORD}\\b`, 'i'),
 ];
 
 // Word-form numbers normalized to numerals before any count check, so
@@ -2114,16 +2161,28 @@ function normalizeWordNumbers(text) {
 //
 // The modifier run between the count and its trap noun is bounded by
 // MEANING, with no token cap at all: adjectives ("exterior mechanical
-// snap") extend the same noun phrase however long it runs, while animals,
-// partitives, articles, conjunctions, and prepositions signal the number
-// belongs to something else — "2 rats near the traps" counts rats, not
-// traps. The old two-token cap missed "We checked 8 exterior mechanical
-// snap traps" entirely (codex P1 round 13), and the interim {0,6} was the
-// same mistake smaller — catalog prose runs past any fixed cap (codex P2
-// round 14). The exclusions alone terminate the phrase: real intervening
-// prose always carries an article or preposition, and any excluded token
-// breaks the chain before it reaches `traps`.
-const TRAP_MODIFIER_RUN = '(?:\\s+(?!(?:rats?|mice|mouse|rodents?|animals?|captures?|catches|of|the|a|an|and|or|nor|but|with|without|near|at|in|on|for|from|around|along|inside|outside|behind|beneath|under|over|by|to|between|through|beyond|across|past|into|onto|above|below|beside|toward|towards|against|off)\\b)[a-z-]+)*?';
+// snap") extend the same noun phrase however long it runs, while anything
+// that starts a NEW phrase ends it. The old two-token cap missed "We
+// checked 8 exterior mechanical snap traps" entirely (codex P1 round 13),
+// and the interim {0,6} was the same mistake smaller — catalog prose runs
+// past any fixed cap (codex P2 round 14).
+//
+// Three terminator families, all of them closed sets (the same philosophy
+// as OBJECT_PHRASE_END — an ADJECTIVE allowlist can always be beaten by an
+// unlisted adjective, whereas the words that start a new phrase are few):
+//  1. nouns the count could belong to instead, and partitives/articles —
+//     "2 rats near the traps" counts rats, not traps.
+//  2. prepositions.
+//  3. clause connectors, auxiliaries, and the re-check verbs — removing
+//     the cap left the scan free to run through a whole predicate, so "We
+//     documented 8 fresh droppings then checked mechanical traps" read as
+//     an 8-trap roster claim (codex P2 round 15, a regression from the
+//     round-14 removal).
+// Participial ADJECTIVES a trap phrase legitimately uses (baited, placed,
+// new, sealed) are deliberately NOT terminators. Verbs that could also be
+// pre-nominal adjectives are the ambiguous middle; they resolve toward
+// terminating, which loses a claim rather than inventing one — the bias
+// this whole guard stack is built on.
 const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:of|out\\s+of)\\s+(\\d+))?(${TRAP_MODIFIER_RUN})\\s+(?:traps?|devices?)\\b`, 'gi');
 // Numeric partitives WITH a check predicate claim the checked count even
 // though they never name a roster: "We checked 8 of the traps" puts 8
@@ -2134,7 +2193,27 @@ const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:of|out\\s+of)\\s+(\\d
 // the attic" is distributive placement prose — counting either against
 // the structured total would re-create the copy-discarding false positive
 // this PR exists to fix.
-const TRAP_PARTITIVE_PREDICATE_RE = /\b(?:checked|inspected)\s+(\d+)\s+of\s+(?:the|our|these|those|all|its)\b(?:\s+[a-z-]+){0,2}?\s+(?:traps?|devices?)\b/gi;
+//
+// BOTH word orders, and the shared semantic modifier run rather than a
+// token cap (codex P1 round 15): the active form was the only one covered,
+// so "8 of the traps were checked" — the way a report actually reads —
+// extracted nothing.
+const TRAP_PARTITIVE_ACTIVE_RE = new RegExp(
+  `\\b(?:re-?)?(?:checked|inspected)\\s+(\\d+)\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`,
+  'gi',
+);
+// The passive predicate is matched as auxiliaries + adverbs + participle
+// rather than "the participle within N characters". Here an allowlist is
+// the SAFE shape, opposite to the object-binding scans: an unlisted adverb
+// costs a missed claim (a stale count may publish), while a loose window
+// binds a later unrelated participle — "8 of the traps were empty and the
+// attic was inspected" — and discards reviewed copy, which is worse.
+const TRAP_PARTITIVE_PASSIVE_RE = new RegExp(
+  `\\b(\\d+)\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`
+  + '(?:\\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*'
+  + '\\s+(?:re-?)?(?:checked|inspected)\\b',
+  'gi',
+);
 const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
 const CAUGHT_CLAIM_RE = /\b(?:caught|captured|removed)\s+(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b/gi;
 // The PASSIVE capture claim, where the animal precedes its verb: "two mice
@@ -2210,9 +2289,11 @@ function trapRosterClaims(text) {
     if (SUBSET_LEAD_RE.test(lead) || SUBSET_LEAD_RE.test(trail)) return;
     claims.add(Number(m.second != null ? m.second : m.first));
   });
-  const partitive = new RegExp(TRAP_PARTITIVE_PREDICATE_RE.source, 'gi');
-  let pm;
-  while ((pm = partitive.exec(text)) !== null) claims.add(Number(pm[1]));
+  for (const rx of [TRAP_PARTITIVE_ACTIVE_RE, TRAP_PARTITIVE_PASSIVE_RE]) {
+    const partitive = new RegExp(rx.source, 'gi');
+    let pm;
+    while ((pm = partitive.exec(text)) !== null) claims.add(Number(pm[1]));
+  }
   return claims;
 }
 
@@ -2295,6 +2376,10 @@ function setupContradictions(text) {
   for (const rx of SETUP_EMPTY_CAPTURE_RES) {
     const match = str.match(rx);
     if (match) found.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
+  }
+  for (const rx of SETUP_RECHECK_NOUN_RES) {
+    const match = str.match(rx);
+    if (match) found.push(`setup_recheck_claim:${match[0].trim().toLowerCase()}`);
   }
   return found;
 }

@@ -25,6 +25,7 @@ jest.mock('../services/termite-stations', () => ({
 }));
 
 const { applyTypedReportNarrative } = require('../services/service-report/rodent-report-narrative');
+const { buildStationMapReportContext } = require('../services/termite-stations');
 const { buildReportV1Data } = require('../services/service-report/report-data');
 
 function stubKnex(fixtures = {}) {
@@ -128,5 +129,73 @@ describe('narrative visitStage resolves from viewer-visible snapshots only', () 
       'token-stage-staff',
       { staffViewer: true },
     )).toBe('initial_trap_setup');
+  });
+});
+
+// Round 15: the map only emits setupCountVerified when a pin carries a
+// per-visit status. The station sync is fail-soft, so a declared setup
+// whose check rows never landed produced NO dispute flag — and for an
+// auto-sent trapping companion the facts carry the primary's findings, so
+// the typed count never reached the grounded number set either. A typed 6
+// beside an 8-pin fallback map licensed "8 traps were set".
+describe('count disputes survive a fail-soft station sync', () => {
+  const prevGate = process.env.GATE_TYPED_REPORT_NARRATIVE;
+  beforeAll(() => { process.env.GATE_TYPED_REPORT_NARRATIVE = 'true'; });
+  afterAll(() => {
+    if (prevGate === undefined) delete process.env.GATE_TYPED_REPORT_NARRATIVE;
+    else process.env.GATE_TYPED_REPORT_NARRATIVE = prevGate;
+  });
+
+  async function disputeFor(mapContext, values = { trap_visit_type: 'Initial setup', traps_checked: 6 }) {
+    buildStationMapReportContext.mockReturnValueOnce(mapContext);
+    applyTypedReportNarrative.mockClear();
+    await buildReportV1Data(
+      serviceRow({ ...trappingCompanion('auto_send'), values }),
+      `token-dispute-${Math.abs(JSON.stringify({ mapContext, values }).length)}-${values.traps_checked}`,
+      stubKnex(),
+      { mode: 'live' },
+    );
+    expect(applyTypedReportNarrative).toHaveBeenCalled();
+    return applyTypedReportNarrative.mock.calls[0][0].stationCountDisputed;
+  }
+
+  // An unsynced setup: pins from the standing registry, no per-visit
+  // statuses, so the map emits neither initialSetup nor setupCountVerified.
+  const unsyncedMap = {
+    available: true,
+    program: 'trapping',
+    summary: { total: 8, checked: 0, activity: 0, serviced: 0, inaccessible: 0 },
+  };
+
+  test('a typed count disagreeing with an unsynced map is disputed', async () => {
+    expect(await disputeFor(unsyncedMap)).toBe(true);
+  });
+
+  test('a typed count matching the standing roster is not disputed', async () => {
+    expect(await disputeFor(unsyncedMap, { trap_visit_type: 'Initial setup', traps_checked: 8 }))
+      .toBe(false);
+  });
+
+  test('a synced setup agreeing with the checked count is not disputed', async () => {
+    const synced = {
+      available: true,
+      program: 'trapping',
+      initialSetup: true,
+      setupCountVerified: true,
+      summary: { total: 8, checked: 6, activity: 0, serviced: 0, inaccessible: 2 },
+    };
+    expect(await disputeFor(synced)).toBe(false);
+  });
+
+  test('the map’s own explicit dispute flag still wins', async () => {
+    const flagged = {
+      available: true,
+      program: 'trapping',
+      initialSetup: true,
+      setupCountVerified: false,
+      summary: { total: 8, checked: 8, activity: 0, serviced: 0, inaccessible: 0 },
+    };
+    expect(await disputeFor(flagged, { trap_visit_type: 'Initial setup', traps_checked: 8 }))
+      .toBe(true);
   });
 });

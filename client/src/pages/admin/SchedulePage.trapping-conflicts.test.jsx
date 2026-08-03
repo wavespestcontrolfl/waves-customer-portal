@@ -48,3 +48,29 @@ describe("rodent trapping initial-setup pre-submit mirror", () => {
     ).toEqual([]);
   });
 });
+
+// Round 15: Number("1.0") and Number("1e1") are positive integers, but the
+// server's count validator requires a digit-only string — so a
+// coercion-only mirror still let through the 422 it exists to prevent.
+describe("setup count shape mirrors the server's digit-only rule", () => {
+  it("rejects numeric forms the server's count validator rejects", () => {
+    for (const raw of ["1.0", "1e1", "0x8", " 8.5 ", "+8", "eight"]) {
+      const conflicts = typedFieldValueConflicts("rodent_trapping", {
+        trap_visit_type: "Initial setup",
+        traps_checked: raw,
+      });
+      expect(conflicts.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("accepts the digit-only forms the server accepts", () => {
+    for (const raw of ["8", "  8  ", "8 ", 8]) {
+      expect(
+        typedFieldValueConflicts("rodent_trapping", {
+          trap_visit_type: "Initial setup",
+          traps_checked: raw,
+        }),
+      ).toEqual([]);
+    }
+  });
+});

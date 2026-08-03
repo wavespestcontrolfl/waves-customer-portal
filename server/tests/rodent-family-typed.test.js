@@ -1353,3 +1353,101 @@ describe('repeated-subject clauses split (round 14)', () => {
       .toBeGreaterThan(0);
   });
 });
+
+// Round 15: only the ACTIVE partitive order was covered, so "8 of the traps
+// were checked" — the way a report actually reads — extracted nothing, and
+// the partitive's own modifier window was still capped at two tokens.
+describe('passive and fully modified checked partitives reconcile (round 15)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('passive, reduced-passive, and adverbial forms all reconcile', () => {
+    for (const text of [
+      '8 of the traps were checked today.',
+      '8 of the traps checked today.',
+      '8 of the traps have now been inspected.',
+      '8 of the traps were carefully re-checked.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    }
+    expect(countContradictions('8 of the traps were checked today.', { traps_checked: 8 }))
+      .toEqual([]);
+  });
+
+  test('the active partitive takes the shared modifier run', () => {
+    expect(countContradictions(
+      'We checked 8 of the exterior black mechanical snap traps.',
+      { traps_checked: 6 },
+    ).length).toBeGreaterThan(0);
+  });
+
+  test('a later unrelated participle is not bound to the partitive', () => {
+    // The predicate is auxiliaries+adverbs+participle, not "a participle
+    // within N characters" — otherwise this discards valid copy.
+    expect(countContradictions(
+      '8 of the traps were empty and the attic was inspected.',
+      { traps_checked: 6 },
+    )).toEqual([]);
+  });
+});
+
+// Round 15: removing the token cap in round 14 left the scan free to run
+// through a whole predicate — a regression, caught by codex.
+describe('the modifier scan stops at predicate boundaries (round 15)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a numeral describing something else does not become a trap roster', () => {
+    for (const text of [
+      'We documented 8 fresh droppings then checked mechanical traps.',
+      'We collected 8 samples while inspecting the traps.',
+      'We found 8 burrows and checked the traps.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 })).toEqual([]);
+    }
+  });
+
+  test('catalog-length trap phrases still reconcile', () => {
+    expect(countContradictions(
+      'We placed 8 new black plastic heavy-duty professional-grade mechanical snap traps.',
+      { traps_checked: 6 },
+    ).length).toBeGreaterThan(0);
+  });
+});
+
+// Round 15: the verb scans never see a noun-form claim — there is no verb
+// bound to a trap noun at all.
+describe('noun-form trap inspection claims contradict a setup (round 15)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('completed trap inspections/checks are refused', () => {
+    for (const text of [
+      'Trap inspection completed today.',
+      'We completed a full trap inspection.',
+      'The inspection of the traps was completed.',
+      'Trap check performed on arrival.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test("the setup's OWN ratified next-step sentence stays legal", () => {
+    // "We will return for the scheduled trap check" is the deterministic
+    // setup next-step AND what the setup prompt asks the model to say. A
+    // completion word is what separates it from a claim.
+    for (const text of [
+      'We will return for the scheduled trap check.',
+      'We set 7 traps today. We will return for the scheduled trap check.',
+      'The next trap check is scheduled for next week.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+
+  test('non-trap inspections stay legal', () => {
+    for (const text of [
+      'Exterior inspection completed today.',
+      'We completed a full attic inspection.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});

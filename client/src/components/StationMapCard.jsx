@@ -284,20 +284,26 @@ const TRAP_PIN_STYLES = `
 export function StationMapCard({ stationMap, sectionId = 'station-map', variant = 'report', hideTitle = false, trapPins = false, animate = false }) {
   const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
   const useTrapPins = trapPins && stationMap?.program === 'trapping' && variant !== 'plan';
+  // A declared trap SETUP is a per-VISIT fact, so it never applies to the
+  // 'plan' variant (that embed aggregates the latest check across visits).
+  const initialSetup = variant !== 'plan' && stationMap?.initialSetup === true;
   // Hook runs unconditionally (Rules of Hooks) — it self-disables when the
   // card won't render, animation is off, no trap is armed, or reduced
   // motion is requested.
+  //
+  // A SETUP map is excluded outright (codex P2 round 15): its pins carry
+  // the same 'ok' status an armed trap does, but the setup labels relabel
+  // that status "Set this visit" — nothing has been checked yet — so a rat
+  // scurrying in and springing one contradicts the stage the report just
+  // declared.
   const ratRun = useAmbientRatCycle(
-    useTrapPins && animate && !!stationMap?.available && !!stationMap?.image?.url,
+    useTrapPins && animate && !initialSetup && !!stationMap?.available && !!stationMap?.image?.url,
     eligibleTrapIndices(stations),
   );
   if (!stationMap?.available || !stations.length || !stationMap.image?.url) return null;
   const plan = variant === 'plan';
   const programMeta = STATION_CARD_PROGRAM_META[stationMap.program] || STATION_CARD_PROGRAM_META.termite;
   const onFileMeta = plan ? PLAN_ON_FILE_META : STATION_ON_FILE_META;
-  // A declared trap SETUP is a per-VISIT fact, so it never applies to the
-  // 'plan' variant (that embed aggregates the latest check across visits).
-  const initialSetup = !plan && stationMap.initialSetup === true;
   // Absent (older payloads) means "no dispute recorded" — only an explicit
   // false suppresses the count line.
   const setupCountVerified = stationMap.setupCountVerified !== false;
