@@ -53,6 +53,13 @@ function fmtUnit(unit) {
   return String(unit || '').replace(/_/g, ' ').trim();
 }
 
+function fmtDayLabel(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString('en-US', { timeZone: TZ, weekday: 'long' });
+}
+
 function fmtPhone(phone) {
   const raw = String(phone || '').replace(/\D/g, '');
   const digits = raw.length === 11 && raw.startsWith('1') ? raw.slice(1) : raw;
@@ -67,17 +74,12 @@ const INTERACTION_LABELS = {
   left_note: 'Left a note for the customer',
 };
 
+// COMPLIANCE (AGENTS.md): never print a fixed re-entry/drying figure — the
+// idiom is "ready once dry" plus the technician-anchored ready-at time. This
+// deliberately does NOT surface target.durationMin.
 function reentryTargetLine(target) {
-  const parts = [];
-  if (Number(target.durationMin) > 0) {
-    const hours = target.durationMin / 60;
-    parts.push(`keep clear for ${hours >= 1 ? `${Math.round(hours * 10) / 10} hour${hours === 1 ? '' : 's'}` : `${target.durationMin} minutes`} after treatment`);
-    const ready = fmtTime(target.readyAt);
-    if (ready) parts.push(`ready after ${ready}`);
-  } else {
-    parts.push('no wait — ready for normal use');
-  }
-  return `${target.label}: ${parts.join(' · ')}`;
+  const ready = Number(target.durationMin) > 0 ? fmtTime(target.readyAt) : '';
+  return `${target.label}: ${ready ? `ready after ${ready}` : 'ready once dry'}`;
 }
 
 function zoneNames(app, zones) {
@@ -189,6 +191,17 @@ export default function ServiceReportDocument({ data, token }) {
     ? ` (${activity.score} of ${activity.maxScore}${activityBaselineNote})`
     : activityBaselineNote;
 
+  // Untyped visits record their findings at the top level; the typed
+  // snapshot only covers typed reports. Both must reach the document or the
+  // PDF silently drops what the visit recorded (codex P1).
+  const recordFindings = (Array.isArray(data.findings) ? data.findings : [])
+    .filter((finding) => String(finding?.title || finding?.detail || '').trim());
+  // Combined-service visits carry companion sections. internalOnly ones are
+  // STAFF-ONLY and must never print — the same rule the web report's print
+  // stylesheet enforces via .companion-internal.
+  const companions = (Array.isArray(data.companionReports) ? data.companionReports : [])
+    .filter((companion) => companion && !companion.internalOnly);
+
   const lawnObservations = String(data.lawnAssessment?.observations || '').trim() || null;
   const mowing = data.mowingHeight || null;
   const interaction = INTERACTION_LABELS[data.customerInteraction] || null;
@@ -290,7 +303,7 @@ export default function ServiceReportDocument({ data, token }) {
         )}
 
         {/* Findings */}
-        {(findings.length > 0 || activity || lawnObservations || mowing) && (
+        {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations || mowing) && (
           <div className="doc-keep">
             <SectionHeader>What we found</SectionHeader>
             {lawnObservations && <Bullet>{lawnObservations}</Bullet>}
@@ -311,6 +324,12 @@ export default function ServiceReportDocument({ data, token }) {
                 <strong>{activity.label}:</strong> {activity.levelWord}{activityDetail}
               </Bullet>
             )}
+            {recordFindings.map((finding) => (
+              <Bullet key={finding.id || finding.title}>
+                {finding.title && <strong>{finding.title}{finding.detail ? ': ' : ''}</strong>}
+                {finding.detail}
+              </Bullet>
+            ))}
           </div>
         )}
 
@@ -325,8 +344,8 @@ export default function ServiceReportDocument({ data, token }) {
             {(reentry?.petAdvisory || data.advisory?.pet_advisory) && (
               <Bullet>{reentry?.petAdvisory || data.advisory.pet_advisory}</Bullet>
             )}
-            {Number(data.advisory?.irrigation_hold_hr) > 0 && (
-              <Bullet>Hold irrigation for {data.advisory.irrigation_hold_hr} hours after treatment.</Bullet>
+            {reentry?.irrigationReadyAt && (
+              <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
             {data.reportV2?.aftercare?.reentry && (
               <Bullet>{data.reportV2.aftercare.reentry}</Bullet>
@@ -477,6 +496,31 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {/* Combined-service companions — the second service on the same
+            visit gets its own findings block (staff-only ones filtered out
+            above, never printed). */}
+        {companions.map((companion) => (
+          <div key={companion.type} className="doc-keep">
+            <SectionHeader>{companion.reportTypeLabel || companion.typeLabel || 'Additional service'}</SectionHeader>
+            {companion.todaysResult?.headline && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>
+                {String(companion.todaysResult.headline).replace(/\.$/, '')}.
+                {companion.todaysResult.body ? ` ${companion.todaysResult.body}` : ''}
+              </p>
+            )}
+            {(companion.findings || [])
+              .filter((finding) => String(finding?.customerValueLabel ?? finding?.value ?? '').trim())
+              .map((finding) => (
+                <Bullet key={finding.fieldKey || finding.customerLabel}>
+                  <strong>{finding.customerLabel}:</strong> {finding.customerValueLabel || finding.value}
+                </Bullet>
+              ))}
+            {companion.activity?.levelWord && (
+              <Bullet><strong>{companion.activity.label}:</strong> {companion.activity.levelWord}</Bullet>
+            )}
+          </div>
+        ))}
+
         {/* Record footer */}
         <div className="doc-keep" style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
           <div style={{ fontSize: 10, color: MUTED, lineHeight: 1.6 }}>
@@ -485,7 +529,13 @@ export default function ServiceReportDocument({ data, token }) {
             Full interactive report: {reportUrl}
             <br />
             This report is provided for your records. This is not an invoice.
-            {data.photoChain?.valid === true ? ' Photos hash-chained and tamper-evident.' : ''}
+            {/* Claim tamper-evidence only when photos are actually displayed
+                AND every displayed photo is in the chain — lawn turf photos
+                are appended outside the service_photos chain, and a chain
+                over only a hidden photo must not over-claim (the web
+                report's guard; dropping half of it was a codex P1). */}
+            {data.photoChain?.valid === true && photos.length > 0 && photos.every((photo) => photo?.hashSha256)
+              ? ' Photos hash-chained and tamper-evident.' : ''}
             <br />
             Waves Pest Control, LLC · Family-owned pest control and lawn care in Southwest Florida · Licensed &amp; insured · {WAVES_FL_LICENSE_LINE}
           </div>

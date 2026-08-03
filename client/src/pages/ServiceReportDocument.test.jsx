@@ -120,6 +120,54 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText('Front perimeter')).toBeInTheDocument();
   });
 
+  it('never prints a fixed re-entry duration (AGENTS.md compliance)', () => {
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(container.textContent).toMatch(/Interior: ready after/);
+    expect(container.textContent).not.toMatch(/keep clear for/i);
+    expect(container.textContent).not.toMatch(/\b\d+\s*(hours?|minutes?)\s*after treatment/i);
+  });
+
+  it('renders top-level record findings, not just typed ones', () => {
+    const data = { ...BASE_DATA, findings: [{ id: 'f1', title: 'Ant trail at the kitchen slider', detail: 'Treated and monitored.', severity: 'medium' }] };
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/Ant trail at the kitchen slider/)).toBeInTheDocument();
+    expect(screen.getByText(/Treated and monitored\./)).toBeInTheDocument();
+  });
+
+  it('renders customer-facing companion services but never staff-only ones', () => {
+    const data = {
+      ...BASE_DATA,
+      companionReports: [
+        { type: 'mosquito', reportTypeLabel: 'Mosquito Service Summary', todaysResult: { headline: 'Mosquito pressure was light.' }, findings: [{ fieldKey: 'sites', customerLabel: 'Breeding sites', customerValueLabel: 'Two corrected' }] },
+        { type: 'internal_audit', internalOnly: true, reportTypeLabel: 'Internal QA', todaysResult: { headline: 'Staff-only note.' }, findings: [] },
+      ],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText('Mosquito Service Summary')).toBeInTheDocument();
+    expect(screen.getByText(/Two corrected/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain('Internal QA');
+    expect(container.textContent).not.toContain('Staff-only note');
+  });
+
+  it('claims tamper-evidence only when every displayed photo is chained', () => {
+    const chained = { id: 'p1', url: 'https://cdn.example.com/a.jpg', hashSha256: 'abc' };
+    const unchained = { id: 'p2', url: 'https://cdn.example.com/b.jpg' };
+    const claim = /hash-chained and tamper-evident/;
+
+    const all = render(<ServiceReportDocument data={{ ...BASE_DATA, photoChain: { valid: true }, photos: [chained] }} token="t" />);
+    expect(all.container.textContent).toMatch(claim);
+    cleanup();
+
+    // one displayed photo outside the chain -> no claim
+    const mixed = render(<ServiceReportDocument data={{ ...BASE_DATA, photoChain: { valid: true }, photos: [chained, unchained] }} token="t" />);
+    expect(mixed.container.textContent).not.toMatch(claim);
+    cleanup();
+
+    // valid chain but nothing displayed (hidden gauge shot) -> no claim
+    const none = render(<ServiceReportDocument data={{ ...BASE_DATA, photoChain: { valid: true }, photos: [] }} token="t" />);
+    expect(none.container.textContent).not.toMatch(claim);
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();
