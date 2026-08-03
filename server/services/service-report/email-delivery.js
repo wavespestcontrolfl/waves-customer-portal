@@ -12,7 +12,7 @@ const {
 const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
-const { formatReadyTime } = require('./time-format');
+const { dateOnlyStamp, formatReadyTime } = require('./time-format');
 const { getServiceReportEmailRecipients, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
@@ -531,7 +531,9 @@ async function sendServiceReportV1Email(recordId, {
 
   const attachments = pdf ? [{
     content: pdf.toString('base64'),
-    filename: `waves-service-report-${data.serviceDate || recordId}.pdf`,
+    // dateOnlyStamp: serviceDate is a hydrated pg DATE — raw interpolation
+    // put the entire Date.toString() into the customer's attachment name.
+    filename: `waves-service-report-${dateOnlyStamp(data.serviceDate) || recordId}.pdf`,
     type: 'application/pdf',
     disposition: 'attachment',
   }] : undefined;
@@ -610,7 +612,9 @@ async function sendServiceReportV1Email(recordId, {
         triggerEventId: `service_report_ready:${recordId}:${recipient.role || 'recipient'}`,
         idempotencyKey: serviceReportEmailIdempotencyKey(recordId, recipient),
         categories: ['service_report_v1'],
-        attachments: pdf ? [pdfAttachment(`waves-service-report-${data.serviceDate || recordId}.pdf`, pdf)] : [],
+        // dateOnlyStamp: raw pg DATE interpolation printed the entire
+        // Date.toString() into the customer's attachment name.
+        attachments: pdf ? [pdfAttachment(`waves-service-report-${dateOnlyStamp(data.serviceDate) || recordId}.pdf`, pdf)] : [],
       }).then((result) => ({ recipient, result }))),
   );
   const sent = [];
