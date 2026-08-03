@@ -2596,6 +2596,20 @@ async function createSelfBooking(payload = {}) {
       logger.warn(`[booking:confirm] card-request funnel failed for visit ${serviceRow.id}: ${err.message}`);
     }
 
+    // Inspection credit: a public self-booking is a REAL customer booking,
+    // so it redeems an open promise (dark behind GATE_INSPECTION_CREDIT).
+    // Redemption is deliberately explicit per surface — seeders, imports
+    // and bulk rebooks create rows nobody booked and must never credit.
+    try {
+      await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+        customerId: serviceRow.customer_id,
+        scheduledServiceId: serviceRow.id,
+        createdBy: 'system:inspection_credit_self_book',
+      });
+    } catch (err) {
+      logger.warn(`[booking:confirm] inspection credit redemption failed for visit ${serviceRow.id}: ${err.message}`);
+    }
+
     return { ok: true, body: { booking, confirmationCode: confCode, ...(secureCard ? { secureCard } : {}) } };
 }
 

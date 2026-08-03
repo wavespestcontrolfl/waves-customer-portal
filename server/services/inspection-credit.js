@@ -356,34 +356,36 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       }
     }
 
-    // Closeout recovery (Codex #3175 r4 P0): recordInspectionCreditOffer is
-    // best-effort by contract — it must never fail a completion — so a
-    // transient DB failure would otherwise lose the promise permanently
-    // while the UI told the tech it was made. The completed inspection
-    // record IS the durable evidence, so re-derive any missing offer here.
-    // Bounded to recent completions: an old inspection whose window has
-    // long passed has nothing left to promise.
+    // Closeout recovery, driven ONLY by the durable opt-in marker the
+    // completion transaction wrote (Codex #3175 r5 P0). Inferring a promise
+    // from "an inspection was completed" could not distinguish a transient
+    // offer-write failure from the tech clearing the box, and on first gate
+    // enablement it would have swept up every historical inspection and
+    // turned them into real account credit.
     try {
-      const lookbackDays = DEFAULT_CREDIT_WINDOW_DAYS;
-      const since = new Date(now.getTime() - lookbackDays * 24 * 60 * 60 * 1000);
-      const missing = await db('scheduled_services as s')
-        .join('services as c', 'c.id', 's.service_id')
+      const missing = await db('service_records as r')
+        .join('scheduled_services as s', 's.id', 'r.scheduled_service_id')
         .leftJoin('inspection_credit_offers as o', 'o.source_scheduled_service_id', 's.id')
-        .where('c.category', 'inspection')
-        .where('s.status', 'completed')
-        .where('s.updated_at', '>=', since)
+        .whereRaw("(r.service_data->>'inspectionCreditOptIn') = 'true'")
         .whereNull('o.id')
         .limit(limit)
-        .select('s.id as id', 's.customer_id as customer_id', 'c.service_key as service_key', 's.updated_at as completed_at');
+        .select('s.id as id', 's.customer_id as customer_id', 's.service_id as service_id',
+          'r.id as record_id', 'r.service_date as service_date');
       for (const visit of missing) {
-        // Frozen from the COMPLETION moment, not from now — the customer's
-        // window started when the inspection happened.
+        let serviceKey = null;
+        try {
+          const svcRow = await db('services').where({ id: visit.service_id }).first('service_key');
+          serviceKey = svcRow?.service_key || null;
+        } catch { serviceKey = null; }
+        // Frozen from the SERVICE DATE — the customer's window started when
+        // the inspection happened, not when recovery ran.
         await recordInspectionCreditOffer({
           customerId: visit.customer_id,
           scheduledServiceId: visit.id,
-          serviceKey: visit.service_key,
+          serviceRecordId: visit.record_id,
+          serviceKey,
           createdBy: 'system:inspection_credit_recovery',
-          now: new Date(visit.completed_at || now),
+          now: visit.service_date ? new Date(visit.service_date) : now,
         });
       }
     } catch (err) {

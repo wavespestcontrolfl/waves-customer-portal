@@ -5458,6 +5458,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               observations: reportObservations,
               recommendations: reportRecommendations,
             },
+            // Durable CONSENT marker for the inspection credit, written
+            // inside the completion transaction (Codex #3175 r5 P0).
+            // Recovery must never infer a promise from "an inspection was
+            // completed" — that can't tell a transient offer-write failure
+            // from the tech clearing the box, and on first gate enablement
+            // it would sweep up every historical inspection. Only an
+            // explicit opt-in recorded HERE is recoverable evidence.
+            ...(offerInspectionCredit && String(completionProfile?.category || '') === 'inspection'
+              ? { inspectionCreditOptIn: true }
+              : {}),
           };
           // Typed specialty completion: resolve trend vs the customer's prior
           // visit for the same indicator, then persist the immutable

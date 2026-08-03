@@ -1396,6 +1396,20 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
     logger.info(`[leads] Lead ${req.params.id} booked appointment ${appt.id} (customer ${customerId})`);
 
+    // Inspection credit: a lead converted into a booking is a REAL customer
+    // booking, so it redeems an open promise (dark behind
+    // GATE_INSPECTION_CREDIT). Explicit per surface by design — seeders,
+    // imports and bulk rebooks create rows nobody booked.
+    try {
+      await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+        customerId,
+        scheduledServiceId: appt.id,
+        createdBy: `admin:${req.technician?.name || req.technicianId || 'unknown'}`,
+      });
+    } catch (err) {
+      logger.warn(`[leads] inspection credit redemption failed for appointment ${appt.id}: ${err.message}`);
+    }
+
     // Booking-triggered estimate pre-draft (GATE_ESTIMATOR_BOOKING_PREDRAFTS,
     // default OFF): a Waves Assessment booked from the leads page seeds a
     // draft estimate. Self-filtering + idempotent; post-commit and detached —

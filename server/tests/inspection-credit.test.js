@@ -26,7 +26,7 @@ const mockChainCalls = [];
 jest.mock('../models/db', () => {
   const makeChain = () => {
     const chain = {};
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'select', 'onConflict', 'ignore', 'returning']) {
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning']) {
       chain[m] = jest.fn(() => { mockChainCalls.push(m); return chain; });
     }
     // select()/the builder itself resolves to the open-offer list
@@ -189,6 +189,17 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
     const res = await sweepInspectionCreditRedemptions();
     expect(res).toMatchObject({ redeemed: 0, reason: 'feature_disabled' });
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
+  it('recovers a missing offer ONLY from the durable opt-in marker, never from "an inspection completed"', async () => {
+    // Inferring consent from completion could not tell a transient write
+    // failure from the tech clearing the box — and on first gate enablement
+    // would have turned every historical inspection into real credit.
+    mockOffers = [];
+    await sweepInspectionCreditRedemptions();
+    // The recovery query must filter on the persisted opt-in marker.
+    const raw = mockChainCalls.filter((c) => c === 'whereRaw');
+    expect(raw.length).toBeGreaterThan(0);
   });
 
   it('retries only offers where a real booking surface already attempted redemption', async () => {
