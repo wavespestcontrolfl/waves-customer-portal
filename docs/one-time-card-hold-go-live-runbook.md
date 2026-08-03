@@ -11,9 +11,9 @@ is the procedure to turn it on safely, verify it, monitor it, and roll it back.
 
 When a customer books a **one-time** visit from an estimate, they save a card to
 **reserve** the appointment — **no money is charged at booking**. The saved card
-is charged the **final total on completion**, and a **flat $49 fee** is charged
+is charged the **final total on completion**, and a **flat $75 fee** is charged
 only if the customer **no-shows or cancels within 24h**. The card requirement,
-fee amount ($49), and cancel window (24h) are all configurable. The feature is
+fee amount ($75, owner ruling 2026-08-01), and cancel window (24h) are all configurable. The feature is
 *additive* — it does not touch the separate, also-dark required-deposit system
 (`ESTIMATE_DEPOSIT_REQUIRED`); a required hold supersedes the one-time deposit if
 both are ever on at once.
@@ -25,10 +25,10 @@ both are ever on at once.
 | Knob | Where | Default | Notes |
 |---|---|---|---|
 | On/off | env `ONE_TIME_CARD_HOLD` | off | `true` / `1` / `on` enables. Anything else = dark. |
-| No-show fee | `pricing_config.estimate_card_hold.noShowFeeAmount` | `49` | Dollars. Synced into the engine on deploy/startup or via the admin pricing path — **not** by a raw SQL edit alone (see §3). |
+| No-show fee | `pricing_config.estimate_card_hold.noShowFeeAmount` | `75` | Dollars. Synced into the engine on deploy/startup or via the admin pricing path — **not** by a raw SQL edit alone (see §3). |
 | Cancel window | `pricing_config.estimate_card_hold.cancelWindowHours` | `24` | Hours before the slot. Same sync caveat. |
 
-The $49 / 24h defaults are the in-code constants — they apply with **no DB row
+The $75 / 24h defaults are the in-code constants — they apply with **no DB row
 at all**. A `pricing_config` row is only needed to *change* them. The card-hold
 path reads the in-memory `CARD_HOLD` constants, which are refreshed from
 `pricing_config` only by `syncConstantsFromDB()` (on startup, or when an edit
@@ -56,14 +56,14 @@ pick up the new value.
       `STRIPE_SECRET_KEY` + `STRIPE_WEBHOOK_SECRET` set, and the
       `setup_intent.succeeded` + `payment_intent.succeeded` webhook events are
       subscribed.
-- [ ] **Decide the amounts.** $49 / 24h need no DB row. To change them, seed the
+- [ ] **Decide the amounts.** $75 / 24h are the defaults; migration `20260802910000` seeds/updates the `estimate_card_hold` row on deploy. To change them later, use the admin Pricing Logic panel (validated), or seed the
       row — `pricing_config` requires `name` + `category` (both NOT NULL) — and
       then **sync** (the admin pricing route only *updates* an existing key, so
       seed first):
       ```sql
       INSERT INTO pricing_config (config_key, name, category, data)
       VALUES ('estimate_card_hold', 'One-time card hold', 'estimate',
-              '{"noShowFeeAmount": 49, "cancelWindowHours": 24}'::jsonb)
+              '{"noShowFeeAmount": 75, "cancelWindowHours": 24}'::jsonb)
       ON CONFLICT (config_key) DO UPDATE SET data = EXCLUDED.data;
       ```
       Then run a sync so the engine picks it up: **restart the server**, or save
@@ -73,7 +73,7 @@ pick up the new value.
 - [ ] **Heads-up the office (Virginia) + techs:** one-time estimates will now
       require a card to book, and completing a one-time job through the billing
       completion path auto-charges that card (no driveway collection).
-      No-shows/late-cancels auto-charge $49. Pest visits completed from the tech
+      No-shows/late-cancels auto-charge $75. Pest visits completed from the tech
       **recap** flow now also auto-charge the hold (PR #2071) — see §7.
 
 ---
@@ -87,7 +87,7 @@ reversible). Use a real card you control.
 
 1. Set `ONE_TIME_CARD_HOLD=true` and restart/redeploy the server.
 2. Open a one-time estimate → pick a slot → the button should read **"Add a card
-   to hold your appointment"** with the "not charged today / $49 fee" disclosure.
+   to hold your appointment"** with the "not charged today / $75 fee" disclosure.
 3. Save a card and confirm. Then check the hold landed:
    ```sql
    SELECT id, status, no_show_fee_amount, cancel_window_hours,
@@ -121,10 +121,10 @@ reversible). Use a real card you control.
    ```sql
    SELECT status, no_show_payment_intent_id, charged_amount
    FROM estimate_card_holds WHERE scheduled_service_id = '<ss_id>';
-   -- expect status='charged_no_show', charged_amount = 49
+   -- expect status='charged_no_show', charged_amount = 75
    SELECT amount, description, metadata FROM payments
    WHERE stripe_payment_intent_id = '<no_show_pi_id>';
-   -- expect a 'paid' $49 row with metadata.purpose='card_hold_no_show_fee'
+   -- expect a 'paid' $75 row with metadata.purpose='card_hold_no_show_fee'
    ```
 6. **Cancel release:** on a third booking, cancel it **outside** the 24h window
    and confirm `status='released'` (no charge). Cancel one **inside** the window
@@ -232,7 +232,7 @@ handful of already-held appointments.
 - **Credit-card processing fee applies on completion.** Completion goes through
   the shared `chargeInvoiceWithSavedCard`, which adds the standard card surcharge
   for credit cards (debit/bank exempt). This is disclosed in the hold consent
-  copy. The $49 no-show fee is charged at face value (surcharge-exempt).
+  copy. The $75 no-show fee is charged at face value (surcharge-exempt).
 - **3DS-redirect slot hold.** If a card triggers a full-page 3DS redirect, the
   captured card is carried back but the slot reservation is not re-held in the UI
   (15-min server-side reservation still stands). Same accepted behavior as the

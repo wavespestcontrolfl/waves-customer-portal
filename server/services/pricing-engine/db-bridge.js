@@ -872,7 +872,11 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.estimate_card_hold) {
       const fee = Number(config.estimate_card_hold.noShowFeeAmount);
       const windowHours = Number(config.estimate_card_hold.cancelWindowHours);
-      if (Number.isFinite(fee) && fee > 0) constants.CARD_HOLD.noShowFeeAmount = r(fee);
+      // money() not r() (Codex #3164 P2): the admin route accepts
+      // cent-denominated fees (e.g. $49.50) — whole-dollar rounding here
+      // would disclose and charge a different amount than Pricing Logic
+      // saved.
+      if (Number.isFinite(fee) && fee > 0) constants.CARD_HOLD.noShowFeeAmount = money(fee);
       if (Number.isFinite(windowHours) && windowHours > 0) constants.CARD_HOLD.cancelWindowHours = Math.round(windowHours);
     }
 

@@ -230,6 +230,22 @@ function validatePricingConfigData(configKey, data, oldConfig) {
         return fail(`waveguard_tiers.${tier}.min_services must be a positive integer`);
       }
     }
+  } else if (configKey === 'estimate_card_hold') {
+    // Charge-authoritative: db-bridge overlays these onto CARD_HOLD, and
+    // both card-on-file rails DISCLOSE then AUTO-CHARGE them — a typo here
+    // becomes a consented $750 fee on real cards. Bounded: positive whole
+    // cents ≤ $500; whole-hour window in [1, 168] (a week).
+    const fee = num(data?.noShowFeeAmount);
+    if (!isPositive(data?.noShowFeeAmount) || fee > 500) {
+      return fail('estimate_card_hold.noShowFeeAmount must be a positive dollar amount no greater than 500');
+    }
+    if (Math.abs(fee * 100 - Math.round(fee * 100)) > 1e-6) {
+      return fail('estimate_card_hold.noShowFeeAmount must not have sub-cent precision');
+    }
+    const win = num(data?.cancelWindowHours);
+    if (!Number.isInteger(win) || win < 1 || win > 168) {
+      return fail('estimate_card_hold.cancelWindowHours must be a whole number of hours between 1 and 168');
+    }
   } else if (configKey === 'termite_bond') {
     // Warranty-bond quarterly rates by term (owner 2026-07-20). Strictly
     // positive dollars — the db-bridge sync coerces and overwrites runtime
@@ -931,24 +947,34 @@ router.put('/:key', requireAdmin, async (req, res, next) => {
   try {
     const { data, name, description, reason } = req.body;
 
-    // Get old value for audit
-    const oldConfig = await db('pricing_config').where({ config_key: req.params.key }).first();
-    if (!oldConfig) return res.status(404).json({ error: 'Config not found' });
-
-    const updates = { updated_at: new Date() };
-    const normalizedData = data !== undefined ? normalizeIncomingConfigData(req.params.key, data) : undefined;
-    // Validate BEFORE the write — syncConstantsFromDB() below loads this row
-    // over the in-code constants, so a bad commit immediately poisons live
-    // pricing rather than waiting for someone to notice.
-    if (normalizedData !== undefined) {
-      const verdict = validatePricingConfigData(req.params.key, normalizedData, oldConfig);
-      if (!verdict.ok) return res.status(400).json({ error: verdict.error });
-    }
-    if (normalizedData !== undefined) updates.data = JSON.stringify(normalizedData);
-    if (name !== undefined) updates.name = name;
-    if (description !== undefined) updates.description = description;
-
-    await db('pricing_config').where({ config_key: req.params.key }).update(updates);
+    // Read + validate + write in ONE transaction with the row locked
+    // (Codex #3164 P2): an unlocked read here can capture a pre-deploy
+    // value while a migration's locked read-modify-write commits, and the
+    // waiting update would then write the stale object back over it. The
+    // migrations lock the same row (forUpdate), so both writers serialize.
+    let oldConfig;
+    let normalizedData;
+    let validationError = null;
+    const found = await db.transaction(async (trx) => {
+      oldConfig = await trx('pricing_config').where({ config_key: req.params.key }).forUpdate().first();
+      if (!oldConfig) return false;
+      const updates = { updated_at: new Date() };
+      normalizedData = data !== undefined ? normalizeIncomingConfigData(req.params.key, data) : undefined;
+      // Validate BEFORE the write — syncConstantsFromDB() below loads this
+      // row over the in-code constants, so a bad commit immediately poisons
+      // live pricing rather than waiting for someone to notice.
+      if (normalizedData !== undefined) {
+        const verdict = validatePricingConfigData(req.params.key, normalizedData, oldConfig);
+        if (!verdict.ok) { validationError = verdict.error; return true; }
+        updates.data = JSON.stringify(normalizedData);
+      }
+      if (name !== undefined) updates.name = name;
+      if (description !== undefined) updates.description = description;
+      await trx('pricing_config').where({ config_key: req.params.key }).update(updates);
+      return true;
+    });
+    if (!found) return res.status(404).json({ error: 'Config not found' });
+    if (validationError) return res.status(400).json({ error: validationError });
 
     try {
       const modular = require('../services/pricing-engine');

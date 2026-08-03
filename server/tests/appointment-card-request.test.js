@@ -915,7 +915,7 @@ describe('loadSecureCardPageData — page state machine', () => {
     // any prior render's value, and a prior no-fee render (window 0) wins.
     expect(String(stamp.no_show_fee_amount.__raw)).toContain('LEAST(COALESCE(no_show_fee_amount');
     expect(String(stamp.no_show_fee_amount.__raw)).toContain('CASE WHEN cancel_window_hours = 0 THEN NULL');
-    expect(stamp.no_show_fee_amount.bindings).toContain(49);
+    expect(stamp.no_show_fee_amount.bindings).toContain(75);
     expect(String(stamp.cancel_window_hours.__raw)).toContain('LEAST(COALESCE(cancel_window_hours');
     expect(stamp.cancel_window_hours.bindings).toContain(24);
     // Consent is NOT recorded at render — only /complete stamps fee_agreed_at.
