@@ -398,13 +398,12 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   // compareScope='group' (create modal): the price covers EVERY quoted line
   // booked together, so the whole-quote sum is the right frame.
   // compareScope='visit' (detail sheet / SchedulePage row): a child visit
-  // carries only the add-ons due on its date (Codex #3173 r2 — monthly lawn
-  // + quarterly pest children differ month to month), so the comparison
-  // stands only for a quote whose every visit IS the whole plan: all
-  // recurring lines per-application on ONE cadence, and no one-time lines.
-  const recurringCadences = new Set(serviceLines.filter((l) => l.recurring).map((l) => l.rawCadence));
-  const visitComparable = allRecurringPerApp && recurringCadences.size === 1 && oneTimeLineSum === 0
-    && serviceLines.every((l) => l.perAppPrice != null || l.oneTimePrice != null)
+  // carries only the add-ons due on its date — cadence mixes differ month
+  // to month (Codex #3173 r2) and even SAME-cadence bundles break on
+  // off-cycle booster visits, which carry only the primary line (r3). The
+  // comparison therefore stands only for a SINGLE-recurring-line quote with
+  // no one-time work: the one shape where every visit provably IS the plan.
+  const visitComparable = allRecurringPerApp && recurringLineCount === 1 && oneTimeLineSum === 0
     ? perAppSum : null;
   const groupComparable = allRecurringPerApp
     ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)

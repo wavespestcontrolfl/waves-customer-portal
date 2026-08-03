@@ -66,6 +66,23 @@ describe('EstimateProvenanceCard quoted framing', () => {
     expect(screen.queryByText(/vs quoted/i)).toBeNull();
   });
 
+  it('visit scope suppresses deltas for same-cadence multi-line quotes (booster visits carry only the primary)', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={100}
+        onetimeTotal={0}
+        currentPrice={121}
+        compareScope="visit"
+        lines={[
+          { name: 'Pest Control', cadence: 'quarterly', price: 121, perApplicationPrice: 121 },
+          { name: 'Flea Add-on', cadence: 'quarterly', price: 40, perApplicationPrice: 40 },
+        ]}
+        estimateRef="EST-2026-0007"
+      />,
+    );
+    expect(screen.queryByText(/vs quoted/i)).toBeNull();
+  });
+
   it('mixed billing units each render their own unit — never one aggregate monthly', () => {
     render(
       <EstimateProvenanceCard

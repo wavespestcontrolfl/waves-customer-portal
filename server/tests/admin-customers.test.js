@@ -846,6 +846,42 @@ describe('admin customers route helpers', () => {
     const [commercialLine] = scheduleLinesFromEstimate(commercial, index);
     expect(commercialLine.perApplicationPrice).toBeUndefined();
     expect(commercialLine.monthlyPrice).toBe(250);
+    // A manual discount whose RECURRING slice is zero (redirected entirely
+    // to one-time work) leaves recurring provenance intact (codex r3).
+    const oneTimeOnlyDiscount = {
+      id: 'est-pa-7',
+      monthly_total: 40.33,
+      estimate_data: {
+        result: {
+          manualDiscount: { type: 'FIXED', amount: 780, recurringAmount: 0, oneTimeAmount: 780 },
+          recurring: { services: [
+            { service: 'pest_control', name: 'Pest Control', perTreatment: 121, visitsPerYear: 4, mo: 40.33 },
+          ] },
+        },
+      },
+    };
+    const [otdLine] = scheduleLinesFromEstimate(oneTimeOnlyDiscount, index);
+    expect(otdLine.perApplicationPrice).toBe(121);
+
+    // Name-only legacy rows resolve their service key through the catalog
+    // match — a station rental must hit the monthly-billed exemption, never
+    // stamp $31/application (codex r3).
+    const rentalIndex = indexServicesForSchedule([
+      { id: 21, service_key: 'termite_station_rental', name: 'Termite Station Rental', category: 'termite', billing_type: 'recurring', frequency: 'quarterly', visits_per_year: 4 },
+    ]);
+    const nameOnlyRental = {
+      id: 'est-pa-8',
+      monthly_total: 10.33,
+      estimate_data: {
+        result: { recurring: { services: [
+          { name: 'Termite Station Rental', perTreatment: 31, visitsPerYear: 4, mo: 10.33 },
+        ] } },
+      },
+    };
+    const [rentalLine] = scheduleLinesFromEstimate(nameOnlyRental, rentalIndex);
+    expect(rentalLine.perApplicationPrice).toBeUndefined();
+    expect(rentalLine.monthlyPrice).toBe(10.33);
+
 
 
 

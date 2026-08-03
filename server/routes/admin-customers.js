@@ -425,6 +425,11 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
   // carried on the line because the modal's own inference can't recover it
   // once the catalog match rewrites `frequency`.
   const schedulerCadence = cadence === 'every_6_weeks' ? 'custom' : cadence;
+  // Canonical service identity for the billing-unit gates (Codex #3173 r3):
+  // legacy/name-only rows carry no `service` key, but the catalog match
+  // resolves one — a name-only "Termite Station Rental" must still hit the
+  // monthly-billed exemption, never stamp $31/application.
+  const resolvedServiceKey = String(line?.service || matched?.service_key || '').trim();
   return {
     serviceId: matched?.id || null,
     serviceKey: matched?.service_key || line?.service || null,
@@ -459,13 +464,13 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
     // set is public-quote's (the same one that refuses per-app for them).
     ...(kind === 'recurring' && moneyOrNull(line?.mo, line?.monthly) != null && (() => {
       try {
-        const svcKey = String(line?.service || '').trim();
         // Commercial recurring bills MONTHLY by rule (AGENTS.md: commercial
         // is exempt from the per-application unit — Codex #3173 r2), on top
-        // of the canonical monthly-billed key set.
-        if (svcKey.startsWith('commercial_')) return true;
+        // of the canonical monthly-billed key set. Resolved key covers
+        // name-only legacy rows (r3).
+        if (resolvedServiceKey.startsWith('commercial_')) return true;
         const { MONTHLY_BILLED_SERVICE_KEYS } = require('./public-quote')._internals;
-        return MONTHLY_BILLED_SERVICE_KEYS.has(svcKey);
+        return MONTHLY_BILLED_SERVICE_KEYS.has(resolvedServiceKey);
       } catch { return false; }
     })()
       ? { monthlyPrice: moneyOrNull(line?.mo, line?.monthly) } : {}),
@@ -480,8 +485,9 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         // Commercial recurring is EXEMPT from the per-application unit rule
         // (AGENTS.md; the public quote path gates on commercialDetected the
         // same way — Codex #3173 r2): it bills monthly, so its perTreatment
-        // must never stamp per-application provenance.
-        if (String(line?.service || '').trim().startsWith('commercial_')) return {};
+        // must never stamp per-application provenance. Resolved key covers
+        // name-only legacy rows (r3).
+        if (resolvedServiceKey.startsWith('commercial_')) return {};
         const appliedPct = Number(line?.discount?.appliedDiscountPercent
           ?? line?.discount?.effectiveDiscount ?? 0);
         // Line-level OR parent-level (result.recurring.discount /
@@ -507,13 +513,13 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex, parentRecurrin
         const discountedPerApp = moneyOrNull(line?.priceAfterDiscount);
         const pa = perApplicationForLine(discountedPerApp != null
           ? {
-            service: line?.service,
+            service: resolvedServiceKey,
             perApp: discountedPerApp,
             ...cadenceFields,
             annualAfterDiscount: line?.annualAfterDiscount,
           }
           : {
-            service: line?.service,
+            service: resolvedServiceKey,
             perApp: moneyOrNull(line?.perApp, line?.perTreatment) || undefined,
             perVisit: line?.perVisit,
             ...cadenceFields,
@@ -553,9 +559,18 @@ function scheduleLinesFromEstimate(estimate, serviceIndex) {
     // uses, plus the recurring-scoped legacy spots.
     const { normalizeManualDiscountSummary } = require('./estimate-public');
     const recManual = rec?.manualDiscount || null;
+    // Only the discount's RECURRING slice suppresses recurring provenance
+    // (Codex #3173 r3): a fixed discount redirected entirely to one-time
+    // work persists amount > 0 with recurringAmount: 0, and the recurring
+    // lines' charges are unchanged. Same fallback rule as
+    // manualDiscountMonthlyAmount: recurringAmount ?? amount.
+    const manual = normalizeManualDiscountSummary(estData);
+    const manualHitsRecurring = !!manual && Number(manual.recurringAmount ?? manual.amount) > 0;
+    const recManualHitsRecurring = !!recManual
+      && Number(recManual.recurringAmount ?? recManual.amount ?? recManual.value) > 0;
     parentRecurringDiscounted = Number(rec?.discount) > 0
-      || !!normalizeManualDiscountSummary(estData)
-      || (recManual && (Number(recManual.value) > 0 || Number(recManual.amount) > 0));
+      || manualHitsRecurring
+      || recManualHitsRecurring;
   } catch { parentRecurringDiscounted = false; }
   const schedulableOneTimeList = oneTimeList.filter(isSchedulableOneTimeEstimateLine);
   const monthlyTotal = Number(estimate.monthly_total || 0);
