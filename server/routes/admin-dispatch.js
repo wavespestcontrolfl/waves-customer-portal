@@ -5465,7 +5465,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // from the tech clearing the box, and on first gate enablement
             // it would sweep up every historical inspection. Only an
             // explicit opt-in recorded HERE is recoverable evidence.
-            ...(offerInspectionCredit && String(completionProfile?.category || '') === 'inspection'
+            // Gate-checked (Codex #3178 P1): with the lane dark the client
+            // still posts the default-true field, and persisting consent
+            // then would let a later gate flip recover promises for
+            // inspections closed out before the feature existed.
+            // visitOutcome must be a real completion — an 'incomplete'
+            // visit performed no inspection to credit.
+            ...(offerInspectionCredit
+              && visitOutcome === 'completed'
+              && String(completionProfile?.category || '') === 'inspection'
+              && require('../config/feature-gates').isEnabled('inspectionCredit')
               ? { inspectionCreditOptIn: true }
               : {}),
           };
@@ -6480,15 +6489,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // promised a credit for. Records the PROMISE only; no money moves
     // until they book. Never throws — a credit hiccup must not fail a
     // completion the tech already performed.
-    if (offerInspectionCredit && String(completionProfile?.category || '') === 'inspection') {
+    if (offerInspectionCredit
+      && visitOutcome === 'completed'
+      && String(completionProfile?.category || '') === 'inspection') {
       try {
         const InspectionCredit = require('../services/inspection-credit');
+        // The window starts when the INSPECTION happened, not when it was
+        // closed out (Codex #3178 P1): a backdated closeout would otherwise
+        // hand a weeks-old inspection a fresh 30 days. ET wall-clock noon
+        // so a date-only value can't slip a day.
+        const inspectionMoment = InspectionCredit.etDateOnlyToDate(record.service_date);
         inspectionCreditOffer = await InspectionCredit.recordInspectionCreditOffer({
           customerId: svc.customer_id,
           scheduledServiceId: svc.id,
           serviceRecordId: record.id,
           serviceKey: completionProfile?.serviceKey || null,
           createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,
+          ...(inspectionMoment ? { now: inspectionMoment } : {}),
         });
       } catch (creditErr) {
         logger.error(`[dispatch] inspection credit offer failed for ${svc.id}: ${creditErr.message}`);

@@ -2605,6 +2605,16 @@ const EstimateConverter = {
             const insertedId = Array.isArray(inserted)
               ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
               : (typeof inserted === 'object' ? inserted?.id : inserted);
+            // Accepting an estimate IS a real customer booking, so it
+            // qualifies for an open inspection-credit promise. Marked
+            // in-transaction (dark behind the gate): the marker commits
+            // with the booking, and the hourly sweep turns it into credit.
+            try {
+              await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                customerId: row.customer_id,
+                scheduledServiceId: insertedId,
+              });
+            } catch { /* never blocks a conversion */ }
             const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
               ? inserted[0]
               : { ...row, id: insertedId };

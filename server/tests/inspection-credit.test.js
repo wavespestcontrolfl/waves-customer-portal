@@ -21,17 +21,22 @@ jest.mock('../services/customer-credit', () => ({
 let mockOffers = [];
 let mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date() }];
 let mockClaimResult = 1;
+let mockBookings = [];
 const mockUpdates = [];
 const mockChainCalls = [];
 jest.mock('../models/db', () => {
-  const makeChain = () => {
+  const makeChain = (table) => {
     const chain = {};
     for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning']) {
       chain[m] = jest.fn(() => { mockChainCalls.push(m); return chain; });
     }
     // select()/the builder itself resolves to the open-offer list
-    chain.then = (res, rej) => Promise.resolve(mockOffers).then(res, rej);
-    chain.first = jest.fn(async () => mockOffers[0] || null);
+    // Table-aware: a scheduled_services lookup is a BOOKING probe, not an
+    // offer read — conflating them made the reversal path think another
+    // live booking existed.
+    const isBookings = String(table || '').includes('scheduled_services');
+    chain.then = (res, rej) => Promise.resolve(isBookings ? mockBookings : mockOffers).then(res, rej);
+    chain.first = jest.fn(async () => (isBookings ? (mockBookings[0] || null) : (mockOffers[0] || null)));
     chain.insert = jest.fn(() => {
       const ins = {};
       ins.onConflict = jest.fn(() => ins);
@@ -42,7 +47,7 @@ jest.mock('../models/db', () => {
     chain.update = jest.fn(async (patch) => { mockUpdates.push(patch); return mockClaimResult; });
     return chain;
   };
-  const db = jest.fn(() => makeChain());
+  const db = jest.fn((table) => makeChain(table));
   db.fn = { now: () => 'NOW' };
   db.transaction = jest.fn(async (cb) => cb(db));
   return db;
@@ -64,6 +69,7 @@ beforeEach(() => {
   mockOffers = [];
   mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date() }];
   mockClaimResult = 1;
+  mockBookings = [];
   mockUpdates.length = 0;
   mockChainCalls.length = 0;
 });
@@ -242,6 +248,20 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     // Reopened so a real booking can still earn it, and the mint binding
     // cleared so it can mint again.
     expect(mockUpdates[0]).toMatchObject({ status: 'offered', credit_ledger_id: null, redeemed_at: null });
+  });
+
+  it('rebinds instead of reversing when another live booking still stands in the window', async () => {
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockBookings = [{ id: 'svc-other' }];
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ reversed: 0 });
+    // Money stays with the customer — they still have a qualifying booking.
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-other' });
   });
 
   it('a lapsed offer closes out instead of dangling reopened', async () => {

@@ -56,6 +56,29 @@ function configuredCreditAmount() {
   return 75;
 }
 
+/**
+ * A date-only value (YYYY-MM-DD) as an ET wall-clock instant.
+ *
+ * `new Date('2026-08-03')` anchors at UTC midnight, which in Eastern time is
+ * the PREVIOUS calendar day — that would shift a credit window a day early
+ * (Codex #3178 P1). Noon ET is chosen so neither DST edge can cross a day
+ * boundary. Non-date-only values pass through unchanged.
+ */
+function etDateOnlyToDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  const str = String(value);
+  const m = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) {
+    const parsed = new Date(str);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  // Noon ET ~= 16:00Z (EDT) / 17:00Z (EST) — 16:00Z is inside the ET day
+  // year-round.
+  const d = new Date(`${m[1]}-${m[2]}-${m[3]}T16:00:00Z`);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function round2(n) {
   return Math.round((Number(n) || 0) * 100) / 100;
 }
@@ -181,6 +204,36 @@ async function recordInspectionCreditOffer({
  * Best-effort by contract (a booking must never fail because crediting
  * failed) — returns a summary, never throws.
  */
+/**
+ * Mark open offers as "this booking is the qualifying one", INSIDE the
+ * caller's booking transaction (Codex #3178 P1).
+ *
+ * Durability matters here: a post-commit marker write can be lost to a
+ * crash between the booking commit and the write, leaving a real booking
+ * that the sweep can never recover. Written in-transaction, the marker
+ * commits with the booking or not at all — and the hourly sweep turns it
+ * into money, so the mint itself never has to succeed inline.
+ *
+ * Safe to call from any booking surface; it only touches offers already
+ * open and in-window, and never throws.
+ */
+async function markBookingForInspectionCredit(trx, { customerId, scheduledServiceId, bookingCreatedAt = new Date() }) {
+  if (!gateOn()) return 0;
+  if (!customerId || !scheduledServiceId || !trx) return 0;
+  try {
+    return await trx('inspection_credit_offers')
+      .where({ customer_id: customerId, status: 'offered' })
+      .whereNull('redeemed_scheduled_service_id')
+      .where('created_at', '<=', bookingCreatedAt)
+      .where('expires_at', '>=', bookingCreatedAt)
+      .whereNot({ source_scheduled_service_id: scheduledServiceId })
+      .update({ redeemed_scheduled_service_id: scheduledServiceId, updated_at: trx.fn.now() });
+  } catch (err) {
+    logger.warn(`[inspection-credit] booking marker failed for ${scheduledServiceId}: ${err.message}`);
+    return 0;
+  }
+}
+
 /**
  * Claim and mint ONE specific offer against ONE booking. The claim is
  * status-guarded AND ordering-guarded inside the transaction: the booking
@@ -385,7 +438,9 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           serviceRecordId: visit.record_id,
           serviceKey,
           createdBy: 'system:inspection_credit_recovery',
-          now: visit.service_date ? new Date(visit.service_date) : now,
+          // ET wall-clock: a date-only service_date parsed as UTC midnight
+          // lands on the previous ET day and shifts the window early.
+          now: etDateOnlyToDate(visit.service_date) || now,
         });
       }
     } catch (err) {
@@ -480,12 +535,32 @@ async function reverseInspectionCreditForBooking({
   try {
     const redeemedOffers = await db('inspection_credit_offers')
       .where({ redeemed_scheduled_service_id: scheduledServiceId, status: 'redeemed' })
-      .select('id', 'customer_id', 'amount', 'expires_at', 'credit_ledger_id');
+      .select('id', 'customer_id', 'amount', 'created_at', 'expires_at', 'credit_ledger_id', 'source_scheduled_service_id');
     if (!redeemedOffers.length) return { reversed: 0, reason: 'no_redeemed_offer' };
 
     let reversed = 0;
     for (const offer of redeemedOffers) {
       try {
+        // The credit was earned by BOOKING inside the window. If another
+        // live booking still stands in that window, the customer is still
+        // entitled to it — rebind rather than claw it back (Codex #3178
+        // P1): cancelling one of two bookings must not cost them the credit.
+        const alternate = await db('scheduled_services')
+          .where({ customer_id: offer.customer_id })
+          .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+          .where('created_at', '>=', offer.created_at)
+          .where('created_at', '<=', offer.expires_at)
+          .whereNot({ id: scheduledServiceId })
+          .whereNot({ id: offer.source_scheduled_service_id || '00000000-0000-0000-0000-000000000000' })
+          .orderBy('created_at', 'asc')
+          .first('id');
+        if (alternate) {
+          await db('inspection_credit_offers')
+            .where({ id: offer.id, status: 'redeemed' })
+            .update({ redeemed_scheduled_service_id: alternate.id, updated_at: db.fn.now() });
+          logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
+          continue;
+        }
         await db.transaction(async (trx) => {
           // Claim the reversal first: status-guarded so two cancellations
           // can't both give the money back.
@@ -524,6 +599,18 @@ async function reverseInspectionCreditForBooking({
         // a log line nobody reads — the same posture as every other
         // unreversible money event in this codebase (Codex #3175 r4 P0).
         logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
+        // Alert ONCE (Codex #3178 P2): the hourly sweep re-selects this
+        // offer forever, and a fresh bell every hour trains the office to
+        // ignore it. The durable marker is the note column.
+        try {
+          const marked = await db('inspection_credit_offers')
+            .where({ id: offer.id })
+            .whereNull('reversal_alerted_at')
+            .update({ reversal_alerted_at: new Date(), updated_at: db.fn.now() });
+          if (marked !== 1) continue;
+        } catch (markErr) {
+          logger.warn(`[inspection-credit] alert dedupe marker failed for offer ${offer.id}: ${markErr.message}`);
+        }
         try {
           await require('./notification-service').notifyAdmin(
             'billing',
@@ -568,6 +655,8 @@ function inspectionCreditReceiptMemo({ amount, expiresAt } = {}) {
 }
 
 module.exports = {
+  etDateOnlyToDate,
+  markBookingForInspectionCredit,
   recordInspectionCreditOffer,
   reverseInspectionCreditForBooking,
   sweepInspectionCreditRedemptions,
