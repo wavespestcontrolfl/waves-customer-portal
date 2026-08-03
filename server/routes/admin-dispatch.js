@@ -43,6 +43,11 @@ const {
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
+const {
+  REENTRY_SEND_LOCK_CLASS,
+  REENTRY_SEND_SEAL_KEY,
+  REENTRY_SEND_SEAL_TTL_MS,
+} = require('../services/service-report/email-delivery');
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
@@ -1301,20 +1306,19 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
 // applied product carries an REI so the caller keeps the service-line default.
 // Used to make the "Exterior ready in …" countdown reflect the product label
 // instead of a flat default.
-// opts.strict: the re-entry correction path fails CLOSED — a catalog lookup
-// failure propagates (500, the admin retries) instead of resolving to a null
-// floor that would accept a correction below the label REI (codex P1
-// PR #3180 r2). The completion path keeps the historical fail-open posture:
-// there the floor is defense-in-depth OVER the service-line defaults being
-// written anyway, and failing the whole closeout on a catalog blip would
-// block the visit.
-async function maxProductReentryMinutes(knex, submittedProducts = [], { strict = false } = {}) {
+// Fail-open by design for the COMPLETION path only: there the floor is
+// defense-in-depth over the service-line defaults being written anyway, and
+// failing the whole closeout on a catalog blip would block the visit. The
+// re-entry correction PATCH deliberately does NOT use this helper — it
+// resolves the applied products inline and fails closed (codex P1 PR #3180
+// r2/r3).
+async function maxProductReentryMinutes(knex, submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return null;
-  const query = knex('products_catalog')
+  const rows = await knex('products_catalog')
     .whereIn('id', productIds)
-    .select('rei_hours');
-  const rows = strict ? await query : await query.catch(() => []);
+    .select('rei_hours')
+    .catch(() => []);
   let maxMinutes = null;
   for (const row of rows) {
     const hours = Number(row.rei_hours);
@@ -2877,17 +2881,44 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
       // lookup failure 500s and the admin retries, rather than skipping a
       // safety floor.
       if (plan.exterior !== undefined) {
-        const appliedProducts = await trx('service_products')
+        // Inline STRICT resolution, not maxProductReentryMinutes: the
+        // helper's .catch(() => []) posture and its filter(Boolean) both
+        // fail OPEN — a catalog lookup failure or a deleted product
+        // (ON DELETE SET NULL leaves service_products.product_id null)
+        // would resolve to a null floor and accept an exterior value the
+        // label may forbid. Here every applied row must resolve to a
+        // catalog product or the correction is refused, and a lookup
+        // failure propagates (500 → the admin retries) instead of skipping
+        // the floor (codex P1 PR #3180 r2/r3).
+        const appliedRows = await trx('service_products')
           .where({ service_record_id: record.id })
           .select('product_id');
-        // strict: a catalog lookup failure aborts the correction (500 →
-        // retry) — the helper's default .catch(() => []) posture would
-        // resolve to a null floor and fail OPEN (codex P1 PR #3180 r2).
-        const productFloor = await maxProductReentryMinutes(
-          trx,
-          appliedProducts.map((p) => ({ productId: p.product_id })),
-          { strict: true },
-        );
+        const productIds = [...new Set(appliedRows.map((p) => p.product_id).filter(Boolean).map(String))];
+        const catalogRows = productIds.length
+          ? await trx('products_catalog').whereIn('id', productIds).select('id', 'rei_hours')
+          : [];
+        if (appliedRows.some((p) => !p.product_id) || catalogRows.length !== productIds.length) {
+          outcome = {
+            status: 409,
+            body: {
+              error: 'A product applied on this visit no longer resolves to the catalog, so its label re-entry interval can\'t be verified — the exterior window is not editable here',
+              code: 'reentry_rei_unverifiable',
+            },
+          };
+          return;
+        }
+        // A resolvable product with NO rei_hours on file carries no label
+        // REI ("until dry") — that's a real answer, not a verification
+        // failure; only finite intervals floor, most restrictive wins
+        // (same rule as the completion path's maxProductReentryMinutes).
+        let productFloor = null;
+        for (const row of catalogRows) {
+          const hours = Number(row.rei_hours);
+          if (Number.isFinite(hours) && hours >= 0) {
+            const minutes = Math.round(hours * 60);
+            if (productFloor == null || minutes > productFloor) productFloor = minutes;
+          }
+        }
         if (productFloor != null && plan.exterior < productFloor) {
           outcome = {
             status: 400,
@@ -2899,6 +2930,35 @@ router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
           };
           return;
         }
+      }
+      // Send-seal handshake (codex P1 PR #3180 r3): the report-email sender
+      // verifies the re-entry revision and stamps a send-window seal under
+      // this same advisory lock, then dispatches. Taking the lock HERE means
+      // this correction can commit neither inside that check-and-seal
+      // transaction nor mid-dispatch: any seal the sender committed is
+      // visible after the lock is acquired, and a fresh one refuses the
+      // correction (retry in a minute — the email will carry what the
+      // customer was actually sent). Seals older than the TTL are a crashed
+      // sender and are ignored. Lock order everywhere: scheduled_services
+      // row lock first, then this advisory lock; the sender takes only the
+      // advisory lock, so no cycle exists.
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        [REENTRY_SEND_LOCK_CLASS, String(record.id)],
+      );
+      const sealRow = await trx('service_records')
+        .where({ id: record.id })
+        .first('structured_notes');
+      const sealAt = Date.parse(parseJsonObject(sealRow?.structured_notes)[REENTRY_SEND_SEAL_KEY] || '');
+      if (Number.isFinite(sealAt) && Date.now() - sealAt < REENTRY_SEND_SEAL_TTL_MS) {
+        outcome = {
+          status: 409,
+          body: {
+            error: 'This visit\'s report email is being sent right now — retry the re-entry correction in a minute',
+            code: 'send_in_flight',
+          },
+        };
+        return;
       }
       const previousAdvisory = parseJsonObject(record.advisory);
       // Per-side authority marker (codex P1 PR #3180): a one-sided edit must

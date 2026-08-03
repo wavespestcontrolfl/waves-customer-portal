@@ -288,7 +288,7 @@ describe('route wiring contracts', () => {
     expect(block).toMatch(/jsonb_build_object\('reentryRev',\s*\n\s*COALESCE\(NULLIF\(COALESCE\(structured_notes::jsonb, '\{\}'::jsonb\) ->> 'reentryRev', ''\), '0'\)::int \+ 1\)/);
   });
 
-  test('the queued report email defers when a correction lands mid-build (codex P1 PR #3180 r2)', () => {
+  test('the queued report email defers on a mid-build correction and holds a send seal through dispatch (codex P1 PR #3180 r2/r3)', () => {
     const emailSource = fs.readFileSync(
       path.join(__dirname, '../services/service-report/email-delivery.js'),
       'utf8',
@@ -296,21 +296,36 @@ describe('route wiring contracts', () => {
     // Version boundary captured from the same row load the body/attachment
     // derive from…
     const captureAt = emailSource.indexOf('const preSendReentryRev = reentryRevFromNotes(service.structured_notes);');
-    // …re-verified against a live read after the render, before dispatch —
-    // a mismatch defers retryably instead of emailing stale guidance.
-    const fenceAt = emailSource.indexOf("if (reentryRevFromNotes(liveNotesRow?.structured_notes) !== preSendReentryRev) {");
-    const deferAt = emailSource.indexOf("error: 'Re-entry guidance corrected during render — deferring send', retryable: true");
+    // …re-verified under the shared advisory lock after the render: a
+    // mismatch defers retryably, a match stamps the send-window seal the
+    // correction PATCH refuses to write through.
     const renderAt = emailSource.indexOf('await getOrRenderServiceReportPdf(recordId, {');
+    const sealTxnAt = emailSource.indexOf('const sealFresh = await db.transaction(async (trx) => {');
+    const lockAt = emailSource.indexOf('[REENTRY_SEND_LOCK_CLASS, String(recordId)]');
+    const fenceAt = emailSource.indexOf('!== preSendReentryRev) return false;');
+    const sealStampAt = emailSource.indexOf("jsonb_build_object('${REENTRY_SEND_SEAL_KEY}', to_jsonb(?::text))");
+    const deferAt = emailSource.indexOf("error: 'Re-entry guidance corrected during render — deferring send', retryable: true");
     const dispatchAt = emailSource.indexOf('EmailTemplateLibrary.sendTemplate(', captureAt);
-    expect(captureAt).toBeGreaterThan(-1);
+    // …and released however dispatch ends, with the PATCH-side TTL as the
+    // crash guard.
+    const sealClearAt = emailSource.indexOf("- '${REENTRY_SEND_SEAL_KEY}'", dispatchAt);
+    for (const [label, at] of [['capture', captureAt], ['render', renderAt], ['sealTxn', sealTxnAt], ['lock', lockAt], ['fence', fenceAt], ['stamp', sealStampAt], ['defer', deferAt], ['dispatch', dispatchAt], ['clear', sealClearAt]]) {
+      expect({ label, found: at > -1 }).toEqual({ label, found: true });
+    }
     expect(renderAt).toBeGreaterThan(captureAt);
-    expect(fenceAt).toBeGreaterThan(renderAt);
-    expect(deferAt).toBeGreaterThan(fenceAt);
-    expect(dispatchAt).toBeGreaterThan(fenceAt);
-    // The live re-read has no soft-catch — failing to prove the revision
-    // defers, never sends unverified.
-    const fenceBlock = emailSource.slice(emailSource.indexOf('const liveNotesRow ='), deferAt);
-    expect(fenceBlock).not.toMatch(/\.catch\(/);
+    expect(sealTxnAt).toBeGreaterThan(renderAt);
+    expect(lockAt).toBeGreaterThan(sealTxnAt);
+    expect(fenceAt).toBeGreaterThan(lockAt);
+    expect(sealStampAt).toBeGreaterThan(fenceAt);
+    expect(dispatchAt).toBeGreaterThan(deferAt);
+    expect(sealClearAt).toBeGreaterThan(dispatchAt);
+    // The dispatch tail sits in a try whose finally releases the seal.
+    expect(emailSource.slice(deferAt, dispatchAt)).toMatch(/try \{/);
+    expect(emailSource.slice(dispatchAt, sealClearAt)).toMatch(/\} finally \{/);
+    // No soft-catch inside the check-and-seal transaction — failing to
+    // prove the revision defers, never sends unverified.
+    const sealTxnBlock = emailSource.slice(sealTxnAt, deferAt);
+    expect(sealTxnBlock).not.toMatch(/\.catch\(/);
   });
 
   test('the re-entry PDF signature rides EVERY storage-key composition site (codex P1 PR #3180)', () => {
@@ -608,10 +623,112 @@ describe('PATCH /:serviceId/reentry — behavioral', () => {
     expect(propagated).toBeTruthy();
     expect(String(propagated.message)).toContain('catalog timeout');
     expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined();
-    // Contract pins: the route calls the helper strict, and the helper's
-    // strict branch skips the fail-open .catch.
-    expect(source).toMatch(/maxProductReentryMinutes\(\s*\n\s*trx,\s*\n\s*appliedProducts\.map\(\(p\) => \(\{ productId: p\.product_id \}\)\),\s*\n\s*\{ strict: true \},\s*\n\s*\)/);
-    expect(source).toMatch(/const rows = strict \? await query : await query\.catch\(\(\) => \[\]\);/);
+    // Contract pin: the REI resolution is inline in the PATCH block with no
+    // soft-catch anywhere — the fail-open maxProductReentryMinutes helper
+    // stays a completion-path tool.
+    const start = source.indexOf("router.patch('/:serviceId/reentry'");
+    const block = source.slice(start, source.indexOf('} catch (err) { next(err); }\n});', start));
+    expect(block).not.toMatch(/maxProductReentryMinutes\(/);
+    const reiBlock = block.slice(block.indexOf('const appliedRows ='), block.indexOf('reentry_below_product_rei'));
+    expect(reiBlock).not.toMatch(/\.catch\(/);
+  });
+
+  test('an applied product that no longer resolves to the catalog refuses exterior edits (codex P1 PR #3180 r3)', async () => {
+    // Deleted catalog product: ON DELETE SET NULL leaves product_id null —
+    // its label REI is unverifiable, so the exterior window is not editable.
+    let dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      serviceProducts: [{ product_id: 'prod-1' }, { product_id: null }],
+      catalogRows: [{ id: 'prod-1', rei_hours: 0.5 }],
+    });
+    mockDbCurrent = dbMock;
+    let res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 0 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('reentry_rei_unverifiable');
+    expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined();
+
+    // Same for a product_id whose catalog row is gone (data drift).
+    dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      serviceProducts: [{ product_id: 'prod-gone' }],
+      catalogRows: [],
+    });
+    mockDbCurrent = dbMock;
+    res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 0 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('reentry_rei_unverifiable');
+
+    // INTERIOR edits stay allowed — the unverifiable REI only governs the
+    // exterior window (mirrors the completion path's exterior-only floor).
+    dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: RECORD,
+      recordCols: RECORD_COLS,
+      serviceProducts: [{ product_id: null }],
+    });
+    mockDbCurrent = dbMock;
+    res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { interiorMinutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+  });
+
+  test('a fresh report-email send seal refuses the correction; a stale one is ignored (codex P1 PR #3180 r3)', async () => {
+    const sealed = {
+      ...RECORD,
+      structured_notes: JSON.stringify({ reentrySendStartedAt: new Date(Date.now() - 30 * 1000).toISOString() }),
+    };
+    let dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: sealed, recordCols: RECORD_COLS });
+    mockDbCurrent = dbMock;
+    let res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe('send_in_flight');
+    expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined();
+
+    // A seal older than the TTL is a crashed sender — corrections proceed.
+    const staleSealed = {
+      ...RECORD,
+      structured_notes: JSON.stringify({ reentrySendStartedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString() }),
+    };
+    dbMock = makeRecordingDb({ svc: COMPLETED_SVC, record: staleSealed, recordCols: RECORD_COLS });
+    mockDbCurrent = dbMock;
+    res = makeRes();
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { exteriorMinutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { throw err; },
+    );
+    expect(res.statusCode).toBe(200);
+
+    // Contract pin: the PATCH takes the sender's advisory lock BEFORE the
+    // seal read, keyed on the record — the handshake that closes the
+    // check-to-dispatch window.
+    const lockAt = source.indexOf("[REENTRY_SEND_LOCK_CLASS, String(record.id)]");
+    const sealReadAt = source.indexOf('const sealRow = await trx');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(sealReadAt).toBeGreaterThan(lockAt);
   });
 
   test('incomplete-visit record → 409 record_incomplete, nothing written (codex P2 PR #3180 r2)', async () => {
