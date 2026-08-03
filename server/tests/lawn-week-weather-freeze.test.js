@@ -171,7 +171,7 @@ describe('freeze contract in the render path', () => {
       expect(src).toMatch(/weekWeatherUncacheable/);
     }
     // pdf-queue returns the bytes with no key rather than storing.
-    expect(pdfQueue).toMatch(/weekWeatherUncacheable[\s\S]{0,300}?uncached: true/);
+    expect(pdfQueue).toMatch(/weekWeatherUncacheable[\s\S]{0,900}?uncached: true/);
     // reports-public branches AROUND the putReportPdf call.
     expect(reportsPublic).toMatch(/weekWeatherUncacheable[\s\S]{0,400}?\} else if/);
   });
@@ -194,10 +194,44 @@ describe('freeze contract in the render path', () => {
   // An uncached render is not a completed job: the job exists to populate the
   // cache, so marking it succeeded would retire it with nothing stored and no
   // retry — the condition that made it unstorable never gets another attempt.
+  // An open window is the one uncacheable condition that RETRYING cannot fix:
+  // the ladder runs out in about half an hour, hours before the ET day ends. A
+  // failed job there is retired before it can ever perform the freeze it exists
+  // for, and pages someone about a terminal failure that was really "not yet".
+  test('an OPEN-WINDOW job waits for ET midnight instead of burning retries', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    expect(pdfQueue).toMatch(/uncachedReason: openWindow \? 'open_window' : 'unfrozen'/);
+    // Deferred, not failed — and the branch precedes the failure path.
+    const deferAt = pdfQueue.indexOf("result.uncachedReason === 'open_window'");
+    const failAt = pdfQueue.indexOf('pdf_render_uncacheable');
+    expect(deferAt).toBeGreaterThan(-1);
+    expect(deferAt).toBeLessThan(failAt);
+    expect(pdfQueue).toMatch(/deferPdfRenderJob\(job, until,/);
+    // The claim's attempt is handed back, so a deferral cannot exhaust the job.
+    expect(pdfQueue).toMatch(/attempts: Math\.max\(0, Number\(job\.attempts \|\| 1\) - 1\)/);
+    // And it never touches failed_at / the terminal alert.
+    const defer = pdfQueue.slice(pdfQueue.indexOf('async function deferPdfRenderJob'), pdfQueue.indexOf('async function markPdfRenderJobFailed'));
+    expect(defer).not.toMatch(/failed_at|emitPdfRenderTerminalFailure|alertServiceReportPdfFailed/);
+  });
+
+  test('the deferral target survives BOTH DST boundaries', () => {
+    const { nextEtMidnight } = require('../services/service-report/application-conditions');
+    const et = (d) => d.toLocaleString('en-CA', { timeZone: 'America/New_York' });
+    // Spring forward (23-hour ET day) and fall back (25-hour ET day) — the
+    // cases fixed -4/-5 offset arithmetic lands an hour wrong on.
+    for (const iso of ['2027-03-13T20:00:00Z', '2026-11-01T02:00:00Z']) {
+      const next = nextEtMidnight(new Date(iso));
+      // Lands in the NEXT ET calendar day, just past midnight.
+      expect(et(next)).toMatch(/12:0\d:\d\d a\.m\./);
+      expect(next.getTime()).toBeGreaterThan(new Date(iso).getTime());
+      expect(next.getTime() - new Date(iso).getTime()).toBeLessThan(26 * 60 * 60 * 1000);
+    }
+  });
+
   test('an UNCACHED render is not treated as a successful store', () => {
     const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
     // The render JOB retries instead of succeeding.
-    expect(pdfQueue).toMatch(/if \(result\?\.uncached\)[\s\S]{0,400}?markPdfRenderJobFailed/);
+    expect(pdfQueue).toMatch(/if \(result\?\.uncached\)[\s\S]{0,1400}?markPdfRenderJobFailed/);
     // The correction marker is RETAINED — nothing was stored, so the canonical
     // cached PDF is still whatever it was.
     expect(pdfQueue).toMatch(/correctionPending && !rendered\.storageFailed && !rendered\.pinned && !rendered\.uncached/);

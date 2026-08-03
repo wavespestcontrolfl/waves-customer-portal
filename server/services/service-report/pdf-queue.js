@@ -3,6 +3,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
+const { nextEtMidnight } = require('./application-conditions');
 const { renderServiceReportV1Pdf } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
@@ -235,8 +236,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // The CACHE gate takes the superset: a failed freeze AND a week that has
     // not settled yet. Delivery above gates on the failure alone.
     if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
-      logger.warn(`[service-report-pdf] week weather unfrozen for ${recordId} — not caching this render`);
-      return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
+      // WHY it was uncacheable decides what the queue does with it. An open
+      // window is not a failure and will resolve itself at ET midnight, so the
+      // job waits for that instead of burning retries against a condition no
+      // retry can change.
+      const openWindow = !renderedData.lawnAssessment.weekWeatherUnfrozen;
+      logger.warn(`[service-report-pdf] week weather ${openWindow ? 'window still open' : 'unfrozen'} for ${recordId} — not caching this render`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: openWindow ? 'open_window' : 'unfrozen',
+      };
     }
     const laAfter = await lawnAssessmentPdfSignature(service, knex);
     if (laAfter !== laSignature) {
@@ -458,6 +467,7 @@ async function getOrRenderServiceReportPdf(recordId, {
     // Likewise for a render that completed but was not cacheable (unfrozen
     // week, or a selection that moved during the render).
     uncached: !!rendered.uncached,
+    uncachedReason: rendered.uncachedReason || null,
   };
 }
 
@@ -578,6 +588,23 @@ async function markPdfRenderJobSucceeded(job, key, knex = db) {
   });
 }
 
+// Reschedule a job WITHOUT consuming an attempt. For conditions that are not
+// failures and that time alone resolves — the retry ladder is for transient
+// errors, and spending it here would exhaust the job before the condition
+// clears and fire a terminal-failure alert for a healthy record.
+async function deferPdfRenderJob(job, until, reason, knex = db) {
+  await knex('service_report_pdf_jobs').where({ id: job.id }).update({
+    status: 'queued',
+    next_attempt_at: until,
+    // Hand back the attempt the claim consumed.
+    attempts: Math.max(0, Number(job.attempts || 1) - 1),
+    locked_at: null,
+    last_error: reason,
+    updated_at: new Date(),
+  });
+  logger.info(`[service-report-pdf-queue] deferred ${job.service_record_id} until ${until.toISOString()}: ${reason}`);
+}
+
 async function markPdfRenderJobFailed(job, err, knex = db) {
   const now = new Date();
   const attempts = Number(job.attempts || 0);
@@ -617,6 +644,17 @@ async function processPdfRenderJob(job, knex = db) {
     // unstorable (an unfrozen week, a selection that moved) never gets another
     // attempt. Fail it so the queue backs off and tries again.
     if (result?.uncached) {
+      // An OPEN weather window is not a failure and no amount of retrying
+      // inside the retry ladder can close it — the delays run out roughly half
+      // an hour in, hours before the ET day ends. Failing it would retire the
+      // job before the freeze it exists to perform is even possible, and page
+      // someone about a terminal failure that was really just "not yet". Wait
+      // for midnight instead, and give the attempt back.
+      if (result.uncachedReason === 'open_window') {
+        const until = nextEtMidnight();
+        await deferPdfRenderJob(job, until, 'weather window still open — deferred until it closes', knex);
+        return { status: 'deferred', nextAttemptAt: until.toISOString() };
+      }
       const err = new Error('render completed but was not cacheable — retrying');
       err.code = 'pdf_render_uncacheable';
       const status = await markPdfRenderJobFailed(job, err, knex);

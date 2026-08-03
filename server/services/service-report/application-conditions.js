@@ -257,6 +257,20 @@ function etTodayYmd() {
   return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
 }
 
+// The next instant at which the ET calendar day has rolled over — i.e. when a
+// window ending "today" has SETTLED and can be frozen. Stepping the formatter
+// forward rather than doing offset arithmetic keeps this correct across the
+// DST boundaries where a fixed -4/-5 would land an hour wrong twice a year.
+// Bounded at 26 hours so a formatter surprise can never spin.
+function nextEtMidnight(now = new Date()) {
+  const today = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  for (let i = 1; i <= 4 * 26; i += 1) {
+    const t = new Date(now.getTime() + i * 15 * 60 * 1000);
+    if (t.toLocaleDateString('en-CA', { timeZone: 'America/New_York' }) !== today) return t;
+  }
+  return new Date(now.getTime() + 26 * 60 * 60 * 1000);
+}
+
 // Merge an MRMS daily series into the Open-Meteo week. Pure — exported for
 // tests. Returns the merged value or null when MRMS adds nothing usable
 // (caller keeps the Open-Meteo result).
@@ -578,6 +592,7 @@ async function fetchRecentMinTempF({ latitude, longitude, pastDays = 7 } = {}) {
 }
 
 module.exports = {
+  nextEtMidnight,
   fetchApplicationConditions,
   fetchOpenMeteoConditions,
   fetchServiceWeekWeather,
