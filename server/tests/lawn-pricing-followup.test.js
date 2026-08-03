@@ -970,12 +970,12 @@ describe('lawn pricing production follow-up', () => {
 
     // Owner 2026-07-17 ("forget all pricing floors"): lawn takes the full
     // Silver 10% ($576 → $518.40), so the manual-discount base is pest
-    // 421.20 + lawn 518.40 = 939.60.
+    // 403.20 + lawn 518.40 = 921.60 (pest base 112, owner ruling 2026-08-03).
     expect(lawn.annualAfterDiscount).toBe(518.4);
-    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(939.6, 2);
-    // With no floor to protect, the 10% manual discount (93.96) applies in
+    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(921.6, 2);
+    // With no floor to protect, the 10% manual discount (92.16) applies in
     // full, uncapped — no lawn_program_minimum cap exists anymore.
-    expect(estimate.summary.manualDiscount.amount).toBe(93.96);
+    expect(estimate.summary.manualDiscount.amount).toBe(92.16);
     expect(estimate.summary.manualDiscount.capped).toBe(false);
     expect(estimate.summary.manualDiscount.capReason).toBeNull();
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');

@@ -170,7 +170,7 @@ describe('pest post-discount program floor (owner decision 2026-07-09)', () => {
     const est = generateEstimate(bundleWithPestFrequency('quarterly'));
     const pest = est.lineItems.find(i => i.service === 'pest_control');
     expect(pest.programFloorApplied).toBe(false);
-    expect(pest.annualAfterDiscount).toBeCloseTo(468 * 0.8, 2);
+    expect(pest.annualAfterDiscount).toBeCloseTo(448 * 0.8, 2);
   });
 
   test('pest-floor manual-discount warning reports in BOTH states and never caps', () => {
@@ -291,9 +291,12 @@ describe('one-time pest anchors on the quarterly rate', () => {
     expect(nonRecurring.recurringIncentiveClampApplied).toBe(false);
     expect(nonRecurring.price).toBeGreaterThan(visitOne);
 
-    // A typical home clears recurring visit-1 even with the perk — no clamp.
+    // At the 112 base (light-tree fold, owner ruling 2026-08-03) the perk on
+    // a typical home lands just under recurring visit-1 ($211), so the clamp
+    // engages and holds one-time strictly above it ($212).
     const typical = priceOneTimePest({ footprint: 2000 }, { isRecurringCustomer: true });
-    expect(typical.recurringIncentiveClampApplied).toBe(false);
+    expect(typical.recurringIncentiveClampApplied).toBe(true);
+    expect(typical.price).toBe(212);
     expect(typical.price).toBeGreaterThan(typical.quarterlyPerApp + constants.PEST.initialFee);
   });
 });

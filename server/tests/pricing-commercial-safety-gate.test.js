@@ -270,7 +270,7 @@ describe('commercial safety gate in generateEstimate', () => {
     const pest = estimate.lineItems.find((line) => line.service === 'pest_control');
     const lawn = estimate.lineItems.find((line) => line.service === 'lawn_care');
 
-    expect(pest).toMatchObject({ monthly: 39, annual: 468, perApp: 117 });
+    expect(pest).toMatchObject({ monthly: 37.33, annual: 448, perApp: 112 });
     // Lawn prices off the market bracket ($600/yr here) with the 35% cost
     // floor disarmed (owner 2026-07-17 "forget all pricing floors"; the floor
     // basis would have lifted this quote to $621).
@@ -285,23 +285,24 @@ describe('commercial safety gate in generateEstimate', () => {
     // the 2026-07-17 owner ruling (the $600/yr lawn program minimum and the
     // pest per-visit program floor are both disarmed).
     expect(pest).toMatchObject({
-      annualAfterDiscount: 421.2,
+      annualAfterDiscount: 403.2,
       discountCapped: false,
       marginGuardApplied: false,
       programFloorApplied: false,
     });
     expect(lawn).toMatchObject({ annualAfterDiscount: 540, monthlyAfterDiscount: 45 });
     expect(estimate.summary).toMatchObject({
-      recurringAnnualBeforeDiscount: 1068,
-      // Silver 10% applies in full: pest 468 → 421.20, lawn 600 → 540;
-      // 421.20 + 540 = 961.20. (Re-armed — useLawnCostFloor — the margin
-      // guard binds at the 642.76 reserve-folded floor and the monthly
-      // CEILs; pinned in lawn-pricing-followup.test.js.)
-      recurringAnnualAfterDiscount: 961.2,
-      recurringMonthlyAfterDiscount: 80.1,
-      year1Total: 961,
-      year2Annual: 961,
-      year2Monthly: 80.1,
+      recurringAnnualBeforeDiscount: 1048,
+      // Silver 10% applies in full: pest 448 → 403.20, lawn 600 → 540;
+      // 403.20 + 540 = 943.20 (pest base 112, owner ruling 2026-08-03).
+      // (Re-armed — useLawnCostFloor — the margin guard binds at the 642.76
+      // reserve-folded floor and the monthly CEILs; pinned in
+      // lawn-pricing-followup.test.js.)
+      recurringAnnualAfterDiscount: 943.2,
+      recurringMonthlyAfterDiscount: 78.6,
+      year1Total: 943,
+      year2Annual: 943,
+      year2Monthly: 78.6,
     });
     expect(estimate.waveGuard).toMatchObject({
       tier: 'silver',
