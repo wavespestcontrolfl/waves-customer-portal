@@ -10013,59 +10013,65 @@ const CallRecordingProcessor = {
           } else {
             try {
             const { buildTriageItem } = require('./call-routing-gates');
-            await db('triage_items')
-              .insert(buildTriageItem({
-                callLogId: call.id,
-                flag: 'email_unverified',
-                extraction: { meta: { call_summary: extracted.call_summary || null } },
-                severity: 'advisory',
-                extraPayload: { hold_reason: 'review_card_insert_failed', held_drip: beehiivResult?.skipped === 'email_under_review', held_newsletter: newsletterResult?.skipped === 'email_under_review' },
-              }))
-              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-              .ignore();
-            // The replacement card describes THIS run's extraction, so the
-            // ledger is retargeted with it (Codex #3084 r50): Step 6
-            // preserved a prior cycle's address while that cycle's card was
-            // still live (recordFirstTouchHold's earlier-card branch), and
-            // with the old card resolved mid-run, resolving the replacement
+            // The WHOLE recovery — card insert, ledger retarget, claim
+            // invalidation — rides ONE token-fenced transaction (Codex
+            // #3084 r52, completing r51): a worker stalled past the
+            // reclaim window must not file an extraction-A card that
+            // absorbs the reclaiming peer's own insert (partial unique
+            // index), must not overwrite the peer's held target, and must
+            // not re-pend the peer's holds. Ownership lost = all three
+            // abort; the owner's run records its own card and target.
+            // Same r46 lock order — hold rows first, then the
+            // token-conditioned call_log lock, then the card write.
+            //
+            // Retarget semantics (r50): the replacement card describes
+            // THIS run's extraction — Step 6 preserved a prior cycle's
+            // address while that cycle's card was still live, and with
+            // the old card resolved mid-run, resolving the replacement
             // card would otherwise release the OLD — still unverified,
-            // possibly hard-bounced — target. Pending/releasing rows only:
-            // a released row's held_email is delivery evidence (the r19
-            // adoption reads it). Never over an operator's explicit
-            // correction (corrected_at, the r39 marker), and no updated_at
-            // bump (the r12 rule — never extend a possibly-dead claimant's
-            // stale window; the repen below owns lease invalidation).
-            // Token-fenced like recordFirstTouchHoldOwned (Codex #3084
-            // r51): a worker stalled past the reclaim window must not
-            // overwrite the reclaiming peer's held target with its stale
-            // extraction. Same r46 lock order — hold rows first, then the
-            // token-conditioned call_log lock; a lost claim skips the
-            // retarget (the owner's own run records its target).
-            await db.transaction(async (trx) => {
+            // possibly hard-bounced — target. Pending/releasing rows
+            // only (a released row's held_email is r19 delivery
+            // evidence); never over an operator's explicit correction
+            // (corrected_at, the r39 marker); no updated_at bump (the
+            // r12 rule — the repen owns lease invalidation).
+            const recoveryOwned = await db.transaction(async (trx) => {
               await trx('first_touch_holds')
                 .where({ call_log_id: call.id })
                 .forUpdate()
                 .select('id');
-              const ownedForRetarget = await trx('call_log')
+              const owned = await trx('call_log')
                 .where({ id: call.id })
                 .where('processing_token', procToken)
                 .forUpdate()
                 .first('id');
-              if (!ownedForRetarget) {
-                logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — skipping the recovery retarget (the owner records it)`);
-                return;
-              }
+              if (!owned) return false;
+              await trx('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag: 'email_unverified',
+                  extraction: { meta: { call_summary: extracted.call_summary || null } },
+                  severity: 'advisory',
+                  extraPayload: { hold_reason: 'review_card_insert_failed', held_drip: beehiivResult?.skipped === 'email_under_review', held_newsletter: newsletterResult?.skipped === 'email_under_review' },
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore();
               await trx('first_touch_holds')
                 .where({ call_log_id: call.id })
                 .whereIn('status', ['pending', 'releasing'])
                 .whereNull('corrected_at')
                 .update({ held_email: extracted.email || '' });
+              // The recovery card is a live review too — invalidate any
+              // in-flight release claim for the call (Codex #3084 r43),
+              // inside the same fence (r52). A failure throws (r44), rolls
+              // back the card and retarget with it, and the catch below
+              // fails the run.
+              const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
+              await repenHoldsForFreshEmailReview(call.id, trx);
+              return true;
             });
-            // The recovery card is a live review too — invalidate any
-            // in-flight release claim for the call (Codex #3084 r43). A
-            // failure throws (r44) and the catch below fails the run.
-            const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
-            await repenHoldsForFreshEmailReview(call.id, db);
+            if (!recoveryOwned) {
+              logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — skipping the recovery card, retarget, and re-pend (the owner records them)`);
+            }
             } catch (markerErr) {
               // Without this card the pending hold is invisible to
               // operators AND ineligible for the sweep (no resolved card
