@@ -684,6 +684,16 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(link).toBeTruthy();
   });
 
+  it('shows a checked-clear station as checked, not as on-file', () => {
+    const data = {
+      ...BASE_DATA,
+      stationMap: { available: true, program: 'trapping', stations: [{ id: 's1', number: 1, cx: 0.3, cy: 0.4, status: 'ok' }], summary: { total: 1, checked: 1 } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.querySelector('.doc-station-pin.is-ok')).toBeTruthy();
+    expect(container.textContent).toMatch(/Checked — no capture/);
+  });
+
   it('labels the station status colors', () => {
     const data = {
       ...BASE_DATA,

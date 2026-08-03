@@ -52,6 +52,29 @@ const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-ser
 // Mirrors STATION_CARD_PROGRAM_META in StationMapCard: "activity" means bait
 // consumption on a bait program and a recorded capture on a trapping program —
 // a generic word would misstate the outcome in the permanent record.
+// Mirrors STATION_STATUS_META / stationStatusMeta in StationMapCard. 'ok'
+// means CHECKED AND CLEAR (green) — falling through to the navy on-file pin
+// labelled a clear, inspected station as uninspected while the summary
+// counted it as checked.
+const STATION_STATUS_META = {
+  ok: { cls: 'is-ok', label: 'Checked — no activity' },
+  activity: { cls: 'is-activity', label: 'Activity observed' },
+  serviced: { cls: 'is-serviced', label: 'Serviced this visit' },
+  inaccessible: { cls: 'is-inaccessible', label: 'Not accessible this visit' },
+};
+const STATION_ON_FILE_META = { cls: '', label: 'On file (not checked this visit)' };
+const STATION_OK_LEGEND = {
+  rodent: 'Checked — no consumption',
+  trapping: 'Checked — no capture',
+};
+
+function stationStatusMeta(status, program) {
+  const base = STATION_STATUS_META[status] || STATION_ON_FILE_META;
+  if (status === 'activity') return { ...base, label: STATION_ACTIVITY_LEGEND[program] || base.label };
+  if (status === 'ok' && STATION_OK_LEGEND[program]) return { ...base, label: STATION_OK_LEGEND[program] };
+  return base;
+}
+
 const STATION_ACTIVITY_LEGEND = {
   termite: 'Termite activity observed',
   rodent: 'Bait consumption observed',
@@ -601,6 +624,7 @@ export default function ServiceReportDocument({ data, token }) {
           border: 1.5px solid #fff; box-shadow: 0 0 0 1px ${LINE};
         }
         .service-report-document .doc-station-pin.is-activity { background: #A33B2E; }
+        .service-report-document .doc-station-pin.is-ok { background: #0F7B54; }
         .service-report-document .doc-station-pin.is-serviced { background: #B7791F; }
         .service-report-document .doc-station-pin.is-inaccessible { background: ${MUTED}; }
       `}</style>
@@ -953,13 +977,15 @@ export default function ServiceReportDocument({ data, token }) {
               {stationMap.stations.map((station) => (
                 <span
                   key={station.id || station.number}
-                  className={`doc-station-pin${station.status === 'activity' ? ' is-activity' : ''}${station.status === 'serviced' ? ' is-serviced' : ''}${station.status === 'inaccessible' ? ' is-inaccessible' : ''}`}
+                  className={`doc-station-pin ${stationStatusMeta(station.status, stationMap.program).cls}`.trim()}
                   style={{ left: `${(station.cx * 100).toFixed(2)}%`, top: `${(station.cy * 100).toFixed(2)}%` }}
                 >{station.number}</span>
               ))}
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6, fontSize: 9.5, color: MUTED }}>
-              {[['', 'On file'], ['is-serviced', 'Serviced this visit'], ['is-activity', STATION_ACTIVITY_LEGEND[stationMap.program] || 'Activity observed'], ['is-inaccessible', 'Not accessible']].map(([cls, label]) => (
+              {['ok', 'serviced', 'activity', 'inaccessible', 'on_file']
+                .map((status) => (status === 'on_file' ? STATION_ON_FILE_META : stationStatusMeta(status, stationMap.program)))
+                .map(({ cls, label }) => (
                 <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   <span className={`doc-station-pin ${cls}`} style={{ position: 'static', transform: 'none', width: 11, height: 11, fontSize: 0 }} aria-hidden="true" />
                   {label}

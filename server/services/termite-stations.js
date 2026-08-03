@@ -860,7 +860,25 @@ async function stationMapPdfSignature(service, knex) {
     const checkPart = checkCount
       ? `c${checkCount}x${Number.isFinite(checkStamp) ? checkStamp : 0}`
       : '';
-    return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}${checkPart}`;
+    // DRIFT INPUTS: the printed cx/cy are resolved through
+    // resolveZoneRowsImageDrift against the CURRENT map center and zoom
+    // (report-data.js:2761-2765), so a re-geocode or a zoom change can move
+    // or drop pins with no station or check write at all. Hash the inputs the
+    // coordinates are derived from, not just the rows.
+    // Same row report-data resolves the zoom from: property_geometries,
+    // newest version first.
+    const geom = await knex('property_geometries')
+      .where({ customer_id: customerId })
+      .orderBy('version', 'desc')
+      .first('zoom', 'version')
+      .catch(() => null);
+    const lat = service?.customer_latitude ?? service?.latitude ?? null;
+    const lng = service?.customer_longitude ?? service?.longitude ?? null;
+    const centerPart = lat != null && lng != null
+      ? `g${Number(lat).toFixed(5)},${Number(lng).toFixed(5)}`
+      : '';
+    const zoomPart = geom ? `z${geom.zoom ?? 20}v${geom.version ?? 0}` : '';
+    return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}${checkPart}${centerPart}${zoomPart}`;
   } catch {
     return '';
   }
