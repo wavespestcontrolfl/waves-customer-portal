@@ -1072,6 +1072,37 @@ describe('technician body count claims reconcile against the typed values (round
     expect(countContradictions('We checked the traps today.', { traps_checked: 6 })).toEqual([]);
   });
 
+  // Round 11: the round-8 narrowness rule (bail when a subject carries more
+  // than one distinct claim) also bailed when prose mixed a ROSTER count with
+  // a STATUS SUBSET — the common shape — so a stale total escaped entirely.
+  // Subsets are now recognized and dropped rather than counted as competing
+  // totals, while a genuine breakdown still bails.
+  test('a status subset does not make the roster count unverifiable', () => {
+    for (const text of [
+      'We checked 8 traps and found activity at 2 traps.',   // cue leads its count
+      'We checked 8 traps and 2 traps had captures.',        // cue trails its count
+      'We checked 8 traps. Activity at 2 traps.',            // separate sentences
+      'We set eight traps and 1 trap was damaged.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    }
+    // …and the same shapes pass when the roster agrees
+    expect(countContradictions('We checked 8 traps and found activity at 2 traps.', { traps_checked: 8 }))
+      .toEqual([]);
+  });
+
+  test('a genuine breakdown is still unverifiable, and subsets alone claim nothing', () => {
+    // two roster claims with no status cue — summing them would be a guess
+    expect(countContradictions('We set two snap traps and six glue traps.', { traps_checked: 8 }))
+      .toEqual([]);
+    expect(countContradictions(
+      'We checked the 8 traps on the north side and the 4 traps on the south side.',
+      { traps_checked: 12 },
+    )).toEqual([]);
+    // a subset on its own asserts no roster size
+    expect(countContradictions('Activity was found at 2 traps.', { traps_checked: 6 })).toEqual([]);
+  });
+
   // Round 10: the animal can precede its verb. CAPTURE_CLAIM_RE needs the
   // noun `captures`; CAUGHT_CLAIM_RE needs the verb before the number — so
   // "two mice were caught" was extracted by neither.

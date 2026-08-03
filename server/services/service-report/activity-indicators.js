@@ -2066,6 +2066,56 @@ const CAUGHT_CLAIM_RE = /\b(?:caught|captured|removed)\s+(\d+)(?:\s+[a-z-]+){0,2
 // count guard was only looking at one word order.
 const CAUGHT_PASSIVE_CLAIM_RE = /\b(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed)\b/gi;
 
+// Cues that mark a trap count as a SUBSET of the roster carrying some
+// status, rather than a claim about how many traps there are. "We checked 8
+// traps and found activity at 2 traps" claims a roster of 8 and a subset of
+// 2 — treating both as roster claims made the pair look ambiguous, and the
+// `claims.size !== 1` bail then skipped the subject entirely, so a stale 8
+// published beside a corrected "Traps checked: 6" (codex P1 round 11).
+//
+// Read from the text BEFORE the number, bounded to the current sentence so a
+// status mentioned in a previous one can't reclassify this count.
+const SUBSET_LEAD_RE = /\b(?:activity|captur|consum|access|damag|missing|sprung|empty|disturb|chew)/i;
+
+// Trap ROSTER claims only — subset counts are recognized and dropped rather
+// than counted as competing totals.
+//
+// The cue can sit on either side of its count ("activity at 2 traps", "2
+// traps had captures"), so both windows are consulted — but each is bounded
+// by the NEIGHBOURING claims, or a cue between two counts would be read as
+// belonging to both. Text between two claims is attributed to the later
+// one's lead: "we checked 8 traps and found activity at 2 traps" puts
+// "found activity at" on the 2, leaving 8 as the roster it is.
+function trapRosterClaims(text) {
+  const re = new RegExp(TRAP_COUNT_CLAIM_RE.source, 'gi');
+  const found = [];
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    found.push({
+      index: match.index,
+      end: match.index + match[0].length,
+      first: match[1],
+      second: match[2],
+      filler: match[3],
+    });
+  }
+  const claims = new Set();
+  found.forEach((m, i) => {
+    if (/\bof\b/i.test(m.filler || '')) return; // "1 of the traps" — no total claimed
+    const lead = text
+      .slice(i > 0 ? found[i - 1].end : Math.max(0, m.index - 40), m.index)
+      .split(/[.!?]/).pop();
+    // Only the LAST claim owns the text after it; otherwise that text is the
+    // next claim's lead and is judged there.
+    const trail = i + 1 < found.length
+      ? ''
+      : text.slice(m.end, m.end + 30).split(/[.!?]/)[0];
+    if (SUBSET_LEAD_RE.test(lead) || SUBSET_LEAD_RE.test(trail)) return;
+    claims.add(Number(m.second != null ? m.second : m.first));
+  });
+  return claims;
+}
+
 function claimedCounts(text, patterns) {
   const claims = new Set();
   for (const pattern of patterns) {
@@ -2115,7 +2165,7 @@ function countContradictions(text, values = {}) {
     const [claimed] = [...claims];
     if (claimed !== actual) found.push(`${kind}:claimed_${claimed}_recorded_${actual}`);
   };
-  check(claimedCounts(str, [TRAP_COUNT_CLAIM_RE]), values.traps_checked, 'trap_count_mismatch');
+  check(trapRosterClaims(str), values.traps_checked, 'trap_count_mismatch');
   check(
     claimedCounts(str, [CAPTURE_CLAIM_RE, CAUGHT_CLAIM_RE, CAUGHT_PASSIVE_CLAIM_RE]),
     values.captures,
