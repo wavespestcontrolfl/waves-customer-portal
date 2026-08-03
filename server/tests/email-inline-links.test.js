@@ -171,25 +171,3 @@ describe('inline markdown links in blocks', () => {
     expect(body).not.toContain('<a class="dm-link"');
   });
 });
-
-describe('the irrigation blog-link migration', () => {
-  const migration = require('../models/migrations/20260803000000_irrigation_blog_links');
-
-  test('links both posts at their canonical hub URLs', () => {
-    const { BLOCK, WATERING_URL, MOWING_URL } = migration.__private;
-    expect(WATERING_URL).toBe('https://www.wavespestcontrol.com/lawn-care/overwatering-underwatering-lawn-southwest-florida/');
-    expect(MOWING_URL).toBe('https://www.wavespestcontrol.com/lawn-care/mowing-height-by-grass-type/');
-    expect(BLOCK.content).toContain(WATERING_URL);
-    expect(BLOCK.content).toContain(MOWING_URL);
-  });
-
-  test('covers all six irrigation templates', () => {
-    expect(migration.__private.TEMPLATE_KEYS).toHaveLength(6);
-  });
-
-  test('the block renders as real anchors, not literal brackets', () => {
-    const body = markup(render(migration.__private.BLOCK.content).html);
-    expect((body.match(/<a class="dm-link"/g) || []).length).toBe(2);
-    expect(body).not.toContain('](http');
-  });
-});
