@@ -130,6 +130,36 @@ describe('freeze contract in the render path', () => {
     expect(source).toMatch(/if \(canonicalWeek\) \{[\s\S]{0,600}?completionRainfall7dInches = canonicalWeek\.rainInches/);
   });
 
+  // A PDF cached BEFORE the freeze keeps its pre-freeze rainfall forever, while
+  // /data freezes and shows a different number — the emailed attachment and the
+  // live report disagreeing, which is the failure class this lane exists to
+  // close. The strategy marker in the storage key forces one fresh render.
+  test('the render-strategy marker was BUMPED so pre-freeze PDFs regenerate', () => {
+    const { LAWN_RENDER_STRATEGY } = require('../services/service-report/report-data');
+    // p1 shipped with #3174 (canonical pinning). The freeze changes render
+    // output again, so it must not reuse p1's keys.
+    expect(LAWN_RENDER_STRATEGY).not.toBe('p1');
+    expect(source).toMatch(/LAWN_RENDER_STRATEGY = 'p2'/);
+  });
+
+  test('a pre-freeze cached key cannot collide with a post-freeze one', async () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const knex = (table) => {
+      expect(table).toBe('lawn_assessments');
+      const chain = {
+        where: () => chain, orderBy: () => chain,
+        first: async () => ({ id: 'assess-A', customer_id: 'c1', confirmed_by_tech: true, service_record_id: 'svc-1' }),
+      };
+      return chain;
+    };
+    const { signature } = await resolveCanonicalLawnRender(
+      { id: 'svc-1', customer_id: 'c1', service_line: 'lawn' }, knex,
+    );
+    // Every pre-freeze lawn key carried -lap1…; none can match -lap2….
+    expect(signature.startsWith('-lap2')).toBe(true);
+    expect(signature.startsWith('-lap1')).toBe(false);
+  });
+
   test('only a RESOLVED week is frozen', () => {
     // Persisting a null would lock in "no rainfall known" forever, turning a
     // transient provider outage into a permanently blank water card.

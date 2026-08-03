@@ -1865,10 +1865,16 @@ class PinnedAssessmentUnavailable extends Error {
 //
 // Bumping this orphans lawn PDFs rendered under an older strategy so they
 // regenerate once. Non-lawn records return '' and are untouched: no
-// fleet-wide bust. Bump it whenever the way a lawn render CHOOSES its
-// assessment changes, not when the assessment's content changes — content is
-// already covered by the hash.
-const LAWN_RENDER_STRATEGY = 'p1';
+// fleet-wide bust. Bump it whenever the way a lawn render RESOLVES ITS INPUTS
+// changes, not when those inputs' content changes — content is already covered
+// by the hash.
+//
+// p1 → p2: the week's weather is now FROZEN at first render. A PDF cached
+// before that keeps the pre-freeze rainfall forever while /data freezes and
+// shows a different number — the emailed attachment and the live report
+// disagreeing, which is the whole failure class this lane exists to close.
+// Bumping forces those lawn PDFs through one fresh render.
+const LAWN_RENDER_STRATEGY = 'p2';
 
 async function resolveCanonicalLawnRender(service, knex = db) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
