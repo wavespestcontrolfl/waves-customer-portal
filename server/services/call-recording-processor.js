@@ -1323,7 +1323,7 @@ async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid
 // admin-triage.js). Fails toward HOLD on a lookup error: a bounce to a wrong
 // guess burns sender reputation and mints a suppression on an address the
 // customer may later confirm; a held send is recoverable from the review card.
-async function shouldHoldLeadEmailEnrollment(callLogId, { procToken = null, callSid = null } = {}) {
+async function shouldHoldLeadEmailEnrollment(callLogId, { procToken = null, callSid = null, extractedEmail = null } = {}) {
   try {
     const open = await db('triage_items')
       .where({ call_log_id: callLogId })
@@ -1353,7 +1353,15 @@ async function shouldHoldLeadEmailEnrollment(callLogId, { procToken = null, call
       const holdRows = await db('first_touch_holds')
         .where({ call_log_id: callLogId })
         .select('held_email');
+      // On the FIRST Step-6 failure no hold row exists yet (r57 —
+      // recordFirstTouchHoldOwned runs after this helper returns, and the
+      // run will record extracted.email as the held target): the current
+      // extraction IS the address this card would release, so it stands
+      // in as the evidence when the ledger has nothing.
       const heldEmails = [...new Set(holdRows.map((r) => String(r.held_email || '').trim()).filter(Boolean))];
+      if (!heldEmails.length && extractedEmail && String(extractedEmail).trim()) {
+        heldEmails.push(String(extractedEmail).trim());
+      }
       const { buildTriageItem } = require('./call-routing-gates');
       await mintEmailReviewCardsFenced({
         callLogId,
@@ -9762,7 +9770,7 @@ const CallRecordingProcessor = {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
       beehiivResult = { skipped: 'v2_tcpa_gate' };
     } else if (customerId && extracted.email
-        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid }))) {
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
       // Owner rule 2026-07-30 (the spelled-email bounce incident): a
       // call-captured email flagged for read-back (email_unverified /
       // email_invalid) is a transcription GUESS — the live incident's
@@ -9788,7 +9796,7 @@ const CallRecordingProcessor = {
         procToken,
       );
     } else if (customerId && !extracted.email && extracted.email_raw && !v2EmailBlocked
-        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid }))) {
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
       // A DEMOTED address (dictation policy moved the unconfirmed guess to
       // email_raw) still owes this customer the first-touch drip once the
       // office confirms the real spelling (Codex #3084 r18): without a
@@ -9989,7 +9997,7 @@ const CallRecordingProcessor = {
     if (newsletterCandidate && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
     } else if (newsletterCandidate
-        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid }))) {
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
       // Same hold as the new_lead drip: the newsletter double-opt-in
       // confirmation is ALSO a first-touch email to the unconfirmed address.
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: extracted email is under read-back review`);
@@ -10095,7 +10103,7 @@ const CallRecordingProcessor = {
             throw ledgerErr;
           }
         }
-        if (!(await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid }))) {
+        if (!(await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
           // No LIVE card. Two very different reasons (Codex #3084 r4):
           //   - an admin resolved the card mid-run → release now;
           //   - the card insert FAILED, so no card ever existed → the
@@ -10173,6 +10181,14 @@ const CallRecordingProcessor = {
             // (corrected_at, the r39 marker); no updated_at bump (the
             // r12 rule — the repen owns lease invalidation).
             const recoveryOwned = await db.transaction(async (trx) => {
+              // Advisory lock FIRST (Codex #3084 r57): same rule as
+              // mintEmailReviewCardsFenced — without it, this trx can own
+              // the hold while an admin verdict holds the advisory lock
+              // and bulk-resolves the fresh card the moment it commits,
+              // releasing a target the operator never reviewed. Taking
+              // lockTriageCall first serializes recovery-card creation
+              // with every card writer.
+              await lockTriageCall(trx, call.id);
               await trx('first_touch_holds')
                 .where({ call_log_id: call.id })
                 .forUpdate()

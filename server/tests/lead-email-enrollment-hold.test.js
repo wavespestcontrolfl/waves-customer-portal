@@ -100,6 +100,22 @@ describe('shouldHoldLeadEmailEnrollment', () => {
     expect(db.transaction).toHaveBeenCalled();
   });
 
+  test('FIRST-failure recovery card (no hold row yet) carries the current extraction as evidence (r57)', async () => {
+    // recordFirstTouchHoldOwned runs AFTER this helper — on the first
+    // Step-6 failure the ledger is empty, but the run will record
+    // extracted.email as the held target, so that address must be what
+    // the card displays.
+    mockTriageLookupError = new Error('db down');
+    mockHoldRows = [];
+    await expect(shouldHoldLeadEmailEnrollment('call-1', {
+      procToken: 'tok', callSid: 'CA1', extractedEmail: 'fresh.extracted@example.com',
+    })).resolves.toBe(true);
+    const card = db._chain.insert.mock.calls[db._chain.insert.mock.calls.length - 1][0];
+    const payloadCard = Array.isArray(card) ? card[0] : card;
+    const evidence = payloadCard.extraPayload || payloadCard;
+    expect(evidence.email_as_heard || evidence.extraPayload?.email_as_heard).toBe('fresh.extracted@example.com');
+  });
+
   test('lookup + marker failure fails the run — never a silent, invisible hold', async () => {
     mockTriageLookupError = new Error('db down');
     mockInsertError = new Error('still down');
