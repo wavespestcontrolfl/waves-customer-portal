@@ -205,7 +205,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -367,11 +367,20 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   //     anchor − WaveGuard slice − manual slice = the headline net.
   // Recomputed from `frequency` on every render, so switching cadence restates
   // the whole stack against the newly selected per-application price.
-  // The WaveGuard row needs a tier to name; without one the anchor keeps its
-  // existing unlabeled behavior rather than inventing a label for the gap.
+  // The WaveGuard row needs a tier to name AND the tier's authoritative
+  // discount pct to corroborate the amount (codex #3183 P1): perAppSavings is
+  // only the residual anchor-to-net gap after the manual slice — preference
+  // removals and floor adjustments shape it too, and labeling those dollars
+  // "WaveGuard <tier> Discount" would misattribute them. When the residual
+  // isn't the tier slice (±$0.06 rounding budget), the anchor keeps its
+  // existing unlabeled strike-through rather than inventing a label.
+  const waveGuardRowConfirmed = waveGuardTier
+    && Number(waveGuardDiscountPct) > 0
+    && perAppSavings > 0
+    && Math.abs(perAppSavings - round2(perAppAnchor * Number(waveGuardDiscountPct))) <= 0.06;
   const savingsStack = perAppNet != null && showSavings
     ? [
-      waveGuardTier && perAppSavings > 0
+      waveGuardRowConfirmed
         ? {
           key: 'waveguard',
           // "WaveGuard Silver Discount", not "WaveGuard Silver" (owner

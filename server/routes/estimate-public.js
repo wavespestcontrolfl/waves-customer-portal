@@ -16009,6 +16009,15 @@ function manualDiscountServiceKeyMatches(entries, sectionKey) {
 }
 
 function stampPerServiceManualDiscountSlices(services = [], payload = {}) {
+  // DARK (owner flip pending): the slices net the SECTION display below the
+  // WaveGuard-net price, but the multi-service accept path still charges the
+  // first application from pre-credit treatment rows (codex #3183 P0) —
+  // flipping this on before accept/invoice math applies the same slices
+  // would show a per-application price the first invoice doesn't match.
+  // Flip blocker: extend acceptManualDiscountItemization + the first-visit
+  // amount to multi-service under these same guards (owner decision — it
+  // changes a customer-visible amount), then set the gate.
+  if (process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES !== 'true') return false;
   const md = payload?.manualDiscount;
   if (!md || md.type !== 'PERCENT') return false;
   const pct = Number(md.value);

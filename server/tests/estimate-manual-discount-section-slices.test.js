@@ -6,6 +6,9 @@
 // card (a static per-row slice of a FIXED amount would be a number no cadence
 // honors — codex #3128 r4).
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+// DARK feature (flip blocker: multi-service accept/invoice math must apply
+// the same slices — owner decision). Tests exercise the gated-ON behavior.
+process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES = 'true';
 
 const {
   buildPricingBundle,
@@ -218,6 +221,19 @@ describe('stampPerServiceManualDiscountSlices guards (direct)', () => {
     manualDiscount: md,
     frequencies: [{ key: 'quarterly', manualDiscount: md ? { ...md } : null }],
     ...extra,
+  });
+
+  test('gate off: never stamps, never mutates (dark until accept math aligns)', () => {
+    const services = sections();
+    const before = JSON.stringify(services);
+    const prior = process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES;
+    try {
+      delete process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES;
+      expect(stampPerServiceManualDiscountSlices(services, payload(baseMd()))).toBe(false);
+      expect(JSON.stringify(services)).toBe(before);
+    } finally {
+      process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES = prior;
+    }
   });
 
   test('stamps the EST-2026-0609 shape: 5% of $90 and $56.40', () => {

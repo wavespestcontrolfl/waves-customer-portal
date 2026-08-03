@@ -142,6 +142,7 @@ describe('ServiceSection', () => {
         onAddOnToggle={vi.fn()}
         renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: true }}
         waveGuardTier="Silver"
+        waveGuardDiscountPct={0.1}
       />,
     );
 

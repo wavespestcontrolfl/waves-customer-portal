@@ -349,7 +349,7 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
     .filter((t) => /^(WaveGuard|Custom Percentage Discount)/.test(t));
 
   it('itemizes the tier discount and the custom discount as separate per-application rows', () => {
-    render(<PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />);
+    render(<PriceCard frequency={lawn()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
     expect(screen.getByText('WaveGuard Silver Discount')).toBeInTheDocument();
     expect(screen.getByText('Custom Percentage Discount')).toBeInTheDocument();
@@ -360,7 +360,7 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
   it.each(['Bronze', 'Silver', 'Gold', 'Platinum'])('names the tier row "WaveGuard %s Discount"', (tier) => {
     // The tier name alone reads like the plan badge above it — the row has to
     // say outright that it is a discount, at every tier.
-    render(<PriceCard frequency={lawn()} waveGuardTier={tier} showTierBadge={false} preferPerApplicationPrice />);
+    render(<PriceCard frequency={lawn()} waveGuardTier={tier} waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
     expect(screen.getByText(`WaveGuard ${tier} Discount`)).toBeInTheDocument();
   });
@@ -368,13 +368,13 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
   it('strips a tier value that already carries the WaveGuard prefix', () => {
     // Payloads send both "Silver" and "WaveGuard Silver"; neither may produce
     // "WaveGuard WaveGuard Silver Discount".
-    render(<PriceCard frequency={lawn()} waveGuardTier="WaveGuard Gold" showTierBadge={false} preferPerApplicationPrice />);
+    render(<PriceCard frequency={lawn()} waveGuardTier="WaveGuard Gold" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
     expect(screen.getByText('WaveGuard Gold Discount')).toBeInTheDocument();
   });
 
   it('reconciles: anchor minus every stack row equals the headline price', () => {
-    render(<PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />);
+    render(<PriceCard frequency={lawn()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
     // $110.00 anchor − $11.00 − $4.83 = $94.17 headline.
     expect(screen.getByText(/\$110\.00 \/ application/)).toBeInTheDocument();
@@ -384,7 +384,7 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
 
   it('does not also render the standalone discount row (no double-reporting)', () => {
     const { container } = render(
-      <PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />,
+      <PriceCard frequency={lawn()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />,
     );
 
     // The custom discount appears exactly once on the card.
@@ -407,6 +407,7 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
           billedPerApplication: true,
         }}
         waveGuardTier="Silver"
+        waveGuardDiscountPct={0.1}
         showTierBadge={false}
         preferPerApplicationPrice
       />,
@@ -424,6 +425,7 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
       <PriceCard
         frequency={lawn({ key: 'lawn_12', visitsPerYear: 12, monthlyBase: 95, perTreatment: 81.88, monthly: 81.88, annual: 982.56 })}
         waveGuardTier="Silver"
+        waveGuardDiscountPct={0.1}
         showTierBadge={false}
         preferPerApplicationPrice
       />,
@@ -432,6 +434,33 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
     expect(screen.getByText(/[−-]\$9\.50/)).toBeInTheDocument();   // tier: $95.00 × 10%
     expect(screen.getByText(/[−-]\$3\.62/)).toBeInTheDocument();   // credit: $43.44 / 12
     expect(screen.getByText('$81.88')).toBeInTheDocument();
+  });
+
+  it('leaves the anchor gap unlabeled when it is not the tier slice (codex #3183 P1)', () => {
+    // Preference removals / floor adjustments also shape the net: here the
+    // residual gap is $15.83, not the $11.00 a 10% Silver slice would be —
+    // labeling it "WaveGuard Silver Discount" would misattribute dollars.
+    render(
+      <PriceCard
+        frequency={lawn({ perTreatment: 89.34, monthly: 67.01, annual: 804.06 })}
+        waveGuardTier="Silver"
+        waveGuardDiscountPct={0.1}
+        showTierBadge={false}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.queryByText('WaveGuard Silver Discount')).toBeNull();
+    // The anchor strike and the authoritative manual slice still render.
+    expect(screen.getByText(/\$110\.00 \/ application/)).toBeInTheDocument();
+    expect(screen.getByText('Custom Percentage Discount')).toBeInTheDocument();
+  });
+
+  it('names no tier row without the authoritative tier pct to corroborate the gap', () => {
+    render(<PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />);
+
+    expect(screen.queryByText('WaveGuard Silver Discount')).toBeNull();
+    expect(screen.getByText('Custom Percentage Discount')).toBeInTheDocument();
   });
 
   it('names no tier row when the card has no WaveGuard tier', () => {
@@ -446,7 +475,7 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
 
   it('falls back to the standalone row when the anchor is suppressed (showSavings off)', () => {
     const { container } = render(
-      <PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice showSavings={false} />,
+      <PriceCard frequency={lawn()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice showSavings={false} />,
     );
 
     expect(screen.queryByText('WaveGuard Silver Discount')).toBeNull();
@@ -476,7 +505,7 @@ describe('PriceCard — applications-per-year line under the price (owner 2026-0
 
   it('glass single-row card shows the count under the price and drops it from the sub-label', () => {
     setGlassDefault(true);
-    render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />);
+    render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
     expect(screen.getByText('9 applications per year')).toBeInTheDocument();
     expect(screen.queryByText(/9 applications\/year/)).toBeNull();
@@ -485,7 +514,7 @@ describe('PriceCard — applications-per-year line under the price (owner 2026-0
   });
 
   it('non-glass card keeps the count in the row sub-label (no header line)', () => {
-    render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />);
+    render(<PriceCard frequency={lawnRowFrequency()} waveGuardTier="Silver" waveGuardDiscountPct={0.1} showTierBadge={false} preferPerApplicationPrice />);
 
     expect(screen.queryByText('9 applications per year')).toBeNull();
     expect(screen.getByText(/9 applications\/year/)).toBeInTheDocument();
