@@ -922,10 +922,20 @@ function matchedPestFamilies(text = '') {
 export function applicationPestFamily(app = {}) {
   const byName = matchedPestFamilies(String(app.product?.name || ''));
   if (byName.length) return byName.length === 1 ? byName[0] : null;
-  const targetText = (Array.isArray(app.targets) ? app.targets : []).filter(Boolean).join(' ');
-  const byTargets = matchedPestFamilies(targetText);
-  if (byTargets.length) return byTargets.length === 1 ? byTargets[0] : null;
-  return null;
+  const targets = (Array.isArray(app.targets) ? app.targets : [])
+    .map((target) => String(target || '').trim()).filter(Boolean);
+  if (!targets.length) return null;
+  // Matched per target, not on the joined text: an unrecognized co-target
+  // (e.g. Gentrol's prefill of cockroaches + drain flies + pantry pests)
+  // means the recorded scope is wider than any one family — that is
+  // ambiguity, not a match (codex P1, PR #3181 r1).
+  const families = new Set();
+  for (const target of targets) {
+    const matched = matchedPestFamilies(target);
+    if (matched.length !== 1) return null;
+    families.add(matched[0]);
+  }
+  return families.size === 1 ? families.values().next().value : null;
 }
 
 export function applicationPurpose(app = {}, serviceLine = 'pest') {

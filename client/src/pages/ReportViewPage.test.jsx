@@ -824,6 +824,19 @@ describe('product purpose follows recorded pest identity', () => {
     expect(applicationPurpose(mixedBait, 'pest')).toBe('Targeted bait placement');
   });
 
+  it('treats an unrecognized co-target as ambiguity, not a match', () => {
+    // Gentrol's catalog prefill keeps all three targets unless the tech trims
+    // them — one recognized family plus unmatched co-targets must stay generic.
+    const mixedFog = {
+      method: 'fog_ulv',
+      targets: ['German cockroaches', 'Drain flies', 'Pantry pests'],
+      product: { name: 'Gentrol IGR', category: 'IGR' },
+    };
+    expect(applicationPestFamily(mixedFog)).toBe(null);
+    expect(applicationPurpose(mixedFog, 'pest')).toBe('Space fog treatment');
+    expect(applicationPurposeCopy(mixedFog, 'pest')).not.toMatch(/cockroach|mosquito/i);
+  });
+
   it('reads identity from the product name ahead of the recorded targets', () => {
     const mislabeledTargets = { method: 'bait_placement', targets: ['Ghost ants'], product: { name: 'Advion Cockroach Gel Bait', category: 'bait' } };
     expect(applicationPurpose(mislabeledTargets, 'pest')).toBe('Targeted cockroach bait');
