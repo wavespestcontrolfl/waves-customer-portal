@@ -308,32 +308,49 @@ async function markBookingForInspectionCredit(trx, { customerId, scheduledServic
     // visible), and if that also fails, raise an office alert so the loss
     // is an exception someone sees, never a log line nobody reads.
     logger.error(`[inspection-credit] booking event failed for ${scheduledServiceId} (post-commit retry queued): ${err.message}`);
-    setImmediate(() => {
-      void (async () => {
-        try {
-          await db('inspection_credit_booking_events')
-            .insert(eventRow)
-            .onConflict('scheduled_service_id')
-            .ignore();
-          logger.info(`[inspection-credit] booking event recovered post-commit for ${scheduledServiceId}`);
-        } catch (retryErr) {
-          logger.error(`[inspection-credit] booking event retry failed for ${scheduledServiceId}: ${retryErr.message}`);
-          try {
-            await require('./notification-service').notifyAdmin(
-              'billing',
-              'Inspection-credit booking evidence failed to record',
-              'A real booking could not record its inspection-credit evidence, so any open credit for this customer will not auto-apply. Verify the booking and apply the credit manually if one was promised.',
-              {
-                link: `/admin/customers/${customerId}`,
-                metadata: { scheduledServiceId, customerId, source: eventRow.source, reason: 'booking_event_write_failed' },
-              },
-            );
-          } catch (alertErr) {
-            logger.error(`[inspection-credit] booking event failure alert failed for ${scheduledServiceId}: ${alertErr.message}`);
+    const recoverEvidence = async (attempt) => {
+      try {
+        // setImmediate is NOT tied to the caller's commit (pre-push P1):
+        // retrying while the booking row is still uncommitted fails the FK
+        // and would drop the only proof redemption accepts. Wait until the
+        // booking is VISIBLE on the global pool before inserting; if it
+        // never appears, the transaction rolled back and there is no
+        // booking to prove.
+        const committed = await db('scheduled_services')
+          .where({ id: scheduledServiceId })
+          .first('id');
+        if (!committed) {
+          if (attempt < 6) {
+            const timer = setTimeout(() => { void recoverEvidence(attempt + 1); }, 10000);
+            if (typeof timer.unref === 'function') timer.unref();
+            return;
           }
+          logger.warn(`[inspection-credit] booking ${scheduledServiceId} never became visible — evidence retry dropped (booking likely rolled back)`);
+          return;
         }
-      })();
-    });
+        await db('inspection_credit_booking_events')
+          .insert(eventRow)
+          .onConflict('scheduled_service_id')
+          .ignore();
+        logger.info(`[inspection-credit] booking event recovered post-commit for ${scheduledServiceId}`);
+      } catch (retryErr) {
+        logger.error(`[inspection-credit] booking event retry failed for ${scheduledServiceId}: ${retryErr.message}`);
+        try {
+          await require('./notification-service').notifyAdmin(
+            'billing',
+            'Inspection-credit booking evidence failed to record',
+            'A real booking could not record its inspection-credit evidence, so any open credit for this customer will not auto-apply. Verify the booking and apply the credit manually if one was promised.',
+            {
+              link: `/admin/customers/${customerId}`,
+              metadata: { scheduledServiceId, customerId, source: eventRow.source, reason: 'booking_event_write_failed' },
+            },
+          );
+        } catch (alertErr) {
+          logger.error(`[inspection-credit] booking event failure alert failed for ${scheduledServiceId}: ${alertErr.message}`);
+        }
+      }
+    };
+    setImmediate(() => { void recoverEvidence(0); });
     return 0;
   }
 }
@@ -772,6 +789,49 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
  * claim is status-guarded, so concurrent cancellations reverse once.
  * Never throws — a cancellation must never fail over the credit.
  */
+/**
+ * Alert the office ONCE that a redeemed credit on a cancelled booking needs
+ * a human, atomically with the reversal_alerted_at claim (Codex #3178 r9
+ * P2): the claim — guarded on the marker being unset — row-locks the offer
+ * so concurrent sweeps can't double-alert, and if the notification insert
+ * doesn't land the rollback releases the claim for the next sweep. A later
+ * successful reversal clears the marker when the offer reopens.
+ */
+async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, body }) {
+  try {
+    await db.transaction(async (trx) => {
+      const alertClaimed = await trx('inspection_credit_offers')
+        .where({ id: offer.id })
+        .whereNull('reversal_alerted_at')
+        .update({ reversal_alerted_at: new Date(), updated_at: trx.fn.now() });
+      if (alertClaimed !== 1) return; // already alerted
+      const notified = await require('./notification-service').notifyAdmin(
+        'billing',
+        'Inspection credit could not be reversed',
+        body,
+        {
+          link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
+          metadata: { offerId: offer.id, scheduledServiceId, reason },
+          connection: trx,
+        },
+      );
+      if (!notified) {
+        // notifyAdmin swallows its own insert failure and returns null;
+        // throwing rolls the claim back so the next sweep retries.
+        const e = new Error('reversal alert did not land');
+        e.inspectionCreditSkip = 'alert_not_delivered';
+        throw e;
+      }
+    });
+  } catch (notifyErr) {
+    if (notifyErr?.inspectionCreditSkip === 'alert_not_delivered') {
+      logger.warn(`[inspection-credit] reversal alert not delivered for offer ${offer.id} — will retry next sweep`);
+    } else {
+      logger.error(`[inspection-credit] reversal alert failed for offer ${offer.id}: ${notifyErr.message}`);
+    }
+  }
+}
+
 async function reverseInspectionCreditForBooking({
   scheduledServiceId,
   createdBy = 'system:inspection_credit_reversal',
@@ -810,6 +870,31 @@ async function reverseInspectionCreditForBooking({
             .where({ id: offer.id, status: 'redeemed' })
             .update({ redeemed_scheduled_service_id: alternate.id, updated_at: db.fn.now() });
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
+          continue;
+        }
+        // An invoice for this cancelled booking still holding money — paid,
+        // processing, unverifiable PI, anything outside the resolved set —
+        // may have the credit EMBEDDED in it (pre-push P0): a blind
+        // negative movement would consume UNRELATED balance while the
+        // invoice keeps the discount. Flag the office once and leave the
+        // offer bound; when the office resolves the invoice, the hourly
+        // sweep retries this reversal and it proceeds normally. Fail
+        // CLOSED on a failed check — never reverse blind.
+        try {
+          const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+          const unresolved = await db('invoices')
+            .where({ scheduled_service_id: scheduledServiceId })
+            .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+            .first('id');
+          if (unresolved) {
+            await alertReversalNeedsOffice(offer, scheduledServiceId, {
+              reason: 'invoice_unresolved',
+              body: `A $${round2(offer.amount).toFixed(2)} inspection credit is tied to a cancelled booking whose invoice still holds money. Reversing automatically could take unrelated balance — resolve the invoice, then collect or write off the credit.`,
+            });
+            continue;
+          }
+        } catch (checkErr) {
+          logger.error(`[inspection-credit] invoice-state check failed for offer ${offer.id} — reversal deferred: ${checkErr.message}`);
           continue;
         }
         await db.transaction(async (trx) => {
@@ -855,46 +940,10 @@ async function reverseInspectionCreditForBooking({
         // a log line nobody reads — the same posture as every other
         // unreversible money event in this codebase (Codex #3175 r4 P0).
         logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
-        // Alert ONCE, atomically (Codex #3178 r9 P2, tightening r2 P1):
-        // the marker CLAIM and the notification insert commit together.
-        // Claiming first — guarded on the marker being unset — row-locks
-        // the offer so concurrent sweeps can't double-alert; if the insert
-        // doesn't land, the rollback clears the claim and the next sweep
-        // retries. The marker still never outlives a delivery that didn't
-        // happen, it just can't drift from one that did.
-        try {
-          await db.transaction(async (trx) => {
-            const alertClaimed = await trx('inspection_credit_offers')
-              .where({ id: offer.id })
-              .whereNull('reversal_alerted_at')
-              .update({ reversal_alerted_at: new Date(), updated_at: trx.fn.now() });
-            if (alertClaimed !== 1) return; // already alerted
-            const notified = await require('./notification-service').notifyAdmin(
-              'billing',
-              'Inspection credit could not be reversed',
-              `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
-              {
-                link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
-                metadata: { offerId: offer.id, scheduledServiceId, reason: 'credit_already_spent' },
-                connection: trx,
-              },
-            );
-            if (!notified) {
-              // notifyAdmin swallows its own insert failure and returns
-              // null; throwing rolls the claim back so the next sweep
-              // retries the alert.
-              const e = new Error('spent-credit alert did not land');
-              e.inspectionCreditSkip = 'alert_not_delivered';
-              throw e;
-            }
-          });
-        } catch (notifyErr) {
-          if (notifyErr?.inspectionCreditSkip === 'alert_not_delivered') {
-            logger.warn(`[inspection-credit] spent-credit alert not delivered for offer ${offer.id} — will retry next sweep`);
-          } else {
-            logger.error(`[inspection-credit] reversal alert failed for offer ${offer.id}: ${notifyErr.message}`);
-          }
-        }
+        await alertReversalNeedsOffice(offer, scheduledServiceId, {
+          reason: 'credit_already_spent',
+          body: `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
+        });
       }
     }
     return { reversed };

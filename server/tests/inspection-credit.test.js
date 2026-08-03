@@ -28,6 +28,7 @@ let mockInsertResult = [{ id: 'offer-new', amount: '75.00', expires_at: new Date
 let mockClaimResult = 1;
 let mockBookings = [];
 let mockAlternates = [];
+let mockInvoices = [];
 const mockUpdates = [];
 const mockChainCalls = [];
 jest.mock('../models/db', () => {
@@ -43,7 +44,9 @@ jest.mock('../models/db', () => {
     const t = String(table || '');
     const isAlternateProbe = t.includes('inspection_credit_booking_events');
     const isBookings = t.includes('scheduled_services') && !isAlternateProbe;
-    const rows = isAlternateProbe ? mockAlternates : (isBookings ? mockBookings : mockOffers);
+    const isInvoices = t === 'invoices' || t.startsWith('invoices ');
+    const rows = isAlternateProbe ? mockAlternates
+      : (isBookings ? mockBookings : (isInvoices ? mockInvoices : mockOffers));
     chain.then = (res, rej) => Promise.resolve(rows).then(res, rej);
     chain.first = jest.fn(async () => rows[0] || null);
     chain.insert = jest.fn(() => {
@@ -86,6 +89,7 @@ beforeEach(() => {
   // trusting the caller.
   mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-10'), status: 'confirmed' }];
   mockAlternates = [];
+  mockInvoices = [];
   mockUpdates.length = 0;
   mockChainCalls.length = 0;
 });
@@ -371,6 +375,25 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     }];
     await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
     expect(mockUpdates[0]).toMatchObject({ status: 'expired' });
+  });
+
+  it('never reverses blind while an invoice for the booking still holds money', async () => {
+    // Paid/processing/unverifiable invoices may hold the credit EMBEDDED —
+    // a negative movement would consume UNRELATED balance while the invoice
+    // keeps the discount. Office alert instead; when the invoice resolves,
+    // the hourly sweep retries the reversal and it proceeds.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockInvoices = [{ id: 'inv-9', status: 'paid' }];
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [, , , opts] = mockNotifyAdmin.mock.calls[0];
+    expect(opts.metadata).toMatchObject({ offerId: 'offer-1', reason: 'invoice_unresolved' });
   });
 
   it('spent credit raises the office alert atomically with the marker claim', async () => {
