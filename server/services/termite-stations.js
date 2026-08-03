@@ -845,7 +845,22 @@ async function stationMapPdfSignature(service, knex) {
     const count = Number(row?.n || 0);
     if (!count) return '';
     const stamp = new Date(row?.updated || 0).getTime();
-    return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}`;
+    // Per-visit STATUS is what the document actually prints (pin colours and
+    // the outcome counts) and it lives in termite_station_checks, not in the
+    // station rows — a completion replay can change a check's status via the
+    // (station_id, service_record_id) upsert without touching any station, so
+    // geometry alone would leave the cached PDF showing the old outcome.
+    const checks = await knex('termite_station_checks')
+      .where({ service_record_id: service.id })
+      .max({ updated: 'updated_at' })
+      .count({ n: '*' })
+      .first();
+    const checkCount = Number(checks?.n || 0);
+    const checkStamp = new Date(checks?.updated || 0).getTime();
+    const checkPart = checkCount
+      ? `c${checkCount}x${Number.isFinite(checkStamp) ? checkStamp : 0}`
+      : '';
+    return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}${checkPart}`;
   } catch {
     return '';
   }
