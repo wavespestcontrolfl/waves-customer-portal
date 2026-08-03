@@ -197,6 +197,19 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // there would mark the delivery sent while Download PDF kept serving the
   // known-stale object. A failed clear must fail the render so the delivery
   // defers and retries.
+  // Checked BEFORE the delivery branch: an emailed attachment is the one copy
+  // that can never be corrected, so a render whose week could not be FROZEN
+  // must not reach a customer's inbox. A later view would freeze different
+  // provider data and the attachment would disagree with the permanent report
+  // forever — the divergence this whole lane exists to prevent, arriving by
+  // email. Retryable, so email-delivery defers the send rather than dropping
+  // it; the next attempt tries the freeze again.
+  if (renderedData?.lawnAssessment?.weekWeatherUnfrozen && isDeliveryPin) {
+    const err = new Error('lawn week weather could not be frozen — deferring pinned render');
+    err.code = 'lawn_week_weather_unfrozen';
+    err.retryable = true;
+    throw err;
+  }
   if (isDeliveryPin) {
     // The delivery forced a fresh render precisely because the cached object
     // may hold an older assessment or recommendation version, so leaving that

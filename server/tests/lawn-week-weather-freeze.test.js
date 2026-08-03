@@ -176,6 +176,21 @@ describe('freeze contract in the render path', () => {
     expect(reportsPublic).toMatch(/weekWeatherUnfrozen[\s\S]{0,400}?\} else if/);
   });
 
+  // The worst case: an emailed attachment is the one copy that can never be
+  // corrected. The delivery branch returns EARLY, so the cache guard alone
+  // never sees it — the check has to come first.
+  test('a DELIVERY render fails retryably when the week could not be frozen', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    // Ordering is the whole point: the unfrozen check must precede the
+    // delivery-pin early return, or emailed PDFs bypass it.
+    const guardAt = pdfQueue.indexOf('weekWeatherUnfrozen && isDeliveryPin');
+    const deliveryReturnAt = pdfQueue.indexOf('if (isDeliveryPin) {');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(deliveryReturnAt);
+    // Retryable so email-delivery DEFERS rather than dropping the send.
+    expect(pdfQueue).toMatch(/lawn_week_weather_unfrozen[\s\S]{0,200}?retryable = true/);
+  });
+
   test('the flag is set ONLY when a fetched week could not be frozen', () => {
     // Not when a frozen week was replayed, and not when nothing was fetched —
     // either of those would make every such render permanently uncacheable.
