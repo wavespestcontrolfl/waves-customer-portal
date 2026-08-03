@@ -22,6 +22,8 @@ jest.mock('../services/service-report/report-data', () => ({
   // config threading, and a non-empty component would only add noise to the
   // expected key.
   lawnAssessmentPdfSignature: async () => '',
+  // Non-lawn fixture: nothing to pin (#3172).
+  canonicalLawnPin: async () => null,
 }));
 jest.mock('../services/service-report/dynamic-context', () => ({
   buildServiceReportDynamicContext: mockBuildServiceReportDynamicContext,

@@ -304,6 +304,58 @@ describe('#3168 — assessment identity is part of the PDF storage key', () => {
   });
 });
 
+describe('#3172 — ordinary renders are pinned to CANONICAL and stay cacheable', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+  const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
+
+  // An UNPINNED render lets the browser resolve its own assessment, so a
+  // selection moving away and back defeats any pre/post check the server makes
+  // — the A-to-B-to-A limitation that created #3168, one level down. Pinning
+  // ordinary renders to the canonical answer removes that freedom.
+  test('renderAndStore falls back to the canonical pin when no delivery pin is given', () => {
+    expect(pdfQueueSource).toMatch(/effectivePin\s*=\s*pinnedLawnAssessmentId\s*\|\|\s*await canonicalLawnPin\(/);
+    // …and the render uses it, not the raw delivery pin.
+    expect(pdfQueueSource).toMatch(/pinnedLawnAssessmentId:\s*effectivePin/);
+  });
+
+  test('the public PDF route pins its render to canonical too', () => {
+    expect(reportsPublicSource).toMatch(/canonicalPin\s*=\s*await canonicalLawnPin\(/);
+    expect((reportsPublicSource.match(/pinnedLawnAssessmentId:\s*canonicalPin/g) || []).length)
+      .toBeGreaterThanOrEqual(2);
+  });
+
+  // The load-bearing distinction: gating cache-bypass on the DELIVERY pin, not
+  // on "is pinned at all". Every render carries a pin now, so gating on the
+  // latter would make every render fresh and unstored — silently destroying
+  // PDF caching for the whole fleet.
+  test('cache bypass and unstored-return key on the DELIVERY pin only', () => {
+    expect(pdfQueueSource).toMatch(/mustRenderFresh\s*=\s*forceFresh\s*\|\|\s*correctionPending\s*\|\|\s*!!pinnedLawnAssessmentId/);
+    expect(pdfQueueSource).toMatch(/if \(isDeliveryPin\) \{/);
+    // effectivePin must NOT be what decides caching.
+    expect(pdfQueueSource).not.toMatch(/mustRenderFresh[^\n]*effectivePin/);
+    expect(pdfQueueSource).not.toMatch(/if \(effectivePin\) \{/);
+  });
+
+  test('canonicalLawnPin: non-lawn pins nothing, lawn absence pins the sentinel', async () => {
+    const { canonicalLawnPin } = require('../services/service-report/report-data');
+    const knex = makeKnex([]);
+    // Non-lawn: nothing to pin, so ordinary caching is untouched.
+    expect(await canonicalLawnPin({ ...SERVICE, service_line: 'pest' }, knex)).toBeNull();
+    // Lawn with no assessment: absence is an answer and must be pinned.
+    expect(await canonicalLawnPin({ ...SERVICE, service_line: 'lawn' }, knex)).toBe(PIN_NO_ASSESSMENT);
+  });
+
+  test('canonicalLawnPin returns the confirmed assessment for a lawn visit', async () => {
+    const { canonicalLawnPin } = require('../services/service-report/report-data');
+    const knex = makeKnex([
+      { id: 'assess-A', customer_id: 'cust-1', confirmed_by_tech: true, service_record_id: 'svc-1' },
+    ]);
+    expect(await canonicalLawnPin({ ...SERVICE, service_line: 'lawn' }, knex)).toBe('assess-A');
+  });
+});
+
 describe('#3168 pinned assessment — fail-closed contract', () => {
   test('PinnedAssessmentUnavailable carries the code the route maps to 409', () => {
     const err = new PinnedAssessmentUnavailable('assess-X');

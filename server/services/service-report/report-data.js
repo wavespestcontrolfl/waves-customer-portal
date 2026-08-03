@@ -1841,6 +1841,29 @@ class PinnedAssessmentUnavailable extends Error {
   }
 }
 
+// The canonical pin for a render that is NOT carrying a delivery's sealed
+// assessment (#3172).
+//
+// An unpinned render is nondeterministic: the browser opens the report page and
+// the page resolves the assessment itself, so a selection that moves away and
+// back during the render defeats any pre/post comparison the server makes — the
+// same A-to-B-to-A limitation that created #3168, one level down in the cache
+// path. Pinning ordinary renders to the CANONICAL answer removes the page's
+// freedom to choose, which is the only thing that actually closes it.
+//
+// Returns the canonical assessment id, PIN_NO_ASSESSMENT when a lawn visit has
+// none (absence is an answer and must be pinned too), or null for a non-lawn
+// record, which has nothing to pin.
+//
+// Throws on an unreadable lookup — a caller that cannot determine the canonical
+// answer must not render as if there were none.
+async function canonicalLawnPin(service, knex = db) {
+  const line = service?.service_line || detectServiceLine(service?.service_type);
+  if (line !== 'lawn') return null;
+  const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
+  return assessment?.id || PIN_NO_ASSESSMENT;
+}
+
 // Lawn-assessment component of the PDF storage key (#3168).
 //
 // Nulling pdf_storage_key is NOT a durable invalidation — the same lesson
@@ -3836,6 +3859,7 @@ module.exports = {
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,
+  canonicalLawnPin,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,

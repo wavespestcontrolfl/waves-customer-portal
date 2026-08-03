@@ -28,7 +28,7 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, canonicalLawnPin } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -1291,6 +1291,8 @@ router.get('/:token', async (req, res, next) => {
       // reused for both the expected-key check and the store, so the key always
       // describes the same assessment on both sides (#3168).
       const laSignature = await lawnAssessmentPdfSignature(service, db);
+      // The canonical assessment this render is pinned to (#3172).
+      const canonicalPin = await canonicalLawnPin(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
         visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
       });
@@ -1313,13 +1315,22 @@ router.get('/:token', async (req, res, next) => {
       try {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
-          const data = await buildServiceReportV1ResponseData(service, req.params.token, { mode: 'pdf', pestPressureConfig });
+          const data = await buildServiceReportV1ResponseData(service, req.params.token, {
+            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin,
+          });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           pdf = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
             logger,
             serviceRecordId: service.id,
+            // Pinned to the CANONICAL answer (#3172). Unpinned, the browser
+            // resolves its own assessment, so a selection moving away and back
+            // during the render defeats the pre/post check below — the same
+            // A-to-B-to-A limitation that created #3168. Pinning removes the
+            // page's freedom to choose; the key already carries assessment
+            // identity, so this render stays cacheable.
+            pinnedLawnAssessmentId: canonicalPin,
           });
 
           const latestPestPressureConfig = await loadActiveConfig(db).catch(() => null);
