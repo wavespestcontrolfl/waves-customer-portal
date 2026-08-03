@@ -8943,7 +8943,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
           })
           : null;
-        if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
+        // A billed report-v1 visit may take the report lane only when the
+        // with-invoice template is BOTH gated on and actually renderable. The
+        // probe is fail-closed (isOptInSmsTemplateEnabled), so a missing or
+        // deactivated row leaves the generic service_complete_with_invoice
+        // path exactly as it behaves today rather than arming a send that
+        // would have to fall back mid-flight. Gate/template are only consulted
+        // for a billed visit — an un-billed completion keeps its unchanged
+        // path without a per-completion template lookup.
+        const reportV1InvoiceArmed = serviceReportV1SmsContext?.enabled
+          && serviceReportV1SmsContext.smsType === 'service_report_v1_with_invoice'
+          && require('../config/feature-gates').isEnabled('reportV1InvoiceSms')
+          && await isOptInSmsTemplateEnabled('service_report_v1_with_invoice');
+        if (completionUsesReportLane({
+          reportLaneEnabled: !!serviceReportV1SmsContext?.enabled,
+          invoiceCreated,
+          usePaidCompletionTemplate,
+          reportV1InvoiceArmed,
+        })) {
           sentSmsType = serviceReportV1SmsContext.smsType;
           // Always the editable DB template (owner ruling 2026-08-01). The lawn
           // lane used to swap in a prebuilt body leading with the V2 synthesis —
@@ -8957,14 +8974,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             entity_type: 'service_record',
             entity_id: record.id,
           });
-          // A toggled-off or removed variant must not cost the customer
-          // their completion text — fall back to the base report template
-          // before giving up (owner report 2026-07-06: the since-removed
+          // A toggled-off or removed variant must not cost the customer their
+          // completion text (owner report 2026-07-06: the since-removed
           // progress variant was inactive and progress visits would have
-          // texted nothing).
-          if (!body && sentSmsType !== 'service_report_v1') {
-            sentSmsType = 'service_report_v1';
-            body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
+          // texted nothing). The with-invoice body was probed active moments
+          // ago, so a null here means a variant/render failure in between —
+          // and the fallback must keep the PAY LINK. Dropping to the base
+          // report text would leave a customer holding an open invoice with no
+          // way to pay it, so this falls to the generic invoice template
+          // instead; only the un-billed lane can fall back to bare report copy
+          // (where sentSmsType is already service_report_v1 and there is
+          // nothing to fall back to).
+          if (!body && sentSmsType === 'service_report_v1_with_invoice') {
+            sentSmsType = 'service_complete_with_invoice';
+            body = await renderTemplate(sentSmsType, {
+              first_name: svc.first_name || '',
+              service_type: displayServiceType,
+              portal_url: reportSmsUrl || reportUrl,
+              pay_url: payUrl,
+            }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
               entity_id: record.id,
@@ -11700,6 +11728,35 @@ function completionSavedCardFallbackPolicy({
   };
 }
 
+// Does the completion SMS take the REPORT lane (service_report_v1*) or fall
+// through to the generic service_complete* family? Extracted for unit testing
+// because the route-level wiring is exactly where this decision was wrong: the
+// lane computed a pay link, handed it to buildServiceReportV1DeliveryContext,
+// and then refused to enter the branch whenever an invoice existed — so
+// service_report_v1_with_invoice was unreachable in production from the day it
+// was written, and every billed report-v1 visit silently got the generic
+// service_complete_with_invoice instead. The pure-function tests all passed:
+// they exercised serviceReportV1SmsType directly, which was never the bug.
+//
+// reportV1InvoiceArmed is the caller's short-circuit — gate ON *and* the
+// with-invoice template present and active. It is only ever true for a billed
+// visit; an un-billed one has nothing to arm.
+function completionUsesReportLane({
+  reportLaneEnabled,
+  invoiceCreated,
+  usePaidCompletionTemplate,
+  reportV1InvoiceArmed,
+}) {
+  // A paid/prepaid completion has its own template family (receipt, prepaid,
+  // annual-prepay) and never routes through the report lane.
+  if (!reportLaneEnabled || usePaidCompletionTemplate) return false;
+  // No bill: the report lane owns the text, exactly as it always has.
+  if (!invoiceCreated) return true;
+  // Billed: only with the with-invoice template armed, so the pay link the
+  // customer needs is guaranteed to be in the body.
+  return Boolean(reportV1InvoiceArmed);
+}
+
 // completionInvoiceAmount and membershipDuesCoverVisit moved to
 // services/billing-lane.js (imported at top) — the schedule payloads'
 // completion-billing prediction must share the exact same authority.
@@ -12153,6 +12210,7 @@ module.exports._test = {
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
+  completionUsesReportLane,
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
   applyBackfillRecordTimingPolicy,
