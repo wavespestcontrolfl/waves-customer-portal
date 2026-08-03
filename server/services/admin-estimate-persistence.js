@@ -867,7 +867,7 @@ function assertLiveTermiteRentalRates(estimateData, { liveConfigVerified = false
 // (their totals are server-recomputed); legacy pre-flag payloads keep the
 // floor machinery's untouched posture — they also predate the fallback flag
 // entirely.
-function assertLivePestBaseForClientPayload(estimateData) {
+function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified = false } = {}) {
   const root = estimateResultRoot(estimateData);
   const results = root?.results;
   if (!results || typeof results !== 'object') return;
@@ -886,10 +886,18 @@ function assertLivePestBaseForClientPayload(estimateData) {
   const isClientEngineResult = !!recurring
     && Object.prototype.hasOwnProperty.call(recurring, 'pestProgramFloorApplied');
   if (!isClientEngineResult) return;
+  // Fail closed when the live config could not be loaded: a one-time-only
+  // pest payload skips the floor normalizer's 503 gate (no recurring rows),
+  // so without this check a stamp matching the process-CACHED base would
+  // pass while another pod's edit made that cache stale (codex r4 P0).
+  // Same unverifiable-config posture as the rental assert.
+  if (!liveConfigVerified) {
+    throw errorWithStatus('Live pest pricing could not be verified — try the save again in a moment.', 422);
+  }
   const liveBase = Math.round(Number(pricingEngine.constants.PEST.base));
   if (!(liveBase > 0)) {
-    // Same unverifiable-config posture as the rental assert: an unusable
-    // live base proves nothing about the stamp — never wave the save through.
+    // An unusable live base proves nothing about the stamp — never wave
+    // the save through.
     throw errorWithStatus('Live pest pricing could not be verified — try the save again in a moment.', 422);
   }
   const stamped = Number(root?.pricingMetadata?.pestBasePerVisit);
@@ -986,7 +994,7 @@ async function resolveEstimateWritePayload({
     logger.warn(`[admin-estimate] pricing-config sync before floor normalize failed: ${err.message}`);
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
-  assertLivePestBaseForClientPayload(trustedEstimateData);
+  assertLivePestBaseForClientPayload(trustedEstimateData, { liveConfigVerified });
   assertNoDarkTermiteBondPayload(trustedEstimateData);
   assertNoDarkTermiteRentalPayload(trustedEstimateData);
   assertLiveTermiteBondRates(trustedEstimateData);

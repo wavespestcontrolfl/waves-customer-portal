@@ -687,31 +687,31 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
 
   test('a stamp matching the live base saves cleanly', () => {
     constants.PEST.base = 112;
-    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 }))).not.toThrow();
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 }), { liveConfigVerified: true })).not.toThrow();
   });
 
   test('a stale-bundle stamp (old 117 base) fails the save closed with the regenerate 409', () => {
     constants.PEST.base = 112;
-    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 117 })))
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 117 }), { liveConfigVerified: true }))
       .toThrow(/regenerate the estimate/);
   });
 
   test('an ABSENT stamp is a stale pre-#3182 bundle — rejected, never waved through', () => {
     constants.PEST.base = 112;
-    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({})))
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({}), { liveConfigVerified: true }))
       .toThrow(/regenerate the estimate/);
   });
 
   test('an admin-tuned live base rejects the kill-value 112 from a client whose config fetch failed', () => {
     constants.PEST.base = 120; // admin-tuned away from the in-code default
-    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 120 }))).not.toThrow();
-    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 })))
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 120 }), { liveConfigVerified: true })).not.toThrow();
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 }), { liveConfigVerified: true }))
       .toThrow(/regenerate the estimate/);
   });
 
   test('client payloads without pest rows are untouched (no stamp required)', () => {
     constants.PEST.base = 112;
-    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ includePest: false }))).not.toThrow();
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ includePest: false }), { liveConfigVerified: true })).not.toThrow();
   });
 
   test('a one-time-only pest payload is gated too — no recurring rows, price still derives from the base (codex r3 P0)', () => {
@@ -729,12 +729,24 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
       };
     }
     // Stale bundle: $257 one-time (117 × 2.2) with no stamp — rejected.
-    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({})))
+    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({}), { liveConfigVerified: true }))
       .toThrow(/regenerate the estimate/);
-    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({ stamp: 117 })))
+    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({ stamp: 117 }), { liveConfigVerified: true }))
       .toThrow(/regenerate the estimate/);
     // Refreshed bundle stamped at the live base passes.
-    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({ stamp: 112 }))).not.toThrow();
+    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({ stamp: 112 }), { liveConfigVerified: true })).not.toThrow();
+  });
+
+  test('unverified live config fails a client pest save closed even with a matching stamp (codex r4 P0)', () => {
+    // One-time-only payloads skip the floor normalizer's 503 gate (no
+    // recurring rows), so this assert must carry its own fail-closed check:
+    // a stamp matching the process-CACHED base proves nothing when the DB
+    // sync failed.
+    constants.PEST.base = 112;
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 }), { liveConfigVerified: false }))
+      .toThrow(/could not be verified/);
+    expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ stamp: 112 })))
+      .toThrow(/could not be verified/); // omitted flag defaults closed
   });
 
   test('server-shaped payloads (no client-engine marker) are untouched', () => {
@@ -747,6 +759,6 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
         },
       },
     };
-    expect(() => assertLivePestBaseForClientPayload(serverShaped)).not.toThrow();
+    expect(() => assertLivePestBaseForClientPayload(serverShaped, { liveConfigVerified: true })).not.toThrow();
   });
 });
