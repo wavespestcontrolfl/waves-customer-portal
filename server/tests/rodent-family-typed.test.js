@@ -1595,3 +1595,41 @@ describe('completion-first `inspection of the traps` (round 16)', () => {
     }
   });
 });
+
+// Pre-push audit P1: the clause-level intent guard exempted the WHOLE
+// clause, so a future promise sharing a subject with a real claim carried
+// the claim out with it — "We checked the traps and will return next week"
+// published a re-check on a declared setup. A future predicate after `and`
+// now starts its own clause, so the exemption covers only the promise.
+describe('a future promise does not exempt the claim beside it', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a real claim sharing a subject with a future predicate still rejects', () => {
+    for (const text of [
+      'We checked the traps and will return next week.',
+      'Trap inspection completed today and follow-up scheduled next week.',
+      'We inspected the traps and will be back Friday.',
+      'Traps were checked and we will return next week.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('a past auxiliary after `and` still continues the predicate', () => {
+    // The scan stops at a re-check verb before any future token, so the
+    // round-13 shared-subject case is untouched.
+    expect(setupContradictions('The traps were set and were checked later.').length)
+      .toBeGreaterThan(0);
+  });
+
+  test('pure future promises stay legal', () => {
+    for (const text of [
+      'We will return to check the traps in one week.',
+      'Traps are set and we will inspect the traps on the follow-up visit.',
+      'We inspected the attic and will set traps next visit.',
+      'We will complete an inspection of the traps next week.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});
