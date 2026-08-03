@@ -3,13 +3,13 @@
     "st_augustine": {
       "name": "St. Augustine Lawn Care Protocol",
       "notes": [
-        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. NOT in April on St. Augustine (still spring green-up) and not during the fall-to-winter transition; use Celsius WG instead.",
+        "⚠ SpeedZone Southern: apply ONLY within 50–85°F — the label prohibits broadcast outside that window. NEVER during spring green-up (April is always green-up here, and March/May can be) or the fall-to-winter transition; use Celsius WG instead.",
         "⚠ PRODIAMINE TIMING: Apply Visit 1 by January 15. Soil temps can hit 55°F germination window by late Jan in Sarasota/Man",
         "⚠ CELSIUS CAP: Maximum 3 applications per property per year. Log every Celsius app. If maxed, use Blindside WDG or Three",
         "⚠ K-FLOW ROTATION: Jun + Sep = K-Flow. Aug = Mg/Ca supplement. Do NOT apply K-Flow every blackout m",
         "★ NEW v4: N RATE CONTROL — Explicit lb N/1,000 per visit in Notes. Annual target: Basic/Std 1.5 lb N, Enh/Prem 3.0 lb N.",
         "★ NEW v4: Soil-test branching — P index >80 skip 24-2-11, K >80 ppm skip K-Flow. Chinch IPM ≥20/sq ft threshold + MOA ro",
-        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. April broadleaf is Celsius WG — SpeedZone barred during spring green-up.",
+        "★ NEW v4: FRAC rotation — Headway (11+3) Jan → Medallion (12) Feb → Torque (3) Oct. April broadleaf is Celsius WG — SpeedZone barred whenever the turf is in spring green-up, which always includes April.",
         "★ NEW v4: Aug drive-by scout + Dec wellness touchpoint for Basic/Std. Thatch measurement V3+V10. Irrigation VWC audit V2",
         "★ ST. AUGUSTINE IS ONE TRACK: Do not split the protocol into full-sun vs shade programs. Use site observations only as condition checks for stress, disease, irrigation, and herbicide safety."
       ],
@@ -75,7 +75,7 @@
             "enhanced": true,
             "premium": true
           },
-          "notes": "CRITICAL: Acelepryn before chinch season. N rate: 0 lb N. ★ NO SpeedZone on St. Augustine in April — still spring green-up, and the label prohibits application during green-up (owner-confirmed 2026-08-02). Celsius WG is the April broadleaf. ⚠ Counts against the Celsius 3-apps/year cap.",
+          "notes": "CRITICAL: Acelepryn before chinch season. N rate: 0 lb N. ★ NO SpeedZone on St. Augustine during spring green-up — the label prohibits it, and April here is always still green-up (owner-confirmed 2026-08-02); check March/May turf too. Celsius WG is the April broadleaf. ⚠ Counts against the Celsius 3-apps/year cap.",
           "conditional_cost": "0.55"
         },
         {
@@ -210,7 +210,7 @@
       "site_condition_rules": {
         "default": "standard_st_augustine",
         "stress_check": "If turf is heat, drought, scalp, or disease stressed, hold PGR and hot herbicide until manager review.",
-        "herbicide_heat_gate": "SpeedZone Southern is weather-gated to 50-85°F; use Celsius WG fallback when heat risk is high. Do not apply to St. Augustinegrass in April (spring green-up) or during the fall-to-winter transition.",
+        "herbicide_heat_gate": "SpeedZone Southern is weather-gated to 50-85°F; use Celsius WG fallback when heat risk is high. Do not apply to St. Augustinegrass at any point during spring green-up — which always includes April and can extend into March or May — or during the fall-to-winter transition.",
         "disease_check": "Pull-test and inspect roots when thinning or patch symptoms are present; choose fungicide by diagnosis, not by sun/shade label.",
         "irrigation_vwc_threshold": "Use VWC/audit notes to adjust irrigation recommendations; do not create a separate St. Augustine shade program."
       }

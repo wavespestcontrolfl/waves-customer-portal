@@ -279,6 +279,10 @@ describe("TRACK_SAFETY_RULES — SpeedZone heat limit", () => {
       const sz = list.find((r) => /speedzone/i.test(r));
       expect(`${track}: ${sz}`).toMatch(/April/);
       expect(`${track}: ${sz}`).toMatch(/Celsius/i);
+      // The label restriction is condition-based. Naming April must ADD to it,
+      // never replace it — a March or May lawn still in green-up is equally
+      // prohibited, and a month-only rule would read as permitting it.
+      expect(`${track}: ${sz}`).toMatch(/green-up/i);
     });
     // Non-St.-Augustine tracks must NOT pick up the April bar.
     rules
