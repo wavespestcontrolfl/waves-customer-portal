@@ -287,7 +287,13 @@ async function getOrRenderServiceReportPdf(recordId, {
   // the expected key must match what renderAndStore writes.
   const service = await knex('service_records')
     .where({ id: recordId })
-    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
+    // customer_id + service_id ride along for the lawn-assessment component
+    // (#3168): loadLinkedLawnAssessment filters on customer_id and falls back
+    // through the scheduled service, so omitting them makes this side compute
+    // "no assessment" while renderAndStore — which uses the full record —
+    // computes the real hash. The keys would never match and every lawn PDF
+    // would re-render on every lookup.
+    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'customer_id', 'service_id');
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public
