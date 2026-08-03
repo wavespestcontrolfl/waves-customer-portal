@@ -588,9 +588,25 @@ describe('disputed setup counts stay out of the narrative (round 12)', () => {
     expect(facts.stations.checked).toBeUndefined();
     expect(facts.stations.serviced).toBeUndefined();
     expect(facts.stations.inaccessible).toBeUndefined();
-    // Event facts survive — a capture recorded AT a pin is not a roster
-    // restatement, and the map keeps showing those pins.
-    expect(facts.stations.trapsWithCaptureRecorded).toBe(0);
+    // Round 13 overturned the round-12 carve-out: the capture-pin count is
+    // pin-derived too — the pins ARE the disputed roster — so it goes with
+    // the rest ("a capture was recorded at 7 traps" beside "Traps set: 6").
+    expect(facts.stations.trapsWithCaptureRecorded).toBeUndefined();
+  });
+
+  test('the capture-pin count is suppressed with the rest (round 13)', () => {
+    // 8 pins, 7 of them capture-flagged, typed count 6 — every one of those
+    // pin numbers is off-limits once the roster is disputed.
+    const facts = groundingFacts({
+      ...setupInput(),
+      stationSummary: { total: 8, checked: 8, activity: 7, serviced: 0, inaccessible: 0 },
+      stationCountDisputed: true,
+    });
+    expect(facts.stations.trapsWithCaptureRecorded).toBeUndefined();
+    const summary = deterministicSummary(facts);
+    expect(summary).not.toContain('capture was recorded at');
+    expect(ungroundedClaims('A capture was recorded at 7 traps.', facts).length)
+      .toBeGreaterThan(0);
   });
 
   test('the deterministic summary names the stage without restating a number', () => {

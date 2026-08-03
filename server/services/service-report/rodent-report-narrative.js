@@ -168,21 +168,22 @@ function stationFacts(stationSummary = null, program = null, countDisputed = fal
   if (!stationSummary || !stationSummary.total) return null;
   // A disputed setup count (the tech's typed trap count disagrees with the
   // pinned roster — setupCountVerified false on the map context) keeps every
-  // roster-derived number OUT of the facts: the map card already suppresses
+  // PIN-derived number OUT of the facts: the map card already suppresses
   // its count line, and whatever number reaches these facts is one the model
   // is licensed to print ("8 of 8 traps were set" beside "Traps set: 6" —
-  // codex P1 round 12). The typed findings still carry the tech's own count,
-  // which is the ratified one. Activity stays: a capture recorded AT a pin
-  // is an event fact, not a roster restatement.
-  const base = countDisputed
-    ? { program: program || null, countDisputed: true }
-    : {
-      program: program || null,
-      total: stationSummary.total,
-      checked: stationSummary.checked || 0,
-      serviced: stationSummary.serviced || 0,
-      inaccessible: stationSummary.inaccessible || 0,
-    };
+  // codex P1 round 12). That includes the activity/capture pin count (codex
+  // P2 round 13): the pins are the disputed roster, so "a capture was
+  // recorded at 7 traps" can publish beside "Traps set: 6". The typed
+  // findings still carry the tech's own counts — captures included — and
+  // those are the ratified numbers.
+  if (countDisputed) return { program: program || null, countDisputed: true };
+  const base = {
+    program: program || null,
+    total: stationSummary.total,
+    checked: stationSummary.checked || 0,
+    serviced: stationSummary.serviced || 0,
+    inaccessible: stationSummary.inaccessible || 0,
+  };
   if (program === 'trapping') {
     return { ...base, trapsWithCaptureRecorded: stationSummary.activity || 0 };
   }

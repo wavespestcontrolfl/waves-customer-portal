@@ -8974,7 +8974,16 @@ export function CompletionPanel({
       .then((res) => {
         if (cancelled) return;
         setPropertyMap(res || null);
-        if (!res?.available) return;
+        if (!res?.available) {
+          // Fail CLOSED (codex P2 round 13): an unavailable response leaves
+          // the registry unconfirmed, and a billing-detour draft restore
+          // may already hold station edits plus a zoneMapImageFallback ref
+          // that the submit path would serialize against a roster we could
+          // not reload. Only a resolved, available response with a loaded
+          // station query re-arms the surface.
+          setStationRegistryFailed(true);
+          return;
+        }
         setStationRegistryFailed(res.stationsLoaded === false);
         setStationPreloads((Array.isArray(res.stations) ? res.stations : [])
           .filter((station) => (station.program || "termite") === stationProgram)
@@ -9015,7 +9024,12 @@ export function CompletionPanel({
           prefillTrapVisitType(existingTraps > 0 ? "Follow-up check" : "Initial setup");
         }
       })
-      .catch(() => { if (!cancelled) setPropertyMap(null); });
+      .catch(() => {
+        if (cancelled) return;
+        setPropertyMap(null);
+        // Same fail-closed rule as the available:false branch above.
+        setStationRegistryFailed(true);
+      });
     return () => { cancelled = true; };
   }, [stationFeatureOn, service?.id]);
 
@@ -9046,6 +9060,13 @@ export function CompletionPanel({
   // overlay preloaded shapes; retired stations drop from display but submit
   // a retire intent; new pins get provisional numbers from the server's
   // nextStationNumber base so what the tech sees matches what persists.
+  // The failed-registry NOTE only renders when something is actually at
+  // stake: a live map whose station query failed, or restored draft edits a
+  // rejected/unavailable refetch left unconfirmed. A property that simply
+  // has no map yet fails closed silently — there is no editor and nothing
+  // to submit, so an orange warning on every mapless completion is noise.
+  const stationRegistryNoteVisible = stationRegistryFailed
+    && (propertyMap?.available === true || stationPreloads.length > 0 || stationNew.length > 0);
   const stationDisplay = stationFeatureOn
     ? [
       ...stationPreloads
@@ -13358,7 +13379,7 @@ export function CompletionPanel({
                 disabled={generating || success || stationRegistryFailed}
               />
             )}
-            {stationFeatureOn && stationRegistryFailed && (
+            {stationFeatureOn && stationRegistryNoteVisible && (
               <div style={{ fontSize: 14, color: "#b45309", marginTop: 6 }}>
                 Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t be
                 loaded, so marking is unavailable for this completion. Complete the visit
@@ -15304,7 +15325,7 @@ export function CompletionPanel({
               disabled={generating || success || stationRegistryFailed}
             />
           )}
-          {stationFeatureOn && stationRegistryFailed && (
+          {stationFeatureOn && stationRegistryNoteVisible && (
             <div style={{ fontSize: 14, color: "#fbbf24", marginTop: 6 }}>
               Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t be
               loaded, so marking is unavailable for this completion. Complete the visit

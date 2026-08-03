@@ -1985,6 +1985,16 @@ const PREDICATE_VERB = /^(?:set|sets|setting|place[sd]?|placing|install(?:ed|ing
 // Skipped when deciding what follows `and`, so "and carefully set …" is still
 // recognized as a new predicate rather than read as an object modifier.
 const ADVERBIAL = /ly$|^(?:also|again|now|today|just|already)$/i;
+// A NEW SUBJECT after `and` also starts a clause: "the traps were set today
+// and the attic was inspected" must not lend the attic's participle to the
+// traps — the unsplit window let passiveRecheckOnTrap bind `inspected` to
+// `traps` and silently discard legitimate setup copy (codex P2 round 13).
+// Recognized as an auxiliary within a few tokens of the `and` with no verb
+// before it: determiners and nouns are exactly the tokens the verb tests
+// reject, so the auxiliary is the earliest reliable signal. Coordinated
+// objects stay joined — "the snap and glue traps" has no auxiliary.
+const CLAUSE_AUX = /^(?:was|were|is|are|has|have|had|will|would|can|could|should|may|might|must)$/i;
+const NEW_SUBJECT_LOOKAHEAD = 4;
 
 function splitOnPredicateAnd(piece) {
   const toks = words(piece);
@@ -1995,7 +2005,19 @@ function splitOnPredicateAnd(piece) {
     let j = i + 1;
     while (j < toks.length && ADVERBIAL.test(toks[j])) j += 1;
     const next = toks[j];
-    if (next && (RECHECK_VERB.test(next) || PREDICATE_VERB.test(next))) {
+    if (!next) continue;
+    let splits = RECHECK_VERB.test(next) || PREDICATE_VERB.test(next);
+    // An auxiliary IMMEDIATELY after `and` is a shared-subject verb phrase
+    // ("were set and were checked later") — that window must stay joined so
+    // the participle still binds to its trap subject. The new-subject scan
+    // starts one token later.
+    if (!splits && !CLAUSE_AUX.test(next)) {
+      for (let k = j + 1; k < Math.min(j + 1 + NEW_SUBJECT_LOOKAHEAD, toks.length); k += 1) {
+        if (RECHECK_VERB.test(toks[k]) || PREDICATE_VERB.test(toks[k])) break;
+        if (CLAUSE_AUX.test(toks[k])) { splits = true; break; }
+      }
+    }
+    if (splits) {
       out.push(toks.slice(start, i).join(' '));
       start = i + 1;
     }
@@ -2023,7 +2045,6 @@ const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
 ];
 const SETUP_EMPTY_CAPTURE_RES = [
   /\bno\s+(?:new\s+)?captures?\b/i,
-  /\bnothing\s+(?:was\s+)?(?:caught|captured)\b/i,
   /\bcaptures?\s+(?:were|was)\s+not\s+recorded\b/i,
   /\b(?:traps?|devices?)\s+(?:were|was)\s+empty\b/i,
   // Numeric and word-form zero say the same thing without the word "no":
@@ -2036,6 +2057,15 @@ const SETUP_EMPTY_CAPTURE_RES = [
   /\b(?:0|zero)\s+(?:new\s+)?(?:captures?|catches)\b/i,
   /\b(?:caught|captured|removed)\s+(?:0|zero)\b/i,
   /\b(?:0|zero)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed)\b/i,
+  // Negated ANIMAL forms and do-not-catch verb phrases make the same claim
+  // with neither the word "captures" nor a number: "No mice were caught",
+  // "We did not catch any rodents", "no rats have been trapped". The count
+  // guard cannot see them at all — there is no numeric claim to reconcile
+  // (codex P1 round 13). "trapped" joins the verb set here only: a bare
+  // "set" stays legal, and "trapped" in the negated form is a check claim.
+  /\bno\s+(?:[a-z-]+\s+){0,2}?(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed|trapped)\b/i,
+  /\b(?:(?:did|do|does|have|has|had)\s+not|didn['’]t|don['’]t|doesn['’]t|haven['’]t|hasn['’]t|hadn['’]t)\s+(?:yet\s+)?(?:catch|caught|capture[ds]?|trap(?:ped)?)\b/i,
+  /\bnothing\s+(?:was\s+|has\s+been\s+|had\s+been\s+)?(?:caught|captured|trapped)\b/i,
 ];
 
 // Word-form numbers normalized to numerals before any count check, so
@@ -2066,7 +2096,18 @@ function normalizeWordNumbers(text) {
 // Count claims in free prose. `N of M traps` yields M — the roster claim —
 // because the N is a subset ("6 of 8 traps were empty" claims 8 exist), and
 // bare partitives ("one of the traps") claim no total at all.
-const TRAP_COUNT_CLAIM_RE = /\b(\d+)(?:\s+(?:of|out\s+of)\s+(\d+))?((?:\s+[a-z-]+){0,2}?)\s+(?:traps?|devices?)\b/gi;
+//
+// The modifier run between the count and its trap noun is bounded by
+// MEANING, not by a flat token cap: adjectives ("exterior mechanical
+// snap") extend the same noun phrase, while animals, partitives, articles,
+// conjunctions, and prepositions signal the number belongs to something
+// else — "2 rats near the traps" counts rats, not traps. The old two-token
+// cap missed "We checked 8 exterior mechanical snap traps" entirely, so
+// the stale 8 published beside a corrected "Traps checked: 6" (codex P1
+// round 13); an uncapped run without the exclusions would have re-created
+// the rats-near-the-traps false positive instead.
+const TRAP_MODIFIER_RUN = '(?:\\s+(?!(?:rats?|mice|mouse|rodents?|animals?|captures?|catches|of|the|a|an|and|or|nor|but|with|without|near|at|in|on|for|from|around|along|inside|outside|behind|beneath|under|over|by|to)\\b)[a-z-]+){0,6}?';
+const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:of|out\\s+of)\\s+(\\d+))?(${TRAP_MODIFIER_RUN})\\s+(?:traps?|devices?)\\b`, 'gi');
 const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
 const CAUGHT_CLAIM_RE = /\b(?:caught|captured|removed)\s+(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b/gi;
 // The PASSIVE capture claim, where the animal precedes its verb: "two mice

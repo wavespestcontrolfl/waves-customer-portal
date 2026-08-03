@@ -1204,3 +1204,85 @@ describe('zero-capture claims contradict a declared setup (round 12)', () => {
     }
   });
 });
+
+// Round 13: negated animal forms and do-not-catch phrasings claim an empty
+// check with neither the word "captures" nor a number — invisible to both
+// the count guard and the round-12 zero patterns.
+describe('negated animal capture claims contradict a declared setup (round 13)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('negated caught/captured/trapped animal forms are refused', () => {
+    for (const text of [
+      'No mice were caught.',
+      'No rodents have been trapped.',
+      'We did not catch any rodents.',
+      "We haven't caught anything yet.",
+      'Nothing has been caught so far.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('negations about anything but catching stay legal setup prose', () => {
+    for (const text of [
+      'No droppings were found in the attic.',
+      'We did not remove the old bait station covers.',
+      'No damage to the soffits was noted.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});
+
+// Round 13: the two-token modifier cap missed "8 exterior mechanical snap
+// traps" entirely, so the roster claim vanished and a stale count published.
+// The run is now bounded by meaning (animals/articles/prepositions end it),
+// not by length.
+describe('long modifier runs still claim the roster (round 13)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('three-plus modifiers between count and noun still reconcile', () => {
+    for (const text of [
+      'We checked 8 exterior mechanical snap traps.',
+      'We placed 8 brand-new heavy-duty snap traps along the wall.',
+    ]) {
+      expect(countContradictions(text, { traps_checked: 6 }).length).toBeGreaterThan(0);
+    }
+    expect(countContradictions('We checked 8 exterior mechanical snap traps.', { traps_checked: 8 }))
+      .toEqual([]);
+  });
+
+  test('a number that counts something else still claims nothing about traps', () => {
+    // "2 rats near the traps" counts rats — the excluded tokens end the run.
+    expect(countContradictions('We removed 2 rats near the traps.', { traps_checked: 6 }))
+      .toEqual([]);
+    expect(countContradictions('One of the traps was moved.', { traps_checked: 6 }))
+      .toEqual([]);
+  });
+});
+
+// Round 13: "the traps were set today and the attic was inspected" — the
+// conditional and-split only recognized a following VERB, so the attic's
+// participle bound to the traps and legitimate setup copy was discarded. A
+// new subject (auxiliary within a few tokens of the `and`) now splits too.
+describe('a new subject after `and` keeps its verb to itself (round 13)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('coordinated clauses with a new subject read as setup prose', () => {
+    for (const text of [
+      'The traps were set today and the attic was inspected.',
+      'We set 8 traps and the crawlspace was checked for droppings.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+
+  test('shared-subject verb phrases and coordinated trap subjects still reject', () => {
+    // Auxiliary immediately after `and` = same subject, stays joined.
+    expect(setupContradictions('The traps were set and were checked later.').length)
+      .toBeGreaterThan(0);
+    // The second conjunct's own subject IS a trap noun.
+    expect(setupContradictions('The traps and monitoring devices were inspected.').length)
+      .toBeGreaterThan(0);
+  });
+});
