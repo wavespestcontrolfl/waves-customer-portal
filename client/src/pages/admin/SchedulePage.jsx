@@ -674,6 +674,21 @@ export function completionResumeOwed(serviceId) {
   }
 }
 
+// Station edits a completion would silently DROP while the registry is
+// loading or failed to load: the payload posts no station entries in that
+// state (an unloaded registry is unavailable, not empty), but a
+// billing-detour draft restores pins, moves, statuses, and retirements
+// into all four of these, and a successful submit clears the draft they
+// were restored from — permanently deleting the tech's work (pre-push P0).
+// handleSubmit fails CLOSED on this; the registry note offers the explicit
+// discard instead.
+export function pendingStationEdits({ stationNew, stationMoves, stationStatuses, stationRetired }) {
+  return stationNew.length > 0
+    || Object.keys(stationMoves).length > 0
+    || Object.keys(stationStatuses).length > 0
+    || stationRetired.length > 0;
+}
+
 // Accepts "HH:MM" or "HH:MM:SS" (DB rows carry seconds; time inputs don't).
 function timeToMinutes(value) {
   if (typeof value !== "string") return null;
@@ -8996,6 +9011,17 @@ export function CompletionPanel({
   const [stationRetired, setStationRetired] = useState([]); // existing ids retired this session
   const [stationNumberBase, setStationNumberBase] = useState(1); // server's next number (never reuses retired)
   const stationNewSeqRef = useRef(0);
+  // Blocks completion (fail closed) while edits exist that the station-less
+  // payload below would silently drop — see pendingStationEdits.
+  const stationEditsPending = stationFeatureOn
+    && pendingStationEdits({ stationNew, stationMoves, stationStatuses, stationRetired });
+  const stationEditsBlocked = stationEditsPending && stationRegistryFailed;
+  const discardStationEdits = () => {
+    setStationNew([]);
+    setStationMoves({});
+    setStationStatuses({});
+    setStationRetired([]);
+  };
 
   // Default the rodent trapping "This visit" select, into whichever slice
   // owns the rodent_trapping schema for this visit (primary findings vs. a
@@ -9135,7 +9161,11 @@ export function CompletionPanel({
   // that state is transient and the editor simply stays inert until the
   // fetch settles.
   const stationRegistryNoteVisible = stationRegistryState === "failed"
-    && (propertyMap?.available === true || stationPreloads.length > 0 || stationNew.length > 0);
+    && (propertyMap?.available === true || stationPreloads.length > 0 || stationNew.length > 0
+      // Restored moves/statuses/retirements block completion even when the
+      // rejected refetch left no roster to display them against — the note
+      // is where the discard escape hatch lives, so it must show.
+      || stationEditsPending);
   const stationDisplay = stationFeatureOn
     ? [
       ...stationPreloads
@@ -11392,6 +11422,19 @@ export function CompletionPanel({
       alert("Hang on — finishing the AI draft. Try again in a moment.");
       return;
     }
+    // A billing-detour draft can restore station pins, moves, statuses, and
+    // retirements while the registry request is still loading or failed.
+    // The completion payload posts no station entries in that state, and a
+    // successful submit clears the draft those edits were restored from —
+    // silently deleting the tech's work (pre-push P0). Fail closed until
+    // the registry confirms, or the tech explicitly discards the edits via
+    // the registry note.
+    if (stationEditsBlocked) {
+      alert(stationRegistryState === "loading"
+        ? "Hang on — confirming the existing trap/station map. Try again in a moment."
+        : "The existing trap/station map couldn't be loaded, so this completion can't save the map edits restored from your draft. Discard them from the station section, or reload to retry.");
+      return;
+    }
     // WaveGuard lawn: the compliance advisories come from the plan request —
     // completing before it settles would record conditions the tech never saw.
     if (closeoutAdvisoriesPending) {
@@ -13483,9 +13526,29 @@ export function CompletionPanel({
             )}
             {stationFeatureOn && stationRegistryNoteVisible && (
               <div style={{ fontSize: 14, color: "#b45309", marginTop: 6 }}>
-                Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t be
-                loaded, so marking is unavailable for this completion. Complete the visit
-                normally — the registry is unchanged.
+                {stationEditsBlocked ? (
+                  <>
+                    Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
+                    be loaded, so the map edits restored from your draft can&apos;t be saved with
+                    this completion. Reload to retry, or discard them to complete without.{" "}
+                    <button
+                      type="button"
+                      onClick={discardStationEdits}
+                      style={{
+                        fontSize: 14, textDecoration: "underline", background: "none",
+                        border: "none", padding: 0, color: "inherit", cursor: "pointer",
+                      }}
+                    >
+                      Discard {stationProgram === "trapping" ? "trap" : "station"} edits
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
+                    be loaded, so marking is unavailable for this completion. Complete the visit
+                    normally — the registry is unchanged.
+                  </>
+                )}
               </div>
             )}
             {/* Service findings — typed specialty completion */}
@@ -15429,9 +15492,29 @@ export function CompletionPanel({
           )}
           {stationFeatureOn && stationRegistryNoteVisible && (
             <div style={{ fontSize: 14, color: "#fbbf24", marginTop: 6 }}>
-              Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t be
-              loaded, so marking is unavailable for this completion. Complete the visit
-              normally — the registry is unchanged.
+              {stationEditsBlocked ? (
+                <>
+                  Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
+                  be loaded, so the map edits restored from your draft can&apos;t be saved with
+                  this completion. Reload to retry, or discard them to complete without.{" "}
+                  <button
+                    type="button"
+                    onClick={discardStationEdits}
+                    style={{
+                      fontSize: 14, textDecoration: "underline", background: "none",
+                      border: "none", padding: 0, color: "inherit", cursor: "pointer",
+                    }}
+                  >
+                    Discard {stationProgram === "trapping" ? "trap" : "station"} edits
+                  </button>
+                </>
+              ) : (
+                <>
+                  Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
+                  be loaded, so marking is unavailable for this completion. Complete the visit
+                  normally — the registry is unchanged.
+                </>
+              )}
             </div>
           )}
           {/* Service findings — typed specialty completion */}
