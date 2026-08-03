@@ -7,10 +7,29 @@ import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants
 // download, the share sheet, and the post-service email attachment all
 // serve this document. The glass web report (mode 'live') is untouched.
 //
+// SCOPE — "record of service" (owner ruling 2026-08-03, option A).
+// This document is the permanent RECORD of the visit, not a reproduction of
+// the interactive report. It carries everything needed to answer "what was
+// done here, with what, where, and what do I do now": identity, conditions,
+// findings, re-entry, recommendations, products with their EPA facts, areas
+// serviced, treatment/placement maps, photos and visit history.
+//
+// It deliberately does NOT reproduce the V2 dashboards' richer analysis —
+// the lawn water-balance breakdown, before/after progression sliders, the
+// mosquito seasonal outlook, the animated visit timeline. Those live in the
+// interactive report, which every copy of this document links to by URL.
+// That boundary is a decision, not an omission: reviewers have raised each
+// of those fields, and the answer is that they belong online.
+//
+// The bar for adding something here: would its ABSENCE make the record
+// wrong, incomplete as a service record, or a broken promise? If yes it
+// belongs (that is why the reconciled result, the promised follow-up, the
+// coverage statuses and the label safety copy are all here). If it is
+// additional analysis of data already summarised here, it stays online.
+//
 // Content rules: strictly the data the interactive report already shows —
-// no pricing (this is a service record, not an invoice), photos stay in
-// the portal (a count + link renders instead), and product safety copy
-// comes only from the approved per-product label facts.
+// no pricing (this is a service record, not an invoice) and product safety
+// copy comes only from the approved per-product label facts.
 
 const NAVY = '#04395E';
 const INK = '#17242F';

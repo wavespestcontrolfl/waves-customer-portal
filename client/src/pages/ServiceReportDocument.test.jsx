@@ -463,6 +463,14 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toContain(`${window.location.origin}/report/tok123`);
   });
 
+  it('always points to the interactive report, which carries what the record omits', () => {
+    // Scope ruling A (record of service): the richer V2 analysis lives online,
+    // so the link out is load-bearing and must render on every document.
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(container.textContent).toContain('Full interactive report');
+    expect(container.textContent).toContain(`${window.location.origin}/report/tok123`);
+  });
+
   it('hides the conditions readings when the visit recorded none', () => {
     render(<ServiceReportDocument data={{ ...BASE_DATA, conditions: {} }} token="tok123" />);
     expect(screen.getByText('Not recorded for this visit.')).toBeInTheDocument();
