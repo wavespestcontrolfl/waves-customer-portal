@@ -28,7 +28,11 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
-const { buildReportV1Data, stripLiveOnlyScheduleFields } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT } = require('../services/service-report/report-data');
+
+// lawn_assessments.id is a Postgres uuid — anything else must be refused
+// before it reaches a query (#3168).
+const ASSESSMENT_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
@@ -1486,9 +1490,21 @@ router.get('/:token/data', async (req, res, next) => {
       // this token already exposes (same customer, confirmed, linked to this
       // visit); an id outside that set throws rather than widening what the
       // token can see. Ignored on non-lawn reports.
-      const pinnedLawnAssessmentId = typeof req.query.assessment === 'string' && req.query.assessment.trim()
+      // Format-validate BEFORE the builder: lawn_assessments.id is a Postgres
+      // uuid, so a junk value like ?assessment=invalid raises an invalid-uuid
+      // syntax error and surfaces as a 500 instead of the fixed 409 refusal
+      // this route promises. A malformed pin is refused exactly like an
+      // unauthorized one — same status, same fixed copy, nothing echoed back.
+      const requestedAssessment = typeof req.query.assessment === 'string' && req.query.assessment.trim()
         ? req.query.assessment.trim()
         : null;
+      if (requestedAssessment
+        && requestedAssessment !== PIN_NO_ASSESSMENT
+        && !ASSESSMENT_UUID_RE.test(requestedAssessment)) {
+        logger.warn(`[reports-public] malformed assessment pin refused for service_record ${serviceRecordId || 'unknown'}`);
+        return res.status(409).json({ error: 'Requested assessment is not available for this report' });
+      }
+      const pinnedLawnAssessmentId = requestedAssessment;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         mode, staffViewer, pinnedLawnAssessmentId,
       });

@@ -154,6 +154,14 @@ describe('#3168 pinned assessment — pinning ABSENCE', () => {
       .toBe(`https://portal.example/report/tok-1?mode=pdf&assessment=${PIN_NO_ASSESSMENT}`);
   });
 
+  test('the sentinel is not a uuid, so the route guard must special-case it', () => {
+    // The route rejects any non-uuid pin before it reaches a query (the id
+    // column is a Postgres uuid). The sentinel therefore has to be allowed
+    // explicitly — this asserts the two rules cannot silently diverge.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    expect(UUID_RE.test(PIN_NO_ASSESSMENT)).toBe(false);
+  });
+
   test('the sentinel can never collide with a real assessment id', () => {
     // Ids are uuids; the sentinel deliberately is not one, so a row could
     // never be named 'none' and be resolved by accident.

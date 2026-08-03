@@ -454,7 +454,14 @@ async function processServiceReportDelivery(delivery, knex = db) {
       // LAWN deliveries only. Pinning a pest report would be meaningless (it
       // has no lawn section to pin) while making every pest render fresh and
       // unstored, since a pinned render deliberately bypasses the cache.
-      pinnedLawnAssessmentId: isLawnDelivery ? (fencedAssessmentId || PIN_NO_ASSESSMENT) : null,
+      // Pin the CANONICAL selection, not the fence target. The held-payload
+      // fallback deliberately seals an id that canonical resolution rejected —
+      // typically an assessment not yet confirmed — and a pin of that id would
+      // be refused by design on every attempt, deterministically 409ing the
+      // render until the delivery exhausts its retries. Pinning absence is
+      // correct there: the page renders no lawn section (canonical found
+      // none), while the seal still guards the held assessment's copy.
+      pinnedLawnAssessmentId: isLawnDelivery ? (canonicalAtResolve || PIN_NO_ASSESSMENT) : null,
       verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {
