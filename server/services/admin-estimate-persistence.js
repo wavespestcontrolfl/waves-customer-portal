@@ -871,8 +871,16 @@ function assertLivePestBaseForClientPayload(estimateData) {
   const root = estimateResultRoot(estimateData);
   const results = root?.results;
   if (!results || typeof results !== 'object') return;
+  // One-time pest derives from the same base (quarterly × 2.2) but a
+  // one-time-only fallback stores it ONLY under oneTime items — no
+  // results.pest/pestTiers rows — so it must be gated too (codex r3 P0).
+  const oneTimeItems = [
+    ...(Array.isArray(root?.oneTime?.items) ? root.oneTime.items : []),
+    ...(Array.isArray(results.oneTime) ? results.oneTime : []),
+  ];
   const hasPestRows = (Array.isArray(results.pestTiers) && results.pestTiers.length > 0)
-    || (results.pest && typeof results.pest === 'object');
+    || (results.pest && typeof results.pest === 'object')
+    || oneTimeItems.some((item) => item && item.service === 'one_time_pest');
   if (!hasPestRows) return;
   const recurring = root.recurring && typeof root.recurring === 'object' ? root.recurring : null;
   const isClientEngineResult = !!recurring

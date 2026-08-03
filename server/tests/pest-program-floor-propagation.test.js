@@ -714,6 +714,29 @@ describe('assertLivePestBaseForClientPayload — stale-bundle base gate at save 
     expect(() => assertLivePestBaseForClientPayload(clientEnginePestPayload({ includePest: false }))).not.toThrow();
   });
 
+  test('a one-time-only pest payload is gated too — no recurring rows, price still derives from the base (codex r3 P0)', () => {
+    constants.PEST.base = 112;
+    function oneTimeOnlyPayload({ stamp } = {}) {
+      const pricingMetadata = { pestProgramFloorArmed: false, pestProgramFloorPerVisit: 89 };
+      if (stamp !== undefined) pricingMetadata.pestBasePerVisit = stamp;
+      return {
+        result: {
+          recurring: { discount: 0, pestProgramFloorApplied: false },
+          pricingMetadata,
+          results: { lawn: [{ v: 9, pa: 60 }] },
+          oneTime: { items: [{ service: 'one_time_pest', name: 'One-Time Pest Control', price: 257 }], total: 257 },
+        },
+      };
+    }
+    // Stale bundle: $257 one-time (117 × 2.2) with no stamp — rejected.
+    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({})))
+      .toThrow(/regenerate the estimate/);
+    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({ stamp: 117 })))
+      .toThrow(/regenerate the estimate/);
+    // Refreshed bundle stamped at the live base passes.
+    expect(() => assertLivePestBaseForClientPayload(oneTimeOnlyPayload({ stamp: 112 }))).not.toThrow();
+  });
+
   test('server-shaped payloads (no client-engine marker) are untouched', () => {
     constants.PEST.base = 112;
     const serverShaped = {
