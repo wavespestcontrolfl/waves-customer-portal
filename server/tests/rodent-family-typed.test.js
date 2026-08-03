@@ -1645,3 +1645,36 @@ describe('a future promise does not exempt the claim beside it', () => {
     }
   });
 });
+
+// Pre-push audit P1: `once` and `as` are subordinators exactly like the
+// `after`/`when`/`while` already in OBJECT_PHRASE_END, and their absence
+// let the passive scan run out of the trap noun's phrase and bind a
+// participle belonging to a different subject — discarding valid setup
+// copy. The neighbouring `after` form was always correct; the set was
+// simply incomplete.
+describe('subordinate clauses bind their participle to their OWN subject', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a non-trap subject after a subordinator stays legal', () => {
+    for (const text of [
+      'We set traps once the crawlspace was checked.',
+      'We set traps as the attic was inspected.',
+      'We placed the devices once the exterior was inspected.',
+      'We set traps after the crawlspace was checked.',
+      'We set traps unless the attic was inspected.',
+      'We set traps though the garage was inspected.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+
+  test('a participle that really is about the traps still rejects', () => {
+    for (const text of [
+      'We set traps once the crawlspace was clear, then the traps were checked.',
+      'All traps were carefully inspected.',
+      '8 traps checked today.',
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+});

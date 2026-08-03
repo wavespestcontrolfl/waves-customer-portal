@@ -9027,6 +9027,16 @@ export function CompletionPanel({
   useEffect(() => {
     if (!stationFeatureOn || !service?.id) return undefined;
     let cancelled = false;
+    // Re-arm fail-closed for the WHOLE in-flight window, and drop the
+    // previous registry's rows before refetching. Without this a re-run
+    // (the panel switching service or program, or the flag toggling back
+    // on) left the surface marked "ready" with the OLD program's preloads
+    // still in state, so the submit guard could serialize stale station
+    // ids against the new one. `stationProgram` also has to be a dependency
+    // — the effect filters by it (codex P1 on the pre-push audit).
+    setStationRegistryState("loading");
+    setStationPreloads([]);
+    setStationNumberBase(1);
     adminFetch(`/admin/dispatch/${service.id}/property-map`)
       .then((res) => {
         if (cancelled) return;
@@ -9087,7 +9097,7 @@ export function CompletionPanel({
         setStationRegistryState("failed");
       });
     return () => { cancelled = true; };
-  }, [stationFeatureOn, service?.id]);
+  }, [stationFeatureOn, service?.id, stationProgram]);
 
   // Existing traced treatment zone for this visit — its measured linear feet
   // prefill the perimeter-spray Linear ft inputs (see addProduct /

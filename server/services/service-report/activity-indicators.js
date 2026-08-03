@@ -1908,7 +1908,14 @@ const RECHECK_PARTICIPLE = new RegExp('^(?:'
 //
 // Deliberately excluded: `of` (partitive — "two of the traps" is still one
 // object phrase) and particles like `out`/`up` ("swapped out the old traps").
-const OBJECT_PHRASE_END = /^(?:in|on|at|for|before|after|with|without|from|to|along|near|around|under|over|behind|beside|by|into|onto|across|through|during|against|where|which|that|when|while|who|whose|because|since|until)$/i;
+// `once` and `as` are subordinators exactly like the `after`/`when`/`while`
+// already here, and their absence let the passive scan run out of the trap
+// noun's phrase and bind a participle belonging to a different subject:
+// "We set traps ONCE the crawlspace was checked" read as a trap re-check
+// and discarded the body (pre-push audit P1). Note the neighbouring
+// "…AFTER the crawlspace was checked" was always correct — the set was
+// simply incomplete.
+const OBJECT_PHRASE_END = /^(?:in|on|at|for|before|after|with|without|from|to|along|near|around|under|over|behind|beside|by|into|onto|across|through|during|against|where|which|that|when|while|once|as|who|whose|because|since|until|unless|though|although)$/i;
 // (No PASSIVE_AUX constant: the passive scan no longer tests for an
 // auxiliary at all — see passiveRecheckOnTrap. Enumerating auxiliaries was
 // what made the reduced passive "8 traps checked today" invisible.)
