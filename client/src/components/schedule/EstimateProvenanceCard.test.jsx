@@ -116,6 +116,34 @@ describe('EstimateProvenanceCard quoted framing', () => {
     expect(screen.queryByText(/vs quoted/i)).toBeNull();
   });
 
+  it('a one-time-only quote IS its visit — a real price change still shows a delta', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={300}
+        onetimeTotal={300}
+        currentPrice={350}
+        compareScope="visit"
+        lines={[{ name: 'Bed Bug Treatment', cadence: 'one_time', price: 300 }]}
+        estimateRef="EST-2026-0008"
+      />,
+    );
+    expect(screen.getByText(/vs quoted/i)).toBeTruthy();
+  });
+
+  it('a fully-discounted one-time line shows $0.00, never the gross price', () => {
+    render(
+      <EstimateProvenanceCard
+        quotedTotal={0}
+        onetimeTotal={0}
+        currentPrice={null}
+        lines={[{ name: 'Bed Bug Treatment', cadence: 'one_time', price: 300, acceptedOneTimePrice: 0 }]}
+        estimateRef="EST-2026-0009"
+      />,
+    );
+    expect(screen.getByText(/\$0\.00 one-time/)).toBeTruthy();
+    expect(screen.queryByText(/\$300\.00/)).toBeNull();
+  });
+
   it('keeps the legacy blended total when only synthesized fallback lines exist', () => {
     render(
       <EstimateProvenanceCard

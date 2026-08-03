@@ -348,8 +348,11 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
         ? Number(line.monthlyPrice) : null,
       // acceptedOneTimePrice is the NET after a manual discount allocated
       // to one-time work — the row's price stays gross (Codex #3173 r4).
+      // PRESENCE, not positivity (r5): the server legitimately emits 0 when
+      // a discount fully covers the line, and a $0 accepted line must not
+      // fall back to the gross price.
       oneTimePrice: line?.cadence === 'one_time'
-        ? (Number(line?.acceptedOneTimePrice) > 0
+        ? (Number.isFinite(Number(line?.acceptedOneTimePrice)) && Number(line?.acceptedOneTimePrice) >= 0
           ? Number(line.acceptedOneTimePrice)
           : (Number(line?.price) > 0 ? Number(line.price) : null))
         : null,
@@ -409,8 +412,15 @@ export default function EstimateProvenanceCard({ quotedTotal, currentPrice, onet
   // off-cycle booster visits, which carry only the primary line (r3). The
   // comparison therefore stands only for a SINGLE-recurring-line quote with
   // no one-time work: the one shape where every visit provably IS the plan.
+  // A one-time-only quote IS its visit — the accepted one-time total is
+  // directly comparable, and suppressing it hid real operator price changes
+  // (Codex #3173 r5).
+  const oneTimeLineCount = serviceLines.filter((l) => l.oneTimePrice != null).length;
   const visitComparable = allRecurringPerApp && recurringLineCount === 1 && oneTimeLineSum === 0
-    ? perAppSum : null;
+    ? perAppSum
+    : (recurringLineCount === 0 && oneTimeLineCount > 0
+      && serviceLines.length === oneTimeLineCount && oneTimeLineSum > 0
+      ? oneTimeLineSum : null);
   const groupComparable = allRecurringPerApp
     ? (everyLinePriced ? perAppSum + oneTimeLineSum : null)
     : (perAppPrices.length || monthlyPrices.length ? null : quoted);
