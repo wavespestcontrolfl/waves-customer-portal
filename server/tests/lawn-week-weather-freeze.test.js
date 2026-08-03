@@ -191,6 +191,21 @@ describe('freeze contract in the render path', () => {
     expect(pdfQueue).toMatch(/lawn_week_weather_unfrozen[\s\S]{0,200}?retryable = true/);
   });
 
+  // An uncached render is not a completed job: the job exists to populate the
+  // cache, so marking it succeeded would retire it with nothing stored and no
+  // retry — the condition that made it unstorable never gets another attempt.
+  test('an UNCACHED render is not treated as a successful store', () => {
+    const pdfQueue = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+    // The render JOB retries instead of succeeding.
+    expect(pdfQueue).toMatch(/if \(result\?\.uncached\)[\s\S]{0,400}?markPdfRenderJobFailed/);
+    // The correction marker is RETAINED — nothing was stored, so the canonical
+    // cached PDF is still whatever it was.
+    expect(pdfQueue).toMatch(/correctionPending && !rendered\.storageFailed && !rendered\.pinned && !rendered\.uncached/);
+    // And the state is propagated so callers can tell "no key by design" from
+    // "no key because storage failed".
+    expect(pdfQueue).toMatch(/uncached: !!rendered\.uncached/);
+  });
+
   test('the flag is set ONLY when a fetched week could not be frozen', () => {
     // Not when a frozen week was replayed, and not when nothing was fetched —
     // either of those would make every such render permanently uncacheable.

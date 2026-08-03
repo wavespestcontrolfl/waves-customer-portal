@@ -395,7 +395,10 @@ async function getOrRenderServiceReportPdf(recordId, {
   // A PINNED render must not clear the correction marker: it stored nothing, so
   // the canonical cached PDF is still whatever it was. Clearing here would
   // retire the marker while a stale object remains the one customers download.
-  if (correctionPending && !rendered.storageFailed && !rendered.pinned && fenceReadOk) {
+  // …and not on an UNCACHED render either: it stored nothing, so the canonical
+  // cached PDF is still whatever it was. Clearing would retire the marker while
+  // a stale object remains the one customers download.
+  if (correctionPending && !rendered.storageFailed && !rendered.pinned && !rendered.uncached && fenceReadOk) {
     try {
       if (!lawnAssessmentId) {
         // No linked assessment (stray marker on a non-lawn record) —
@@ -450,6 +453,9 @@ async function getOrRenderServiceReportPdf(recordId, {
     // Pinned renders are deliberately unstored (#3168) — surfaced so a caller
     // can tell "no key because storage failed" from "no key by design".
     pinned: !!rendered.pinned,
+    // Likewise for a render that completed but was not cacheable (unfrozen
+    // week, or a selection that moved during the render).
+    uncached: !!rendered.uncached,
   };
 }
 
@@ -603,6 +609,17 @@ async function markPdfRenderJobFailed(job, err, knex = db) {
 async function processPdfRenderJob(job, knex = db) {
   try {
     const result = await renderAndStoreServiceReportPdf(job.service_record_id, { knex });
+    // A render that deliberately stored NOTHING has not done this job's work —
+    // the job exists to populate the cache. Marking it succeeded would retire
+    // it with no cached PDF and no retry, so the condition that made the render
+    // unstorable (an unfrozen week, a selection that moved) never gets another
+    // attempt. Fail it so the queue backs off and tries again.
+    if (result?.uncached) {
+      const err = new Error('render completed but was not cacheable — retrying');
+      err.code = 'pdf_render_uncacheable';
+      const status = await markPdfRenderJobFailed(job, err, knex);
+      return { status, error: err.message };
+    }
     await markPdfRenderJobSucceeded(job, result.key, knex);
     return { status: 'succeeded', key: result.key };
   } catch (err) {
