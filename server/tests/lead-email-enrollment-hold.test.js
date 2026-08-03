@@ -8,9 +8,10 @@
  */
 
 let mockFirstResult = null;
-let mockFirstError = null;
+let mockTriageLookupError = null;
 let mockInsertError = null;
 let mockUpdateError = null;
+let mockHoldRows = [];
 jest.mock('../models/db', () => {
   const chain = {
     where: jest.fn(() => chain),
@@ -20,7 +21,14 @@ jest.mock('../models/db', () => {
     // ticket, everything else re-pends plain.
     whereNull: jest.fn(() => chain),
     whereNot: jest.fn(() => chain),
-    first: jest.fn(() => (mockFirstError ? Promise.reject(mockFirstError) : Promise.resolve(mockFirstResult))),
+    // Table-scoped (r56): the recovery path now reads first_touch_holds
+    // and the call_log ownership row inside the fenced mint — a failure
+    // injected on the TRIAGE lookup must not also fail those.
+    first: jest.fn(() => {
+      if (chain._table === 'triage_items' && mockTriageLookupError) return Promise.reject(mockTriageLookupError);
+      if (chain._table === 'call_log') return Promise.resolve({ id: 'call-1' });
+      return Promise.resolve(mockFirstResult);
+    }),
     forUpdate: jest.fn(() => chain),
     select: jest.fn(() => chain),
     insert: jest.fn(() => { if (mockInsertError) throw mockInsertError; return chain; }),
@@ -29,8 +37,10 @@ jest.mock('../models/db', () => {
     // The r43/r44 fresh-review claim invalidation runs after the recovery
     // marker insert — a plain fence-bumping hold update.
     update: jest.fn(() => (mockUpdateError ? Promise.reject(mockUpdateError) : Promise.resolve(1))),
+    // Awaited bare selects (the holds evidence read) resolve rows.
+    then: (resolve, reject) => Promise.resolve(chain._table === 'first_touch_holds' ? mockHoldRows : []).then(resolve, reject),
   };
-  const db = jest.fn(() => chain);
+  const db = jest.fn((table) => { chain._table = table; return chain; });
   db._chain = chain;
   db.raw = jest.fn((x) => x);
   db.schema = { hasTable: jest.fn(async () => true) };
@@ -50,9 +60,10 @@ const { shouldHoldLeadEmailEnrollment, mintEmailReviewCardsFenced } = _test;
 
 beforeEach(() => {
   mockFirstResult = null;
-  mockFirstError = null;
+  mockTriageLookupError = null;
   mockInsertError = null;
   mockUpdateError = null;
+  mockHoldRows = [];
   jest.clearAllMocks();
 });
 
@@ -71,16 +82,26 @@ describe('shouldHoldLeadEmailEnrollment', () => {
     await expect(shouldHoldLeadEmailEnrollment('call-1')).resolves.toBe(false);
   });
 
-  test('lookup failure fails toward HOLD and persists a recovery marker', async () => {
-    mockFirstError = new Error('db down');
-    await expect(shouldHoldLeadEmailEnrollment('call-1')).resolves.toBe(true);
+  test('lookup failure fails toward HOLD and persists a recovery marker WITH the held address as evidence (r56)', async () => {
+    mockTriageLookupError = new Error('db down');
+    mockHoldRows = [{ held_email: 'held.target@example.com' }];
+    await expect(shouldHoldLeadEmailEnrollment('call-1', { procToken: 'tok', callSid: 'CA1' })).resolves.toBe(true);
     // The marker is what a later resume path releases — a silent hold with
-    // no card would strand the lead outside the drip forever.
+    // no card would strand the lead outside the drip forever. It rides the
+    // fenced mint (card + claim invalidation in ONE transaction) and must
+    // SHOW the held address it would release (the r53 evidence contract).
     expect(db._chain.insert).toHaveBeenCalled();
+    const card = db._chain.insert.mock.calls.find((c) => Array.isArray(c[0]) && c[0][0])?.[0]?.[0]
+      || db._chain.insert.mock.calls[db._chain.insert.mock.calls.length - 1][0];
+    const payloadCard = Array.isArray(card) ? card[0] : card;
+    const evidence = payloadCard.extraPayload || payloadCard;
+    expect(evidence.email_as_heard || evidence.extraPayload?.email_as_heard).toBe('held.target@example.com');
+    // One fenced transaction wrapped the card + invalidation.
+    expect(db.transaction).toHaveBeenCalled();
   });
 
   test('lookup + marker failure fails the run — never a silent, invisible hold', async () => {
-    mockFirstError = new Error('db down');
+    mockTriageLookupError = new Error('db down');
     mockInsertError = new Error('still down');
     await expect(shouldHoldLeadEmailEnrollment('call-1')).rejects.toMatchObject({
       emailReviewStateUnavailable: true,
@@ -92,7 +113,7 @@ describe('shouldHoldLeadEmailEnrollment', () => {
     // and an in-flight claimant's fence NOT invalidated, that claimant
     // could send the unreviewed address (Codex #3084 r44). The failure
     // routes into the extraction_failed retry, which re-runs both writes.
-    mockFirstError = new Error('db down');
+    mockTriageLookupError = new Error('db down');
     mockUpdateError = new Error('write down');
     await expect(shouldHoldLeadEmailEnrollment('call-1')).rejects.toMatchObject({
       emailReviewStateUnavailable: true,

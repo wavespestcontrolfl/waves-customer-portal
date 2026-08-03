@@ -855,6 +855,13 @@ describe('propagateCustomerEmailChange', () => {
       .filter((c) => c.table === 'automation_enrollments' && c.op === 'orWhereRaw')
       .map((c) => (c.arg.bindings || [])[0]);
     expect(sweepTargets).toContain('raced.target@example.com');
+    // r56: the late-discovered target also gets the SUBSCRIBER/token pass —
+    // the raced release may have created/adopt-linked a subscriber at X,
+    // whose DOI/unsubscribe bearer links must die with the correction.
+    const subscriberTargets = conn.__calls
+      .filter((c) => c.table === 'newsletter_subscribers' && c.op === 'orWhereRaw')
+      .map((c) => (c.arg.bindings || [])[0]);
+    expect(subscriberTargets).toContain('raced.target@example.com');
   });
 
   test('a final ownership-scoped enrollment retarget runs after the marker merges', async () => {

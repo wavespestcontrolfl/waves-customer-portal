@@ -537,7 +537,13 @@ async function propagateCustomerEmailChange({
   // subscriber at B. Ownership-safe by construction: customer_id-bound
   // selection only — an unlinked or foreign-owned row at a prior target is
   // never touched (the extraction can be a stranger's real address).
-  if (priorHoldTargets.length) {
+  // Shared by the pre-pass (priorHoldTargets) AND the post-merge late pass
+  // (r56): a raced release can create/adopt-link a subscriber at a hold
+  // target the pre-lock snapshot never saw — when the marker merge later
+  // recovers that target, the SAME subscriber/token fanout must run for it,
+  // or the DOI/unsubscribe bearer links delivered to the rejected mailbox
+  // stay valid after the record moves to the corrected address.
+  const retargetSubscribersAtRejectedTargets = async (targets) => {
     // Unlocked snapshot → deliveries → FOR UPDATE re-read (Codex #3084
     // r43/r46): the retarget and delete act on the LOCKED read's status,
     // so an unsubscribe committing after our lock waits and one before it
@@ -548,7 +554,7 @@ async function propagateCustomerEmailChange({
     const priorTargetSnapshot = await conn('newsletter_subscribers')
       .where({ customer_id: customerId })
       .where(function atPriorTargets() {
-        for (const target of priorHoldTargets) this.orWhereRaw('LOWER(email) = ?', [target]);
+        for (const target of targets) this.orWhereRaw('LOWER(email) = ?', [target]);
       })
       .select('id');
     let priorTargetSubs = [];
@@ -625,7 +631,8 @@ async function propagateCustomerEmailChange({
         if (retargeted) subscriberAtCorrectedAddress = true;
       }
     }
-  }
+  };
+  if (priorHoldTargets.length) await retargetSubscribersAtRejectedTargets(priorHoldTargets);
 
   // The operator asserting a NEW email on the record answers any open
   // read-back question for this customer's calls — resolve those cards and
@@ -847,6 +854,17 @@ async function propagateCustomerEmailChange({
     // racedMergeTargets (r55): pre-merge pending/releasing targets the
     // retarget above overwrote — same hold-lane evidence tier as the
     // held targets read back here, recoverable ONLY before the merge.
+    //
+    // Late-discovered targets get the SAME subscriber/token fanout the
+    // pre-pass gave priorHoldTargets (r56): a raced release can
+    // create/adopt-link a subscriber at X before this correction's
+    // snapshot ever saw a hold row — without this pass, X's DOI
+    // confirmation and unsubscribe bearer links stay valid in the
+    // rejected mailbox after the record moves to the corrected address.
+    const newEmailLcLate = newEmail.toLowerCase();
+    const lateSubscriberTargets = [...new Set([...lateReleaseTargets, ...racedMergeTargets])]
+      .filter((t) => t && t !== newEmailLcLate && t !== oldEmail && !priorHoldTargets.includes(t));
+    if (lateSubscriberTargets.length) await retargetSubscribersAtRejectedTargets(lateSubscriberTargets);
     const finalSweepTargets = [...new Set([oldEmail, ...priorHoldTargets, ...lateReleaseTargets, ...racedMergeTargets].filter(Boolean))];
     if (finalSweepTargets.length) {
       counts.automations += await conn('automation_enrollments')
