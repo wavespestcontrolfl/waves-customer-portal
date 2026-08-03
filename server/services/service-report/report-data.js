@@ -1841,75 +1841,46 @@ class PinnedAssessmentUnavailable extends Error {
   }
 }
 
-// The canonical pin for a render that is NOT carrying a delivery's sealed
-// assessment (#3172).
+// ONE lookup, both answers (#3172 r1).
 //
-// An unpinned render is nondeterministic: the browser opens the report page and
-// the page resolves the assessment itself, so a selection that moves away and
-// back during the render defeats any pre/post comparison the server makes — the
-// same A-to-B-to-A limitation that created #3168, one level down in the cache
-// path. Pinning ordinary renders to the CANONICAL answer removes the page's
-// freedom to choose, which is the only thing that actually closes it.
+// The pin and the storage-key component must describe the SAME assessment. Two
+// independent lookups can straddle a selection change: the render gets pinned
+// to B while the object is cached under A's key — which is the very race this
+// is meant to close, reintroduced by resolving twice.
 //
-// Returns the canonical assessment id, PIN_NO_ASSESSMENT when a lawn visit has
-// none (absence is an answer and must be pinned too), or null for a non-lawn
-// record, which has nothing to pin.
+// Returns { pin, signature }:
+//   non-lawn record          → { pin: null, signature: '' }        (nothing to pin)
+//   lawn visit, assessment   → { pin: <id>, signature: '-la<hash>' }
+//   lawn visit, none         → { pin: PIN_NO_ASSESSMENT, signature: '-la0' }
 //
-// Throws on an unreadable lookup — a caller that cannot determine the canonical
-// answer must not render as if there were none.
-async function canonicalLawnPin(service, knex = db) {
+// THROWS on an unreadable lookup: a render that cannot determine the canonical
+// answer must not proceed as though there were none, and a cache key must not
+// be computed from a guess.
+async function resolveCanonicalLawnRender(service, knex = db) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
-  if (line !== 'lawn') return null;
+  if (line !== 'lawn') return { pin: null, signature: '' };
+
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
-  return assessment?.id || PIN_NO_ASSESSMENT;
+  if (!assessment?.id) return { pin: PIN_NO_ASSESSMENT, signature: '-la0' };
+
+  const recs = typeof assessment.recommendations === 'string'
+    ? assessment.recommendations
+    : JSON.stringify(assessment.recommendations || '');
+  const stamp = crypto.createHash('sha1')
+    .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}`)
+    .digest('hex')
+    .slice(0, 12);
+  return { pin: assessment.id, signature: `-la${stamp}` };
 }
 
-// Lawn-assessment component of the PDF storage key (#3168).
-//
-// Nulling pdf_storage_key is NOT a durable invalidation — the same lesson
-// `timeOnSiteAdjustedPdfSignature` records for the time-on-site correction: a
-// render already in flight with the OLD assessment finishes afterward, writes
-// the deterministic key back, and with no assessment identity in the key that
-// stale PDF reads as current forever. So a pinned delivery could email
-// assessment A while the recipient's Download PDF served a raced render of B.
-//
-// Folding assessment identity + copy version into the key fences it: the stale
-// renderer computed its key from the OLD assessment, so its write-back no
-// longer matches the key the next view expects, and that view re-renders.
-//
-// Empty for every non-lawn record and every lawn visit without an assessment —
-// no fleet-wide cache bust. Best-effort: an unreadable assessment yields '',
-// which can only cause an extra re-render, never a stale serve.
-//
-// MUST ride in EVERY composition site that builds the storage-key signature
-// (pdf-queue renderAndStore + getOrRender, reports-public expected + store),
-// exactly like the time-on-site component.
+// Signature-only entry point for CACHE-LOOKUP sites, which must never throw —
+// a report view should not 500 because an assessment read blipped. An
+// unreadable state yields a value nothing can match, forcing a re-render
+// instead of serving a stale object.
 async function lawnAssessmentPdfSignature(service, knex = db) {
   try {
-    const line = service?.service_line || detectServiceLine(service?.service_type);
-    if (line !== 'lawn') return '';
-    // failClosed so a transient lookup error is NOT mistaken for "no
-    // assessment": both used to yield '', which is also the legacy/pre-change
-    // key shape — so during a blip a stale cached lawn PDF would read as
-    // current. An error now lands in the catch below and produces a key that
-    // matches nothing.
-    const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
-    // A CONFIRMED absence gets its own non-empty marker, distinct from both a
-    // non-lawn record and the legacy empty key.
-    if (!assessment?.id) return '-la0';
-    const recs = typeof assessment.recommendations === 'string'
-      ? assessment.recommendations
-      : JSON.stringify(assessment.recommendations || '');
-    const stamp = crypto.createHash('sha1')
-      .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}`)
-      .digest('hex')
-      .slice(0, 12);
-    return `-la${stamp}`;
+    return (await resolveCanonicalLawnRender(service, knex)).signature;
   } catch {
-    // Unreadable state must never produce a key that could MATCH a stored
-    // object — that is how a stale PDF gets served during an outage. A value
-    // nothing can match forces a re-render instead: extra work, never wrong
-    // content, and never a 500 on a report view.
     return `-laerr${crypto.randomBytes(6).toString('hex')}`;
   }
 }
@@ -3859,7 +3830,7 @@ module.exports = {
   PinnedAssessmentUnavailable,
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,
-  canonicalLawnPin,
+  resolveCanonicalLawnRender,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,

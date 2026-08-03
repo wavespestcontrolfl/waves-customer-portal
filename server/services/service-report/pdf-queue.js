@@ -2,7 +2,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, canonicalLawnPin } = require('./report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
 const { renderServiceReportV1Pdf } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
@@ -125,7 +125,12 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const tzSignature = await treatmentZonePdfSignature(service, knex);
   // Assessment identity + copy version in the key, so a stale in-flight render
   // cannot republish over a newer one (#3168).
-  const laSignature = await lawnAssessmentPdfSignature(service, knex);
+  // ONE canonical lookup feeds BOTH the pin and the storage-key component
+  // (#3172 r1). Two lookups can straddle a selection change, pinning the
+  // render to B while caching it under A's key — the race this closes,
+  // reintroduced by resolving twice.
+  const canonical = await resolveCanonicalLawnRender(service, knex);
+  const laSignature = canonical.signature;
   // DELIVERY pin vs CANONICAL pin (#3172).
   //
   // `pinnedLawnAssessmentId` is a delivery's SEALED assessment — it may
@@ -136,7 +141,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // makes them deterministic AND still cacheable, because the pin and the key
   // describe the same assessment.
   const isDeliveryPin = !!pinnedLawnAssessmentId;
-  const effectivePin = pinnedLawnAssessmentId || await canonicalLawnPin(service, knex);
+  const effectivePin = pinnedLawnAssessmentId || canonical.pin;
   let pdf;
   // The signature of the narrative text actually rendered travels ON the
   // payload (attached by report-data at the moment the text was chosen) —
@@ -146,7 +151,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   let tnRenderedSignature = '-tn0';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize

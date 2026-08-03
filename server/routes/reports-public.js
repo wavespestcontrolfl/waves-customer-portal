@@ -28,7 +28,7 @@ const {
   filingBinaryMayDiscloseFee,
 } = require('../services/project-types');
 const { findReportFollowupAppointment } = require('../services/report-followup-appointment');
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, canonicalLawnPin } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -1290,9 +1290,12 @@ router.get('/:token', async (req, res, next) => {
       // Assessment identity + copy version, computed ONCE before the render and
       // reused for both the expected-key check and the store, so the key always
       // describes the same assessment on both sides (#3168).
-      const laSignature = await lawnAssessmentPdfSignature(service, db);
-      // The canonical assessment this render is pinned to (#3172).
-      const canonicalPin = await canonicalLawnPin(service, db);
+      // ONE canonical lookup feeds BOTH the pin and the storage-key component
+      // (#3172 r1) — two lookups can straddle a selection change and cache a
+      // B-pinned PDF under A's key, which is the race this closes.
+      const canonical = await resolveCanonicalLawnRender(service, db);
+      const laSignature = canonical.signature;
+      const canonicalPin = canonical.pin;
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
         visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
       });
