@@ -164,26 +164,28 @@ async function renderAndStoreServiceReportPdf(recordId, {
     pestPressureConfig = latestPestPressureConfig;
     visibilitySignature = latestVisibilitySignature;
   }
+  // A PINNED render never joins the shared cache (#3168). The storage key is
+  // assessment-agnostic, so persisting one would let a later UNPINNED download
+  // serve a PDF built for a specific assessment — and the pinned path exists
+  // precisely for the case where the pin and the current selection disagree.
+  //
+  // Deliberately OUTSIDE the storage try/catch below: that catch exists to let
+  // an ordinary render degrade to an unstored PDF, and swallowing this failure
+  // there would mark the delivery sent while Download PDF kept serving the
+  // known-stale object. A failed clear must fail the render so the delivery
+  // defers and retries.
+  if (pinnedLawnAssessmentId) {
+    // The delivery forced a fresh render precisely because the cached object
+    // may hold an older assessment or recommendation version, so leaving that
+    // key in place would hand the recipient a document different from the
+    // attachment they were just emailed. The next unpinned request re-renders
+    // canonically; nothing reads a null key as an error.
+    await knex('service_records')
+      .where({ id: recordId })
+      .update({ pdf_storage_key: null });
+    return { key: null, pdf, rendered: true, token: reportToken, pinned: true };
+  }
   try {
-    // A PINNED render never joins the shared cache (#3168). The storage key is
-    // assessment-agnostic, so persisting one would let a later UNPINNED
-    // download serve a PDF built for a specific assessment — and the pinned
-    // path exists precisely for the case where the pin and the current
-    // selection disagree. The delivery gets its bytes in-hand; nothing is
-    // written, and pdf_storage_key keeps pointing at the canonical render.
-    if (pinnedLawnAssessmentId) {
-      // The delivery forced a fresh render precisely because the cached object
-      // may hold an older assessment or recommendation version. Leaving that
-      // known-stale key in place means the recipient's "Download PDF" serves a
-      // document different from the attachment they were just emailed — so
-      // clear it. The next unpinned request re-renders canonically; nothing
-      // reads a null key as an error.
-      await knex('service_records')
-        .where({ id: recordId })
-        .update({ pdf_storage_key: null })
-        .catch((clearErr) => logger.warn(`[service-report-pdf] stale key clear failed for ${recordId}: ${clearErr.message}`));
-      return { key: null, pdf, rendered: true, token: reportToken, pinned: true };
-    }
     const key = await putReportPdf(recordId, pdf, {
       visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service),
     });
