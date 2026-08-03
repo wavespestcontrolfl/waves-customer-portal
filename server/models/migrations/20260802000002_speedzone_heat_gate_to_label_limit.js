@@ -54,14 +54,14 @@ async function shiftGateThreshold(knex, { from, to }) {
     // per-key independence — an existing value is never overwritten.
     await knex('lawn_protocol_gates')
       .where('gate_key', 'speedzone_heat_gate')
-      .whereRaw("NOT (COALESCE(logic, '{}'::jsonb) ? 'minTempF')")
+      .whereRaw("NOT (COALESCE(logic, '{}'::jsonb) \\? 'minTempF')")
       .update({
         logic: knex.raw("jsonb_set(COALESCE(logic, '{}'::jsonb), '{minTempF}', ?::jsonb)", ['50']),
       });
 
     await knex('lawn_protocol_gates')
       .where('gate_key', 'speedzone_heat_gate')
-      .whereRaw("NOT (COALESCE(logic, '{}'::jsonb) ? 'stAugustineSeasonalBlock')")
+      .whereRaw("NOT (COALESCE(logic, '{}'::jsonb) \\? 'stAugustineSeasonalBlock')")
       .update({
         logic: knex.raw(
           "jsonb_set(COALESCE(logic, '{}'::jsonb), '{stAugustineSeasonalBlock}', ?::jsonb)",
@@ -126,14 +126,14 @@ async function shiftGateThreshold(knex, { from, to }) {
     // any other, so an existing value always wins.
     await knex('lawn_protocol_products')
       .whereRaw('product_name ILIKE ?', ['%speedzone%'])
-      .whereRaw("NOT (COALESCE(gates, '{}'::jsonb) ? 'minTempF')")
+      .whereRaw("NOT (COALESCE(gates, '{}'::jsonb) \\? 'minTempF')")
       .update({
         gates: knex.raw("jsonb_set(COALESCE(gates, '{}'::jsonb), '{minTempF}', ?::jsonb)", ['50']),
       });
 
     await knex('lawn_protocol_products')
       .whereRaw('product_name ILIKE ?', ['%speedzone%'])
-      .whereRaw("NOT (COALESCE(gates, '{}'::jsonb) ? 'stAugustineSeasonalBlock')")
+      .whereRaw("NOT (COALESCE(gates, '{}'::jsonb) \\? 'stAugustineSeasonalBlock')")
       .update({
         gates: knex.raw(
           "jsonb_set(COALESCE(gates, '{}'::jsonb), '{stAugustineSeasonalBlock}', ?::jsonb)",

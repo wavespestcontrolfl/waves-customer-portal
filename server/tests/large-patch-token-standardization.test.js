@@ -138,6 +138,57 @@ describe('no source still produces the retired disease token', () => {
   });
 });
 
+describe('raw SQL compiles — jsonb ? operator is escaped', () => {
+  // Knex reads a bare `?` as a binding placeholder, so the jsonb existence
+  // operator has to be written `\\?`. Get it wrong and the query fails while
+  // COMPILING — which means the migration throws, and since migrations run
+  // pre-deploy, the deploy dies with it. A mocked knex cannot catch this
+  // because nothing compiles SQL; this builds real query objects instead.
+  const knexLib = require('knex');
+  const k = knexLib({ client: 'pg' });
+  afterAll(async () => { await k.destroy(); });
+
+  const ESCAPED = "NOT (COALESCE(gates, '{}'::jsonb) \\? 'minTempF')";
+
+  // NOTE: toSQL() alone cannot tell these apart — it leaves the escape
+  // unprocessed. The substitution happens in toNative(), which is where the
+  // driver-bound statement is produced, so that is what these assert.
+  const native = (pred) =>
+    k('lawn_protocol_products').whereRaw(pred).update({ a: 1 }).toSQL().toNative();
+
+  test('the escaped form keeps ? as the jsonb operator', () => {
+    const n = native(ESCAPED);
+    expect(n.sql).toContain("? 'minTempF'");
+    // Only the update value is bound.
+    expect(n.bindings).toEqual([1]);
+  });
+
+  test('the UNescaped form corrupts the statement — the escape is load-bearing', () => {
+    const bare = "NOT (COALESCE(gates, '{}'::jsonb) ? 'minTempF')";
+    const n = native(bare);
+    // The operator is consumed as placeholder $2 while only one binding
+    // exists, so Postgres rejects the statement: "bind message supplies 1
+    // parameters, but prepared statement requires 2".
+    expect(n.sql).toContain("$2 'minTempF'");
+    expect(n.bindings).toHaveLength(1);
+  });
+
+  test('no migration in this change ships a bare jsonb ? operator', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, '../models/migrations');
+    const mine = fs.readdirSync(dir).filter((f) => f.startsWith('202608020000'));
+    expect(mine.length).toBeGreaterThan(0);
+    const offenders = mine.filter((f) => {
+      const src = fs.readFileSync(path.join(dir, f), 'utf8');
+      // A `?` directly after a jsonb expression and before a quoted key,
+      // without the backslash escape.
+      return /jsonb\)\s*\?\s*'/.test(src);
+    });
+    expect(offenders).toEqual([]);
+  });
+});
+
 describe('deployed lawn template rename', () => {
   const tpl = require('../models/migrations/20260802000003_lawn_visit_template_large_patch');
 
