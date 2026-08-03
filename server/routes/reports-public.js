@@ -1321,6 +1321,9 @@ router.get('/:token', async (req, res, next) => {
       // the cache-lookup value; assigned inside the try so an unreadable
       // lookup fails closed through the retry path.
       let laRenderSignature = null;
+      // The payload the render was produced from — its flags decide whether
+      // this output may be cached.
+      let renderedData = null;
       try {
         // ONE canonical lookup feeds BOTH the pin and the storage-key component
         // (#3172 r1) — two lookups can straddle a selection change and cache a
@@ -1334,6 +1337,7 @@ router.get('/:token', async (req, res, next) => {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+          renderedData = data;
           pdf = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
@@ -1385,7 +1389,12 @@ router.get('/:token', async (req, res, next) => {
         // Compare against what the render was PINNED to, not the cache-lookup
         // value — the object must be keyed by the assessment it contains.
         const laAfter = await lawnAssessmentPdfSignature(service, db);
-        if (laAfter !== laRenderSignature) {
+        // Same rule as pdf-queue: a render whose week could not be FROZEN is
+        // not reproducible, so serve it but cache nothing — otherwise a later
+        // view freezes different data while this object keeps these numbers.
+        if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
+          logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
+        } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
