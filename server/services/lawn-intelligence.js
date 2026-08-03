@@ -415,41 +415,12 @@ If no contradictions, return: { "contradictions": [] }`
     return { overall, delta, deltaStr, tip };
   },
 
-  // Score lines folded into the completion service-report SMS so the
-  // customer's lawn health score rides in the SAME text as the report link,
-  // instead of a separate "lawn health report ready" message at confirm time.
-  // Returns { scoreLine, tipLine } (tipLine may be '') or null when there's no
-  // confirmed assessment/score. Split so the caller can drop the (longer) tip
-  // to stay within its SMS segment budget. Never throws.
-  // Note: recommendations.customerTip is generated asynchronously after
-  // /confirm, so tipLine can legitimately be '' when a completion races ahead
-  // of that generation — the full recommendations still live in the linked
-  // report, so an occasional missing inline tip degrades gracefully.
-  async buildCompletionScoreBlock(assessmentId) {
-    try {
-      if (!assessmentId) return null;
-      const assessment = await db('lawn_assessments')
-        .where({ id: assessmentId, confirmed_by_tech: true })
-        .first();
-      if (!assessment) return null;
-      const parts = await LawnIntelligence.computeAssessmentScoreParts(assessment);
-      if (!parts || !Number.isFinite(parts.overall)) return null;
-      return {
-        scoreLine: `You scored ${parts.overall}/100${parts.deltaStr}.`,
-        tipLine: parts.tip ? `Tip: ${parts.tip}` : '',
-      };
-    } catch (err) {
-      logger.error(`[lawn-intel] buildCompletionScoreBlock failed: ${err.message}`);
-      return null;
-    }
-  },
-
   // ── 7b. Assessment notification (legacy standalone) ─────────
-  // SUPERSEDED: the lawn health score is now folded into the single
-  // completion service-report SMS (see admin-dispatch completion +
-  // buildCompletionScoreBlock) so customers get one report text, not two.
-  // Retained for manual re-send / backfill; no longer invoked from the
-  // confirm pipeline.
+  // SUPERSEDED, twice over: the lawn score was folded into the single
+  // completion service-report SMS, and that fold-in was itself retired
+  // 2026-08-01 (owner ruling — the completion text is a short link to the
+  // report; the score lives ON the report). Retained for manual re-send /
+  // backfill; not invoked from the confirm or completion pipelines.
   async sendAssessmentNotification(assessmentId) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId, confirmed_by_tech: true }).first();
