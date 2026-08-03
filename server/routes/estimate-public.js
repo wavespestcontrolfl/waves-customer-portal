@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const db = require('../models/db');
+const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
 const { verifyStaffBearer } = require('../middleware/admin-auth');
@@ -8604,6 +8605,15 @@ router.put('/:token/accept', async (req, res, next) => {
           if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);
         }
       }
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r21): an
+      // existing customer's accept graduates a held slot / books visits, so
+      // it must serialize with a concurrent merge-undo BEFORE this txn's
+      // first row lock (the estimates UPDATE just below; commitReservation
+      // attaches customer_id with no lock of its own). A customer created
+      // later in this txn cannot be an undo's winner; the phone-matched
+      // reuse path takes a TRY-lock at resolution time instead (it resolves
+      // after the estimates row lock — see below).
+      if (estimate.customer_id) await lockCustomerComms(trx, estimate.customer_id);
 
       const acceptedUpdates = {
         status: 'accepted',
@@ -8741,6 +8751,16 @@ router.put('/:token/accept', async (req, res, next) => {
         }
         if (existing) {
           customerId = existing.id;
+          // Rung-6 TRY-lock (r21): this resolution happens while the txn
+          // already holds the estimates row lock, and the undo locks
+          // journaled estimates AFTER customer-comms — a blocking acquire
+          // here could deadlock. Same degrade posture as annual-prepay
+          // activation: a miss proceeds unfenced with a loud log (the
+          // residual is an undo of this exact phone-matched customer
+          // mid-transaction, and it degrades comms routing, not money).
+          if (!(await tryLockCustomerComms(trx, customerId))) {
+            logger.warn(`[estimate-accept] customer-comms lock busy for phone-matched customer ${customerId} (merge-undo in flight?) — proceeding unfenced`);
+          }
         } else {
           const nameParts = (estimate.customer_name || 'New Customer').split(' ');
           const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');

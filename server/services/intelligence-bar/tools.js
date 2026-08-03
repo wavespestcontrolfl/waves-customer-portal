@@ -1181,7 +1181,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
 
   const addressSubmitted = ['address_line1', 'address_line2', 'city', 'state', 'zip']
     .some((f) => clean[f] !== undefined);
-  if (!addressSubmitted) {
+  const emailSubmitted = clean.email !== undefined;
+  if (!addressSubmitted && !emailSubmitted) {
     const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     return {
@@ -1197,6 +1198,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // then coords cleared + re-geocoded. The old single-statement path skipped
   // all of that, leaving property dedup keys, map pins, and snapshot copies
   // pointing at the old address.
+  //
+  // A bulk EMAIL edit takes the per-row path too (r21): assigning an email
+  // MUST serialize with a concurrent merge-undo's claim probe under the
+  // shared customer-email advisory lock, re-check the live claimant under
+  // it, and run the email fan-out — the single-statement path bypassed all
+  // three, so a bulk edit could hand another live customer's address out
+  // and leave subscriber tokens/queued copies on the old mailbox.
   let count = 0;
   const errors = [];
   for (const customerId of customerIds) {
@@ -1205,27 +1213,65 @@ async function bulkUpdateCustomers(customerIds, updates) {
       errors.push({ customer_id: customerId, error: 'Customer not found' });
       continue;
     }
-    const merged = { ...before, ...clean };
+    let emailSync = null;
     try {
       await db.transaction(async (trx) => {
         // Same row-lock serialization as the single-edit path.
         const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
         const lockedMerged = { ...lockedBefore, ...clean };
+        if (emailSubmitted && clean.email) {
+          const emailLc = String(clean.email).trim().toLowerCase();
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+            [`customer-email:${emailLc}`],
+          );
+          // Same post-lock claimant re-check as updateCustomer (r20/r21).
+          const claimant = await trx('customers')
+            .whereRaw('lower(email) = ?', [emailLc])
+            .whereNot('id', customerId)
+            .where('active', true)
+            .whereNull('deleted_at')
+            .first('id');
+          if (claimant) {
+            const err = new Error('That email address belongs to another active customer — resolve the conflict (or merge the records) before assigning it.');
+            err.code = 'email_claimed_by_live_customer';
+            throw err;
+          }
+        }
         await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
-        await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
-        await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
+        if (addressSubmitted) {
+          await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
+          await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
+        }
+        if (emailSubmitted) {
+          emailSync = await require('../customer-email-fanout').propagateCustomerEmailChange(
+            { before: lockedBefore, after: lockedMerged, source: 'Intelligence Bar bulk_update_customers' }, trx,
+          );
+        }
       });
     } catch (e) {
       if (e && e.code === '23505') {
         errors.push({ customer_id: customerId, error: 'That address already exists as another property on this customer.' });
         continue;
       }
+      if (e && e.code === 'email_claimed_by_live_customer') {
+        errors.push({ customer_id: customerId, error: e.message });
+        continue;
+      }
       throw e;
     }
-    await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
-    void require('../geocoder').ensureCustomerGeocoded(customerId)
-      .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
-      .catch(() => {});
+    const { pendingConfirmation: rowPendingConfirmation } = emailSync || {};
+    if (rowPendingConfirmation) {
+      // Post-commit DOI re-send, exactly as the single-edit path — the
+      // bearer token never rides into the tool result.
+      void require('../customer-email-fanout').resendPendingConfirmation(rowPendingConfirmation);
+    }
+    if (addressSubmitted) {
+      await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+      void require('../geocoder').ensureCustomerGeocoded(customerId)
+        .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
+        .catch(() => {});
+    }
     count += 1;
   }
   logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);

@@ -1364,6 +1364,16 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     const [journal] = await trx('customer_merge_journal').insert({
       winner_customer_id: winnerId,
       loser_customer_id: loserId,
+      // LOCK-SERIALIZED ordering stamp (r21): created_at's default now()
+      // is the TRANSACTION START time — two merges on one winner can
+      // acquire the winner row in the opposite order of their starts, and
+      // trx-start timestamps would then invert the LIFO sequence the undo
+      // enforces. clock_timestamp() is the statement time, taken while
+      // THIS transaction holds the winner row FOR UPDATE, so it is
+      // monotonic across the row-lock serialization the merges already
+      // share — the same column the LIFO probe and the /merges mirror
+      // compare.
+      created_at: trx.raw('clock_timestamp()'),
       loser_snapshot: JSON.stringify(loser),
       repointed: JSON.stringify(repointed),
       // Row-precise repoint record + the transferred Stripe id — everything
@@ -1689,6 +1699,14 @@ const EMAIL_BOUND_SURFACES = [
     emailColumn: 'recipient_email',
     linkColumn: 'recipient_id',
     linkValue: (id) => String(id),
+    // Lead-attributed runs (r21): the executor preserves a lead UUID in
+    // recipient_id, but a linked lead's run still delivers the CUSTOMER's
+    // sequence — the probe must follow leads.customer_id, or a queued
+    // winner-linked lead run to the inherited email is invisible here.
+    linkWhere: (q, winnerId, conn) => {
+      q.where('recipient_id', String(winnerId))
+        .orWhereIn('recipient_id', conn('leads').select(conn.raw('id::text')).where({ customer_id: winnerId }));
+    },
     active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled']),
     label: 'queued template send(s)',
     carriesName: true,
@@ -1961,9 +1979,14 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       for (const probe of surfaces) {
         let rows = [];
         try {
-          let query = trx(probe.table)
-            .where(probe.linkColumn, probe.linkValue ? probe.linkValue(winnerId) : winnerId)
-            .select(['id', ...activityColumnsFor(probe.table)]);
+          let query = trx(probe.table);
+          // linkWhere (r21): a probe whose linkage is more than one
+          // equality (the lead-attributed template runs) builds its own
+          // grouped predicate; everything else keeps the plain equality.
+          query = probe.linkWhere
+            ? query.where(function linked() { probe.linkWhere(this, winnerId, trx); })
+            : query.where(probe.linkColumn, probe.linkValue ? probe.linkValue(winnerId) : winnerId);
+          query = query.select(['id', ...activityColumnsFor(probe.table)]);
           if (emailLower) query = query.whereRaw(`lower(${probe.emailColumn}) = ?`, [emailLower]);
           query = probe.active(query);
           rows = await query;

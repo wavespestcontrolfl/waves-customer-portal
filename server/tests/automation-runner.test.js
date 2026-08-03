@@ -50,6 +50,14 @@ function setDbQueues(queues) {
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
   });
+  // Customer-linked enrollments ride a customer-comms-locked transaction
+  // (r21) — pass the queue-backed connection through with a raw stub for
+  // the advisory lock.
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    return fn(trx);
+  });
 }
 
 describe('automation runner rendering', () => {

@@ -25,7 +25,7 @@ const { resetFkCache } = dedupe._test;
 function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
-    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
+    'where', 'whereIn', 'orWhereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
     'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'sum', 'max', 'onConflict',
     'ignore', 'returning', 'first', 'increment', 'decrement', 'limit', 'leftJoin',
   ];
@@ -687,6 +687,26 @@ describe('EMAIL_BOUND_SURFACES', () => {
     const q = makeChain('newsletter_subscribers', () => []);
     surface.active(q);
     expect(q.args('whereIn')).toEqual(['status', ['active', 'pending']]);
+  });
+
+  it('the queued-run probe follows LEAD linkage — recipient_id = winner OR a lead owned by the winner (r21)', () => {
+    // The executor preserves a lead UUID in recipient_id; a linked lead's
+    // run still delivers the CUSTOMER's sequence, so the undo's absence
+    // probe must see it or a queued winner-linked lead run to the
+    // inherited email survives the undo and mails the restored loser.
+    const surface = dedupe._test.EMAIL_BOUND_SURFACES.find((s) => s.table === 'email_template_automation_runs');
+    expect(surface).toBeTruthy();
+    expect(typeof surface.linkWhere).toBe('function');
+    const q = makeChain('email_template_automation_runs', () => []);
+    const conn = (table) => makeChain(table, () => []);
+    conn.raw = (sql) => ({ __raw: sql });
+    surface.linkWhere(q, 'winner-1', conn);
+    expect(q.args('where')).toEqual(['recipient_id', 'winner-1']);
+    const orIn = q.args('orWhereIn');
+    expect(orIn[0]).toBe('recipient_id');
+    // The subquery selects lead ids (cast to text) scoped to the winner.
+    expect(orIn[1]._table).toBe('leads');
+    expect(orIn[1].args('where')).toEqual([{ customer_id: 'winner-1' }]);
   });
 });
 

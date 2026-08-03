@@ -14,6 +14,7 @@
  */
 
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
@@ -153,6 +154,31 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
     .orderBy('step_order', 'asc');
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
+  // Customer-linked enrollment mutations serialize with a concurrent
+  // merge-undo (r21): the undo's active-enrollment absence probe runs
+  // under `customer-comms:<id>`, and an unfenced insert/reactivation
+  // carrying an inherited email/name snapshot could commit AFTER the undo
+  // cleared those fields — the scheduler would then send the winner's
+  // sequence to the restored loser's mailbox. The active-row read and the
+  // insert/reactivation ride one locked transaction; a caller-provided
+  // transaction (the appointment tagger) takes the same key inline.
+  // Lead-email-only enrollments (no customer id) stay unfenced — the
+  // undo's probes are winner-scoped.
+  const runEnrollment = async (conn) => enrollCustomerLocked({
+    conn, templateKey, customer, normalizedEmail, steps,
+  });
+  if (!customer.id) return runEnrollment(dbh);
+  if (dbh.isTransaction) {
+    await lockCustomerComms(dbh, customer.id);
+    return runEnrollment(dbh);
+  }
+  return db.transaction(async (trx) => {
+    await lockCustomerComms(trx, customer.id);
+    return runEnrollment(trx);
+  });
+}
+
+async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps }) {
   const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });

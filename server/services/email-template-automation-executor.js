@@ -524,13 +524,35 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
   // otherwise identical (the lock only blocks while an undo of THIS
   // customer is mid-transaction). Key derivation + lock-order contract are
   // centralized in utils/customer-comms-lock.js.
-  // No recipient id = unlinked run, and a NON-customer id (a lead's, or an
-  // explicitly typed non-customer recipient — recipientFor's idIsCustomer)
-  // cannot collide with a customer-merge undo at all: the undo's probes
-  // match customers-row ids only. Both keep the original lock-free path —
-  // and, critically, a lead-backed run must never have its id stripped by
-  // the customer revalidation.
+  // No recipient id = unlinked run — lock-free. A NON-customer id keeps
+  // the lead UUID in recipient_id (a lead-backed run must never have its
+  // id stripped by the customer revalidation) but is NO LONGER assumed
+  // unrelated to a merge-undo (r21): a LINKED lead's run delivers the
+  // customer's sequence, and the undo's queued-run probe now follows
+  // leads.customer_id — so the insert must fence through that owner. An
+  // unlinked lead (no customer_id) or a genuinely non-lead id stays
+  // lock-free; a failed owner lookup queues unfenced with a loud log
+  // (sends are never blocked into failure — r14 posture).
   if (!recipient.id || recipient.idIsCustomer === false) {
+    let leadOwnerCustomerId = null;
+    if (recipient.id && recipient.idIsCustomer === false
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(recipient.id))) {
+      try {
+        const leadRow = await db('leads').where({ id: recipient.id }).first('customer_id');
+        leadOwnerCustomerId = (leadRow && leadRow.customer_id) || null;
+      } catch (lookupErr) {
+        logger.warn(`[template-executor] lead owner lookup failed for recipient ${recipient.id} — queuing unfenced: ${lookupErr.message}`);
+      }
+    }
+    if (leadOwnerCustomerId) {
+      return db.transaction(async (trx) => {
+        await lockCustomerComms(trx, leadOwnerCustomerId);
+        return createRunUnlocked({
+          conn: trx, automation, triggerEventKey, triggerEventId, entityType, entityId,
+          recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,
+        });
+      });
+    }
     return createRunUnlocked({
       conn: db, automation, triggerEventKey, triggerEventId, entityType, entityId,
       recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,
