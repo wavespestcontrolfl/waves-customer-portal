@@ -233,26 +233,48 @@ async function main() {
         ORDER BY created_at DESC`,
       [visitId],
     );
-    const paidRow = invRows.find((r) => ['paid', 'prepaid'].includes(String(r.status).toLowerCase()));
-    const openRow = invRows.find((r) => !['paid', 'prepaid', 'processing'].includes(String(r.status).toLowerCase()));
     for (const r of invRows) {
-      const st = String(r.status);
-      console.log(`         invoice ${r.id} status=${st} subtotal=${money(r.subtotal ?? r.total)} discount=${money(r.discount_amount)} payer_id=${r.payer_id || 'none'}`);
+      console.log(`         invoice ${r.id} status=${r.status} subtotal=${money(r.subtotal ?? r.total)} discount=${money(r.discount_amount)} payer_id=${r.payer_id || 'none'} record=${r.service_record_id || 'none'}`);
     }
+
+    // `alreadyPaid` is scoped to the CURRENT completion record only — not to
+    // every invoice ever attached to the visit. An older paid invoice on a
+    // PRIOR record does not suppress the lane.
+    const paidRow = record
+      ? invRows.find((r) => String(r.service_record_id) === String(record.id)
+        && ['paid', 'prepaid'].includes(String(r.status).toLowerCase()))
+      : null;
+
+    // Then the invoice the route would reuse: newest non-void on the current
+    // record, else newest non-void on the visit (invRows is already
+    // created_at DESC).
+    const inv = (record && invRows.find((r) => String(r.service_record_id) === String(record.id)))
+      || invRows[0]
+      || null;
+
     if (!invRows.length) {
       say(BLOCK, 'no non-void invoice for this visit', 'nothing to charge.');
     } else if (paidRow) {
-      say(BLOCK, `a paid/prepaid invoice exists for this visit (${paidRow.id}, ${paidRow.status})`,
-        'the route sets alreadyPaid from ANY paid invoice on the visit — a newer open invoice does NOT clear it, so the completion charge is suppressed. Remedy: reconcile the duplicate invoices before expecting an auto-charge.');
+      say(BLOCK, `the current completion record already has a ${paidRow.status} invoice (${paidRow.id})`,
+        'the route sets alreadyPaid from a paid/prepaid invoice on THIS record, which suppresses the completion charge.');
     } else {
-      say(OK, 'no paid/prepaid invoice suppressing the lane');
+      say(OK, 'no paid/prepaid invoice on the current completion record');
     }
 
-    // The invoice the cap would be compared against.
-    const inv = openRow || invRows[0] || null;
     if (inv) {
       const subtotal = inv.subtotal != null ? Number(inv.subtotal) : Number(inv.total || 0);
       inv._net = Math.round((subtotal - Math.max(0, Number(inv.discount_amount) || 0)) * 100) / 100;
+      // The charge condition refuses these statuses outright
+      // (admin-dispatch.js:8219). `processing` means an ACH debit is already
+      // in flight — money is moving, so this is a legitimate no-charge, not a
+      // clean lane.
+      const st = String(inv.status || '').toLowerCase();
+      if (['paid', 'prepaid', 'void', 'processing'].includes(st)) {
+        say(BLOCK, `the invoice the route would reuse is ${st} (${inv.id})`,
+          st === 'processing'
+            ? 'an ACH debit is already in flight — the route never re-charges a processing invoice; the webhook settles processing→paid and the receipt delivers then.'
+            : 'already settled — nothing to collect.');
+      }
       if (inv.payer_id) {
         say(BLOCK, `invoice ${inv.id} has a payer_id`, 'third-party-billed invoices never auto-charge the homeowner.');
       }
@@ -276,9 +298,28 @@ async function main() {
     } else {
       livePayerId = v.customer_payer_id || null;
     }
+    // A payer LINK is not a payer. resolveForInvoice loads the row and falls
+    // back to self-pay when the payer is missing or `active === false` — a
+    // deactivated payer must not be reported as the blocker.
     if (livePayerId) {
-      say(BLOCK, `live payer resolves to ${livePayerId}`,
-        `the charge boundary re-resolves the payer and refuses to charge when one exists, even with invoices.payer_id null (source: ${v.visit_payer_id ? 'visit' : 'customer default'}). The payer flows own this bill.`);
+      let payerRow = null;
+      let payerLookupFailed = false;
+      try {
+        const { rows } = await client.query('SELECT id, active FROM payers WHERE id = $1', [livePayerId]);
+        payerRow = rows[0] || null;
+      } catch (e) { payerLookupFailed = true; }
+      const src = v.visit_payer_id ? 'visit' : 'customer default';
+      if (payerLookupFailed) {
+        say(UNKNOWN, `payer ${livePayerId} linked (${src}) but the payers table was not readable`,
+          'cannot tell an active payer (blocks the charge) from a deactivated one (falls back to self-pay).');
+      } else if (!payerRow) {
+        say(OK, `payer link ${livePayerId} (${src}) resolves to nothing — self-pay`);
+      } else if (payerRow.active === false) {
+        say(OK, `payer ${livePayerId} (${src}) is INACTIVE — resolveForInvoice falls back to self-pay`);
+      } else {
+        say(BLOCK, `live payer resolves to ACTIVE payer ${livePayerId} (${src})`,
+          'the charge boundary re-resolves the payer and refuses to charge when an active one exists, even with invoices.payer_id null. The payer flows own this bill.');
+      }
     } else {
       say(OK, 'live payer resolution = self-pay');
     }
