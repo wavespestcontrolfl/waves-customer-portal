@@ -2791,13 +2791,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the companion's "Traps set" finding beside a map still saying
     // "inspected" (codex P2 on #3159). Scoped require matches this file's
     // pattern for report-time helpers.
-    initialSetup: [typedSnapshot, ...companionReports].some((snap) => require('./activity-indicators')
+    // Read off the RAW companion snapshots, not the projected
+    // `companionReports` view: that projection is built above from a fixed
+    // field list that has no `values`, so the companion arm of this lookup
+    // was structurally dead — it could only ever read `undefined` and the
+    // primary alone decided the map's wording (codex P2 round 8). The raw
+    // array is also unfiltered by delivery, which is correct here: whether
+    // the traps went out today is a fact about the visit, not about which
+    // companion sections this viewer is allowed to see.
+    initialSetup: [typedSnapshot, ...companionSnapshots].some((snap) => require('./activity-indicators')
       .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)),
     // The trapping snapshot's own count, so the map can confirm it agrees
     // before restating it (the tech may have hand-edited it away from the
-    // autofilled pin count).
+    // autofilled pin count). Same sourcing fix as above.
     typedTrapCount: (() => {
-      const trapSnap = [typedSnapshot, ...companionReports]
+      const trapSnap = [typedSnapshot, ...companionSnapshots]
         .find((snap) => snap?.type === 'rodent_trapping');
       const n = Number(trapSnap?.values?.traps_checked);
       return Number.isInteger(n) ? n : null;

@@ -1886,7 +1886,20 @@ const RECHECK_VERB = new RegExp('^(?:'
   + '|swap(?:ped|ping|s)?'
   + '|move[sd]?|moving'
   + ')$', 'i');
-const RECHECK_PARTICIPLE = /^(?:re-?)?(?:checked|inspected|reset|rebaited|refreshed|repositioned|replaced|swapped|moved)$/i;
+// Per-verb `re-` prefixes, for the same reason RECHECK_VERB spells them out:
+// a single leading `(?:re-?)?` in front of a literal `rebaited` cannot match
+// the hyphenated "re-baited" (the prefix eats "re-", leaving "baited" to
+// match nothing), while bare `baited` must stay legal because baiting is
+// what a setup does. Found by the round-8 passive matrix, not by review.
+const RECHECK_PARTICIPLE = new RegExp('^(?:'
+  + 're-?set'
+  + '|(?:re-?)?checked'
+  + '|(?:re-?)?inspected'
+  + '|re-?baited'
+  + '|re-?freshed'
+  + '|re-?positioned'
+  + '|replaced|swapped|moved'
+  + ')$', 'i');
 // Where a verb's object phrase ENDS. Listing terminators rather than the
 // allowed modifiers is the only version that survives real prose: an
 // adjective allowlist can always be beaten by an unlisted one ("all
@@ -1922,15 +1935,25 @@ function activeRecheckOnTrap(clause) {
 // "<trap noun> … <auxiliary> … <participle>", any number and any tense:
 // "one trap was reset", "eight traps have been checked", "the devices had
 // been inspected".
+//
+// The participle is SEARCHED FOR, not assumed to sit immediately after the
+// auxiliary: reading only the first following token saw the adverb in "all
+// traps were carefully inspected" / "the devices have been thoroughly
+// checked" and passed them (codex P1 round 8). The active side already
+// learned this lesson in round 7 — an allowlist of intervening words is
+// always one unlisted adverb from failing — so the scan stops at the same
+// closed OBJECT_PHRASE_END set instead of guessing which modifiers are legal.
 function passiveRecheckOnTrap(clause) {
   const toks = words(clause);
   const trapAt = toks.findIndex((t) => TRAP_NOUNS.test(t));
   if (trapAt === -1) return null;
   const tail = toks.slice(trapAt + 1).join(' ');
   if (!PASSIVE_AUX.test(tail)) return null;
-  const after = tail.replace(new RegExp(`^.*?${PASSIVE_AUX.source}\\s*`, 'i'), '');
-  const head = words(after)[0];
-  return head && RECHECK_PARTICIPLE.test(head) ? `${toks[trapAt]} … ${head}` : null;
+  const after = words(tail.replace(new RegExp(`^.*?${PASSIVE_AUX.source}\\s*`, 'i'), ''));
+  for (let i = 0; i < after.length && !OBJECT_PHRASE_END.test(after[i]); i += 1) {
+    if (RECHECK_PARTICIPLE.test(after[i])) return `${toks[trapAt]} … ${after[i]}`;
+  }
+  return null;
 }
 
 // Clause split: sentence enders plus the coordinators that introduce a NEW
@@ -1958,6 +1981,84 @@ const SETUP_EMPTY_CAPTURE_RES = [
   /\bcaptures?\s+(?:were|was)\s+not\s+recorded\b/i,
   /\b(?:traps?|devices?)\s+(?:were|was)\s+empty\b/i,
 ];
+
+// Word-form numbers normalized to numerals before any count check, so
+// "eight traps" is validated exactly like "8 traps". Shared with the
+// narrative module, which validates the LLM summary against the same facts
+// (it imports from this file; a copy in each would drift).
+const WORD_NUMBER_VALUES = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
+  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
+  fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
+  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90, hundred: 100, thousand: 1000,
+};
+const WORD_NUMBER_RE = new RegExp(`\\b(${Object.keys(WORD_NUMBER_VALUES).join('|')})\\b`, 'gi');
+
+function normalizeWordNumbers(text) {
+  return String(text || '')
+    .replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]))
+    // recombine compound word-numbers the word pass split — hyphenated
+    // ("twenty-one" → "20-1") AND space-separated ("twenty one" → "20 1")
+    // — so they can't slip a smaller grounded digit past the count
+    // validators (codex P2 r3 + P1 r8)
+    .replace(/\b(\d+)[-\s](\d)\b/g, (full, tens, ones) => (Number(tens) >= 20 && Number(tens) % 10 === 0
+      ? String(Number(tens) + Number(ones))
+      : full));
+}
+
+// Count claims in free prose. `N of M traps` yields M — the roster claim —
+// because the N is a subset ("6 of 8 traps were empty" claims 8 exist), and
+// bare partitives ("one of the traps") claim no total at all.
+const TRAP_COUNT_CLAIM_RE = /\b(\d+)(?:\s+(?:of|out\s+of)\s+(\d+))?((?:\s+[a-z-]+){0,2}?)\s+(?:traps?|devices?)\b/gi;
+const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
+const CAUGHT_CLAIM_RE = /\b(?:caught|captured|removed)\s+(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b/gi;
+
+function claimedCounts(text, patterns) {
+  const claims = new Set();
+  for (const pattern of patterns) {
+    const re = new RegExp(pattern.source, 'gi');
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      const [, first, second, filler] = match;
+      if (/\bof\b/i.test(filler || '')) continue; // "1 of the traps" — subset, no total claimed
+      claims.add(Number(second != null ? second : first));
+    }
+  }
+  return claims;
+}
+
+/**
+ * Returns the count claims in `text` that contradict the FINAL structured
+ * values (empty when clean or unverifiable).
+ *
+ * The tech drafts the AI report, then can keep editing the typed fields
+ * before completing — nothing re-runs the draft. So a body written against
+ * 8 traps survives a correction to 6 and publishes "We checked 8 traps"
+ * beside a frozen "Traps checked: 6" and a map drawing 6 pins (codex P1
+ * round 8). Unlike the stage guards this applies to BOTH stages: the same
+ * staleness produces "We set 8 traps" on a setup.
+ *
+ * Deliberately narrow, because a false positive silently discards the
+ * technician's reviewed copy — the exact failure this PR exists to fix:
+ *  - only ONE distinct claim per subject is enforced. Several numbers are a
+ *    breakdown ("two snap traps and six glue traps"), not a total, and
+ *    summing them would be a guess.
+ *  - a missing/non-integer structured value is unverifiable, not wrong.
+ */
+function countContradictions(text, values = {}) {
+  const str = normalizeWordNumbers(text);
+  const found = [];
+  const check = (claims, raw, kind) => {
+    const actual = Number(raw);
+    if (!Number.isInteger(actual) || claims.size !== 1) return;
+    const [claimed] = [...claims];
+    if (claimed !== actual) found.push(`${kind}:claimed_${claimed}_recorded_${actual}`);
+  };
+  check(claimedCounts(str, [TRAP_COUNT_CLAIM_RE]), values.traps_checked, 'trap_count_mismatch');
+  check(claimedCounts(str, [CAPTURE_CLAIM_RE, CAUGHT_CLAIM_RE]), values.captures, 'capture_count_mismatch');
+  return found;
+}
 
 /**
  * Returns the setup-contradicting phrases found in `text` (empty when clean).
@@ -2371,8 +2472,12 @@ function buildTodaysResult({
     const rawTrappingBody = projectType === 'rodent_trapping' && activity.score !== 0
       ? technicianReportBody
       : null;
+    // Stage guard (setup only) AND count guard (both stages): the draft is
+    // written before the tech's last edit to the typed fields, so it can
+    // contradict the frozen findings on the stage OR on the numbers.
     const trappingReportBody = rawTrappingBody
       && !(initialTrapSetup && setupContradictions(rawTrappingBody).length)
+      && !countContradictions(rawTrappingBody, values).length
       ? rawTrappingBody
       : null;
     // One line of expectation-setting on a trap-setup visit: nothing has
@@ -2727,5 +2832,7 @@ module.exports = {
   buildTypedReportSnapshot,
   isInitialRodentTrapSetup,
   setupContradictions,
+  countContradictions,
+  normalizeWordNumbers,
   findingsSchemaForType,
 };

@@ -953,3 +953,62 @@ describe('setup matcher binds verbs to their objects (round 6)', () => {
     }
   });
 });
+
+// Round 8. Two independent staleness holes, both reachable because the tech
+// drafts the AI report and can keep editing the typed fields afterwards.
+describe('setup matcher scans past adverbs in the passive (round 8)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test('modifiers between the auxiliary and the participle do not hide it', () => {
+    for (const text of [
+      'All traps were carefully inspected today.',
+      'The devices have been thoroughly checked.',
+      'The traps were quickly reset this morning.',
+      'All 8 traps had been carefully re-baited.',
+      'The traps were very carefully repositioned.',   // two modifiers
+    ]) {
+      expect(setupContradictions(text).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('an adverb does not manufacture a claim where the participle is legal', () => {
+    for (const text of [
+      'All traps were carefully set today.',
+      'The devices have been carefully placed along the runways.',
+      // the participle sits in a NEW phrase, so it is not bound to the traps
+      'The traps were set before the attic was inspected.',
+    ]) {
+      expect(setupContradictions(text)).toEqual([]);
+    }
+  });
+});
+
+describe('technician body count claims reconcile against the typed values (round 8)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('a stale count contradicting the final structured value is rejected', () => {
+    // Codex round 8: body drafted at 8 traps, tech corrects the field to 6.
+    expect(countContradictions('We checked 8 traps today.', { traps_checked: 6 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('We set eight traps today.', { traps_checked: 6 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('We removed 2 rats from the traps.', { captures: 1 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('There were 3 captures.', { captures: 0 }).length)
+      .toBeGreaterThan(0);
+  });
+
+  test('agreeing, partitive and unverifiable counts pass', () => {
+    expect(countContradictions('We checked 8 traps today.', { traps_checked: 8 })).toEqual([]);
+    expect(countContradictions('We checked eight traps today.', { traps_checked: 8 })).toEqual([]);
+    // "N of M" claims the roster (M), not the subset
+    expect(countContradictions('6 of 8 traps were empty.', { traps_checked: 8 })).toEqual([]);
+    expect(countContradictions('One of the traps held a capture.', { traps_checked: 8 })).toEqual([]);
+    // a breakdown is not a total claim — summing it would be a guess
+    expect(countContradictions('We set two snap traps and six glue traps.', { traps_checked: 8 }))
+      .toEqual([]);
+    // nothing structured to reconcile against is unverifiable, not wrong
+    expect(countContradictions('We checked 8 traps today.', {})).toEqual([]);
+    expect(countContradictions('We checked the traps today.', { traps_checked: 6 })).toEqual([]);
+  });
+});

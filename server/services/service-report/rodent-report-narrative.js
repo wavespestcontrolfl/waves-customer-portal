@@ -38,6 +38,7 @@ const {
   findBannedCustomerCopy,
   isInitialRodentTrapSetup,
   setupContradictions,
+  normalizeWordNumbers,
 } = require('./activity-indicators');
 const { validateCustomerCopy } = require('./premium-experience');
 const {
@@ -385,26 +386,10 @@ function numberTokens(text) {
 // traps" can't route around the numeral checks (codex round-2 P1). "one" is
 // included deliberately — the partitive filter below keeps "one of the
 // traps" from tripping the count check.
-const WORD_NUMBER_RE = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/gi;
-const WORD_NUMBER_VALUES = {
-  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
-  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
-  fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
-  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
-  seventy: 70, eighty: 80, ninety: 90, hundred: 100, thousand: 1000,
-};
-
-function normalizeWordNumbers(text) {
-  return String(text || '')
-    .replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]))
-    // recombine compound word-numbers the word pass split — hyphenated
-    // ("twenty-one" → "20-1") AND space-separated ("twenty one" → "20 1")
-    // — so they can't slip a smaller grounded digit past the count
-    // validators (codex P2 r3 + P1 r8)
-    .replace(/\b(\d+)[-\s](\d)\b/g, (full, tens, ones) => (Number(tens) >= 20 && Number(tens) % 10 === 0
-      ? String(Number(tens) + Number(ones))
-      : full));
-}
+//
+// The implementation lives in activity-indicators (imported above) so this
+// lane and the technician-body count guard added in round 8 normalize
+// identically; two copies would drift and only one of them would be tested.
 
 function collectNumbers(set, value) {
   if (value == null) return;
