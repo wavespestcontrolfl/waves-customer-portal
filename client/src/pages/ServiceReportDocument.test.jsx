@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import ServiceReportDocument from './ServiceReportDocument';
 
@@ -249,6 +249,118 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     const app = { ...BASE_DATA.applications[0], zone_ids: [], applicationArea: 'Attic and soffit line' };
     render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="tok123" />);
     expect(screen.getByText('Attic and soffit line')).toBeInTheDocument();
+  });
+
+  it('records serviced areas with reasons, and never the internal description', () => {
+    const data = {
+      ...BASE_DATA,
+      coverageServiceType: 'pest_control',
+      serviceCoverage: {
+        enabled: true,
+        items: [
+          { id: 'z1', markerLabel: 'A', areaName: 'Front perimeter', status: 'completed', customerDescription: 'Exterior perimeter service completed.', internalDescription: 'perimeter dbl-rate' },
+          { id: 'z2', markerLabel: 'B', areaName: 'Garage', status: 'inaccessible', customerDescription: '', skippedReason: 'vehicle parked inside' },
+        ],
+        summary: { completedCount: 1, inaccessibleCount: 1 },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText('Areas serviced')).toBeInTheDocument();
+    // "A — Front perimeter:" is the coverage row (the bare zone name also
+    // appears in the products table, hence the marker-qualified match)
+    expect(screen.getByText(/A — Front perimeter/)).toBeInTheDocument();
+    expect(screen.getByText(/Exterior perimeter service completed/)).toBeInTheDocument();
+    expect(screen.getByText(/Could not access: vehicle parked inside/)).toBeInTheDocument();
+    expect(container.textContent).not.toContain('perimeter dbl-rate');
+  });
+
+  it('honours the Pest Pressure visibility flags the PDF cache key is hashed on', () => {
+    const pressure = { enabled: true, showOnCustomerReport: true, label: 'Very Low', displayScore: '0.9', maxScore: 5 };
+    render(<ServiceReportDocument data={{ ...BASE_DATA, pestPressure: pressure }} token="t" />);
+    expect(screen.getByText(/Very Low/)).toBeInTheDocument();
+    cleanup();
+
+    const hidden = render(<ServiceReportDocument data={{ ...BASE_DATA, pestPressure: { ...pressure, showOnCustomerReport: false } }} token="t" />);
+    expect(hidden.container.textContent).not.toMatch(/Pest Pressure/);
+    cleanup();
+
+    const off = render(<ServiceReportDocument data={{ ...BASE_DATA, pestPressure: { ...pressure, enabled: false } }} token="t" />);
+    expect(off.container.textContent).not.toMatch(/Pest Pressure/);
+  });
+
+  it('carries the next appointment and the WaveGuard re-service benefit', () => {
+    const data = { ...BASE_DATA, nextAppointment: { scheduledDate: '2026-09-01T00:00:00.000Z', serviceType: 'Quarterly Pest Control' }, waveGuardTier: 'Silver' };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/Next service: September 1, 2026/);
+    expect(container.textContent).toMatch(/WaveGuard members receive free re-service/);
+  });
+
+  it('drops a treatment map that fails to load instead of printing an empty claim', () => {
+    const data = { ...BASE_DATA, applications: [], treatmentMap: { traced: { snapshotUrl: 'https://cdn.example.com/dead.png' } } };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const img = container.querySelector('img[src="https://cdn.example.com/dead.png"]');
+    expect(img).toBeTruthy();
+    fireEvent.error(img);
+    expect(container.querySelector('img[src="https://cdn.example.com/dead.png"]')).toBeNull();
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
+  it('reads primaryMove from the builders\' real fields (title/why/impact/dueLabel)', () => {
+    // buildPrimaryMove returns exactly these keys in pest-report-v2.js and
+    // mosquito-report-v2.js — a customerText/text lookup silently yields null.
+    const data = {
+      ...BASE_DATA,
+      pestReportV2: { primaryMove: { title: 'Clear the mulch bed', why: 'It holds moisture against the slab.', impact: 'Cuts ant harborage.', dueLabel: 'Before next service' } },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/Clear the mulch bed/);
+    expect(container.textContent).toMatch(/Before next service/);
+  });
+
+  it('renders V2 defense / habitat items', () => {
+    const defense = { summary: 'Your property is in a strong position after this visit.', items: [
+      { key: 'perimeter_shield', label: 'Perimeter shield', status: 'active', detail: 'Exterior protection was applied today.' },
+    ] };
+    render(<ServiceReportDocument data={{ ...BASE_DATA, pestReportV2: { defense } }} token="t" />);
+    expect(screen.getByText(/strong position after this visit/)).toBeInTheDocument();
+    expect(screen.getByText(/Exterior protection was applied today/)).toBeInTheDocument();
+    cleanup();
+    // mosquito stores the same shape under `habitat`
+    const hab = render(<ServiceReportDocument data={{ ...BASE_DATA, mosquitoReportV2: { habitat: defense } }} token="t" />);
+    expect(hab.container.textContent).toMatch(/Perimeter shield/);
+  });
+
+  it('does not claim treated areas when the only application is a station check', () => {
+    // treatment-map.js isRenderableApplication excludes method 'station_check'
+    const data = {
+      ...BASE_DATA,
+      mapSvg: '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
+      applications: [{ id: 'a1', method: 'station_check', product: { name: 'Snap trap' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toContain('Where we treated');
+  });
+
+  it('keeps the legacy lawn assessment result when reportV2 is absent', () => {
+    const data = {
+      ...BASE_DATA,
+      lawnAssessment: {
+        scores: { overallScore: 86, turfDensity: 90, colorHealth: 80, weedSuppression: 95, stressDamage: 75 },
+        recommendations: { summary: 'Lawn is performing very well for peak season.' },
+        observations: '',
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).toMatch(/86\/100/);
+    expect(container.textContent).toMatch(/Turf density 90/);
+    expect(screen.getByText(/performing very well for peak season/)).toBeInTheDocument();
+  });
+
+  it('keeps a pest V2 customer concern, not just the top-level card', () => {
+    const data = { ...BASE_DATA, pestReportV2: { customerConcern: { customerConcern: 'Ants by the dishwasher again.', acknowledgement: 'We treated that run and placed bait.' } } };
+    render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.getByText(/Ants by the dishwasher again/)).toBeInTheDocument();
+    expect(screen.getByText(/We treated that run and placed bait/)).toBeInTheDocument();
   });
 
   it('hides the conditions readings when the visit recorded none', () => {

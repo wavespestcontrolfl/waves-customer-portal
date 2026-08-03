@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 
 // Work-order style service report document (owner direction 2026-08-03,
@@ -51,6 +51,19 @@ function fmtAmount(value) {
 
 function fmtUnit(unit) {
   return String(unit || '').replace(/_/g, ' ').trim();
+}
+
+// Mirrors the web report's coverageReasonText so a skipped area reads the
+// same way in the printed record as it does online.
+function coverageReasonText(item, serviceType) {
+  const reason = String(item.skippedReason || item.blockedReason || '').trim();
+  if (!reason) return '';
+  if (item.status === 'blocked') return `Blocked because: ${reason}`;
+  if (serviceType === 'pest_control' && (item.status === 'skipped' || item.status === 'inaccessible')) {
+    return `Could not access: ${reason}`;
+  }
+  if (item.status === 'skipped' || item.status === 'inaccessible') return `Skipped because: ${reason}`;
+  return reason;
 }
 
 function fmtDayLabel(value) {
@@ -136,6 +149,18 @@ function Bullet({ children }) {
 }
 
 export default function ServiceReportDocument({ data, token }) {
+  // Remote images (the traced S3 snapshot, photos) can fail during the
+  // headless capture. A heading with no image under it is a broken-looking
+  // claim in a permanent record, so a failed image drops itself and its
+  // section — same defensive pattern as RecapVideoCard on the live report.
+  // The schematic is a data URI and cannot fail.
+  const [failedImages, setFailedImages] = useState(() => new Set());
+  const markImageFailed = (url) => setFailedImages((prev) => {
+    if (!url || prev.has(url)) return prev;
+    const next = new Set(prev);
+    next.add(url);
+    return next;
+  });
   const typed = data.typedReport || null;
   const result = typed?.todaysResult || null;
   const findings = Array.isArray(typed?.findings) ? typed.findings.filter((f) => (f.customerValueLabel ?? f.value) != null && String(f.customerValueLabel ?? f.value).trim() !== '') : [];
@@ -177,8 +202,10 @@ export default function ServiceReportDocument({ data, token }) {
   const gaugePhoto = data.mowingHeight?.photoUrl
     ? [{ id: 'mowing-gauge', url: data.mowingHeight.photoUrl, caption: 'Turf height measured at this visit', isMoment: true }]
     : [];
-  const photos = [...galleryPhotos, ...momentPhotos, ...gaugePhoto];
-  const tracedMapUrl = data.treatmentMap?.traced?.snapshotUrl || null;
+  const photos = [...galleryPhotos, ...momentPhotos, ...gaugePhoto]
+    .filter((photo) => !failedImages.has(photo.url));
+  const tracedMapRaw = data.treatmentMap?.traced?.snapshotUrl || null;
+  const tracedMapUrl = tracedMapRaw && !failedImages.has(tracedMapRaw) ? tracedMapRaw : null;
   // buildReportV1Data ALWAYS builds mapSvg, even for an inspection-only or
   // station-check-only visit where the SVG carries no treatment layer.
   // Heading it "Where we treated" would be a false treatment claim in a
@@ -196,6 +223,13 @@ export default function ServiceReportDocument({ data, token }) {
   const zoneLegend = (data.zones || [])
     .map((zone) => ({ letter: zone.letter, label: zone.label }))
     .filter((zone) => zone.label);
+  // treatment-map.js isRenderableApplication EXCLUDES method 'station_check',
+  // so a station-check-only visit produces a schematic with no treatment
+  // layer — a bare applications.length check still printed the false
+  // "Where we treated" claim (codex P1 r2). Mirror the renderer's predicate.
+  const hasRenderableTreatment = applications
+    .some((app) => (app.method || 'perimeter_spray') !== 'station_check');
+
   const stationMap = data.stationMap?.available && Array.isArray(data.stationMap.stations) && data.stationMap.stations.length
     ? data.stationMap : null;
   const reportUrl = `${PORTAL_BASE}/report/${encodeURIComponent(token)}`;
@@ -237,8 +271,23 @@ export default function ServiceReportDocument({ data, token }) {
     .filter((row) => row && row.customerExplanation);
   const pestBugFiles = (Array.isArray(pestV2?.bugFiles) ? pestV2.bugFiles : [])
     .filter((bug) => bug && (bug.suspectLabel || bug.whatWeDid));
-  const v2NextMove = pestV2?.primaryMove?.customerText || pestV2?.primaryMove?.text
-    || mosquitoV2?.primaryMove?.customerText || mosquitoV2?.primaryMove?.text || null;
+  // The principal SPATIAL result for recurring pest/mosquito V2 visits —
+  // what is protected, what was watched, what is clear. Shapes are
+  // { summary, items:[{ key, label, status, detail }] } in both builders.
+  const defenseBlock = pestV2?.defense || mosquitoV2?.habitat || null;
+  const defenseItems = (Array.isArray(defenseBlock?.items) ? defenseBlock.items : [])
+    .filter((item) => item && (item.label || item.detail));
+  // PEST_REPORT_V2 puts the approved concern card here; non-V2 pest reports
+  // use the top-level customerConcernCard. Both must survive into the PDF.
+  const v2Concern = pestV2?.customerConcern || mosquitoV2?.customerConcern || null;
+  // buildPrimaryMove returns { title, why, impact, dueLabel } in BOTH builders
+  // (pest-report-v2.js / mosquito-report-v2.js) — an earlier customerText/text
+  // lookup here silently always resolved to null (codex P1 r2).
+  const primaryMove = pestV2?.primaryMove || mosquitoV2?.primaryMove || null;
+  const v2NextMove = primaryMove?.title
+    ? [primaryMove.title, primaryMove.why, primaryMove.impact].filter(Boolean).join(' ')
+      + (primaryMove.dueLabel ? ` (${primaryMove.dueLabel})` : '')
+    : null;
 
 
   const recommendations = [];
@@ -273,6 +322,29 @@ export default function ServiceReportDocument({ data, token }) {
     ? ` (${activity.score} of ${activity.maxScore}${activityBaselineNote})`
     : activityBaselineNote;
 
+  // Per-area service record: which areas were serviced, and which were
+  // skipped/inaccessible and WHY. This is core work-order content the
+  // document was dropping entirely.
+  // ⛔ customerDescription ONLY — items also carry internalDescription,
+  // which is staff copy and must never egress (same rule as technician_notes).
+  const coverageItems = (data.serviceCoverage?.enabled !== false
+    ? (data.serviceCoverage?.items || []) : [])
+    .filter((item) => item && item.areaName);
+  const coverageSummary = data.serviceCoverage?.summary || null;
+
+  // Pest Pressure honours the admin visibility config the PDF cache key is
+  // hashed on (pestPressureVisibilitySignature) — rendering it past those
+  // flags would defeat that control.
+  const pressure = data.pestPressure
+    && data.pestPressure.enabled !== false
+    && data.pestPressure.showOnCustomerReport !== false
+    && data.pestPressure.label
+    ? data.pestPressure : null;
+
+  const concern = data.customerConcernCard || v2Concern || null;
+  const nextAppt = data.nextAppointment || null;
+  const isWaveGuard = Boolean(data.waveGuardTier || data.waveguardTier || data.plan?.isWaveGuard);
+
   // Untyped visits record their findings at the top level; the typed
   // snapshot only covers typed reports. Both must reach the document or the
   // PDF silently drops what the visit recorded (codex P1).
@@ -290,6 +362,26 @@ export default function ServiceReportDocument({ data, token }) {
   const lawnObservations = data.reportV2
     ? null
     : (String(data.lawnAssessment?.observations || '').trim() || null);
+  // Legacy lawn reports (no reportV2 — historical payloads and the fail-soft
+  // V2 build path) carry the visit's principal lawn-health result in
+  // lawnAssessment.scores + its customer summary. Reducing that to the
+  // observations string dropped it from the permanent record (codex P1 r2).
+  const legacyLawn = !data.reportV2 && data.lawnAssessment ? data.lawnAssessment : null;
+  const legacyLawnScores = legacyLawn?.scores || null;
+  const legacyLawnSummary = legacyLawn?.recommendations?.summary || legacyLawn?.aiSummary || null;
+  const LEGACY_LAWN_SCORE_LABELS = [
+    ['turfDensity', 'Turf density'],
+    ['colorHealth', 'Color & vigor'],
+    ['weedSuppression', 'Weed suppression'],
+    ['stressDamage', 'Stress / damage'],
+    ['fungusControl', 'Fungus control'],
+    ['thatchScore', 'Thatch'],
+  ];
+  const legacyLawnRows = legacyLawnScores
+    ? LEGACY_LAWN_SCORE_LABELS
+      .filter(([key]) => legacyLawnScores[key] != null)
+      .map(([key, label]) => `${label} ${legacyLawnScores[key]}`)
+    : [];
   const mowing = data.mowingHeight || null;
   const interaction = INTERACTION_LABELS[data.customerInteraction] || null;
 
@@ -389,11 +481,35 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {/* The customer's own concern + our acknowledgment — a pest V2 visit
+            carries it in pestReportV2.customerConcern, other lines in the
+            top-level card. Losing it makes the report read as if the
+            concern was ignored. */}
+        {concern && (concern.customerConcern || concern.acknowledgement || concern.response) && (
+          <div className="doc-keep">
+            <SectionHeader>Your concern this visit</SectionHeader>
+            {concern.customerConcern && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{concern.customerConcern}</p>
+            )}
+            {(concern.acknowledgement || concern.response) && (
+              <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{concern.acknowledgement || concern.response}</p>
+            )}
+          </div>
+        )}
+
         {/* Findings */}
         {(findings.length > 0 || recordFindings.length > 0 || activity || lawnObservations
-          || mowing || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0) && (
+          || mowing || v2StatusLine || v2Insights.length > 0 || v2Diagnosis.length > 0 || pestBugFiles.length > 0
+          || defenseItems.length > 0 || pressure || legacyLawnScores?.overallScore != null) && (
           <div className="doc-keep">
             <SectionHeader>What we found</SectionHeader>
+            {pressure && (
+              <Bullet>
+                <strong>Pest Pressure:</strong> {pressure.label}
+                {pressure.displayScore != null ? ` (${pressure.displayScore} of ${pressure.maxScore})` : ''}
+                {pressure.summary ? ` — ${pressure.summary}` : ''}
+              </Bullet>
+            )}
             {v2StatusLine && (
               <Bullet>
                 <strong>{v2StatusLine.label}:</strong> {v2StatusLine.value}
@@ -411,11 +527,24 @@ export default function ServiceReportDocument({ data, token }) {
                 <strong>{insight.headline}{insight.headline ? ':' : ''}</strong> {[insight.whatWeSaw, insight.whyItMatters, insight.wavesAction].filter(Boolean).join(' ')}
               </Bullet>
             ))}
+            {defenseBlock?.summary && <Bullet>{defenseBlock.summary}</Bullet>}
+            {defenseItems.map((item) => (
+              <Bullet key={item.key || item.label}>
+                <strong>{item.label}{item.status ? ` (${item.status})` : ''}:</strong> {item.detail}
+              </Bullet>
+            ))}
             {pestBugFiles.map((bug, i) => (
               <Bullet key={bug.pestKey || i}>
                 <strong>{bug.suspectLabel}{bug.suspectLabel ? ':' : ''}</strong> {[bug.whyItMatters, bug.whatWeDid].filter(Boolean).join(' ')}
               </Bullet>
             ))}
+            {legacyLawnScores?.overallScore != null && (
+              <Bullet>
+                <strong>Lawn health:</strong> {legacyLawnScores.overallScore}/100
+                {legacyLawnRows.length ? ` — ${legacyLawnRows.join(' · ')}` : ''}
+              </Bullet>
+            )}
+            {legacyLawnSummary && <Bullet>{legacyLawnSummary}</Bullet>}
             {lawnObservations && <Bullet>{lawnObservations}</Bullet>}
             {mowing && mowing.heightIn != null && (
               <Bullet>
@@ -534,12 +663,40 @@ export default function ServiceReportDocument({ data, token }) {
             (Waves-stored image), else the generated zone schematic. The
             satellite basemap never prints (provider ToS — long-standing
             rule), which these two Waves-owned renderings don't involve. */}
-        {(tracedMapUrl || (schematicSrc && applications.length > 0)) && (
+        {coverageItems.length > 0 && (
+          <div className="doc-keep">
+            <SectionHeader>Areas serviced</SectionHeader>
+            {coverageItems.map((item) => {
+              const reason = coverageReasonText(item, data.coverageServiceType);
+              return (
+                <Bullet key={item.id || item.areaName}>
+                  <strong>{item.markerLabel ? `${item.markerLabel} — ` : ''}{item.areaName}:</strong>{' '}
+                  {[item.customerDescription, reason].filter(Boolean).join(' ')}
+                </Bullet>
+              );
+            })}
+            {coverageSummary && (
+              <div style={{ marginTop: 5, fontSize: 10.5, color: MUTED }}>
+                {[
+                  coverageSummary.completedCount != null ? `${coverageSummary.completedCount} completed` : null,
+                  coverageSummary.inaccessibleCount ? `${coverageSummary.inaccessibleCount} inaccessible` : null,
+                  coverageSummary.skippedCount ? `${coverageSummary.skippedCount} skipped` : null,
+                  coverageSummary.needsAttentionCount ? `${coverageSummary.needsAttentionCount} needing attention` : null,
+                ].filter(Boolean).join(' · ')}
+              </div>
+            )}
+            {data.serviceCoverage?.disclaimer && (
+              <div style={{ marginTop: 4, fontSize: 9.5, color: MUTED }}>{data.serviceCoverage.disclaimer}</div>
+            )}
+          </div>
+        )}
+
+        {(tracedMapUrl || (schematicSrc && hasRenderableTreatment)) && (
           <div className="doc-keep">
             <SectionHeader>Where we treated</SectionHeader>
             <div className="doc-map-frame" style={{ border: `1px solid ${HAIR}`, borderRadius: 6, overflow: 'hidden' }}>
               {tracedMapUrl
-                ? <img src={tracedMapUrl} alt="Technician-traced treatment map" style={{ display: 'block', width: '100%' }} />
+                ? <img src={tracedMapUrl} alt="Technician-traced treatment map" onError={() => markImageFailed(tracedMapUrl)} style={{ display: 'block', width: '100%' }} />
                 : <img src={schematicSrc} alt="Treatment map of the serviced areas" style={{ display: 'block', width: '100%' }} />}
             </div>
             {!tracedMapUrl && zoneLegend.length > 0 && (
@@ -605,6 +762,7 @@ export default function ServiceReportDocument({ data, token }) {
                   <img
                     src={photo.url}
                     alt={photo.caption || 'Service photo'}
+                    onError={() => markImageFailed(photo.url)}
                     style={{ display: 'block', width: '100%', height: 190, objectFit: 'contain', background: '#F7F8F9', borderRadius: 4, border: `1px solid ${HAIR}` }}
                   />
                   {!suppressPhotoCaption(photo) && (photo.caption || photo.stateBadge) && (
@@ -646,6 +804,8 @@ export default function ServiceReportDocument({ data, token }) {
         {/* Record footer */}
         <div className="doc-keep" style={{ borderTop: `1px solid ${LINE}`, marginTop: 18, paddingTop: 8, textAlign: 'center' }}>
           <div style={{ fontSize: 10, color: MUTED, lineHeight: 1.6 }}>
+            {nextAppt?.scheduledDate ? <>Next service: {fmtServiceDate(nextAppt.scheduledDate)}{nextAppt.serviceType ? ` · ${nextAppt.serviceType}` : ''}.<br /></> : null}
+            {isWaveGuard ? <>WaveGuard members receive free re-service when covered activity continues after the treatment window.<br /></> : null}
             Questions about today&apos;s service? Ask Waves in your online report or call {WAVES_SUPPORT_PHONE_DISPLAY}.
             <br />
             Full interactive report: {reportUrl}
