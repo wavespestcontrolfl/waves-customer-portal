@@ -38,10 +38,17 @@ function buildTreatmentSummary(treatment) {
   // on the product cards; the narrative speaks in actives). Strip the label
   // percentage ("Dinotefuran 20%" → "dinotefuran"); fall back to the product
   // name when no active is recorded. Word-wise lowercase: element symbols and
-  // short acronyms keep their case ("Iron + N" must not become "iron + n"),
-  // and anything carrying digits ("0-0-25") is left untouched.
+  // short acronyms keep their case ("Iron + N" must not become "iron + n";
+  // "Fe/Mg/Mn/S" and "Mn" keep proper-case symbols — codex P3 #3197 r1), and
+  // anything carrying digits ("0-0-25") is left untouched. A token counts as
+  // symbol notation when EVERY alphabetic segment is element-shaped (capital
+  // + optional lowercase letter) — "Iron" (4 letters) still lowercases.
+  const isSymbolToken = (w) => {
+    const segments = String(w).split(/[^A-Za-z]+/).filter(Boolean);
+    return segments.length > 0 && segments.every((seg) => /^[A-Z][a-z]?$/.test(seg));
+  };
   const smartLower = (s) => String(s).split(/\s+/).map((w) => (
-    /\d/.test(w) || (w.length <= 3 && /^[A-Z]+$/.test(w)) ? w : w.toLowerCase()
+    /\d/.test(w) || (w.length <= 3 && /^[A-Z]+$/.test(w)) || isSymbolToken(w) ? w : w.toLowerCase()
   )).join(' ');
   const activeName = (p) => {
     const active = String(p.activeIngredient || '').replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();

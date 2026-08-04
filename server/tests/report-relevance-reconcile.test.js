@@ -33,11 +33,25 @@ describe('reconcileRainFigure', () => {
   });
 
   test('a target mention is never rewritten', () => {
-    // Below half the canonical AND in a target sentence — both guards hold.
+    // Below half the canonical — the per-number guard holds.
     expect(reconcileRainFigure(
       'Rain this week ran well past the 0.75 inch target total.',
       2.96,
     )).toBeNull();
+  });
+
+  test('stale total is rewritten even when the target shares the sentence (codex P2 r1)', () => {
+    expect(reconcileRainFigure(
+      'Rainfall totaling 2.72 inches was above the 0.75 inch target.',
+      2.96,
+    )).toBe('Rainfall totaling 2.96 inches was above the 0.75 inch target.');
+  });
+
+  test('a leading target figure does not consume the rewrite attempt', () => {
+    expect(reconcileRainFigure(
+      'Against the 0.75 inch target, rain totaled 2.72 inches this week.',
+      2.96,
+    )).toBe('Against the 0.75 inch target, rain totaled 2.96 inches this week.');
   });
 
   test('a rain sentence without a weekly-total cue is left alone', () => {
@@ -120,6 +134,25 @@ describe('reconcileLawnReport — relevance pass integration', () => {
     expect(fix.photoSummary).toBeNull();
   });
 
+  test('rain-unknown report: null figures never coerce to 0 (codex P1 r1)', () => {
+    // Number(null) === 0 — a rain-unknown report must not rewrite the summary
+    // to "0 inches" or judge rain against a phantom 0" target.
+    const input = base();
+    input.reportV2.water = { rainInches: null, targetInches: null };
+    const fix = reconcileLawnReport(input);
+    expect(fix.summary).toBeNull();
+    expect(fix.insights).toBeNull();
+    expect(fix.photoSummary).toBeNull();
+    expect(fix.warnings.some((w) => /rain/.test(w.code))).toBe(false);
+  });
+
+  test('the rendered nextVisitPlan row is reconciled too (codex P2 r1)', () => {
+    const input = base();
+    input.reportV2.insights[0].nextVisitPlan = 'Recheck the sidewalk edge for chinch bug or drought stress.';
+    const fix = reconcileLawnReport(input);
+    expect(fix.insights[0].nextVisitPlan).toBe('Recheck the sidewalk edge for chinch bug or uneven sprinkler coverage.');
+  });
+
   test('todaysResult carries no fixed "No urgent homeowner action" clause', () => {
     const fix = reconcileLawnReport(base());
     expect(fix.todaysResult).toBe('Recent rainfall totaling 2.96 inches raised disease pressure this week.');
@@ -164,6 +197,16 @@ describe('buildTreatmentSummary — shared method + symbol casing (owner 2026-08
     expect(out).toContain('iron + N (foliar)');
     expect(out).toContain('potassium 0-0-25 + sulfur');
     expect(out).not.toContain('iron + n');
+  });
+
+  test('proper-case element notation survives ("Mn + Fe", "Fe/Mg/Mn/S" — codex P3 r1)', () => {
+    const out = buildTreatmentSummary({ products: [
+      { name: 'LESCO Micro Blend', kind: 'fertilizer', activeIngredient: 'Mn + Fe + Mg + S', targets: [], method: 'broadcast_spray' },
+      { name: 'SiteOne Chelated Mix', kind: 'fertilizer', activeIngredient: 'Chelated Fe/Mg/Mn/S blend', targets: [], method: 'broadcast_spray' },
+    ] });
+    expect(out).toContain('Mn + Fe + Mg + S');
+    expect(out).toContain('chelated Fe/Mg/Mn/S blend');
+    expect(out).not.toMatch(/\bmn\b|\bfe\/mg/);
   });
 
   test('mixed methods keep the per-item tag', () => {

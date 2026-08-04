@@ -90,6 +90,10 @@ const REENTRY_REWRITES = {
 };
 
 const toNum = (v) => {
+  // null-check BEFORE Number(): Number(null) and Number('') are a finite 0,
+  // which would invent a 0" rain reading / 0" target on rain-unknown reports
+  // (codex P1 #3197 r1 — the same trap the client baseline guard documents).
+  if (v == null || v === '') return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 };
@@ -110,13 +114,18 @@ function reconcileRainFigure(text, canonicalRain) {
   const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
     if (!/\brain(?:fall)?\b/i.test(sentence)) return sentence;
     if (!/\bweek\b|\b7[- ]day\b|\bpast seven\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
-    if (/\btarget\b/i.test(sentence)) return sentence;
-    let done = false;
-    return sentence.replace(/\b(\d+(?:\.\d+)?)(\s*)(inches?|in\.|")/i, (match, value, gap, unit) => {
-      if (done) return match;
-      done = true;
+    // No sentence-level target bailout (codex P2 #3197 r1): "totaling 2.72
+    // inches was above the 0.75 inch target" is the exact comparison this
+    // pass reconciles. The per-number guards do the work instead — a figure
+    // below half the canonical (the target mention) is skipped, and only the
+    // FIRST qualifying figure is rewritten; a skipped figure does not consume
+    // the attempt.
+    let replacedOne = false;
+    return sentence.replace(/\b(\d+(?:\.\d+)?)(\s*)(inches?|in\.|")/gi, (match, value, gap, unit) => {
+      if (replacedOne) return match;
       const v = Number(value);
       if (!Number.isFinite(v) || Math.abs(v - canonicalRain) <= 0.05 || v < canonicalRain * 0.5) return match;
+      replacedOne = true;
       changed = true;
       return `${formatInches(canonicalRain)}${gap}${unit}`;
     });
@@ -205,7 +214,11 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     const patched = insights.map((i) => {
       const fields = {};
       let touched = false;
-      for (const f of ['whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisit']) {
+      // The full set of insight fields the card renders (LawnReportV2.jsx
+      // InsightLine rows + the headline) — nextVisitPlan is the rendered
+      // "Next visit" row (codex P2 #3197 r1: a bare `nextVisit` left the
+      // visible line saying drought while the rest was reconciled).
+      for (const f of ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan']) {
         const replaced = replaceDroughtHypothesis(i && i[f]);
         if (replaced) { fields[f] = replaced; touched = true; }
       }
