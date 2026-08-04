@@ -342,8 +342,14 @@ async function buildServiceReportV1ResponseData(service, token, {
           ...data.reportV2,
           todaysResult: fix.todaysResult || data.reportV2.todaysResult || null,
           followUp: fix.followUp || data.reportV2.followUp || null,
+          // Rain-contradicted drought hypotheses reworded in place (null = untouched).
+          insights: fix.insights || data.reportV2.insights,
+          photoSummary: fix.photoSummary || data.reportV2.photoSummary,
           consistencyWarnings: fix.warnings || [],
         };
+        // Stale weekly-rain figure in the AI summary rewritten to the widget's
+        // total so the report never quotes two different rain numbers.
+        if (fix.summary) data.summary = fix.summary;
         if (fix.reentry && dynamicContext && dynamicContext.reentry) {
           dynamicContext.reentry = { ...dynamicContext.reentry, petAdvisory: fix.reentry.petAdvisory };
         }

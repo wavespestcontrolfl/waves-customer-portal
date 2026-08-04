@@ -1017,7 +1017,41 @@ export function recognizedDiseaseTargetsText(app = {}) {
   return targets.join(', ').toLowerCase();
 }
 
-export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
+// Nutrient why-used, correlated to today's tech-confirmed photo diagnosis.
+// The generic program line was identical on every fertilizer card while the
+// SAME page's assessment documented the reason the product matters (owner
+// 2026-08-04). Claims stay within the record: the category status/label come
+// from the server-derived diagnosis the Turf Health section already renders,
+// and the product statement is a product property — no "chosen because"
+// causality, no observed-condition claim. Fail-closed: unrecognized product
+// or an un-flagged / absent category → the existing generic line.
+const NUTRIENT_DIAGNOSIS_LINKS = [
+  {
+    productRe: /\biron\b|chelat|micro[\s-]?nutrient/i,
+    categoryKey: 'color_vigor',
+    copy: (label) => `Used to support leaf color and recovery — today’s photo assessment marked ${label} as an area to watch, and this application feeds the color response we’re tracking between visits.`,
+  },
+  {
+    productRe: /\bpotassium\b|\bpotash\b|(?:^|\D)0-0-\d{1,2}\b/i,
+    categoryKey: 'damage_disease_signals',
+    copy: (label) => `Used to support root strength and stress tolerance — today’s photo assessment marked ${label} as an area to watch, and potassium helps the turf recover from stress between visits.`,
+  },
+];
+
+export function nutrientDiagnosisCopy(app = {}, diagnosis = []) {
+  if (!Array.isArray(diagnosis) || !diagnosis.length) return '';
+  const hay = `${app.product?.active_ingredient || ''} ${app.product?.name || ''}`;
+  for (const link of NUTRIENT_DIAGNOSIS_LINKS) {
+    if (!link.productRe.test(hay)) continue;
+    const cat = diagnosis.find((c) => c && c.key === link.categoryKey);
+    if (!cat || !cat.label) continue;
+    if (cat.status !== 'watch' && cat.status !== 'needs_attention') continue;
+    return link.copy(cat.label);
+  }
+  return '';
+}
+
+export function applicationPurposeCopy(app = {}, serviceLine = 'pest', context = {}) {
   const purpose = applicationPurpose(app, serviceLine);
   if (purpose === 'Targeted weed treatment') return 'Applied where visible weed pressure or service notes called for targeted control.';
   if (purpose === 'Lawn insect control') {
@@ -1041,7 +1075,10 @@ export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
       ? `Applied to protect the turf against ${diseaseTargets}, the targets your technician recorded for this application.`
       : 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';
   }
-  if (purpose === 'Lawn nutrient application') return 'Used to support turf density, color, and recovery within the documented lawn program.';
+  if (purpose === 'Lawn nutrient application') {
+    return nutrientDiagnosisCopy(app, context.diagnosis)
+      || 'Used to support turf density, color, and recovery within the documented lawn program.';
+  }
   if (purpose === 'Lawn treatment application') return 'Recorded as part of today’s lawn care visit and treatment plan.';
   if (purpose === 'Station service') return 'Checked or serviced at the documented station locations.';
   if (purpose === 'Bait placement') return 'Placed at documented activity or monitoring points.';
@@ -2926,7 +2963,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const active = applicationActiveIngredient(app);
             const epa = applicationEpaReg(app);
             const purpose = applicationPurpose(app, data.serviceLine);
-            const why = applicationPurposeCopy(app, data.serviceLine);
+            const why = applicationPurposeCopy(app, data.serviceLine, { diagnosis: data.reportV2?.diagnosis });
             const usedIn = applicationZoneText(app, zoneById, data.serviceLine);
             const productSummary = applicationProductSummary(app);
             const precautionSummary = applicationPrecautionSummary(app);

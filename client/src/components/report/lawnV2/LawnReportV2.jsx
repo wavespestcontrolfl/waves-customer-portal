@@ -598,6 +598,12 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   const target = Number(water.targetInches);
   const hasRain = Number.isFinite(rain);
   const hasIrr = Number.isFinite(irrigation);
+  // No usable schedule on file → the server still sends irrigation as a
+  // finite 0, which rendered as `Irrigation 0"` — a claim the customer didn't
+  // water, not the truth that we don't know (owner 2026-08-04). Show "Not on
+  // file" instead and keep the zero-width segment out of the bar/legend.
+  // scheduleOnFile undefined (older cached payloads) keeps the numeric row.
+  const irrOnFile = water.scheduleOnFile !== false;
   // Nothing measurable → don't draw an empty chart.
   if (!hasRain && !hasIrr) return null;
 
@@ -614,26 +620,29 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       <CardTitle sub="Rain in your area plus the irrigation schedule we have on file.">Water This Week</CardTitle>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
         {hasRain ? <><span style={{ color: MUTED }}>Rain</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(rain)}</strong></> : null}
-        {hasIrr ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
+        {hasIrr && irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
+        {hasIrr && !irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span></> : null}
         <span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong>
         {Number.isFinite(target) ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
       </div>
       {/* Stacked bar with a target marker — segments grow on mount */}
       <div style={{ position: 'relative', height: 26, borderRadius: 8, background: '#F1EEE6', overflow: 'hidden' }}>
         {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: COLORS.glassNavy, transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
-        {hasIrr ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: 'rgba(4, 57, 94, 0.35)', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+        {hasIrr && irrOnFile ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: 'rgba(4, 57, 94, 0.35)', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
         {Number.isFinite(target) ? (
           <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
         ) : null}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
         {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
-        {hasIrr ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
+        {hasIrr && irrOnFile ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
         {Number.isFinite(target) ? <Legend color={TEXT} label="Target" /> : null}
       </div>
       <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <StatusPill status={status === 'unknown' ? 'tracking' : status} small />
-        {water.confidence ? <ConfidenceTag confidence={water.confidence} /> : null}
+        {/* When the rain reading is solid and only the schedule is missing,
+            "Limited data this week" blamed the rain — name the actual gap. */}
+        {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={!irrOnFile && hasRain ? 'Irrigation not on file' : null} /> : null}
       </div>
       {water.explanation ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
@@ -689,9 +698,9 @@ function Legend({ color, label }) {
   );
 }
 
-function ConfidenceTag({ confidence }) {
+function ConfidenceTag({ confidence, overrideLabel = null }) {
   const map = { high: 'Verified data', medium: 'Estimated for your area', low: 'Limited data this week' };
-  return <span style={{ fontSize: 12, color: MUTED, fontStyle: 'italic' }}>{map[confidence] || ''}</span>;
+  return <span style={{ fontSize: 12, color: MUTED, fontStyle: 'italic' }}>{overrideLabel || map[confidence] || ''}</span>;
 }
 
 // ── 4. Rain in your area — last 7 days ───────────────────────────────────────────
@@ -1180,7 +1189,7 @@ function bandAccent(v, lo, hi) { return v >= lo && v <= hi ? COLORS.glassNavy : 
 function gapAccent(v) { return Math.abs(Number(v)) <= 0.25 ? COLORS.glassNavy : COLORS.glassNavy; }
 const lastVal = (pts = []) => { const f = [...pts].reverse().find((p) => Number.isFinite(toScore(p.value))); return f ? toScore(f.value) : NaN; };
 
-export function LawnTrends({ trends = {} }) {
+export function LawnTrends({ trends = {}, baselineScore = null }) {
   const { overall, waterGap, mowing, weed, stress, coverage, color, seasonalNote } = trends;
   // The server emits [null, null] when no ideal band is known for the grass —
   // a destructure default only covers undefined, so [null, null] used to ride
@@ -1212,7 +1221,25 @@ export function LawnTrends({ trends = {} }) {
     stress && { key: 'stress', title: 'Stress / Damage', sub: 'higher is better', points: stress, domain: [0, 100], accent: scoreAccent(lastVal(stress)) },
   ].filter(Boolean).filter((m) => (m.points || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2);
 
-  if (!hasOverall && !minis.length) return null;
+  // First scored visit: nothing charts yet (every series needs 2+ visits — a
+  // single point is not a trend), but silence read as "the charts went away"
+  // (owner 2026-08-04). Tell the customer the baseline is set and trends
+  // start next visit. Only with a real score — an unscored visit stays silent.
+  if (!hasOverall && !minis.length) {
+    // null-check BEFORE Number(): Number(null) === 0 is finite — the same
+    // trap the mowing band guard above documents.
+    if (baselineScore == null || !Number.isFinite(Number(baselineScore))) return null;
+    return (
+      <Card>
+        <CardTitle sub="Visit-to-visit progress for your lawn.">Progress Tracking</CardTitle>
+        <p style={{ margin: 0, fontSize: 14, color: BODY, lineHeight: 1.55 }}>
+          Today’s visit sets your lawn’s baseline at {Math.round(Number(baselineScore))}/100.
+          Starting with your next visit, this section will chart how your overall score,
+          color, coverage, weeds, and stress signals move over time.
+        </p>
+      </Card>
+    );
+  }
   return (
     <>
       {hasOverall ? (

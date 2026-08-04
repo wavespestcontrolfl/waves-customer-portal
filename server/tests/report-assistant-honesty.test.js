@@ -103,9 +103,11 @@ describe('reconciled todaysResult leads with the visit summary', () => {
     const result = reconcile(
       'The front and back yards received a lawn application addressing large patch and fire ants. More prose follows.',
     );
+    // No appended fixed clause (owner 2026-08-04): "No urgent homeowner
+    // action is needed today." rendered on every reconciled report and
+    // contradicted snapshots carrying a real "Your next step".
     expect(result.todaysResult).toBe(
-      'The front and back yards received a lawn application addressing large patch and fire ants. '
-      + 'No urgent homeowner action is needed today.',
+      'The front and back yards received a lawn application addressing large patch and fire ants.',
     );
   });
 
@@ -120,21 +122,21 @@ describe('reconciled todaysResult leads with the visit summary', () => {
 
   test('abbreviation periods are not sentence boundaries ("The St." must never ship)', () => {
     const result = reconcile('The St. Augustine lawn received a preventive fungicide application. More prose follows.');
-    expect(result.todaysResult).toMatch(
-      /^The St\. Augustine lawn received a preventive fungicide application\. No urgent/,
+    expect(result.todaysResult).toBe(
+      'The St. Augustine lawn received a preventive fungicide application.',
     );
   });
 
   test('initialism periods are not sentence boundaries ("The U.S." must never ship)', () => {
     const result = reconcile('The U.S. EPA-registered product was applied to the full lawn. More prose follows.');
-    expect(result.todaysResult).toMatch(
-      /^The U\.S\. EPA-registered product was applied to the full lawn\. No urgent/,
+    expect(result.todaysResult).toBe(
+      'The U.S. EPA-registered product was applied to the full lawn.',
     );
   });
 
   test('a single-letter product suffix IS a sentence end ("Heritage G.")', () => {
     const result = reconcile('We applied Heritage G. A follow-up is planned to recheck the flagged areas.');
-    expect(result.todaysResult).toMatch(/^We applied Heritage G\. No urgent/);
+    expect(result.todaysResult).toBe('We applied Heritage G.');
     expect(result.todaysResult).not.toMatch(/A follow-up is planned/);
   });
 

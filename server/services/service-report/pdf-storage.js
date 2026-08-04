@@ -29,7 +29,7 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // (product name / technician targets) instead of equipment keywords — cached
 // PDFs would keep captioning cockroach gel as ant bait and fogged roach
 // products as mosquito applications without a re-render.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p4-report-relevance-20260803';
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p5-report-relevance2-20260804';
 
 const s3 = new S3Client({
   region: config.s3?.region,

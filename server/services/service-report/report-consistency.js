@@ -52,10 +52,21 @@ function firstSentence(text, max = 170) {
   const m = t.match(/^[^.!?]*[.!?]/);
   let out = (m ? m[0] : t).trim();
   if (out.length > max) {
-    out = out.slice(0, max);
-    const lastSpace = out.lastIndexOf(' ');
-    if (lastSpace > 40) out = out.slice(0, lastSpace);
-    out = `${out.replace(/[,;:]\s*$/, '').trim()}…`;
+    // Over-cap: prefer ending on a complete CLAUSE (the tech's long
+    // next-visit focus lines are single sentences joined by semicolons), so
+    // the card never trails off mid-thought with "…inspect edge areas for
+    // chinch bug or drought…" (owner 2026-08-04). Word-boundary + ellipsis
+    // survives only as the no-clause-boundary fallback.
+    const head = out.slice(0, max);
+    const clauseEnd = Math.max(head.lastIndexOf('; '), head.lastIndexOf(', '));
+    if (clauseEnd > 40) {
+      out = `${head.slice(0, clauseEnd).trim()}.`;
+    } else {
+      out = head;
+      const lastSpace = out.lastIndexOf(' ');
+      if (lastSpace > 40) out = out.slice(0, lastSpace);
+      out = `${out.replace(/[,;:]\s*$/, '').trim()}…`;
+    }
   }
   return out;
 }
@@ -66,14 +77,76 @@ function firstSentence(text, max = 170) {
 // 2026-07-18 P1). Unknown lines get no rewrite rather than a wrong noun.
 const REENTRY_REWRITES = {
   lawn: {
-    dried: 'Treated turf has dried — pets and family are fine on it now.',
+    // Label-consistent framing (dried → may re-enter) without a safety
+    // adjective: "are fine" read as a safety assurance the label language
+    // never makes (owner compliance pass 2026-08-04).
+    dried: 'Treated turf has dried, so pets and family can use the lawn again.',
     untilDry: 'Keep pets and family off treated turf until it dries.',
   },
   tree_shrub: {
-    dried: 'Treated beds and foliage have dried — pets and family are fine around them now.',
+    dried: 'Treated beds and foliage have dried, so pets and family can be around them again.',
     untilDry: 'Keep pets and family off treated beds and foliage until they dry.',
   },
 };
+
+const toNum = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+const formatInches = (n) => String(Math.round(n * 100) / 100);
+
+// The AI visit summary bakes a rainfall total in at completion time, while the
+// Water This Week widget recomputes at request time — the same report was
+// telling the customer "2.72 inches" and "2.96 in" at once (owner 2026-08-04).
+// Sentence-scoped: only a weekly-total rain sentence is touched, only its first
+// inch figure, and only when it's in the canonical figure's neighborhood (a
+// target mention like "0.75 inch" is below half the canonical and never
+// rewritten; a sentence naming the target is skipped entirely).
+function reconcileRainFigure(text, canonicalRain) {
+  const t = String(text || '');
+  if (!t || canonicalRain == null) return null;
+  let changed = false;
+  const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
+    if (!/\brain(?:fall)?\b/i.test(sentence)) return sentence;
+    if (!/\bweek\b|\b7[- ]day\b|\bpast seven\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
+    if (/\btarget\b/i.test(sentence)) return sentence;
+    let done = false;
+    return sentence.replace(/\b(\d+(?:\.\d+)?)(\s*)(inches?|in\.|")/i, (match, value, gap, unit) => {
+      if (done) return match;
+      done = true;
+      const v = Number(value);
+      if (!Number.isFinite(v) || Math.abs(v - canonicalRain) <= 0.05 || v < canonicalRain * 0.5) return match;
+      changed = true;
+      return `${formatInches(canonicalRain)}${gap}${unit}`;
+    });
+  }).join(' ');
+  return changed ? out : null;
+}
+
+// A drought / dry-pocket hypothesis sitting on a report whose own widget shows
+// rain far above target contradicts the data on the page (owner 2026-08-04:
+// "we know from rainfall that this would not necessarily be the case"). When
+// weekly rain is at least an inch over target, the hypothesis is reworded to
+// the water-adequate differential the coverage copy already uses. Hypothesis
+// sentences only: the sentence must be about the stress signals, negated
+// mentions are left alone, and "drought-tolerant"/"drought tolerance" praise
+// never matches.
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|a\s+)?(?:drought(?:\s+stress)?|dry\s+pockets?|dry\s+spells?)\b(?!-)(?!\s+toleran)/gi;
+
+function replaceDroughtHypothesis(text) {
+  const t = String(text || '');
+  if (!t) return null;
+  let changed = false;
+  const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
+    if (!/chinch|stress|thin|tan\b|patch|scuff/i.test(sentence)) return sentence;
+    if (/\bno\b[^.]{0,30}\b(?:drought|dry)\b/i.test(sentence)) return sentence;
+    const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, 'uneven sprinkler coverage');
+    if (replaced !== sentence) changed = true;
+    return replaced;
+  }).join(' ');
+  return changed ? out : null;
+}
 
 /**
  * @param {object} input
@@ -94,8 +167,54 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   if (!reentryWording) return null;
   const lawnPass = serviceLine === 'lawn';
   const warnings = [];
-  const insights = Array.isArray(reportV2.insights) ? reportV2.insights : [];
-  const hasIssue = lawnPass && insights.some((i) => i.status === 'watch' || i.status === 'needs_attention');
+  const rawInsights = Array.isArray(reportV2.insights) ? reportV2.insights : [];
+  const hasIssue = lawnPass && rawInsights.some((i) => i.status === 'watch' || i.status === 'needs_attention');
+
+  // ── Rain-figure reconciliation (lawn only) ────────────────────────────────
+  // Keep the AI summary's weekly rain total in agreement with the live widget.
+  const canonicalRain = lawnPass ? toNum(reportV2.water && reportV2.water.rainInches) : null;
+  let summary = null;
+  if (canonicalRain != null) {
+    summary = reconcileRainFigure(data.summary, canonicalRain);
+    if (summary) {
+      warnings.push({
+        severity: 'warning',
+        code: 'summary_rain_figure_stale',
+        message: `Visit summary's weekly rain total disagrees with the Water This Week widget (${formatInches(canonicalRain)}").`,
+        suggestedFix: summary,
+      });
+    }
+  }
+  const liveSummary = summary || data.summary;
+
+  // ── Drought-hypothesis reconciliation (lawn only) ─────────────────────────
+  // Rain an inch or more OVER target → a drought / dry-pocket differential
+  // contradicts the page's own water data; reword to the coverage differential.
+  const rainTarget = lawnPass ? toNum(reportV2.water && reportV2.water.targetInches) : null;
+  const rainWellAboveTarget = canonicalRain != null && rainTarget != null && canonicalRain >= rainTarget + 1;
+  let insights = rawInsights;
+  let photoSummary = null;
+  const droughtWarn = (where) => warnings.push({
+    severity: 'warning',
+    code: 'drought_hypothesis_contradicts_rainfall',
+    message: `${where} attributed stress to drought/dry conditions while measured weekly rain (${formatInches(canonicalRain)}") is well above the ${formatInches(rainTarget)}" target.`,
+  });
+  if (rainWellAboveTarget) {
+    const summaryDrought = replaceDroughtHypothesis(liveSummary);
+    if (summaryDrought) { summary = summaryDrought; droughtWarn('Visit summary'); }
+    const patched = insights.map((i) => {
+      const fields = {};
+      let touched = false;
+      for (const f of ['whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisit']) {
+        const replaced = replaceDroughtHypothesis(i && i[f]);
+        if (replaced) { fields[f] = replaced; touched = true; }
+      }
+      return touched ? { ...i, ...fields } : i;
+    });
+    if (patched.some((p, idx) => p !== insights[idx])) { insights = patched; droughtWarn('A priority finding'); }
+    photoSummary = replaceDroughtHypothesis(reportV2.photoSummary);
+    if (photoSummary) droughtWarn('The photo narrative');
+  }
 
   // ── Follow-up detection (lawn only — see serviceLine doc above) ──────────
   // Honest framing: "planned" — we surface it as a reassurance card with the reason
@@ -115,10 +234,14 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     || (!deniesFollowUp && /\bfollow[- ]?up\b|\bre-?check\b|\breturn visit\b|\b(?:will|we['’]ll) (?:return|come back|be back)\b/i.test(summaryText)));
   let followUp = null;
   if (mentionsFollowUp) {
+    // The reason rides through the same drought reconciliation as the cards —
+    // "inspect edge areas for drought stress" must not survive on a
+    // rain-above-target report when every other surface was corrected.
+    const focus = (rainWellAboveTarget && replaceDroughtHypothesis(nextVisitFocus)) || nextVisitFocus;
     followUp = {
       scheduled: true,
       headline: 'Follow-up already planned',
-      reason: firstSentence(nextVisitFocus) || 'We’ll recheck the areas we flagged and compare them against today’s photos.',
+      reason: firstSentence(focus) || 'We’ll recheck the areas we flagged and compare them against today’s photos.',
       customerAction: 'No action is needed from you before then unless the area changes quickly.',
     };
   }
@@ -134,12 +257,15 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     // else keeps the neutral lead. The greeting strip mirrors the client's
     // cleanVisitSummary so the hero never opens with a thank-you line.
     const summaryLead = leadSentence(
-      String(data.summary || '').replace(/^Thanks for having us out today\.\s*/i, '').trim()
+      String(summary || data.summary || '').replace(/^Thanks for having us out today\.\s*/i, '').trim()
     );
-    const lead = summaryLead || 'Routine service completed.';
     // No follow-up clause here (owner directive 2026-08-03): the follow-up
     // card below carries that promise; the hero states only today's outcome.
-    todaysResult = `${lead} No urgent homeowner action is needed today.`;
+    // No appended "No urgent homeowner action is needed today." either (owner
+    // 2026-08-04): it rendered on EVERY reconciled report — redundant next to
+    // the follow-up card's "no action" line and contradictory when the
+    // snapshot carries a real "Your next step".
+    todaysResult = summaryLead || 'Routine service completed.';
     warnings.push({
       severity: 'warning',
       code: 'todays_result_overclaims_clear',
@@ -166,7 +292,17 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     }
   }
 
-  return { todaysResult, reentry, followUp, warnings };
+  return {
+    todaysResult,
+    reentry,
+    followUp,
+    warnings,
+    // Non-null ONLY when a reconciliation changed the text — the route applies
+    // these over the payload; null means "keep what the payload already has".
+    summary,
+    photoSummary,
+    insights: insights === rawInsights ? null : insights,
+  };
 }
 
-module.exports = { reconcileLawnReport, firstSentence };
+module.exports = { reconcileLawnReport, firstSentence, reconcileRainFigure, replaceDroughtHypothesis };

@@ -21,6 +21,55 @@ describe('WaterIntakeBar inch labels', () => {
   });
 });
 
+describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
+  it('no schedule on file: shows "Not on file" instead of a false 0" reading', () => {
+    render(<WaterIntakeBar water={{ rainInches: 2.96, irrigationInches: 0, totalInches: 2.96, targetInches: 0.75, status: 'high', confidence: 'low', scheduleOnFile: false }} />);
+    expect(screen.getByText('Not on file')).toBeInTheDocument();
+    expect(screen.queryByText('0"')).not.toBeInTheDocument();
+    // The confidence tag names the actual gap instead of blaming the rain data.
+    expect(screen.getByText('Irrigation not on file')).toBeInTheDocument();
+    expect(screen.queryByText('Limited data this week')).not.toBeInTheDocument();
+  });
+
+  it('a real schedule keeps the numeric row and the standard confidence tag', () => {
+    render(<WaterIntakeBar water={{ rainInches: 1.2, irrigationInches: 0.5, totalInches: 1.7, targetInches: 0.75, status: 'high', confidence: 'high', scheduleOnFile: true }} />);
+    expect(screen.getByText('0.5"')).toBeInTheDocument();
+    expect(screen.queryByText('Not on file')).not.toBeInTheDocument();
+    expect(screen.getByText('Verified data')).toBeInTheDocument();
+  });
+
+  it('older payloads without scheduleOnFile keep the numeric row (no false "Not on file")', () => {
+    render(<WaterIntakeBar water={{ rainInches: 1.2, irrigationInches: 0, totalInches: 1.2, targetInches: 0.75, status: 'high', confidence: 'low' }} />);
+    expect(screen.getByText('0"')).toBeInTheDocument();
+    expect(screen.queryByText('Not on file')).not.toBeInTheDocument();
+    expect(screen.getByText('Limited data this week')).toBeInTheDocument();
+  });
+});
+
+describe('LawnTrends first-visit baseline (owner 2026-08-04)', () => {
+  it('no chartable series + a real score → baseline card, not silence', () => {
+    render(<LawnTrends trends={{}} baselineScore={74} />);
+    expect(screen.getByText('Progress Tracking')).toBeInTheDocument();
+    expect(screen.getByText(/baseline at 74\/100/)).toBeInTheDocument();
+    expect(screen.getByText(/next visit/i)).toBeInTheDocument();
+  });
+
+  it('no score → still renders nothing (an unscored visit makes no baseline claim)', () => {
+    const { container } = render(<LawnTrends trends={{}} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('real trends render charts, never the baseline card', () => {
+    const overall = [
+      { date: '2026-06-01', label: 'Jun 1', value: 62 },
+      { date: '2026-07-01', label: 'Jul 1', value: 70 },
+    ];
+    render(<LawnTrends trends={{ overall }} baselineScore={70} />);
+    expect(screen.getByText('Lawn Health Trend')).toBeInTheDocument();
+    expect(screen.queryByText('Progress Tracking')).not.toBeInTheDocument();
+  });
+});
+
 describe('LawnTrends mowing band honesty', () => {
   const mowing = [
     { date: '2026-05-26', value: 3.2 },
