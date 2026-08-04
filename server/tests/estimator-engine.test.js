@@ -856,6 +856,48 @@ describe('review fixes', () => {
     expect(validateIntent(partialStinging).valid).toBe(false);
     const fullStinging = { ...baseIntent(), services: { stinging: { species: 'PAPER_WASP', tier: 2, removal: 'SMALL' } }, service_interest_label: 'Wasp Treatment' };
     expect(validateIntent(fullStinging).valid).toBe(true);
+    // germanRoach: priceGermanRoach silently DEFAULTS a missing/invalid
+    // severity to the light (cheapest) tier — a severity-less intent must
+    // fail validation, not green-lane a guessed underquote.
+    const partialGermanRoach = { ...baseIntent(), services: { germanRoach: {} }, service_interest_label: 'German Roach Cleanout' };
+    expect(validateIntent(partialGermanRoach).valid).toBe(false);
+    // 'severe' is a pricer-side alias, not a canonical tier — out of vocab.
+    const aliasSeverity = { ...baseIntent(), services: { germanRoach: { severity: 'severe' } }, service_interest_label: 'German Roach Cleanout' };
+    expect(validateIntent(aliasSeverity).valid).toBe(false);
+    const fullGermanRoach = { ...baseIntent(), services: { germanRoach: { severity: 'light' } }, service_interest_label: 'German Roach Cleanout' };
+    expect(validateIntent(fullGermanRoach).valid).toBe(true);
+  });
+
+  test('a germanRoach intent prices the severity-tier cleanout, not generic one-time pest', () => {
+    const { generateEstimate } = require('../services/pricing-engine');
+    const { SPECIALTY } = require('../services/pricing-engine/constants');
+    const intent = {
+      ...baseIntent(),
+      services: { germanRoach: { severity: 'light' } },
+      service_interest_label: 'German Roach Cleanout',
+    };
+    const input = buildEngineInput({
+      intent,
+      propertyFacts: {
+        home: { value: 2100, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] },
+        lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] },
+        newConstruction: false,
+        tenant: false,
+      },
+      context: {},
+    });
+    const result = generateEstimate(input);
+    const line = (result.lineItems || []).find((l) => l.service === 'german_roach');
+    expect(line).toBeTruthy();
+    expect(line.visits).toBe(SPECIALTY.germanRoach.tiers.light.visits);
+    expect(line.price).toBe(SPECIALTY.germanRoach.tiers.light.price);
+    expect(line.severityWasDefaulted).toBe(false);
+    // No generic one-time pest line rides along uninvited.
+    expect((result.lineItems || []).some((l) => l.service === 'one_time_pest')).toBe(false);
+    // The cleanout lands in the one-time bucket of the draft totals.
+    const totals = deriveTotals(result);
+    expect(totals.oneTime).toBe(line.price);
+    expect(totals.monthly).toBe(0);
   });
 
   test('structural lookup facts and the graduated water multiplier reach the engine input', () => {

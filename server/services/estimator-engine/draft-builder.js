@@ -314,6 +314,7 @@ function deriveTotals(engineResult) {
 const SERVICE_COMPS_ALIASES = {
   pest: 'pest',
   oneTimePest: 'pest',
+  germanRoach: 'roach',
   lawn: 'lawn',
   oneTimeLawn: 'lawn',
   lawnPestControl: 'lawn pest',

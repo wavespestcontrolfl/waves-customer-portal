@@ -31,6 +31,22 @@ const SERVICE_OPTION_SCHEMAS = {
     additionalProperties: false,
   },
   oneTimePest: { type: 'object', additionalProperties: false, properties: {} },
+  germanRoach: {
+    type: 'object',
+    properties: {
+      // The cleanout pricer's tier keys. 'severe' exists as a pricer alias
+      // (collapses to heavy) but stays out of the enum — one canonical word
+      // per tier keeps the composer's choice auditable against the call.
+      severity: { enum: ['light', 'moderate', 'heavy'] },
+    },
+    // priceGermanRoach silently DEFAULTS a missing/invalid severity to the
+    // light (cheapest) tier — an intent without severity would green-lane a
+    // guessed underquote instead of skipping. Required forces the composer
+    // to establish infestation severity on the call or skip with a reason
+    // (same contract as stinging/bedBug).
+    required: ['severity'],
+    additionalProperties: false,
+  },
   lawn: {
     type: 'object',
     properties: {
