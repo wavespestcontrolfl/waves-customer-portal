@@ -2518,11 +2518,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // service on the schedule ("Monthly Lawn Care Service"), so the scheduled
   // row's service_type (the catalog name) wins over the record's snapshot
   // when the visit is linked; unlinked/legacy records keep the snapshot.
+  // A REJECTED row lookup is not the same as "unlinked" (codex P2 r22):
+  // the flag routes the record into the unresolved-linked-identity
+  // sentinel below instead of the editable label fallback.
+  let scheduleRowLookupFailed = false;
   const scheduledServiceRow = service.scheduled_service_id
     ? await knex('scheduled_services')
       .where({ id: service.scheduled_service_id })
       .first('id', 'service_id', 'service_type')
-      .catch(() => null)
+      .catch(() => { scheduleRowLookupFailed = true; return null; })
     : null;
   const linkedServiceName = String(scheduledServiceRow?.service_type || '').trim()
     || serviceDisplayName(service);
@@ -2587,7 +2591,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceKey: hasFrozenPrimary
       ? (frozenTraceData.completedServiceKey || null)
       : (laneProfile?.serviceKey
-        || (laneProfileLookupFailed ? 'unresolved:linked_service' : null)),
+        || ((laneProfileLookupFailed || scheduleRowLookupFailed) ? 'unresolved:linked_service' : null)),
     findingsType: snapshotFindingsType || (hasFrozenPrimary ? null : laneProfile?.findingsType) || null,
     displayName: `${service.service_type || ''} ${hasFrozenPrimary ? (frozenTraceData.completedServiceName || '') : (scheduledServiceRow?.service_type || '')}`,
     // Render side: conditional lanes (roach family) need the frozen

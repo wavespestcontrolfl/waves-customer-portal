@@ -448,6 +448,42 @@ describe('classification behavior', () => {
     )).rejects.toThrow('profiles down');
   });
 
+  test('round 22 — the completion freezer never stamps a typed key whose pointer was not found', async () => {
+    const { frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+    const trxFor = (profiles) => (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        orderBy: () => q,
+        select: () => {
+          if (table === 'scheduled_service_addons') {
+            return Promise.resolve([
+              { service_id: 'a1', service_name: 'Flea & Tick', service_key_snapshot: 'flea_tick' },
+              { service_id: 'a2', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+            ]);
+          }
+          if (table === 'service_completion_profiles') return Promise.resolve(profiles);
+          return Promise.resolve([]);
+        },
+      };
+      return q;
+    };
+    // pointer found: the typed line freezes key + pointer
+    const withPointer = await frozenAddonLinesForCompletion('ss-r22', trxFor([
+      { service_key: 'flea_tick', project_type: 'flea' },
+    ]));
+    expect(withPointer[0]).toMatchObject({ serviceKey: 'flea_tick', findingsType: 'flea' });
+    // no active profile row (cutover/deactivation): the typed line stays
+    // LIVE-RESOLVABLE — a frozen null pointer would be permanently
+    // unclassified even after the profile is restored
+    const withoutPointer = await frozenAddonLinesForCompletion('ss-r22', trxFor([]));
+    expect(withoutPointer[0]).not.toHaveProperty('serviceKey');
+    expect(withoutPointer[0]).toMatchObject({ serviceId: 'a1', serviceName: 'Flea & Tick' });
+    // a SERVICE_KEY_RULES-covered key classifies without a pointer, so it
+    // freezes either way
+    expect(withoutPointer[1]).toMatchObject({ serviceKey: 'pest_general_quarterly', findingsType: null });
+  });
+
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
     // pre-untype callback: the eligible one_time_pest_treatment snapshot
     // no longer bypasses the exterior-evidence condition

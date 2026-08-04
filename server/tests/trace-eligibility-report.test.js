@@ -327,6 +327,29 @@ describe('round 21 — the shared resolver fails closed on a linked lookup failu
     );
     expect(unlinked.suppressed).toBe(false);
   });
+
+  test('round 22 — the report builder fails closed when the schedule-row lookup REJECTS', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    // knex where only the scheduled_services lookup rejects — everything
+    // else behaves like the standard stub
+    const base = stubKnex({ treatment_zone_maps: [TRACED_ROW] });
+    const rejectingKnex = (table) => {
+      if (table !== 'scheduled_services') return base(table);
+      const q = {
+        where: () => q,
+        first: () => Promise.reject(new Error('db down')),
+      };
+      return q;
+    };
+    // linked record + eligible-by-name label: the sentinel must suppress
+    const data = await buildReportV1Data(
+      serviceRow('Quarterly Pest Control'),
+      'token-trace-r22-schedule-reject',
+      rejectingKnex,
+      { mode: 'live' },
+    );
+    expect(data.treatmentMap?.traced || null).toBeNull();
+  });
 });
 
 // Codex P1 r2: reports-public and email-delivery build the re-entry

@@ -577,10 +577,18 @@ async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
   }
   return rows.map((row) => {
     const key = row.service_key_snapshot || keyById.get(row.service_id) || null;
+    // A typed key's ONLY identity is its findings pointer — freezing it
+    // with a null pointer during a cutover/temporary deactivation would
+    // make the report permanently unclassified even after the profile is
+    // restored (codex P2 r22). Freeze only when the pointer was actually
+    // found or SERVICE_KEY_RULES covers the key on its own; otherwise
+    // the line stays live-resolvable.
+    const freezable = key && !lookupFailed
+      && (pointerByKey.has(key) || Object.prototype.hasOwnProperty.call(SERVICE_KEY_RULES, key));
     return {
       serviceId: row.service_id || null,
       serviceName: row.service_name || null,
-      ...(key && !lookupFailed
+      ...(freezable
         ? { serviceKey: key, findingsType: pointerByKey.get(key) || null }
         : {}),
     };
