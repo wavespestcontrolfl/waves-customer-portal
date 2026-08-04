@@ -70,9 +70,14 @@ const FINDINGS_TYPE_RULES = {
   one_time_lawn_treatment: {
     eligible: true, variant: 'outline', captionKey: 'lawnCoverage', requiresAppliedWork: true,
   },
-  // liquid termite family (trench/rod/spot) — a perimeter application IS
-  // the product; the compliance certificate lane is excluded separately.
-  termite_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // The shared termite form allows spot/bait/cartridge/wood methods
+  // beside the two perimeter ones, so RENDER requires a recorded
+  // perimeter method — a wood-treatment completion must not publish a
+  // sprayed perimeter (codex P1 r10). Capture stays permissive until the
+  // method is recorded.
+  termite_treatment: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresPerimeterMethod: true,
+  },
   // nothing is sprayed on these stops — a trace would be a claim the
   // visit cannot support (rodent-trapping ruling, owner 2026-08-02,
   // generalized)
@@ -112,7 +117,13 @@ const SERVICE_KEY_RULES = {
   fire_ant: {
     eligible: true, variant: 'outline', captionKey: 'lawnCoverage', overridesSnapshot: true,
   },
-  tick_control: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Yard, fence line, and wooded edges — granular broadcast plus
+  // perimeter spray, so the treated geometry is the property area (codex
+  // P1 r10). overridesSnapshot for the same reason as fire_ant: pre-untype
+  // reports carry the generic one_time_pest_treatment 'spray' pointer.
+  tick_control: {
+    eligible: true, variant: 'outline', captionKey: 'lawnCoverage', overridesSnapshot: true,
+  },
   // Individual-nest removal with localized residual on eaves/soffits —
   // never a property-perimeter application (codex P1 r6).
   bee_wasp_removal: { eligible: false, reason: 'localized_treatment_lane' },
@@ -257,6 +268,15 @@ function resolveTraceEligibility({
       && typedValues !== undefined && !recordedExteriorWork(typedValues)) {
       return {
         eligible: false, variant: null, captionKey: null, reason: 'no_exterior_work_recorded',
+      };
+    }
+    // Termite form: only the two perimeter methods substantiate a
+    // perimeter trace (codex P1 r10).
+    if (rule.eligible && rule.requiresPerimeterMethod
+      && typedValues !== undefined
+      && !/^(?:liquid perimeter|trenching)$/i.test(String(typedValues?.treatment_method || '').trim())) {
+      return {
+        eligible: false, variant: null, captionKey: null, reason: 'no_perimeter_method_recorded',
       };
     }
     if (rule.eligible && rule.requiresAppliedWork

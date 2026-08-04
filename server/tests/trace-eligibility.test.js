@@ -268,6 +268,38 @@ describe('classification behavior', () => {
     })).toMatchObject({ eligible: true, variant: 'spray' });
   });
 
+  test('tick control is yard geometry and survives its stale snapshot (round 10)', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'tick_control' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'tick_control',
+      findingsType: 'one_time_pest_treatment',
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+  });
+
+  test('termite traces require a recorded perimeter method at render (round 10)', () => {
+    // capture side stays permissive
+    expect(resolveTraceEligibility({ findingsType: 'termite_treatment' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'termite_treatment',
+      typedValues: { treatment_method: 'Liquid perimeter' },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'termite_treatment',
+      typedValues: { treatment_method: 'Trenching' },
+    })).toMatchObject({ eligible: true });
+    for (const method of ['Wood treatment', 'Spot treatment', 'Bait station setup', 'Cartridge replacement', 'Other']) {
+      expect(resolveTraceEligibility({
+        findingsType: 'termite_treatment',
+        typedValues: { treatment_method: method },
+      })).toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+    }
+    // no snapshot at all fails closed at render
+    expect(resolveTraceEligibility({ findingsType: 'termite_treatment', typedValues: null }))
+      .toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+  });
+
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
     for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
       expect(resolveTraceEligibility({ displayName }))
