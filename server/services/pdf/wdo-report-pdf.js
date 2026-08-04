@@ -289,8 +289,22 @@ const INACCESSIBLE_ROWS = [
 // Category labels as written in the findings blob. Longest-first so
 // "crawl space" wins over a bare "crawl", and the alternation can't match a
 // prefix of a longer label.
+//
+// TWO forms, because the findings blob has two writers:
+//  1. Line-anchored, separator OPTIONAL — the property-intelligence emitter
+//     (client/src/lib/wdoProfileToFindings.js) appends whole lines like
+//     "Crawlspace present — verify access and clearance on site.", where a
+//     filler word sits between the category and the dash. Each appended note
+//     is its own line, so a line STARTING with a category word is that
+//     category's row. Without this, such a note folds into whatever labelled
+//     segment preceded it and its box never ticks.
+//  2. Inline, separator REQUIRED — "Attic: insulation. Interior: wall voids."
+//     typed by the tech. A bare category word mid-sentence ("areas of the
+//     interior") must NOT split, so here the colon/dash is mandatory.
+const INACCESSIBLE_CATEGORY_WORDS = String.raw`crawl\s*spaces?|crawlspaces?|crawl|attics?|interiors?|exteriors?|other`;
 const INACCESSIBLE_LABEL_PATTERN = new RegExp(
-  String.raw`\b(crawl\s*spaces?|crawlspaces?|crawl|attics?|interiors?|exteriors?|other)\b\s*(?::|—|–|-)+\s*`,
+  String.raw`(?:^|\n)[\s;,]*(${INACCESSIBLE_CATEGORY_WORDS})\b[ \t]*(?::|—|–|-)?[ \t]*`
+  + String.raw`|\b(${INACCESSIBLE_CATEGORY_WORDS})\b\s*(?::|—|–|-)+\s*`,
   'gi'
 );
 
@@ -327,7 +341,8 @@ function splitInaccessibleAreas(value) {
   const marks = [];
   let m;
   while ((m = INACCESSIBLE_LABEL_PATTERN.exec(text)) !== null) {
-    marks.push({ key: inaccessibleRowKeyFor(m[1]), start: m.index, bodyStart: m.index + m[0].length });
+    // m[1] = line-anchored form, m[2] = inline form (see the pattern above).
+    marks.push({ key: inaccessibleRowKeyFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
   }
 
   const append = (key, chunk) => {

@@ -344,3 +344,52 @@ describe('wdo-report-pdf Section 3 row distribution', () => {
     expect((await PDFDocument.load(buf)).getPageCount()).toBe(2);
   });
 });
+
+// Codex #3188 P1: the property-intelligence emitter
+// (client/src/lib/wdoProfileToFindings.js) appends whole LINES where a filler
+// word sits between the category and the dash. With a separator-required-only
+// parser, such a note folded into the preceding labelled segment and its box
+// never ticked — reintroducing the exact misattribution this PR fixes.
+describe('wdo-report-pdf Section 3 — generated property-intelligence notes', () => {
+  const { splitInaccessibleAreas } = _private;
+
+  // Verbatim strings emitted by applyProfileToWdoFindings().
+  const CRAWL_PRESENT = 'Crawlspace present — verify access and clearance on site.';
+  const CRAWL_SLAB = 'Crawlspace: N/A — slab-on-grade foundation.';
+
+  test('generated crawlspace note keeps its own row alongside a tech label', () => {
+    const { rows, ticked } = splitInaccessibleAreas(`Attic: concealed by insulation.\n${CRAWL_PRESENT}`);
+    expect(rows.attic).toBe('concealed by insulation.');
+    // sanitizeText normalises the em-dash to WinAnsi before it reaches the form.
+    expect(rows.crawlspace).toBe('present - verify access and clearance on site.');
+    expect(ticked.has('crawlspace')).toBe(true);
+    expect([...ticked].sort()).toEqual(['attic', 'crawlspace']);
+  });
+
+  test('generated slab note keeps its own row alongside a tech label', () => {
+    const { rows, ticked } = splitInaccessibleAreas(`Interior: wall voids.\n${CRAWL_SLAB}`);
+    expect(rows.interior).toBe('wall voids.');
+    expect(rows.crawlspace).toBe('N/A - slab-on-grade foundation.');
+    expect([...ticked].sort()).toEqual(['crawlspace', 'interior']);
+  });
+
+  test('generated note alone still routes to Crawlspace', () => {
+    const { rows, ticked } = splitInaccessibleAreas(CRAWL_PRESENT);
+    expect([...ticked]).toEqual(['crawlspace']);
+    expect(rows.crawlspace).toBe('present - verify access and clearance on site.');
+  });
+
+  test('a bare category word mid-sentence still does NOT split a segment', () => {
+    // "interior" here is prose, not a label — it must not start a new row.
+    const { rows, ticked } = splitInaccessibleAreas('Attic: areas of the interior hatch were blocked.');
+    expect(rows.attic).toBe('areas of the interior hatch were blocked.');
+    expect([...ticked]).toEqual(['attic']);
+  });
+
+  test('multiple generated lines each keep their own row', () => {
+    const { ticked } = splitInaccessibleAreas(
+      `Attic: insulation.\n${CRAWL_PRESENT}\nExterior soffit wrap conceals the fascia.`
+    );
+    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior']);
+  });
+});
