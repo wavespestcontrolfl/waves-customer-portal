@@ -25,6 +25,8 @@ function chain({ result = [], first, returning, updateResult = 1 } = {}) {
     'where',
     'whereRaw',
     'whereNot',
+    'join',
+    'whereNotNull',
     'whereNull',
     'whereNotNull',
     'orWhereNotNull',
@@ -371,9 +373,10 @@ describe('automation runner enrollment reactivation', () => {
       customers: [
         // Post-lock re-read: the undo cleared the winner's inherited email.
         chain({ first: { id: 'cust-1', email: null, deleted_at: null } }),
-        // Claimant probe: the restored loser now owns the passed address.
-        chain({ first: { id: 'cust-loser', email: 'inherited@example.com' } }),
       ],
+      // Joined undone-holder existence query (r31): a live holder who IS
+      // the restored loser of an undone merge with this winner.
+      'customers as c': [chain({ first: { id: 'cust-loser' } })],
     });
     const result = await enrollCustomer({
       templateKey: 'flea',
@@ -393,11 +396,10 @@ describe('automation runner enrollment reactivation', () => {
       customers: [
         // Row's own email differs (tenant-under-landlord shape)...
         chain({ first: { id: 'cust-1', email: 'landlord@example.com', deleted_at: null } }),
-        // ...and the tenant has their own live customer record.
-        chain({ first: { id: 'cust-tenant' } }),
       ],
-      // No undone merge links cust-1 → cust-tenant: supported, not stale.
-      customer_merge_journal: [chain({ first: undefined })],
+      // The tenant has their own live record but NO undone-merge link to
+      // cust-1 — the joined existence query finds nothing: supported.
+      'customers as c': [chain({ first: undefined })],
       automation_enrollments: [
         chain({ first: { id: 'enr-2', status: 'completed', email: 'old@example.com' } }),
         reactivateUpdate,

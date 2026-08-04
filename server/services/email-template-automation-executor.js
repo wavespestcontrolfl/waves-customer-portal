@@ -484,35 +484,45 @@ async function resolveRecipientUnderLock(conn, recipient) {
     const payloadEmail = String(recipient.email || '').trim().toLowerCase();
     const liveEmail = String(row.email || '').trim().toLowerCase();
     if (payloadEmail && payloadEmail !== liveEmail) {
-      const otherOwner = await conn('customers')
-        .whereRaw('lower(email) = ?', [payloadEmail])
-        .whereNot({ id: recipient.id })
-        .where('active', true)
-        .whereNull('deleted_at')
-        .first('id');
-      if (otherOwner) {
-        // Another holder ALONE is not staleness (r30): shared household
-        // addresses and different-by-design recipients (a tenant with
-        // their own customer record) are supported. The post-undo shape
-        // has MERGE-SPECIFIC evidence — the other holder is the restored
-        // LOSER of an undone merge whose winner is this run's customer.
-        // Only that blocks; an unreadable journal blocks too (the
-        // conservative pre-r30 posture).
-        let undoneLink = { id: 'unverifiable' };
+      // Another holder ALONE is not staleness (r30): shared household
+      // addresses and different-by-design recipients (a tenant with their
+      // own customer record) are supported. The post-undo shape has
+      // MERGE-SPECIFIC evidence — a live holder who is the restored LOSER
+      // of an undone merge whose winner is this run's customer — checked
+      // across EVERY holder in one joined query (r31: sampling a single
+      // holder could pick the spouse and miss the restored loser sharing
+      // the same mailbox). Unreadable → conservative block only when a
+      // bare holder exists.
+      let undoneHolder = null;
+      try {
+        undoneHolder = await conn('customers as c')
+          .join('customer_merge_journal as j', function joinUndone() {
+            this.on('j.loser_customer_id', 'c.id');
+          })
+          .where('j.winner_customer_id', recipient.id)
+          .whereNotNull('j.undone_at')
+          .whereRaw('lower(c.email) = ?', [payloadEmail])
+          .whereNot('c.id', recipient.id)
+          .where('c.active', true)
+          .whereNull('c.deleted_at')
+          .first('c.id');
+      } catch {
         try {
-          undoneLink = await conn('customer_merge_journal')
-            .where({ winner_customer_id: recipient.id, loser_customer_id: otherOwner.id })
-            .whereNotNull('undone_at')
+          undoneHolder = await conn('customers')
+            .whereRaw('lower(email) = ?', [payloadEmail])
+            .whereNot({ id: recipient.id })
+            .where('active', true)
+            .whereNull('deleted_at')
             .first('id');
-        } catch { /* keep the conservative block */ }
-        if (undoneLink) {
-          // Recorded (audit trail) but never sent: a 'skipped' row fails
-          // executeRun's status claim, so no delivery can follow.
-          return {
-            recipient,
-            blockReason: 'recipient address was restored to the merged-away customer by an undo (stale pre-undo address)',
-          };
-        }
+        } catch { /* both unreadable → keep the payload attribution */ }
+      }
+      if (undoneHolder) {
+        // Recorded (audit trail) but never sent: a 'skipped' row fails
+        // executeRun's status claim, so no delivery can follow.
+        return {
+          recipient,
+          blockReason: 'recipient address was restored to the merged-away customer by an undo (stale pre-undo address)',
+        };
       }
     }
   } catch {
@@ -585,26 +595,20 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
         const leadPayloadEmail = String(recipient.email || '').trim().toLowerCase();
         if (leadPayloadEmail && ownerNow) {
           try {
-            const otherOwner = await trx('customers')
-              .whereRaw('lower(email) = ?', [leadPayloadEmail])
-              .whereNot({ id: ownerNow })
-              .where('active', true)
-              .whereNull('deleted_at')
-              .first('id');
-            if (otherOwner) {
-              // Merge-specific evidence only (r30) — see
-              // resolveRecipientUnderLock: another holder blocks solely
-              // when it is the restored loser of an undone merge whose
-              // winner is this lead's customer.
-              let undoneLink = { id: 'unverifiable' };
-              try {
-                undoneLink = await trx('customer_merge_journal')
-                  .where({ winner_customer_id: ownerNow, loser_customer_id: otherOwner.id })
-                  .whereNotNull('undone_at')
-                  .first('id');
-              } catch { /* keep the conservative block */ }
-              if (undoneLink) leadBlockReason = 'recipient address was restored to the merged-away customer by an undo (stale pre-undo address)';
-            }
+            // Merge-specific evidence across EVERY live holder (r30/r31)
+            // — see resolveRecipientUnderLock for the sampling rationale.
+            const undoneLeadHolder = await trx('customers as c')
+              .join('customer_merge_journal as j', function joinUndone() {
+                this.on('j.loser_customer_id', 'c.id');
+              })
+              .where('j.winner_customer_id', ownerNow)
+              .whereNotNull('j.undone_at')
+              .whereRaw('lower(c.email) = ?', [leadPayloadEmail])
+              .whereNot('c.id', ownerNow)
+              .where('c.active', true)
+              .whereNull('c.deleted_at')
+              .first('c.id');
+            if (undoneLeadHolder) leadBlockReason = 'recipient address was restored to the merged-away customer by an undo (stale pre-undo address)';
           } catch { /* unreadable → keep the payload attribution (unchanged behavior) */ }
         }
         return createRunUnlocked({

@@ -183,28 +183,30 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
       if (!fresh || fresh.deleted_at) return { enrolled: false, reason: 'customer gone' };
       const liveEmail = String(fresh.email || '').trim().toLowerCase();
       if (normalizedEmail !== liveEmail) {
-        const otherOwner = await conn('customers')
-          .whereRaw('lower(email) = ?', [normalizedEmail])
-          .whereNot({ id: customer.id })
-          .where('active', true)
-          .whereNull('deleted_at')
-          .first('id');
-        if (otherOwner) {
-          // Merge-specific evidence only (r30): another holder blocks
-          // solely when it is the restored loser of an undone merge whose
-          // winner is this customer — shared household addresses and
-          // different-by-design recipients with their own customer rows
-          // are supported and still enroll.
-          let undoneLink = { id: 'unverifiable' };
-          try {
-            undoneLink = await conn('customer_merge_journal')
-              .where({ winner_customer_id: customer.id, loser_customer_id: otherOwner.id })
-              .whereNotNull('undone_at')
-              .first('id');
-          } catch { /* keep the conservative block */ }
-          if (undoneLink) {
-            return { enrolled: false, reason: 'address was restored to the merged-away customer by an undo (stale pre-undo address)' };
-          }
+        // Merge-specific evidence only (r30), checked across EVERY live
+        // holder of the address (r31 — sampling one arbitrary holder could
+        // pick a spouse/tenant and miss the restored loser sharing the
+        // same mailbox): one joined existence query — any live customer at
+        // this address who is the LOSER of an UNDONE merge whose winner is
+        // this customer blocks; shared household addresses and
+        // different-by-design recipients still enroll. Unreadable → block
+        // (conservative posture).
+        let undoneHolder = { id: 'unverifiable' };
+        try {
+          undoneHolder = await conn('customers as c')
+            .join('customer_merge_journal as j', function joinUndone() {
+              this.on('j.loser_customer_id', 'c.id');
+            })
+            .where('j.winner_customer_id', customer.id)
+            .whereNotNull('j.undone_at')
+            .whereRaw('lower(c.email) = ?', [normalizedEmail])
+            .whereNot('c.id', customer.id)
+            .where('c.active', true)
+            .whereNull('c.deleted_at')
+            .first('c.id');
+        } catch { /* keep the conservative block */ }
+        if (undoneHolder) {
+          return { enrolled: false, reason: 'address was restored to the merged-away customer by an undo (stale pre-undo address)' };
         }
       }
       // Names come from the POST-LOCK row when it has them (r23 P2): the

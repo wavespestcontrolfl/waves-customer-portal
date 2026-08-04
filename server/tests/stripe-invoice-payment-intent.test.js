@@ -253,6 +253,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(updateInvoice).toHaveBeenCalledWith({
       processor: 'stripe',
       stripe_payment_intent_id: 'pi_open',
+      // r31: the reuse branch stamps updated_at too — same mutation-gate
+      // rationale as the fresh-PI path.
+      updated_at: 'NOW',
     });
   });
 

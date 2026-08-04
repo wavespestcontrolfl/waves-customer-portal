@@ -1916,6 +1916,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   appointment_card_requests: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260530000021; public-token outline state.
   service_outline_packets: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260423000008; public report tokens.
+  projects: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2570,6 +2572,24 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       });
       if (strandedFollowups) {
         refuse(`${strandedFollowups} follow-up visit(s) reference this merge's appointments as their source — moving the source visits back would split the follow-ups from them; reconcile by hand`);
+      }
+      // Projects (r31): a WDO/prep/project report created for a journaled
+      // visit stores its own customer_id and sends the public report from
+      // it, never touching the visit — moving the visit back would leave
+      // the report and its public token on the kept customer.
+      let projectRows = [];
+      try {
+        projectRows = await trx('projects')
+          .whereIn('scheduled_service_id', journaledVisitIdsAll)
+          .select(['id', ...activityColumnsFor('projects')]);
+      } catch (e) {
+        refuse(`Cannot verify projects for this merge's visits (${e.message}) — refusing to revert`);
+      }
+      const strandedProjects = countActivityRows(projectRows, {
+        journaledIds: journaledIdsFor('projects'), mergeAt, table: 'projects',
+      });
+      if (strandedProjects) {
+        refuse(`${strandedProjects} project/report record(s) for this merge's visits are outside its journal — the public report would stay on the kept customer; reconcile by hand`);
       }
     }
 

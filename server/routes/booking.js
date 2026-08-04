@@ -2019,6 +2019,22 @@ async function createSelfBooking(payload = {}) {
     const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../services/availability');
     let txResult;
     try {
+      // Pre-fence fingerprint for the rung-6 revalidation inside the
+      // transaction (r31): zone, pricing, unit, and the intent phone were
+      // all derived from pre-lock customer state — if a merge-undo wins
+      // the fence and clears an inherited address/contact, the booking
+      // must retry against live state, not commit on stale assumptions.
+      const COMMS_FINGERPRINT_COLS = [
+        'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
+        ...[1, 2, 3].flatMap((n) => {
+          const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
+          return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
+        }),
+      ];
+      const commsFingerprint = (r) => COMMS_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
+      const preFenceCustomer = custId
+        ? await db('customers').where({ id: custId }).first(...COMMS_FINGERPRINT_COLS)
+        : null;
       txResult = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
       // in services/scheduling/occupancy.js). This path's own conflict gate
@@ -2068,6 +2084,17 @@ async function createSelfBooking(payload = {}) {
       // it must serialize against a concurrent customer-merge undo's
       // absence probes — after the scheduling rungs, BEFORE every row lock.
       await lockCustomerComms(trx, custId);
+      if (custId) {
+        const freshBookingCustomer = await trx('customers')
+          .where({ id: custId }).first(...COMMS_FINGERPRINT_COLS);
+        if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)) {
+          throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'CUSTOMER_CHANGED_RETRY',
+          });
+        }
+      }
 
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate.
