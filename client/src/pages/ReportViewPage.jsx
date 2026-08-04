@@ -1007,15 +1007,15 @@ export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   }
   if (purpose === 'Weed prevention application') return 'Applied to stop new weeds before they sprout, ahead of the season when they spread fastest.';
   if (purpose === 'Fungus control application') {
-    // Same recorded-targets-only guard as insect control: the disease names
-    // come from the completion form's target chips, never from a hardcoded
-    // example. Framed as what the application is designed to control — the
-    // chips can be untrimmed catalog prefill (label targets), so this line
-    // must never claim the diseases were OBSERVED (codex P1 r3; same rule
-    // as the target-chip-is-a-treatment-claim ruling).
+    // Same recorded-targets-only guard as insect control: the names come
+    // from the completion form's target chips, never from a hardcoded
+    // example. Framed as what the TECHNICIAN RECORDED — the chips can be
+    // untrimmed catalog prefill (never claim OBSERVED, codex P1 r3) or
+    // hand-typed free text (never claim the label DESIGNED it, codex P1
+    // r10); recording is the only claim both sources support.
     const diseaseTargets = recordedTargetsText(app);
     return diseaseTargets
-      ? `Applied to protect the turf against ${diseaseTargets} — the diseases this treatment is designed to control.`
+      ? `Applied to protect the turf against ${diseaseTargets}, the targets your technician recorded for this application.`
       : 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';
   }
   if (purpose === 'Lawn nutrient application') return 'Used to support turf density, color, and recovery within the documented lawn program.';

@@ -34,17 +34,18 @@
  * a no-op: value-matched rollbacks cannot prove authorship.
  */
 
-// Surface-neutral on purpose: several of these rows serve ornamental/plant
-// visits too (Turf & Ornamental micronutrients, the soil amendment), and
-// this field renders on the application card for whatever service line used
-// the product — "to the turf" would misdescribe a Tree & Shrub visit
-// (codex P1 #3187 r3).
+// Surface- AND method-neutral on purpose: several of these rows serve
+// ornamental/plant visits too (Turf & Ornamental micronutrients, the soil
+// amendment), and this catalog field renders on the application card for
+// whatever service line and METHOD used the product — "to the turf" would
+// misdescribe a Tree & Shrub visit (codex P1 #3187 r3) and "spray" would
+// contradict a CarbonPro-L soil-drench narrative (codex P1 r10).
 const GRANULAR_PRECAUTION = 'Granules on sidewalks or driveways are swept back into the turf or beds; watering-in follows the visit notes. No re-entry wait once watered in and dry.';
 // Conditional instruction, not a completed-work claim: the completion
 // payload records the application, never whether drift occurred or was
 // rinsed — a permanent report must not state cleanup happened (codex P2
 // #3187 r8).
-const LIQUID_PRECAUTION = 'Applied as a liquid spray to the treated areas. If any overspray reaches walks or driveways, it rinses off with water. Watering-in follows the visit notes — treated areas are ready once dry, and your technician confirms timing.';
+const LIQUID_PRECAUTION = 'Applied in liquid form to the treated areas. If any reaches walks or driveways, it rinses off with water. Watering-in follows the visit notes — treated areas are ready once dry, and your technician confirms timing.';
 
 const GRANULAR_BLEND_SUMMARY = 'A professional-grade fertilizer blend feeding the documented plants or turf — supporting density, color, root development, and recovery on a controlled release schedule.';
 const LIQUID_BLEND_SUMMARY = 'A professional-grade liquid fertilizer feeding the documented turf or plants through leaf and root uptake — supporting density, color, root development, and recovery.';

@@ -878,11 +878,11 @@ describe('lawn fungicide purpose copy', () => {
   it('names the recorded disease targets, lowercased, without claiming observation', () => {
     expect(applicationPurpose(fungicide, 'lawn')).toBe('Fungus control application');
     expect(applicationPurposeCopy(fungicide, 'lawn')).toBe(
-      'Applied to protect the turf against large patch, gray leaf spot, take-all root rot — the diseases this treatment is designed to control.',
+      'Applied to protect the turf against large patch, gray leaf spot, take-all root rot, the targets your technician recorded for this application.',
     );
     // Chips can be untrimmed catalog prefill (label targets) — the copy must
     // never present them as observed/documented disease (codex P1 #3187).
-    expect(applicationPurposeCopy(fungicide, 'lawn')).not.toMatch(/documented|observed|found/i);
+    expect(applicationPurposeCopy(fungicide, 'lawn')).not.toMatch(/documented|observed|found|designed/i);
   });
 
   it('normalizes enum-key targets before printing', () => {

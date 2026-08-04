@@ -12460,6 +12460,18 @@ export function CompletionPanel({
       sideEffectsRetryRef.current = 0;
       sideEffectsCommittedRef.current = false;
       lastSubmitBodyRef.current = null;
+      // Panel closed while the request was in flight (codex P2 r10):
+      // unmount can't abort a fetch. The completion is durable server-side
+      // and the parent's own bookkeeping already ran inside onSubmit —
+      // clear the local artifacts, but never alert or onClose from a stale
+      // mount (they'd target whichever visit the operator opened next).
+      if (completionPanelClosedRef.current) {
+        localStorage.removeItem(completionDraftKey(service.id));
+        try {
+          localStorage.removeItem(completionResumeOwedKey(service.id));
+        } catch { /* ignore */ }
+        return;
+      }
       const photoResult = result?.completionPhotoUpload;
       if (photoResult?.failed > 0) {
         alert(
@@ -12581,9 +12593,14 @@ export function CompletionPanel({
         // Parent-equivalent success bookkeeping — onSubmit never resolved,
         // so the parent's own status flip / cache refresh never ran.
         if (onCompletedElsewhere) onCompletedElsewhere(service.id);
-        alert(CROSS_KEY_COMPLETED_MESSAGE);
-        setSubmitting(false);
-        onClose(true);
+        // Stale-mount guard (codex P2 r10): bookkeeping and storage
+        // cleanup above are safe post-close; the dialog and onClose(true)
+        // are not.
+        if (!completionPanelClosedRef.current) {
+          alert(CROSS_KEY_COMPLETED_MESSAGE);
+          setSubmitting(false);
+          onClose(true);
+        }
         return;
       }
       const retryPlan = completionSideEffectsRetryPlan(e, sideEffectsRetryCount);
@@ -12618,11 +12635,15 @@ export function CompletionPanel({
         try {
           localStorage.setItem(completionResumeOwedKey(service.id), "1");
         } catch { /* storage unavailable — the mounted panel's retry still works */ }
-        alert(retryPlan.message);
-        setSubmitting(false);
+        if (!completionPanelClosedRef.current) {
+          alert(retryPlan.message);
+          setSubmitting(false);
+        }
         return;
       }
-      alert("Failed to complete service: " + e.message);
+      if (!completionPanelClosedRef.current) {
+        alert("Failed to complete service: " + e.message);
+      }
     }
     setSubmitting(false);
   }
