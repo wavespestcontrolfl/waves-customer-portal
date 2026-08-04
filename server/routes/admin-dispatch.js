@@ -4115,7 +4115,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
     let preCommitCompletionPhotoRows = [];
-    const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
+    let completionReviewDelayMinutes;
+    try {
+      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
+    } catch (timingErr) {
+      // A committed chain replays an immutable body, and by the time a
+      // retry lands its custom reviewScheduledFor can legitimately be in
+      // the past — the freshness gate must not 400 a committed retry
+      // before it can reach the replay/resume claim (codex P2 #3187 r7).
+      // The original submit passed the strict gate, so the only reachable
+      // failure here is must-be-in-the-future; 0 = "due now" preserves the
+      // intent (the chosen time has arrived). Fresh completions keep the
+      // strict gate.
+      const committed = await CompletionAttempts
+        .hasCommittedCompletionAttempt(req.params.serviceId)
+        .catch(() => false);
+      if (!committed) throw timingErr;
+      completionReviewDelayMinutes = 0;
+    }
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedCustomerInteraction = normalizeCustomerInteractionValue(customerInteraction);

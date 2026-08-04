@@ -9817,6 +9817,16 @@ export function CompletionPanel({
   // failure leaves the flag false and the next submit sends fresh state.
   const lastSubmitBodyRef = useRef(null);
   const sideEffectsCommittedRef = useRef(false);
+  // Unmount ends the quiet poll: without this, closing the panel mid-delay
+  // let the stale timer re-invoke handleSubmit, whose alerts and
+  // onClose(true) could then close a DIFFERENT visit the user had opened
+  // meanwhile (codex P2 #3187 r7).
+  const sideEffectsPollTimerRef = useRef(null);
+  const completionPanelClosedRef = useRef(false);
+  useEffect(() => () => {
+    completionPanelClosedRef.current = true;
+    window.clearTimeout(sideEffectsPollTimerRef.current);
+  }, []);
   const draftReadyRef = useRef(false);
 
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
@@ -12110,7 +12120,18 @@ export function CompletionPanel({
       alert("Choose a review request time.");
       return;
     }
-    if (!oneTimeRecapOnly && willReview && reviewTiming === "custom") {
+    // The ONLY time-dependent pre-submit gate — skipped for a committed
+    // chain retry: the replayed body is immutable and the server ignores
+    // its review timing on replay/resume, so Date.now() advancing past a
+    // custom review time mid-poll must not strand the poll behind this
+    // alert with the button stuck on submitting (codex P2 #3187 r7). All
+    // other gates are pure over form state the poll never changes.
+    if (
+      !sideEffectsCommittedRef.current &&
+      !oneTimeRecapOnly &&
+      willReview &&
+      reviewTiming === "custom"
+    ) {
       const target = new Date(reviewCustomAt);
       if (
         !reviewCustomAt ||
@@ -12557,7 +12578,15 @@ export function CompletionPanel({
         } catch { /* storage unavailable — the mounted panel's retry still works */ }
         sideEffectsCommittedRef.current = true;
         sideEffectsRetryRef.current = sideEffectsRetryCount + 1;
-        await new Promise((resolve) => setTimeout(resolve, retryPlan.delayMs));
+        await new Promise((resolve) => {
+          sideEffectsPollTimerRef.current = window.setTimeout(
+            resolve,
+            retryPlan.delayMs,
+          );
+        });
+        // Panel closed during the delay — stop quietly. The durable reopen
+        // marker (set above) is what carries the resume across the close.
+        if (completionPanelClosedRef.current) return;
         return handleSubmit(reconcileConfirmed);
       }
       if (retryPlan?.action === "give_up") {
