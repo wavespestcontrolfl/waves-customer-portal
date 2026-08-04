@@ -2247,11 +2247,17 @@ function pestRecurringForPricingRows(rows = []) {
   return { count: pestRows.length, visitsPerYear, monthlyBase, pricingVersion: pestPricingVersionOf(...pestRows) };
 }
 
-// Per-row first-visit amounts (WaveGuard-net, preference-adjusted) — the ONE
-// derivation both the same-day visit total and the plan-credit first-visit
-// slice read, so a slice can never be computed on a base the visit doesn't
-// bill. Returns null when any row lacks an amount (the total then falls back
-// to sameDayTreatmentTotal, whose composition per row is unknown).
+// Per-row first-visit amounts — the ONE derivation both the same-day visit
+// total and the plan-credit first-visit slice read, so a slice can never be
+// computed on a base the visit doesn't bill. `amount` is the billed figure
+// (WaveGuard-net, preference-adjusted); `baseAmount` is the pre-preference
+// figure — the manual percentage credit is calculated on the pre-preference
+// base (shapeFromV1) and the section stamper slices the unadjusted
+// per-application price, so the accept slice must too (codex #3185 P1): an
+// opt-out reduces the bill by its own preference credit AND the full
+// promised plan-credit slice, never a shrunken one. Returns null when any
+// row lacks an amount (the total then falls back to sameDayTreatmentTotal,
+// whose composition per row is unknown).
 function sameDayVisitRowAmounts(frequency = {}, opts = {}) {
   const rows = Array.isArray(frequency?.perServiceTreatments)
     ? frequency.perServiceTreatments
@@ -2270,15 +2276,16 @@ function sameDayVisitRowAmounts(frequency = {}, opts = {}) {
   const out = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
-    let amount = displayedTreatmentAmountForPricingRow(row);
-    if (!(amount > 0)) return null;
+    const baseAmount = displayedTreatmentAmountForPricingRow(row);
+    if (!(baseAmount > 0)) return null;
+    let amount = baseAmount;
     if (prefMonthlyOff > 0 && pestWeightTotal > 0 && recurringServiceKey(row) === 'pest_control') {
       const visits = treatmentVisitsForPricingRow(row);
       const rowMonthlyOff = prefMonthlyOff * (pestRowWeights[index] / pestWeightTotal);
       const perTreatmentOff = visits ? (rowMonthlyOff * 12) / visits : 0;
       amount = Math.max(0, amount - perTreatmentOff);
     }
-    out.push({ row, amount });
+    out.push({ row, amount, baseAmount });
   }
   return out.length ? out : null;
 }
@@ -16096,10 +16103,23 @@ function stampPerServiceManualDiscountSlices(services = [], payload = {}) {
     // percentage — a cadence whose credit is empty or partly one-time would
     // let section rows itemize a recurring slice that cadence doesn't grant
     // (codex hardening on #3183).
-    return row && row.type === 'PERCENT' && Number(row.value) === pct
+    if (!(row && row.type === 'PERCENT' && Number(row.value) === pct
       && row.capped !== true && !row.capReason && !row.floorBreach
       && Number(row.recurringAmount ?? row.amount) > 0
-      && !(Number(row.oneTimeAmount) > 0);
+      && !(Number(row.oneTimeAmount) > 0))) return false;
+    // Display and billing must slice the SAME shapes (codex #3185 P1): the
+    // accept-side slice reads the combined cadence's per-row amounts, and a
+    // member row without a per-treatment price or visit count (legacy
+    // flat-monthly termite monitoring) makes that math bail to the
+    // pre-credit first visit — so the sections must not slice (nor hide the
+    // plan-level card) for those plans either. Symmetric bail keeps every
+    // such plan exactly on today's behavior on both surfaces.
+    const treatmentRows = Array.isArray(frequency.perServiceTreatments)
+      ? frequency.perServiceTreatments
+      : [];
+    if (!treatmentRows.length) return false;
+    return treatmentRows.every((treatment) => displayedTreatmentAmountForPricingRow(treatment) > 0
+      && treatmentVisitsForPricingRow(treatment) > 0);
   });
   if (!combinedOk) return false;
 
@@ -16254,12 +16274,17 @@ function planCreditFirstVisitSlice(frequency = {}, { preferences = null, service
   for (const entry of rowAmounts) {
     const visits = treatmentVisitsForPricingRow(entry.row);
     if (!(visits > 0)) return null;
-    allRowsAnnual = round2(allRowsAnnual + round2(entry.amount * visits));
+    // Slices and reconciliation use the PRE-preference base (codex #3185
+    // P1): the credit object and the net annual are both preference-blind
+    // (preferences subtract separately at accept), and the section stamper
+    // sliced the same unadjusted price — the promised slice must not shrink
+    // because the customer also took an opt-out credit.
+    allRowsAnnual = round2(allRowsAnnual + round2(entry.baseAmount * visits));
     const key = recurringServiceKey(entry.row);
     const eligible = (!eligibleList || manualDiscountServiceKeyMatches(eligibleList, key))
       && !manualDiscountServiceKeyMatches(md.excludedServices, key);
     if (!eligible) continue;
-    const rowSlice = round2(entry.amount * (pct / 100));
+    const rowSlice = round2(entry.baseAmount * (pct / 100));
     firstVisitSlice = round2(firstVisitSlice + rowSlice);
     annualSliceTotal = round2(annualSliceTotal + round2(rowSlice * visits));
     visitTotal += visits;

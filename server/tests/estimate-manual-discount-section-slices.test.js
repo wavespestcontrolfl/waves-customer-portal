@@ -218,9 +218,20 @@ describe('stampPerServiceManualDiscountSlices guards (direct)', () => {
       }],
     },
   ]);
+  // Combined cadence rows carry the per-row treatment composition the
+  // accept-side slice bills from — the stamper requires it (display and
+  // billing must slice the same shapes).
+  const combinedTreatments = () => ([
+    { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+    { service: 'lawn_care', perTreatment: 62.67, displayPrice: 56.4, visitsPerYear: 9 },
+  ]);
   const payload = (md, extra = {}) => ({
     manualDiscount: md,
-    frequencies: [{ key: 'quarterly', manualDiscount: md ? { ...md } : null }],
+    frequencies: [{
+      key: 'quarterly',
+      manualDiscount: md ? { ...md } : null,
+      perServiceTreatments: combinedTreatments(),
+    }],
     ...extra,
   });
 
@@ -415,5 +426,75 @@ describe('planCreditFirstVisitSlice — accept-side mirror (owner GO 2026-08-04)
     frequency.manualDiscount.recurringAmount = 25.38;
     const slice = planCreditFirstVisitSlice(frequency);
     expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 2.82 });
+  });
+});
+
+describe('codex #3185 P1 regressions — preference bases and flat-monthly members', () => {
+  const gateOnFrequency = () => ({
+    key: 'quarterly',
+    monthly: 68.68,
+    annual: 824.16,
+    manualDiscount: {
+      type: 'PERCENT', value: 5, label: 'Custom Percentage Discount',
+      amount: 43.38, recurringAmount: 43.38, oneTimeAmount: 0,
+      scope: 'recurring_annual_after_waveguard',
+      eligibleServices: ['pest_control', 'lawn_care_enhanced'],
+      excludedServices: [],
+    },
+    perServiceTreatments: [
+      { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+      { service: 'lawn_care', perTreatment: 62.67, displayPrice: 56.4, visitsPerYear: 9 },
+    ],
+  });
+
+  test('an opt-out preference does not shrink the plan-credit slice (pre-preference base)', () => {
+    // interior_spray off = a separate $10/visit preference credit; the 5%
+    // plan credit was computed on the pre-preference base, so the slice is
+    // still 5% of $90 + 5% of $56.40 = $7.32 and reconciliation holds.
+    const slice = planCreditFirstVisitSlice(gateOnFrequency(), {
+      preferences: { interior_spray: false },
+    });
+    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
+  });
+
+  test('a flat-monthly member row bails BOTH surfaces: no accept slice…', () => {
+    const frequency = gateOnFrequency();
+    frequency.perServiceTreatments.push({ service: 'termite_bait', monthly: 35 });
+    expect(planCreditFirstVisitSlice(frequency)).toBeNull();
+  });
+
+  test('…and no section stamping (the plan-level card stays)', () => {
+    const services = [
+      {
+        key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly',
+        frequencies: [{ key: 'quarterly', perTreatment: 90, perVisit: 100, monthly: 30, annual: 360, visitsPerYear: 4, perServiceTreatments: [] }],
+      },
+      {
+        key: 'termite_bait', isRecurring: true, defaultFrequencyKey: 'recurring',
+        frequencies: [{ key: 'recurring', monthly: 35, annual: 420 }],
+      },
+    ];
+    const md = {
+      type: 'PERCENT', value: 5, label: 'Custom Percentage Discount',
+      amount: 39, recurringAmount: 39, oneTimeAmount: 0,
+      scope: 'recurring_annual_after_waveguard',
+      eligibleServices: ['pest_control', 'termite_bait'], excludedServices: [],
+    };
+    const p = {
+      manualDiscount: md,
+      frequencies: [{
+        key: 'quarterly',
+        manualDiscount: { ...md },
+        // The termite member row has no per-treatment price — the accept
+        // slice cannot bill it per row, so the display must not slice either.
+        perServiceTreatments: [
+          { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+          { service: 'termite_bait', monthly: 35 },
+        ],
+      }],
+    };
+    const before = JSON.stringify(services);
+    expect(stampPerServiceManualDiscountSlices(services, p)).toBe(false);
+    expect(JSON.stringify(services)).toBe(before);
   });
 });
