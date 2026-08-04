@@ -115,8 +115,15 @@ const SERVICE_KEY_RULES = {
   // (kitchen/bath breakthrough) must not publish a perimeter map, so the
   // RENDER verdict requires recorded exterior area/action evidence from
   // the generic completion (codex P1 r13). Capture stays permissive.
+  // overridesSnapshot (codex P1 r19): pre-untype callbacks retain an
+  // eligible one_time_pest_treatment snapshot that would bypass the
+  // evidence condition — the callback key's conditional rule wins.
   pest_re_service: {
-    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresExteriorAreas: true,
+    eligible: true,
+    variant: 'spray',
+    captionKey: 'sprayPerimeter',
+    requiresExteriorAreas: true,
+    overridesSnapshot: true,
   },
   one_time_pest_control: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   pest_initial_cleanout: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
@@ -376,7 +383,7 @@ function traceEligibilityGateOn() {
  * guarantee, so a profile hiccup must not block a legitimate spray trace
  * in the field.
  */
-async function traceCaptureBlockPayload(scheduledService, knex) {
+async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = undefined } = {}) {
   if (!traceEligibilityGateOn()) return null;
   let eligibility;
   try {
@@ -390,7 +397,30 @@ async function traceCaptureBlockPayload(scheduledService, knex) {
   } catch {
     return null;
   }
-  if (eligibility.eligible) return null;
+  if (eligibility.eligible) {
+    // The posted capture mode must agree with the resolved geometry
+    // (codex P2 r19): the render path trusts capture_mode for its
+    // presentation, so a stale client posting `lawn` on a spray-only
+    // visit would relabel the bitmap as treated lawn coverage. Absent
+    // mode (legacy clients) passes.
+    if (captureMode !== undefined && captureMode !== null && captureMode !== '') {
+      const lawnMode = captureMode === 'lawn' || captureMode === 'lawn_highlight';
+      const wantsLawn = eligibility.variant === 'outline';
+      if (lawnMode !== wantsLawn) {
+        return {
+          status: 400,
+          payload: {
+            error: wantsLawn
+              ? 'This service maps the treated area — use the lawn outline workflow, not the perimeter tracer.'
+              : 'This service maps the treated perimeter — use the perimeter tracer, not the lawn outline workflow.',
+            code: 'trace_capture_mode_mismatch',
+            reason: eligibility.variant,
+          },
+        };
+      }
+    }
+    return null;
+  }
   // An eligible ADD-ON line rescues the capture too (codex P2 r11) —
   // fail-open on lookup errors, same posture as the rest of this helper.
   try {

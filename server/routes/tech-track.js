@@ -668,16 +668,17 @@ router.post('/:id/treatment-zone', upload.fields([
     // suppress anyway — reject the save with the reason so the tech knows,
     // instead of silently publishing nothing. Fail-open inside the helper:
     // a profile hiccup must never block a legitimate field capture.
-    {
-      const traceBlock = await traceCaptureBlockPayload(svc, db);
-      if (traceBlock) return res.status(traceBlock.status).json(traceBlock.payload);
-    }
-
     let payload;
     try {
       payload = JSON.parse(req.body?.payload || '');
     } catch {
       return res.status(400).json({ error: 'payload must be valid JSON' });
+    }
+    {
+      // Eligibility AND capture-mode agreement (codex P2 r19) — the
+      // render path trusts the saved mode for its presentation.
+      const traceBlock = await traceCaptureBlockPayload(svc, db, { captureMode: payload.captureMode });
+      if (traceBlock) return res.status(traceBlock.status).json(traceBlock.payload);
     }
     const snapshotFile = req.files?.snapshot?.[0] || null;
     const maskFile = req.files?.mask?.[0] || null;

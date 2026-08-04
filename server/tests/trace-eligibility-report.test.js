@@ -258,8 +258,9 @@ describe('PDF signature varies with the eligibility verdict', () => {
     process.env.GATE_TRACE_ELIGIBILITY = 'true';
     const bait = await signatureFor('Termite Bait Quarterly');
     const pest = await signatureFor('Quarterly Pest Control');
-    expect(bait).toMatch(/-te0$/);
-    expect(pest).toMatch(/-te1spray$/);
+    // r19: the capture-mode presentation component rides the key too
+    expect(bait).toMatch(/-te0-cmperimeter$/);
+    expect(pest).toMatch(/-te1spray-cmperimeter$/);
     expect(bait).not.toBe(pest);
   });
 });

@@ -320,7 +320,7 @@ async function submitRecap({
     const existing = await trx('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
-      .first('id', 'status', 'recap_sms_sent_at', 'structured_notes');
+      .first('id', 'status', 'recap_sms_sent_at', 'structured_notes', 'service_data');
 
     // At-most-once recap text: claim recap_sms_sent_at here, inside the
     // lock. If a prior submit already sent (column set), this one skips —
@@ -359,43 +359,58 @@ async function submitRecap({
     willSendSms = wantSms && !alreadyTexted;
     const smsClaim = willSendSms ? { recap_sms_sent_at: new Date() } : {};
 
+    // Trace-identity freeze, same as the full /complete handler (codex
+    // P2 on #3189): this lightweight path also completes permanent report
+    // records, and without the frozen identities a later update-details
+    // edit would re-resolve the mutable schedule rows. Computed for BOTH
+    // branches (codex P2 r19): a recap that completes a pre-existing
+    // draft/legacy record must freeze too, merging only when the fields
+    // are absent so an earlier full completion's freeze is never
+    // overwritten. Fail-soft — a lookup error omits the fields.
+    let frozenTraceIdentity = {};
+    try {
+      const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+      const recapProfile = await resolveCompletionProfileForScheduledService(svc, trx);
+      const recapAddonRows = await trx('scheduled_service_addons')
+        .where({ scheduled_service_id: serviceId })
+        .orderBy('created_at', 'asc')
+        .select('service_id', 'service_name')
+        .catch(() => null);
+      frozenTraceIdentity = {
+        completedServiceKey: recapProfile?.serviceKey || null,
+        completedServiceName: svc.service_type || null,
+        ...(Array.isArray(recapAddonRows)
+          ? {
+            completedAddonLines: recapAddonRows.map((row) => ({
+              serviceId: row.service_id || null,
+              serviceName: row.service_name || null,
+            })),
+          }
+          : {}),
+      };
+    } catch { /* legacy live-row behavior */ }
+
     if (existing) {
+      let mergedServiceData;
+      try {
+        const existingData = typeof existing.service_data === 'string'
+          ? JSON.parse(existing.service_data || '{}')
+          : (existing.service_data || {});
+        if (Object.keys(frozenTraceIdentity).length
+          && !Object.prototype.hasOwnProperty.call(existingData, 'completedServiceKey')) {
+          mergedServiceData = JSON.stringify({ ...existingData, ...frozenTraceIdentity });
+        }
+      } catch { /* leave service_data untouched */ }
       await trx('service_records').where({ id: existing.id }).update({
         technician_notes: note || null,
         status: 'completed',
+        ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,
         updated_at: new Date(),
       });
       recordId = existing.id;
     } else {
-      // Trace-identity freeze, same as the full /complete handler (codex
-      // P2 on #3189): this lightweight path also mints permanent report
-      // records, and without the frozen identities a later update-details
-      // edit would re-resolve the mutable schedule rows. Fail-soft — a
-      // lookup error just omits the fields (legacy live-row behavior).
-      let frozenTraceIdentity = {};
-      try {
-        const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-        const recapProfile = await resolveCompletionProfileForScheduledService(svc, trx);
-        const recapAddonRows = await trx('scheduled_service_addons')
-          .where({ scheduled_service_id: serviceId })
-          .orderBy('created_at', 'asc')
-          .select('service_id', 'service_name')
-          .catch(() => null);
-        frozenTraceIdentity = {
-          completedServiceKey: recapProfile?.serviceKey || null,
-          completedServiceName: svc.service_type || null,
-          ...(Array.isArray(recapAddonRows)
-            ? {
-              completedAddonLines: recapAddonRows.map((row) => ({
-                serviceId: row.service_id || null,
-                serviceName: row.service_name || null,
-              })),
-            }
-            : {}),
-        };
-      } catch { /* legacy live-row behavior */ }
       const inserted = await trx('service_records').insert({
         customer_id: svc.customer_id,
         technician_id: svc.technician_id || null,

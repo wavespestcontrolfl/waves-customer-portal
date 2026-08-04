@@ -417,6 +417,54 @@ describe('classification behavior', () => {
     expect(legacy[0]).toMatchObject({ eligible: true, variant: 'spray' });
   });
 
+  test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
+    // pre-untype callback: the eligible one_time_pest_treatment snapshot
+    // no longer bypasses the exterior-evidence condition
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_re_service',
+      findingsType: 'one_time_pest_treatment',
+      renderAreas: 'Kitchen, Bathrooms',
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_area_recorded' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_re_service',
+      findingsType: 'one_time_pest_treatment',
+      renderAreas: 'Exterior perimeter',
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    // capture-mode agreement at the write route (gate on)
+    const prev = process.env.GATE_TRACE_ELIGIBILITY;
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    try {
+      jest.doMock('../services/service-completion-profiles', () => ({
+        resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+          serviceKey: 'pest_general_quarterly', findingsType: null,
+        })),
+      }));
+      await jest.isolateModulesAsync(async () => {
+        const mod = require('../services/service-report/trace-eligibility');
+        // spray visit + lawn mode → 400 mismatch
+        const block = await mod.traceCaptureBlockPayload(
+          { service_type: 'Quarterly Pest Control' }, null, { captureMode: 'lawn' },
+        );
+        expect(block).toMatchObject({
+          status: 400,
+          payload: { code: 'trace_capture_mode_mismatch' },
+        });
+        // matching mode and absent mode both pass
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Quarterly Pest Control' }, null, { captureMode: 'perimeter' },
+        )).toBeNull();
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Quarterly Pest Control' }, null, {},
+        )).toBeNull();
+      });
+      jest.dontMock('../services/service-completion-profiles');
+    } finally {
+      if (prev === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+      else process.env.GATE_TRACE_ELIGIBILITY = prev;
+      jest.resetModules();
+    }
+  });
+
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
     for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
       expect(resolveTraceEligibility({ displayName }))

@@ -216,7 +216,7 @@ async function treatmentZonePdfSignature(service, knex = db) {
     if (!scheduledServiceId) return '';
     const row = await knex('treatment_zone_maps')
       .where({ scheduled_service_id: scheduledServiceId })
-      .first('updated_at', 'created_at');
+      .first('updated_at', 'created_at', 'capture_mode');
     if (!row) return '';
     const stamp = new Date(row.updated_at || row.created_at || 0).getTime();
     // Trace-eligibility component (GATE_TRACE_ELIGIBILITY): the live view
@@ -235,6 +235,14 @@ async function treatmentZonePdfSignature(service, knex = db) {
       eligibilityComponent = verdict.suppressed
         ? '-te0'
         : `-te1${verdict.eligibility.variant || ''}`;
+      // The capture PRESENTATION keys the cached PDF too (codex P1 r19):
+      // the live builder harmonizes variant/copy with capture_mode (a
+      // lawn-family capture renders outline regardless of the winning
+      // verdict; lawn vs lawn_highlight changes the wording), and the
+      // trace timestamp doesn't change at deploy — without the mode in
+      // the key, pre-harmonization PDFs would serve stale spray/highlight
+      // wording forever. Gate-on only, like the verdict component.
+      eligibilityComponent += `-cm${String(row.capture_mode || 'none')}`;
     }
     return `-tz${Number.isFinite(stamp) ? stamp : 0}${eligibilityComponent}`;
   } catch {
