@@ -2910,23 +2910,36 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // address — a ZIP with no street — that scheduling/dispatch then
     // resolves against. If ANY member changed since the merge, the WHOLE
     // tuple stays (every member skips as changed-since-merge).
+    // ATOMIC FIELD GROUPS (r27/r28/r29): the address tuple and each
+    // service-contact slot are copied whole by the forward merge, so they
+    // revert whole — clearing/restoring unchanged members around an
+    // operator's edit strands a mixed address or an orphan contact
+    // fragment. EVERY merge-touched member participates: null-applied
+    // members (the replacement wrote NULL, recorded in backfills) and
+    // prior-values members both count, with baseline = what the merge
+    // left the field as (the applied backfill, else empty).
     const ADDRESS_TUPLE_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
-    // EVERY merge-touched member participates (r28): null-applied members
-    // (the loser's address had no unit — the replacement wrote
-    // address_line2 = NULL, recorded in backfills) and prior-values
-    // members (the merge overwrote a pre-merge winner value) are part of
-    // the tuple too. Baseline per member = what the merge left it as:
-    // the applied backfill when one exists, else empty for a null-apply —
-    // the same still-merge-written rule the restore pass uses.
-    const mergeTouchedTupleFields = ADDRESS_TUPLE_FIELDS.filter((f) =>
-      Object.prototype.hasOwnProperty.call(backfills, f)
-      || Object.prototype.hasOwnProperty.call(priorValues, f));
-    const addressTupleChanged = mergeTouchedTupleFields.some((f) => {
+    const ATOMIC_FIELD_GROUPS = [
+      ADDRESS_TUPLE_FIELDS,
+      ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
+      ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
+      ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
+    ];
+    const memberChangedSinceMerge = (f) => {
       const appliedVal = Object.prototype.hasOwnProperty.call(backfills, f) ? backfills[f] : null;
       return (appliedVal === null || appliedVal === undefined)
         ? !(winner[f] === null || winner[f] === undefined || String(winner[f]).trim() === '')
         : !backfillValueUnchanged(winner[f], appliedVal);
-    });
+    };
+    const frozenGroupFields = new Set();
+    for (const group of ATOMIC_FIELD_GROUPS) {
+      const touched = group.filter((f) =>
+        Object.prototype.hasOwnProperty.call(backfills, f)
+        || Object.prototype.hasOwnProperty.call(priorValues, f));
+      if (touched.length && touched.some(memberChangedSinceMerge)) {
+        for (const f of group) frozenGroupFields.add(f);
+      }
+    }
     for (const [field, value] of Object.entries(backfills)) {
       if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;
       // Restored (not just vacated) by the prior-values pass below.
@@ -2934,7 +2947,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // Null backfills (e.g. the consent-stamp clear) copied nothing onto
       // the winner — there is nothing to vacate.
       if (value === null || value === undefined) continue;
-      if (addressTupleChanged && ADDRESS_TUPLE_FIELDS.includes(field)) {
+      if (frozenGroupFields.has(field)) {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
         continue;
       }
@@ -3074,10 +3087,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // and is reported.
     for (const [field, prior] of Object.entries(priorValues)) {
       if (prior === null || prior === undefined) continue;
-      // Tuple atomicity (r28): a changed address member freezes the WHOLE
-      // tuple — restores included, or the unchanged members would revert
-      // around the operator's edit and recreate the partial mixed address.
-      if (addressTupleChanged && ADDRESS_TUPLE_FIELDS.includes(field)) {
+      // Group atomicity (r28/r29): a changed member freezes its WHOLE
+      // group — restores included, or the unchanged members would revert
+      // around the operator's edit and recreate the mixed fragment.
+      if (frozenGroupFields.has(field)) {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
         continue;
       }
@@ -3318,19 +3331,30 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // restored address in that window is vanishingly rare and self-heals
       // (the undo simply refuses on the next attempt).
       await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
-      let claimant = null;
+      // Serialization ONLY — no claimant refusal (r29, same product ruling
+      // as the operator writers): customers.email is deliberately
+      // non-unique (20260417000010 — spouses and shared household/business
+      // accounts share addresses), and a loser who ALREADY shared its
+      // address before the merge must not become permanently irreversible
+      // because the other holder is still active. The lock is what the
+      // concurrent writers need (their claim probes run under this key);
+      // the share itself is supported state. Surfaced in the result as a
+      // notice, never a block.
       try {
-        claimant = await trx('customers')
+        const sharedHolder = await trx('customers')
           .whereRaw('lower(email) = ?', [emailKeyNorm])
           .whereNotIn('id', [loserId, winnerId])
           .where('active', true)
           .whereNull('deleted_at')
           .first('id');
+        if (sharedHolder) {
+          // The restore still proceeds — this is supported shared state,
+          // logged for the audit trail only (a `skipped` entry would
+          // misreport the restore as not-done).
+          logger.info(`[customer-dedupe] restored customer ${loserId}'s email is shared with live customer ${sharedHolder.id} (supported — 20260417000010)`);
+        }
       } catch (e) {
-        refuse(`Cannot verify whether the merged-away customer's email is now claimed elsewhere (${e.message}) — refusing to revert`);
-      }
-      if (claimant) {
-        refuse("The merged-away customer's email address is now used by another live customer — restoring the account with it would leave its communications targeting someone else's mailbox; resolve the address conflict first, then revert");
+        refuse(`Cannot verify whether the merged-away customer's email is shared (${e.message}) — refusing to revert`);
       }
     }
     try {

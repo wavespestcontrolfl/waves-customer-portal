@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   ESIGN_DISCLOSURE,
@@ -410,7 +411,23 @@ router.post('/:key/contracts', async (req, res, next) => {
     const recipientEmail = cleanRecipientName(req.body?.recipientEmail) || customer.email || null;
     const recipientPhone = cleanRecipientName(req.body?.recipientPhone) || customer.phone || null;
 
+    const recipientEmailExplicit = Boolean(cleanRecipientName(req.body?.recipientEmail));
     const contract = await db.transaction(async (trx) => {
+      // Comms fence + post-lock re-read (Codex #3109 r29): the contract is
+      // an email-bound bearer surface — taken BEFORE the row locks below,
+      // so a merge-undo either committed (the fresh read sees post-undo
+      // state) or waits its turn. When the recipient email came from the
+      // customer fallback (no explicit override), mint from the LIVE row.
+      await lockCustomerComms(trx, customer.id);
+      const freshDocCustomer = await trx('customers')
+        .where({ id: customer.id })
+        .first('id', 'email', 'deleted_at', 'active');
+      if (!freshDocCustomer || freshDocCustomer.deleted_at || freshDocCustomer.active === false) {
+        const goneErr = new Error('This customer changed while issuing the document — reload and try again.');
+        goneErr.status = 409;
+        throw goneErr;
+      }
+      const recipientEmailLive = recipientEmailExplicit ? recipientEmail : (freshDocCustomer.email || null);
       // Termite program agreements carry a service-wide invariant (one
       // live request per property) enforced under a per-customer advisory
       // lock by the accept-time service, the reconciliation sweeps, and
@@ -484,7 +501,7 @@ router.post('/:key/contracts', async (req, res, next) => {
         title: rendered.title || loaded.activeVersion.title || loaded.template.name,
         status: loaded.template.requires_signature === false ? 'sent' : 'sent',
         recipient_name: recipientName,
-        recipient_email: recipientEmail,
+        recipient_email: recipientEmailLive,
         recipient_phone: recipientPhone,
         service_name: context.service?.name || null,
         esign_disclosure_snapshot: loaded.activeVersion.signer_disclosure || ESIGN_DISCLOSURE,

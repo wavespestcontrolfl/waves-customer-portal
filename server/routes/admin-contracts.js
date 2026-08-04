@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { logAutopay } = require('../services/autopay-log');
 const {
@@ -225,6 +226,21 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
     });
 
     const [contract] = await db.transaction(async (trx) => {
+      // Comms fence + post-lock re-read (Codex #3109 r29): the contract is
+      // an email-bound bearer surface — minting it with the pre-transaction
+      // customer snapshot while a merge-undo holds the row lets the insert
+      // commit a winner-owned contract whose recipient_email the undo just
+      // restored to another account. Lock, re-read, mint from live state.
+      await lockCustomerComms(trx, customer.id);
+      const freshContractCustomer = await trx('customers')
+        .where({ id: customer.id })
+        .first('id', 'email', 'phone', 'first_name', 'last_name', 'deleted_at', 'active');
+      if (!freshContractCustomer || freshContractCustomer.deleted_at || freshContractCustomer.active === false) {
+        const err = new Error('This customer changed while creating the contract — reload and try again.');
+        err.statusCode = 409;
+        err.isOperational = true;
+        throw err;
+      }
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
         payment_method_id: paymentMethod.id,
@@ -233,8 +249,8 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
         title: 'AutoPay Authorization',
         status: 'sent',
         recipient_name: recipientName,
-        recipient_email: customer.email || null,
-        recipient_phone: customer.phone || null,
+        recipient_email: freshContractCustomer.email || null,
+        recipient_phone: freshContractCustomer.phone || null,
         service_name: serviceName,
         renewal_date: renewalDate,
         cancellation_deadline: cancellationDeadline,

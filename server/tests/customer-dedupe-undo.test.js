@@ -2585,12 +2585,13 @@ describe('revertMerge', () => {
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/pending booking follow-up.*deliver to the merged-in email/) });
   });
 
-  it("refuses (409, zero writes) when a THIRD live customer holds the loser's email — explicit check, not a unique violation", async () => {
-    // customers.email has NO unique constraint (20260417000010 dropped
-    // customers_email_unique; 20260504000008 replaced it with a NON-unique
-    // index), so the pre-r13 23505 catch could never fire — the stub
-    // therefore raises NO error here and the refusal must come from the
-    // explicit claim query alone.
+  it("PROCEEDS when a THIRD live customer shares the loser's email — shared addresses are supported, the lock still serializes (r29)", async () => {
+    // customers.email is deliberately non-unique (20260417000010 —
+    // spouses/shared household accounts). The pre-r29 refusal made a merge
+    // permanently irreversible merely because the loser already shared its
+    // address; now the advisory serialization stays (the probe still runs
+    // under the customer-email lock) but another holder never blocks the
+    // restore.
     const { trx, state } = buildRevertTrx({
       journal: baseJournal(),
       winner: baseWinner(),
@@ -2599,14 +2600,15 @@ describe('revertMerge', () => {
       emailClaimant: { id: 'dddddddd-0000-0000-0000-000000000009' },
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
-    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
-      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/email address is now used by another live customer/) });
-    // Zero writes: no partial restoration, journal never stamped.
-    expect(state.loserRestore).toBe(null);
-    expect(state.journalUpdate).toBe(null);
-    // The probe excludes BOTH merge participants — the winner holds the
-    // address only because this merge backfilled it.
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // The restore happened WITH the shared address.
+    expect(state.loserRestore.email).toBe('loser.testcase@example.com');
+    expect(state.journalUpdate.undone_at).toBeTruthy();
+    // The probe still ran under the lock and still excludes BOTH merge
+    // participants — the winner holds the address only via this merge.
+    expect(state.emailClaimLockedFirst).toBe(true);
     expect(state.emailClaimProbe.notIn[1]).toEqual([LOSER, WINNER]);
+    expect(result.skipped).toEqual([]);
   });
 
   it('refuses (409, zero writes) when the winner spent below a cache-only credit the merge moved', async () => {
