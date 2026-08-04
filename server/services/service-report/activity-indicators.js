@@ -2718,6 +2718,14 @@ function buildTodaysResult({
   // and rodent trapping use it — zero states and every other owner-specified
   // story branch keep their approved wording.
   technicianReportBody = null,
+  // The tech confirmed the pre-submit reconciliation prompt
+  // (GATE_REPORT_RECONCILE_PROMPT): the contradiction the matcher found
+  // was reviewed by a person and overridden, so the stage/count screens
+  // must not silently discard the body they confirmed — that is the exact
+  // outcome the prompt exists to avoid (codex P1 on the reconciliation
+  // round). Stamped onto todaysResult so render-time consumers (the
+  // report-data summary screen) honor the same decision.
+  reconcileConfirmed = false,
 }) {
   const indicator = ACTIVITY_INDICATORS[projectType];
   // Sectioned-checklist types compose "what we did" from their selections
@@ -3096,8 +3104,9 @@ function buildTodaysResult({
     // written before the tech's last edit to the typed fields, so it can
     // contradict the frozen findings on the stage OR on the numbers.
     const trappingReportBody = rawTrappingBody
-      && !(initialTrapSetup && setupContradictions(rawTrappingBody).length)
-      && !countContradictions(rawTrappingBody, values).length
+      && (reconcileConfirmed
+        || (!(initialTrapSetup && setupContradictions(rawTrappingBody).length)
+          && !countContradictions(rawTrappingBody, values).length))
       ? rawTrappingBody
       : null;
     // One line of expectation-setting on a trap-setup visit: nothing has
@@ -3138,7 +3147,9 @@ function buildTodaysResult({
         // dropped it from exactly the reports that needed it most.
         body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
         nextStep,
-        ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
+        ...(trappingReportBody
+        ? { bodySource: 'technician_report', ...(reconcileConfirmed ? { reconcileConfirmed: true } : {}) }
+        : {}),
       };
     }
     if (activity.score === 0) {
@@ -3153,7 +3164,9 @@ function buildTodaysResult({
       headline: `${noun} activity was ${levelWord.replace(' activity', '').toLowerCase()} today.`,
       body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
       nextStep,
-      ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
+      ...(trappingReportBody
+        ? { bodySource: 'technician_report', ...(reconcileConfirmed ? { reconcileConfirmed: true } : {}) }
+        : {}),
     };
   }
 
@@ -3186,7 +3199,9 @@ function buildTodaysResult({
     headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today`,
     body: `${technicianReportBody || whatWeDid} ${nextStep}`,
     nextStep,
-    ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
+    ...(technicianReportBody
+      ? { bodySource: 'technician_report', ...(reconcileConfirmed ? { reconcileConfirmed: true } : {}) }
+      : {}),
   };
 }
 
@@ -3208,6 +3223,7 @@ function buildTypedReportSnapshot({
   activity = null,
   photoSummary = null,
   technicianReportBody = null,
+  reconcileConfirmed = false,
 }) {
   const config = PROJECT_TYPES[projectType];
   if (!config) return null;
@@ -3266,6 +3282,7 @@ function buildTypedReportSnapshot({
     activity,
     visitSequence,
     technicianReportBody,
+    reconcileConfirmed,
   });
 
   return {

@@ -3509,7 +3509,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ].find((snap) => snap?.type === 'rodent_trapping') || null;
     // Scoped require matches this file's pattern for report-time helpers.
     const indicators = require('./activity-indicators');
-    const trapSetupScreened = !technicianReport?.body
+    // A confirmed reconciliation prompt (frozen onto the accepting
+    // snapshot's todaysResult at completion) is a PERSON overriding the
+    // matcher — this render-time screen must honor that decision, not
+    // silently re-reject the body they reviewed (codex P1 on the
+    // reconciliation round).
+    const trapSetupScreened = typedSnapshot?.todaysResult?.reconcileConfirmed === true
+      || !technicianReport?.body
       || (
         (!narrativeTrapSetupSnapshot
           || indicators.setupContradictions(technicianReport.body).length === 0)

@@ -73,7 +73,16 @@ function isOperatorTimeOnSite(value) {
 // set). Both matchers treat a separator-free stored hash as core-only, so
 // in-flight attempts across the deploy keep matching.
 function completionRequestHashSegments(body) {
-  const { idempotencyKey, timeOnSite, completionTelemetry, backfill, ...stableBody } = body || {};
+  // reportReconcileConfirmed controls only the PRE-claim reconciliation
+  // prompt (GATE_REPORT_RECONCILE_PROMPT): a same-key retry that first
+  // meets the prompt and then confirms must replay/resume the original
+  // attempt, not strand it on a payload mismatch — so the bit is excluded
+  // from both segments, like idempotencyKey and completionTelemetry
+  // (codex P1 on the reconciliation round).
+  const {
+    idempotencyKey, timeOnSite, completionTelemetry, backfill,
+    reportReconcileConfirmed, ...stableBody
+  } = body || {};
   const core = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))
     .digest('hex');

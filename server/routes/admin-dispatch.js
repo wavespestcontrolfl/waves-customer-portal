@@ -3436,13 +3436,16 @@ function reportReconcileBlockPayload({
   reportReconcileConfirmed,
   technicianNotes,
   structuredFindings,
+  primaryFindingsType = null,
   companionFindings,
 }) {
   if (process.env.GATE_REPORT_RECONCILE_PROMPT !== 'true') return null;
   if (isIncompleteVisit || reportReconcileConfirmed) return null;
   let issues = [];
   try {
-    issues = reportReconciliationIssues({ technicianNotes, structuredFindings, companionFindings });
+    issues = reportReconciliationIssues({
+      technicianNotes, structuredFindings, primaryFindingsType, companionFindings,
+    });
   } catch {
     return null;
   }
@@ -3886,6 +3889,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         reportReconcileConfirmed,
         technicianNotes,
         structuredFindings,
+        primaryFindingsType: completionProfile?.findingsType || null,
         companionFindings,
       });
       if (reconcileBlock) {
@@ -5498,6 +5502,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // Primary section only — the AI report describes this visit's
               // primary work; companion sections keep their own typed copy.
               technicianReportBody,
+              // The tech confirmed the reconciliation prompt: the frozen
+              // snapshot carries the decision so neither the snapshot's own
+              // screens nor the render-time summary screen silently discard
+              // the body a person reviewed and overrode.
+              reconcileConfirmed: reportReconcileConfirmed === true,
             });
           }
           // Companion typed sections: one immutable snapshot per validated

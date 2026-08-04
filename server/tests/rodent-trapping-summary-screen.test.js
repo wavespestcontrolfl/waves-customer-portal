@@ -187,4 +187,18 @@ describe('technician summaries screen against visible companion setup stages (ro
     );
     expect(source).not.toBe('technician_report');
   });
+
+  // Reconciliation round: a confirmed prompt is a PERSON overriding the
+  // matcher, frozen onto the accepting snapshot at completion — the
+  // render-time screen honors it instead of silently re-rejecting the
+  // body they reviewed.
+  test('a completion-confirmed body is honored at render time', async () => {
+    const row = serviceRow(trappingCompanion('auto_send'), CONTRADICTING_NOTES);
+    const data = JSON.parse(row.service_data);
+    data.typedReportSnapshot.todaysResult.reconcileConfirmed = true;
+    row.service_data = JSON.stringify(data);
+    const result = await buildReportV1Data(row, 'token-screen-confirmed', stubKnex(), { mode: 'live' });
+    expect(result.summarySource).toBe('technician_report');
+    expect(result.summary).toBe(CONTRADICTING_BODY);
+  });
 });

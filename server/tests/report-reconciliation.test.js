@@ -47,9 +47,24 @@ describe('reportReconciliationIssues', () => {
     const issues = reportReconciliationIssues({
       technicianNotes: CAPTURE_NOTES,
       structuredFindings: trapping({ trap_visit_type: 'Follow-up check', captures: 1 }),
+      primaryFindingsType: 'rodent_trapping',
       companionFindings: null,
     });
     expect(issues.some((issue) => issue.kind === 'capture_count_mismatch')).toBe(true);
+  });
+
+  test('wildlife trapping never prompts — its report keeps deterministic copy', () => {
+    expect(reportReconciliationIssues({
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: { type: 'wildlife_trapping', values: { trap_visit_type: 'Follow-up check', traps_checked: 6 } },
+      primaryFindingsType: 'wildlife_trapping',
+      companionFindings: null,
+    })).toEqual([]);
+    expect(reportReconciliationIssues({
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: null,
+      companionFindings: [{ type: 'wildlife_trapping', values: { trap_visit_type: 'Follow-up check', traps_checked: 6 } }],
+    })).toEqual([]);
   });
 
   test('a check claim on a declared setup surfaces as a setup contradiction', () => {
@@ -139,5 +154,38 @@ describe('reportReconcileBlockPayload (route gate)', () => {
       ...contradicting,
       companionFindings: [{ get values() { throw new Error('boom'); } }],
     })).toBeNull();
+  });
+});
+
+// The three confirmation-honoring contracts (codex round on the feature):
+// the frozen snapshot keeps a confirmed body, the render-time summary
+// screen honors the frozen decision, and a confirmed retry hashes
+// identically to its original attempt.
+describe('a confirmed prompt is honored downstream', () => {
+  const { buildTodaysResult } = require('../services/service-report/activity-indicators');
+  const { hashCompletionRequest } = require('../services/completion-attempts');
+
+  const trappingArgs = {
+    projectType: 'rodent_trapping',
+    reportTypeLabel: 'Rodent Trapping Summary',
+    values: { trap_visit_type: 'Follow-up check', traps_checked: 6 },
+    activity: { score: 2, trend: null, trendWord: null },
+    visitSequence: 2,
+    technicianReportBody: 'We checked 8 traps and refreshed the bait at each one. Rodent droppings were present along the north runway.',
+  };
+
+  test('the snapshot screen discards a contradicting body — unless confirmed', () => {
+    const screened = buildTodaysResult(trappingArgs);
+    expect(screened.bodySource).toBeUndefined();
+    const confirmed = buildTodaysResult({ ...trappingArgs, reconcileConfirmed: true });
+    expect(confirmed.bodySource).toBe('technician_report');
+    expect(confirmed.reconcileConfirmed).toBe(true);
+    expect(confirmed.body).toContain('We checked 8 traps');
+  });
+
+  test('the confirmation bit does not change the completion request hash', () => {
+    const base = { idempotencyKey: 'k1', technicianNotes: 'x', visitOutcome: 'completed' };
+    expect(hashCompletionRequest({ ...base, reportReconcileConfirmed: true }))
+      .toBe(hashCompletionRequest(base));
   });
 });

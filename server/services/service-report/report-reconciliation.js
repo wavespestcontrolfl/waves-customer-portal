@@ -34,17 +34,25 @@ const COUNT_MESSAGES = {
  * Returns [{ kind, message }] with customer-support-quality wording — the
  * messages are shown verbatim to the tech in the completion prompt.
  */
-function reportReconciliationIssues({ technicianNotes, structuredFindings, companionFindings }) {
+function reportReconciliationIssues({
+  technicianNotes, structuredFindings, primaryFindingsType = null, companionFindings,
+}) {
   const report = technicianReportCustomerCopy(technicianNotes);
   if (!report || !report.body) return [];
-  const sections = [structuredFindings, ...(Array.isArray(companionFindings) ? companionFindings : [])]
-    .map((entry) => (entry && entry.values && typeof entry.values === 'object' ? entry.values : null))
-    .filter(Boolean);
-  // `trap_visit_type` / `traps_checked` / `captures` only exist on the
-  // trapping schema — their presence identifies the section, the same
-  // marker the serviced-pin rejection uses.
-  const trapValues = sections.find((values) => 'trap_visit_type' in values
-    || 'traps_checked' in values || 'captures' in values);
+  // rodent_trapping ONLY, matched by TYPE: wildlife_trapping shares the
+  // traps_checked/captures field names, but the report pipeline never
+  // admits the reviewed body for it (the wildlife gauge branch keeps
+  // deterministic copy), so prompting on it would 409 over prose that
+  // cannot reach the report (codex P2 on the reconciliation round). The
+  // primary's type comes from the completion profile; companions carry
+  // their own.
+  const sections = [
+    { type: primaryFindingsType, values: structuredFindings?.values },
+    ...(Array.isArray(companionFindings) ? companionFindings : [])
+      .map((entry) => ({ type: entry?.type, values: entry?.values })),
+  ];
+  const trapValues = sections.find((section) => section.type === 'rodent_trapping'
+    && section.values && typeof section.values === 'object')?.values || null;
   if (!trapValues) return [];
   const issues = [];
   if (String(trapValues.trap_visit_type || '').trim() === 'Initial setup'
