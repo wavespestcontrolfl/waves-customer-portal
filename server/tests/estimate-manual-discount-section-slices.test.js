@@ -363,11 +363,16 @@ describe('planCreditFirstVisitSlice — accept-side mirror (owner GO 2026-08-04)
     expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
   });
 
-  test('gate off: returns null (accept keeps the pre-credit first visit)', () => {
+  test('gate-independent: billing honors the credit under either presentation (codex #3185 r6)', () => {
+    // The gate flips the DISPLAY only. With it off the page shows the
+    // plan-level card ("applied when you book") — netting the first invoice
+    // delivers that promise, and a mid-flight kill-switch flip can never
+    // move an accepted amount upward.
     const prior = process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES;
     try {
       delete process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES;
-      expect(planCreditFirstVisitSlice(acceptedFrequency())).toBeNull();
+      expect(planCreditFirstVisitSlice(acceptedFrequency()))
+        .toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
     } finally {
       process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES = prior;
     }
@@ -393,21 +398,39 @@ describe('planCreditFirstVisitSlice — accept-side mirror (owner GO 2026-08-04)
     expect(planCreditFirstVisitSlice(frequency)).toBeNull();
   });
 
-  test('combo overlay reconciles against the frequency net-annual diff when the base credit object is stale', () => {
-    // A lawn:monthly combo swaps rows + net totals but keeps the BASE row's
-    // credit object (43.38). Rows: pest 90×4 + lawn premium 54.9×0.9=49.41×12
-    // → slices 4.50×4 + 2.47×12 = 47.64; base credit says 43.38 (stale), but
-    // pre-credit row-sum annual 952.92 − net annual 905.28 = 47.64 matches.
-    const combo = acceptedFrequency({
+  test("a combo's own persisted credit object is the authority (codex #3185 r7)", () => {
+    // Combos carry their per-combo shapeFromV1 credit; the accept overlay
+    // replaces the stale base object with it. Rows: pest 90×4 + lawn premium
+    // 49.41×12 → slices 4.50×4 + 2.47×12 = 47.64 = the combo's own credit.
+    const comboFrequency = (mdOverrides = {}) => acceptedFrequency({
       annual: 905.28,
       monthly: 75.44,
+      manualDiscount: {
+        type: 'PERCENT', value: 5, label: 'Custom Percentage Discount',
+        amount: 47.64, recurringAmount: 47.64, oneTimeAmount: 0,
+        scope: 'recurring_annual_after_waveguard',
+        eligibleServices: ['pest_control', 'lawn_care_premium'],
+        excludedServices: [],
+        ...mdOverrides,
+      },
       perServiceTreatments: [
         { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
         { service: 'lawn_care', perTreatment: 54.9, displayPrice: 49.41, visitsPerYear: 12 },
       ],
     });
-    const slice = planCreditFirstVisitSlice(combo);
-    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
+    expect(planCreditFirstVisitSlice(comboFrequency()))
+      .toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
+    // A floor-capped combo credit differs by real dollars — refused exactly,
+    // no tolerance to hide inside (r7 P0).
+    expect(planCreditFirstVisitSlice(comboFrequency({ amount: 47.5, recurringAmount: 47.5, capped: true, capReason: 'lawn_program_minimum' })))
+      .toBeNull();
+    // Even uncapped, a granted amount that is not the full percentage slice
+    // fails the exact reconciliation.
+    expect(planCreditFirstVisitSlice(comboFrequency({ amount: 47.0, recurringAmount: 47.0 })))
+      .toBeNull();
+    // A legacy snapshot combo resolves manualDiscount to null at the accept
+    // overlay — no credit object, no slice.
+    expect(planCreditFirstVisitSlice({ ...comboFrequency(), manualDiscount: null })).toBeNull();
   });
 
   test('bails when neither the credit object nor the net-annual diff reconciles', () => {
@@ -496,5 +519,155 @@ describe('codex #3185 P1 regressions — preference bases and flat-monthly membe
     const before = JSON.stringify(services);
     expect(stampPerServiceManualDiscountSlices(services, p)).toBe(false);
     expect(JSON.stringify(services)).toBe(before);
+  });
+});
+
+describe('codex #3185 r2 regressions — combo+preference reconciliation and overshoot slices', () => {
+  const comboWithStaleCredit = (annual) => ({
+    key: 'quarterly',
+    annual,
+    manualDiscount: {
+      type: 'PERCENT', value: 5, label: 'Custom Percentage Discount',
+      // Stale BASE-combo credit object (combo overlays keep it).
+      amount: 43.38, recurringAmount: 43.38, oneTimeAmount: 0,
+      scope: 'recurring_annual_after_waveguard',
+      eligibleServices: ['pest_control', 'lawn_care_premium'],
+      excludedServices: [],
+    },
+    perServiceTreatments: [
+      { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+      { service: 'lawn_care', perTreatment: 54.9, displayPrice: 49.41, visitsPerYear: 12 },
+    ],
+  });
+
+  test('combo + preference opt-out: the pref-blind credit object still reconciles', () => {
+    // The combo's own credit object and the pre-preference slice bases are
+    // both preference-blind, so an opt-out changes neither side of the
+    // reconciliation — the customer keeps the full slice on top of the
+    // separate preference credit.
+    const combo = comboWithStaleCredit(865.28);
+    combo.manualDiscount = {
+      ...combo.manualDiscount,
+      amount: 47.64, recurringAmount: 47.64,
+    };
+    const slice = planCreditFirstVisitSlice(combo, {
+      preferences: { interior_spray: false },
+    });
+    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
+  });
+
+  test('a slice that fully comps the first visit is refused (zero net cannot thread the fallbacks)', () => {
+    // A 100% comp credit nets the first visit to exactly $0 — a zero/negative
+    // netted amount would persist into estimated_price and the
+    // falsy-fallback consumers (visitEstimatedPrice, invoice-mode's amount
+    // resolver) would then charge a POSITIVE cadence amount instead. Refuse
+    // the slice; the accept keeps the pre-credit story.
+    const frequency = {
+      key: 'quarterly',
+      annual: 0.01,
+      manualDiscount: {
+        type: 'PERCENT', value: 100, label: 'Full Comp',
+        amount: 328, recurringAmount: 328, oneTimeAmount: 0,
+        scope: 'recurring_annual_after_waveguard',
+        eligibleServices: [], excludedServices: [],
+      },
+      perServiceTreatments: [
+        { service: 'pest_control', perTreatment: 24, displayPrice: 22, visitsPerYear: 4 },
+        { service: 'lawn_care', perTreatment: 22, displayPrice: 20, visitsPerYear: 12 },
+      ],
+    };
+    expect(planCreditFirstVisitSlice(frequency)).toBeNull();
+  });
+});
+
+describe('codex #3185 r3 — the display flag never authorizes an unsliceable combo', () => {
+  test('one combo with an unpriceable member row keeps the whole plan on the plan card', () => {
+    const services = [
+      {
+        key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly',
+        frequencies: [{ key: 'quarterly', perTreatment: 90, perVisit: 100, monthly: 30, annual: 360, visitsPerYear: 4, perServiceTreatments: [] }],
+      },
+      {
+        key: 'lawn_care', isRecurring: true, defaultFrequencyKey: 'enhanced',
+        frequencies: [{
+          key: 'enhanced', monthly: 42.3, annual: 507.6, monthlyBase: 47,
+          perServiceTreatments: [{ service: 'lawn_care', perTreatment: 56.4, displayPrice: 56.4, visitsPerYear: 9 }],
+        }],
+      },
+    ];
+    const md = {
+      type: 'PERCENT', value: 5, label: 'Custom Percentage Discount',
+      amount: 43.38, recurringAmount: 43.38, oneTimeAmount: 0,
+      scope: 'recurring_annual_after_waveguard',
+      eligibleServices: ['pest_control', 'lawn_care_enhanced'], excludedServices: [],
+    };
+    const rows = [
+      { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+      { service: 'lawn_care', perTreatment: 62.67, displayPrice: 56.4, visitsPerYear: 9 },
+    ];
+    const p = {
+      manualDiscount: md,
+      frequencies: [{ key: 'quarterly', manualDiscount: { ...md }, perServiceTreatments: rows }],
+      serviceCadenceCombos: [
+        // Sliceable combo carrying its OWN credit object (r7): slices
+        // 4.50×4 + 2.82×9 = 43.38 reconcile exactly.
+        { key: 'lawn_care:enhanced|pest_control:quarterly', annual: 824.22, perServiceTreatments: rows, manualDiscount: { ...md } },
+        // A selectable combo whose lawn row has no per-treatment price —
+        // the accept slice would refuse it, so the flag must not be set.
+        {
+          key: 'lawn_care:legacy|pest_control:quarterly',
+          perServiceTreatments: [
+            { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+            { service: 'lawn_care', monthly: 40 },
+          ],
+        },
+      ],
+    };
+    const before = JSON.stringify(services);
+    expect(stampPerServiceManualDiscountSlices(services, p)).toBe(false);
+    expect(JSON.stringify(services)).toBe(before);
+    // Same payload with only sliceable combos stamps fine.
+    const p2 = { ...p, serviceCadenceCombos: [p.serviceCadenceCombos[0]] };
+    expect(stampPerServiceManualDiscountSlices(services, p2)).toBe(true);
+  });
+});
+
+describe('codex #3185 r8 — combo credit state fully replaces the base row state', () => {
+  test('a base-cadence suppression does not veto a combo that grants its own credit', () => {
+    // Mirror of the accept overlay spread: base row floor-suppressed, combo
+    // carries its own valid credit — the combo's state wins on BOTH fields.
+    const base = {
+      key: 'quarterly',
+      annual: 1000,
+      manualDiscount: null,
+      manualDiscountSuppressed: true,
+      perServiceTreatments: [],
+    };
+    const combo = {
+      annual: 905.28,
+      perServiceTreatments: [
+        { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+        { service: 'lawn_care', perTreatment: 54.9, displayPrice: 49.41, visitsPerYear: 12 },
+      ],
+      manualDiscount: {
+        type: 'PERCENT', value: 5, label: 'Custom Percentage Discount',
+        amount: 47.64, recurringAmount: 47.64, oneTimeAmount: 0,
+        scope: 'recurring_annual_after_waveguard',
+        eligibleServices: [], excludedServices: [],
+      },
+    };
+    const overlaid = {
+      ...base,
+      annual: combo.annual,
+      perServiceTreatments: combo.perServiceTreatments,
+      manualDiscount: combo.manualDiscount ?? null,
+      manualDiscountSuppressed: combo.manualDiscountSuppressed === true,
+    };
+    expect(planCreditFirstVisitSlice(overlaid))
+      .toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
+    // And the inverse: a combo's own suppression blocks even with a live
+    // base credit inherited nowhere.
+    const suppressedOverlay = { ...overlaid, manualDiscountSuppressed: true };
+    expect(planCreditFirstVisitSlice(suppressedOverlay)).toBeNull();
   });
 });
