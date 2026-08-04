@@ -1338,6 +1338,23 @@ export default function DispatchPageV2({
       setPaymentData(handoff);
     }
   }, []);
+  // Close-and-drain for the completion panel — EVERY dismissal path (Back/
+  // Close AND the mobile Details swap) must clear the ownership ref
+  // synchronously and drain this visit's staged handoff, or a response
+  // landing in the effect-lag window stages an entry no drain ever reads
+  // (codex P1 #3187 r18 + r21).
+  const closeCompletionPanel = useCallback(() => {
+    completionPanelOpenServiceRef.current = null;
+    const closingServiceId = completingService?.id || null;
+    setCompletingService(null);
+    const staged = closingServiceId
+      ? pendingPaymentAfterCompletionRef.current.get(closingServiceId)
+      : null;
+    if (staged) {
+      pendingPaymentAfterCompletionRef.current.delete(closingServiceId);
+      deliverPaymentHandoff(staged);
+    }
+  }, [completingService, deliverPaymentHandoff]);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -2557,26 +2574,7 @@ export default function DispatchPageV2({
         <CompletionPanel
           service={completingService}
           products={products}
-          onClose={() => {
-            // Synchronous — a completion response landing before the
-            // passive effect re-runs must already see this panel as
-            // closed, or applyCompletionResult stages the handoff for an
-            // onClose drain that has already happened (codex P1 #3187
-            // r18).
-            completionPanelOpenServiceRef.current = null;
-            const closingServiceId = completingService?.id || null;
-            setCompletingService(null);
-            const staged = closingServiceId
-              ? pendingPaymentAfterCompletionRef.current.get(closingServiceId)
-              : null;
-            if (staged) {
-              // Drain exactly THIS visit's staged entry, through the
-              // synchronized helper (queues behind an active sheet —
-              // codex P1 #3187 r16 + r20).
-              pendingPaymentAfterCompletionRef.current.delete(closingServiceId);
-              deliverPaymentHandoff(staged);
-            }
-          }}
+          onClose={closeCompletionPanel}
           onSubmit={handleCompleteSubmit}
           onCompletedElsewhere={(serviceId) => {
             // Cross-key completion: the visit finished under another
@@ -2616,7 +2614,8 @@ export default function DispatchPageV2({
           onViewDetails={
             isMobile
               ? (svc) => {
-                  setCompletingService(null);
+                  // Same close-and-drain as Back/Close (codex P1 r21).
+                  closeCompletionPanel();
                   setDetailService(svc);
                 }
               : undefined
