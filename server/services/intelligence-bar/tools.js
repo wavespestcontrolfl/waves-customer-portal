@@ -1243,7 +1243,14 @@ async function bulkUpdateCustomers(customerIds, updates) {
       }
       throw e;
     }
-    const { pendingConfirmation: rowPendingConfirmation } = emailSync || {};
+    const { pendingConfirmation: rowPendingConfirmation, heldNewsletterResume: rowHeldNewsletterResume } = emailSync || {};
+    if (rowHeldNewsletterResume) {
+      // Deferred held-newsletter DOI, post-commit — same contract as the
+      // single-row paths (r32: the bulk branch dropped the resume, leaving
+      // corrected customers' newsletter holds parked until stale reclaim).
+      require('../lead-first-touch-resume').resumeHeldNewsletterPostCommit(rowHeldNewsletterResume)
+        .catch((err) => logger.error(`[ib] deferred held-newsletter resume failed (bulk): ${err.code || err.name || 'resume_failed'}`));
+    }
     if (rowPendingConfirmation) {
       // Post-commit DOI re-send, exactly as the single-edit path — the
       // bearer token never rides into the tool result.

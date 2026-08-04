@@ -311,6 +311,17 @@ async function markEstimateManuallyAccepted({
   const claim = await database.transaction(async (trx) => {
     const estimate = await trx('estimates').where({ id: estimateId }).first();
     if (!estimate) throw httpError('Estimate not found', 404);
+    // Rung 6 BEFORE the estimate row lock below (Codex #3109 r32): the
+    // merge-undo takes customer-comms and THEN locks journaled estimates —
+    // acquiring comms only later (inside convertEstimate, after the
+    // status-flip UPDATE row-locked this estimate) was an AB-BA that
+    // deadlock-aborted the operator's Mark Won or the undo. The unlocked
+    // peek above picks the key; convertEstimate's own acquisition is
+    // reentrant on this transaction.
+    if (estimate.customer_id) {
+      const { lockCustomerComms } = require('../utils/customer-comms-lock');
+      await lockCustomerComms(trx, estimate.customer_id);
+    }
 
     if (estimate.status === 'accepted') {
       return { acceptedEstimate: estimate, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: estimate };

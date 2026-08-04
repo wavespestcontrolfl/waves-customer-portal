@@ -1918,6 +1918,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   service_outline_packets: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260423000008; public report tokens.
   projects: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260520000002; report-rating scores.
+  pest_pressure_scores: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2573,6 +2575,30 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (strandedFollowups) {
         refuse(`${strandedFollowups} follow-up visit(s) reference this merge's appointments as their source — moving the source visits back would split the follow-ups from them; reconcile by hand`);
       }
+      // Pest Pressure scores for journaled SERVICE RECORDS (r32): a
+      // public report rating can mint a pest_pressure_scores row carrying
+      // the winner's customer_id for a service record this journal moved —
+      // the undo would return the record while the score stays in the
+      // kept customer's history.
+      {
+        const journaledServiceRecordIds = [...journaledIdsFor('service_records')];
+        if (journaledServiceRecordIds.length) {
+          let pressureRows = [];
+          try {
+            pressureRows = await trx('pest_pressure_scores')
+              .whereIn('service_record_id', journaledServiceRecordIds)
+              .select(['id', ...activityColumnsFor('pest_pressure_scores')]);
+          } catch (e) {
+            refuse(`Cannot verify Pest Pressure scores for this merge's service records (${e.message}) — refusing to revert`);
+          }
+          const strandedScores = countActivityRows(pressureRows, {
+            journaledIds: journaledIdsFor('pest_pressure_scores'), mergeAt, table: 'pest_pressure_scores',
+          });
+          if (strandedScores) {
+            refuse(`${strandedScores} Pest Pressure score(s) for this merge's service records are outside its journal — the restored customer's report history would lose them; reconcile by hand`);
+          }
+        }
+      }
       // Projects (r31): a WDO/prep/project report created for a journaled
       // visit stores its own customer_id and sends the public report from
       // it, never touching the visit — moving the visit back would leave
@@ -2715,17 +2741,23 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // signature stores a loser-owned method in the winner's autopay
       // while the method update matches zero rows. Signed contracts are
       // covered by the consent probe above; open ones must refuse here.
-      let openCardContracts = 0;
+      // Journaled contracts move back WITH the card (r32): a loser's own
+      // pre-merge sent/draft AutoPay contract is in the undo plans and
+      // stays consistent — only an UNJOURNALED open contract (or a
+      // journaled one updated since the merge) is the split the gate
+      // exists for. Standard activity shape.
+      let openCardContractRows = [];
       try {
-        const row = await trx('customer_contracts')
+        openCardContractRows = await trx('customer_contracts')
           .whereIn('payment_method_id', pmReturnIds)
           .whereIn('status', ['draft', 'sent', 'viewed'])
-          .count('id as n')
-          .first();
-        openCardContracts = Number(row?.n || 0);
+          .select(['id', ...activityColumnsFor('customer_contracts')]);
       } catch (e) {
         refuse(`Cannot verify open contracts against the returned card(s) (${e.message}) — refusing to revert`);
       }
+      const openCardContracts = countActivityRows(openCardContractRows, {
+        journaledIds: journaledIdsFor('customer_contracts'), mergeAt, table: 'customer_contracts',
+      });
       if (openCardContracts) {
         refuse(`${openCardContracts} open AutoPay contract(s) reference the card(s) this undo returns — the issued signing link would change account ownership underneath the signer; cancel or complete the contract first, then revert`);
       }

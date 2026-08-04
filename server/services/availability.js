@@ -289,6 +289,8 @@ class AvailabilityEngine {
     // its own writes (onboarding reschedule books + cancels in one txn) —
     // side effects are then deferred to the returned notify() so nothing
     // customer-visible fires before the outer transaction commits.
+    // Baseline for the rung-6 revalidation inside the transaction (r32).
+    const preFenceAvailCustomer = customer;
     const runBookingWork = async (work) => (options.trx ? work(options.trx) : db.transaction(work));
     const { booking, scheduled } = await runBookingWork(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST and UNCONDITIONAL (see the
@@ -325,8 +327,27 @@ class AvailabilityEngine {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the
       // scheduled_services insert below serializes against a concurrent
       // merge-undo of this customer — after the scheduling rungs, before
-      // any row lock.
+      // any row lock. Then revalidate (r32, mirroring /book): zone and the
+      // booking's comms assumptions were derived from the PRE-fence
+      // customer — if the undo won the wait and cleared an inherited
+      // address/contact, retry against live state instead of committing a
+      // visit whose dispatch/reminders resolve against the cleared row.
       await lockCustomerComms(trx, customerId);
+      {
+        const AVAIL_FINGERPRINT_COLS = [
+          'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
+          ...[1, 2, 3].flatMap((n) => {
+            const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
+            return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
+          }),
+        ];
+        const fp = (r) => AVAIL_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
+        const freshAvailCustomer = await trx('customers')
+          .where({ id: customerId }).first(...AVAIL_FINGERPRINT_COLS);
+        if (!freshAvailCustomer || fp(freshAvailCustomer) !== fp(preFenceAvailCustomer)) {
+          throw bookingError('Your account details just changed — please refresh and book again.', 'CUSTOMER_CHANGED_RETRY');
+        }
+      }
       const dayCount = await countActiveSelfBookingsForDay(trx, dateStr, {
         excludeSelfBookingId: options.excludeSelfBookingId || null,
       });
