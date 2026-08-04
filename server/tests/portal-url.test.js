@@ -178,3 +178,45 @@ describe('configuredPublicPortalOrigin()', () => {
     expect(configuredPublicPortalOrigin()).toBe('https://staging.example.com');
   });
 });
+
+describe('publicOriginPdfSignature()', () => {
+  const { publicOriginPdfSignature } = require('../utils/portal-url');
+  const ALL_VARS = [...VARS, 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT'];
+  let envBefore;
+
+  beforeEach(() => {
+    envBefore = Object.fromEntries(ALL_VARS.map((v) => [v, process.env[v]]));
+    for (const v of ALL_VARS) delete process.env[v];
+  });
+
+  afterEach(() => {
+    for (const k of ALL_VARS) {
+      if (envBefore[k] === undefined) delete process.env[k];
+      else process.env[k] = envBefore[k];
+    }
+  });
+
+  test('empty when no origin is configured — renderer-relative links do not vary by env', () => {
+    expect(publicOriginPdfSignature()).toBe('');
+  });
+
+  test('a configured origin yields a stable -o component', () => {
+    process.env.PUBLIC_PORTAL_URL = 'https://portal.wavespestcontrol.com';
+    const sig = publicOriginPdfSignature();
+    expect(sig).toMatch(/^-o[0-9a-f]{8}$/);
+    expect(publicOriginPdfSignature()).toBe(sig);
+  });
+
+  test('a domain migration changes the component — cached PDFs must re-render (codex P2 #3176 r18)', () => {
+    process.env.PUBLIC_PORTAL_URL = 'https://portal.wavespestcontrol.com';
+    const before = publicOriginPdfSignature();
+    process.env.PUBLIC_PORTAL_URL = 'https://portal.waveslawnandpest-newdomain.com';
+    expect(publicOriginPdfSignature()).not.toBe(before);
+  });
+
+  test('the production-name fallback counts as a configured origin', () => {
+    process.env.CLIENT_URL = 'https://waves-portal-production.up.railway.app';
+    process.env.RAILWAY_ENVIRONMENT_NAME = 'production';
+    expect(publicOriginPdfSignature()).toMatch(/^-o[0-9a-f]{8}$/);
+  });
+});

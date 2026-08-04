@@ -387,7 +387,13 @@ const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|sa
 // Word-order enumeration of banned claims proved unbounded across review
 // rounds (#3059 r2-r9), so the timing and product-safety classes are caught
 // by CLAUSE-LEVEL CO-OCCURRENCE instead. These constants are the vocabulary.
-const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:an?|one|two)[\s-]+hours?|half[\s-]+(?:an[\s-]+)?hour)\b/i;
+// Spelled-out numbers carry the same banned figure as digits ("avoid the
+// treated area for five hours" — codex P1 #3176 r18): the full spoken grid
+// — tens with optional compound ("thirty", "forty-five"), teens, units, and
+// the vague quantities labels actually use. Longer forms first so
+// "fourteen" can't half-match as "four". Units stay minutes/hours — day
+// counts are the agronomic-cadence class the matrix protects.
+const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour)\b/i;
 const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
 // Agronomic aftercare timing (mowing/watering windows) is legitimate copy,
 // and cadence copy uses days — only minute/hour figures are the banned class.

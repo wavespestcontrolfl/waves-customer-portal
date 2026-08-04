@@ -133,8 +133,9 @@ const {
 } = require('../services/pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
-const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
 const { stripFixedReentryTiming } = require('../services/social-media');
+const { publicOriginPdfSignature } = require('../utils/portal-url');
 // The approved idiom that replaces a stripped fixed-timing clause.
 const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 const { dateOnlyStamp } = require('../services/service-report/time-format');
@@ -1362,7 +1363,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1456,13 +1457,20 @@ router.get('/:token', async (req, res, next) => {
         // Same rule as pdf-queue: a render whose week could not be FROZEN is
         // not reproducible, so serve it but cache nothing — otherwise a later
         // view freezes different data while this object keeps these numbers.
+        // A photo the browser could not load rendered as its placeholder,
+        // invisible in the returned bytes — probe the printed photo URLs
+        // before keying this output as the healthy PDF (codex P2 #3176
+        // r18). Serve it, cache nothing; the next view re-renders.
+        const unreachablePhotos = await countUnreachableReportPhotos(renderedData);
         if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else if (unreachablePhotos > 0) {
+          logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laRenderSignature,
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laRenderSignature + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

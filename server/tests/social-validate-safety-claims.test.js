@@ -54,6 +54,13 @@ const FLAGGED_PRODUCT_SAFETY = [
 
 // Fixed drying/re-entry timing co-occurrence.
 const FLAGGED_TIMING = [
+  // Spelled-out numbers carry the same banned figure as digits
+  // (codex P1 #3176 r18): the vocabulary was a/an/one/two only.
+  'avoid the treated area for five hours',
+  'keep pets off the treated area for thirty minutes',
+  'stay off the lawn for twenty-four hours',
+  'safe to re-enter after three hours',
+  'keep children away from treated surfaces for a couple of hours',
   'safe after 30 minutes',
   '30-minute drying time',
   're-enter after 45 minutes',
@@ -84,6 +91,10 @@ const FLAGGED_TIMING = [
 ];
 
 const CLEAN = [
+  // Spelled-number agronomic windows stay legitimate — the exemption is
+  // clause-scoped, not defeated by the widened vocabulary.
+  'avoid watering for twenty-four hours',
+  'do not mow for three days after seeding',
   'EPA-registered products applied by licensed technicians',
   'a failsafe scheduling process',
   'Petsmart is next door',

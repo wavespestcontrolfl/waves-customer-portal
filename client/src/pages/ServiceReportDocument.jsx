@@ -223,6 +223,10 @@ const REENTRY_CLAIM_RX = new RegExp(
   '\\b(re-?enter|re-?entry|reentry|entry|ready|dry|dries|dried|drying|safe'
   + '|keep\\s+(\\w+\\s+){0,3}(off|out|away|clear)'
   + '|stay\\s+(off|out|away)'
+  // "avoid the treated area for five hours" is a re-entry claim too
+  // (codex P1 #3176 r18) — scoped to the treated-surface nouns so "avoid
+  // watering for 24 hours" stays agronomic.
+  + '|avoid\\w*\\s+(the\\s+)?(treated|lawn|grass|yard|area)'
   + '|off\\s+(the\\s+)?treated)\\b',
   'i',
 );

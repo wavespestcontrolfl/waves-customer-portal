@@ -794,6 +794,21 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/once dry/i);
   });
 
+  it('sanitizes an avoid-phrased spelled-out duration (codex P1 #3176 r18)', () => {
+    // "avoid the treated area for five hours" — spelled number + a claim
+    // verb the earlier vocabulary missed; the agronomic "avoid watering"
+    // stays because the claim requires a treated-surface noun.
+    const app = {
+      ...BASE_DATA.applications[0],
+      product: { ...BASE_DATA.applications[0].product, precaution_summary: 'Avoid the treated area for five hours. Avoid watering for twenty-four hours.' },
+    };
+    const data = { ...BASE_DATA, applications: [app] };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent).not.toMatch(/five hours/i);
+    expect(container.textContent).toMatch(/Avoid watering for twenty-four hours/i);
+    expect(container.textContent).toMatch(/once dry/i);
+  });
+
   it('keeps label-required agronomic directions that carry time units', () => {
     // "irrigate within 14 days" is a real catalog reentry_text (LESCO seed) —
     // it has a time unit but makes no re-entry claim, so it must survive

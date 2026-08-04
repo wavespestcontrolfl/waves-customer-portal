@@ -109,6 +109,44 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
   }
 }
 
+/**
+ * Cacheability probe for the photos the document prints (codex P2 #3176
+ * r18): a photo that fails during the headless render is replaced by its
+ * placeholder and the renderer still returns success, so the store paths
+ * would key that output as the healthy PDF and serve the placeholder
+ * forever. The browser's own fetch outcome is invisible from here (the
+ * Cloudflare renderer returns only bytes), so the store-time proxy is the
+ * server re-probing each printed photo URL: any unreachable photo marks the
+ * render uncacheable — it is still SERVED (availability > completeness),
+ * just not stored, so the next view re-renders once the photo is back.
+ * Ranged GETs, not HEAD: presigned S3 URLs are method-specific and a HEAD
+ * against a GET-presign 403s. Fail-soft per URL — a probe error counts as
+ * unreachable, which only costs a re-render.
+ */
+async function countUnreachableReportPhotos(data, { timeoutMs = 2500 } = {}) {
+  const urls = (Array.isArray(data?.photos) ? data.photos : [])
+    .map((p) => p?.url)
+    .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u));
+  if (!urls.length) return 0;
+  const probes = urls.map(async (url) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Range: 'bytes=0-0' },
+        signal: controller.signal,
+      });
+      return (res.ok || res.status === 206) ? 0 : 1;
+    } catch {
+      return 1;
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+  return (await Promise.all(probes)).reduce((a, b) => a + b, 0);
+}
+
 async function renderReportPdf(url, { serviceRecordId } = {}) {
   const provider = selectedPdfRenderer();
   if (provider === 'cloudflare_browser_rendering') {
@@ -161,6 +199,7 @@ module.exports = {
   launchBrowser,
   assertPdfBuffer,
   cfBrowserRenderingTimeoutMs,
+  countUnreachableReportPhotos,
   isPdfBuffer,
   renderReportPdf,
   renderReportPdfWithBrowser,

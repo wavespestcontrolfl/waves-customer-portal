@@ -4,7 +4,7 @@ const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
 const { nextEtMidnight } = require('./application-conditions');
-const { renderServiceReportV1Pdf } = require('./pdf');
+const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('./pdf');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
@@ -19,6 +19,7 @@ const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
 const { treatmentNarrativePdfSignature } = require('./treatment-narrative');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
+const { publicOriginPdfSignature } = require('../../utils/portal-url');
 const { alertServiceReportPdfFailed } = require('./failure-alerts');
 const {
   emitPdfRenderTerminalFailure,
@@ -261,8 +262,20 @@ async function renderAndStoreServiceReportPdf(recordId, {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
     }
+    // A photo the browser could not load rendered as its placeholder, and
+    // that state is invisible in the returned bytes — probe the printed
+    // photo URLs before keying this output as the healthy PDF (codex P2
+    // #3176 r18). Serve it, cache nothing; the next view re-renders.
+    const unreachablePhotos = await countUnreachableReportPhotos(renderedData);
+    if (unreachablePhotos > 0) {
+      logger.warn(`[service-report-pdf] ${unreachablePhotos} report photo(s) unreachable for ${recordId} — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: 'photos_unreachable',
+      };
+    }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -398,7 +411,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

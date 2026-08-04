@@ -30,6 +30,9 @@ jest.mock('../services/service-report/dynamic-context', () => ({
 }));
 jest.mock('../services/service-report/pdf', () => ({
   renderServiceReportV1Pdf: mockRenderServiceReportV1Pdf,
+  // Photo-reachability probe (codex P2 #3176 r18): reachable here — this
+  // suite asserts the config keying, not the photo gate.
+  countUnreachableReportPhotos: jest.fn().mockResolvedValue(0),
 }));
 jest.mock('../services/service-report/pdf-storage', () => ({
   getHealthyStoredReportPdf: mockGetHealthyStoredReportPdf,

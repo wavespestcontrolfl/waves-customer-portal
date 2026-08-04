@@ -99,4 +99,24 @@ function configuredPublicPortalOrigin() {
   return '';
 }
 
-module.exports = { publicPortalUrl, portalUrl, configuredPublicPortalOrigin };
+/**
+ * PDF cache-key component for the public origin the document prints
+ * (codex P2 #3176 r18). The interactive-report link baked into every PDF
+ * comes from configuredPublicPortalOrigin(), so a domain migration (or the
+ * production-name fallback flipping) changes what the document renders —
+ * the key must change with it or a stored PDF keeps directing customers to
+ * the obsolete origin forever. Short hash, not the raw URL: origins carry
+ * schemes and slashes that don't belong in an S3 key. '' when no origin is
+ * configured (the document then prints renderer-relative links, which don't
+ * vary by env config).
+ */
+function publicOriginPdfSignature() {
+  const origin = configuredPublicPortalOrigin();
+  if (!origin) return '';
+  const hash = require('crypto').createHash('sha1').update(origin).digest('hex').slice(0, 8);
+  return `-o${hash}`;
+}
+
+module.exports = {
+  publicPortalUrl, portalUrl, configuredPublicPortalOrigin, publicOriginPdfSignature,
+};
