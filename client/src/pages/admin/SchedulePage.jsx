@@ -11970,7 +11970,9 @@ export function CompletionPanel({
         return;
       }
       if (action === "cross_key") return resolveCrossKeyCompleted();
-      if (action === "resume") return handleSubmit(reconcileConfirmed);
+      if (action === "resume") {
+        return handleSubmit(reconcileConfirmed, { resumingPoll: true });
+      }
       if (action === "failed") {
         // Pre-commit failure (e.g. a stale claim was reclaimed-as-failed):
         // a fresh manual submit is correct — drop the chain so it rebuilds.
@@ -11995,8 +11997,14 @@ export function CompletionPanel({
     }
   }
 
-  async function handleSubmit(reconcileConfirmed = false) {
-    if (submitting) return;
+  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false } = {}) {
+    // The status poll's "resumable" verdict re-enters here while submitting
+    // is STILL true (the button stayed in its completing state through the
+    // whole chain) — that re-entry is the continuation of the same logical
+    // submission, not a double-tap, so it bypasses the guard (codex P1
+    // #3187 r18: the guard silently swallowed the resume POST and left the
+    // button disabled forever).
+    if (submitting && !resumingPoll) return;
     // Don't complete while an AI draft is in flight — the response is about to
     // replace the notes, and submitting now would either lose the generated copy
     // or rebuild the structured fields from soon-to-be-overwritten notes.

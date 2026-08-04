@@ -2554,6 +2554,12 @@ export default function DispatchPageV2({
           service={completingService}
           products={products}
           onClose={() => {
+            // Synchronous — a completion response landing before the
+            // passive effect re-runs must already see this panel as
+            // closed, or applyCompletionResult stages the handoff for an
+            // onClose drain that has already happened (codex P1 #3187
+            // r18).
+            completionPanelOpenServiceRef.current = null;
             setCompletingService(null);
             if (pendingPaymentAfterCompletionRef.current) {
               // Same active-sheet queue as the late-response path (codex
@@ -3028,6 +3034,11 @@ export default function DispatchPageV2({
       )}
       {paymentData && (
         <MobilePaymentSheet
+          // Invoice-keyed remount: advancing the queue must never reuse the
+          // previous invoice's local tender state (a launched Tap to Pay
+          // left `charging` stuck for the next customer — codex P2 #3187
+          // r18).
+          key={paymentData.invoiceId}
           service={paymentData.service}
           invoiceId={paymentData.invoiceId}
           invoiceToken={paymentData.invoiceToken}
@@ -3043,10 +3054,11 @@ export default function DispatchPageV2({
               ...paymentData.service,
               completionInvoiceAlreadySent: true,
             };
-            // No release here: MobilePaymentSheet always invokes onClose right
-            // after this callback, and releasing twice would shift TWO queue
-            // entries and lose one (codex P1 #3187 r17) — onClose is the
-            // sheet's single release point.
+            // Unlike the card/cash/check tenders, MobilePaymentSheet does
+            // NOT chain onClose after onInvoiceSent — this path releases
+            // itself or the sheet stays mounted and the queue stalls
+            // (codex P1 #3187 r18).
+            releasePaymentSheet();
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];
