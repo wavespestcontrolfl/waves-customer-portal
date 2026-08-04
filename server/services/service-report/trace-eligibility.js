@@ -210,6 +210,11 @@ const INELIGIBLE_NAME_RES = [
   [/\b(?:rodents?|trap(?:ping|s)?)\b/i, 'trap_lane'],
   [/\binspections?\b/i, 'inspection_lane'],
   [/\bwdo\b/i, 'inspection_lane'],
+  // Stinging-insect visits are localized nest work, same as their stable
+  // bee_wasp_removal/mud_dauber keys (codex P2 r26) — the generic spray
+  // token list treated identity-less bee/wasp labels as perimeter-spray
+  // eligible.
+  [/\b(?:bees?|wasps?|hornets?|yellow\s*jackets?|mud\s*daubers?)\b/i, 'localized_treatment_lane'],
 ];
 const ELIGIBLE_NAME_RES = [
   [/\b(?:lawn|turf|fertiliz\w*)\b/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
@@ -221,7 +226,7 @@ const ELIGIBLE_NAME_RES = [
   // Pest + Termite Bait Station" are pest-PRIMARY bundles — the spray is
   // real (codex P1 r1). A pure "Termite Bait" name matches neither of
   // these and falls to the bait rule.
-  [/\b(?:pest|mosquito|spray|trees?|shrubs?|roach(?:es)?|ants?|wasps?|bees?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
+  [/\b(?:pest|mosquito|spray|trees?|shrubs?|roach(?:es)?|ants?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
 ];
 const TRAILING_INELIGIBLE_NAME_RES = [
   [/\bbait\b/i, 'bait_station_lane'],
@@ -556,7 +561,17 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
         : null;
       return resolveTraceEligibility({
         serviceKey: key,
-        findingsType: (key && pointerByKey.get(key)) || null,
+        // A successful pointer query that returned NO row for a resolved
+        // key is a cutover/deactivation, not "untyped" (codex P2 r26):
+        // at RENDER the unknown-pointer sentinel fails it closed (the
+        // r23 rule) instead of falling to the unconditional key rule —
+        // termite_liquid must not skip its perimeter-method check while
+        // its profile is dark. A row present with a null project_type is
+        // genuinely untyped and keeps the key rule; capture stays
+        // permissive.
+        findingsType: key && pointerByKey.has(key)
+          ? (pointerByKey.get(key) || null)
+          : (key && renderSide ? 'unresolved:pointer' : null),
         displayName: addon.service_name || '',
         // RENDER-side rescue by a conditional typed add-on requires its
         // recorded evidence — which lives in a companion snapshot this
@@ -609,16 +624,17 @@ async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
   }
   return rows.map((row) => {
     const key = row.service_key_snapshot || keyById.get(row.service_id) || null;
-    // A typed key's ONLY identity is its findings pointer — freezing it
-    // with a null pointer during a cutover/temporary deactivation would
-    // make the report permanently unclassified even after the profile is
-    // restored (codex P2 r22). Freeze only when the pointer was actually
-    // found or SERVICE_KEY_RULES covers the key on its own; otherwise
-    // the line stays live-resolvable. The decision is PER ROW (codex P2
-    // r23): a transient failure on one lookup must not stop an already-
-    // resolved sibling (snapshot-keyed, or rules-covered) from freezing.
-    const freezable = key
-      && (pointerByKey.has(key) || Object.prototype.hasOwnProperty.call(SERVICE_KEY_RULES, key));
+    // Freeze ONLY when the key's profile row was actually found (codex
+    // P2 r22 + r26): a null-pointer freeze during a cutover/deactivation
+    // would pin the line to the WRONG verdict forever — permanently
+    // unclassified for a typed key, or permanently unconditional for a
+    // rules-covered typed lane (termite_liquid frozen without its
+    // termite_treatment pointer would skip the perimeter-method check
+    // even after the profile is restored). A found row with a null
+    // project_type is genuinely untyped and freezes {key, null}. The
+    // decision stays PER ROW (codex P2 r23): a failed lookup leaves only
+    // its dependent rows live.
+    const freezable = key && pointerByKey.has(key);
     return {
       serviceId: row.service_id || null,
       serviceName: row.service_name || null,

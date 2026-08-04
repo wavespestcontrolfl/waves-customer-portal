@@ -479,9 +479,10 @@ describe('classification behavior', () => {
     const withoutPointer = await frozenAddonLinesForCompletion('ss-r22', trxFor([]));
     expect(withoutPointer[0]).not.toHaveProperty('serviceKey');
     expect(withoutPointer[0]).toMatchObject({ serviceId: 'a1', serviceName: 'Flea & Tick' });
-    // a SERVICE_KEY_RULES-covered key classifies without a pointer, so it
-    // freezes either way
-    expect(withoutPointer[1]).toMatchObject({ serviceKey: 'pest_general_quarterly', findingsType: null });
+    // r26: a rules-covered key does NOT freeze without its profile row
+    // either — a null-pointer freeze would pin a typed lane (termite)
+    // to its unconditional key rule forever
+    expect(withoutPointer[1]).not.toHaveProperty('serviceKey');
   });
 
   test('round 23 — sentinel keys and unknown typed pointers fail closed ahead of eligible rules', () => {
@@ -534,7 +535,9 @@ describe('classification behavior', () => {
       return q;
     };
     const rows = await frozenAddonLinesForCompletion('ss-r23', catalogDownTrx);
-    expect(rows[0]).toMatchObject({ serviceKey: 'pest_general_quarterly' });
+    // r26: freezing requires the key's profile row — this fixture has
+    // none, so the snapshot-keyed row stays live too
+    expect(rows[0]).not.toHaveProperty('serviceKey');
     expect(rows[1]).not.toHaveProperty('serviceKey');
     // pointer lookup fails: typed rows stay live, rules-covered rows freeze
     const profilesDownTrx = (table) => {
@@ -559,7 +562,9 @@ describe('classification behavior', () => {
     };
     const mixed = await frozenAddonLinesForCompletion('ss-r23b', profilesDownTrx);
     expect(mixed[0]).not.toHaveProperty('serviceKey');
-    expect(mixed[1]).toMatchObject({ serviceKey: 'pest_general_quarterly' });
+    // r26: the pointer lookup failed, so nothing freezes — a null-pointer
+    // freeze would pin the wrong verdict permanently
+    expect(mixed[1]).not.toHaveProperty('serviceKey');
   });
 
   test('round 24 — add-on order is id-tiebroken; rules-covered keys skip the pointer lookup', async () => {
@@ -624,6 +629,57 @@ describe('classification behavior', () => {
     // capture stays permissive (typedValues undefined)
     const capture = await addonVerdictsFromLines(line, termiteKnex);
     expect(capture[0]).toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('round 26 — identity-less stinging-insect names fail closed; absent pointers fail render closed; found rows freeze', async () => {
+    // name fallback: localized nest work, same as the stable keys
+    for (const displayName of ['Wasp Control Service', 'Bee / Wasp Nest Removal', 'Hornet Nest Treatment', 'Mud Dauber Removal']) {
+      expect(resolveTraceEligibility({ displayName }))
+        .toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+    }
+    // live path: a SUCCESSFUL pointer query with no row for the key
+    // fails closed at render (cutover ≠ untyped) and stays permissive at
+    // capture
+    const { addonVerdictsFromLines, frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+    const noRowKnex = (table) => {
+      if (table === 'services') {
+        return { whereIn: () => ({ select: () => Promise.resolve([{ id: 't1', service_key: 'termite_liquid' }]) }) };
+      }
+      if (table === 'service_completion_profiles') {
+        return { whereIn: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }) };
+      }
+      return { whereIn: () => ({ select: () => Promise.resolve([]) }) };
+    };
+    const line = [{ serviceId: 't1', serviceName: 'Termite Treatment Add-on' }];
+    const render = await addonVerdictsFromLines(line, noRowKnex, { renderSide: true });
+    expect(render[0]).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    const capture = await addonVerdictsFromLines(line, noRowKnex);
+    expect(capture[0]).toMatchObject({ eligible: true, variant: 'spray' });
+    // freezer: a FOUND row freezes (null project_type = genuinely
+    // untyped), an absent row leaves the line live
+    const foundNullTrx = (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        orderBy: () => q,
+        select: () => {
+          if (table === 'scheduled_service_addons') {
+            return Promise.resolve([
+              { service_id: 'p1', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+              { service_id: 't2', service_name: 'Termite Add-on', service_key_snapshot: 'termite_liquid' },
+            ]);
+          }
+          if (table === 'service_completion_profiles') {
+            return Promise.resolve([{ service_key: 'pest_general_quarterly', project_type: null }]);
+          }
+          return Promise.resolve([]);
+        },
+      };
+      return q;
+    };
+    const frozen = await frozenAddonLinesForCompletion('ss-r26', foundNullTrx);
+    expect(frozen[0]).toMatchObject({ serviceKey: 'pest_general_quarterly', findingsType: null });
+    expect(frozen[1]).not.toHaveProperty('serviceKey');
   });
 
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
