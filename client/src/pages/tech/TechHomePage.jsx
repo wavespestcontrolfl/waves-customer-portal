@@ -1109,13 +1109,20 @@ function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
         }}>
           📷 Photos
         </button>
-        <button onClick={onZone} aria-label="Trace treatment zone" style={{
-          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: `1px solid ${DARK.border}`, background: 'transparent',
-          color: DARK.teal, cursor: 'pointer',
-        }}>
-          🛰️ Zone
-        </button>
+        {/* Hidden when the schedule feed marks the service trace-ineligible
+            (GATE_TRACE_ELIGIBILITY): nothing is sprayed on bait/trapping/
+            inspection stops, so the tracer has nothing true to capture.
+            Absent flag (older payloads, gate off) keeps the button — the
+            write route enforces the same registry either way. */}
+        {service.traceEligible !== false && (
+          <button onClick={onZone} aria-label="Trace treatment zone" style={{
+            padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+            border: `1px solid ${DARK.border}`, background: 'transparent',
+            color: DARK.teal, cursor: 'pointer',
+          }}>
+            🛰️ Zone
+          </button>
+        )}
         <button onClick={onLead} aria-label="Flag opportunity" style={{
           padding: '6px 8px', borderRadius: 6, fontSize: 12, fontWeight: 600,
           border: `1px solid ${DARK.border}`, background: 'transparent',

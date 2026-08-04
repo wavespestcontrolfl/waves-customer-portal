@@ -2522,16 +2522,33 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // it exists to remove. The immutable snapshot is the authority; the live
   // profile only widens it. Seeded before the try/catch so a throw leaves
   // the snapshot verdict standing.
-  let trapLaneNoSprayMap = parseJsonObject(service.service_data)
-    ?.typedReportSnapshot?.type === 'rodent_trapping';
+  const snapshotFindingsType = parseJsonObject(service.service_data)
+    ?.typedReportSnapshot?.type || null;
+  let trapLaneNoSprayMap = snapshotFindingsType === 'rodent_trapping';
+  let laneProfile = null;
   if (!interiorOnlyLane && scheduledServiceRow) {
     try {
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
-      const laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
+      laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
       interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
       trapLaneNoSprayMap = trapLaneNoSprayMap || laneProfile?.findingsType === 'rodent_trapping';
     } catch { /* label fallback stands */ }
   }
+  // Centralized trace eligibility (GATE_TRACE_ELIGIBILITY, dark): ONE
+  // registry decides whether this report may carry a spray trace,
+  // generalizing the two hand-built lane exclusions above (which stay as
+  // the gate-off behavior AND as belt-and-suspenders when it is on). The
+  // frozen snapshot's findings type outranks the live profile — the same
+  // snapshot-is-authority rule the trap lane ratified — and display names
+  // are the last-resort fallback. Scoped require matches this file's
+  // pattern for report-time helpers.
+  const { resolveTraceEligibility, traceEligibilityGateOn } = require('./trace-eligibility');
+  const traceEligibility = resolveTraceEligibility({
+    serviceKey: laneProfile?.serviceKey || null,
+    findingsType: snapshotFindingsType || laneProfile?.findingsType || null,
+    displayName: `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
+  });
+  const traceSuppressed = traceEligibilityGateOn() && !traceEligibility.eligible;
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -3077,7 +3094,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // is stale exterior evidence on an interior treatment's report
     // (codex P2 r6; stable-key classification r9).
     if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id
-      && !interiorOnlyLane && !trapLaneNoSprayMap) {
+      && !interiorOnlyLane && !trapLaneNoSprayMap && !traceSuppressed) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -3121,6 +3138,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             pathPoints: parseJsonArray(tracedRow.path_points)
               .map((p) => ({ x: numberOrNull(p?.px?.x), y: numberOrNull(p?.px?.y) }))
               .filter((p) => p.x != null && p.y != null),
+            // Server-decided render variant/caption from the eligibility
+            // registry — the client falls back to its legacy inline
+            // service-line switch when these are absent (older cached
+            // payloads, gate off on an unclassified lane).
+            variant: traceEligibility.eligible ? traceEligibility.variant : null,
+            captionKey: traceEligibility.eligible ? traceEligibility.captionKey : null,
           };
         }
       }
@@ -3336,7 +3359,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     : { valid: null, photo_count: photos.length, broken_at: null };
   // Pass the already-resolved classification so the resolver does not
   // re-resolve the profile for the report payload path.
-  const payloadTracedExteriorZone = interiorOnlyLane
+  // An ineligible lane's trace must not assert an exterior re-entry window
+  // either — a trace on an inspection would otherwise emit a false
+  // advisory (scope RC3).
+  const payloadTracedExteriorZone = (interiorOnlyLane || traceSuppressed)
     ? false
     : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex);
   const advisory = normalizeAdvisoryForTreatmentScope({

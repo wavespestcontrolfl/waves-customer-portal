@@ -1923,6 +1923,28 @@ router.get('/', async (req, res, next) => {
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
+    // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
+    // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
+    // in ONE batch query; gate off keeps every row eligible so the UI is
+    // unchanged. This is a UI affordance only — the tech-track write route
+    // enforces the same registry with a 403, and the report render
+    // suppresses ineligible traces regardless.
+    const {
+      resolveTraceEligibility: rowTraceEligibility,
+      traceEligibilityGateOn,
+    } = require('../services/service-report/trace-eligibility');
+    let serviceKeyByServiceId = new Map();
+    if (traceEligibilityGateOn()) {
+      const catalogIds = [...new Set(services.map((s) => s.service_id).filter(Boolean))];
+      if (catalogIds.length) {
+        const catalogRows = await db('services')
+          .whereIn('id', catalogIds)
+          .select('id', 'service_key')
+          .catch(() => []);
+        serviceKeyByServiceId = new Map(catalogRows.map((r) => [r.id, r.service_key]));
+      }
+    }
+
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -2079,6 +2101,10 @@ router.get('/', async (req, res, next) => {
       return {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
+        traceEligible: !traceEligibilityGateOn() || rowTraceEligibility({
+          serviceKey: serviceKeyByServiceId.get(s.service_id) || null,
+          displayName: s.service_type || '',
+        }).eligible,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,

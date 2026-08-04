@@ -1,0 +1,196 @@
+// Centralized spray-trace eligibility (GATE_TRACE_ELIGIBILITY, dark —
+// owner-ruled build 2026-08-04, scope doc 2026-08-02).
+//
+// The Treatment Zone Mapper's trace was eligible everywhere by accident:
+// the only exclusions ever added were bed bug (interior lane) and rodent
+// trapping (trap lane), each hand-built at the render point after a
+// customer-visible defect. Every other decision — capture button, write
+// route, eight client render sites, the exterior re-entry advisory — keyed
+// on display-name strings independently. This module is the ONE registry:
+// `{ eligible, variant, captionKey, reason }` keyed on the stable
+// findingsType/serviceKey identity (display names only as the last-resort
+// fallback, same posture the bed-bug lane ratified), mirroring
+// buildStationMapReportContext's `{available, reason}` contract.
+//
+// Bias: a service this registry does not recognize is INELIGIBLE
+// ('unclassified_service') — a trace asserts "we treated along this line",
+// and an unfounded spray claim on a bait/inspection/trapping report is the
+// defect this module exists to end. The coverage contract test forces
+// every ACTIVE catalog key to classify explicitly, so the default only
+// ever bites admin-added keys — which is exactly when the safe answer is
+// "no spray claim until classified".
+//
+// Legacy data: traces already saved on now-ineligible services are
+// SUPPRESSED at render (reports recompose at view time), never deleted or
+// relabeled.
+
+// Typed lanes first — findingsType is the most specific stable identity
+// (the typed pointer), and a typed lane's verdict must not depend on which
+// catalog key routed to it.
+const FINDINGS_TYPE_RULES = {
+  // spray/spatial typed lanes
+  tree_shrub: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  mosquito_event: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  flea: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  cockroach: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  german_roach_knockdown: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  palmetto_roach_knockdown: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  one_time_pest_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  one_time_lawn_treatment: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  // liquid termite family (trench/rod/spot) — a perimeter application IS
+  // the product; the compliance certificate lane is excluded separately.
+  termite_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // nothing is sprayed on these stops — a trace would be a claim the
+  // visit cannot support (rodent-trapping ruling, owner 2026-08-02,
+  // generalized)
+  termite_bait_station: { eligible: false, reason: 'bait_station_lane' },
+  rodent_bait_station: { eligible: false, reason: 'bait_station_lane' },
+  rodent_trapping: { eligible: false, reason: 'trap_lane' },
+  wildlife_trapping: { eligible: false, reason: 'trap_lane' },
+  rodent_exclusion: { eligible: false, reason: 'exclusion_lane' },
+  rodent_sanitation: { eligible: false, reason: 'sanitation_lane' },
+  rodent_inspection: { eligible: false, reason: 'inspection_lane' },
+  pest_inspection: { eligible: false, reason: 'inspection_lane' },
+  termite_inspection: { eligible: false, reason: 'inspection_lane' },
+  wdo_inspection: { eligible: false, reason: 'inspection_lane' },
+  bed_bug: { eligible: false, reason: 'interior_only_lane' },
+  palm_injection: { eligible: false, reason: 'injection_lane' },
+  pre_treatment_termite_certificate: { eligible: false, reason: 'compliance_project_lane' },
+};
+
+// Catalog keys (generic lanes have no findingsType). Mirrors the
+// completion-lane registry's family groupings.
+const SERVICE_KEY_RULES = {
+  // recurring + one-time pest: exterior spray is the product
+  pest_general_bimonthly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  pest_general_monthly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  pest_general_quarterly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  pest_general_semiannual: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  pest_re_service: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  one_time_pest_control: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  pest_initial_cleanout: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  fire_ant: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  tick_control: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  bee_wasp_removal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  mud_dauber_removal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // mosquito programs
+  mosquito_monthly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  mosquito_seasonal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  waveguard_membership: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // lawn programs — coverage outline/highlight, not a spray-mist replay
+  lawn_care_6week: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  lawn_care_monthly: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  lawn_care_quarterly: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  lawn_care_recurring: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  lawn_fertilization: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  lawn_tree_shrub_combo: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  // liquid termite keys (typed — listed for callers that only have the key)
+  termite_liquid: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  termite_trenching: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  termite_pretreatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  termite_spot_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // never lanes
+  bed_bug_treatment: { eligible: false, reason: 'interior_only_lane' },
+  pest_termite_bait_quarterly: { eligible: false, reason: 'bait_station_lane' },
+  termite_slab_pretreat: { eligible: false, reason: 'compliance_project_lane' },
+  wdo_inspection: { eligible: false, reason: 'inspection_lane' },
+  lawn_inspection: { eligible: false, reason: 'inspection_lane' },
+  palm_treatment: { eligible: false, reason: 'injection_lane' },
+  general_appointment: { eligible: false, reason: 'appointment_lane' },
+  waveguard_initial_setup: { eligible: false, reason: 'appointment_lane' },
+  termite_renewal: { eligible: false, reason: 'billing_rider' },
+  termite_bond_1yr: { eligible: false, reason: 'billing_rider' },
+  termite_bond_5yr: { eligible: false, reason: 'billing_rider' },
+  termite_bond_10yr: { eligible: false, reason: 'billing_rider' },
+};
+
+const INELIGIBLE_NAME_RES = [
+  [/\bbed\s*bugs?\b/i, 'interior_only_lane'],
+  [/\brodent|trap(?:ping)?\b/i, 'trap_lane'],
+  [/\bbait\b/i, 'bait_station_lane'],
+  [/\binspection\b/i, 'inspection_lane'],
+  [/\bwdo\b/i, 'inspection_lane'],
+];
+const ELIGIBLE_NAME_RES = [
+  [/\blawn|turf|fertiliz/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
+  [/\bpest|mosquito|spray|tree|shrub|flea|tick|roach|ant|wasp|bee\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
+];
+
+function verdict(rule, source) {
+  if (rule.eligible) {
+    return {
+      eligible: true,
+      variant: rule.variant,
+      captionKey: rule.captionKey,
+      reason: `eligible_${source}`,
+    };
+  }
+  return { eligible: false, variant: null, captionKey: null, reason: rule.reason };
+}
+
+/**
+ * Pure resolver. Precedence: findingsType (typed pointer, most specific) →
+ * serviceKey → display-name regex (last resort, admin-editable labels) →
+ * ineligible 'unclassified_service'.
+ */
+function resolveTraceEligibility({
+  serviceKey = null, findingsType = null, displayName = '',
+} = {}) {
+  if (findingsType && FINDINGS_TYPE_RULES[findingsType]) {
+    return verdict(FINDINGS_TYPE_RULES[findingsType], 'findings_type');
+  }
+  if (serviceKey && SERVICE_KEY_RULES[serviceKey]) {
+    return verdict(SERVICE_KEY_RULES[serviceKey], 'service_key');
+  }
+  const name = String(displayName || '');
+  for (const [re, reason] of INELIGIBLE_NAME_RES) {
+    if (re.test(name)) return { eligible: false, variant: null, captionKey: null, reason };
+  }
+  for (const [re, rule] of ELIGIBLE_NAME_RES) {
+    if (re.test(name)) return verdict({ eligible: true, ...rule }, 'display_name');
+  }
+  return { eligible: false, variant: null, captionKey: null, reason: 'unclassified_service' };
+}
+
+function traceEligibilityGateOn() {
+  return process.env.GATE_TRACE_ELIGIBILITY === 'true';
+}
+
+/**
+ * Capture-side block payload for the tech write routes (403), or null.
+ * Gate-off keeps today's behavior; resolver errors FAIL OPEN — capture is
+ * an internal tool and the render-side suppression is the customer-facing
+ * guarantee, so a profile hiccup must not block a legitimate spray trace
+ * in the field.
+ */
+async function traceCaptureBlockPayload(scheduledService, knex) {
+  if (!traceEligibilityGateOn()) return null;
+  let eligibility;
+  try {
+    const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+    const profile = await resolveCompletionProfileForScheduledService(scheduledService, knex);
+    eligibility = resolveTraceEligibility({
+      serviceKey: profile?.serviceKey || null,
+      findingsType: profile?.findingsType || null,
+      displayName: scheduledService?.service_type || '',
+    });
+  } catch {
+    return null;
+  }
+  if (eligibility.eligible) return null;
+  return {
+    status: 403,
+    payload: {
+      error: 'Treatment-zone tracing does not apply to this service — nothing is sprayed on this visit type.',
+      code: 'trace_ineligible_service',
+      reason: eligibility.reason,
+    },
+  };
+}
+
+module.exports = {
+  resolveTraceEligibility,
+  traceEligibilityGateOn,
+  traceCaptureBlockPayload,
+  _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },
+};

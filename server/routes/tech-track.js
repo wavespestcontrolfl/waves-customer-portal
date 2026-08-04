@@ -643,6 +643,7 @@ const {
   getTreatmentZoneMapForScheduledService,
 } = require('../services/treatment-zone-maps');
 const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
+const { traceCaptureBlockPayload } = require('../services/service-report/trace-eligibility');
 const { geocodeAddress } = require('../services/geocoder');
 
 router.post('/:id/treatment-zone', upload.fields([
@@ -657,10 +658,19 @@ router.post('/:id/treatment-zone', upload.fields([
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'customer_id', 'technician_id');
+      .first('id', 'customer_id', 'technician_id', 'service_id', 'service_type');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    // Centralized trace eligibility (GATE_TRACE_ELIGIBILITY, dark): a trace
+    // on a bait/trapping/inspection visit asserts a spray the report will
+    // suppress anyway — reject the save with the reason so the tech knows,
+    // instead of silently publishing nothing. Fail-open inside the helper:
+    // a profile hiccup must never block a legitimate field capture.
+    {
+      const traceBlock = await traceCaptureBlockPayload(svc, db);
+      if (traceBlock) return res.status(traceBlock.status).json(traceBlock.payload);
     }
 
     let payload;
@@ -728,10 +738,16 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
     }
     const svc = await db('scheduled_services')
       .where({ id: req.params.id })
-      .first('id', 'technician_id');
+      .first('id', 'technician_id', 'service_id', 'service_type');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     if (req.techRole !== 'admin' && svc.technician_id !== req.technicianId) {
       return res.status(403).json({ error: 'Not assigned to this service' });
+    }
+    // Same eligibility gate as the save route — the auto-trace suggestion
+    // is the same capture flow one step earlier.
+    {
+      const traceBlock = await traceCaptureBlockPayload(svc, db);
+      if (traceBlock) return res.status(traceBlock.status).json(traceBlock.payload);
     }
     if (!req.file?.buffer?.length) {
       return res.status(400).json({ error: 'map image is required' });

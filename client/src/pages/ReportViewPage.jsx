@@ -8371,7 +8371,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
-              tracedVariant={data.serviceLine === 'lawn' ? 'outline' : 'spray'}
+              tracedVariant={data.treatmentMap?.traced?.variant
+                || (data.serviceLine === 'lawn' ? 'outline' : 'spray')}
               live={mode === 'live'}
               applications={data.applications || []}
             />
@@ -8503,7 +8504,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
-              tracedVariant={data.serviceLine === 'lawn' ? 'outline' : 'spray'}
+              tracedVariant={data.treatmentMap?.traced?.variant
+                || (data.serviceLine === 'lawn' ? 'outline' : 'spray')}
               live={mode === 'live'}
               applications={data.applications || []}
             />
