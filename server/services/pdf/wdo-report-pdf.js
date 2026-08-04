@@ -305,7 +305,7 @@ const INACCESSIBLE_ROWS = [
 // hyphenated compounds parse as labels: "inaccessible at exterior-facing
 // eaves" split at "exterior-", stranding "inaccessible at" on the Attic row
 // and ticking Exterior with the remainder. A colon needs no surrounding space.
-const INACCESSIBLE_CATEGORY_WORDS = String.raw`crawl\s*spaces?|crawlspaces?|crawl|attics?|interiors?|exteriors?|other`;
+const INACCESSIBLE_CATEGORY_WORDS = String.raw`crawl[-\s]*spaces?|crawlspaces?|crawl|attics?|interiors?|exteriors?|other`;
 const INACCESSIBLE_LABEL_PATTERN = new RegExp(
   // Line-anchored: a colon, OR whitespace when a spaced dash follows one filler
   // word — the emitter's "Crawlspace present — …" shape (the lookahead keeps
@@ -362,27 +362,36 @@ function splitInaccessibleAreas(value) {
     const lower = chunk.toLowerCase();
     return INACCESSIBLE_ROWS.filter((row) => {
       // A category used as a hyphenated adjective ("exterior-facing eaves") is
-      // describing a location, not claiming that category as its own area.
-      const word = row.key === 'crawlspace' ? 'crawl' : row.key;
-      const re = new RegExp(String.raw`\b${word}\w*\b(?!-\w)`, 'i');
-      return re.test(lower);
+      // describing a location, not claiming that category as its own area — so
+      // a hyphen followed by a word normally disqualifies a match. "Crawl-space"
+      // is the exception: there the hyphen is part of the category's own name.
+      if (row.key === 'crawlspace') return /\bcrawl[-\s]?spaces?\b|\bcrawl\b(?!-\w)/i.test(lower);
+      return new RegExp(String.raw`\b${row.key}\w*\b(?!-\w)`, 'i').test(lower);
     });
   };
 
   // Line by line, then clause by clause within a line. The blob is built by
   // appending whole lines (the property-intelligence emitter) and by a tech
   // typing prose, and a semicolon starts a new claim inside a line.
+  // The row the previous clause spoke about, so an unlabelled clause naming no
+  // category reads as a CONTINUATION of it ("Crawlspace: skirting was closed;
+  // the area beneath was not inspected") rather than a new area. It carries
+  // ACROSS lines too — a tech wrapping one reason onto a second line is still
+  // describing the same row. A line that is labelled, or that names a
+  // category, overrides it.
+  let lastKey = null;
+
   for (const rawLine of text.split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
-    // The row the previous clause spoke about, so an unlabelled clause naming
-    // no category reads as a CONTINUATION of it ("Crawlspace: skirting was
-    // closed; the area beneath was not inspected") rather than a new area.
-    let lastKey = null;
 
-    for (const rawClause of line.split(';')) {
-      const clause = rawClause.trim();
+    const clauses = line.split(';');
+    for (let ci = 0; ci < clauses.length; ci += 1) {
+      const clause = clauses[ci].trim();
       if (!clause) continue;
+      // A semicolon-split clause rejoins with its semicolon; a wrapped LINE
+      // (ci === 0) is mid-sentence and rejoins with a plain space.
+      const contJoiner = ci === 0 ? ' ' : '; ';
 
       INACCESSIBLE_LABEL_PATTERN.lastIndex = 0;
       const marks = [];
@@ -399,7 +408,16 @@ function splitInaccessibleAreas(value) {
         // interior). With no previous row it attaches to the first label rather
         // than being dropped.
         const preamble = clause.slice(0, marks[0].start);
-        if (preamble.trim()) append(lastKey || marks[0].key, preamble, lastKey ? '; ' : ' ');
+        if (preamble.trim()) {
+          // A preamble that NAMES categories is a list, not stray text — the
+          // repo's own placeholder is exactly this shape ("Attic, interior,
+          // exterior, crawlspace, other: specific areas and reasons"), where
+          // only the final "other:" is an explicit label. Routing it to that
+          // label alone would leave the four named categories unticked.
+          const named = categoriesMentionedIn(preamble);
+          if (named.length) for (const hit of named) append(hit.key, preamble);
+          else append(lastKey || marks[0].key, preamble, lastKey ? contJoiner : ' ');
+        }
         marks.forEach((mark, i) => {
           const end = i + 1 < marks.length ? marks[i + 1].start : clause.length;
           append(mark.key, clause.slice(mark.bodyStart, end));
@@ -417,8 +435,9 @@ function splitInaccessibleAreas(value) {
         for (const hit of hits) append(hit.key, clause);
         lastKey = hits[hits.length - 1].key;
       } else if (lastKey) {
-        // Keep the semicolon that split it — this is one sentence continuing.
-        append(lastKey, clause, '; ');
+        // One sentence continuing — keep the semicolon that split it, or a
+        // plain space when the break was a line wrap.
+        append(lastKey, clause, contJoiner);
       } else {
         append('other', clause);
         lastKey = 'other';

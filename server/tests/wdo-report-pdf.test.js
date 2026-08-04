@@ -506,3 +506,48 @@ describe('wdo-report-pdf Section 3 — continuation before a later label', () =>
     expect(rows.interior).toBe('Not inspected. wall voids.');
   });
 });
+
+// Codex #3188 round 4.
+describe('wdo-report-pdf Section 3 — category lists, wrapped lines, crawl-space spelling', () => {
+  const { splitInaccessibleAreas } = _private;
+
+  // P1: the repo's OWN placeholder shape. Only "other:" is an explicit label,
+  // so routing the preamble to it alone left four categories unticked.
+  test("the repo's placeholder shape ticks every category it lists", () => {
+    const { ticked } = splitInaccessibleAreas(
+      'Attic, interior, exterior, crawlspace, other: specific areas and reasons'
+    );
+    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior', 'interior', 'other']);
+  });
+
+  // P2: a wrapped reason must not split across two rows.
+  test('a manual line break inside one reason stays on the same row', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Attic: North side blocked by insulation\nand HVAC ductwork');
+    expect([...ticked]).toEqual(['attic']);
+    expect(rows.attic).toBe('North side blocked by insulation and HVAC ductwork');
+    expect(rows.other).toBeUndefined();
+  });
+
+  test('a labelled later line still overrides the carried row', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Attic: insulation\nand ductwork\nInterior: wall voids'
+    );
+    expect([...ticked].sort()).toEqual(['attic', 'interior']);
+    expect(rows.attic).toBe('insulation and ductwork');
+    expect(rows.interior).toBe('wall voids');
+  });
+
+  // P2: "Crawl-space" is a common spelling; the old includes('crawl') caught it.
+  test.each(['Crawl-space: no hatch', 'crawl-space was inaccessible', 'Crawl space: no hatch'])(
+    'crawl-space spelling %p routes to Crawlspace, not Other',
+    (input) => {
+      const { ticked } = splitInaccessibleAreas(input);
+      expect([...ticked]).toEqual(['crawlspace']);
+    }
+  );
+
+  test('hyphenated adjective guard still holds for other categories', () => {
+    const { ticked } = splitInaccessibleAreas('Attic: inaccessible at exterior-facing eaves due to insulation');
+    expect([...ticked]).toEqual(['attic']);
+  });
+});
