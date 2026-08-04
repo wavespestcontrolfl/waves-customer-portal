@@ -150,3 +150,37 @@ describe('PDF signature varies with the eligibility verdict', () => {
     expect(bait).not.toBe(pest);
   });
 });
+
+// Codex P1 r2: reports-public and email-delivery build the re-entry
+// context through resolveTracedExteriorZone independently of the report
+// payload, so the verdict must live INSIDE that shared resolver — an
+// ineligible visit losing its map must lose the exterior ready-time
+// claim on every surface, not just the one call site.
+describe('the shared exterior-zone resolver honors the verdict', () => {
+  const { resolveTracedExteriorZone } = require('../services/service-report/report-data');
+  const prevGate = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = prevGate;
+  });
+
+  const zoneFor = (serviceType) => resolveTracedExteriorZone(
+    { scheduled_service_id: 'sched-trace-1', service_type: serviceType, service_data: '{}' },
+    stubKnex({
+      treatment_zone_maps: [TRACED_ROW],
+      scheduled_services: [{ id: 'sched-trace-1', service_id: null, service_type: serviceType }],
+    }),
+  );
+
+  test('gate off: a saved trace still asserts the exterior zone (current behavior)', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    expect(await zoneFor('Termite Bait Quarterly')).toBe(true);
+  });
+
+  test('gate on: ineligible lanes lose the exterior claim, eligible lanes keep it', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    expect(await zoneFor('Termite Bait Quarterly')).toBe(false);
+    expect(await zoneFor('Termite Inspection')).toBe(false);
+    expect(await zoneFor('Quarterly Pest Control')).toBe(true);
+  });
+});

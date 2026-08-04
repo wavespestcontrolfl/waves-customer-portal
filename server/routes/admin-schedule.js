@@ -2102,7 +2102,14 @@ router.get('/', async (req, res, next) => {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
         traceEligible: !traceEligibilityGateOn() || rowTraceEligibility({
-          serviceKey: serviceKeyByServiceId.get(s.service_id) || null,
+          // Unlinked rows (null service_id) fall back to the profile's
+          // resolved key — the profile resolver already handles the
+          // name/short-name lookup the batch join can't (codex P2 r2:
+          // an unlinked mud_dauber_removal row's label matches no regex,
+          // but its resolved key classifies).
+          serviceKey: serviceKeyByServiceId.get(s.service_id)
+            || projectCompletionContext?.completionProfile?.serviceKey
+            || null,
           // The already-resolved typed profile (loaded above for every row)
           // — typed keys absent from the key registry classify by their
           // findings pointer, exactly like the write and report paths
@@ -2373,6 +2380,14 @@ router.get('/week', async (req, res, next) => {
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
       const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
       const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+      // Same trace-eligibility flag the day feed carries (codex P2 r2):
+      // the mobile Week view opens the shared CompletionPanel straight off
+      // these rows, so the tracer-gating verdict must ride here too. The
+      // resolved profile supplies both identities — no extra queries.
+      const {
+        resolveTraceEligibility: weekTraceEligibility,
+        traceEligibilityGateOn: weekTraceGateOn,
+      } = require('../services/service-report/trace-eligibility');
 
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
@@ -2496,6 +2511,11 @@ router.get('/week', async (req, res, next) => {
           // "Tree & Shrub Care", which would drop every lawn target.
           serviceTypeRaw: s.service_type,
           serviceCategory: detectServiceCategory(svcType),
+          traceEligible: !weekTraceGateOn() || weekTraceEligibility({
+            serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
+            findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
+            displayName: s.service_type || '',
+          }).eligible,
           status: s.status,
           techName: s.tech_name, zone: s.zone,
           tier: s.waveguard_tier,

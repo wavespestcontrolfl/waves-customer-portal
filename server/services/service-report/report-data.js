@@ -542,6 +542,17 @@ async function resolveTracedExteriorZone(record, knex = db) {
       }
     } catch { /* label fallback above already ran; proceed to the lookup */ }
   }
+  // Centralized eligibility (GATE_TRACE_ELIGIBILITY): an ineligible lane's
+  // saved trace must not drive the exterior dry-down timer either. This
+  // function is the single choke point for the report payload, the
+  // re-entry context — which reports-public and email-delivery each build
+  // independently — and the completion SMS, so the verdict lives HERE
+  // rather than at any one call site (codex P1 r2). Fail-soft: helper
+  // errors fall through to the ordinary lookup.
+  try {
+    const { resolveTraceRenderVerdict } = require('./trace-eligibility');
+    if ((await resolveTraceRenderVerdict(record, knex)).suppressed) return false;
+  } catch { /* proceed to the ordinary lookup */ }
   try {
     return !!(await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })

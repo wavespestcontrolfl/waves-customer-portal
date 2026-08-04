@@ -229,31 +229,12 @@ async function treatmentZonePdfSignature(service, knex = db) {
     // display names last) — the verdict itself comes from the shared
     // resolver, so registry changes invalidate here for free.
     let eligibilityComponent = '';
-    const { resolveTraceEligibility, traceEligibilityGateOn } = require('./service-report/trace-eligibility');
-    if (traceEligibilityGateOn()) {
-      let serviceKey = null;
-      let findingsType = null;
-      let names = String(service?.service_type || '');
-      try {
-        const serviceData = typeof service?.service_data === 'string'
-          ? JSON.parse(service.service_data || '{}')
-          : (service?.service_data || {});
-        findingsType = serviceData?.typedReportSnapshot?.type || null;
-      } catch { /* names + profile still stand */ }
-      try {
-        const sched = await knex('scheduled_services')
-          .where({ id: scheduledServiceId })
-          .first('id', 'service_id', 'service_type');
-        if (sched?.service_type) names += ` ${sched.service_type}`;
-        const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-        const profile = await resolveCompletionProfileForScheduledService(sched || { id: scheduledServiceId }, knex);
-        serviceKey = profile?.serviceKey || null;
-        findingsType = findingsType || profile?.findingsType || null;
-      } catch { /* label fallback stands, same as the render path */ }
-      const traceVerdict = resolveTraceEligibility({ serviceKey, findingsType, displayName: names });
-      eligibilityComponent = traceVerdict.eligible
-        ? `-te1${traceVerdict.variant || ''}`
-        : '-te0';
+    const { resolveTraceRenderVerdict } = require('./service-report/trace-eligibility');
+    const verdict = await resolveTraceRenderVerdict(service, knex);
+    if (verdict.eligibility) {
+      eligibilityComponent = verdict.suppressed
+        ? '-te0'
+        : `-te1${verdict.eligibility.variant || ''}`;
     }
     return `-tz${Number.isFinite(stamp) ? stamp : 0}${eligibilityComponent}`;
   } catch {

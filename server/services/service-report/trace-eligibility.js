@@ -210,8 +210,54 @@ async function traceCaptureBlockPayload(scheduledService, knex) {
   };
 }
 
+/**
+ * Async render-verdict for callers that hold only a service_records-like
+ * row ({ scheduled_service_id, service_type, service_data }): assembles
+ * the same inputs the report payload build uses — the frozen snapshot's
+ * findingsType is the authority, the live profile widens, display names
+ * are last — and returns { suppressed, eligibility }. `suppressed` is
+ * ALWAYS false while the gate is off, and `eligibility` is null then so
+ * cache-key callers emit nothing pre-flip. Fail-soft: assembly errors
+ * degrade to the label-only verdict, never throw. ONE assembly for the
+ * exterior-zone resolver and the PDF signature — a second copy of this
+ * input gathering is how the bed-bug and trap lanes came to disagree
+ * across surfaces.
+ */
+async function resolveTraceRenderVerdict(record, knex) {
+  if (!traceEligibilityGateOn()) {
+    return { suppressed: false, eligibility: null };
+  }
+  let serviceKey = null;
+  let findingsType = null;
+  let names = String(record?.service_type || '');
+  try {
+    const serviceData = typeof record?.service_data === 'string'
+      ? JSON.parse(record.service_data || '{}')
+      : (record?.service_data || {});
+    findingsType = serviceData?.typedReportSnapshot?.type || null;
+  } catch { /* names + profile still stand */ }
+  try {
+    if (record?.scheduled_service_id && knex) {
+      const sched = await knex('scheduled_services')
+        .where({ id: record.scheduled_service_id })
+        .first('id', 'service_id', 'service_type');
+      if (sched?.service_type) names += ` ${sched.service_type}`;
+      const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+      const profile = await resolveCompletionProfileForScheduledService(
+        sched || { id: record.scheduled_service_id },
+        knex,
+      );
+      serviceKey = profile?.serviceKey || null;
+      findingsType = findingsType || profile?.findingsType || null;
+    }
+  } catch { /* label fallback stands, same as the render path */ }
+  const eligibility = resolveTraceEligibility({ serviceKey, findingsType, displayName: names });
+  return { suppressed: !eligibility.eligible, eligibility };
+}
+
 module.exports = {
   resolveTraceEligibility,
+  resolveTraceRenderVerdict,
   traceEligibilityGateOn,
   traceCaptureBlockPayload,
   _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },
