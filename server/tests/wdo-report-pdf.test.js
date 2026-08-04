@@ -596,3 +596,44 @@ describe('wdo-report-pdf Section 3 — shared reasons, standalone adjectives, pa
     expect(rows.other).toBeUndefined();
   });
 });
+
+// Codex #3188 round 6: a label may name SEVERAL categories sharing one
+// separator. Matching only the last one appended the rest to the previous row.
+describe('wdo-report-pdf Section 3 — grouped labels', () => {
+  const { splitInaccessibleAreas } = _private;
+
+  test('a grouped label gives its reason to every category it names', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Attic: insulation. Interior and exterior: blocked by stored goods'
+    );
+    expect([...ticked].sort()).toEqual(['attic', 'exterior', 'interior']);
+    expect(rows.attic).toBe('insulation.');
+    expect(rows.interior).toBe('blocked by stored goods');
+    expect(rows.exterior).toBe('blocked by stored goods');
+  });
+
+  test.each([
+    ['Interior, exterior: blocked', ['exterior', 'interior']],
+    ['Interior & exterior: blocked', ['exterior', 'interior']],
+    ['Attic, interior, and crawlspace: blocked', ['attic', 'crawlspace', 'interior']],
+  ])('grouped label %p ticks every member', (input, expected) => {
+    const { ticked } = splitInaccessibleAreas(input);
+    expect([...ticked].sort()).toEqual(expected);
+  });
+
+  test('a comma list terminated by one label still shares the reason', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Attic, interior, exterior, crawlspace, other: blocked by stored goods'
+    );
+    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior', 'interior', 'other']);
+    for (const k of ['attic', 'interior', 'exterior', 'crawlspace', 'other']) {
+      expect(rows[k]).toBe('blocked by stored goods');
+    }
+  });
+
+  test('an unlabelled category list is still not a label', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Interior and exterior were blocked by stored goods');
+    expect([...ticked].sort()).toEqual(['exterior', 'interior']);
+    expect(rows.interior).toBe('Interior and exterior were blocked by stored goods');
+  });
+});

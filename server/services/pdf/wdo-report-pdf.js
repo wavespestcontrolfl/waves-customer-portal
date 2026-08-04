@@ -306,6 +306,13 @@ const INACCESSIBLE_ROWS = [
 // eaves" split at "exterior-", stranding "inaccessible at" on the Attic row
 // and ticking Exterior with the remainder. A colon needs no surrounding space.
 const INACCESSIBLE_CATEGORY_WORDS = String.raw`crawl[-\s]*spaces?|crawlspaces?|crawl|attics?|interiors?|exteriors?|other`;
+// A label may name SEVERAL categories sharing one separator — "Interior and
+// exterior: blocked by stored goods", and the repo's own placeholder
+// "Attic, interior, exterior, crawlspace, other: specific areas and reasons".
+// Matching the whole group as ONE label is what keeps every named category
+// ticked with the shared reason; matching only the last one silently appends
+// the rest to whatever row came before.
+const INACCESSIBLE_GROUP = String.raw`(?:${INACCESSIBLE_CATEGORY_WORDS})(?:[ \t]*(?:,[ \t]*and|,|&|and)[ \t]*(?:${INACCESSIBLE_CATEGORY_WORDS}))*`;
 const INACCESSIBLE_LABEL_PATTERN = new RegExp(
   // Line-anchored: a colon, OR whitespace when a spaced dash follows one filler
   // word — the emitter's "Crawlspace present — …" shape (the lookahead keeps
@@ -313,9 +320,9 @@ const INACCESSIBLE_LABEL_PATTERN = new RegExp(
   // that merely BEGINS with a category word ("Attic, interior and exterior
   // areas were blocked") from being read as a single-category label, which
   // would drop the other categories.
-  String.raw`(?:^|\n)[\s;,]*(${INACCESSIBLE_CATEGORY_WORDS})\b(?:[ \t]*:[ \t]*|[ \t]+(?=\w+[ \t]+[—–-][ \t]+))`
+  String.raw`(?:^|\n)[\s;,]*(${INACCESSIBLE_GROUP})\b(?:[ \t]*:[ \t]*|[ \t]+(?=\w+[ \t]+[—–-][ \t]+))`
   // Inline: colon, or a dash with whitespace on BOTH sides.
-  + String.raw`|\b(${INACCESSIBLE_CATEGORY_WORDS})\b(?:[ \t]*:[ \t]*|\s+[—–-]\s+)`,
+  + String.raw`|\b(${INACCESSIBLE_GROUP})\b(?:[ \t]*:[ \t]*|\s+[—–-]\s+)`,
   'gi'
 );
 
@@ -326,6 +333,19 @@ function inaccessibleRowKeyFor(word) {
   if (w.startsWith('interior')) return 'interior';
   if (w.startsWith('exterior')) return 'exterior';
   return 'other';
+}
+
+// Split a matched label group ("Interior and exterior") into its row keys,
+// in order, without duplicates.
+function inaccessibleRowKeysFor(group) {
+  const re = new RegExp(INACCESSIBLE_CATEGORY_WORDS, 'gi');
+  const keys = [];
+  let m;
+  while ((m = re.exec(group)) !== null) {
+    const key = inaccessibleRowKeyFor(m[0]);
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
 }
 
 /**
@@ -403,7 +423,7 @@ function splitInaccessibleAreas(value) {
       let m;
       while ((m = INACCESSIBLE_LABEL_PATTERN.exec(clause)) !== null) {
         // m[1] = line-anchored form, m[2] = inline form (see the pattern above).
-        marks.push({ key: inaccessibleRowKeyFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
+        marks.push({ keys: inaccessibleRowKeysFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
       }
 
       if (marks.length) {
@@ -427,20 +447,22 @@ function splitInaccessibleAreas(value) {
             // reason. Writing the name list into those rows would tick four
             // boxes whose FDACS rows state no limitation at all.
             const reason = clause.slice(marks[0].bodyStart).trim();
-            const markKeys = new Set(marks.map((mk) => mk.key));
+            const markKeys = new Set(marks.flatMap((mk) => mk.keys));
             for (const hit of named) {
               if (markKeys.has(hit.key)) continue; // the marks loop fills these
               append(hit.key, reason || preamble);
             }
           } else {
-            append(lastKey || marks[0].key, preamble, lastKey ? contJoiner : ' ');
+            append(lastKey || marks[0].keys[0], preamble, lastKey ? contJoiner : ' ');
           }
         }
         marks.forEach((mark, i) => {
           const end = i + 1 < marks.length ? marks[i + 1].start : clause.length;
-          append(mark.key, clause.slice(mark.bodyStart, end));
+          const body = clause.slice(mark.bodyStart, end);
+          for (const key of mark.keys) append(key, body);
         });
-        lastKey = marks[marks.length - 1].key;
+        const lastGroup = marks[marks.length - 1].keys;
+        lastKey = lastGroup[lastGroup.length - 1];
         continue;
       }
 
