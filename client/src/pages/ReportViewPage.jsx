@@ -46,6 +46,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import BrandFooter from '../components/BrandFooter';
+import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -8769,6 +8770,13 @@ export default function ReportViewPage() {
     </div>
   );
   if (!data || data.error) return <NotFoundState glass={glassActive} />;
-  if (data.reportVersion === 'service_report_v1') return <ServiceReportV1 data={data} token={token} mode={mode} />;
+  if (data.reportVersion === 'service_report_v1') {
+    // The PDF artifact is the work-order document (owner 2026-08-03):
+    // the renderer hits ?mode=pdf, so the download, the share sheet, and
+    // the post-service email attachment all serve this capture. The glass
+    // web report (live) and the unused static mode are unchanged.
+    if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
+    return <ServiceReportV1 data={data} token={token} mode={mode} />;
+  }
   return <LegacyReport data={data} token={token} glass={glassActive} />;
 }

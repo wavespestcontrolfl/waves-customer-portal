@@ -29,7 +29,10 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // (product name / technician targets) instead of equipment keywords — cached
 // PDFs would keep captioning cockroach gel as ant bait and fogged roach
 // products as mosquito applications without a re-render.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p4-report-relevance-20260803';
+// 20260804: the PDF artifact is now the work-order document layout
+// (ServiceReportDocument) instead of a capture of the web report — every
+// cached PDF must re-render. Supersedes p4 (whose bust this one subsumes).
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p5-document-20260804';
 
 const s3 = new S3Client({
   region: config.s3?.region,

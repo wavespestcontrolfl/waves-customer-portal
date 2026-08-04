@@ -93,7 +93,7 @@ async function renderReportPdfWithBrowser(url) {
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
     await page.waitForSelector('.service-report-v1', { timeout: 10000 });
     await page.emulateMedia({ media: 'print', colorScheme: 'light' });
-    return await page.pdf({
+    const pdf = await page.pdf({
       format: 'Letter',
       printBackground: true,
       margin: { top: '0.5in', right: '0.5in', bottom: '0.5in', left: '0.5in' },
@@ -101,6 +101,21 @@ async function renderReportPdfWithBrowser(url) {
       headerTemplate: '<div></div>',
       footerTemplate: '<div style="font-size:8px; width:100%; text-align:center; color:#999;">Waves Pest Control &middot; Page <span class="pageNumber"></span> of <span class="totalPages"></span></div>',
     });
+    // The page's OWN image-load outcomes (codex P2 #3176 r20): the browser
+    // fetches its own /data, so its photo URLs can differ from any payload
+    // the server built — the document counts its onError fallbacks into
+    // window.__WAVES_PDF_IMAGE_FAILURES, and this is the only channel that
+    // reports what the artifact actually shows. null = unknown (old page
+    // bundle mid-deploy), which callers treat as "fall back to the probe".
+    let imageFailures = null;
+    try {
+      // globalThis === window in the page context; spelled this way so the
+      // server-side lint (no browser globals) accepts the in-page function.
+      imageFailures = await page.evaluate(() => (
+        typeof globalThis.__WAVES_PDF_IMAGE_FAILURES === 'number' ? globalThis.__WAVES_PDF_IMAGE_FAILURES : null
+      ));
+    } catch { imageFailures = null; }
+    return { pdf, imageFailures };
   } finally {
     if (page) await page.close().catch(() => {});
     await browser.close().catch(() => {});

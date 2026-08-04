@@ -44,6 +44,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
 try {
@@ -124,6 +125,18 @@ function taggedNoteLines(notes, tags) {
     })
     .filter((entry) => entry && tagSet.has(entry.tag))
     .map((entry) => entry.text);
+}
+
+// Whether the row RECORDS its method, as opposed to methodFromProduct
+// inferring one from category/service-line. The distinction is load-bearing
+// for the document (pre-push P1 #3176 r19): an EXPLICIT station_check is a
+// deliberate device inspection and must never be re-classified as a product
+// application, however pesticide-flavored the product — only an INFERRED
+// station_check (legacy null application_method on a termite/rodent product)
+// may be overridden by pesticide identity.
+function hasExplicitApplicationMethod(product) {
+  const raw = String(product.application_method || product.method || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return !!raw && raw !== 'null';
 }
 
 function methodFromProduct(product, serviceLine) {
@@ -2487,6 +2500,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
+  // Images this build EXPECTS but drops because their URL would not resolve
+  // (presign failure on a gallery/turf/gauge photo or the traced snapshot).
+  // Rides the payload so the cacheability gate — and the page's own render
+  // counter — can refuse to cache a silently incomplete PDF (codex P2
+  // #3176 r21).
+  let imageResolutionFailures = 0;
   // Owner ruling 2026-07-16: the report kicker mirrors the customer's LINKED
   // service on the schedule ("Monthly Lawn Care Service"), so the scheduled
   // row's service_type (the catalog name) wins over the record's snapshot
@@ -2972,6 +2991,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         facts_approved: !!product.approved_report_product_facts,
       },
       method,
+      // Explicit vs inferred decides whether pesticide identity may override
+      // a station_check classification in the document (see
+      // hasExplicitApplicationMethod).
+      methodInferred: !hasExplicitApplicationMethod(product),
       methodLabel: METHOD_LABELS[method] || method.replace(/_/g, ' '),
       zone_ids: matchZoneIds(product, zones, areaLabels),
       rate: product.application_rate,
@@ -3087,6 +3110,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           tracedRow.snapshot_s3_key,
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS
         ).catch(() => null);
+        // A traced row whose snapshot would not presign is an EXPECTED image
+        // silently omitted from the artifact (codex P2 #3176 r21) — the
+        // cacheability gate must know.
+        if (!tracedSnapshotUrl) imageResolutionFailures += 1;
         if (tracedSnapshotUrl) {
           // lawn_highlight rows may carry the transparent highlight layer —
           // the report pulses it over the snapshot (owner 2026-07-30).
@@ -3264,6 +3291,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     try {
       const gaugePhoto = photos.find((p) => String(p.id) === String(gaugePhotoId));
       const gaugeUrl = gaugePhoto ? await photoUrl(gaugePhoto) : null;
+      if (gaugePhoto && !gaugeUrl) imageResolutionFailures += 1;
       if (gaugeUrl) mowingHeight = { ...mowingHeight, photoUrl: gaugeUrl };
     } catch { /* fail-soft: report still renders the reading without the photo */ }
   }
@@ -3284,6 +3312,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       prevHashSha256: photo.prev_hash_sha256 || null,
       aiTags: parseJsonArray(photo.ai_tags),
     })));
+  // Photos that EXIST on the record but whose URL would not resolve are
+  // silent omissions the page's onError counter can never see (codex P2
+  // #3176 r21) — count them for the cacheability gate.
+  imageResolutionFailures += photoPayload.filter((p) => !p.url).length;
   // Lawn visits capture turf photos in the tech's Lawn Assessment block instead
   // of a separate Service Photos upload. Surface those turf photos in the
   // customer gallery so the single capture point feeds both the lawn scorecard
@@ -3315,7 +3347,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         .catch(() => []);
       const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
         const url = await lawnPhotoUrl(photo);
-        if (!url) return null;
+        // Dropped-but-expected turf photo — same silent-omission class.
+        if (!url) { imageResolutionFailures += 1; return null; }
         return {
           id: `lawn-${photo.id}`,
           url,
@@ -3664,6 +3697,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       const { buildTreeShrubAssessmentReportData } = require('../tree-shrub-assessment');
       const treeShrubAssessment = await buildTreeShrubAssessmentReportData(service, serviceLine, knex);
       if (treeShrubAssessment) {
+        // Assessment photos the builder dropped for a failed signing are
+        // expected images the artifact silently omits (codex P2 #3176 r22).
+        imageResolutionFailures += Number(treeShrubAssessment.droppedPhotoCount) || 0;
         reportV2 = buildTreeShrubReportV2({
           treeShrubAssessment,
           applications,
@@ -4202,6 +4238,39 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       : photoPayload,
     photoChain,
     pdfUrl: `/api/reports/${token}`,
+    // Canonical PUBLIC origin for links baked into the permanent PDF, and ''
+    // when none is configured. The headless renderer opens the page through
+    // CLIENT_URL / SERVICE_REPORT_PDF_BASE_URL, which on prod is the raw
+    // Railway hostname, so the document can't trust its own origin there.
+    // But it must NOT be handed the production default either: a preview
+    // deployment's token only resolves on that preview, so with no explicit
+    // origin configured the document falls back to its own (see portalBase).
+    publicOrigin: configuredPublicPortalOrigin(),
+    // A station/trap visit whose placement section was dropped because the
+    // LIVE basemap call failed transiently (quota, network, provider config
+    // unavailable) — not because the lane is off or the visit has no
+    // stations (codex P2 #3176 r23). The cache key hashes provider/env
+    // configuration, which is unchanged by a transient miss, so without
+    // this flag the map-less PDF would be stored under exactly the key
+    // expected after the provider recovers and the report would never
+    // regain its map. Counted like an image drop: serve it, cache nothing.
+    stationMapTransientlyUnavailable: stationMap?.available === false
+      && ['satellite_unavailable', 'provider_config_unavailable', 'build_failed']
+        .includes(String(stationMap?.reason || '')),
+    // Images this build EXPECTED but silently dropped (URL resolution
+    // failed): the document folds this into its render-failure counter and
+    // the store paths refuse to cache on it (codex P2 #3176 r21) — a
+    // placeholder-free but incomplete PDF must not become the permanent
+    // healthy object.
+    // Approved moments whose media would not sign come back with a null
+    // mediaUrl and the document filters them before any <img> mounts, so
+    // neither the page counter nor the URL probe can see them (codex P2
+    // #3176 r22). Counted HERE, at the payload boundary, because the
+    // moments load long before this return. Videos are excluded — the
+    // document never renders them.
+    imageResolutionFailures: imageResolutionFailures
+      + (Array.isArray(approvedVisualMoments) ? approvedVisualMoments : [])
+        .filter((m) => m && m.mediaType !== 'video' && !m.mediaUrl).length,
     legacy: {
       // No raw technician_notes here (owner ruling 2026-07-16): the field is
       // internal — access codes, billing notes — and the only sanctioned path
