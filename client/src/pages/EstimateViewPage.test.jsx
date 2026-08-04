@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, MembershipCard, OneTimeBreakdownCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -153,6 +153,49 @@ describe('ServiceSection', () => {
     expect(screen.getByText(/[−-]\$10\.00/)).toBeInTheDocument();
     expect(screen.getByText('Custom Percentage Discount')).toBeInTheDocument();
     expect(screen.getByText(/[−-]\$4\.50/)).toBeInTheDocument();
+  });
+
+  it('labels a margin-capped member discount from the membership snapshot saving (owner 2026-08-04)', () => {
+    // Current-member estimate: Gold priced the section, but the margin guard
+    // capped the applied rate at 12.7% — the 15% tier pct can't reconcile the
+    // $12.70 gap; the snapshot's applied per-application saving can.
+    render(
+      <ServiceSection
+        section={{
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          frequencies: [{
+            key: 'quarterly',
+            label: 'Quarterly',
+            monthly: 29.1,
+            annual: 349.2,
+            perVisit: 100,
+            perTreatment: 87.3,
+            visitsPerYear: 4,
+            billedPerApplication: true,
+            included: [],
+            addOns: [],
+          }],
+          copy: { priceWording: {} },
+        }}
+        servicesLength={2}
+        selectedFrequencyKey="quarterly"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: true }}
+        waveGuardTier="Gold"
+        waveGuardDiscountPct={0.15}
+        memberPerApplicationSavings={12.7}
+      />,
+    );
+
+    expect(screen.getByText(/\$100\.00 \/ application/)).toBeInTheDocument();
+    expect(screen.getByText('$87.30')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Gold Discount')).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$12\.70/)).toBeInTheDocument();
   });
 
   it('shows tree and shrub service cadence without changing monthly billing copy', () => {
@@ -1462,5 +1505,63 @@ describe('ServiceSection — details-packet preview parity', () => {
     expect(screen.getByRole('button', { name: /Email me the PDF/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Text me the link/ })).toBeInTheDocument();
     expect(screen.getByText(/Preview only\./)).toBeInTheDocument();
+  });
+});
+
+describe('MembershipCard — member savings live in the price block, not a separate list (owner 2026-08-04)', () => {
+  const membership = (overrides = {}) => ({
+    isExistingCustomer: true,
+    firstName: 'Jordan',
+    tier: 'gold',
+    tierLabel: 'Gold',
+    tierDiscountPct: 15,
+    discountAppliesTo: 'new_services_only',
+    existingServiceKeys: ['pest_control', 'lawn_care'],
+    upgrade: null,
+    existingServices: [],
+    newServices: [
+      { key: 'mosquito', label: 'Mosquito', discountPct: 15, monthlySavings: 13, perApplicationSavings: 13 },
+    ],
+    ...overrides,
+  });
+  const upgrade = {
+    fromLabel: 'Silver', toLabel: 'Gold', deltaPct: 5, addedServiceLabels: ['Mosquito'],
+  };
+
+  it('renders no per-service savings rows — those dollars are itemized in each price block', () => {
+    render(<MembershipCard membership={membership({ upgrade })} />);
+
+    expect(screen.queryByText('This estimate')).toBeNull();
+    expect(screen.queryByText(/member discount/i)).toBeNull();
+    expect(screen.queryByText(/save \$13\.00 per application/)).toBeNull();
+  });
+
+  it('keeps the welcome, the tier badge, and the upgrade story', () => {
+    render(<MembershipCard membership={membership({ upgrade })} />);
+
+    expect(screen.getByText('Welcome back, Jordan')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Gold')).toBeInTheDocument();
+    expect(screen.getByText(/member pricing is already applied/)).toBeInTheDocument();
+    expect(screen.getByText(/bumps your membership from/)).toBeInTheDocument();
+    expect(screen.getByText(/discounts the new services by up to 15%/)).toBeInTheDocument();
+  });
+
+  it('skips the card entirely when new-service savings were its only content', () => {
+    // No upgrade story, no legacy existing-service rows: everything this card
+    // used to say now lives in the section price blocks + corner badges.
+    const { container } = render(<MembershipCard membership={membership()} />);
+
+    expect(container.firstChild).toBeNull();
+  });
+
+  it('still renders legacy existing-service rows — services not priced on this estimate', () => {
+    render(<MembershipCard membership={membership({
+      existingServices: [
+        { key: 'lawn_care', label: 'Lawn Care', extraDiscountPct: 5, perVisitSavings: 8.2, remainingVisits: 3, prepaid: false },
+      ],
+    })} />);
+
+    expect(screen.getByText('Your existing services')).toBeInTheDocument();
+    expect(screen.getByText(/\+5% off · save \$8\.20 per application on your 3 remaining applications/)).toBeInTheDocument();
   });
 });

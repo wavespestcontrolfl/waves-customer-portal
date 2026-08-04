@@ -1053,7 +1053,16 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
 // Existing-customer WaveGuard membership benefits. Rendered only when the
 // estimate is linked to an active customer (server returns estimate.membership).
 // Display/transparency only — warm tone, matches the customer-facing brief.
-function MembershipCard({ membership }) {
+// The per-service "This estimate" savings rows are GONE (owner 2026-08-04,
+// same ruling as the discounts on 2026-08-03): a current member's savings
+// render inside each service section's price block — struck-through anchor +
+// itemized "WaveGuard {tier} Discount" row — never as a separate green list.
+// The card keeps only what the price blocks can't carry: the welcome, the
+// tier badge, the tier-upgrade story, and (legacy snapshots only) the
+// existing-services rows, which describe services that are not priced on
+// this estimate at all. The legacy SSR renderMembershipBlockHtml keeps its
+// old rows — the v1 page has no in-price savings stack to hand them to.
+export function MembershipCard({ membership }) {
   if (!membership || !membership.isExistingCustomer) return null;
   const money = fmtMoney; // shared formatter (audit 2026-07-06)
   const TIER_COLORS = {
@@ -1063,25 +1072,17 @@ function MembershipCard({ membership }) {
     platinum: { bg: '#EDEFF2', fg: '#2B3340' },
   };
   const tc = TIER_COLORS[membership.tier] || TIER_COLORS.bronze;
-  // Mirrors renderMembershipBlockHtml in routes/estimate-public.js: Bronze
-  // (0% tier discount) has no member benefits to show, so the card gates on
-  // the snapshot's combined tier — the tier that priced this estimate.
-  // Legacy snapshots without tierDiscountPct fall through to the row checks;
-  // rows must carry a real non-zero benefit (margin guard can cap the
-  // applied discount to 0 even at Silver+), and a card with no upgrade and
-  // no rows left is skipped.
+  // Bronze (0% tier discount) has no member benefits to show, so the card
+  // gates on the snapshot's combined tier — the tier that priced this
+  // estimate. Legacy snapshots without tierDiscountPct fall through to the
+  // remaining content checks.
   if (membership.tierDiscountPct != null && !(Number(membership.tierDiscountPct) > 0)) return null;
   const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
     .filter((s) => Number(s.extraDiscountPct) > 0);
-  // monthlySavings is deliberately NOT an admission criterion (pre-push audit
-  // P1, "per month" sweep 2026-08-01) — mirrors the SSR filter. The row prints
-  // a discount percentage or a per-application saving and nothing else, so a
-  // row admitted on monthlySavings ALONE renders a bare "Member pricing" with
-  // no figure, which is the no-benefit card this gate exists to suppress.
-  const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
-    .filter((s) => Number(s.discountPct) > 0
-      || Number(s.perApplicationSavings) > 0);
-  if (!membership.upgrade && existing.length === 0 && added.length === 0) return null;
+  // With the new-service savings itemized in the price blocks, a card with no
+  // upgrade story and no legacy existing-service rows has nothing left to say
+  // — skip it. Each eligible section's corner badge still names the tier.
+  if (!membership.upgrade && existing.length === 0) return null;
   const hello = membership.firstName ? `Welcome back, ${membership.firstName}` : 'Welcome back';
 
   const rowStyle = {
@@ -1092,7 +1093,10 @@ function MembershipCard({ membership }) {
     fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700,
   };
   const labelStyle = { color: ESTIMATE_TEXT, fontWeight: 600, fontSize: 15 };
-  const valStyle = { color: W.green, fontSize: 14, fontWeight: 600, textAlign: 'right' };
+  // Navy, not green (owner 2026-08-01 ruling, extended here 2026-08-04): the
+  // customer surface is a navy/gold system — savings figures take the price's
+  // own color rather than reading as a separate green callout.
+  const valStyle = { color: W.blueDeeper, fontSize: 14, fontWeight: 600, textAlign: 'right' };
 
   return (
     <section style={{ ...estimateCard(), display: 'grid', gap: 16 }}>
@@ -1102,7 +1106,7 @@ function MembershipCard({ membership }) {
             {hello}
           </h2>
           <p style={{ margin: '8px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.5 }}>
-            Here&rsquo;s what your WaveGuard membership saves you on this estimate.
+            Your WaveGuard member pricing is already applied to this estimate.
           </p>
         </div>
         <span style={{
@@ -1138,29 +1142,12 @@ function MembershipCard({ membership }) {
               <span style={labelStyle}>{s.label}</span>
               <span style={valStyle}>
                 +{s.extraDiscountPct}% off
-                {/* "per application", matching the This-estimate rows below —
-                    owner ruling 2026-07-24: one pricing noun on every
-                    customer surface, existing-member rows included. */}
+                {/* "per application" — owner ruling 2026-07-24: one pricing
+                    noun on every customer surface, existing-member rows
+                    included. */}
                 {Number(s.perVisitSavings) > 0 ? ` · save ${money(s.perVisitSavings)} per application` : ''}
                 {(Number(s.perVisitSavings) > 0 && s.remainingVisits > 0)
                   ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'application' : 'applications'}`
-                  : ''}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      {added.length ? (
-        <div style={{ display: 'grid', gap: 8 }}>
-          <div style={sectionTitle}>This estimate</div>
-          {added.map((s) => (
-            <div key={s.key} style={rowStyle}>
-              <span style={labelStyle}>{s.label}</span>
-              <span style={valStyle}>
-                {s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}
-                {Number(s.perApplicationSavings) > 0
-                  ? ` · save ${money(s.perApplicationSavings)} per application`
                   : ''}
               </span>
             </div>
@@ -3373,6 +3360,7 @@ export function ServiceSection({
   // way the bundle card keeps its combined total (codex #3128 r6).
   billsMonthly = false,
   waveGuardDiscountPct = null,
+  memberPerApplicationSavings = null,
   selectedFrequencyKey,
   selectedAddOns = new Set(),
   onFrequencyChange,
@@ -3509,6 +3497,11 @@ export function ServiceSection({
             // anchor gap before labeling it a WaveGuard discount (codex #3183
             // P1) — an ambiguous gap keeps the unlabeled strike-through.
             waveGuardDiscountPct={sectionTierEligible ? waveGuardDiscountPct : null}
+            // Current-member estimates: the membership snapshot's applied
+            // per-application saving for this service — corroborates the gap
+            // when the margin guard capped the rate below the tier pct
+            // (owner 2026-08-04: member savings show in the price itself).
+            memberPerApplicationSavings={sectionTierEligible ? memberPerApplicationSavings : null}
             // The card corner carries the badge now — PriceCard keeps the
             // tier only for its per-row service tags.
             showTierBadge={false}
@@ -5012,6 +5005,20 @@ function EstimateViewPageInner() {
   // service), so an excluded section (palm/rodent) never shows it even alongside
   // an eligible service, and an eligible single service / bundle always can.
   const waveGuardTier = pricing.combinedRecurring?.waveGuardTierLabel || pricing.waveGuardTier || null;
+  // Current-member estimates: per-service applied member savings from the
+  // frozen membership snapshot (margin caps included). Keyed by the same
+  // service keys the sections use, so each section's price block can
+  // corroborate — and label — its own member discount (owner 2026-08-04:
+  // member savings show in the price itself, not a separate green card).
+  const memberSavingsByServiceKey = (() => {
+    const membership = estimate.membership;
+    if (!membership || membership.isExistingCustomer !== true) return null;
+    const map = {};
+    for (const row of (Array.isArray(membership.newServices) ? membership.newServices : [])) {
+      if (row?.key && Number(row.perApplicationSavings) > 0) map[row.key] = Number(row.perApplicationSavings);
+    }
+    return Object.keys(map).length ? map : null;
+  })();
   // The whole-plan tier badge and combined summary show the tier only if any
   // section in the bundle is eligible, so an excluded-only bundle (e.g.
   // palm + rodent) stays badge-free.
@@ -5174,6 +5181,7 @@ function EstimateViewPageInner() {
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
                 waveGuardDiscountPct={Number(pricing.combinedRecurring?.waveGuardDiscountPct) || null}
+                memberPerApplicationSavings={memberSavingsByServiceKey?.[section.key] ?? null}
                 // Multi-service plans embed each service's one-time work in
                 // its own box; single-service keeps the afterPrice breakdown.
                 oneTimeEmbed={services.length > 1 ? section.oneTimeContribution : null}

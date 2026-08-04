@@ -3660,9 +3660,14 @@ ${shellTopBar()}
 }
 
 
-// Server-rendered "Your WaveGuard membership" block for existing customers.
-// Mirrors the React MembershipCard in EstimateViewPage.jsx. Returns '' when
-// there is no membership context (leads, or any error upstream).
+// Server-rendered "Your WaveGuard membership" block for existing customers —
+// LEGACY v1 page only, and intentionally NO LONGER a mirror of the React
+// MembershipCard: the React card dropped its per-service savings rows (owner
+// 2026-08-04 — a current member's savings itemize inside each section's price
+// block, same ruling as the discounts on 2026-08-03), while this v1 block
+// keeps them because the legacy page has no in-price savings stack to hand
+// them to. Do not re-sync the two. Returns '' when there is no membership
+// context (leads, or any error upstream).
 function renderMembershipBlockHtml(membership) {
   if (!membership || !membership.isExistingCustomer) return '';
 
