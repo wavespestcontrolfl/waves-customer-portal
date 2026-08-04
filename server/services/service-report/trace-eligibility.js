@@ -290,11 +290,16 @@ function resolveTraceEligibility({
         eligible: false, variant: null, captionKey: null, reason: 'no_exterior_work_recorded',
       };
     }
-    // Generic-lane exterior evidence (codex P1 r13): render requires an
-    // exterior-ish recorded area/action; absent data fails closed at
-    // render, capture stays permissive (renderAreas undefined).
+    // Generic-lane exterior evidence (codex P1 r13): render suppresses
+    // when areas/actions WERE recorded and none are exterior. EMPTY
+    // evidence passes (codex P2 r17): the lightweight recap flow records
+    // no areas at all, and on a no-evidence completion the captured
+    // trace itself is the tech's assertion of exterior work — only a
+    // recorded-interior completion contradicts it. Capture stays
+    // permissive (renderAreas undefined).
     if (rule.eligible && rule.requiresExteriorAreas
       && renderAreas !== undefined
+      && String(renderAreas || '').trim() !== ''
       && !/exterior|perimeter|yard|lawn|foundation|eaves|soffit|outside|garage door|fence/i.test(String(renderAreas || ''))) {
       return {
         eligible: false, variant: null, captionKey: null, reason: 'no_exterior_area_recorded',

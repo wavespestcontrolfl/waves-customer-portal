@@ -531,10 +531,18 @@ async function resolveTracedExteriorZone(record, knex = db) {
     const { resolveTraceRenderVerdict, traceEligibilityGateOn } = require('./trace-eligibility');
     if (traceEligibilityGateOn()) {
       if ((await resolveTraceRenderVerdict(record, knex)).suppressed) return false;
-      return !!(await knex('treatment_zone_maps')
-        .where({ scheduled_service_id: record.scheduled_service_id })
-        .first()
-        .catch(() => null));
+      // Same conservative error semantics as the legacy lookup below
+      // (codex P1 r17): only a MISSING TABLE means "no trace" — any other
+      // transient failure preserves the exterior dry-down guidance rather
+      // than silently dropping customer re-entry advice.
+      try {
+        return !!(await knex('treatment_zone_maps')
+          .where({ scheduled_service_id: record.scheduled_service_id })
+          .first());
+      } catch (traceErr) {
+        return !(traceErr?.code === '42P01'
+          || /no such table|does not exist/i.test(String(traceErr?.message || '')));
+      }
     }
   } catch { /* proceed to the ordinary lookup */ }
   // Interior-only treatments (bed bug): a trace saved before the tracer was

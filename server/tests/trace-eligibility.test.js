@@ -339,8 +339,11 @@ describe('classification behavior', () => {
       serviceKey: 'pest_re_service',
       renderAreas: 'Kitchen, Exterior perimeter',
     })).toMatchObject({ eligible: true, variant: 'spray' });
+    // EMPTY evidence passes (r17): the recap flow records no areas, and
+    // the captured trace stands as the tech's exterior record — only a
+    // recorded-interior completion contradicts it
     expect(resolveTraceEligibility({ serviceKey: 'pest_re_service', renderAreas: '' }))
-      .toMatchObject({ eligible: false, reason: 'no_exterior_area_recorded' });
+      .toMatchObject({ eligible: true, variant: 'spray' });
     // identity-less yard families resolve outline by NAME too
     expect(resolveTraceEligibility({ displayName: 'Fire Ant Treatment' }))
       .toMatchObject({ eligible: true, variant: 'outline' });
