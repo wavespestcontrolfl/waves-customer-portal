@@ -3983,6 +3983,23 @@ function reportReconcileBlockPayload({
 // adminAuthenticate + requireTechOrAdmin.
 router.get('/:serviceId/completion-status', async (req, res) => {
   try {
+    // Same per-visit technician boundary as the completion POST (codex P2
+    // #3187 r12): the status carries attempt state, serviceRecordId, and —
+    // same-key — the stored completion response, so a technician may read
+    // it only for their own assigned visit; admins keep office-wide reach.
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .select('id', 'technician_id')
+      .first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) {
+      return res.status(ownershipError.status).json(ownershipError.payload);
+    }
     const status = await CompletionAttempts.completionStatusForService({
       serviceId: req.params.serviceId,
       idempotencyKey: String(req.query.idempotencyKey || ''),
