@@ -180,6 +180,45 @@ describe('classification behavior', () => {
     })).toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
   });
 
+  test('inspection-capable lanes need applied work at render (round 6)', () => {
+    // capture side stays permissive
+    expect(resolveTraceEligibility({ findingsType: 'tree_shrub' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // T&S derives treatments_completed='Inspection only' with no products
+    expect(resolveTraceEligibility({
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: 'Inspection only' },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: 'Foliar spray, Root drench' },
+    })).toMatchObject({ eligible: true });
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Inspection only'] },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'one_time_lawn_treatment',
+      typedValues: { work_completed: 'Inspection completed' },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'one_time_lawn_treatment',
+      typedValues: { work_completed: ['Fertilizer application', 'Inspection completed'] },
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+  });
+
+  test('fire ant traces the LAWN, nest removals never trace, the retired combo keeps its maps (round 6)', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'fire_ant' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({ serviceKey: 'bee_wasp_removal' }))
+      .toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+    expect(resolveTraceEligibility({ serviceKey: 'mud_dauber_removal' }))
+      .toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+    // 3 completed historical visits deliberately retained at retirement
+    expect(resolveTraceEligibility({ serviceKey: 'pest_rodent_quarterly' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
     for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
       expect(resolveTraceEligibility({ displayName }))

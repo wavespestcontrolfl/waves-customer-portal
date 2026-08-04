@@ -29,8 +29,17 @@
 // catalog key routed to it.
 const FINDINGS_TYPE_RULES = {
   // spray/spatial typed lanes
-  tree_shrub: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  mosquito_event: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Inspection-capable lanes (codex P1 r6): T&S derives
+  // treatments_completed = 'Inspection only' when no products were
+  // recorded, and the mosquito + one-time-lawn schemas offer inspection
+  // as a first-class completion — an inspection-only visit must not
+  // publish a treated map or an exterior re-entry claim.
+  tree_shrub: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresAppliedWork: true,
+  },
+  mosquito_event: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresAppliedWork: true,
+  },
   // Flea joins the evidence-conditional lanes (codex P1 r5): interior-only
   // and inspection-only completions are first-class choices on its form.
   flea: {
@@ -55,7 +64,9 @@ const FINDINGS_TYPE_RULES = {
   // P1 r3).
   german_roach_knockdown: { eligible: false, reason: 'interior_only_lane' },
   one_time_pest_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  one_time_lawn_treatment: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  one_time_lawn_treatment: {
+    eligible: true, variant: 'outline', captionKey: 'lawnCoverage', requiresAppliedWork: true,
+  },
   // liquid termite family (trench/rod/spot) — a perimeter application IS
   // the product; the compliance certificate lane is excluded separately.
   termite_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
@@ -88,10 +99,14 @@ const SERVICE_KEY_RULES = {
   pest_re_service: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   one_time_pest_control: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   pest_initial_cleanout: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  fire_ant: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Broadcast bait + mound drench priced by LAWN square footage (codex P1
+  // r6) — the treated geometry is the yard, not the building perimeter.
+  fire_ant: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   tick_control: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  bee_wasp_removal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  mud_dauber_removal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Individual-nest removal with localized residual on eaves/soffits —
+  // never a property-perimeter application (codex P1 r6).
+  bee_wasp_removal: { eligible: false, reason: 'localized_treatment_lane' },
+  mud_dauber_removal: { eligible: false, reason: 'localized_treatment_lane' },
   // mosquito programs
   mosquito_monthly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   mosquito_seasonal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
@@ -121,6 +136,11 @@ const SERVICE_KEY_RULES = {
   // station map coexists on the same report; a pure bait stop routes
   // through the termite_bait_station typed pointer above instead.
   pest_termite_bait_quarterly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // RETIRED key, 3 historical completed visits deliberately left intact
+  // (codex P2 r6): the visit was a perimeter pest treatment with rodent
+  // bait as a companion, so its permanent reports keep their legitimate
+  // spray maps.
+  pest_rodent_quarterly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   // never lanes
   bed_bug_treatment: { eligible: false, reason: 'interior_only_lane' },
   termite_slab_pretreat: { eligible: false, reason: 'compliance_project_lane' },
@@ -180,6 +200,20 @@ function recordedExteriorWork(typedValues) {
   return /exterior|perimeter|\blawn\b/i.test(recorded);
 }
 
+// Applied-work test for requiresAppliedWork rules: any recorded treatment
+// chip beyond the inspection-only completions, across the three chip
+// fields the typed schemas use.
+function recordedAppliedWork(typedValues) {
+  const recorded = ['treatment_completed', 'treatments_completed', 'work_completed']
+    .map((key) => String(typedValues?.[key] ?? ''))
+    .join(',');
+  return recorded
+    .split(',')
+    .map((chip) => chip.trim())
+    .filter(Boolean)
+    .some((chip) => !/^inspection (?:only|completed)$/i.test(chip));
+}
+
 /**
  * Pure resolver. Precedence: INELIGIBLE verdicts win in either direction —
  * a frozen snapshot's findingsType may WIDEN suppression over a spray key
@@ -202,6 +236,12 @@ function resolveTraceEligibility({
       && typedValues !== undefined && !recordedExteriorWork(typedValues)) {
       return {
         eligible: false, variant: null, captionKey: null, reason: 'no_exterior_work_recorded',
+      };
+    }
+    if (rule.eligible && rule.requiresAppliedWork
+      && typedValues !== undefined && !recordedAppliedWork(typedValues)) {
+      return {
+        eligible: false, variant: null, captionKey: null, reason: 'no_treatment_recorded',
       };
     }
     return verdict(rule, source);
