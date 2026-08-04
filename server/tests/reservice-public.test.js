@@ -49,9 +49,12 @@ jest.mock('../services/short-url', () => ({
   shortenOrPassthrough: jest.fn(async (longUrl) => longUrl),
 }));
 
+const fs = require('fs');
+const path = require('path');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   RESERVICE_LANES,
+  OPEN_CALLBACK_STATUSES,
   laneForCoverageRow,
   laneForCallbackRow,
   reserviceLanesForCustomer,
@@ -85,6 +88,12 @@ describe('lane classification', () => {
     expect(laneForCoverageRow({ serviceType: 'WaveGuard Quarterly' })).toBe('pest');
     expect(laneForCoverageRow({ serviceType: 'Mosquito Control' })).toBe(null);
     expect(laneForCoverageRow({ serviceType: 'Termite Bait Monitoring' })).toBe(null);
+    // Rodent-led labels contain "pest" ("Rodent Pest Control" is
+    // rodent_general_one_time's canonical label) but rodent work stays
+    // office-handled — same carve-out toQualifyingKeys makes (codex P2).
+    expect(laneForCoverageRow({ serviceType: 'Rodent Pest Control' })).toBe(null);
+    expect(laneForCoverageRow({ serviceType: 'Commercial Pest Program' })).toBe(null);
+    expect(laneForCoverageRow({ serviceType: 'One-Time Pest Control' })).toBe(null);
     expect(laneForCoverageRow({})).toBe(null);
   });
 
@@ -249,5 +258,29 @@ describe('createSelfBooking callbackVisit trust boundary', () => {
 
     expect(res.statusCode).toBe(409);
     expect(res.body.error).toMatch(/no longer available/);
+  });
+});
+
+describe('lane dedupe atomicity (source guards, codex P1 #3194)', () => {
+  const bookingSrc = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
+
+  test('the commit transaction takes the customer+lane advisory lock and re-checks the open callback INSIDE it', () => {
+    const txIdx = bookingSrc.indexOf('txResult = await db.transaction');
+    const laneLockIdx = bookingSrc.indexOf("['reservice-lane', `${custId}:${callbackVisit.serviceKey}`]");
+    const recheckIdx = bookingSrc.indexOf('await openCallbackExistsForLane(trx, custId, lane)');
+    const insertIdx = bookingSrc.indexOf("await trx('self_booked_appointments').insert({");
+    expect(txIdx).toBeGreaterThan(-1);
+    // Lock, then re-check, both inside the transaction and before the insert.
+    expect(laneLockIdx).toBeGreaterThan(txIdx);
+    expect(recheckIdx).toBeGreaterThan(laneLockIdx);
+    expect(recheckIdx).toBeLessThan(insertIdx);
+    // The dedupe answers with its own code so the route can distinguish it
+    // from a slot race.
+    expect(bookingSrc).toMatch(/code: 'ALREADY_BOOKED',/);
+    expect(bookingSrc).toMatch(/txErr\.code === 'SLOT_TAKEN' \|\| txErr\.code === 'DAY_FULL' \|\| txErr\.code === 'ALREADY_BOOKED'/);
+  });
+
+  test('live callbacks (en_route/on_site) still block the lane — dedupe uses the open-status set (codex P2)', () => {
+    expect(OPEN_CALLBACK_STATUSES).toEqual(['pending', 'confirmed', 'en_route', 'on_site']);
   });
 });

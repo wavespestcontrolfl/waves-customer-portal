@@ -1348,12 +1348,20 @@ router.post('/reservice-link', requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'No customer found for that number' });
     }
 
-    // First account row holding an eligible lane wins (deterministic: the
-    // account helper returns rows in a stable order and most accounts have
-    // one property). No eligible row → nothing to insert.
+    // The operator-selected row is checked FIRST — the /reservice page
+    // builds availability around the token row's ADDRESS, so on a
+    // multi-property account the sibling scan below must never shadow the
+    // property the operator actually picked (codex P2 #3194). Remaining
+    // siblings follow in a sorted (deterministic) order —
+    // customerIdsForAccount has no ORDER BY of its own. First eligible row
+    // wins; none → nothing to insert.
+    const selectedId = customerIds.find((id) => String(id).toLowerCase() === String(customerId || '').toLowerCase()) || null;
+    const orderedIds = selectedId
+      ? [selectedId, ...customerIds.filter((id) => id !== selectedId).sort()]
+      : [...customerIds].sort();
     let eligible = null;
     let lanes = [];
-    for (const id of customerIds) {
+    for (const id of orderedIds) {
       const row = await db('customers')
         .where({ id })
         .whereNull('deleted_at')

@@ -436,9 +436,24 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     });
 
     if (!result.ok) {
-      // A 409 out of the transaction is a slot-level race (SLOT_TAKEN /
-      // DAY_FULL) — refresh the list so the page recovers in one step, the
-      // same shape the pre-check above answers with.
+      // Lane-dedupe race lost inside the transaction (another commit for
+      // this lane won under the advisory lock): answer exactly like the
+      // pre-check's dedupe hit, with the winning visit's reschedule link.
+      if (result.code === 'ALREADY_BOOKED') {
+        let booked = null;
+        try {
+          const open = await openReserviceCallbacks(customer.id);
+          booked = open[lane] || null;
+        } catch { /* answer without the visit details */ }
+        return res.status(409).json({
+          error: result.error,
+          code: 'ALREADY_BOOKED',
+          alreadyBooked: booked,
+        });
+      }
+      // Any other 409 out of the transaction is a slot-level race
+      // (SLOT_TAKEN / DAY_FULL) — refresh the list so the page recovers in
+      // one step, the same shape the pre-check above answers with.
       if (result.status === 409) {
         let refreshed = null;
         try {

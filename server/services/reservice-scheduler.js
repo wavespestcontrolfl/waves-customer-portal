@@ -47,6 +47,12 @@ function laneForCoverageRow({ category, serviceType } = {}) {
   const label = String(serviceType || '').toLowerCase();
   if (!label) return null;
   if (/\blawn\b|\bturf\b/.test(label)) return 'lawn';
+  // Out-of-lane families whose legacy labels can still contain "pest"
+  // ("Rodent Pest Control" is rodent_general_one_time's canonical label —
+  // same rodent-led carve-out toQualifyingKeys makes for tier math), plus
+  // families that are never re-service lanes. Checked BEFORE the pest
+  // regex so the fallback can't grant the pest lane to office-handled work.
+  if (/rodent|termite|mosquito|tree|shrub|commercial|one[\s_-]?time|onetime/.test(label)) return null;
   if (/\bpest\b|waveguard/.test(label)) return 'pest';
   return null;
 }
@@ -98,18 +104,26 @@ async function reserviceLanesForCustomer(customer) {
   return ['pest', 'lawn'].filter((lane) => lanes.has(lane));
 }
 
+// Statuses that keep a callback "open" for the lane dedupe: booked
+// (pending/confirmed) AND live (en_route/on_site) — a tech already on the
+// way is the strongest possible reason not to book a second free visit in
+// the lane. Completed/cancelled/no_show/skipped/rescheduled release it.
+const OPEN_CALLBACK_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
+
 /**
- * Open (pending/confirmed, today-or-later) callback visits for the customer,
+ * Open (booked-or-live, today-or-later) callback visits for the customer,
  * keyed by lane — the dedupe that keeps the page from booking a SECOND free
  * re-service in the same lane, and the tie-in that hands the customer the
  * existing visit's /reschedule link instead ("already booked — move it").
+ * Advisory only at page level — the COMMIT re-checks under a lane lock via
+ * openCallbackExistsForLane below.
  */
 async function openReserviceCallbacks(customerId) {
   if (!customerId) return {};
   const rows = await db('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
     .where('s.customer_id', customerId)
-    .whereIn('s.status', ['pending', 'confirmed'])
+    .whereIn('s.status', OPEN_CALLBACK_STATUSES)
     .where('s.scheduled_date', '>=', etDateString())
     .where((qb) => qb
       .where('s.is_callback', true)
@@ -141,11 +155,36 @@ async function openReserviceCallbacks(customerId) {
   return byLane;
 }
 
+/**
+ * Transaction-capable lane-dedupe re-check for the COMMIT path: true when the
+ * customer already has an open callback in `lane`. Takes the db handle (a
+ * trx) so createSelfBooking can run it INSIDE its booking transaction, under
+ * the reservice-lane advisory lock — the page-level openReserviceCallbacks
+ * check is racy on its own (two parallel commits with different slots both
+ * pass it before either insert; codex P1 on #3194).
+ */
+async function openCallbackExistsForLane(dbh, customerId, lane) {
+  if (!customerId || !RESERVICE_LANES[lane]) return false;
+  const rows = await dbh('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', customerId)
+    .whereIn('s.status', OPEN_CALLBACK_STATUSES)
+    .where('s.scheduled_date', '>=', etDateString())
+    .where((qb) => qb
+      .where('s.is_callback', true)
+      .orWhereIn('sv.service_key', Array.from(RE_SERVICE_SERVICE_KEYS)))
+    .select('s.service_type', 'sv.service_key')
+    .limit(50);
+  return rows.some((row) => laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type }) === lane);
+}
+
 module.exports = {
   RESERVICE_LANES,
+  OPEN_CALLBACK_STATUSES,
   reserviceSelfServeEnabled,
   laneForCoverageRow,
   laneForCallbackRow,
   reserviceLanesForCustomer,
   openReserviceCallbacks,
+  openCallbackExistsForLane,
 };

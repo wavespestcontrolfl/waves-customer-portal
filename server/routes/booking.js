@@ -2096,6 +2096,24 @@ async function createSelfBooking(payload = {}) {
       // scheduling/occupancy.js) so concurrent confirms can't deadlock.
       await acquireSelfBookingDayCapLock(trx, slotDateStr);
 
+      // Free re-service lane dedupe (codex P1 #3194): the reservice route's
+      // page-level open-callback check is advisory — two parallel commits
+      // with DIFFERENT slots both pass it before either insert, and the
+      // replay guard below only catches the exact same slot. Serialize per
+      // customer+lane and re-check INSIDE the transaction. Taken AFTER every
+      // shared rung (date → customer → tech → zone → day-cap stays the
+      // global order in scheduling/occupancy.js); only reservice commits
+      // take this namespace and it is the terminal lock, so no cycle with
+      // the other writers is possible. Placed BEFORE the replay lookup only
+      // for lock-order clarity — the replay return below still wins for an
+      // exact double-submit, so retries never see this 409.
+      if (callbackVisit) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+          ['reservice-lane', `${custId}:${callbackVisit.serviceKey}`],
+        );
+      }
+
       // Idempotent replay: same customer, same day, same start time →
       // return the original booking instead of creating a duplicate.
       const existing = await trx('self_booked_appointments')
@@ -2103,6 +2121,18 @@ async function createSelfBooking(payload = {}) {
         .whereNot('status', 'cancelled')
         .first();
       if (existing) return { existing };
+
+      if (callbackVisit) {
+        const { openCallbackExistsForLane, laneForCallbackRow } = require('../services/reservice-scheduler');
+        const lane = laneForCallbackRow({ serviceKey: callbackVisit.serviceKey });
+        if (await openCallbackExistsForLane(trx, custId, lane)) {
+          throw Object.assign(new Error('You already have a re-service visit on the books.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'ALREADY_BOOKED',
+          });
+        }
+      }
 
       // Commit-time max_self_books_per_day re-check (same predicate the
       // availability builder uses to drop full days, via the shared helper) —
@@ -2290,18 +2320,24 @@ async function createSelfBooking(payload = {}) {
       // path: both are "pick another slot" outcomes, and both must roll back
       // a just-created profile so the retry doesn't strand on the
       // phone-already-on-file 409.
-      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL') {
+      if (txErr.code === 'SLOT_TAKEN' || txErr.code === 'DAY_FULL' || txErr.code === 'ALREADY_BOOKED') {
         // Undo a profile this request just created: leaving it would make
         // the customer's retry with a different slot hit the
         // phone-already-on-file 409 and strand them entirely. The row is
         // seconds old with no children beyond its prefs row.
+        // (ALREADY_BOOKED can only fire for callbackVisit callers, whose
+        // identity is token-resolved — createdCustomerId is always null
+        // there; the rollback is harmlessly idle.)
         if (createdCustomerId) {
           await db('notification_prefs').where({ customer_id: createdCustomerId }).del().catch(() => {});
           await db('customers').where({ id: createdCustomerId }).del().catch((delErr) => {
             logger.warn(`[booking:confirm] Could not roll back just-created customer ${createdCustomerId}: ${delErr.message}`);
           });
         }
-        return { ok: false, status: 409, error: txErr.message };
+        // code rides along so the reservice route can distinguish the lane
+        // dedupe from a slot race; /confirm's response shape is unchanged
+        // (it reads only error + customersOnly fields).
+        return { ok: false, status: 409, error: txErr.message, code: txErr.code || null };
       }
       throw txErr;
     }
