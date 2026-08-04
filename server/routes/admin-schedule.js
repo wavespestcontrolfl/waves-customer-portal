@@ -1931,11 +1931,18 @@ router.get('/', async (req, res, next) => {
     // suppresses ineligible traces regardless.
     const {
       resolveTraceEligibility: rowTraceEligibility,
+      combineLineVerdicts: combineRowVerdicts,
       traceEligibilityGateOn,
     } = require('../services/service-report/trace-eligibility');
     let serviceKeyByServiceId = new Map();
     if (traceEligibilityGateOn()) {
-      const catalogIds = [...new Set(services.map((s) => s.service_id).filter(Boolean))];
+      // Primary AND add-on catalog ids in one batch — a grouped visit with
+      // an ineligible primary but a spray-capable add-on line still traces
+      // (codex P2 r11).
+      const catalogIds = [...new Set([
+        ...services.map((s) => s.service_id),
+        ...[...addonsByServiceId.values()].flat().map((a) => a.serviceId),
+      ].filter(Boolean))];
       if (catalogIds.length) {
         const catalogRows = await db('services')
           .whereIn('id', catalogIds)
@@ -2099,13 +2106,19 @@ router.get('/', async (req, res, next) => {
       };
 
       const rowTraceVerdict = traceEligibilityGateOn()
-        ? rowTraceEligibility({
-          serviceKey: serviceKeyByServiceId.get(s.service_id)
-            || projectCompletionContext?.completionProfile?.serviceKey
-            || null,
-          findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
-          displayName: s.service_type || '',
-        })
+        ? combineRowVerdicts(
+          rowTraceEligibility({
+            serviceKey: serviceKeyByServiceId.get(s.service_id)
+              || projectCompletionContext?.completionProfile?.serviceKey
+              || null,
+            findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
+            displayName: s.service_type || '',
+          }),
+          (addonsByServiceId.get(s.id) || []).map((addon) => rowTraceEligibility({
+            serviceKey: serviceKeyByServiceId.get(addon.serviceId) || null,
+            displayName: addon.serviceName || '',
+          })),
+        )
         : null;
       return {
         id: s.id, routeOrder: s.route_order,
@@ -2386,6 +2399,7 @@ router.get('/week', async (req, res, next) => {
       // resolved profile supplies both identities — no extra queries.
       const {
         resolveTraceEligibility: weekTraceEligibility,
+        combineLineVerdicts: weekCombineVerdicts,
         traceEligibilityGateOn: weekTraceGateOn,
       } = require('../services/service-report/trace-eligibility');
 
@@ -2513,11 +2527,16 @@ router.get('/week', async (req, res, next) => {
           serviceCategory: detectServiceCategory(svcType),
           ...(() => {
             const v = weekTraceGateOn()
-              ? weekTraceEligibility({
-                serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
-                findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
-                displayName: s.service_type || '',
-              })
+              ? weekCombineVerdicts(
+                weekTraceEligibility({
+                  serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
+                  findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
+                  displayName: s.service_type || '',
+                }),
+                serviceAddons.map((addon) => weekTraceEligibility({
+                  displayName: addon.serviceName || '',
+                })),
+              )
               : null;
             return {
               traceEligible: !v || v.eligible,

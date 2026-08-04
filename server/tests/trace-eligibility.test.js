@@ -184,14 +184,24 @@ describe('classification behavior', () => {
     // capture side stays permissive
     expect(resolveTraceEligibility({ findingsType: 'tree_shrub' }))
       .toMatchObject({ eligible: true, variant: 'spray' });
-    // T&S derives treatments_completed='Inspection only' with no products
+    // T&S derives treatments_completed='Inspection only' with no products;
+    // r11 tightened it to CHIP-MATCHED — fertilizer/soil work is real but
+    // a spray trace cannot depict it
     expect(resolveTraceEligibility({
       findingsType: 'tree_shrub',
       typedValues: { treatments_completed: 'Inspection only' },
-    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    })).toMatchObject({ eligible: false, reason: 'no_traceable_treatment_recorded' });
     expect(resolveTraceEligibility({
       findingsType: 'tree_shrub',
-      typedValues: { treatments_completed: 'Foliar spray, Root drench' },
+      typedValues: { treatments_completed: 'Fertilizer, Micronutrients, Soil drench' },
+    })).toMatchObject({ eligible: false, reason: 'no_traceable_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: 'Fertilizer, Foliar treatment' },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: ['Insect treatment', 'Horticultural oil'] },
     })).toMatchObject({ eligible: true });
     expect(resolveTraceEligibility({
       findingsType: 'mosquito_event',
@@ -243,7 +253,7 @@ describe('classification behavior', () => {
       serviceKey: 'lawn_tree_shrub_combo',
       findingsType: 'tree_shrub',
       typedValues: { treatments_completed: 'Inspection only' },
-    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    })).toMatchObject({ eligible: false, reason: 'no_traceable_treatment_recorded' });
     // legacy station keys repointed by the bait-station cutover: the
     // explicit ineligible KEY rule overrides the old termite_treatment
     // snapshot
@@ -298,6 +308,23 @@ describe('classification behavior', () => {
     // no snapshot at all fails closed at render
     expect(resolveTraceEligibility({ findingsType: 'termite_treatment', typedValues: null }))
       .toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+  });
+
+  test('an eligible add-on line rescues an ineligible primary (round 11)', () => {
+    const { combineLineVerdicts } = require('../services/service-report/trace-eligibility');
+    const baitPrimary = resolveTraceEligibility({ findingsType: 'termite_bait_station' });
+    const pestAddon = resolveTraceEligibility({ serviceKey: 'pest_general_quarterly' });
+    // termite-bait primary + pest add-on → the appointment traces as spray
+    expect(combineLineVerdicts(baitPrimary, [pestAddon]))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // an eligible PRIMARY always wins (it carries conditional semantics)
+    const lawnPrimary = resolveTraceEligibility({ serviceKey: 'lawn_care_monthly' });
+    expect(combineLineVerdicts(lawnPrimary, [pestAddon]))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    // no eligible line anywhere → the primary's verdict stands
+    const inspectionAddon = resolveTraceEligibility({ findingsType: 'pest_inspection' });
+    expect(combineLineVerdicts(baitPrimary, [inspectionAddon]))
+      .toMatchObject({ eligible: false, reason: 'bait_station_lane' });
   });
 
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {

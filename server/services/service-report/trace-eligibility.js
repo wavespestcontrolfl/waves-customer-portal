@@ -34,8 +34,15 @@ const FINDINGS_TYPE_RULES = {
   // recorded, and the mosquito + one-time-lawn schemas offer inspection
   // as a first-class completion — an inspection-only visit must not
   // publish a treated map or an exterior re-entry claim.
+  // T&S is chip-matched, not merely applied-work (codex P1 r11):
+  // fertilizer, micronutrients, soil drench, and soil amendment are real
+  // work a spray trace cannot honestly depict — only the foliar/area
+  // application chips substantiate the map.
   tree_shrub: {
-    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresAppliedWork: true,
+    eligible: true,
+    variant: 'spray',
+    captionKey: 'sprayPerimeter',
+    requiresChipMatch: /^(?:insect treatment|disease \/ fungicide treatment|horticultural oil|foliar treatment|pre-emergent bed treatment)$/i,
   },
   mosquito_event: {
     eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresAppliedWork: true,
@@ -235,15 +242,17 @@ function recordedExteriorWork(typedValues) {
 // application to water-holding areas — an application, but not one a
 // perimeter or area trace can substantiate; codex P1 r9).
 const NON_APPLIED_CHIP_RE = /^(?:inspection (?:only|completed)|source reduction|larvicide applied)$/i;
-function recordedAppliedWork(typedValues) {
-  const recorded = ['treatment_completed', 'treatments_completed', 'work_completed']
+function allRecordedChips(typedValues) {
+  return ['treatment_completed', 'treatments_completed', 'work_completed']
     .map((key) => String(typedValues?.[key] ?? ''))
-    .join(',');
-  return recorded
+    .join(',')
     .split(',')
     .map((chip) => chip.trim())
-    .filter(Boolean)
-    .some((chip) => !NON_APPLIED_CHIP_RE.test(chip));
+    .filter(Boolean);
+}
+
+function recordedAppliedWork(typedValues) {
+  return allRecordedChips(typedValues).some((chip) => !NON_APPLIED_CHIP_RE.test(chip));
 }
 
 /**
@@ -268,6 +277,15 @@ function resolveTraceEligibility({
       && typedValues !== undefined && !recordedExteriorWork(typedValues)) {
       return {
         eligible: false, variant: null, captionKey: null, reason: 'no_exterior_work_recorded',
+      };
+    }
+    // Chip-matched lanes (codex P1 r11): at render, at least one recorded
+    // chip must be one the trace can honestly depict.
+    if (rule.eligible && rule.requiresChipMatch
+      && typedValues !== undefined
+      && !allRecordedChips(typedValues).some((chip) => rule.requiresChipMatch.test(chip))) {
+      return {
+        eligible: false, variant: null, captionKey: null, reason: 'no_traceable_treatment_recorded',
       };
     }
     // Termite form: only the two perimeter methods substantiate a
@@ -347,6 +365,15 @@ async function traceCaptureBlockPayload(scheduledService, knex) {
     return null;
   }
   if (eligibility.eligible) return null;
+  // An eligible ADD-ON line rescues the capture too (codex P2 r11) —
+  // fail-open on lookup errors, same posture as the rest of this helper.
+  try {
+    const combined = combineLineVerdicts(
+      eligibility,
+      await resolveAddonVerdicts(scheduledService?.id, knex),
+    );
+    if (combined.eligible) return null;
+  } catch { return null; }
   return {
     status: 403,
     payload: {
@@ -355,6 +382,49 @@ async function traceCaptureBlockPayload(scheduledService, knex) {
       reason: eligibility.reason,
     },
   };
+}
+
+// Multi-line appointments (codex P2 r11): a grouped visit with an
+// ineligible primary can still perform a spray-capable ADD-ON line (a
+// termite-bait primary with a pest-control add-on sprays the perimeter),
+// so the appointment traces when any line supports it. The primary's
+// verdict wins whenever it is eligible (it carries the typed conditional
+// semantics); otherwise the first eligible add-on supplies the variant.
+// Add-ons are generic catalog lines — key or display name, no typed
+// values — and the report-data belt lanes (bed bug, rodent trapping)
+// still hard-suppress regardless, the conservative direction.
+function combineLineVerdicts(primaryVerdict, addonVerdicts = []) {
+  if (primaryVerdict.eligible) return primaryVerdict;
+  const rescued = addonVerdicts.find((v) => v && v.eligible);
+  return rescued || primaryVerdict;
+}
+
+// Resolve the add-on lines' verdicts for a scheduled service: catalog key
+// when the services row resolves, display name otherwise. Fail-soft — an
+// addon lookup error contributes nothing (the primary verdict stands).
+async function resolveAddonVerdicts(scheduledServiceId, knex) {
+  if (!scheduledServiceId || !knex) return [];
+  try {
+    const addons = await knex('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .select('service_id', 'service_name');
+    if (!addons.length) return [];
+    const catalogIds = [...new Set(addons.map((a) => a.service_id).filter(Boolean))];
+    let keyById = new Map();
+    if (catalogIds.length) {
+      const rows = await knex('services')
+        .whereIn('id', catalogIds)
+        .select('id', 'service_key')
+        .catch(() => []);
+      keyById = new Map(rows.map((r) => [r.id, r.service_key]));
+    }
+    return addons.map((addon) => resolveTraceEligibility({
+      serviceKey: keyById.get(addon.service_id) || null,
+      displayName: addon.service_name || '',
+    }));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -403,15 +473,22 @@ async function resolveTraceRenderVerdict(record, knex) {
       findingsType = findingsType || profile?.findingsType || null;
     }
   } catch { /* label fallback stands, same as the render path */ }
-  const eligibility = resolveTraceEligibility({
+  let eligibility = resolveTraceEligibility({
     serviceKey, findingsType, displayName: names, typedValues,
   });
+  if (!eligibility.eligible) {
+    eligibility = combineLineVerdicts(
+      eligibility,
+      await resolveAddonVerdicts(record?.scheduled_service_id, knex),
+    );
+  }
   return { suppressed: !eligibility.eligible, eligibility };
 }
 
 module.exports = {
   resolveTraceEligibility,
   resolveTraceRenderVerdict,
+  combineLineVerdicts,
   traceEligibilityGateOn,
   traceCaptureBlockPayload,
   _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },
