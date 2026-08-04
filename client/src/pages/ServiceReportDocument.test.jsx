@@ -645,6 +645,18 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toMatch(/hash-chained and tamper-evident/);
   });
 
+  it('keeps an EXPLICIT station check of a registered bait out of products applied (r19)', () => {
+    // The tech deliberately recorded a device inspection: pesticide identity
+    // must not re-classify it — nothing was applied.
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'rodent',
+      applications: [{ id: 'a1', method: 'station_check', methodInferred: false, totalAmount: '1', amountUnit: 'ea', product: { name: 'Contrac Blox', epa_reg: '12455-79', category: 'rodenticide bait' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toContain('Products applied');
+  });
+
   it('does not list a station check under products applied', () => {
     const data = {
       ...BASE_DATA,

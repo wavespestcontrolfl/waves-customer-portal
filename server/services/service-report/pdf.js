@@ -123,10 +123,30 @@ async function renderReportPdfWithCloudflare(url, { serviceRecordId } = {}) {
  * against a GET-presign 403s. Fail-soft per URL — a probe error counts as
  * unreachable, which only costs a re-render.
  */
+/**
+ * Every remote image URL the document prints, from the payload — the
+ * server-side mirror of ServiceReportDocument's gallery assembly (its
+ * galleryPhotos + v2AssessmentPhotos + momentPhotos + gaugePhoto sources,
+ * plus the traced-map snapshot). Probing only data.photos left the other
+ * four sources cacheable with placeholders (pre-push P1 r19) — keep this
+ * list in lockstep with what the component renders.
+ */
+function collectRenderedImageUrls(data) {
+  const urls = [
+    ...(Array.isArray(data?.photos) ? data.photos : []).map((p) => p?.url),
+    ...(Array.isArray(data?.reportV2?.photos) ? data.reportV2.photos : [])
+      .map((p) => p?.url || p?.imageUrl),
+    ...((data?.proofMoments || data?.visualServiceMoments || [])
+      .filter((m) => m && m.mediaType !== 'video')
+      .map((m) => m?.mediaUrl)),
+    data?.mowingHeight?.photoUrl,
+    data?.treatmentMap?.traced?.snapshotUrl,
+  ];
+  return [...new Set(urls.filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u)))];
+}
+
 async function countUnreachableReportPhotos(data, { timeoutMs = 2500 } = {}) {
-  const urls = (Array.isArray(data?.photos) ? data.photos : [])
-    .map((p) => p?.url)
-    .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u));
+  const urls = collectRenderedImageUrls(data);
   if (!urls.length) return 0;
   const probes = urls.map(async (url) => {
     const controller = new AbortController();

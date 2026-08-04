@@ -127,6 +127,18 @@ function taggedNoteLines(notes, tags) {
     .map((entry) => entry.text);
 }
 
+// Whether the row RECORDS its method, as opposed to methodFromProduct
+// inferring one from category/service-line. The distinction is load-bearing
+// for the document (pre-push P1 #3176 r19): an EXPLICIT station_check is a
+// deliberate device inspection and must never be re-classified as a product
+// application, however pesticide-flavored the product — only an INFERRED
+// station_check (legacy null application_method on a termite/rodent product)
+// may be overridden by pesticide identity.
+function hasExplicitApplicationMethod(product) {
+  const raw = String(product.application_method || product.method || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return !!raw && raw !== 'null';
+}
+
 function methodFromProduct(product, serviceLine) {
   const raw = String(product.application_method || product.method || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
   if (raw && raw !== 'null') return raw;
@@ -2946,6 +2958,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         facts_approved: !!product.approved_report_product_facts,
       },
       method,
+      // Explicit vs inferred decides whether pesticide identity may override
+      // a station_check classification in the document (see
+      // hasExplicitApplicationMethod).
+      methodInferred: !hasExplicitApplicationMethod(product),
       methodLabel: METHOD_LABELS[method] || method.replace(/_/g, ' '),
       zone_ids: matchZoneIds(product, zones, areaLabels),
       rate: product.application_rate,

@@ -30,6 +30,28 @@ describe('countUnreachableReportPhotos', () => {
     expect(opts.headers.Range).toBe('bytes=0-0');
   });
 
+  it('collects every rendered image source, not just data.photos (r19)', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 206 });
+    await countUnreachableReportPhotos({
+      photos: [{ url: 'https://s3.example.com/gallery.jpg' }],
+      reportV2: { photos: [{ imageUrl: 'https://s3.example.com/v2.jpg' }] },
+      proofMoments: [
+        { mediaUrl: 'https://s3.example.com/moment.jpg', mediaType: 'image' },
+        { mediaUrl: 'https://s3.example.com/clip.mp4', mediaType: 'video' },
+      ],
+      mowingHeight: { photoUrl: 'https://s3.example.com/gauge.jpg' },
+      treatmentMap: { traced: { snapshotUrl: 'https://s3.example.com/traced.png' } },
+    });
+    const probed = global.fetch.mock.calls.map(([u]) => u).sort();
+    expect(probed).toEqual([
+      'https://s3.example.com/gallery.jpg',
+      'https://s3.example.com/gauge.jpg',
+      'https://s3.example.com/moment.jpg',
+      'https://s3.example.com/traced.png',
+      'https://s3.example.com/v2.jpg',
+    ]);
+  });
+
   it('counts a non-OK response and a network error as unreachable', async () => {
     global.fetch = jest.fn()
       .mockResolvedValueOnce({ ok: false, status: 403 })
