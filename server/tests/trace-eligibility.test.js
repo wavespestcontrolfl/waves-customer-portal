@@ -579,8 +579,10 @@ describe('classification behavior', () => {
     };
     await resolveAddonVerdicts('ss-r24', recordingKnex);
     expect(orderCalls).toEqual([['created_at', 'asc'], ['id', 'asc']]);
-    // a batch whose only keys are SERVICE_KEY_RULES-covered never issues
-    // the profiles query — a profiles outage cannot abort it
+    // EVERY key loads its pointer (codex P1 r25 reverted the r24
+    // scoping): rules-covered keys can be typed lanes whose pointer
+    // narrows the verdict, so a profiles outage propagates for the
+    // whole batch — capture fail-opens, render fails closed
     const profilesExplodeKnex = (table) => {
       if (table === 'service_completion_profiles') throw new Error('profiles down');
       const q = {
@@ -588,11 +590,40 @@ describe('classification behavior', () => {
       };
       return q;
     };
-    const verdicts = await addonVerdictsFromLines(
+    await expect(addonVerdictsFromLines(
       [{ serviceId: 'a1', serviceName: 'Quarterly Pest' }],
       profilesExplodeKnex,
-    );
-    expect(verdicts[0]).toMatchObject({ eligible: true, variant: 'spray' });
+    )).rejects.toThrow('profiles down');
+  });
+
+  test('round 25 — a rules-covered typed lane loads its pointer, and the condition narrows the render verdict', async () => {
+    const { addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    // termite_liquid routes to termite_treatment, whose render rule
+    // requires a recorded perimeter method — without the pointer a
+    // spot/bait completion would publish a perimeter trace
+    const termiteKnex = (table) => {
+      if (table === 'services') {
+        return { whereIn: () => ({ select: () => Promise.resolve([{ id: 't1', service_key: 'termite_liquid' }]) }) };
+      }
+      if (table === 'service_completion_profiles') {
+        return {
+          whereIn: () => ({
+            where: () => ({
+              select: () => Promise.resolve([{ service_key: 'termite_liquid', project_type: 'termite_treatment' }]),
+            }),
+          }),
+        };
+      }
+      return { whereIn: () => ({ select: () => Promise.resolve([]) }) };
+    };
+    const line = [{ serviceId: 't1', serviceName: 'Termite Treatment Add-on' }];
+    // render: no recorded evidence → the perimeter-method condition
+    // fails closed and the add-on cannot rescue a report
+    const render = await addonVerdictsFromLines(line, termiteKnex, { renderSide: true });
+    expect(render[0]).toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+    // capture stays permissive (typedValues undefined)
+    const capture = await addonVerdictsFromLines(line, termiteKnex);
+    expect(capture[0]).toMatchObject({ eligible: true, variant: 'spray' });
   });
 
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {

@@ -517,14 +517,16 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
   // see the failure instead of 403ing the rescued visit. Render callers
   // wrap with their own fail-closed catch.
   let pointerByKey = new Map();
-  // Only TYPED keys — those without a SERVICE_KEY_RULES entry — need the
-  // profile pointer (codex P2 r24): a rules-covered key like
-  // pest_general_quarterly carries a complete verdict on its own, so a
-  // transient service_completion_profiles failure must not abort the
-  // whole batch (render would leave a rescued primary suppressed and
-  // capture would fail open before validating the posted mode).
-  const keys = [...new Set([...keyById.values()]
-    .filter((k) => k && !Object.prototype.hasOwnProperty.call(SERVICE_KEY_RULES, k)))];
+  // EVERY key loads its pointer (codex P1 r25, reverting the r24
+  // per-key scoping): a SERVICE_KEY_RULES entry does not make a key
+  // pointer-independent — termite_liquid/termite_trenching route to the
+  // termite_treatment findings rule, whose perimeter-method condition
+  // NARROWS the render verdict, so skipping the pointer let a spot/bait
+  // completion publish a perimeter trace its evidence doesn't support.
+  // The lookup's failure therefore propagates for the whole batch (the
+  // r21 policy): capture fail-opens, render fails closed via its
+  // caller's catch — the conservative direction on every surface.
+  const keys = [...new Set([...keyById.values()].filter(Boolean))];
   if (keys.length) {
     const profiles = await knex('service_completion_profiles')
       .whereIn('service_key', keys)
