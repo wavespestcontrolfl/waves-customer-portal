@@ -356,6 +356,35 @@ describe('classification behavior', () => {
       .toMatchObject({ eligible: false });
   });
 
+  test('round 14 — protocol scopes count as exterior evidence; frozen add-on lines resolve', async () => {
+    const { renderAreasFromRecord, addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    // an exterior APPLIED protocol action alone is exterior evidence
+    expect(renderAreasFromRecord({
+      areas_serviced: '[]',
+      structured_notes: JSON.stringify({
+        protocolActionScopesCompleted: [{ scope: 'exterior', treatmentApplied: true }],
+      }),
+    })).toMatch(/exterior/i);
+    // a not-applied or interior-only action is not
+    expect(renderAreasFromRecord({
+      areas_serviced: JSON.stringify(['Kitchen']),
+      structured_notes: JSON.stringify({
+        protocolActionScopesCompleted: [
+          { scope: 'exterior', treatmentApplied: false },
+          { scope: 'interior', treatmentApplied: true },
+        ],
+      }),
+    })).not.toMatch(/exterior/i);
+    // frozen completion lines resolve verdicts by name without a knex
+    // catalog hit (null ids)
+    const verdicts = await addonVerdictsFromLines(
+      [{ serviceId: null, serviceName: 'Quarterly Pest Control' }],
+      { /* knex unused for name-only lines */ },
+    );
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]).toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
     for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
       expect(resolveTraceEligibility({ displayName }))

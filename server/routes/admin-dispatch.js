@@ -5992,6 +5992,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               recommendations: reportRecommendations,
             },
           };
+          // Freeze the appointment's add-on line identities with the
+          // completion (codex P2 on #3189): schedule add-on rows are
+          // MUTABLE after completion (the update-details route replaces
+          // them), and the trace-eligibility render verdict must reflect
+          // the lines completed on the visit, not later edits — an add-on
+          // added afterwards must not republish a suppressed trace, and
+          // one removed must not hide a legitimately completed map.
+          // Fail-soft: a lookup error omits the field and render falls
+          // back to the live rows (legacy-record behavior).
+          try {
+            const completedAddonRows = await trx('scheduled_service_addons')
+              .where({ scheduled_service_id: svc.id })
+              .orderBy('created_at', 'asc')
+              .select('service_id', 'service_name');
+            if (completedAddonRows.length) {
+              serviceData.completedAddonLines = completedAddonRows.map((row) => ({
+                serviceId: row.service_id || null,
+                serviceName: row.service_name || null,
+              }));
+            }
+          } catch { /* render falls back to live rows */ }
           // Typed specialty completion: resolve trend vs the customer's prior
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders

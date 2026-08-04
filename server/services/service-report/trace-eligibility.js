@@ -423,17 +423,18 @@ function combineLineVerdicts(primaryVerdict, addonVerdicts = []) {
 // Resolve the add-on lines' verdicts for a scheduled service: catalog key
 // when the services row resolves, display name otherwise. Fail-soft — an
 // addon lookup error contributes nothing (the primary verdict stands).
-async function resolveAddonVerdicts(scheduledServiceId, knex, { renderSide = false } = {}) {
-  if (!scheduledServiceId || !knex) return [];
+// Verdicts for a list of add-on line identities ({ serviceId,
+// serviceName }) — shared by the live-row path (capture, legacy records)
+// and the completion-frozen path (render, codex P2 r14).
+async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) {
   try {
-    const addons = await knex('scheduled_service_addons')
-      .where({ scheduled_service_id: scheduledServiceId })
-      // Same deterministic order the capture feeds use — the first
-      // eligible add-on supplies the variant, so the report/PDF/re-entry
-      // pick must match the one the mapper keyed off (codex P2 r13).
-      .orderBy('created_at', 'asc')
-      .select('service_id', 'service_name');
-    if (!addons.length) return [];
+    const addons = (Array.isArray(lines) ? lines : [])
+      .map((line) => ({
+        service_id: line?.serviceId ?? line?.service_id ?? null,
+        service_name: line?.serviceName ?? line?.service_name ?? null,
+      }))
+      .filter((line) => line.service_id || line.service_name);
+    if (!addons.length || !knex) return [];
     const catalogIds = [...new Set(addons.map((a) => a.service_id).filter(Boolean))];
     let keyById = new Map();
     if (catalogIds.length) {
@@ -475,6 +476,25 @@ async function resolveAddonVerdicts(scheduledServiceId, knex, { renderSide = fal
   }
 }
 
+// Live schedule rows — the CAPTURE-side truth (pre-completion) and the
+// legacy fallback for records completed before add-on identities were
+// frozen with the completion.
+async function resolveAddonVerdicts(scheduledServiceId, knex, { renderSide = false } = {}) {
+  if (!scheduledServiceId || !knex) return [];
+  try {
+    const rows = await knex('scheduled_service_addons')
+      .where({ scheduled_service_id: scheduledServiceId })
+      // Same deterministic order the capture feeds use — the first
+      // eligible add-on supplies the variant, so the report/PDF/re-entry
+      // pick must match the one the mapper keyed off (codex P2 r13).
+      .orderBy('created_at', 'asc')
+      .select('service_id', 'service_name');
+    return addonVerdictsFromLines(rows, knex, { renderSide });
+  } catch {
+    return [];
+  }
+}
+
 // The generic completion's recorded areas/actions, joined for the
 // requiresExteriorAreas render check: areas_serviced (JSON array or raw)
 // plus structured_notes.areasTreated. Fail-soft — unparseable fields
@@ -495,6 +515,16 @@ function renderAreasFromRecord(record) {
     const treated = structured?.areasTreated;
     if (Array.isArray(treated)) parts.push(...treated.map(String));
     else if (treated) parts.push(String(treated));
+    // Scoped protocol actions are the completion's authoritative record
+    // of WHERE treatment was applied — area chips are optional, so an
+    // exterior action alone must count as exterior evidence (codex P2
+    // r14). Only applied treatments contribute their scope.
+    const scopes = structured?.protocolActionScopesCompleted;
+    if (Array.isArray(scopes)) {
+      parts.push(...scopes
+        .filter((entry) => entry && entry.treatmentApplied === true && entry.scope)
+        .map((entry) => String(entry.scope)));
+    }
   } catch { /* nothing more to add */ }
   return parts.filter(Boolean).join(', ');
 }
@@ -550,9 +580,25 @@ async function resolveTraceRenderVerdict(record, knex) {
     renderAreas: renderAreasFromRecord(record),
   });
   if (!eligibility.eligible) {
+    // Add-on identities FROZEN with the completion win over the mutable
+    // schedule rows (codex P2 r14): a spray add-on added after completion
+    // must not republish a suppressed trace, and one removed must not
+    // hide a legitimately completed map. Legacy records (no frozen field)
+    // fall back to the live rows — the pre-freeze behavior.
+    let frozenLines = null;
+    try {
+      const serviceData = typeof record?.service_data === 'string'
+        ? JSON.parse(record.service_data || '{}')
+        : (record?.service_data || {});
+      if (Array.isArray(serviceData?.completedAddonLines)) {
+        frozenLines = serviceData.completedAddonLines;
+      }
+    } catch { /* live-row fallback */ }
     eligibility = combineLineVerdicts(
       eligibility,
-      await resolveAddonVerdicts(record?.scheduled_service_id, knex, { renderSide: true }),
+      frozenLines !== null
+        ? await addonVerdictsFromLines(frozenLines, knex, { renderSide: true })
+        : await resolveAddonVerdicts(record?.scheduled_service_id, knex, { renderSide: true }),
     );
   }
   return { suppressed: !eligibility.eligible, eligibility };
@@ -563,6 +609,7 @@ module.exports = {
   resolveTraceRenderVerdict,
   combineLineVerdicts,
   resolveAddonVerdicts,
+  addonVerdictsFromLines,
   renderAreasFromRecord,
   traceEligibilityGateOn,
   traceCaptureBlockPayload,

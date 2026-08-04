@@ -2555,7 +2555,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // pattern for report-time helpers.
   const {
     resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts,
-    renderAreasFromRecord, traceEligibilityGateOn,
+    addonVerdictsFromLines, renderAreasFromRecord, traceEligibilityGateOn,
   } = require('./trace-eligibility');
   let traceEligibility = resolveTraceEligibility({
     serviceKey: laneProfile?.serviceKey || null,
@@ -2574,9 +2574,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // P2 r12). Fail-soft: an addon lookup error leaves the primary verdict.
   if (traceEligibilityGateOn() && !traceEligibility.eligible) {
     try {
+      // Completion-frozen add-on identities win over the mutable schedule
+      // rows; legacy records fall back to the live rows (codex P2 r14).
+      const frozenAddonLines = parseJsonObject(service.service_data)?.completedAddonLines;
       traceEligibility = combineLineVerdicts(
         traceEligibility,
-        await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true }),
+        Array.isArray(frozenAddonLines)
+          ? await addonVerdictsFromLines(frozenAddonLines, knex, { renderSide: true })
+          : await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true }),
       );
     } catch { /* primary verdict stands */ }
   }
