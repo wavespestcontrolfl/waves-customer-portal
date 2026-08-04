@@ -518,6 +518,25 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // require cycle.
 async function resolveTracedExteriorZone(record, knex = db) {
   if (!record?.scheduled_service_id) return false;
+  // Centralized eligibility (GATE_TRACE_ELIGIBILITY): an ineligible lane's
+  // saved trace must not drive the exterior dry-down timer either. This
+  // function is the single choke point for the report payload, the
+  // re-entry context — which reports-public and email-delivery each build
+  // independently — and the completion SMS, so the verdict lives HERE
+  // rather than at any one call site (codex P1 r2). Gate ON, the verdict
+  // ALONE decides (frozen identity + add-on aware — the label checks
+  // above read the mutable row and would override in both directions;
+  // codex P2 r16). Fail-soft: helper errors fall through to the lookup.
+  try {
+    const { resolveTraceRenderVerdict, traceEligibilityGateOn } = require('./trace-eligibility');
+    if (traceEligibilityGateOn()) {
+      if ((await resolveTraceRenderVerdict(record, knex)).suppressed) return false;
+      return !!(await knex('treatment_zone_maps')
+        .where({ scheduled_service_id: record.scheduled_service_id })
+        .first()
+        .catch(() => null));
+    }
+  } catch { /* proceed to the ordinary lookup */ }
   // Interior-only treatments (bed bug): a trace saved before the tracer was
   // hidden for this lane is stale EXTERIOR evidence — never let it drive
   // the exterior dry-down timer. Single choke point for the report payload,
@@ -542,17 +561,6 @@ async function resolveTracedExteriorZone(record, knex = db) {
       }
     } catch { /* label fallback above already ran; proceed to the lookup */ }
   }
-  // Centralized eligibility (GATE_TRACE_ELIGIBILITY): an ineligible lane's
-  // saved trace must not drive the exterior dry-down timer either. This
-  // function is the single choke point for the report payload, the
-  // re-entry context — which reports-public and email-delivery each build
-  // independently — and the completion SMS, so the verdict lives HERE
-  // rather than at any one call site (codex P1 r2). Fail-soft: helper
-  // errors fall through to the ordinary lookup.
-  try {
-    const { resolveTraceRenderVerdict } = require('./trace-eligibility');
-    if ((await resolveTraceRenderVerdict(record, knex)).suppressed) return false;
-  } catch { /* proceed to the ordinary lookup */ }
   try {
     return !!(await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })
@@ -3137,8 +3145,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // outline — a trace saved before the tracer was hidden for this lane
     // is stale exterior evidence on an interior treatment's report
     // (codex P2 r6; stable-key classification r9).
+    // Gate ON: the centralized combined verdict (frozen identity,
+    // add-on aware) is the ONLY decider — the legacy lane booleans read
+    // the MUTABLE row/label and would both hide a frozen-eligible map
+    // after a repoint and override an add-on rescue (codex P2 r16). Gate
+    // OFF: the legacy belts, bit-for-bit.
     if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id
-      && !interiorOnlyLane && !trapLaneNoSprayMap && !traceSuppressed) {
+      && (traceEligibilityGateOn()
+        ? !traceSuppressed
+        : (!interiorOnlyLane && !trapLaneNoSprayMap))) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -3410,7 +3425,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // An ineligible lane's trace must not assert an exterior re-entry window
   // either — a trace on an inspection would otherwise emit a false
   // advisory (scope RC3).
-  const payloadTracedExteriorZone = (interiorOnlyLane || traceSuppressed)
+  const payloadTracedExteriorZone = (traceEligibilityGateOn()
+    ? traceSuppressed
+    : interiorOnlyLane)
     ? false
     : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex);
   const advisory = normalizeAdvisoryForTreatmentScope({

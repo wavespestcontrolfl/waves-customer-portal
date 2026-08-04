@@ -155,6 +155,39 @@ describe('trace suppression at report payload build', () => {
     expect(kept.treatmentMap?.traced || null).not.toBeNull();
   });
 
+  test('round 16 — gate on, the combined verdict outranks the legacy belt lanes', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    // trapping-primary belt no longer overrides an add-on rescue: the
+    // frozen trapping snapshot is ineligible, the pest add-on rescues
+    const trapRow = serviceRow('Rodent Trapping');
+    trapRow.service_data = JSON.stringify({
+      typedReportSnapshot: { type: 'rodent_trapping', values: {} },
+      completedServiceKey: null,
+      completedServiceName: 'Rodent Trapping',
+      completedAddonLines: [{ serviceId: null, serviceName: 'Quarterly Pest Control' }],
+    });
+    const rescued = await buildReportV1Data(
+      trapRow, 'token-trace-belt-rescued',
+      stubKnex({ treatment_zone_maps: [TRACED_ROW] }),
+      { mode: 'live' },
+    );
+    expect(rescued.treatmentMap?.traced || null).not.toBeNull();
+    // frozen-pest primary + live label repointed to bed bug: the frozen
+    // identity keeps the map (the label belt would have hidden it)
+    const repointedRow = serviceRow('Bed Bug Treatment');
+    repointedRow.service_data = JSON.stringify({
+      completedServiceKey: 'pest_general_quarterly',
+      completedServiceName: 'Quarterly Pest Control',
+      completedAddonLines: [],
+    });
+    const kept = await buildReportV1Data(
+      repointedRow, 'token-trace-belt-kept',
+      stubKnex({ treatment_zone_maps: [TRACED_ROW] }),
+      { mode: 'live' },
+    );
+    expect(kept.treatmentMap?.traced || null).not.toBeNull();
+  });
+
   test('gate ON: an eligible add-on line rescues the report map (round 13 — the export bug path)', async () => {
     process.env.GATE_TRACE_ELIGIBILITY = 'true';
     const data = await buildReportV1Data(
