@@ -348,52 +348,81 @@ function splitInaccessibleAreas(value) {
   const ticked = new Set();
   if (!text) return { rows, ticked };
 
-  const append = (key, chunk) => {
-    // Strip separator punctuation the label split leaves behind. Trailing
-    // periods are sentence punctuation and stay.
-    const piece = chunk.trim().replace(/^[;,.\s]+/, '').replace(/[;,\s]+$/, '').trim();
+  const append = (key, chunk, joiner = ' ') => {
+    // Strip separator punctuation the label split leaves behind. A period is
+    // only separator noise when it is NOT a decimal point — stripping the one
+    // in "Interior: .5-inch opening" would record "5-inch" and misstate a
+    // measurement by a factor of ten on a signed filing.
+    const piece = chunk.trim().replace(/^(?:[;,\s]|\.(?!\d))+/, '').replace(/[;,\s]+$/, '').trim();
     if (!piece) return;
-    rows[key] = rows[key] ? `${rows[key]} ${piece}` : piece;
+    rows[key] = rows[key] ? `${rows[key]}${joiner}${piece}` : piece;
   };
 
-  // Line by line. The findings blob is built by appending whole lines (the
-  // property-intelligence emitter) and by a tech typing prose, so a line is
-  // the meaningful unit: a labelled line owns its row, and an UNLABELLED line
-  // is a shared statement that must tick every category it names.
+  const categoriesMentionedIn = (chunk) => {
+    const lower = chunk.toLowerCase();
+    return INACCESSIBLE_ROWS.filter((row) => {
+      // A category used as a hyphenated adjective ("exterior-facing eaves") is
+      // describing a location, not claiming that category as its own area.
+      const word = row.key === 'crawlspace' ? 'crawl' : row.key;
+      const re = new RegExp(String.raw`\b${word}\w*\b(?!-\w)`, 'i');
+      return re.test(lower);
+    });
+  };
+
+  // Line by line, then clause by clause within a line. The blob is built by
+  // appending whole lines (the property-intelligence emitter) and by a tech
+  // typing prose, and a semicolon starts a new claim inside a line.
   for (const rawLine of text.split('\n')) {
     const line = rawLine.trim();
     if (!line) continue;
+    // The row the previous clause spoke about, so an unlabelled clause naming
+    // no category reads as a CONTINUATION of it ("Crawlspace: skirting was
+    // closed; the area beneath was not inspected") rather than a new area.
+    let lastKey = null;
 
-    INACCESSIBLE_LABEL_PATTERN.lastIndex = 0;
-    const marks = [];
-    let m;
-    while ((m = INACCESSIBLE_LABEL_PATTERN.exec(line)) !== null) {
-      // m[1] = line-anchored form, m[2] = inline form (see the pattern above).
-      marks.push({ key: inaccessibleRowKeyFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
-    }
+    for (const rawClause of line.split(';')) {
+      const clause = rawClause.trim();
+      if (!clause) continue;
 
-    if (marks.length) {
-      // Text before the first label belongs to nothing in particular — attach
-      // it to the first labelled row rather than dropping it on the floor.
-      const preamble = line.slice(0, marks[0].start);
-      if (preamble.trim()) append(marks[0].key, preamble);
-      marks.forEach((mark, i) => {
-        const end = i + 1 < marks.length ? marks[i + 1].start : line.length;
-        append(mark.key, line.slice(mark.bodyStart, end));
-      });
-    } else {
-      // Unlabelled — repeat the shared statement on EVERY category it mentions.
-      // The single findings textarea is documented as holding several
-      // categories at once ("Attic, interior, exterior, crawlspace, other:
-      // specific areas and reasons" — project-types.js) and the previous
-      // checkbox matcher ticked all of them. Picking one row would silently
-      // drop a disclosed inspection limitation off a signed FDACS filing.
-      const lower = line.toLowerCase();
-      const hits = INACCESSIBLE_ROWS.filter((row) => (
-        row.key === 'crawlspace' ? /crawl/.test(lower) : lower.includes(row.key)
-      ));
-      if (hits.length) for (const hit of hits) append(hit.key, line);
-      else append('other', line);
+      INACCESSIBLE_LABEL_PATTERN.lastIndex = 0;
+      const marks = [];
+      let m;
+      while ((m = INACCESSIBLE_LABEL_PATTERN.exec(clause)) !== null) {
+        // m[1] = line-anchored form, m[2] = inline form (see the pattern above).
+        marks.push({ key: inaccessibleRowKeyFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
+      }
+
+      if (marks.length) {
+        // Text before the first label continues the PREVIOUS clause's row when
+        // there is one ("Crawlspace: skirting closed; the area beneath was not
+        // inspected. Interior: ..." — that middle sentence is crawlspace, not
+        // interior). With no previous row it attaches to the first label rather
+        // than being dropped.
+        const preamble = clause.slice(0, marks[0].start);
+        if (preamble.trim()) append(lastKey || marks[0].key, preamble, lastKey ? '; ' : ' ');
+        marks.forEach((mark, i) => {
+          const end = i + 1 < marks.length ? marks[i + 1].start : clause.length;
+          append(mark.key, clause.slice(mark.bodyStart, end));
+        });
+        lastKey = marks[marks.length - 1].key;
+        continue;
+      }
+
+      // Unlabelled clause. If it NAMES categories it is a shared statement and
+      // must tick every one of them — the checkbox matcher this replaced did,
+      // and quietly dropping one removes a disclosed inspection limitation
+      // from a signed FDACS filing.
+      const hits = categoriesMentionedIn(clause);
+      if (hits.length) {
+        for (const hit of hits) append(hit.key, clause);
+        lastKey = hits[hits.length - 1].key;
+      } else if (lastKey) {
+        // Keep the semicolon that split it — this is one sentence continuing.
+        append(lastKey, clause, '; ');
+      } else {
+        append('other', clause);
+        lastKey = 'other';
+      }
     }
   }
 

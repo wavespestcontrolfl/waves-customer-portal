@@ -438,3 +438,71 @@ describe('wdo-report-pdf Section 3 — multi-category and hyphen handling', () =
     expect(rows.crawlspace).toBe('N/A - slab-on-grade foundation.');
   });
 });
+
+// Codex #3188 round 3.
+describe('wdo-report-pdf Section 3 — mixed syntax and decimal safety', () => {
+  const { splitInaccessibleAreas } = _private;
+
+  // P1: an explicit label followed by prose naming other categories.
+  test('prose categories after an explicit label are still ticked', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Attic: insulation; interior and exterior were blocked');
+    expect([...ticked].sort()).toEqual(['attic', 'exterior', 'interior']);
+    expect(rows.attic).toBe('insulation');
+    expect(rows.interior).toBe('interior and exterior were blocked');
+    expect(rows.exterior).toBe('interior and exterior were blocked');
+  });
+
+  // P2: a leading decimal point is data, not separator noise. Stripping it
+  // turns ".5-inch" into "5-inch" — a tenfold error on a signed filing.
+  test('leading decimal point is preserved in row text', () => {
+    const { rows } = splitInaccessibleAreas('Interior: .5-inch opening was inaccessible');
+    expect(rows.interior).toBe('.5-inch opening was inaccessible');
+  });
+
+  test('leading separator punctuation is still stripped', () => {
+    const { rows } = splitInaccessibleAreas('Interior: . wall voids');
+    expect(rows.interior).toBe('wall voids');
+  });
+
+  // An unlabelled clause naming NO category continues the previous claim
+  // rather than opening an Other row.
+  test('semicolon continuation stays on the labelled row and keeps its semicolon', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected.'
+    );
+    expect([...ticked]).toEqual(['crawlspace']);
+    expect(rows.crawlspace).toBe(
+      'skirting was closed at the time of inspection; the area beneath was not inspected.'
+    );
+  });
+
+  test('hyphenated category adjective still does not tick its category', () => {
+    const { ticked } = splitInaccessibleAreas('Attic: inaccessible at exterior-facing eaves due to insulation');
+    expect([...ticked]).toEqual(['attic']);
+  });
+});
+
+// Caught by rendering the PDF, not by the unit tests above: when a clause has
+// BOTH a continuation preamble and later inline labels, the preamble belongs
+// to the previous clause's row, not to the first label in this one.
+describe('wdo-report-pdf Section 3 — continuation before a later label', () => {
+  const { splitInaccessibleAreas } = _private;
+
+  test('continuation sentence stays with the previous row when a label follows', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected. '
+      + 'Interior: wall and ceiling voids. Exterior: soffit and fascia wrap.'
+    );
+    expect([...ticked].sort()).toEqual(['crawlspace', 'exterior', 'interior']);
+    expect(rows.crawlspace).toBe(
+      'skirting was closed at the time of inspection; the area beneath was not inspected.'
+    );
+    expect(rows.interior).toBe('wall and ceiling voids.');
+    expect(rows.exterior).toBe('soffit and fascia wrap.');
+  });
+
+  test('with no previous row the preamble still attaches to the first label', () => {
+    const { rows } = splitInaccessibleAreas('Not inspected. Interior: wall voids.');
+    expect(rows.interior).toBe('Not inspected. wall voids.');
+  });
+});
