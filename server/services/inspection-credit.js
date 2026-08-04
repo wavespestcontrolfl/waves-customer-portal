@@ -824,11 +824,22 @@ async function rebindRedeemedOffer(offerId, bookingId) {
 async function alertReversalNeedsOffice(offer, scheduledServiceId, { reason, body }) {
   try {
     await db.transaction(async (trx) => {
+      // The claim re-validates the STATE the alert describes, not just the
+      // dedupe marker (pre-push P1 r19): between the failed/deferred
+      // reversal and this transaction another worker can reverse or rebind
+      // the offer, and a marker-only claim would then stamp the reopened
+      // offer AND tell the office to collect credit that no longer needs
+      // intervention — a false instruction nothing retracts. Still redeemed,
+      // still bound to THIS cancelled booking, still unalerted, or no alert.
       const alertClaimed = await trx('inspection_credit_offers')
-        .where({ id: offer.id })
+        .where({
+          id: offer.id,
+          status: 'redeemed',
+          redeemed_scheduled_service_id: scheduledServiceId,
+        })
         .whereNull('reversal_alerted_at')
         .update({ reversal_alerted_at: new Date(), updated_at: trx.fn.now() });
-      if (alertClaimed !== 1) return; // already alerted
+      if (alertClaimed !== 1) return; // already alerted, reversed, or rebound
       const notified = await require('./notification-service').notifyAdmin(
         'billing',
         'Inspection credit could not be reversed',
