@@ -263,6 +263,38 @@ describe('PDF signature varies with the eligibility verdict', () => {
     expect(pest).toMatch(/-te1spray-cmperimeter$/);
     expect(bait).not.toBe(pest);
   });
+
+  test('round 20 — a partial caller row resolves the same key as the full row', async () => {
+    // pdf-queue passes a narrow column set; the signature must load the
+    // missing evidence itself or the lookup key diverges from the stored
+    // one and the attachment re-renders on every fetch.
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const fullRow = {
+      id: 'svc-r20',
+      service_type: 'Pest Re-Service',
+      areas_serviced: JSON.stringify(['Exterior perimeter']),
+      structured_notes: '{}',
+      service_data: JSON.stringify({
+        completedServiceKey: 'pest_re_service',
+        completedServiceName: 'Pest Re-Service',
+        completedAddonLines: [],
+      }),
+    };
+    const fixtures = {
+      treatment_zone_maps: [TRACED_ROW],
+      service_records: [fullRow],
+    };
+    const partial = await treatmentZonePdfSignature(
+      { scheduled_service_id: 'sched-trace-1', id: 'svc-r20' },
+      stubKnex(fixtures),
+    );
+    const full = await treatmentZonePdfSignature(
+      { scheduled_service_id: 'sched-trace-1', ...fullRow },
+      stubKnex(fixtures),
+    );
+    expect(partial).toBe(full);
+    expect(partial).toMatch(/-te1spray-cmperimeter$/);
+  });
 });
 
 // Codex P1 r2: reports-public and email-delivery build the re-entry

@@ -500,6 +500,14 @@ describe('classification behavior', () => {
     expect(resolveTraceEligibility({ findingsType: 'future_new_schema', displayName: 'Lawn Something' }))
       .toMatchObject({ eligible: false, reason: 'unclassified_service' });
   });
+
+  test('round 20 — the unresolved linked-identity sentinel fails closed; the display name cannot rescue it', () => {
+    // A LINKED row whose profile lookup threw sends this sentinel instead
+    // of nothing, so an explicitly ineligible service (bee_wasp_removal)
+    // can't republish its map through the generic spray-name regex.
+    expect(resolveTraceEligibility({ serviceKey: 'unresolved:linked_service', displayName: 'Bee & Wasp Removal' }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+  });
 });
 
 describe('capture-side block payload (tech write routes)', () => {
@@ -553,6 +561,46 @@ describe('capture-side block payload (tech write routes)', () => {
     await jest.isolateModulesAsync(async () => {
       const mod = require('../services/service-report/trace-eligibility');
       expect(await mod.traceCaptureBlockPayload({ service_type: 'Rodent Trapping' }, null)).toBeNull();
+    });
+    jest.dontMock('../services/service-completion-profiles');
+  });
+
+  test('round 20 — the rescue path validates capture mode against the rescuing line; addon row-list errors keep the fail-open posture', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    jest.doMock('../services/service-completion-profiles', () => ({
+      resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+        serviceKey: null, findingsType: 'termite_bait_station',
+      })),
+    }));
+    const addonKnex = (rows, { throwOnAddons = false } = {}) => (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        orderBy: () => q,
+        select: () => {
+          if (table !== 'scheduled_service_addons') return Promise.resolve([]);
+          return throwOnAddons ? Promise.reject(new Error('db down')) : Promise.resolve(rows);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return q;
+    };
+    const addonRows = [{ service_id: null, service_name: 'Quarterly Pest Control' }];
+    await jest.isolateModulesAsync(async () => {
+      const mod = require('../services/service-report/trace-eligibility');
+      const svc = { id: 'ss-r20', service_type: 'Termite Bait Station Check' };
+      // rescued spray add-on + lawn mode → 400 keyed on the RESCUING line
+      expect(await mod.traceCaptureBlockPayload(svc, addonKnex(addonRows), { captureMode: 'lawn' }))
+        .toMatchObject({ status: 400, payload: { code: 'trace_capture_mode_mismatch', reason: 'spray' } });
+      // agreeing mode still passes through the rescue
+      expect(await mod.traceCaptureBlockPayload(svc, addonKnex(addonRows), { captureMode: 'perimeter' }))
+        .toBeNull();
+      // the row-list failure PROPAGATES out of resolveAddonVerdicts...
+      await expect(mod.resolveAddonVerdicts('ss-r20', addonKnex([], { throwOnAddons: true })))
+        .rejects.toThrow('db down');
+      // ...so the capture helper fails OPEN instead of 403ing the visit
+      expect(await mod.traceCaptureBlockPayload(svc, addonKnex([], { throwOnAddons: true })))
+        .toBeNull();
     });
     jest.dontMock('../services/service-completion-profiles');
   });
