@@ -13,6 +13,7 @@ process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES = 'true';
 const {
   buildPricingBundle,
   stampPerServiceManualDiscountSlices,
+  planCreditFirstVisitSlice,
 } = require('../routes/estimate-public');
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
@@ -320,5 +321,99 @@ describe('stampPerServiceManualDiscountSlices guards (direct)', () => {
     expect(services[0].frequencies[0].manualDiscount).toBeUndefined();
     expect(services[0].frequencies[0].perTreatment).toBe(90);
     expect(services[1].frequencies[0].manualDiscount.recurringAmount).toBe(25.38);
+  });
+});
+
+describe('planCreditFirstVisitSlice — accept-side mirror (owner GO 2026-08-04)', () => {
+  // The SELECTED combined cadence at accept, EST-2026-0609 shape: pest
+  // quarterly $90 + lawn enhanced $56.40 per application (WaveGuard-net,
+  // pre-credit rows), net annual carries the 5% credit.
+  const acceptedFrequency = (overrides = {}) => ({
+    key: 'quarterly',
+    monthly: 68.68,
+    annual: 824.16,
+    manualDiscount: {
+      type: 'PERCENT', value: 5, label: 'Custom Percentage Discount',
+      amount: 43.38, recurringAmount: 43.38, oneTimeAmount: 0,
+      scope: 'recurring_annual_after_waveguard',
+      eligibleServices: ['pest_control', 'lawn_care_enhanced'],
+      excludedServices: [],
+    },
+    perServiceTreatments: [
+      { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+      { service: 'lawn_care', perTreatment: 62.67, displayPrice: 56.4, visitsPerYear: 9 },
+    ],
+    sameDayTreatmentTotal: 162.67,
+    ...overrides,
+  });
+
+  test('slices the first visit exactly: 5% of $90 + 5% of $56.40 = $7.32', () => {
+    const slice = planCreditFirstVisitSlice(acceptedFrequency());
+    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 7.32 });
+  });
+
+  test('gate off: returns null (accept keeps the pre-credit first visit)', () => {
+    const prior = process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES;
+    try {
+      delete process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES;
+      expect(planCreditFirstVisitSlice(acceptedFrequency())).toBeNull();
+    } finally {
+      process.env.GATE_ESTIMATE_SECTION_DISCOUNT_SLICES = prior;
+    }
+  });
+
+  test.each([
+    ['FIXED type', { manualDiscount: { type: 'FIXED', value: 25, amount: 25, recurringAmount: 25, label: 'Referral Credit' } }],
+    ['capped credit', null],
+    ['one-time slice', null],
+    ['suppressed cadence', { manualDiscountSuppressed: true }],
+  ])('bails on %s', (label, overrides) => {
+    let frequency;
+    if (label === 'capped credit') {
+      frequency = acceptedFrequency();
+      frequency.manualDiscount.capped = true;
+    } else if (label === 'one-time slice') {
+      frequency = acceptedFrequency();
+      frequency.manualDiscount.oneTimeAmount = 10;
+      frequency.manualDiscount.scope = 'recurring_and_one_time_after_waveguard';
+    } else {
+      frequency = acceptedFrequency(overrides);
+    }
+    expect(planCreditFirstVisitSlice(frequency)).toBeNull();
+  });
+
+  test('combo overlay reconciles against the frequency net-annual diff when the base credit object is stale', () => {
+    // A lawn:monthly combo swaps rows + net totals but keeps the BASE row's
+    // credit object (43.38). Rows: pest 90×4 + lawn premium 54.9×0.9=49.41×12
+    // → slices 4.50×4 + 2.47×12 = 47.64; base credit says 43.38 (stale), but
+    // pre-credit row-sum annual 952.92 − net annual 905.28 = 47.64 matches.
+    const combo = acceptedFrequency({
+      annual: 905.28,
+      monthly: 75.44,
+      perServiceTreatments: [
+        { service: 'pest_control', perTreatment: 100, displayPrice: 90, visitsPerYear: 4 },
+        { service: 'lawn_care', perTreatment: 54.9, displayPrice: 49.41, visitsPerYear: 12 },
+      ],
+    });
+    const slice = planCreditFirstVisitSlice(combo);
+    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 6.97 });
+  });
+
+  test('bails when neither the credit object nor the net-annual diff reconciles', () => {
+    // Net annual pretends a much larger credit than 5% of the rows explains.
+    const drifted = acceptedFrequency({ annual: 700 });
+    drifted.manualDiscount.recurringAmount = 99;
+    drifted.manualDiscount.amount = 99;
+    expect(planCreditFirstVisitSlice(drifted)).toBeNull();
+  });
+
+  test('an excluded service bills full price — only eligible rows slice', () => {
+    const frequency = acceptedFrequency();
+    frequency.manualDiscount.eligibleServices = ['lawn_care_enhanced'];
+    frequency.manualDiscount.excludedServices = ['pest_control'];
+    frequency.manualDiscount.amount = 25.38;
+    frequency.manualDiscount.recurringAmount = 25.38;
+    const slice = planCreditFirstVisitSlice(frequency);
+    expect(slice).toEqual({ label: 'Custom Percentage Discount', firstVisitSlice: 2.82 });
   });
 });
