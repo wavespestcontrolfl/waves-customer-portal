@@ -88,7 +88,13 @@ describe('glassEstimateCopyFor', () => {
 describe('glassCtaMicroFor', () => {
   it('keeps the recurring terms for recurring plans and swaps them for one-time projects', () => {
     expect(glassCtaMicroFor('pest_control')).toBe(GLASS_COPY.ctaMicro);
-    expect(glassCtaMicroFor('lawn_care')).toBe(GLASS_COPY.ctaMicro);
+    // Lawn carries its own scoped terms line (owner copy ruling 2026-08-04):
+    // no "Unlimited free callbacks" under a cadence-tier ladder — a lawn
+    // service call spot-treats covered issues, it doesn't replay missed
+    // applications.
+    expect(glassCtaMicroFor('lawn_care')).toMatch(/Free between-visit service calls/);
+    expect(glassCtaMicroFor('lawn_care')).not.toMatch(/Unlimited free callbacks/);
+    expect(glassCtaMicroFor('lawn_care')).toMatch(/90-day money-back guarantee/);
     // One-time projects must not advertise contract/callback terms, and the
     // license NUMBER stays out of static copy (GuaranteeStrip renders the
     // configured one — a hardcoded copy here would drift; codex P2).
@@ -104,8 +110,14 @@ describe('glassCtaMicroFor', () => {
 
 describe('glassCtaMicroForKeys', () => {
   it('keeps recurring terms only when every covered service carries them', () => {
-    expect(glassCtaMicroForKeys(['pest_control', 'lawn_care'])).toBe(GLASS_COPY.ctaMicro);
-    expect(glassCtaMicroForKeys(['lawn_care'])).toBe(GLASS_COPY.ctaMicro);
+    // Pest+lawn now carry DISTINCT terms lines (lawn's scoped 2026-08-04
+    // line vs pest's callbacks claim) — the bundle CTA demotes to the
+    // terms-neutral line rather than advertising callback terms next to a
+    // lawn tier ladder.
+    expect(glassCtaMicroForKeys(['pest_control', 'lawn_care'])).not.toMatch(/callbacks/);
+    expect(glassCtaMicroForKeys(['pest_control', 'lawn_care'])).toMatch(/Satisfaction guaranteed/);
+    expect(glassCtaMicroForKeys(['pest_control'])).toBe(GLASS_COPY.ctaMicro);
+    expect(glassCtaMicroForKeys(['lawn_care'])).toMatch(/Free between-visit service calls/);
     // A rodent section in a split bundle demotes the combined CTA to the
     // terms-neutral line — no callback terms rodent copy avoids (codex rd2).
     expect(glassCtaMicroForKeys(['rodent_bait', 'lawn_care'])).not.toMatch(/callbacks/);
@@ -113,8 +125,10 @@ describe('glassCtaMicroForKeys', () => {
     // Unresolvable composition (synthetic unsplit 'bundle' key) is neutral.
     expect(glassCtaMicroForKeys(['bundle'])).not.toMatch(/callbacks/);
     expect(glassCtaMicroForKeys([])).not.toMatch(/callbacks/);
-    // memberKeys resolution: unsplit pest+lawn keeps the full recurring line.
-    expect(glassCtaMicroForKeys(['pest_control', 'lawn_care', 'lawn_pest_control'])).toBe(GLASS_COPY.ctaMicro);
+    // memberKeys resolution: an unsplit mix containing lawn demotes to the
+    // neutral line too (lawn's scoped 2026-08-04 terms differ from pest's).
+    expect(glassCtaMicroForKeys(['pest_control', 'lawn_care', 'lawn_pest_control'])).not.toMatch(/callbacks/);
+    expect(glassCtaMicroForKeys(['pest_control', 'lawn_care', 'lawn_pest_control'])).toMatch(/Satisfaction guaranteed/);
   });
 });
 

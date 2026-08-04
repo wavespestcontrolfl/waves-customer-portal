@@ -127,6 +127,14 @@ const GLASS_PACKS = {
     heroH1: 'Hello {first}, your greener-lawn game plan is ready!',
     heroSub: 'Built for your actual turf — feeding, weed control, and fungus watch on a program that fits your lawn, backed by a 90-day money-back guarantee.',
     eyebrow: 'Your custom lawn program',
+    // Lawn CTA terms drop "Unlimited free callbacks" (owner copy ruling
+    // 2026-08-04): the shared default's callback claim sits directly under
+    // the 6x/9x/12x tier cards and implies every cadence delivers the same
+    // outcome — a lawn service call diagnoses and spot-treats a covered
+    // issue; it cannot replay the applications a lower tier didn't buy.
+    // Mixed pest+lawn bundles demote to the neutral line via the existing
+    // distinct-micros rule in glassCtaMicroForKeys.
+    ctaMicro: 'No long-term contract · Free between-visit service calls · 90-day money-back guarantee',
     aiTitle: 'Your price was built from your lawn — not somebody else’s',
     aiBody: 'We reviewed your lawn size, turf type, and current condition before pricing this program — your lawn, your price, nothing generic.',
     askChips: [

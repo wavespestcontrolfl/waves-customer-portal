@@ -1937,7 +1937,12 @@ const LAWN_CARE_PERKS = [
   'Locked-in pricing for 12 months',
   'Seasonal product rotations matched to Southwest Florida turf cycles',
   'Lawn health scored every visit — turf density, weeds, and color tracked over time',
-  'Re-service between visits at no charge',
+  // Scoped re-service claim (owner copy ruling 2026-08-04): a lawn
+  // application is calendar agronomy, not a redoable treatment — an
+  // unscoped "re-service at no charge" implies every cadence tier delivers
+  // identical results. The pest PERKS list keeps the unscoped line; a pest
+  // re-service genuinely is a redo.
+  'Between-visit service calls at no charge — we diagnose and spot-treat covered issues',
   'Text your tech directly for quick questions',
   'Billing after completed lawn care visits',
   'Owner-operator accountability on every visit',
