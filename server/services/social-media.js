@@ -426,6 +426,42 @@ const AGRONOMIC_SPAN_SPLIT_RE = /\s+(?:before|after|until|prior\s+to|then|and|bu
  * span (boundary-straddling) falls back to the previous whole-clause
  * behaviour rather than silently hardening the rule.
  */
+// Product TARGETS are unconstrained free text — the tech's picker takes typed
+// input (SchedulePage's ProductTargetsPicker), so a target chip can carry
+// compliance copy ("pet-safe", "EPA-approved", "dries in 1 hour") that the
+// permanent PDF would then print verbatim (codex P1 #3176 r24).
+//
+// FAIL CLOSED on the claim, not on an allowlist: techs legitimately type real
+// pest names that no suggestion list contains, so an allowlist would delete
+// true field data. A target is a NOUN naming a pest/weed/nutrient — none of
+// these words belong in one. Verified against all 92 shipped suggestions
+// (PEST/LAWN/ORNAMENTAL/NUTRITION): zero collide. 'green' is deliberately
+// ABSENT — "Green kyllinga", "Nitrogen green-up" and "Deep green color" are
+// real targets.
+const TARGET_CLAIM_WORD_RE = /\b(?:safe|safety|safer|safest|toxic|toxicity|nontoxic|non-toxic|harmless|natural|organic|approved|registered|guaranteed|effective|proof|free)\b/i;
+
+/**
+ * Drop target chips that carry a compliance claim instead of naming a target.
+ * Uses the SAME shared validator every other surface uses, plus the claim-word
+ * guard for phrasings validateContent does not classify on a bare noun phrase
+ * ("non-toxic"). Returns { targets, changed }; never throws.
+ */
+function sanitizeProductTargets(targets) {
+  const list = Array.isArray(targets) ? targets : [];
+  if (!list.length) return { targets: list, changed: false };
+  const kept = list.filter((raw) => {
+    const text = String(raw == null ? '' : raw).trim();
+    if (!text) return false;
+    if (TARGET_CLAIM_WORD_RE.test(text)) return false;
+    try {
+      return validateContent(text, 'gbp').issues.length === 0;
+    } catch {
+      return false;
+    }
+  });
+  return { targets: kept, changed: kept.length !== list.length };
+}
+
 function agronomicExemptionApplies(clause) {
   if (!AGRONOMIC_EXEMPT_RE.test(clause)) return false;
   const spans = String(clause).split(AGRONOMIC_SPAN_SPLIT_RE).filter((s) => s && s.trim());
@@ -2499,6 +2535,7 @@ module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
 // `module.exports = SocialMediaService` reassignment on the line above, which
 // discards any property set earlier in the file.
 module.exports.stripFixedReentryTiming = stripFixedReentryTiming;
+module.exports.sanitizeProductTargets = sanitizeProductTargets;
 module.exports.isPausedByAdmin = isPausedByAdmin;
 module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
 module.exports.validateContent = validateContent;

@@ -143,6 +143,33 @@ const CLEAN = [
   'Technicians wear protective equipment to stay safe while applying pesticides',
 ];
 
+describe('sanitizeProductTargets — target chips are free text (codex P1 #3176 r24)', () => {
+  const { sanitizeProductTargets } = require('../services/social-media');
+
+  it('drops chips that carry a compliance claim instead of naming a target', () => {
+    const { targets, changed } = sanitizeProductTargets([
+      'German cockroaches', 'pet-safe', 'EPA-approved', 'dries in 1 hour', 'non-toxic',
+    ]);
+    expect(targets).toEqual(['German cockroaches']);
+    expect(changed).toBe(true);
+  });
+
+  it('keeps every real target, including the "green" ones a blunt rule would eat', () => {
+    // Verified against the 92 shipped picker suggestions — "Green kyllinga",
+    // "Nitrogen green-up" and "Deep green color" are real targets, so the
+    // claim vocabulary deliberately omits "green".
+    const real = ['German cockroaches', 'Palmetto bugs', 'Green kyllinga', 'Nitrogen green-up', 'Deep green color', 'subterranean termites'];
+    const { targets, changed } = sanitizeProductTargets(real);
+    expect(targets).toEqual(real);
+    expect(changed).toBe(false);
+  });
+
+  it('is inert on empty/absent target lists', () => {
+    expect(sanitizeProductTargets([]).changed).toBe(false);
+    expect(sanitizeProductTargets(undefined).targets).toEqual([]);
+  });
+});
+
 describe('compliance-language classes in validateContent', () => {
   it.each(FLAGGED_OVERCLAIM)('flags overclaim: %s', (text) => {
     const result = validateContent(text, 'gbp');

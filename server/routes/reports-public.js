@@ -134,7 +134,7 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
-const { stripFixedReentryTiming } = require('../services/social-media');
+const { stripFixedReentryTiming, sanitizeProductTargets } = require('../services/social-media');
 const { publicOriginPdfSignature } = require('../utils/portal-url');
 // The approved idiom that replaces a stripped fixed-timing clause.
 const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
@@ -480,6 +480,17 @@ async function buildServiceReportV1ResponseData(service, token, {
       });
       if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
     } catch { /* best-effort — never block the report */ }
+  }
+
+  // Product TARGETS are free text from the tech's picker, so a chip can carry
+  // a compliance claim the permanent PDF would print verbatim (codex P1
+  // #3176 r24). Sanitized at the SAME payload boundary as the re-entry copy —
+  // one enforcement point, not a per-render-site guard.
+  if (mode !== 'live' && Array.isArray(data.applications)) {
+    data.applications = data.applications.map((app) => {
+      const result = sanitizeProductTargets(app?.targets);
+      return result.changed ? { ...app, targets: result.targets } : app;
+    });
   }
 
   // The re-entry context is assembled after the block above, so its
