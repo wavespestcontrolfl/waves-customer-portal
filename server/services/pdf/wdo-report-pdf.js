@@ -203,22 +203,9 @@ const LINE_POOLS = {
       'use additional page if needed 7',
     ],
   },
-  // The first (Attic-row) triplet of Section 3. The findings collect one
-  // free-text blob for all inaccessible areas (the named checkboxes are
-  // keyword-detected from it), so it flows across the first row's three
-  // writing lines, exactly where it printed before — but now on the correct
-  // lines: the row's SPECIFIC AREAS line is the field auto-named from the
-  // lead-in sentence ("not visible andor accessible ..."), its REASON line is
-  // the field named 'SPECIFIC AREAS', and its continuation line is 'REASON'.
-  inaccessible_areas: {
-    label: 'Section 3 - Obstructions / inaccessible areas (specific areas and reasons)',
-    order: 30,
-    fields: [
-      'not visible andor accessible for inspection The descriptions and reasons for inaccessibility are stated below',
-      'SPECIFIC AREAS',
-      'REASON',
-    ],
-  },
+  // Section 3 is NOT a LINE_POOLS entry — which of its five checkboxed rows
+  // carries the text depends on which boxes are ticked. See
+  // INACCESSIBLE_ROWS / fillInaccessibleAreas below.
   // "List what was observed" line 1 is the field auto-named from the label
   // text ('EVIDENCE of previous treatment observed'); the previously-mapped
   // 'treatment List what was observed' is its continuation line 2.
@@ -244,6 +231,68 @@ const LINE_POOLS = {
     ],
   },
 };
+
+// Section 3 has FIVE checkbox-labelled rows, each owning THREE writing lines.
+// Field names were verified against the bundled template's widget geometry
+// (page 2, y 685 down to 475) — they are NOT guessable from the names alone:
+// each row's "SPECIFIC AREAS" line is the field the form's auto-namer took
+// from the text above it ('not visible andor accessible ...' for Attic,
+// 'undefined_2'..'undefined_5' for the rest), so the field literally called
+// 'SPECIFIC AREAS_n' sits on the REASON line and 'REASON_n' on the row's
+// third line. Mapping by name instead of geometry puts text a line low.
+//
+// The findings collect ONE free-text blob for all of Section 3. It is NOT
+// parsed into per-row segments: eight review rounds on free-text category
+// parsing each traded one mis-tick for another (a comma is both a list
+// separator and a clause delimiter; a period ends a sentence, abbreviates a
+// unit, and opens a decimal), and the final round produced an input that LOST
+// a ticked box relative to the shipped rule. Ticks therefore keep the shipped
+// permissive keyword rule (inaccessibleTickedKeys below), and the blob prints
+// whole on the first ticked row instead of unconditionally on the Attic row.
+const INACCESSIBLE_ROWS = [
+  {
+    key: 'attic',
+    checkbox: 'Attic',
+    fields: [
+      'not visible andor accessible for inspection The descriptions and reasons for inaccessibility are stated below',
+      'SPECIFIC AREAS',
+      'REASON',
+    ],
+  },
+  { key: 'interior', checkbox: 'Interior', fields: ['undefined_2', 'SPECIFIC AREAS_2', 'REASON_2'] },
+  { key: 'exterior', checkbox: 'Exterior', fields: ['undefined_3', 'SPECIFIC AREAS_3', 'REASON_3'] },
+  { key: 'crawlspace', checkbox: 'Crawlspace', fields: ['undefined_4', 'SPECIFIC AREAS_4', 'REASON_4'] },
+  { key: 'other', checkbox: 'Other', fields: ['undefined_5', 'SPECIFIC AREAS_5', 'REASON_5'] },
+];
+
+// Continuation-page heading for Section 3 overflow — deliberately the section
+// label, not a per-category one: the blob is one shared statement, so an
+// "Interior (specific areas)" heading over it would misattribute the whole
+// entry to one row.
+const INACCESSIBLE_POOL = {
+  label: 'Section 3 - Obstructions / inaccessible areas (specific areas and reasons)',
+  order: 30,
+};
+
+/**
+ * Which Section 3 boxes to tick, in form row order. This is the permissive
+ * keyword rule that has always shipped, kept bit-for-bit so no input can lose
+ * a checkbox (an unticked disclosed limitation on a signed FDACS filing):
+ * every category the text mentions anywhere is ticked, and Other is ticked
+ * for an "other:" convention or when nothing matched. The same list drives
+ * checkboxes AND text placement so a tick and its text cannot drift apart.
+ */
+function inaccessibleTickedKeys(findings) {
+  const inacc = clean(findings.inaccessible_areas).toLowerCase();
+  if (!inacc) return [];
+  const keys = [];
+  if (inacc.includes('attic')) keys.push('attic');
+  if (inacc.includes('interior')) keys.push('interior');
+  if (inacc.includes('exterior')) keys.push('exterior');
+  if (inacc.includes('crawl')) keys.push('crawlspace');
+  if (inacc.includes('other') || !keys.length) keys.push('other');
+  return keys;
+}
 
 // Findings-driven single-blank fields: fitted at FORM_FONT_FLOOR with overflow
 // onto the continuation page. Value `null` = fit/truncate but don't record a
@@ -436,6 +485,19 @@ function selectRadio(form, name, option) {
   }
 }
 
+/**
+ * Section 3: the whole blob prints on the FIRST ticked row's writing lines
+ * (overflowing to the continuation page like every other pool). When Attic is
+ * ticked that is exactly the shipped behavior; when it isn't, the text now
+ * sits beside a box that is actually ticked instead of on the empty Attic row.
+ */
+function fillInaccessibleAreas(form, font, findings, overflows) {
+  const [firstKey] = inaccessibleTickedKeys(findings);
+  if (!firstKey) return;
+  const row = INACCESSIBLE_ROWS.find((r) => r.key === firstKey);
+  fillLinePool(form, font, { ...INACCESSIBLE_POOL, fields: row.fields }, findings.inaccessible_areas, overflows);
+}
+
 function applyCheckboxes(form, findings) {
   // Section 2 finding (mutually exclusive checkboxes on the form)
   const finding = clean(findings.wdo_finding).toLowerCase();
@@ -451,24 +513,10 @@ function applyCheckboxes(form, findings) {
     if (clean(findings.wdo_damage)) checkBox(form, '3 DAMAGE caused by WDOs was observed and noted as follows');
   }
 
-  // Inaccessible / obstructed areas — keyword-detect to tick the named boxes.
-  // The findings field uses an "other:" convention for areas outside the named
-  // categories, so detect that too (and tick Other for any inaccessible text
-  // that matched none of the named categories, so Section 3 isn't left with an
-  // uncategorized note).
-  const inacc = clean(findings.inaccessible_areas).toLowerCase();
-  if (inacc) {
-    const attic = inacc.includes('attic');
-    const interior = inacc.includes('interior');
-    const exterior = inacc.includes('exterior');
-    const crawl = inacc.includes('crawl');
-    if (attic) checkBox(form, 'Attic');
-    if (interior) checkBox(form, 'Interior');
-    if (exterior) checkBox(form, 'Exterior');
-    if (crawl) checkBox(form, 'Crawlspace');
-    if (inacc.includes('other') || !(attic || interior || exterior || crawl)) {
-      checkBox(form, 'Other');
-    }
+  // Inaccessible / obstructed areas — the same tick list that decides where
+  // the text prints (see fillInaccessibleAreas).
+  for (const key of inaccessibleTickedKeys(findings)) {
+    checkBox(form, INACCESSIBLE_ROWS.find((r) => r.key === key).checkbox);
   }
 
   // Treatment method
@@ -540,6 +588,7 @@ async function buildWdoReportPDFBuffer({ project, customer, applicator: applicat
   for (const [key, pool] of Object.entries(LINE_POOLS)) {
     fillLinePool(form, measureFont, pool, findings[key], overflows);
   }
+  fillInaccessibleAreas(form, measureFont, findings, overflows);
   applyCheckboxes(form, findings);
 
   // Stamp the licensee e-signature into the signature field BEFORE flattening,
@@ -822,5 +871,8 @@ module.exports = {
     cutToFit,
     LINE_POOLS,
     FITTED_FIELDS,
+    inaccessibleTickedKeys,
+    fillInaccessibleAreas,
+    INACCESSIBLE_ROWS,
   },
 };
