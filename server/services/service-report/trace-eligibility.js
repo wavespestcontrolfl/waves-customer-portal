@@ -442,12 +442,14 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
     if (!addons.length || !knex) return [];
     const catalogIds = [...new Set(addons.map((a) => a.service_id).filter(Boolean))];
     let keyById = new Map();
+    let catalogLookupFailed = false;
     if (catalogIds.length) {
-      const rows = await knex('services')
-        .whereIn('id', catalogIds)
-        .select('id', 'service_key')
-        .catch(() => []);
-      keyById = new Map(rows.map((r) => [r.id, r.service_key]));
+      try {
+        const rows = await knex('services')
+          .whereIn('id', catalogIds)
+          .select('id', 'service_key');
+        keyById = new Map(rows.map((r) => [r.id, r.service_key]));
+      } catch { catalogLookupFailed = true; }
     }
     // Typed add-on keys (flea_tick, lawn_aeration…) are deliberately
     // absent from SERVICE_KEY_RULES — their identity is the typed
@@ -463,7 +465,17 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
       pointerByKey = new Map(profiles.map((r) => [r.service_key, r.project_type]));
     }
     return addons.map((addon) => {
-      const key = keyById.get(addon.service_id) || null;
+      // A SUPPLIED catalog id that cannot be resolved — transient lookup
+      // failure, or the row no longer exists — must not fall to the
+      // editable display name and broaden eligibility (codex P2 r18).
+      // Passing the unresolvable id as a key reuses the fail-closed
+      // supplied-identity rule: unclassified_service, never name-rescued.
+      // Genuinely unlinked legacy lines (no id at all) keep name fallback.
+      const key = addon.service_id
+        ? (catalogLookupFailed
+          ? `unresolved:${addon.service_id}`
+          : (keyById.get(addon.service_id) || `unresolved:${addon.service_id}`))
+        : null;
       return resolveTraceEligibility({
         serviceKey: key,
         findingsType: (key && pointerByKey.get(key)) || null,

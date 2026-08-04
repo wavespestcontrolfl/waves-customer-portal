@@ -388,6 +388,35 @@ describe('classification behavior', () => {
     expect(verdicts[0]).toMatchObject({ eligible: true, variant: 'spray' });
   });
 
+  test('round 18 — a failed or unresolved catalog lookup never broadens add-on eligibility', async () => {
+    const { addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    const throwingKnex = () => ({
+      whereIn: () => { throw new Error('db down'); },
+    });
+    // supplied id + lookup failure: fails closed, the editable name
+    // ("Bee / Wasp Nest Removal" would match the spray regex) cannot rescue
+    const failed = await addonVerdictsFromLines(
+      [{ serviceId: 'svc-1', serviceName: 'Bee / Wasp Nest Removal' }],
+      throwingKnex,
+    );
+    expect(failed[0]).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // supplied id that resolves to NO row (deleted catalog row): same
+    const emptyKnex = () => ({
+      whereIn: () => ({ select: () => Promise.resolve([]) }),
+    });
+    const unresolved = await addonVerdictsFromLines(
+      [{ serviceId: 'svc-gone', serviceName: 'Quarterly Pest Control' }],
+      emptyKnex,
+    );
+    expect(unresolved[0]).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // genuinely unlinked legacy line (no id): name fallback stands
+    const legacy = await addonVerdictsFromLines(
+      [{ serviceId: null, serviceName: 'Quarterly Pest Control' }],
+      emptyKnex,
+    );
+    expect(legacy[0]).toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
     for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
       expect(resolveTraceEligibility({ displayName }))

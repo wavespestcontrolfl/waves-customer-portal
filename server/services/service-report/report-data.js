@@ -3211,10 +3211,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             // today (the client's legacy serviceLine switch), matching the
             // legacy capture mode those visits were traced with. The
             // variant goes live with the same flip that changes capture.
+            // The PRESENTATION must match the captured bitmap (codex P1
+            // r18): a lawn-family capture renders as outline even when the
+            // winning verdict came from a spray add-on line — the saved
+            // lawn geometry cannot honestly wear spray copy/animation.
             variant: (traceEligibilityGateOn() && traceEligibility.eligible)
-              ? traceEligibility.variant : null,
+              ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
+                ? 'outline' : traceEligibility.variant)
+              : null,
             captionKey: (traceEligibilityGateOn() && traceEligibility.eligible)
-              ? traceEligibility.captionKey : null,
+              ? ((tracedRow.capture_mode === 'lawn' || tracedRow.capture_mode === 'lawn_highlight')
+                ? 'lawnCoverage' : traceEligibility.captionKey)
+              : null,
           };
         }
       }

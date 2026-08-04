@@ -155,6 +155,23 @@ describe('trace suppression at report payload build', () => {
     expect(kept.treatmentMap?.traced || null).not.toBeNull();
   });
 
+  test('round 18 — the presentation follows the captured bitmap', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    // a lawn-family capture renders as outline even when the verdict is
+    // a spray lane — the saved geometry cannot wear spray copy
+    const lawnRow = { ...TRACED_ROW, capture_mode: 'lawn' };
+    const data = await buildReportV1Data(
+      serviceRow('Quarterly Pest Control'),
+      'token-trace-lawn-capture-harmonized',
+      stubKnex({ treatment_zone_maps: [lawnRow] }),
+      { mode: 'live' },
+    );
+    const traced = data.treatmentMap?.traced || null;
+    expect(traced).not.toBeNull();
+    expect(traced.variant).toBe('outline');
+    expect(traced.captionKey).toBe('lawnCoverage');
+  });
+
   test('round 16 — gate on, the combined verdict outranks the legacy belt lanes', async () => {
     process.env.GATE_TRACE_ELIGIBILITY = 'true';
     // trapping-primary belt no longer overrides an add-on rescue: the

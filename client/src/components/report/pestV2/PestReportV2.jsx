@@ -205,7 +205,9 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
                 </div>
                 <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '6px 0 10px' }}>
                   {outlineCoverage
-                    ? 'Today’s treated area — the highlighted zone outlines the coverage your technician marked on-site.'
+                    ? (tracedMap.captureMode === 'lawn_highlight'
+                      ? 'Today’s treated area — the highlighted zone shows the coverage your technician marked on-site.'
+                      : 'Today’s treated area — the outlined zone marks the coverage your technician traced on-site.')
                     : legacyOutlineMismatch
                       ? 'The area your technician traced on-site during this visit.'
                       : 'A replay of today’s application — the blue band traces the treatment your technician applied on-site.'}
