@@ -562,6 +562,39 @@ describe('classification behavior', () => {
     expect(mixed[1]).toMatchObject({ serviceKey: 'pest_general_quarterly' });
   });
 
+  test('round 24 — add-on order is id-tiebroken; rules-covered keys skip the pointer lookup', async () => {
+    const { resolveAddonVerdicts, addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    // the row query orders by created_at THEN id — same-transaction
+    // lines share created_at, and the first eligible add-on picks the
+    // variant on every surface
+    const orderCalls = [];
+    const recordingKnex = (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        orderBy: (col, dir) => { if (table === 'scheduled_service_addons') orderCalls.push([col, dir]); return q; },
+        select: () => Promise.resolve([]),
+      };
+      return q;
+    };
+    await resolveAddonVerdicts('ss-r24', recordingKnex);
+    expect(orderCalls).toEqual([['created_at', 'asc'], ['id', 'asc']]);
+    // a batch whose only keys are SERVICE_KEY_RULES-covered never issues
+    // the profiles query — a profiles outage cannot abort it
+    const profilesExplodeKnex = (table) => {
+      if (table === 'service_completion_profiles') throw new Error('profiles down');
+      const q = {
+        whereIn: () => ({ select: () => Promise.resolve([{ id: 'a1', service_key: 'pest_general_quarterly' }]) }),
+      };
+      return q;
+    };
+    const verdicts = await addonVerdictsFromLines(
+      [{ serviceId: 'a1', serviceName: 'Quarterly Pest' }],
+      profilesExplodeKnex,
+    );
+    expect(verdicts[0]).toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
     // pre-untype callback: the eligible one_time_pest_treatment snapshot
     // no longer bypasses the exterior-evidence condition

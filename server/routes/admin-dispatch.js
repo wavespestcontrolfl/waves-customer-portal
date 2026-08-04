@@ -2264,6 +2264,30 @@ router.get('/:date?', async (req, res, next) => {
         ach_status: s.ach_status,
       });
       const completionProfile = await resolveCompletionProfileForScheduledService(s).catch(() => null);
+      // Trace verdict for the dispatch surface (codex P2 r24):
+      // CompletionPanel opened from DispatchPageV2 reads THIS feed, and
+      // the client treats an absent flag as eligible — without the
+      // verdict, gate-on dispatch completions still exposed the tracer
+      // on ineligible lanes (the save route then 403s) and ran outline
+      // lanes through the perimeter workflow into the capture-mode
+      // validator. Same shared helpers as the schedule feeds; fail-soft
+      // (absent flags = eligible; capture stays the fail-open surface).
+      let dispatchTraceVerdict = null;
+      try {
+        const {
+          resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts, traceEligibilityGateOn,
+        } = require('../services/service-report/trace-eligibility');
+        if (traceEligibilityGateOn()) {
+          dispatchTraceVerdict = combineLineVerdicts(
+            resolveTraceEligibility({
+              serviceKey: completionProfile?.serviceKey || null,
+              findingsType: completionProfile?.findingsType || null,
+              displayName: s.service_type || '',
+            }),
+            await resolveAddonVerdicts(s.id, db),
+          );
+        }
+      } catch { dispatchTraceVerdict = null; }
       // Only fan out the series-context lookup for visits that are actually
       // prepaid — most rows aren't, and we don't want N extra family-fetches
       // per day on the dispatch list.
@@ -2325,6 +2349,8 @@ router.get('/:date?', async (req, res, next) => {
         isCallback: !!s.is_callback,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
+        traceEligible: !dispatchTraceVerdict || dispatchTraceVerdict.eligible,
+        traceVariant: dispatchTraceVerdict?.eligible ? dispatchTraceVerdict.variant : null,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,

@@ -517,7 +517,14 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
   // see the failure instead of 403ing the rescued visit. Render callers
   // wrap with their own fail-closed catch.
   let pointerByKey = new Map();
-  const keys = [...new Set([...keyById.values()].filter(Boolean))];
+  // Only TYPED keys — those without a SERVICE_KEY_RULES entry — need the
+  // profile pointer (codex P2 r24): a rules-covered key like
+  // pest_general_quarterly carries a complete verdict on its own, so a
+  // transient service_completion_profiles failure must not abort the
+  // whole batch (render would leave a rescued primary suppressed and
+  // capture would fail open before validating the posted mode).
+  const keys = [...new Set([...keyById.values()]
+    .filter((k) => k && !Object.prototype.hasOwnProperty.call(SERVICE_KEY_RULES, k)))];
   if (keys.length) {
     const profiles = await knex('service_completion_profiles')
       .whereIn('service_key', keys)
@@ -571,7 +578,9 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
 async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
   const rows = await trx('scheduled_service_addons')
     .where({ scheduled_service_id: scheduledServiceId })
+    // id tiebreaker: same-transaction lines share created_at (codex P2 r24)
     .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
     .select('service_id', 'service_name', 'service_key_snapshot');
   const missingIds = [...new Set(rows
     .filter((r) => !r.service_key_snapshot && r.service_id)
@@ -632,8 +641,13 @@ async function resolveAddonVerdicts(scheduledServiceId, knex, { renderSide = fal
     .where({ scheduled_service_id: scheduledServiceId })
     // Same deterministic order the capture feeds use — the first
     // eligible add-on supplies the variant, so the report/PDF/re-entry
-    // pick must match the one the mapper keyed off (codex P2 r13).
+    // pick must match the one the mapper keyed off (codex P2 r13). The
+    // id tiebreaker makes the order stable for lines inserted in one
+    // transaction, whose created_at is the SAME timestamp (codex P2
+    // r24) — without it a spray+outline pair could pick different
+    // variants across feed, save, freeze, and PDF lookup.
     .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
     .select('service_id', 'service_name');
   return addonVerdictsFromLines(rows, knex, { renderSide });
 }

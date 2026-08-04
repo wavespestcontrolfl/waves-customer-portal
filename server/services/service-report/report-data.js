@@ -516,7 +516,7 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // guidance (codex P1 #3007 r9/r17). Lives here (not reentry.js) so the
 // report payload's own advisory normalization can use it without a
 // require cycle.
-async function resolveTracedExteriorZone(record, knex = db) {
+async function resolveTracedExteriorZone(record, knex = db, { precomputedTraceVerdict = null } = {}) {
   if (!record?.scheduled_service_id) return false;
   // Centralized eligibility (GATE_TRACE_ELIGIBILITY): an ineligible lane's
   // saved trace must not drive the exterior dry-down timer either. This
@@ -530,7 +530,14 @@ async function resolveTracedExteriorZone(record, knex = db) {
   try {
     const { resolveTraceRenderVerdict, traceEligibilityGateOn } = require('./trace-eligibility');
     if (traceEligibilityGateOn()) {
-      if ((await resolveTraceRenderVerdict(record, knex)).suppressed) return false;
+      // The report-payload caller passes its ALREADY-COMBINED verdict
+      // (codex P2 r24): recomputing here meant a transient failure in
+      // the second add-on pass could strip exterior re-entry guidance
+      // from the same payload whose map just rendered. Independent
+      // callers (reports-public, email-delivery, SMS) resolve internally.
+      const renderVerdict = precomputedTraceVerdict
+        || await resolveTraceRenderVerdict(record, knex);
+      if (renderVerdict.suppressed) return false;
       // Same conservative error semantics as the legacy lookup below
       // (codex P1 r17): only a MISSING TABLE means "no trace" — any other
       // transient failure preserves the exterior dry-down guidance rather
@@ -3455,7 +3462,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     ? traceSuppressed
     : interiorOnlyLane)
     ? false
-    : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex);
+    : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex, {
+      // Reuse the payload's combined verdict — ONE verdict per report
+      // (codex P2 r24); the resolver only re-checks the zone row.
+      ...(traceEligibilityGateOn()
+        ? { precomputedTraceVerdict: { suppressed: traceSuppressed, eligibility: traceEligibility } }
+        : {}),
+    });
   const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),

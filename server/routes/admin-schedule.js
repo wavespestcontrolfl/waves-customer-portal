@@ -1658,7 +1658,10 @@ async function loadAddonsByServiceId(serviceIds) {
   try {
     const rows = await db('scheduled_service_addons')
       .whereIn('scheduled_service_id', ids)
-      .orderBy('created_at', 'asc');
+      // id tiebreaker: same-transaction lines share created_at, and the
+      // FIRST eligible add-on picks the trace variant (codex P2 r24)
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc');
     const map = new Map();
     for (const row of rows) {
       const key = row.scheduled_service_id;
@@ -2131,7 +2134,14 @@ router.get('/', async (req, res, next) => {
             displayName: s.service_type || '',
           }),
           (addonsByServiceId.get(s.id) || []).map((addon) => {
-            const addonKey = serviceKeyByServiceId.get(addon.serviceId) || null;
+            // A LINKED add-on whose batched catalog lookup failed or
+            // omitted it fails closed via the unresolved sentinel — the
+            // save route's shared resolver rejects the same id, so name
+            // fallback here would show a tracer the save then 403s
+            // (codex P2 r24). Unlinked lines keep name fallback.
+            const addonKey = addon.serviceId
+              ? (serviceKeyByServiceId.get(addon.serviceId) || `unresolved:${addon.serviceId}`)
+              : null;
             return rowTraceEligibility({
               serviceKey: addonKey,
               findingsType: (addonKey && dayPointerByKey.get(addonKey)) || null,
@@ -2582,7 +2592,10 @@ router.get('/week', async (req, res, next) => {
                   displayName: s.service_type || '',
                 }),
                 serviceAddons.map((addon) => {
-                  const addonKey = weekKeyByCatalogId.get(addon.serviceId) || null;
+                  // Same unresolved-sentinel rule as the day feed (codex P2 r24)
+                  const addonKey = addon.serviceId
+                    ? (weekKeyByCatalogId.get(addon.serviceId) || `unresolved:${addon.serviceId}`)
+                    : null;
                   return weekTraceEligibility({
                     serviceKey: addonKey,
                     findingsType: (addonKey && weekPointerByKey.get(addonKey)) || null,

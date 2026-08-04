@@ -350,6 +350,28 @@ describe('round 21 — the shared resolver fails closed on a linked lookup failu
     );
     expect(data.treatmentMap?.traced || null).toBeNull();
   });
+
+  test('round 24 — a precomputed verdict skips the second resolve pass entirely', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const { resolveTracedExteriorZone } = require('../services/service-report/report-data');
+    // identity lookups EXPLODE — only the zone row works: with the
+    // payload's combined verdict passed in, the resolver must not
+    // recompute, so the exterior claim survives
+    const zoneOnlyKnex = (table) => {
+      if (table !== 'treatment_zone_maps') throw new Error('identity lookups must not run');
+      const q = { where: () => q, first: () => Promise.resolve(TRACED_ROW) };
+      return q;
+    };
+    const record = { scheduled_service_id: 'sched-trace-1', service_type: 'Quarterly Pest Control' };
+    const kept = await resolveTracedExteriorZone(record, zoneOnlyKnex, {
+      precomputedTraceVerdict: { suppressed: false, eligibility: { eligible: true, variant: 'spray' } },
+    });
+    expect(kept).toBe(true);
+    const suppressed = await resolveTracedExteriorZone(record, zoneOnlyKnex, {
+      precomputedTraceVerdict: { suppressed: true, eligibility: null },
+    });
+    expect(suppressed).toBe(false);
+  });
 });
 
 // Codex P1 r2: reports-public and email-delivery build the re-entry
