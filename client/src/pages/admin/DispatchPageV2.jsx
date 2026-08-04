@@ -2497,6 +2497,14 @@ export default function DispatchPageV2({
             }
           }}
           onSubmit={handleCompleteSubmit}
+          onCompletedElsewhere={(serviceId) => {
+            // Cross-key completion: the visit finished under another
+            // idempotency key, so handleCompleteSubmit never resolved —
+            // run its non-payment bookkeeping (the invoice payload only
+            // travels on the same-key response, so no payment handoff).
+            handleStatusChange(serviceId, "completed");
+            setScheduleRefreshKey((k) => k + 1);
+          }}
           onScheduleFollowup={async (suggestion) => {
             // Books the suggested follow-up as a PENDING appointment (the
             // normal pending → confirmed dispatch flow is the confirmation

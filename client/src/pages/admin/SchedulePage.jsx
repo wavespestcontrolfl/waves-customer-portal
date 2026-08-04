@@ -570,7 +570,7 @@ export function completionSideEffectsRetryPlan(error, retryCount) {
 // finishes. Inside a committed chain that response IS completion, never a
 // failure (codex P1 #3187 r6).
 export const CROSS_KEY_COMPLETED_MESSAGE =
-  "This visit is completed and saved — the original submission finished while this screen was retrying. No further action is needed.";
+  "This visit is completed and saved — the original submission finished while this screen was retrying. If today's invoice is due for collection, open the visit's billing to take payment.";
 export function completionCrossKeyCompleted(error, chainCommitted) {
   return chainCommitted === true && error?.code === "service_already_completed";
 }
@@ -8988,6 +8988,14 @@ export function CompletionPanel({
   // Typed specialty completion (PR 4): parent-owned success-screen
   // follow-up CTA (the button only renders when provided).
   onScheduleFollowup,
+  // Cross-key completion (codex P1 #3187 r8): the visit completed under a
+  // DIFFERENT idempotency key (original attempt finished while this panel
+  // polled), so onSubmit never resolved and the parent's normal success
+  // bookkeeping (status flip, schedule cache refresh) never ran — this
+  // callback is its equivalent. The mobile payment handoff cannot run here
+  // (the invoice payload only travels on the same-key response), which the
+  // cross-key copy tells the tech.
+  onCompletedElsewhere,
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -12561,6 +12569,9 @@ export function CompletionPanel({
         try {
           localStorage.removeItem(completionResumeOwedKey(service.id));
         } catch { /* ignore */ }
+        // Parent-equivalent success bookkeeping — onSubmit never resolved,
+        // so the parent's own status flip / cache refresh never ran.
+        if (onCompletedElsewhere) onCompletedElsewhere(service.id);
         alert(CROSS_KEY_COMPLETED_MESSAGE);
         setSubmitting(false);
         onClose(true);
