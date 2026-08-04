@@ -15645,6 +15645,44 @@ export function CompletionPanel({
             <span>One-time recap + review only (no invoice)</span>{" "}
           </label>
           )}{" "}
+          {/* Inspection credit — DEFAULT ON, mirroring the mobile closeout
+              (Codex #3178 r22 P1: the control existed only in the isMobile
+              branch, so a desktop tech or CSR could not clear the
+              default-on promise and would record an unintended $75). The
+              customer is promised the inspection fee toward anything they
+              book in the window; it becomes real money only on a booking. */}
+          {isInspectionVisit && (
+            <label
+              style={{
+                ...checkboxRow,
+                alignItems: "flex-start",
+                fontSize: 14,
+                borderColor: offerInspectionCredit ? D.teal : checkboxRow.borderColor,
+              }}
+            >
+              {" "}
+              <input
+                type="checkbox"
+                checked={offerInspectionCredit}
+                onChange={(e) => setOfferInspectionCredit(e.target.checked)}
+                style={{ marginTop: 2 }}
+              />{" "}
+              <span>
+                Credit this inspection toward booked service
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: 14,
+                    color: D.muted,
+                    marginTop: 2,
+                  }}
+                >
+                  Applies as account credit only if they book — nothing is
+                  credited now.
+                </span>
+              </span>{" "}
+            </label>
+          )}{" "}
           {backfillEligible && (
             <label
               style={{

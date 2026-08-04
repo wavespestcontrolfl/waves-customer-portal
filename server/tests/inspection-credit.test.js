@@ -83,6 +83,7 @@ const {
   sweepInspectionCreditRedemptions,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
+  etEndOfDayAfterDays,
   creditWindowDaysForServiceKey,
   DEFAULT_CREDIT_WINDOW_DAYS,
 } = require('../services/inspection-credit');
@@ -682,6 +683,16 @@ describe('window + receipt copy', () => {
     expect(validatePricingConfigData('inspection_credit', { amount: 75, creditableWithinDays: 0 }).ok).toBe(false);
     expect(validatePricingConfigData('inspection_credit', { amount: 75, creditableWithinDays: 400 }).ok).toBe(false);
     expect(validatePricingConfigData('inspection_credit', { amount: 75, creditableWithinDays: 1.5 }).ok).toBe(false);
+  });
+
+  it('names the LAST BOOKABLE day, not the exclusive expiry instant (r22 P1)', () => {
+    // expires_at is ET midnight OPENING the day after the window, so
+    // formatting it directly said "book by September 3" while a September 3
+    // booking fails the redemption guard.
+    const expiry = etEndOfDayAfterDays(new Date('2026-08-03T16:00:00Z'), 30);
+    const memo = inspectionCreditReceiptMemo({ amount: 75, expiresAt: expiry });
+    expect(memo).toContain('September 2, 2026');
+    expect(memo).not.toContain('September 3');
   });
 
   it('states a flat SERVICE credit with the frozen deadline — never "your inspection fee"', () => {

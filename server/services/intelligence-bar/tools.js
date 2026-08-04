@@ -1605,6 +1605,17 @@ async function cancelAppointment(input) {
       const { handleFollowupChildCancellation } = require('../typed-followup-obligation');
       void handleFollowupChildCancellation({ jobId: appointment_id, toStatus: 'cancelled' }).catch(() => {});
     }
+    // The money seam runs on the REPLAY path too (Codex #3178 r22 P1): a
+    // process exit between the committed cancellation and the post-commit
+    // call below leaves this early return as the only path a retry reaches,
+    // and the credited $75 would stay spendable until the hourly sweep.
+    // Idempotent — the void helper skips resolved invoices and the reversal
+    // finds no redeemed offer once it has already run.
+    try {
+      await require('../invoice').voidOpenInvoicesForCancelledService(appointment_id);
+    } catch (e) {
+      logger.error(`[intelligence-bar] cancel replay void sweep failed for ${appointment_id}: ${e.message}`);
+    }
     return {
       success: true,
       appointment_id,

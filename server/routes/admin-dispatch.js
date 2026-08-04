@@ -6511,7 +6511,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // promised a credit for. Records the PROMISE only; no money moves
     // until they book. Never throws — a credit hiccup must not fail a
     // completion the tech already performed.
-    if (offerInspectionCredit
+    // On a RESUME the committed record is the only truth (Codex #3178 r22
+    // P1): the request field defaults to true and the gate is re-read live,
+    // so a completion that committed while the lane was dark — deliberately
+    // carrying no marker — would retroactively mint a promise if the gate
+    // flipped on before the retry. Same posture as the backfill freeze
+    // above: first run derives from the request (which is what wrote the
+    // marker inside the transaction), resumes read the marker.
+    const inspectionCreditConsented = resumingCommittedCompletion
+      ? parseJsonObject(record.service_data)?.inspectionCreditOptIn === true
+      : offerInspectionCredit;
+    if (inspectionCreditConsented
       && visitOutcome === 'completed'
       && String(completionProfile?.category || '') === 'inspection') {
       try {

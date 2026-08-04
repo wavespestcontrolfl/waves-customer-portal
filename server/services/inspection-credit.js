@@ -1070,7 +1070,33 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId }) {
           .whereNull('payer_id')
           .orderBy('created_at', 'desc')
           .first('id');
-        if (!paidInvoice) return;
+        if (!paidInvoice) {
+          // A comped / no-invoice / payer-billed inspection has NO receipt
+          // to carry the terms, and the repo has no customer-facing credit
+          // surface — so this customer would hold a promise they were never
+          // told about, and watch it lapse (Codex #3178 r22 P2). The credit
+          // stands; the office is told once so a human can pass on the
+          // deadline. Deliberately NOT an automated customer send: new
+          // customer-facing comms are the owner's call, and which channel
+          // should carry these terms is a copy decision (flagged on the PR).
+          const offer = await db('inspection_credit_offers')
+            .where({ id: offerId })
+            .first('customer_id', 'amount', 'expires_at');
+          if (!offer) return;
+          const memo = inspectionCreditReceiptMemo({
+            amount: offer.amount, expiresAt: offer.expires_at,
+          });
+          await require('./notification-service').notifyAdmin(
+            'billing',
+            'Inspection credit has no receipt to ride',
+            `${memo || 'An inspection credit was recorded.'} This visit has no paid customer invoice, so the terms were not delivered — tell the customer their deadline.`,
+            {
+              link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
+              metadata: { offerId, scheduledServiceId, reason: 'no_receipt_channel' },
+            },
+          );
+          return;
+        }
         const { sendReceiptEmail } = require('./invoice-email');
         await sendReceiptEmail(paidInvoice.id, {
           idempotencyKey: `inspection-credit-offer-${offerId}`,
@@ -1094,7 +1120,14 @@ function inspectionCreditReceiptMemo({ amount, expiresAt } = {}) {
   if (!when || Number.isNaN(when.getTime())) return null;
   // The FROZEN expiry date, not a wall-clock day count — a resend must not
   // reword the promise, and the customer gets an unambiguous deadline.
-  const date = when.toLocaleDateString('en-US', {
+  //
+  // `expires_at` is the EXCLUSIVE boundary: ET midnight that OPENS the day
+  // after the window (etEndOfDayAfterDays). Formatting it directly told the
+  // customer to "book by September 3" when a September 3 booking fails the
+  // redemption guard — the last bookable day is September 2 (Codex #3178
+  // r22 P1). Step back one second to land inside the final valid day.
+  const lastBookable = new Date(when.getTime() - 1000);
+  const date = lastBookable.toLocaleDateString('en-US', {
     month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
   });
   // "service credit", never "your inspection fee" (Codex #3175 r3 P1): the
