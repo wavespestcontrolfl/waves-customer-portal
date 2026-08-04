@@ -96,7 +96,18 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   // ── Today's result reconciliation ─────────────────────────────────────────
   let todaysResult = null;
   if (hasIssue || followUp) {
-    todaysResult = `Routine service completed. No urgent homeowner action is needed today${followUp ? ', and a follow-up is already planned' : ''}.`;
+    // Lead with THIS visit's story, not one fixed sentence for every
+    // customer (owner feedback 2026-08-03). The summary's first sentence is
+    // already vetted customer copy — it renders verbatim in Visit Summary —
+    // so it can't introduce a new claim. Only a complete sentence qualifies
+    // (firstSentence marks truncation with "…"); anything else keeps the
+    // neutral lead. The greeting strip mirrors the client's
+    // cleanVisitSummary so the hero never opens with a thank-you line.
+    const summaryLead = firstSentence(
+      String(data.summary || '').replace(/^Thanks for having us out today\.\s*/i, '').trim()
+    );
+    const lead = /[.!?]$/.test(summaryLead) ? summaryLead : 'Routine service completed.';
+    todaysResult = `${lead} No urgent homeowner action is needed today${followUp ? ', and a follow-up is already planned' : ''}.`;
     warnings.push({
       severity: 'warning',
       code: 'todays_result_overclaims_clear',

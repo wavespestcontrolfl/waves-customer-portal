@@ -537,6 +537,32 @@ export function shouldResetCompletionIdempotencyKey(error) {
   return error?.code === "lawn_assessment_stale";
 }
 
+// completion_side_effects_running means the completion COMMITTED (the claim
+// only returns it for an attempt that already has a service_record) and the
+// server is still running its post-commit side effects — usually the
+// original request finishing while this client's response got lost in the
+// field. A same-key retry resolves every outcome (replay once it succeeds,
+// resume if it failed), so the panel retries quietly instead of surfacing a
+// dead-end "Failed to complete service" dialog. ~2 minutes of polling covers
+// any live run; a crash-stranded claim only frees after the server's
+// 10-minute stale window, which is what the give-up copy points at.
+const SIDE_EFFECTS_RETRY_MS = 5000;
+const SIDE_EFFECTS_MAX_RETRIES = 24;
+export const SIDE_EFFECTS_GIVE_UP_MESSAGE =
+  "This visit is saved — its report and billing steps are still wrapping up on the server. You can leave this screen; if the visit still shows incomplete in about 10 minutes, open it and complete it again to finish up.";
+
+// The retry decision for a submit error, given how many quiet retries this
+// submit chain has already made: retry (same key, fixed delay), give up with
+// the honest saved-not-finalized copy, or null for every other error so the
+// existing handlers keep it.
+export function completionSideEffectsRetryPlan(error, retryCount) {
+  if (error?.code !== "completion_side_effects_running") return null;
+  if (retryCount < SIDE_EFFECTS_MAX_RETRIES) {
+    return { action: "retry", delayMs: SIDE_EFFECTS_RETRY_MS };
+  }
+  return { action: "give_up", message: SIDE_EFFECTS_GIVE_UP_MESSAGE };
+}
+
 // The completion route's pre-submit reconciliation 409 (code
 // 'report_reconcile', behind GATE_REPORT_RECONCILE_PROMPT): the server
 // packs the human-readable contradictions into the error string because
@@ -9766,6 +9792,9 @@ export function CompletionPanel({
   const recapAbortRef = useRef(null);
   const draftSnapshotRef = useRef(null);
   const completionIdempotencyKeyRef = useRef(null);
+  // Consecutive completion_side_effects_running retries in the current
+  // submit chain — see SIDE_EFFECTS_RETRY_MS for the contract.
+  const sideEffectsRetryRef = useRef(0);
   const draftReadyRef = useRef(false);
 
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
@@ -12359,6 +12388,7 @@ export function CompletionPanel({
         body.invoiceAlreadySent = true;
       }
       const result = await onSubmit(service.id, body);
+      sideEffectsRetryRef.current = 0;
       const photoResult = result?.completionPhotoUpload;
       if (photoResult?.failed > 0) {
         alert(
@@ -12448,6 +12478,25 @@ export function CompletionPanel({
         alert(
           "This closeout is already saved — the retry didn't match the original submission (photos don't survive a reload). The office can bill the visit from Billing Recovery.",
         );
+        setSubmitting(false);
+        return;
+      }
+      // Committed completion, side effects still running (see the
+      // completionSideEffectsRetryPlan contract): retry the same key
+      // quietly — the button keeps showing its completing state — and only
+      // give up with honest copy after the polling window.
+      const retryPlan = completionSideEffectsRetryPlan(
+        e,
+        sideEffectsRetryRef.current,
+      );
+      if (retryPlan?.action === "retry") {
+        sideEffectsRetryRef.current += 1;
+        await new Promise((resolve) => setTimeout(resolve, retryPlan.delayMs));
+        return handleSubmit(reconcileConfirmed);
+      }
+      if (retryPlan?.action === "give_up") {
+        sideEffectsRetryRef.current = 0;
+        alert(retryPlan.message);
         setSubmitting(false);
         return;
       }

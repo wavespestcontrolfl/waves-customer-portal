@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  SIDE_EFFECTS_GIVE_UP_MESSAGE,
   completionPreferencesNeedDraft,
   completionReconcilePrompt,
   completionReviewSuppressionReason,
+  completionSideEffectsRetryPlan,
   completionTimeOnSiteBody,
   completionWillReview,
   restoredBackfillChoices,
@@ -266,5 +268,36 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     expect(
       completionReviewSuppressionReason({ isIncompleteVisit: true, backfillQuietCloseout: true }),
     ).toBe("incomplete");
+  });
+});
+
+// completion_side_effects_running means the completion COMMITTED and the
+// server is still running post-commit side effects — the panel retries the
+// same key quietly instead of surfacing a dead-end failure dialog (field
+// report, 2026-08-03), and only gives up with saved-not-finalized copy.
+describe("completion side-effects auto-retry", () => {
+  const sideEffects409 = { status: 409, code: "completion_side_effects_running" };
+
+  it("retries with a fixed delay while under the polling window", () => {
+    const plan = completionSideEffectsRetryPlan(sideEffects409, 0);
+    expect(plan).toMatchObject({ action: "retry" });
+    expect(plan.delayMs).toBeGreaterThan(0);
+  });
+
+  it("gives up with the honest saved-copy after the window", () => {
+    const plan = completionSideEffectsRetryPlan(sideEffects409, 24);
+    expect(plan).toEqual({ action: "give_up", message: SIDE_EFFECTS_GIVE_UP_MESSAGE });
+    expect(plan.message).toMatch(/saved/i);
+    expect(plan.message).not.toMatch(/fail/i);
+  });
+
+  it("leaves every other error to the existing handlers", () => {
+    expect(completionSideEffectsRetryPlan({ status: 409, code: "completion_pending" }, 0)).toBeNull();
+    expect(completionSideEffectsRetryPlan(new Error("network"), 0)).toBeNull();
+    expect(completionSideEffectsRetryPlan(null, 0)).toBeNull();
+  });
+
+  it("the retried key survives the 409 (pairs with the reset rule)", () => {
+    expect(shouldResetCompletionIdempotencyKey(sideEffects409)).toBe(false);
   });
 });

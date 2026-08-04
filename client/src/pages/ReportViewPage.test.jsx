@@ -863,3 +863,35 @@ describe('product purpose follows recorded pest identity', () => {
     expect(applicationPurpose({ method: 'bait_placement', product: { name: 'Contrac Blox' } }, 'rodent')).toBe('Bait placement');
   });
 });
+
+// Fungicide purpose copy names the RECORDED disease targets — the same
+// recorded-targets-only guard as lawn insect control (owner relevance pass
+// 2026-08-03: the Artavia card read generic boilerplate while the visit
+// documented large patch / gray leaf spot / take-all root rot).
+describe('lawn fungicide purpose copy', () => {
+  const fungicide = {
+    method: 'broadcast_spray',
+    targets: ['Large patch', 'Gray leaf spot', 'Take-all root rot'],
+    product: { name: 'Artavia 2 SC (Azoxy)', category: 'Fungicide', active_ingredient: 'Azoxystrobin' },
+  };
+
+  it('names the recorded disease targets, lowercased', () => {
+    expect(applicationPurpose(fungicide, 'lawn')).toBe('Fungus control application');
+    expect(applicationPurposeCopy(fungicide, 'lawn')).toBe(
+      'Applied to protect the turf against large patch, gray leaf spot, take-all root rot — the disease pressure documented for this lawn.',
+    );
+  });
+
+  it('normalizes enum-key targets before printing', () => {
+    const enumTargets = { ...fungicide, targets: ['take_all_root_rot'] };
+    expect(applicationPurposeCopy(enumTargets, 'lawn')).toContain('take all root rot');
+    expect(applicationPurposeCopy(enumTargets, 'lawn')).not.toContain('_');
+  });
+
+  it('fails closed to the generic line with no recorded targets', () => {
+    const noTargets = { ...fungicide, targets: [] };
+    expect(applicationPurposeCopy(noTargets, 'lawn')).toBe(
+      'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+    );
+  });
+});
