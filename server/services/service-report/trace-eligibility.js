@@ -33,7 +33,12 @@ const FINDINGS_TYPE_RULES = {
   mosquito_event: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   flea: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   cockroach: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  german_roach_knockdown: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // German knockdown is an INTERIOR bait/IGR program (rooms, harborage,
+  // prep — no exterior or perimeter work in its treatment choices), so a
+  // satellite perimeter trace would be a false exterior claim (codex P1
+  // r3). Palmetto knockdown differs: its lane explicitly includes
+  // exterior harborage + perimeter treatment, so it stays eligible.
+  german_roach_knockdown: { eligible: false, reason: 'interior_only_lane' },
   palmetto_roach_knockdown: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   one_time_pest_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   one_time_lawn_treatment: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },

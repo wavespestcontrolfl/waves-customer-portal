@@ -778,7 +778,9 @@ export default function TechHomePage() {
           /* Shared category detection (mirrors server service-normalizer) —
              a bare lawn|turf regex missed lawn jobs like Weed Control and
              Dethatching (codex P1 #3038 r3). */
-          lawnMode={detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'lawn'}
+          lawnMode={zoneTarget.traceVariant
+            ? zoneTarget.traceVariant === 'outline'
+            : detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'lawn'}
         />
       )}
 

@@ -85,6 +85,13 @@ describe('classification behavior', () => {
       .toMatchObject({ eligible: false, reason: 'inspection_lane' });
     expect(resolveTraceEligibility({ findingsType: 'bed_bug' }))
       .toMatchObject({ eligible: false, reason: 'interior_only_lane' });
+    // codex P1 r3: German knockdown is an interior bait/IGR program — no
+    // exterior work in its lane — while palmetto explicitly treats the
+    // exterior perimeter.
+    expect(resolveTraceEligibility({ findingsType: 'german_roach_knockdown' }))
+      .toMatchObject({ eligible: false, reason: 'interior_only_lane' });
+    expect(resolveTraceEligibility({ findingsType: 'palmetto_roach_knockdown' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
   });
 
   test('the typed pointer outranks the catalog key', () => {

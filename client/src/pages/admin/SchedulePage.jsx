@@ -9772,6 +9772,16 @@ export function CompletionPanel({
   // (soil readings, treatment plan/calibration, tank cleanout) never apply.
   const isLawn =
     !isTypedFindings && detectServiceCategory(service.serviceType) === "lawn";
+  // The tracer's capture mode follows the SERVER's eligibility variant
+  // when the feed carries one (codex P2 r3): typed lawn visits
+  // (aeration/fungicide/insect control) set isTypedFindings, which forces
+  // isLawn false — without this, their newly enabled mapper would run the
+  // building-perimeter workflow and store a spray barrier the report then
+  // renders as a treated-lawn outline. Absent variant (gate off, other
+  // feeds) keeps the isLawn heuristic.
+  const traceOutlineMode = service.traceVariant
+    ? service.traceVariant === "outline"
+    : isLawn;
   // Lawn visits replace the Service Photos uploader with the turf photos from
   // the Lawn Assessment block — but only for a PURE lawn visit. A combined
   // visit (e.g. lawn + Tree & Shrub) carries a companion findings schema whose
@@ -13690,7 +13700,7 @@ export function CompletionPanel({
                   onClick={() => setZoneMapOpen(true)}
                   style={secondaryPill}
                 >
-                  {isLawn ? "Outline the treated lawn" : "Trace where we sprayed"}
+                  {traceOutlineMode ? "Outline the treated lawn" : "Trace where we sprayed"}
                 </button>
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
@@ -13702,7 +13712,7 @@ export function CompletionPanel({
                     onClose={() => setZoneMapOpen(false)}
                     onSaved={applyTracedTreatmentZone}
                     appearance="light"
-                    lawnMode={isLawn}
+                    lawnMode={traceOutlineMode}
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>

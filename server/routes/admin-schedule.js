@@ -2098,26 +2098,26 @@ router.get('/', async (req, res, next) => {
         }),
       };
 
-      return {
-        id: s.id, routeOrder: s.route_order,
-        scheduledDate: date,
-        traceEligible: !traceEligibilityGateOn() || rowTraceEligibility({
-          // Unlinked rows (null service_id) fall back to the profile's
-          // resolved key — the profile resolver already handles the
-          // name/short-name lookup the batch join can't (codex P2 r2:
-          // an unlinked mud_dauber_removal row's label matches no regex,
-          // but its resolved key classifies).
+      const rowTraceVerdict = traceEligibilityGateOn()
+        ? rowTraceEligibility({
           serviceKey: serviceKeyByServiceId.get(s.service_id)
             || projectCompletionContext?.completionProfile?.serviceKey
             || null,
-          // The already-resolved typed profile (loaded above for every row)
-          // — typed keys absent from the key registry classify by their
-          // findings pointer, exactly like the write and report paths
-          // (codex P2 r1: lawn_aeration's raw "Aeration" label matches no
-          // fallback regex, but its one_time_lawn_treatment pointer does).
           findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
           displayName: s.service_type || '',
-        }).eligible,
+        })
+        : null;
+      return {
+        id: s.id, routeOrder: s.route_order,
+        scheduledDate: date,
+        // Verdict computed once per row; traceVariant drives the tracer's
+        // capture mode client-side (codex P2 r3: typed lawn visits must
+        // outline the lawn, not run the building-perimeter workflow).
+        // Unlinked rows (null service_id) fall back to the profile's
+        // resolved key (codex P2 r2), and typed keys classify by their
+        // findings pointer (codex P2 r1).
+        traceEligible: !rowTraceVerdict || rowTraceVerdict.eligible,
+        traceVariant: rowTraceVerdict?.eligible ? rowTraceVerdict.variant : null,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
@@ -2511,11 +2511,19 @@ router.get('/week', async (req, res, next) => {
           // "Tree & Shrub Care", which would drop every lawn target.
           serviceTypeRaw: s.service_type,
           serviceCategory: detectServiceCategory(svcType),
-          traceEligible: !weekTraceGateOn() || weekTraceEligibility({
-            serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
-            findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
-            displayName: s.service_type || '',
-          }).eligible,
+          ...(() => {
+            const v = weekTraceGateOn()
+              ? weekTraceEligibility({
+                serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
+                findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
+                displayName: s.service_type || '',
+              })
+              : null;
+            return {
+              traceEligible: !v || v.eligible,
+              traceVariant: v?.eligible ? v.variant : null,
+            };
+          })(),
           status: s.status,
           techName: s.tech_name, zone: s.zone,
           tier: s.waveguard_tier,
