@@ -898,3 +898,29 @@ describe('lawn fungicide purpose copy', () => {
     );
   });
 });
+
+// Free-form target chips are unrestricted text — only governed disease
+// vocabulary may render on the fungicide line; ANY unrecognized target
+// fails the whole line closed (codex P1 #3187 r16).
+describe('fungicide targets are restricted to governed disease vocabulary', () => {
+  const base = {
+    method: 'broadcast_spray',
+    product: { name: 'Artavia 2 SC (Azoxy)', category: 'Fungicide', active_ingredient: 'Azoxystrobin' },
+  };
+
+  it('free-form claims never render, even alongside recognized diseases', () => {
+    for (const targets of [['pet-safe'], ['EPA-approved'], ['dries in 1 hour'], ['Large patch', 'pet-safe']]) {
+      const copy = applicationPurposeCopy({ ...base, targets }, 'lawn');
+      expect(copy).toBe(
+        'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+      );
+    }
+  });
+
+  it('governed names, including enum keys and the combined prefill label, still render', () => {
+    expect(applicationPurposeCopy({ ...base, targets: ['Brown patch / large patch', 'Fairy ring'] }, 'lawn'))
+      .toContain('brown patch / large patch, fairy ring');
+    expect(applicationPurposeCopy({ ...base, targets: ['take_all_root_rot'] }, 'lawn'))
+      .toContain('take all root rot');
+  });
+});

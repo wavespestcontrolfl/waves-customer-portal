@@ -993,6 +993,26 @@ export function recordedTargetsText(app = {}) {
   return targets.length ? targets.join(', ').toLowerCase() : '';
 }
 
+// Governed disease vocabulary for the fungicide purpose line: target chips
+// accept unrestricted free text (ProductTargetsPicker), so only names
+// recognized as turf diseases may render — ANY unrecognized target fails
+// the WHOLE line closed to the generic copy, mirroring
+// applicationPestFamily's unrecognized-co-target rule (codex P1 #3187
+// r16; the completion intake gate also rejects banned copy in targets,
+// this is the render-side backstop for records that predate it).
+// Vocabulary mirrors the catalog prefill lists (20260723000001 /
+// 20260801300000).
+const LAWN_DISEASE_TARGET_RE = /^(?:brown patch(?: ?\/ ?large patch)?|large patch|gray leaf spot|grey leaf spot|take[- ]?all root rot|fairy ring|dollar spot|anthracnose|pythium(?: (?:blight|root rot))?|rust|leaf spot|melting out|summer patch|powdery mildew|slime mold)$/i;
+
+export function recognizedDiseaseTargetsText(app = {}) {
+  const targets = (Array.isArray(app.targets) ? app.targets : [])
+    .map((t) => String(t || '').replace(/_+/g, ' ').trim())
+    .filter(Boolean);
+  if (!targets.length) return '';
+  if (!targets.every((t) => LAWN_DISEASE_TARGET_RE.test(t))) return '';
+  return targets.join(', ').toLowerCase();
+}
+
 export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   const purpose = applicationPurpose(app, serviceLine);
   if (purpose === 'Targeted weed treatment') return 'Applied where visible weed pressure or service notes called for targeted control.';
@@ -1007,13 +1027,12 @@ export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   }
   if (purpose === 'Weed prevention application') return 'Applied to stop new weeds before they sprout, ahead of the season when they spread fastest.';
   if (purpose === 'Fungus control application') {
-    // Same recorded-targets-only guard as insect control: the names come
-    // from the completion form's target chips, never from a hardcoded
-    // example. Framed as what the TECHNICIAN RECORDED — the chips can be
-    // untrimmed catalog prefill (never claim OBSERVED, codex P1 r3) or
-    // hand-typed free text (never claim the label DESIGNED it, codex P1
-    // r10); recording is the only claim both sources support.
-    const diseaseTargets = recordedTargetsText(app);
+    // Recognized-disease-vocabulary guard: the names come from the
+    // completion form's target chips — untrimmed catalog prefill (never
+    // claim OBSERVED, codex P1 r3), hand-typed free text (never claim the
+    // label DESIGNED it, r10; never render unvetted claims at all, r16).
+    // Only governed disease names print; recording is the only claim made.
+    const diseaseTargets = recognizedDiseaseTargetsText(app);
     return diseaseTargets
       ? `Applied to protect the turf against ${diseaseTargets}, the targets your technician recorded for this application.`
       : 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';

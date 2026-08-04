@@ -1314,7 +1314,25 @@ export default function DispatchPageV2({
   }, [paymentData]);
   const latePaymentHandoffQueueRef = useRef([]);
   const releasePaymentSheet = useCallback(() => {
-    setPaymentData(latePaymentHandoffQueueRef.current.shift() || null);
+    const next = latePaymentHandoffQueueRef.current.shift() || null;
+    // Synchronous ref update: a delivery landing before the paymentData
+    // effect re-runs must already see the sheet as occupied/free.
+    paymentSheetActiveRef.current = !!next;
+    setPaymentData(next);
+  }, []);
+  // EVERY payment-handoff delivery routes through here — the late-response
+  // path AND the panel-close drain (codex P1 #3187 r15 + r16): an active
+  // sheet queues the handoff (MobilePaymentSheet has no visit key; a
+  // paymentData swap under an open tender silently switches the invoice
+  // being collected), a free sheet opens it.
+  const deliverPaymentHandoff = useCallback((handoff) => {
+    if (!handoff) return;
+    if (paymentSheetActiveRef.current) {
+      latePaymentHandoffQueueRef.current.push(handoff);
+    } else {
+      paymentSheetActiveRef.current = true;
+      setPaymentData(handoff);
+    }
   }, []);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
@@ -1646,16 +1664,12 @@ export default function DispatchPageV2({
         if (completionPanelOpenServiceRef.current !== serviceId) {
           const handoff = pendingPaymentAfterCompletionRef.current;
           pendingPaymentAfterCompletionRef.current = null;
-          if (paymentSheetActiveRef.current) {
-            latePaymentHandoffQueueRef.current.push(handoff);
-          } else {
-            setPaymentData(handoff);
-          }
+          deliverPaymentHandoff(handoff);
         }
       }
       return r;
     },
-    [completingService, handleStatusChange, isMobile, data],
+    [completingService, handleStatusChange, isMobile, data, deliverPaymentHandoff],
   );
 
   const handleCompleteSubmit = useCallback(
@@ -2542,8 +2556,12 @@ export default function DispatchPageV2({
           onClose={() => {
             setCompletingService(null);
             if (pendingPaymentAfterCompletionRef.current) {
-              setPaymentData(pendingPaymentAfterCompletionRef.current);
+              // Same active-sheet queue as the late-response path (codex
+              // P1 #3187 r16): a late handoff may already be collecting
+              // when this panel closes with its own staged handoff.
+              const handoff = pendingPaymentAfterCompletionRef.current;
               pendingPaymentAfterCompletionRef.current = null;
+              deliverPaymentHandoff(handoff);
             }
           }}
           onSubmit={handleCompleteSubmit}

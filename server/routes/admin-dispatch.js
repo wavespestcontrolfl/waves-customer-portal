@@ -4520,6 +4520,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(Array.isArray(completionPhotos)
             ? completionPhotos.map((p) => p?.caption).filter(Boolean)
             : []),
+          // Per-application targets render verbatim in the report's
+          // product purpose copy (ReportViewPage applicationPurposeCopy) —
+          // free-form chips are customer copy too (codex P1 #3187 r16).
+          ...(Array.isArray(products)
+            ? products
+                .flatMap((prod) => (Array.isArray(prod?.targets) ? prod.targets : []))
+                .filter((t) => typeof t === 'string')
+            : []),
         ];
         const untypedViolations = [...new Set(
           untypedCopySources.flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry)),
@@ -4671,6 +4679,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(photoSummaryText ? [photoSummaryText] : []),
           ...(Array.isArray(completionPhotos)
             ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+          // Per-application targets render verbatim in the report's
+          // product purpose copy (ReportViewPage applicationPurposeCopy) —
+          // free-form chips are customer copy too (codex P1 #3187 r16).
+          ...(Array.isArray(products)
+            ? products
+                .flatMap((prod) => (Array.isArray(prod?.targets) ? prod.targets : []))
+                .filter((t) => typeof t === 'string')
             : []),
         ];
         const copyViolations = [...new Set(
