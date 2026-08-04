@@ -132,6 +132,12 @@ describe('reconciled todaysResult leads with the visit summary', () => {
     );
   });
 
+  test('a single-letter product suffix IS a sentence end ("Heritage G.")', () => {
+    const result = reconcile('We applied Heritage G. A follow-up is planned to recheck the flagged areas.');
+    expect(result.todaysResult).toMatch(/^We applied Heritage G\. No urgent/);
+    expect(result.todaysResult).not.toMatch(/A follow-up is planned/);
+  });
+
   test('an over-long first sentence falls back instead of truncating with an ellipsis', () => {
     const longSentence = `The lawn received ${'a very detailed set of applications, '.repeat(8)}covering every zone.`;
     expect(reconcile(longSentence).todaysResult).toMatch(/^Routine service completed\./);

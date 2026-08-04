@@ -23,11 +23,12 @@
 // hero "The St." — codex P1 #3187 r4) and decimals ("2.77 in"), and
 // anything over the cap returns '' (caller falls back to the neutral
 // lead) rather than truncating.
-// Single letters cover initialisms letter-by-letter ("U.S." ends "S.",
-// "e.g." ends "g.") — a genuine sentence ending in a single-letter word is
-// rare, and the miss just merges into the next boundary or falls back to
-// the neutral lead (codex P2 #3187 r5).
-const LEAD_ABBREVIATIONS = /\b(?:St|Mr|Mrs|Ms|Dr|Sr|Jr|vs|etc|approx|Ave|Blvd|Rd|Ft|Mt|No|[A-Za-z])\.$/i;
+// Initialisms are recognized by their DOTTED sequence — a period, letter,
+// period tail ("U.S." ends ".S.", "e.g." ends ".g.") — never by a blanket
+// single-letter rule: "We applied Heritage G." is a real catalog product
+// ending a real sentence, and suppressing that boundary merged the next
+// sentence into the hero (codex P2 #3187 r5 → r20).
+const LEAD_ABBREVIATIONS = /(?:\b(?:St|Mr|Mrs|Ms|Dr|Sr|Jr|vs|etc|approx|Ave|Blvd|Rd|Ft|Mt|No)|\.[A-Za-z])\.$/i;
 
 function leadSentence(text, max = 220) {
   const t = String(text || '').replace(/\s+/g, ' ').trim();

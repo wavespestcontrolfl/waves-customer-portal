@@ -1291,7 +1291,11 @@ export default function DispatchPageV2({
   const [detailService, setDetailService] = useState(null);
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
-  const pendingPaymentAfterCompletionRef = useRef(null);
+  // Staged handoffs are PER SERVICE (Map serviceId → handoff): a singleton
+  // let an earlier visit's slower response overwrite the handoff already
+  // staged for the open panel, whose close then found nothing to drain and
+  // a payment-due invoice went uncollected (codex P1 #3187 r20).
+  const pendingPaymentAfterCompletionRef = useRef(new Map());
   // Mirrors WHICH visit's completion panel is mounted, for callbacks that
   // resolve AFTER the operator backed out (the onClose payment-ref drain
   // only runs at close — a later response must deliver its own handoff,
@@ -1649,21 +1653,21 @@ export default function DispatchPageV2({
         const completedService =
           (data?.services || []).find((s) => s.id === serviceId) ||
           completingService;
-        pendingPaymentAfterCompletionRef.current = {
+        const handoff = {
           service: completedService,
           invoiceId: r.invoiceId,
           invoiceToken: r.invoiceToken,
           amount: Number(r.invoiceTotal),
         };
-        // THIS visit's panel is no longer the open one (closed, or the
-        // operator moved on to another visit): its onClose drain has run
-        // or will drain a different visit's entry — deliver the payment
-        // handoff now instead of stranding it in, or having it overwritten
-        // out of, the singleton ref (codex P1 #3187 r11 + r13). An ACTIVE
-        // payment sheet queues the delivery instead (codex P1 r15).
-        if (completionPanelOpenServiceRef.current !== serviceId) {
-          const handoff = pendingPaymentAfterCompletionRef.current;
-          pendingPaymentAfterCompletionRef.current = null;
+        if (completionPanelOpenServiceRef.current === serviceId) {
+          // Own panel still open: stage under THIS service's key — its
+          // onClose drains exactly this entry, and no other visit's
+          // response can overwrite it (codex P1 #3187 r20).
+          pendingPaymentAfterCompletionRef.current.set(serviceId, handoff);
+        } else {
+          // Panel closed or the operator moved on: deliver now through the
+          // synchronized helper (queues behind an active sheet — codex P1
+          // r11 + r13 + r15).
           deliverPaymentHandoff(handoff);
         }
       }
@@ -2560,14 +2564,17 @@ export default function DispatchPageV2({
             // onClose drain that has already happened (codex P1 #3187
             // r18).
             completionPanelOpenServiceRef.current = null;
+            const closingServiceId = completingService?.id || null;
             setCompletingService(null);
-            if (pendingPaymentAfterCompletionRef.current) {
-              // Same active-sheet queue as the late-response path (codex
-              // P1 #3187 r16): a late handoff may already be collecting
-              // when this panel closes with its own staged handoff.
-              const handoff = pendingPaymentAfterCompletionRef.current;
-              pendingPaymentAfterCompletionRef.current = null;
-              deliverPaymentHandoff(handoff);
+            const staged = closingServiceId
+              ? pendingPaymentAfterCompletionRef.current.get(closingServiceId)
+              : null;
+            if (staged) {
+              // Drain exactly THIS visit's staged entry, through the
+              // synchronized helper (queues behind an active sheet —
+              // codex P1 #3187 r16 + r20).
+              pendingPaymentAfterCompletionRef.current.delete(closingServiceId);
+              deliverPaymentHandoff(staged);
             }
           }}
           onSubmit={handleCompleteSubmit}
