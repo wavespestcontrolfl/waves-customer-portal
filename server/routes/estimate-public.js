@@ -1926,7 +1926,7 @@ const PERKS = [
   'Re-service between visits at no charge',
   'Locked-in pricing for 12 months',
   'Free annual termite inspection',
-  '15% off any one-time treatment',
+  '15% off eligible one-time treatments',
   'One point of contact — no call-center runaround',
   'Text your tech directly for quick questions',
   'Customer portal for service history, invoices, and payments',
@@ -4742,7 +4742,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     <table>${oneTimeRows}${manualOneTimeDiscountRowHtml}
       ${oneTimeSingleRowNoDiscount ? '' : `<tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>`}
     </table>
-    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
+    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off eligible one-time treatments.</p>` : ''}
   </div>` : '';
 
   const perksHtml = (hasOnlyLawnCareServices
