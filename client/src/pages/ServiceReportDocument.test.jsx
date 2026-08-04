@@ -832,6 +832,15 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/once dry/i);
   });
 
+  it('reports payload-dropped images to the renderer counter (codex P2 #3176 r21)', () => {
+    // The server counts photos its build EXPECTED but could not presign;
+    // V2 photos arriving without a URL are filtered before any <img>
+    // mounts — both must reach the renderer's cacheability counter even
+    // though no onError ever fires.
+    render(<ServiceReportDocument data={{ ...BASE_DATA, imageResolutionFailures: 2, reportV2: { photos: [{ id: 'v2-nourl' }] } }} token="t" />);
+    expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(3);
+  });
+
   it('keeps label-required agronomic directions that carry time units', () => {
     // "irrigate within 14 days" is a real catalog reentry_text (LESCO seed) —
     // it has a time unit but makes no re-entry claim, so it must survive

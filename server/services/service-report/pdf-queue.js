@@ -274,7 +274,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // as the floor when the count is unavailable (Cloudflare renderer,
     // mid-deploy page bundle). Serve it, cache nothing; the next view
     // re-renders.
-    const unreachablePhotos = renderImageFailures ?? await countUnreachableReportPhotos(renderedData);
+    const unreachablePhotos = renderImageFailures
+      ?? ((renderedData?.imageResolutionFailures || 0) + await countUnreachableReportPhotos(renderedData));
     if (unreachablePhotos > 0) {
       logger.warn(`[service-report-pdf] ${unreachablePhotos} report image(s) failed/unreachable for ${recordId} — serving without storing`);
       return {

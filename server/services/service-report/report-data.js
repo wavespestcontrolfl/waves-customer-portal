@@ -2490,6 +2490,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     : undefined;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   const config = getServiceLineConfig(serviceLine);
+  // Images this build EXPECTS but drops because their URL would not resolve
+  // (presign failure on a gallery/turf/gauge photo or the traced snapshot).
+  // Rides the payload so the cacheability gate — and the page's own render
+  // counter — can refuse to cache a silently incomplete PDF (codex P2
+  // #3176 r21).
+  let imageResolutionFailures = 0;
   // Owner ruling 2026-07-16: the report kicker mirrors the customer's LINKED
   // service on the schedule ("Monthly Lawn Care Service"), so the scheduled
   // row's service_type (the catalog name) wins over the record's snapshot
@@ -3076,6 +3082,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           tracedRow.snapshot_s3_key,
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS
         ).catch(() => null);
+        // A traced row whose snapshot would not presign is an EXPECTED image
+        // silently omitted from the artifact (codex P2 #3176 r21) — the
+        // cacheability gate must know.
+        if (!tracedSnapshotUrl) imageResolutionFailures += 1;
         if (tracedSnapshotUrl) {
           // lawn_highlight rows may carry the transparent highlight layer —
           // the report pulses it over the snapshot (owner 2026-07-30).
@@ -3167,6 +3177,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     try {
       const gaugePhoto = photos.find((p) => String(p.id) === String(gaugePhotoId));
       const gaugeUrl = gaugePhoto ? await photoUrl(gaugePhoto) : null;
+      if (gaugePhoto && !gaugeUrl) imageResolutionFailures += 1;
       if (gaugeUrl) mowingHeight = { ...mowingHeight, photoUrl: gaugeUrl };
     } catch { /* fail-soft: report still renders the reading without the photo */ }
   }
@@ -3187,6 +3198,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       prevHashSha256: photo.prev_hash_sha256 || null,
       aiTags: parseJsonArray(photo.ai_tags),
     })));
+  // Photos that EXIST on the record but whose URL would not resolve are
+  // silent omissions the page's onError counter can never see (codex P2
+  // #3176 r21) — count them for the cacheability gate.
+  imageResolutionFailures += photoPayload.filter((p) => !p.url).length;
   // Lawn visits capture turf photos in the tech's Lawn Assessment block instead
   // of a separate Service Photos upload. Surface those turf photos in the
   // customer gallery so the single capture point feeds both the lawn scorecard
@@ -3218,7 +3233,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         .catch(() => []);
       const turfGalleryItems = (await Promise.all(turfPhotos.map(async (photo) => {
         const url = await lawnPhotoUrl(photo);
-        if (!url) return null;
+        // Dropped-but-expected turf photo — same silent-omission class.
+        if (!url) { imageResolutionFailures += 1; return null; }
         return {
           id: `lawn-${photo.id}`,
           url,
@@ -4055,6 +4071,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // deployment's token only resolves on that preview, so with no explicit
     // origin configured the document falls back to its own (see portalBase).
     publicOrigin: configuredPublicPortalOrigin(),
+    // Images this build EXPECTED but silently dropped (URL resolution
+    // failed): the document folds this into its render-failure counter and
+    // the store paths refuse to cache on it (codex P2 #3176 r21) — a
+    // placeholder-free but incomplete PDF must not become the permanent
+    // healthy object.
+    imageResolutionFailures,
     legacy: {
       // No raw technician_notes here (owner ruling 2026-07-16): the field is
       // internal — access codes, billing notes — and the only sanctioned path

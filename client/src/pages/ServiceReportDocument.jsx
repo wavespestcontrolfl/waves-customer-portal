@@ -343,10 +343,16 @@ export default function ServiceReportDocument({ data, token }) {
   // the browser fetches its own /data, so the server's probe of a payload IT
   // built can miss a divergent URL that failed here — this counter is the
   // page's own load outcome, the only signal that describes what the
-  // artifact actually shows. Harmless on the live report.
+  // artifact actually shows. It also folds in images the PAYLOAD build
+  // dropped before any <img> could mount (codex P2 r21): the server's own
+  // resolution-failure count plus V2 photos arriving without a URL, which
+  // the gallery filter below silently omits. Harmless on the live report.
+  const payloadDroppedImages = (data.imageResolutionFailures || 0)
+    + (Array.isArray(data.reportV2?.photos) ? data.reportV2.photos : [])
+      .filter((photo) => photo && !(photo.url || photo.imageUrl)).length;
   useEffect(() => {
-    window.__WAVES_PDF_IMAGE_FAILURES = failedImages.size;
-  }, [failedImages]);
+    window.__WAVES_PDF_IMAGE_FAILURES = failedImages.size + payloadDroppedImages;
+  }, [failedImages, payloadDroppedImages]);
   const typed = data.typedReport || null;
   const result = typed?.todaysResult || null;
   const findings = Array.isArray(typed?.findings) ? typed.findings.filter((f) => (f.customerValueLabel ?? f.value) != null && String(f.customerValueLabel ?? f.value).trim() !== '') : [];

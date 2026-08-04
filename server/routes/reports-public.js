@@ -1467,7 +1467,8 @@ router.get('/:token', async (req, res, next) => {
         // (authoritative — the browser fetches its own /data), and the
         // server-side URL probe as the floor when the count is unavailable
         // (Cloudflare renderer, mid-deploy bundle). Serve, cache nothing.
-        const unreachablePhotos = renderImageFailures ?? await countUnreachableReportPhotos(renderedData);
+        const unreachablePhotos = renderImageFailures
+          ?? ((renderedData?.imageResolutionFailures || 0) + await countUnreachableReportPhotos(renderedData));
         if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
