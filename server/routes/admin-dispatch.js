@@ -34,6 +34,7 @@ const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('.
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
 const TurfHeightOcr = require('../services/turf-height-ocr');
@@ -1920,7 +1921,22 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     zoom,
     width: liveConfig.width || 640,
     height: liveConfig.height || 340,
-  }).catch(() => ({ stations: [], nextStationNumber: 1, nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 } }));
+  })
+    // `loaded: false` distinguishes a degraded shape from a property that
+    // genuinely has no stations — both carry `stations: []` (codex P2 on
+    // #3159). Consumers that only draw pins can ignore it; anything INFERRING
+    // from the absence of stations must not treat a failed query as fact.
+    // The loader swallows its own query failure (so a station outage never
+    // takes down zone marking) and reports it via `loaded`, so this must
+    // FORWARD that value rather than stamp true — an earlier version stamped
+    // unconditionally here and the flag was inert (codex P2 round 3).
+    .then((slice) => ({ ...slice, loaded: slice.loaded !== false }))
+    .catch(() => ({
+      stations: [],
+      nextStationNumber: 1,
+      nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 },
+      loaded: false,
+    }));
 
   return {
     available: true,
@@ -1933,6 +1949,9 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
       attributionText: liveConfig.attributionText || '',
     },
     stations: stationSlice.stations,
+    // false = the station query failed and the empty array above is a
+    // fallback, not a fact about the property.
+    stationsLoaded: stationSlice.loaded !== false,
     nextStationNumber: stationSlice.nextStationNumber,
     nextStationNumberByProgram: stationSlice.nextStationNumberByProgram,
     stationCap: TermiteStations.MAX_ACTIVE_STATIONS,
@@ -3917,6 +3936,45 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 });
 
 // POST /api/admin/dispatch/:serviceId/complete
+// Pre-submit report reconciliation block (409) — pure for testability
+// (_test), like the other completion block-payload helpers. Returns
+// { status, payload } or null. Fail-OPEN on checker errors: this prompt
+// must never be the reason a visit cannot complete — the render-time
+// guards remain the backstop for anything it skips.
+function reportReconcileBlockPayload({
+  isIncompleteVisit,
+  reportReconcileConfirmed,
+  technicianNotes,
+  structuredFindings,
+  primaryFindingsType = null,
+  primaryActivityScore = null,
+  companionFindings,
+}) {
+  if (process.env.GATE_REPORT_RECONCILE_PROMPT !== 'true') return null;
+  if (isIncompleteVisit || reportReconcileConfirmed) return null;
+  let issues = [];
+  try {
+    issues = reportReconciliationIssues({
+      technicianNotes, structuredFindings, primaryFindingsType, primaryActivityScore, companionFindings,
+    });
+  } catch {
+    return null;
+  }
+  if (!issues.length) return null;
+  return {
+    status: 409,
+    payload: {
+      // adminFetch surfaces only error + code to the client, so the
+      // human-readable contradictions ride in the error string; the
+      // structured list stays for API consumers and tests.
+      error: issues.map((issue) => issue.message).join('\n'),
+      code: 'report_reconcile',
+      contradictions: issues,
+      confirmable: true,
+    },
+  };
+}
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -3976,6 +4034,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       typedPhotoSummary = null,
       zoneShapes = null,            // satellite zone marks [{ areaLabel, shape }] — OPTIONAL
       termiteStations = null,       // bait station pins/status [{ id?, shape?, status?, retire? }] — OPTIONAL
+      reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -4263,6 +4322,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'termite_stations_cap',
       });
     }
+    // A declared trap SETUP cannot carry serviced pins: the map relabels
+    // `ok` to "Set this visit" but leaves `serviced` saying "Serviced this
+    // visit", so the frozen report would contradict its own declared stage.
+    //
+    // Scoped to the TRAPPING program, and therefore placed here rather than
+    // with the shape validation above — a combined profile can resolve to
+    // the termite/rodent bait program while a trapping companion declares a
+    // setup, and rejecting on the declaration alone blocked a legitimate
+    // serviced BAIT-STATION entry (codex P1 — a regression from the first
+    // version of this check). `trap_visit_type` only exists on the
+    // rodent_trapping schema, so its presence in any submitted section
+    // identifies the declaration.
+    if (stationProgram === 'trapping' && Array.isArray(termiteStations) && termiteStations.length) {
+      const declaresTrapSetup = [
+        structuredFindings?.values,
+        ...(Array.isArray(companionFindings) ? companionFindings.map((entry) => entry?.values) : []),
+      ].some((values) => String(values?.trap_visit_type || '').trim() === 'Initial setup');
+      const servicedError = TermiteStations.validateStationEntriesBody(termiteStations, {
+        rejectServiced: declaresTrapSetup,
+      });
+      if (servicedError) {
+        return res.status(400).json({ error: servicedError, code: 'termite_stations_invalid' });
+      }
+    }
     // Rodent consumption consistency (codex r2): station checks recording
     // bait consumption must not ship beside an explicit "None" consumption
     // select — the customer report would contradict itself. Pre-commit like
@@ -4302,6 +4385,36 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
       if (conflict) {
         return res.status(400).json({ error: conflict, code: 'trap_capture_conflict' });
+      }
+    }
+    // Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT,
+    // dark): the AI body is generated from the typed fields, the tech can
+    // keep editing them afterwards, and nothing re-runs — the render-time
+    // guards then silently degrade the copy or a missed pattern publishes
+    // a stale number. Surfacing the contradiction HERE lets the tech
+    // regenerate or confirm before anything freezes; a confirmed resubmit
+    // (same idempotency key — 409s don't reset it client-side) passes
+    // through, and the render-time guards remain the backstop.
+    {
+      const reconcileBlock = reportReconcileBlockPayload({
+        isIncompleteVisit,
+        reportReconcileConfirmed,
+        technicianNotes,
+        structuredFindings,
+        primaryFindingsType: completionProfile?.findingsType || null,
+        primaryActivityScore: activityScore,
+        companionFindings,
+      });
+      // A same-key retry of an ALREADY-COMMITTED completion (lost
+      // response, post-commit side-effect failure) must reach the
+      // replay/resume claim untouched: the frozen snapshot exists and a
+      // confirm cannot change it, so prompting would accept an override
+      // the report can never honor (codex P1). Checked only when a block
+      // exists — the clean path costs nothing — and a lookup error skips
+      // the prompt too (fail open).
+      if (reconcileBlock
+        && !(await CompletionAttempts.hasCommittedCompletionAttempt(svc.id).catch(() => true))) {
+        return res.status(reconcileBlock.status).json(reconcileBlock.payload);
       }
     }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
@@ -5934,6 +6047,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // Primary section only — the AI report describes this visit's
               // primary work; companion sections keep their own typed copy.
               technicianReportBody,
+              // The tech confirmed the reconciliation prompt: the frozen
+              // snapshot carries the decision so neither the snapshot's own
+              // screens nor the render-time summary screen silently discard
+              // the body a person reviewed and overrode.
+              reconcileConfirmed: reportReconcileConfirmed === true,
             });
           }
           // Companion typed sections: one immutable snapshot per validated
@@ -5978,6 +6096,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 visitSequence: companionVisitSequence,
                 activity: companionActivity,
                 photoSummary: null,
+                // A standard primary with a trapping COMPANION has no typed
+                // primary snapshot to carry the confirmed override — freeze
+                // it on the trapping companion so the render-time summary
+                // screen can honor it (codex P1).
+                reconcileConfirmed: reportReconcileConfirmed === true
+                  && companion.type === 'rodent_trapping',
               });
               if (companionSnapshot) {
                 // The frozen per-section delivery rides the snapshot itself
@@ -12728,6 +12852,7 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  reportReconcileBlockPayload,
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
   completionAllowsTechnicianPestRating,

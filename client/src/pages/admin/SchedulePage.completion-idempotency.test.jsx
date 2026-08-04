@@ -2,12 +2,43 @@ import { describe, expect, it } from "vitest";
 
 import {
   completionPreferencesNeedDraft,
+  completionReconcilePrompt,
   completionReviewSuppressionReason,
   completionTimeOnSiteBody,
   completionWillReview,
   restoredBackfillChoices,
   shouldResetCompletionIdempotencyKey,
 } from "./SchedulePage.jsx";
+
+// Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT): the
+// server 409s with code 'report_reconcile' and the contradictions packed
+// into the error message. The prompt helper must render them, other
+// errors must pass through untouched — and the 409 must PRESERVE the
+// idempotency key so the confirmed resubmit replays under the same key.
+describe("completion reconcile prompt", () => {
+  it("renders the server's contradictions with the confirm/cancel guidance", () => {
+    const text = completionReconcilePrompt({
+      status: 409,
+      code: "report_reconcile",
+      message: "Your report says 8 traps; this visit records 6.",
+    });
+    expect(text).toContain("8 traps");
+    expect(text).toContain("records 6");
+    expect(text).toContain("OK — complete anyway");
+    expect(text).toContain("Cancel — go back");
+  });
+
+  it("ignores every other error", () => {
+    expect(completionReconcilePrompt(null)).toBeNull();
+    expect(completionReconcilePrompt({ code: "trap_capture_conflict", message: "x" })).toBeNull();
+    expect(completionReconcilePrompt(new Error("network"))).toBeNull();
+  });
+
+  it("the reconcile 409 preserves the idempotency key for the confirmed resubmit", () => {
+    expect(shouldResetCompletionIdempotencyKey({ status: 409, code: "report_reconcile" }))
+      .toBe(false);
+  });
+});
 
 describe("completion idempotency retry keys", () => {
   it("resets the key for ordinary client errors", () => {

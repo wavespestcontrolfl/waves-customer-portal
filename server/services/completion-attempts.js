@@ -73,7 +73,16 @@ function isOperatorTimeOnSite(value) {
 // set). Both matchers treat a separator-free stored hash as core-only, so
 // in-flight attempts across the deploy keep matching.
 function completionRequestHashSegments(body) {
-  const { idempotencyKey, timeOnSite, completionTelemetry, backfill, ...stableBody } = body || {};
+  // reportReconcileConfirmed controls only the PRE-claim reconciliation
+  // prompt (GATE_REPORT_RECONCILE_PROMPT): a same-key retry that first
+  // meets the prompt and then confirms must replay/resume the original
+  // attempt, not strand it on a payload mismatch — so the bit is excluded
+  // from both segments, like idempotencyKey and completionTelemetry
+  // (codex P1 on the reconciliation round).
+  const {
+    idempotencyKey, timeOnSite, completionTelemetry, backfill,
+    reportReconcileConfirmed, ...stableBody
+  } = body || {};
   const core = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys(stableBody)))
     .digest('hex');
@@ -178,6 +187,24 @@ async function claimSideEffectsRun(row, requestHash, knex = db) {
 
   if (!claimed) return sideEffectsRunningPayload();
   return { action: 'resume', attempt: claimed, serviceRecordId: claimed.service_record_id };
+}
+
+// True when committed evidence exists for the service — a succeeded or
+// side-effects-phase attempt, or a service record. The reconciliation
+// prompt (GATE_REPORT_RECONCILE_PROMPT) must never intercept a retry of
+// an already-committed completion (codex P1 on the reconciliation
+// rounds): the frozen snapshot exists, a confirm cannot change it, and
+// the retry needs to reach replay/resume untouched.
+async function hasCommittedCompletionAttempt(serviceId, knex = db) {
+  const attempt = await knex('service_completion_attempts')
+    .where({ service_id: serviceId })
+    .whereIn('status', ['succeeded', 'side_effects_pending', 'side_effects_running'])
+    .first();
+  if (attempt) return true;
+  const record = await knex('service_records')
+    .where({ scheduled_service_id: serviceId })
+    .first();
+  return Boolean(record);
 }
 
 async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }, knex = db) {
@@ -694,6 +721,7 @@ async function storeResolvedSnapshot(
 module.exports = {
   claimCompletionAttempt,
   hashCompletionRequest,
+  hasCommittedCompletionAttempt,
   // The single timer-vs-operator classification rule, shared with the
   // completion route's intake gate (liveTimeOnSitePlan) so the idempotency
   // hash and the authorization gate can never disagree about what counts

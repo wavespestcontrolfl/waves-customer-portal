@@ -537,6 +537,21 @@ export function shouldResetCompletionIdempotencyKey(error) {
   return error?.code === "lawn_assessment_stale";
 }
 
+// The completion route's pre-submit reconciliation 409 (code
+// 'report_reconcile', behind GATE_REPORT_RECONCILE_PROMPT): the server
+// packs the human-readable contradictions into the error string because
+// adminFetch surfaces only message + code. Returns the confirm() text, or
+// null for any other error so the generic handler keeps it. The 409
+// deliberately does NOT reset the idempotency key
+// (shouldResetCompletionIdempotencyKey), so a confirmed resubmit replays
+// under the same key.
+export function completionReconcilePrompt(error) {
+  if (error?.code !== "report_reconcile") return null;
+  const lead = String(error?.message || "").trim()
+    || "The report disagrees with the recorded values.";
+  return `${lead}\n\nOK — complete anyway (the recorded values stay authoritative on the report).\nCancel — go back to fix the fields or regenerate the AI report.`;
+}
+
 export function completionPreferencesNeedDraft({
   sendSms = true,
   includePayLink = true,
@@ -672,6 +687,58 @@ export function completionResumeOwed(serviceId) {
   } catch {
     return false;
   }
+}
+
+// Station edits a completion would silently DROP while the registry is
+// loading or failed to load: the payload posts no station entries in that
+// state (an unloaded registry is unavailable, not empty), but a
+// billing-detour draft restores pins, moves, statuses, and retirements
+// into all four of these, and a successful submit clears the draft they
+// were restored from — permanently deleting the tech's work (pre-push P0).
+// handleSubmit fails CLOSED on this; the registry note offers the explicit
+// discard instead.
+export function pendingStationEdits({ stationNew, stationMoves, stationStatuses, stationRetired }) {
+  return stationNew.length > 0
+    || Object.keys(stationMoves).length > 0
+    || Object.keys(stationStatuses).length > 0
+    || stationRetired.length > 0;
+}
+
+// Mirrors positionKey in server/services/termite-stations.js: the
+// completion sync deduplicates an id-less create landing on an existing
+// row's exact position and attaches its check row to the EXISTING station.
+// A draft pin colliding with a registry row confirmed after the draft was
+// saved (another writer added a station there while the billing detour
+// waited) must therefore not display or auto-count as a second trap — the
+// completion would record one station while the frozen count says two
+// (codex P1 r18). The pin drops and its status transfers to the existing
+// row (the same outcome the server's dedupe produces) unless that row
+// already carries one.
+export function reconcileNewPinsWithRegistry({ stationNew, stationPreloads, stationStatuses }) {
+  const existingByPosition = new Map();
+  stationPreloads.forEach((station) => {
+    if (station?.shape?.cx != null && station?.shape?.cy != null) {
+      existingByPosition.set(`${Number(station.shape.cx)}:${Number(station.shape.cy)}`, station.id);
+    }
+  });
+  const keptNew = [];
+  const statuses = { ...stationStatuses };
+  let changed = false;
+  stationNew.forEach((pin) => {
+    const key = pin?.shape?.cx != null && pin?.shape?.cy != null
+      ? `${Number(pin.shape.cx)}:${Number(pin.shape.cy)}`
+      : null;
+    const existingId = key == null ? undefined : existingByPosition.get(key);
+    if (existingId === undefined) {
+      keptNew.push(pin);
+      return;
+    }
+    changed = true;
+    if (statuses[pin.key] && !statuses[existingId]) statuses[existingId] = statuses[pin.key];
+    delete statuses[pin.key];
+  });
+  if (!changed) return { changed, stationNew, stationStatuses };
+  return { changed, stationNew: keptNew, stationStatuses: statuses };
 }
 
 // Accepts "HH:MM" or "HH:MM:SS" (DB rows carry seconds; time inputs don't).
@@ -5974,6 +6041,17 @@ export function typedActivityScoreConflict(schemaType, values, score) {
   return null;
 }
 
+// Follow-up-only trap actions a declared Initial setup cannot carry —
+// mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS in
+// server/services/service-report/activity-indicators.js.
+const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
+  "Traps reset",
+  "Traps moved",
+  "Traps replaced",
+  "Bait/lure refreshed",
+  "Damaged or missing traps found",
+];
+
 // Termite Phase-3 attestation contradictions, mirrored pre-submit so the
 // tech gets the inline prompt instead of the server 422 (Codex P3 r3 on
 // #2703). The method list mirrors TERMITE_PERIMETER_METHODS in
@@ -6000,6 +6078,44 @@ export function typedFieldValueConflicts(schemaType, values) {
     conflicts.push(
       'The inspection notice must be affixed before completing — affix the notice and select "Yes"',
     );
+  }
+  // Initial-setup constraints on rodent trapping, mirrored pre-submit so
+  // the tech gets the inline prompt instead of the server 422 (codex P2
+  // round 14 on #3159) — same rationale as the termite mirrors above, and
+  // the caller already runs this for both the primary and every companion
+  // section. The action list mirrors SETUP_INCOMPATIBLE_TRAP_ACTIONS and
+  // the messages mirror validateTypedFindings in activity-indicators.js.
+  if (
+    schemaType === "rodent_trapping" &&
+    String(values?.trap_visit_type ?? "").trim() === "Initial setup"
+  ) {
+    const followUpOnly = String(values?.trap_actions ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .filter((action) => SETUP_INCOMPATIBLE_TRAP_ACTIONS.includes(action));
+    if (followUpOnly.length) {
+      conflicts.push(
+        `Trap actions ${followUpOnly.map((a) => `"${a}"`).join(", ")} describe traps that were already out — either clear them or set this visit to "Follow-up check"`,
+      );
+    }
+    // Shape FIRST, exactly as validateTypedFindings checks a count field:
+    // Number("1.0") and Number("1e1") are positive integers here but the
+    // server rejects both, so a coercion-only mirror still let the 422 it
+    // exists to prevent through (codex P2 round 15).
+    const rawCount = values?.traps_checked;
+    const countStr = typeof rawCount === "number"
+      ? String(rawCount)
+      : (typeof rawCount === "string" ? rawCount.trim() : null);
+    if (countStr == null || !/^\d{1,4}$/.test(countStr)) {
+      conflicts.push(
+        'An initial setup must record how many traps were set — enter the count as a whole number, or set this visit to "Follow-up check"',
+      );
+    } else if (Number(countStr) < 1) {
+      conflicts.push(
+        'An initial setup must record how many traps were set — enter the count, or set this visit to "Follow-up check"',
+      );
+    }
   }
   return conflicts;
 }
@@ -6062,6 +6178,23 @@ const EMPTY_COMPANION_ENTRY = {
   score: null,
   scoreTouched: false,
 };
+
+// Field labels that follow a sibling selection. Registry labels are static,
+// but rodent trapping's count means two different things depending on the
+// visit the tech just declared — and a form reading "Traps checked" under
+// "Initial setup" would contradict the report, which labels the very same
+// number "Traps set" (owner 2026-08-02). Kept to this one pair rather than a
+// general mechanism: it is the only field whose noun flips.
+export function typedFieldLabel(schemaType, field, values = {}) {
+  if (
+    schemaType === "rodent_trapping"
+    && field.key === "traps_checked"
+    && String(values.trap_visit_type || "").trim() === "Initial setup"
+  ) {
+    return "Traps set";
+  }
+  return field.label;
+}
 
 // Typed specialty completion form (specialty-service-completion-contract.md
 // §3-§4, §7): registry-driven findings fields + activity gauge + next-step
@@ -6135,7 +6268,7 @@ export function TypedFindingsSection({
         <div style={sectionHeaderStyle}>{field.section}</div>
       )}
       <div style={fieldLabelStyle}>
-        {field.label}
+        {typedFieldLabel(schema.type, field, values)}
         {/* pesticideOnly compliance fields only render when a pesticide
             product is recorded — and then the server REQUIRES them
             (validateTreeShrubTypedCompliance), so they carry the required
@@ -8095,6 +8228,34 @@ export function ZoneMarkingStep({
 // interior-infestation language).
 const STATION_PIN_R = 0.035; // normalized against the SHORT side (~12px @340)
 const STATION_TAP_RADIUS_PX = 22;
+// Frame size the pins and the tap math are authored against. Zooming shrinks
+// the rendered viewBox around this same frame — the satellite image and the
+// stored NORMALIZED pin coordinates never change, so a zoomed placement is
+// byte-identical to the same placement at 1× (no re-anchoring, no drift).
+const STATION_FRAME_W = 640;
+const STATION_FRAME_H = 340;
+// The Static Map basemap is fetched at scale=2, so 4× is where the imagery
+// itself runs out of detail — past that the tech is magnifying blur.
+const STATION_MAX_ZOOM = 4;
+const STATION_ZOOM_STEP = 2;
+// Pointer travel in CLIENT PIXELS that turns a tap into a pan. Below it the
+// gesture still places/selects a pin, so the one-tap flow survives the shaky
+// thumb a phone in the field always has. Deliberately NOT frame units: those
+// scale with the rendered width and the zoom, which would shrink a thumb
+// tolerance on exactly the small screens that need it most.
+const STATION_DRAG_SLOP = 6;
+const STATION_FULL_VIEW = { x: 0, y: 0, w: STATION_FRAME_W, h: STATION_FRAME_H };
+// Keep the window inside the basemap so zooming can never reveal blank space.
+// Rounded to 2dp: a pan otherwise writes a 15-decimal viewBox string on every
+// pointermove, and sub-hundredth precision is invisible on a 640-unit frame.
+function clampStationView(view) {
+  const round = (n) => Math.round(n * 100) / 100;
+  return {
+    ...view,
+    x: round(Math.min(Math.max(0, view.x), STATION_FRAME_W - view.w)),
+    y: round(Math.min(Math.max(0, view.y), STATION_FRAME_H - view.h)),
+  };
+}
 const STATION_STATUS_UI = {
   ok: { color: "#10b981", label: "OK" },
   activity: { color: "#ef4444", label: "Activity" },
@@ -8143,11 +8304,34 @@ export function StationMarkingStep({
   program = "termite", // 'termite' | 'rodent' — labels only, mechanics shared
   disabled = false,
   dark = false,
+  // A declared trap SETUP cannot carry serviced pins (the server rejects
+  // the completion) — hide the chip so the conflict can't be created by
+  // tap. A pin already serviced (restored, or marked before the visit-type
+  // selector changed) keeps its chip visible so the operator can see the
+  // mark and switch it off; the handleSubmit mirror still catches it if
+  // they don't (codex P2 r18).
+  disallowServiced = false,
 }) {
   const [selectedKey, setSelectedKey] = useState(null);
   const [addMode, setAddMode] = useState(false);
   const [armedMoveKey, setArmedMoveKey] = useState(null);
+  // Magnifier over the SAME basemap (owner 2026-08-02: "when I mark rodent
+  // traps I can't zoom in and zoom out like I can with trace where we
+  // sprayed"). Deliberately NOT the tracer's approach — that one re-fetches
+  // the Static Map at a new Google zoom, which is fine for a throwaway trace
+  // but would re-project every stored pin here. This is a pure viewBox
+  // window: the image, the normalized pin coordinates, and the drift
+  // re-anchoring are all untouched, so a pin dropped at 4× lands exactly
+  // where the same tap would land at 1×.
+  const [view, setView] = useState(STATION_FULL_VIEW);
   const svgRef = useRef(null);
+  // Live pan gesture: null between gestures, else the pointer origin and the
+  // view it started from. `moved` latches once the drag passes the slop, and
+  // suppresses the pin tap that would otherwise fire on pointerup.
+  const gestureRef = useRef(null);
+
+  // A new basemap invalidates the window (and the pins re-anchor against it).
+  useEffect(() => { setView(STATION_FULL_VIEW); }, [map?.image?.url]);
 
   if (!map?.available || !map.image?.url) return null;
 
@@ -8163,14 +8347,26 @@ export function StationMarkingStep({
   const statusOf = (key) => statuses[key] || "ok";
   const activityCount = pinned.filter((station) => statusOf(station.key) === "activity").length;
 
+  // How much of the frame one rendered pixel covers. 1 at full view; 0.5 at
+  // 2×, 0.25 at 4× — the single factor every screen-space number below is
+  // divided by so pins, taps, and labels stay physically the same size.
+  const viewScale = view.w / STATION_FRAME_W;
+  const zoomLevel = Math.round(1 / viewScale);
+  const canPan = view.w < STATION_FRAME_W;
+
   const svgPointFromEvent = (evt) => {
     const el = svgRef.current;
     if (!el) return null;
     const rect = el.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
+    // Client px → viewBox units → normalized against the FULL frame, which
+    // is the coordinate space the pins persist in. At full view the two
+    // conversions cancel and this is the original 0-1 mapping.
+    const frameX = view.x + ((evt.clientX - rect.left) / rect.width) * view.w;
+    const frameY = view.y + ((evt.clientY - rect.top) / rect.height) * view.h;
     return {
-      x: Math.min(1, Math.max(0, (evt.clientX - rect.left) / rect.width)),
-      y: Math.min(1, Math.max(0, (evt.clientY - rect.top) / rect.height)),
+      x: Math.min(1, Math.max(0, frameX / STATION_FRAME_W)),
+      y: Math.min(1, Math.max(0, frameY / STATION_FRAME_H)),
     };
   };
 
@@ -8178,19 +8374,88 @@ export function StationMarkingStep({
     let best = null;
     let bestDist = Infinity;
     pinned.forEach((station) => {
-      const dx = (station.shape.cx - pt.x) * 640;
-      const dy = (station.shape.cy - pt.y) * 340;
+      const dx = (station.shape.cx - pt.x) * STATION_FRAME_W;
+      const dy = (station.shape.cy - pt.y) * STATION_FRAME_H;
       const dist = Math.sqrt(dx * dx + dy * dy);
       if (dist < bestDist) {
         best = station;
         bestDist = dist;
       }
     });
-    return bestDist <= STATION_TAP_RADIUS_PX ? best : null;
+    // The tap target is a THUMB, so its tolerance is fixed in screen pixels
+    // and converted with the CURRENT rendered width — not with the nominal
+    // 640-unit frame. Using the frame made the radius scale with the card's
+    // rendered size: on a 390px phone (~340px frame) at 2× it was ~11.7
+    // physical px, so a 15px-off tap missed the pin and add-mode could drop
+    // a duplicate beside it. The 640px test stub hid this because there the
+    // two denominators are equal (codex P2 on #3159).
+    const rect = svgRef.current?.getBoundingClientRect();
+    const unitsPerClientPx = rect?.width ? view.w / rect.width : viewScale;
+    return bestDist <= STATION_TAP_RADIUS_PX * unitsPerClientPx ? best : null;
+  };
+
+  const changeZoom = (factor) => {
+    if (disabled) return;
+    const next = Math.min(STATION_MAX_ZOOM, Math.max(1, zoomLevel * factor));
+    if (next === zoomLevel) return;
+    const w = STATION_FRAME_W / next;
+    const h = STATION_FRAME_H / next;
+    // Zoom about the current centre — the tech has already panned to the
+    // part of the property they're working on.
+    const cx = view.x + view.w / 2;
+    const cy = view.y + view.h / 2;
+    setView(clampStationView({ x: cx - w / 2, y: cy - h / 2, w, h }));
+  };
+
+  const handlePointerDown = (evt) => {
+    // Panning only exists while zoomed in; at full view the frame keeps its
+    // original tap-only behavior with no gesture state at all.
+    if (disabled || !canPan) return;
+    const el = svgRef.current;
+    const rect = el?.getBoundingClientRect();
+    if (!rect?.width || !rect?.height) return;
+    gestureRef.current = {
+      clientX: evt.clientX,
+      clientY: evt.clientY,
+      view,
+      rect,
+      moved: false,
+    };
+    if (evt.pointerId != null && el.setPointerCapture) {
+      try { el.setPointerCapture(evt.pointerId); } catch { /* not a real pointer event */ }
+    }
+  };
+
+  const handlePointerMove = (evt) => {
+    const gesture = gestureRef.current;
+    if (!gesture) return;
+    // The slop is a THUMB tolerance, so it is measured in the client pixels
+    // the thumb actually moved — never in frame units (codex P2 on #3159).
+    // Converting first made the advertised 6px scale with the rendered
+    // width: on a 390px phone the frame renders ~340px, so 6 frame units was
+    // ~3.2 real pixels and an ordinary shake latched `moved`, silently
+    // swallowing the pin placement. The earlier test hid this by stubbing a
+    // 640px-wide SVG, where the two units happen to coincide.
+    const dxPx = evt.clientX - gesture.clientX;
+    const dyPx = evt.clientY - gesture.clientY;
+    if (!gesture.moved && Math.abs(dxPx) + Math.abs(dyPx) <= STATION_DRAG_SLOP) return;
+    const dx = (dxPx / gesture.rect.width) * gesture.view.w;
+    const dy = (dyPx / gesture.rect.height) * gesture.view.h;
+    gesture.moved = true;
+    // Drag the MAP, not the window: content follows the thumb.
+    setView(clampStationView({ ...gesture.view, x: gesture.view.x - dx, y: gesture.view.y - dy }));
   };
 
   const handlePointerUp = (evt) => {
+    const gesture = gestureRef.current;
+    gestureRef.current = null;
+    const el = svgRef.current;
+    if (evt.pointerId != null && el?.releasePointerCapture) {
+      try { el.releasePointerCapture(evt.pointerId); } catch { /* already released */ }
+    }
     if (disabled) return;
+    // That gesture was a pan — it must not also drop or select a pin.
+    if (gesture?.moved) return;
     const pt = svgPointFromEvent(evt);
     if (!pt) return;
     if (armedMoveKey) {
@@ -8246,13 +8511,32 @@ export function StationMarkingStep({
     const isSelected = station.key === selectedKey;
     const meta = STATION_STATUS_UI[statusOf(station.key)] || STATION_STATUS_UI.ok;
     const fill = showStatuses ? meta.color : "#64748b";
-    const cx = station.shape.cx * 640;
-    const cy = station.shape.cy * 340;
+    const cx = station.shape.cx * STATION_FRAME_W;
+    const cy = station.shape.cy * STATION_FRAME_H;
+    // Pins are UI chrome, not map features: scaling them by the view keeps
+    // them a constant size on screen, so zooming in reveals more IMAGE
+    // rather than growing the markers over the detail being aimed at.
     return (
       <g key={station.key}>
-        {isSelected && <circle cx={cx} cy={cy} r={17} fill="none" stroke={accent} strokeWidth={3} />}
-        <circle cx={cx} cy={cy} r={12} fill={fill} stroke="rgba(255,255,255,0.95)" strokeWidth={2.5} />
-        <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">
+        {isSelected && (
+          <circle cx={cx} cy={cy} r={17 * viewScale} fill="none" stroke={accent} strokeWidth={3 * viewScale} />
+        )}
+        <circle
+          cx={cx}
+          cy={cy}
+          r={12 * viewScale}
+          fill={fill}
+          stroke="rgba(255,255,255,0.95)"
+          strokeWidth={2.5 * viewScale}
+        />
+        <text
+          x={cx}
+          y={cy + 4 * viewScale}
+          textAnchor="middle"
+          fontSize={12 * viewScale}
+          fontWeight={700}
+          fill="#fff"
+        >
           {station.number}
         </text>
       </g>
@@ -8300,14 +8584,71 @@ export function StationMarkingStep({
       <div style={{ position: "relative", borderRadius: 10, overflow: "hidden", border: `1px solid ${hairline}` }}>
         <svg
           ref={svgRef}
-          viewBox="0 0 640 340"
+          viewBox={`${view.x} ${view.y} ${view.w} ${view.h}`}
           style={{ display: "block", width: "100%", touchAction: "none", cursor: disabled ? "default" : "crosshair" }}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={() => { gestureRef.current = null; }}
         >
-          <image href={map.image.url} x="0" y="0" width="640" height="340" preserveAspectRatio="xMidYMid slice" />
+          <image
+            href={map.image.url}
+            x="0"
+            y="0"
+            width={STATION_FRAME_W}
+            height={STATION_FRAME_H}
+            preserveAspectRatio="xMidYMid slice"
+          />
           {pinned.filter((station) => station.key !== selectedKey).map(renderPin)}
           {selected && selected.shape ? renderPin(selected) : null}
         </svg>
+        {/* Zoom stepper — deliberately the SAME affordance as the treatment-
+            zone tracer (position, 40px thumb target, glass chip), because the
+            owner asked for these two map tools to behave alike. It sits over
+            the frame rather than in the button row below so it stays under
+            the thumb while pins are being placed. */}
+        <div style={{ position: "absolute", top: 8, right: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+          {[
+            { label: "+", factor: STATION_ZOOM_STEP, blocked: zoomLevel >= STATION_MAX_ZOOM, name: "Zoom in" },
+            { label: "−", factor: 1 / STATION_ZOOM_STEP, blocked: zoomLevel <= 1, name: "Zoom out" },
+          ].map(({ label, factor, blocked, name }) => (
+            <button
+              key={name}
+              type="button"
+              aria-label={name}
+              disabled={disabled || blocked}
+              // Belt and braces with the tracer: never let the stepper start a
+              // pan gesture on the frame behind it.
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); changeZoom(factor); }}
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 8,
+                border: "none",
+                background: "rgba(15,25,35,0.72)",
+                color: "#fff",
+                fontSize: 22,
+                lineHeight: 1,
+                fontWeight: 600,
+                cursor: disabled || blocked ? "default" : "pointer",
+                opacity: disabled || blocked ? 0.35 : 1,
+                touchAction: "manipulation",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {/* Bottom-LEFT, opposite the required attribution: on a 390px phone
+            the frame is only ~172px tall, and the stepper already covers the
+            right edge — parking this in a third corner would leave barely any
+            unobstructed ground to pin on. */}
+        {canPan ? (
+          <div style={{ position: "absolute", bottom: 4, left: 6, padding: "3px 8px", borderRadius: 999, background: "rgba(15,25,35,0.72)", color: "#fff", fontSize: 11, fontWeight: 600, pointerEvents: "none" }}>
+            {zoomLevel}× · drag to pan
+          </div>
+        ) : null}
         {map.image.attributionText ? (
           <div style={{ position: "absolute", right: 6, bottom: 4, fontSize: 10, color: "#fff", textShadow: "0 1px 2px rgba(0,0,0,0.9)", pointerEvents: "none" }}>
             {map.image.attributionText}
@@ -8332,17 +8673,21 @@ export function StationMarkingStep({
         {selected && !addMode && (
           <>
             <span style={{ fontSize: 11, color: mutedInk }}>Station {selected.number}:</span>
-            {showStatuses && Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
-              <button
-                key={status}
-                type="button"
-                disabled={disabled}
-                onClick={() => { if (!disabled) onSetStatus(selected.key, status); }}
-                style={chipStyle(statusOf(selected.key) === status, meta.color)}
-              >
-                {stationStatusLabel(status, program)}
-              </button>
-            ))}
+            {showStatuses && Object.entries(STATION_STATUS_UI)
+              .filter(([status]) => status !== "serviced"
+                || !disallowServiced
+                || statusOf(selected.key) === "serviced")
+              .map(([status, meta]) => (
+                <button
+                  key={status}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => { if (!disabled) onSetStatus(selected.key, status); }}
+                  style={chipStyle(statusOf(selected.key) === status, meta.color)}
+                >
+                  {stationStatusLabel(status, program)}
+                </button>
+              ))}
             {selected.shape && (
               <button
                 type="button"
@@ -8366,12 +8711,16 @@ export function StationMarkingStep({
       </div>
       {showStatuses && (
         <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", marginTop: 8 }}>
-          {Object.entries(STATION_STATUS_UI).map(([status, meta]) => (
-            <span key={status} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: mutedInk }}>
-              <span style={{ width: 8, height: 8, borderRadius: "50%", background: meta.color }} />
-              {stationStatusLabel(status, program)}
-            </span>
-          ))}
+          {Object.entries(STATION_STATUS_UI)
+            .filter(([status]) => status !== "serviced"
+              || !disallowServiced
+              || stations.some((station) => statusOf(station.key) === "serviced"))
+            .map(([status, meta]) => (
+              <span key={status} style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, color: mutedInk }}>
+                <span style={{ width: 8, height: 8, borderRadius: "50%", background: meta.color }} />
+                {stationStatusLabel(status, program)}
+              </span>
+            ))}
         </div>
       )}
     </div>
@@ -8827,6 +9176,22 @@ export function CompletionPanel({
   // zone-mark widget this also fed was retired 2026-07-23 — the traced
   // Treatment Zone Mapper is the report's coverage-map source now.
   const [propertyMap, setPropertyMap] = useState(null);
+  // The station QUERY inside /property-map failed and the server substituted
+  // an empty roster (stationsLoaded false). The map still renders, so
+  // without this flag the tech could pin "new" traps numbered from 1 over
+  // an invisible existing registry and submit duplicate or skipped entries
+  // (codex P2 round 12). While set, station marking is disabled and the
+  // completion posts no station entries at all — an unloaded registry is
+  // unavailable, not empty.
+  // "loading" until the property-map request settles, so the surface fails
+  // CLOSED for the whole in-flight window too (codex P2 round 15): a
+  // billing-detour draft can restore moves, retirements, and new pins
+  // before the fetch resolves, and an already-complete form submitted in
+  // that window would serialize them — against a registry never confirmed
+  // — using the restored zoneMapImageFallback ref. Only a settled,
+  // available response with a loaded station query re-arms it.
+  const [stationRegistryState, setStationRegistryState] = useState("loading");
+  const stationRegistryFailed = stationRegistryState !== "ready";
   // Image params restored from a saved draft (checkout detour) — lets a
   // restored station submit stamp the drift ref for pins placed pre-detour
   // even if the live /property-map refetch hasn't resolved yet.
@@ -8876,6 +9241,52 @@ export function CompletionPanel({
   const [stationRetired, setStationRetired] = useState([]); // existing ids retired this session
   const [stationNumberBase, setStationNumberBase] = useState(1); // server's next number (never reuses retired)
   const stationNewSeqRef = useRef(0);
+  // Blocks completion (fail closed) while edits exist that the station-less
+  // payload below would silently drop — see pendingStationEdits. Pending is
+  // computed from the restored state WITHOUT stationFeatureOn: a flag
+  // kill-switched (or a program change) after the draft was saved posts no
+  // station entries either, and gating pending on the flag would bypass
+  // the guard in exactly that state (codex P1 r17). With the flag off no
+  // fetch is coming, so the block is terminal, not transient.
+  const stationEditsPending = pendingStationEdits({ stationNew, stationMoves, stationStatuses, stationRetired });
+  const stationEditsBlocked = stationEditsPending && (!stationFeatureOn || stationRegistryFailed);
+  const stationEditsBlockTransient = stationFeatureOn && stationRegistryState === "loading";
+  const discardStationEdits = () => {
+    setStationNew([]);
+    setStationMoves({});
+    setStationStatuses({});
+    setStationRetired([]);
+  };
+  // Latest new-pin/status state for the async /property-map resolution: a
+  // restore can land while the fetch is in flight, and the effect closure
+  // would reconcile the PRE-restore values (resurrecting state the restore
+  // replaced). The editor is disabled for the whole in-flight window, so
+  // the restore is the only writer this bridges.
+  const stationEditsRef = useRef({ stationNew: [], stationStatuses: {} });
+  stationEditsRef.current = { stationNew, stationStatuses };
+
+  // Default the rodent trapping "This visit" select, into whichever slice
+  // owns the rodent_trapping schema for this visit (primary findings vs. a
+  // companion section) — same primary/companion split the station auto-count
+  // effect uses. Only fills a BLANK field: a tech selection, or a restored
+  // draft, always wins.
+  const prefillTrapVisitType = (value) => {
+    const fill = (values) => (
+      String(values?.trap_visit_type || "").trim()
+        ? values
+        : { ...values, trap_visit_type: value }
+    );
+    if (service.completionProfile?.findingsType === "rodent_trapping") {
+      setFindingsValues((prev) => fill(prev));
+      return;
+    }
+    setCompanionState((prev) => {
+      const entry = prev.rodent_trapping || EMPTY_COMPANION_ENTRY;
+      const nextValues = fill(entry.values);
+      if (nextValues === entry.values) return prev;
+      return { ...prev, rodent_trapping: { ...entry, values: nextValues } };
+    });
+  };
 
   // Satellite basemap + the property's existing bait-station pins. The fetch
   // runs only when the station surface is on — the manual zone-mark step that
@@ -8884,12 +9295,31 @@ export function CompletionPanel({
   useEffect(() => {
     if (!stationFeatureOn || !service?.id) return undefined;
     let cancelled = false;
+    // Re-arm fail-closed for the WHOLE in-flight window, and drop the
+    // previous registry's rows before refetching. Without this a re-run
+    // (the panel switching service or program, or the flag toggling back
+    // on) left the surface marked "ready" with the OLD program's preloads
+    // still in state, so the submit guard could serialize stale station
+    // ids against the new one. `stationProgram` also has to be a dependency
+    // — the effect filters by it (codex P1 on the pre-push audit).
+    setStationRegistryState("loading");
+    setStationPreloads([]);
+    setStationNumberBase(1);
     adminFetch(`/admin/dispatch/${service.id}/property-map`)
       .then((res) => {
         if (cancelled) return;
         setPropertyMap(res || null);
-        if (!res?.available) return;
-        setStationPreloads((Array.isArray(res.stations) ? res.stations : [])
+        if (!res?.available) {
+          // Fail CLOSED (codex P2 round 13): an unavailable response leaves
+          // the registry unconfirmed, and a billing-detour draft restore
+          // may already hold station edits plus a zoneMapImageFallback ref
+          // that the submit path would serialize against a roster we could
+          // not reload.
+          setStationRegistryState("failed");
+          return;
+        }
+        setStationRegistryState(res.stationsLoaded === false ? "failed" : "ready");
+        const freshPreloads = (Array.isArray(res.stations) ? res.stations : [])
           .filter((station) => (station.program || "termite") === stationProgram)
           .map((station) => ({
             id: String(station.id),
@@ -8899,16 +9329,58 @@ export function CompletionPanel({
               ? station.geometryImage
               : null,
             stale: Boolean(station.staleMark),
-          })));
+          }));
+        setStationPreloads(freshPreloads);
+        // Draft pins restored while this fetch was in flight can collide
+        // with rows another writer confirmed since the draft was saved —
+        // same reconcile as the restore's ready path, via the latest-edits
+        // ref (the effect closure predates the restore).
+        if (res.stationsLoaded !== false) {
+          const reconciled = reconcileNewPinsWithRegistry({
+            ...stationEditsRef.current,
+            stationPreloads: freshPreloads,
+          });
+          if (reconciled.changed) {
+            setStationNew(reconciled.stationNew);
+            setStationStatuses(reconciled.stationStatuses);
+          }
+        }
         setStationNumberBase(
           Number(res.nextStationNumberByProgram?.[stationProgram])
           || Number(res.nextStationNumber)
           || 1,
         );
+        // Pre-select "is this a setup or a re-check?" from the property's
+        // own trap registry: no trap pins on record = the traps go out
+        // today. Done HERE, inside the resolved fetch, because an empty
+        // preload array before it lands is indistinguishable from a
+        // property with no traps. This is only a DEFAULT — the tech owns
+        // the field and an untouched-by-the-map property (traps predating
+        // the trap map) is exactly the case they override. Never
+        // overwrites a value already on the form.
+        //
+        // stationsLoaded false means the station query FAILED and the empty
+        // array is a fallback (the server converts that error into a
+        // successful payload). Inferring "Initial setup" from it would
+        // silently satisfy the required selector with the wrong value on a
+        // follow-up, and freeze "the traps were newly set" into the customer
+        // report (codex P2 on #3159). Leave it blank instead — the field is
+        // required, so a tech pick is the worst case, and a wrong default is
+        // strictly worse than one tap.
+        if (stationProgram === "trapping" && res.stationsLoaded !== false) {
+          const existingTraps = (Array.isArray(res.stations) ? res.stations : [])
+            .filter((station) => (station.program || "termite") === "trapping").length;
+          prefillTrapVisitType(existingTraps > 0 ? "Follow-up check" : "Initial setup");
+        }
       })
-      .catch(() => { if (!cancelled) setPropertyMap(null); });
+      .catch(() => {
+        if (cancelled) return;
+        setPropertyMap(null);
+        // Same fail-closed rule as the available:false branch above.
+        setStationRegistryState("failed");
+      });
     return () => { cancelled = true; };
-  }, [stationFeatureOn, service?.id]);
+  }, [stationFeatureOn, service?.id, stationProgram]);
 
   // Existing traced treatment zone for this visit — its measured linear feet
   // prefill the perimeter-spray Linear ft inputs (see addProduct /
@@ -8937,6 +9409,20 @@ export function CompletionPanel({
   // overlay preloaded shapes; retired stations drop from display but submit
   // a retire intent; new pins get provisional numbers from the server's
   // nextStationNumber base so what the tech sees matches what persists.
+  // The failed-registry NOTE only renders when something is actually at
+  // stake: a live map whose station query failed, or restored draft edits a
+  // rejected/unavailable refetch left unconfirmed. A property that simply
+  // has no map yet fails closed silently — there is no editor and nothing
+  // to submit, so an orange warning on every mapless completion is noise.
+  // The note is a FAILURE message, so the in-flight window never shows it —
+  // that state is transient and the editor simply stays inert until the
+  // fetch settles.
+  const stationRegistryNoteVisible = stationRegistryState === "failed"
+    && (propertyMap?.available === true || stationPreloads.length > 0 || stationNew.length > 0
+      // Restored moves/statuses/retirements block completion even when the
+      // rejected refetch left no roster to display them against — the note
+      // is where the discard escape hatch lives, so it must show.
+      || stationEditsPending);
   const stationDisplay = stationFeatureOn
     ? [
       ...stationPreloads
@@ -9106,6 +9592,19 @@ export function CompletionPanel({
     ),
   );
   const [findingsValues, setFindingsValues] = useState({});
+  // The trapping section — primary OR companion, `trap_visit_type` can
+  // live in either — declares this visit as the initial trap setup. ONE
+  // source for the serviced-pin rules: the handleSubmit mirror of the
+  // server's rejection, and the editor hiding the "Serviced" chip so the
+  // conflict can't be created by tap in the first place (codex P2 r18).
+  const declaresTrapSetup = [
+    findingsValues,
+    ...companionSchemas.map(
+      (schema) => (companionState[schema.type] || EMPTY_COMPANION_ENTRY).values,
+    ),
+  ].some(
+    (values) => String(values?.trap_visit_type ?? "").trim() === "Initial setup",
+  );
   const [typedActivityScore, setTypedActivityScore] = useState(null);
   // Pin semantics (contract §4): while untouched, the score recomputes from
   // deriveScores[values[deriveField]]; the FIRST tap on the picker pins
@@ -9306,6 +9805,14 @@ export function CompletionPanel({
   // profile did not resolve (codex P2 r8).
   const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
     || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
+  // Rodent trapping skips the spray tracer for the same reason bed bug does:
+  // nothing is sprayed on a trapping stop, so "Trace where we sprayed" has
+  // nothing to trace and a spray outline on the report would be a claim the
+  // visit can't support (owner 2026-08-02). The trap map below owns this
+  // visit's spatial story. PRIMARY flow only — a trapping COMPANION riding a
+  // pest visit keeps the tracer, because that visit really did spray.
+  const isRodentTrappingVisit =
+    service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
@@ -10298,7 +10805,6 @@ export function CompletionPanel({
         && typeof station.key === "string"
         && station.shape && typeof station.shape === "object")
       : [];
-    setStationNew(restoredStationNew);
     // keep the key sequence ahead of restored pins so a new add can't
     // collide with a restored key
     stationNewSeqRef.current = restoredStationNew.reduce((max, station) => {
@@ -10310,25 +10816,52 @@ export function CompletionPanel({
         ? savedDraft.stationMoves
         : {},
     );
-    setStationStatuses(
-      savedDraft.stationStatuses && typeof savedDraft.stationStatuses === "object"
-        ? savedDraft.stationStatuses
-        : {},
-    );
+    const restoredStatuses = savedDraft.stationStatuses && typeof savedDraft.stationStatuses === "object"
+      ? savedDraft.stationStatuses
+      : {};
+    // Against a CONFIRMED registry, a restored pin can collide with a row
+    // another writer added at the same position while the draft waited —
+    // the server dedupes that create onto the existing row, so displaying
+    // and auto-counting both here records one station while the frozen
+    // count says two (codex P1 r18). Reconcile before setting; the
+    // unconfirmed path keeps the raw restore and reconciles when the
+    // fetch resolves (see the /property-map effect).
+    if (stationRegistryState === "ready") {
+      const reconciled = reconcileNewPinsWithRegistry({
+        stationNew: restoredStationNew,
+        stationPreloads,
+        stationStatuses: restoredStatuses,
+      });
+      setStationNew(reconciled.stationNew);
+      setStationStatuses(reconciled.stationStatuses);
+    } else {
+      setStationNew(restoredStationNew);
+      setStationStatuses(restoredStatuses);
+    }
     setStationRetired(
       Array.isArray(savedDraft.stationRetired) ? savedDraft.stationRetired : [],
     );
     // Bridge until the /property-map refetch resolves — submit iterates
     // preloads, so restored existing-station edits need their rows present.
     // The live fetch overwrites these with fresh (drift-resolved) data.
-    setStationPreloads(
-      Array.isArray(savedDraft.stationPreloads)
-        ? savedDraft.stationPreloads.filter((station) => station
-          && typeof station.id === "string" && station.id)
-        : [],
-    );
-    if (Number.isFinite(Number(savedDraft.stationNumberBase)) && Number(savedDraft.stationNumberBase) >= 1) {
-      setStationNumberBase(Number(savedDraft.stationNumberBase));
+    // ONLY while the registry is unconfirmed: when the fetch resolved
+    // BEFORE the operator clicked Restore, the confirmed roster stays and
+    // the restored edit intents overlay it by id — replacing it with the
+    // draft's older rows re-submitted stations retired since the draft,
+    // skipped this visit's check on stations added since, and recomputed
+    // auto-counts from the stale roster, with nothing triggering another
+    // fetch (codex P1 r17). An intent whose id no longer exists simply
+    // doesn't render or submit, the safe direction.
+    if (stationRegistryState !== "ready") {
+      setStationPreloads(
+        Array.isArray(savedDraft.stationPreloads)
+          ? savedDraft.stationPreloads.filter((station) => station
+            && typeof station.id === "string" && station.id)
+          : [],
+      );
+      if (Number.isFinite(Number(savedDraft.stationNumberBase)) && Number(savedDraft.stationNumberBase) >= 1) {
+        setStationNumberBase(Number(savedDraft.stationNumberBase));
+      }
     }
     setCustomerInteraction(
       normalizeCustomerInteractionValue(savedDraft.customerInteraction),
@@ -11196,13 +11729,26 @@ export function CompletionPanel({
     setTypedPhotoSummary("");
   }
 
-  async function handleSubmit() {
+  async function handleSubmit(reconcileConfirmed = false) {
     if (submitting) return;
     // Don't complete while an AI draft is in flight — the response is about to
     // replace the notes, and submitting now would either lose the generated copy
     // or rebuild the structured fields from soon-to-be-overwritten notes.
     if (generating) {
       alert("Hang on — finishing the AI draft. Try again in a moment.");
+      return;
+    }
+    // A billing-detour draft can restore station pins, moves, statuses, and
+    // retirements while the registry request is still loading or failed.
+    // The completion payload posts no station entries in that state, and a
+    // successful submit clears the draft those edits were restored from —
+    // silently deleting the tech's work (pre-push P0). Fail closed until
+    // the registry confirms, or the tech explicitly discards the edits via
+    // the registry note.
+    if (stationEditsBlocked) {
+      alert(stationEditsBlockTransient
+        ? "Hang on — confirming the existing trap/station map. Try again in a moment."
+        : "The trap/station map isn't available for this completion, so it can't save the map edits restored from your draft. Discard them from the station section, or reload to retry.");
       return;
     }
     // WaveGuard lawn: the compliance advisories come from the plan request —
@@ -11361,6 +11907,32 @@ export function CompletionPanel({
         completionTelemetryRef.current.requiredFieldErrorCount += 1;
         alert(
           `Fix the findings before submitting: ${fieldConflicts.join("; ")}.`,
+        );
+        return;
+      }
+    }
+    // A declared trap SETUP cannot carry serviced pins — the map relabels
+    // `ok` to "Set this visit" but leaves `serviced` saying "Serviced this
+    // visit", so the frozen report would contradict its own stage (codex
+    // P1). Mirrors the server's rejection so the tech gets the inline
+    // prompt instead of a 422. Checked across the primary AND companion
+    // sections, since `trap_visit_type` can live in either.
+    // Trapping program only — a combined profile can resolve to the
+    // termite/rodent bait program while a trapping companion declares a
+    // setup, and a legitimate serviced BAIT-STATION pin must not be blocked
+    // (codex P1). Mirrors the server's scoping exactly.
+    if (stationFeatureOn && stationProgram === "trapping" && !isIncompleteVisit) {
+      // declaresTrapSetup is the hoisted component-level source — the same
+      // value hides the "Serviced" chip in the editor (codex P2 r18).
+      if (
+        declaresTrapSetup &&
+        stationDisplay.some(
+          (station) => (stationStatuses[station.key] || "ok") === "serviced",
+        )
+      ) {
+        completionTelemetryRef.current.requiredFieldErrorCount += 1;
+        alert(
+          'A trap marked "Serviced" contradicts an initial setup — the traps went out on this visit. Clear the serviced mark, or set this visit to "Follow-up check".',
         );
         return;
       }
@@ -11561,6 +12133,9 @@ export function CompletionPanel({
       const body = {
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
+        // Set only on the resubmit after the tech OK'd the reconciliation
+        // prompt — the server then skips the 409 and completes.
+        ...(reconcileConfirmed ? { reportReconcileConfirmed: true } : {}),
         // customerRecap is intentionally NOT sent: the report summary is generated
         // server-side from the technician notes (there's no recap editor here).
         // Sending a hidden/restored stale draft would bypass that and become
@@ -11636,7 +12211,11 @@ export function CompletionPanel({
         // pin must not restamp its drift ref with today's image params);
         // creates go last so server numbering (payload order) matches the
         // provisional numbers the tech saw.
-        ...(stationFeatureOn
+        // A failed station registry (stationsLoaded false) posts NOTHING:
+        // the editor is disabled, but the submit guard is the boundary that
+        // matters — a status-only entry against a fallback roster would
+        // still mint check rows the visit's map cannot show (codex P2 r12).
+        ...(stationFeatureOn && !stationRegistryFailed
           ? (() => {
             const image = (propertyMap?.available && propertyMap.image) || zoneMapImageFallback;
             const ref = image
@@ -11837,6 +12416,17 @@ export function CompletionPanel({
     } catch (e) {
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
+      }
+      // Reconciliation prompt (409, key preserved): the tech either
+      // confirms — one resubmit with the flag set — or goes back to fix
+      // the typed fields / regenerate the AI report.
+      const reconcileText = completionReconcilePrompt(e);
+      if (reconcileText) {
+        setSubmitting(false);
+        if (window.confirm(reconcileText)) {
+          return handleSubmit(true);
+        }
+        return;
       }
       if (e?.code === "backfill_invoice_mint_failed") {
         // The closeout committed but its REQUIRED invoice didn't mint. Mark
@@ -13082,8 +13672,11 @@ export function CompletionPanel({
             {/* Interior-only treatments (bed bug) skip the tracer: it is a
                 SATELLITE perimeter tool, and an exterior spray outline on an
                 interior treatment's report would be wrong. Photos carry the
-                visual story; a room-level interior marker is its own lane. */}
-            {!quickComplete && !isBedBugVisit && (
+                visual story; a room-level interior marker is its own lane.
+                Rodent trapping skips it too — nothing is sprayed on a trapping
+                stop, and the trap map below is that visit's spatial story
+                (owner 2026-08-02). */}
+            {!quickComplete && !isBedBugVisit && !isRodentTrappingVisit && (
               <Field label="Treatment zone map">
                 <button
                   type="button"
@@ -13288,8 +13881,37 @@ export function CompletionPanel({
                 onRemoveStation={removeStationPin}
                 program={stationProgram || "termite"}
                 maxStations={Number(propertyMap?.stationCap) || 80}
-                disabled={generating || success}
+                disallowServiced={stationProgram === "trapping" && declaresTrapSetup}
+                disabled={generating || success || stationRegistryFailed}
               />
+            )}
+            {((stationEditsBlocked && !stationEditsBlockTransient)
+              || (stationFeatureOn && stationRegistryNoteVisible)) && (
+              <div style={{ fontSize: 14, color: "#b45309", marginTop: 6 }}>
+                {stationEditsBlocked ? (
+                  <>
+                    Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
+                    be confirmed for this completion, so the map edits restored from your draft
+                    can&apos;t be saved with it. Reload to retry, or discard them to complete without.{" "}
+                    <button
+                      type="button"
+                      onClick={discardStationEdits}
+                      style={{
+                        fontSize: 14, textDecoration: "underline", background: "none",
+                        border: "none", padding: 0, color: "inherit", cursor: "pointer",
+                      }}
+                    >
+                      Discard {stationProgram === "trapping" ? "trap" : "station"} edits
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
+                    be loaded, so marking is unavailable for this completion. Complete the visit
+                    normally — the registry is unchanged.
+                  </>
+                )}
+              </div>
             )}
             {/* Service findings — typed specialty completion */}
             {isTypedFindings && (
@@ -15268,8 +15890,37 @@ export function CompletionPanel({
               program={stationProgram || "termite"}
               maxStations={Number(propertyMap?.stationCap) || 80}
               dark
-              disabled={generating || success}
+              disallowServiced={stationProgram === "trapping" && declaresTrapSetup}
+              disabled={generating || success || stationRegistryFailed}
             />
+          )}
+          {((stationEditsBlocked && !stationEditsBlockTransient)
+            || (stationFeatureOn && stationRegistryNoteVisible)) && (
+            <div style={{ fontSize: 14, color: "#fbbf24", marginTop: 6 }}>
+              {stationEditsBlocked ? (
+                <>
+                  Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
+                  be confirmed for this completion, so the map edits restored from your draft
+                  can&apos;t be saved with it. Reload to retry, or discard them to complete without.{" "}
+                  <button
+                    type="button"
+                    onClick={discardStationEdits}
+                    style={{
+                      fontSize: 14, textDecoration: "underline", background: "none",
+                      border: "none", padding: 0, color: "inherit", cursor: "pointer",
+                    }}
+                  >
+                    Discard {stationProgram === "trapping" ? "trap" : "station"} edits
+                  </button>
+                </>
+              ) : (
+                <>
+                  Existing {stationProgram === "trapping" ? "traps" : "stations"} couldn&apos;t
+                  be loaded, so marking is unavailable for this completion. Complete the visit
+                  normally — the registry is unchanged.
+                </>
+              )}
+            </div>
           )}
           {/* Service findings — typed specialty completion */}
           {isTypedFindings && (

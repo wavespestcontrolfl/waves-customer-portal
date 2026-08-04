@@ -61,7 +61,7 @@ const PLAN_STATUS_LABELS = {
 };
 const PLAN_INTRO_SUFFIX = 'Colors reflect the most recent check.';
 
-function stationStatusMeta(status, programMeta, plan = false) {
+function stationStatusMeta(status, programMeta, plan = false, initialSetup = false) {
   const base = STATION_STATUS_META[status] || STATION_ON_FILE_META;
   if (plan && PLAN_STATUS_LABELS[status]) return { ...base, label: PLAN_STATUS_LABELS[status] };
   if (status === 'activity') return { ...base, label: programMeta.activityLegend };
@@ -69,15 +69,32 @@ function stationStatusMeta(status, programMeta, plan = false) {
     return { ...base, label: 'Checked — no consumption' };
   }
   if (status === 'ok' && programMeta === STATION_CARD_PROGRAM_META.trapping) {
-    return { ...base, label: 'Checked — no capture' };
+    // On a declared trap SETUP the pins went out on this visit — "Checked —
+    // no capture" would claim a check that never happened, and contradict
+    // the same report's "Traps set" finding (codex P1 on #3159).
+    return { ...base, label: initialSetup ? 'Set this visit' : 'Checked — no capture' };
   }
   return base;
 }
 
-function stationSummaryLine(summary, programMeta) {
+function stationSummaryLine(summary, programMeta, initialSetup = false, countVerified = true) {
   if (!summary || !summary.total) return null;
+  // On a declared setup whose count the report disputes, the pin LABELS stay
+  // setup-correct but this line says nothing — it is the only place the map
+  // restates the number, and restating a number that disagrees with the
+  // typed finding is the contradiction being avoided (codex P2 round 9).
+  if (initialSetup && !countVerified) return null;
   const parts = [];
-  if (summary.checked > 0) {
+  // Same rule as the pin label: traps placed today were SET, not inspected.
+  // Counts the ACCESSIBLE pins, not every pin — `checked` excludes
+  // inaccessible ones, which is the same exclusion the closeout's
+  // traps_checked autofill applies. Using `total` here made the map say
+  // "8 traps set this visit · 1 not accessible" beside a typed
+  // "Traps set: 7" (codex P2 on #3159).
+  if (initialSetup) {
+    const set = summary.checked;
+    parts.push(`${set} trap${set === 1 ? '' : 's'} set this visit`);
+  } else if (summary.checked > 0) {
     parts.push(`${summary.checked} of ${summary.total} station${summary.total === 1 ? '' : 's'} inspected`);
   } else {
     parts.push(`${summary.total} station${summary.total === 1 ? '' : 's'} on file`);
@@ -267,20 +284,34 @@ const TRAP_PIN_STYLES = `
 export function StationMapCard({ stationMap, sectionId = 'station-map', variant = 'report', hideTitle = false, trapPins = false, animate = false }) {
   const stations = Array.isArray(stationMap?.stations) ? stationMap.stations : [];
   const useTrapPins = trapPins && stationMap?.program === 'trapping' && variant !== 'plan';
+  // A declared trap SETUP is a per-VISIT fact, so it never applies to the
+  // 'plan' variant (that embed aggregates the latest check across visits).
+  const initialSetup = variant !== 'plan' && stationMap?.initialSetup === true;
   // Hook runs unconditionally (Rules of Hooks) — it self-disables when the
   // card won't render, animation is off, no trap is armed, or reduced
   // motion is requested.
+  //
+  // A SETUP map is excluded outright (codex P2 round 15): its pins carry
+  // the same 'ok' status an armed trap does, but the setup labels relabel
+  // that status "Set this visit" — nothing has been checked yet — so a rat
+  // scurrying in and springing one contradicts the stage the report just
+  // declared.
   const ratRun = useAmbientRatCycle(
-    useTrapPins && animate && !!stationMap?.available && !!stationMap?.image?.url,
+    useTrapPins && animate && !initialSetup && !!stationMap?.available && !!stationMap?.image?.url,
     eligibleTrapIndices(stations),
   );
   if (!stationMap?.available || !stations.length || !stationMap.image?.url) return null;
   const plan = variant === 'plan';
   const programMeta = STATION_CARD_PROGRAM_META[stationMap.program] || STATION_CARD_PROGRAM_META.termite;
   const onFileMeta = plan ? PLAN_ON_FILE_META : STATION_ON_FILE_META;
+  // Absent (older payloads) means "no dispute recorded" — only an explicit
+  // false suppresses the count line.
+  const setupCountVerified = stationMap.setupCountVerified !== false;
   const intro = plan
     ? programMeta.intro.replace('Colors reflect this visit.', PLAN_INTRO_SUFFIX)
-    : programMeta.intro;
+    : (initialSetup
+      ? 'Numbered pins show where the traps went out on this visit. We check them and adjust placements from here.'
+      : programMeta.intro);
   const width = stationMap.image.width || 640;
   const height = stationMap.image.height || 340;
   const legendKeys = [];
@@ -290,8 +321,8 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
   });
   const legend = legendKeys.map((key) => (key === 'on_file'
     ? { key, ...onFileMeta }
-    : { key, ...stationStatusMeta(key, programMeta, plan) }));
-  const summaryLine = stationSummaryLine(stationMap.summary, programMeta);
+    : { key, ...stationStatusMeta(key, programMeta, plan, initialSetup) }));
+  const summaryLine = stationSummaryLine(stationMap.summary, programMeta, initialSetup, setupCountVerified);
   const mutedColor = plan ? '#475569' : 'var(--muted)';
   const lineColor = plan ? '#E7E2D7' : 'var(--line)';
   const Wrapper = plan ? 'div' : 'section';
@@ -319,7 +350,7 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
           {useTrapPins && <style>{TRAP_PIN_STYLES}</style>}
           {stations.map((station, index) => {
             const meta = STATION_STATUS_META[station.status]
-              ? stationStatusMeta(station.status, programMeta, plan)
+              ? stationStatusMeta(station.status, programMeta, plan, initialSetup)
               : onFileMeta;
             const cx = station.cx * width;
             const cy = station.cy * height;

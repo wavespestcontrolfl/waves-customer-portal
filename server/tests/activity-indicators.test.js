@@ -544,6 +544,9 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
   const V2_VALUES = {
     species: 'Roof rat',
     evidence_observed: 'Droppings, Gnaw marks, Noises reported by customer',
+    // Required alongside species since #3159 — traps reset with captures is
+    // a re-check by definition.
+    trap_visit_type: 'Follow-up check',
     traps_checked: '8',
     captures: '2',
     trap_actions: 'Traps reset, Bait/lure refreshed, Exterior inspection completed',
@@ -583,7 +586,7 @@ describe('rodent trapping sectioned checklist (schema v2)', () => {
     }
     const zero = validateTypedFindings({
       type: 'rodent_trapping',
-      values: { species: 'Roof rat', captures: '0' },
+      values: { species: 'Roof rat', trap_visit_type: 'Follow-up check', captures: '0' },
       expectedType: 'rodent_trapping',
       enforceRequired: true,
     });

@@ -219,7 +219,9 @@ describe('typed snapshot — technician report body in the generic tail composit
     expect(snapshot.todaysResult.headline).toBe('Pest Control Re-Service completed today');
     expect(snapshot.todaysResult.body).toBe(`${AI_BODY} ${chipSentence}`);
     expect(snapshot.todaysResult.bodySource).toBe('technician_report');
-    expect(snapshot.summaryTemplateVersion).toBe(3);
+    // v4: rodent trapping joined the technician-report lane and gained the
+    // declared setup/re-check composition (#3159).
+    expect(snapshot.summaryTemplateVersion).toBe(4);
   });
 
   test('one-time pest zero state keeps the template body — a body drafted pre-zero-flip must not contradict the headline (Codex P2)', () => {
