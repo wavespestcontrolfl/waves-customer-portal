@@ -1654,6 +1654,18 @@ async function cancelAppointment(input) {
     throw err;
   }
 
+  // Void any still-open pre-minted invoice and reverse the inspection
+  // credit IMMEDIATELY (Codex #3178 r21 P1) — the shared money seam every
+  // other cancel surface runs (the reversal rides the void helper's
+  // finally); without it a credited booking cancelled from the
+  // Intelligence Bar left the $75 spendable until the hourly sweep.
+  // Best-effort after the committed transition, same as the status routes.
+  try {
+    await require('../invoice').voidOpenInvoicesForCancelledService(appointment_id);
+  } catch (e) {
+    logger.error(`[intelligence-bar] cancel invoice void sweep failed for ${appointment_id}: ${e.message}`);
+  }
+
   const customer = await db('customers').where('id', appt.customer_id).first();
 
   logger.info(`[intelligence-bar] Cancelled appointment ${appointment_id}`);

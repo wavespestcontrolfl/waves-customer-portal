@@ -163,6 +163,9 @@ async function recordInspectionCreditOffer({
   serviceRecordId = null,
   serviceKey = null,
   amount = null,
+  // Explicit window override — recovery passes the days frozen at closeout
+  // so a config change can't move a promise already made (r21 P2).
+  windowDays: explicitWindowDays = null,
   createdBy = 'system:inspection_closeout',
   // The real moment the promise was made — the ordering boundary every
   // redemption guard compares against.
@@ -184,7 +187,9 @@ async function recordInspectionCreditOffer({
     return { recorded: false, reason: 'no_credit_amount' };
   }
 
-  const windowDays = creditWindowDaysForServiceKey(serviceKey);
+  const windowDays = Number(explicitWindowDays) > 0
+    ? Math.round(Number(explicitWindowDays))
+    : creditWindowDaysForServiceKey(serviceKey);
   // END OF THE ET DAY, not now + N×24h (Codex #3178 r2 P0): the receipt
   // prints a calendar deadline ("book by September 2"), so a booking made
   // that afternoon must still qualify. Fixed 24-hour periods from a
@@ -614,13 +619,25 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         .select('s.id as id', 's.customer_id as customer_id', 's.service_id as service_id',
           'r.id as record_id', 'r.service_date as service_date',
           // The CLOSEOUT instant — the real moment the promise was made.
-          'r.created_at as closed_out_at');
+          'r.created_at as closed_out_at',
+          // The TERMS frozen with the consent marker (Codex #3178 r21 P2).
+          db.raw("r.service_data->'inspectionCreditTerms' as frozen_terms"));
       for (const visit of missing) {
         let serviceKey = null;
         try {
           const svcRow = await db('services').where({ id: visit.service_id }).first('service_key');
           serviceKey = svcRow?.service_key || null;
         } catch { serviceKey = null; }
+        // The terms the CLOSEOUT froze with the marker (Codex #3178 r21
+        // P2): pricing config can change between the failed insert and this
+        // recovery, and the customer was promised the closeout's amount and
+        // window — never the newly configured ones. Absent (pre-terms
+        // markers), the configured values remain the only source.
+        let frozenTerms = null;
+        try {
+          frozenTerms = typeof visit.frozen_terms === 'string'
+            ? JSON.parse(visit.frozen_terms) : (visit.frozen_terms || null);
+        } catch { frozenTerms = null; }
         // Frozen from the SERVICE DATE — the customer's window started when
         // the inspection happened, not when recovery ran.
         const created = await recordInspectionCreditOffer({
@@ -628,6 +645,8 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           scheduledServiceId: visit.id,
           serviceRecordId: visit.record_id,
           serviceKey,
+          ...(Number(frozenTerms?.amount) > 0 ? { amount: Number(frozenTerms.amount) } : {}),
+          ...(Number(frozenTerms?.windowDays) > 0 ? { windowDays: Number(frozenTerms.windowDays) } : {}),
           createdBy: 'system:inspection_credit_recovery',
           // The promise moment is the CLOSEOUT instant (Codex #3178 r8
           // P0). Passing the service date here backdated created_at to noon
@@ -959,9 +978,21 @@ async function reverseInspectionCreditForBooking({
         }
         await db.transaction(async (trx) => {
           // Claim the reversal first: status-guarded so two cancellations
-          // can't both give the money back.
+          // can't both give the money back — and bound to the LIFECYCLE this
+          // sweep actually read (Codex #3178 r21 P1): a delayed attempt can
+          // straddle a reverse-then-re-redeem by another worker, and an
+          // id+status guard alone would then reverse the NEW booking's
+          // credit while that booking is still live. The claim requires the
+          // offer to still be bound to THIS cancelled booking and to the
+          // ledger entry read at the top; any concurrent transition makes
+          // it a silent claim_lost.
           const claimed = await trx('inspection_credit_offers')
-            .where({ id: offer.id, status: 'redeemed' })
+            .where({
+              id: offer.id,
+              status: 'redeemed',
+              redeemed_scheduled_service_id: scheduledServiceId,
+              credit_ledger_id: offer.credit_ledger_id,
+            })
             .update({
               // Reopens ONLY while the original window still stands; a
               // lapsed one closes out instead of dangling.

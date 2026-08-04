@@ -5482,7 +5482,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               && visitOutcome === 'completed'
               && String(completionProfile?.category || '') === 'inspection'
               && require('../config/feature-gates').isEnabled('inspectionCredit')
-              ? { inspectionCreditOptIn: true }
+              ? {
+                inspectionCreditOptIn: true,
+                // The TERMS the promise was made under, frozen WITH the
+                // consent marker (Codex #3178 r21 P2): if the offer insert
+                // fails and pricing config changes before the hourly
+                // recovery runs, the customer must still receive the
+                // closeout's amount and window — never the newly
+                // configured ones. Recovery passes these through.
+                inspectionCreditTerms: (() => {
+                  const InspectionCredit = require('../services/inspection-credit');
+                  return {
+                    amount: InspectionCredit.configuredCreditAmount(),
+                    windowDays: InspectionCredit.creditWindowDaysForServiceKey(completionProfile?.serviceKey || null),
+                  };
+                })(),
+              }
               : {}),
           };
           // Typed specialty completion: resolve trend vs the customer's prior

@@ -1723,6 +1723,13 @@ async function loadProjectCompletionContextByServiceId(services) {
       });
     return [service.id, {
       completionProfile,
+      // Whether the inspection-credit lane is live — Dispatch V2 completes
+      // from THIS endpoint's payload, and the closeout panel renders its
+      // promise checkbox only on true (Codex #3178 r21 P1): without the
+      // field here the toggle never rendered, submission fell back to
+      // default-true, and the tech could not clear the $75 promise from
+      // the actual completion UI. Mirrors /admin/dispatch/:date.
+      inspectionCreditAvailable: require('../config/feature-gates').isEnabled('inspectionCredit'),
       // Typed-findings schema embedded alongside the profile so the
       // CompletionPanel (fed by this endpoint on desktop AND mobile) can
       // render the typed form without a registry round-trip. Null for
@@ -2113,6 +2120,9 @@ router.get('/', async (req, res, next) => {
         // even when the visit itself resolves self-pay.
         checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
         completionProfile: projectCompletionContext.completionProfile || null,
+        // Dispatch V2 completes from this payload — the closeout promise
+        // checkbox renders only on true (Codex #3178 r21 P1).
+        inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
         linkedProject: projectCompletionContext.linkedProject || null,
@@ -2504,6 +2514,8 @@ router.get('/week', async (req, res, next) => {
           // Same invoice-level Bill-To flag as the day payload (see there).
           checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
           completionProfile: projectCompletionContext.completionProfile || null,
+          // Same field as the day view above — both feed the V2 closeout.
+          inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
           linkedProject: projectCompletionContext.linkedProject || null,

@@ -125,6 +125,19 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
     expect(res.amount).toBe(75);
   });
 
+  it('honors terms frozen at closeout over the current configuration (r21 P2)', async () => {
+    // Recovery passes the amount and window the CLOSEOUT froze with its
+    // consent marker — a pricing-config change between the failed insert
+    // and the recovery pass must not change the promise the customer got.
+    const res = await recordInspectionCreditOffer({
+      customerId: 'cust-1', scheduledServiceId: 'svc-1',
+      amount: 60, windowDays: 21, now: new Date('2026-08-03T12:00:00Z'),
+    });
+    expect(res.recorded).toBe(true);
+    expect(res.amount).toBe(60);
+    expect(res.windowDays).toBe(21);
+  });
+
   it('freezes the amount and expiry, and mints NOTHING at closeout', async () => {
     const now = new Date('2026-08-03T12:00:00Z');
     const res = await recordInspectionCreditOffer({
