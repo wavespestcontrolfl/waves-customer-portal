@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, MembershipCard, OneTimeBreakdownCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -1508,60 +1508,11 @@ describe('ServiceSection — details-packet preview parity', () => {
   });
 });
 
-describe('MembershipCard — member savings live in the price block, not a separate list (owner 2026-08-04)', () => {
-  const membership = (overrides = {}) => ({
-    isExistingCustomer: true,
-    firstName: 'Jordan',
-    tier: 'gold',
-    tierLabel: 'Gold',
-    tierDiscountPct: 15,
-    discountAppliesTo: 'new_services_only',
-    existingServiceKeys: ['pest_control', 'lawn_care'],
-    upgrade: null,
-    existingServices: [],
-    newServices: [
-      { key: 'mosquito', label: 'Mosquito', discountPct: 15, monthlySavings: 13, perApplicationSavings: 13 },
-    ],
-    ...overrides,
-  });
-  const upgrade = {
-    fromLabel: 'Silver', toLabel: 'Gold', deltaPct: 5, addedServiceLabels: ['Mosquito'],
-  };
-
-  it('renders no per-service savings rows — those dollars are itemized in each price block', () => {
-    render(<MembershipCard membership={membership({ upgrade })} />);
-
-    expect(screen.queryByText('This estimate')).toBeNull();
-    expect(screen.queryByText(/member discount/i)).toBeNull();
-    expect(screen.queryByText(/save \$13\.00 per application/)).toBeNull();
-  });
-
-  it('keeps the welcome, the tier badge, and the upgrade story', () => {
-    render(<MembershipCard membership={membership({ upgrade })} />);
-
-    expect(screen.getByText('Welcome back, Jordan')).toBeInTheDocument();
-    expect(screen.getByText('WaveGuard Gold')).toBeInTheDocument();
-    expect(screen.getByText(/member pricing is already applied/)).toBeInTheDocument();
-    expect(screen.getByText(/bumps your membership from/)).toBeInTheDocument();
-    expect(screen.getByText(/discounts the new services by up to 15%/)).toBeInTheDocument();
-  });
-
-  it('skips the card entirely when new-service savings were its only content', () => {
-    // No upgrade story, no legacy existing-service rows: everything this card
-    // used to say now lives in the section price blocks + corner badges.
-    const { container } = render(<MembershipCard membership={membership()} />);
-
-    expect(container.firstChild).toBeNull();
-  });
-
-  it('still renders legacy existing-service rows — services not priced on this estimate', () => {
-    render(<MembershipCard membership={membership({
-      existingServices: [
-        { key: 'lawn_care', label: 'Lawn Care', extraDiscountPct: 5, perVisitSavings: 8.2, remainingVisits: 3, prepaid: false },
-      ],
-    })} />);
-
-    expect(screen.getByText('Your existing services')).toBeInTheDocument();
-    expect(screen.getByText(/\+5% off · save \$8\.20 per application on your 3 remaining applications/)).toBeInTheDocument();
+describe('membership card retired (owner 2026-08-04)', () => {
+  it('exports no MembershipCard — a member estimate is price → picker → approve, savings in the price block', async () => {
+    // The member card is gone entirely; if someone reintroduces the export,
+    // this fails and points them at the in-price savings stack instead.
+    const page = await import('./EstimateViewPage');
+    expect(page.MembershipCard).toBeUndefined();
   });
 });

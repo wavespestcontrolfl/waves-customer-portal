@@ -1050,113 +1050,15 @@ function WaveGuardIntelligenceCard({ intelligence, address, copy, showYourWork =
   );
 }
 
-// Existing-customer WaveGuard membership benefits. Rendered only when the
-// estimate is linked to an active customer (server returns estimate.membership).
-// Display/transparency only — warm tone, matches the customer-facing brief.
-// The per-service "This estimate" savings rows are GONE (owner 2026-08-04,
-// same ruling as the discounts on 2026-08-03): a current member's savings
-// render inside each service section's price block — struck-through anchor +
-// itemized "WaveGuard {tier} Discount" row — never as a separate green list.
-// The card keeps only what the price blocks can't carry: the welcome, the
-// tier badge, the tier-upgrade story, and (legacy snapshots only) the
-// existing-services rows, which describe services that are not priced on
-// this estimate at all. The legacy SSR renderMembershipBlockHtml keeps its
-// old rows — the v1 page has no in-price savings stack to hand them to.
-export function MembershipCard({ membership }) {
-  if (!membership || !membership.isExistingCustomer) return null;
-  const money = fmtMoney; // shared formatter (audit 2026-07-06)
-  const TIER_COLORS = {
-    bronze: { bg: '#F3E7D8', fg: '#8A5A21' },
-    silver: { bg: '#ECEEF1', fg: '#525B66' },
-    gold: { bg: '#FBF1D6', fg: '#8A6A12' },
-    platinum: { bg: '#EDEFF2', fg: '#2B3340' },
-  };
-  const tc = TIER_COLORS[membership.tier] || TIER_COLORS.bronze;
-  // Bronze (0% tier discount) has no member benefits to show, so the card
-  // gates on the snapshot's combined tier — the tier that priced this
-  // estimate. Legacy snapshots without tierDiscountPct fall through to the
-  // remaining content checks.
-  if (membership.tierDiscountPct != null && !(Number(membership.tierDiscountPct) > 0)) return null;
-  const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
-    .filter((s) => Number(s.extraDiscountPct) > 0);
-  // With the new-service savings itemized in the price blocks, a card with no
-  // upgrade story and no legacy existing-service rows has nothing left to say
-  // — skip it. Each eligible section's corner badge still names the tier.
-  if (!membership.upgrade && existing.length === 0) return null;
-  const hello = membership.firstName ? `Welcome back, ${membership.firstName}` : 'Welcome back';
-
-  const rowStyle = {
-    display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12,
-    background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`, borderRadius: 10, padding: '12px 12px',
-  };
-  const sectionTitle = {
-    fontSize: 14, color: ESTIMATE_MUTED, textTransform: 'uppercase', letterSpacing: '0.08em', fontWeight: 700,
-  };
-  const labelStyle = { color: ESTIMATE_TEXT, fontWeight: 600, fontSize: 15 };
-  // Navy, not green (owner 2026-08-01 ruling, extended here 2026-08-04): the
-  // customer surface is a navy/gold system — savings figures take the price's
-  // own color rather than reading as a separate green callout.
-  const valStyle = { color: W.blueDeeper, fontSize: 14, fontWeight: 600, textAlign: 'right' };
-
-  return (
-    <section style={{ ...estimateCard(), display: 'grid', gap: 16 }}>
-      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
-        <div style={{ minWidth: 0 }}>
-          <h2 style={{ fontFamily: FONTS.serif, fontSize: 24, fontWeight: 500, lineHeight: 1.2, color: ESTIMATE_TEXT, margin: 0 }}>
-            {hello}
-          </h2>
-          <p style={{ margin: '8px 0 0', color: '#3F4A65', fontSize: 14, lineHeight: 1.5 }}>
-            Your WaveGuard member pricing is already applied to this estimate.
-          </p>
-        </div>
-        <span style={{
-          flex: 'none', alignSelf: 'flex-start', padding: '8px 12px', borderRadius: 999,
-          background: tc.bg, color: tc.fg, fontSize: 14, fontWeight: 800, lineHeight: 1,
-          letterSpacing: '0.04em', textTransform: 'uppercase', whiteSpace: 'nowrap',
-          border: `1px solid ${ESTIMATE_BORDER}`,
-        }}>
-          WaveGuard {membership.tierLabel}
-        </span>
-      </div>
-
-      {membership.upgrade ? (
-        <div style={{
-          background: COLORS.white, border: `1px solid ${ESTIMATE_BORDER}`,
-          /* glass accent blue — walker doesn't repaint border-left */
-          borderLeft: '4px solid #0A7EC2', borderRadius: 10, padding: '12px 16px',
-          color: ESTIMATE_TEXT, fontSize: 15, lineHeight: 1.5,
-        }}>
-          Adding {membership.upgrade.addedServiceLabels.join(' & ') || 'this service'} bumps your membership from{' '}
-          <strong>{membership.upgrade.fromLabel}</strong> up to <strong>{membership.upgrade.toLabel}</strong>
-          {membership.discountAppliesTo === 'new_services_only'
-            ? ` for this estimate. That tier discounts the new services by up to ${membership.tierDiscountPct}%; your current service prices stay unchanged.`
-            : ` — an extra ${membership.upgrade.deltaPct}% off every qualifying service, including the ones you already have.`}
-        </div>
-      ) : null}
-
-      {existing.length ? (
-        <div style={{ display: 'grid', gap: 8 }}>
-          <div style={sectionTitle}>Your existing services</div>
-          {existing.map((s) => (
-            <div key={s.key} style={rowStyle}>
-              <span style={labelStyle}>{s.label}</span>
-              <span style={valStyle}>
-                +{s.extraDiscountPct}% off
-                {/* "per application" — owner ruling 2026-07-24: one pricing
-                    noun on every customer surface, existing-member rows
-                    included. */}
-                {Number(s.perVisitSavings) > 0 ? ` · save ${money(s.perVisitSavings)} per application` : ''}
-                {(Number(s.perVisitSavings) > 0 && s.remainingVisits > 0)
-                  ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'application' : 'applications'}`
-                  : ''}
-              </span>
-            </div>
-          ))}
-        </div>
-      ) : null}
-    </section>
-  );
-}
+// The "Welcome back" membership card is RETIRED (owner 2026-08-04): a current
+// member's estimate carries no member card at all — the flow is price → slot
+// picker → approve, with the member discount itemized inside each section's
+// price block (struck-through anchor + "WaveGuard {tier} Discount" row, see
+// memberSavingsByServiceKey) and the section corner badge naming the tier.
+// estimate.membership still arrives from the server: the price-row
+// corroboration and the add-service cross-sell (estimateAddServiceOffer)
+// read it. The legacy v1 SSR page keeps renderMembershipBlockHtml — it has
+// no in-price savings stack to hand the member story to.
 
 const ESTIMATE_ASK_PROMPTS = [
   'What is included?',
@@ -5410,7 +5312,6 @@ function EstimateViewPageInner() {
           headline={stateHero?.h1 || headline}
           eyebrowOverride={stateHero ? stateHero.eyebrow : (glassPack?.eyebrow || null)}
         />
-        <MembershipCard membership={estimate.membership} />
         <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
         {showAskBar ? (
           <EstimateAskBar
@@ -5469,7 +5370,6 @@ function EstimateViewPageInner() {
   // during the held-slot review step too.
   const aiPanelBlock = (
     <>
-      <MembershipCard membership={estimate.membership} />
       <WaveGuardIntelligenceCard intelligence={intelligenceDisplay} address={estimate.address} copy={copy} showYourWork={data.showYourWork || null} />
       <EstimateAskBar
         token={token}
@@ -5710,8 +5610,11 @@ function EstimateViewPageInner() {
               the customer sees the price first. Glass reorders per the
               approved section positioning (schedule directly after price;
               why-price-custom, reviews, app, Ask, and the lawn upsell follow
-              below) — only the membership card keeps this spot. */}
-          {glassContent ? <MembershipCard membership={estimate.membership} /> : aiPanelBlock}
+              below) — nothing holds this spot under glass since the member
+              card was retired (owner 2026-08-04: a member's estimate goes
+              price → slot picker → approve, with the member discount
+              itemized in the price block itself). */}
+          {glassContent ? null : aiPanelBlock}
 
           <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
             {canShowSlotPicker ? (
