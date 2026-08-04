@@ -396,6 +396,17 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
         logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
       });
+      // Invoice void + inspection-credit reversal seam for every non-live
+      // transition (Codex #3178 r25 P1): 'skipped' reached no route branch
+      // that ran it, leaving a skipped visit's redeemed credit spendable
+      // until the hourly sweep. Guarded HERE — the one shared status
+      // writer — so no transition surface can forget it; the helper is
+      // idempotent, so routes that also run it (cancel/no-show branches)
+      // double-run safely. Post-commit by placement, best-effort by
+      // contract.
+      void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
+        logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
+      });
     } else {
       // Reverse direction: a compensated cancellation (offboarding /
       // cancellation-processor revert a cancel when tracker state raced) or

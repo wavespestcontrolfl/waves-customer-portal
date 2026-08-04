@@ -758,6 +758,64 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(client).toContain('service.completionProfile?.serviceKey === "rodent_inspection"');
   });
 
+  it('every non-live transition runs the money seam in the ONE shared status writer (r25 P1)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/job-status.js'), 'utf8');
+    // 'skipped' reached no route branch that ran the void/reversal seam,
+    // leaving a skipped visit's redeemed credit spendable until the hourly
+    // sweep. The seam lives in the shared writer's post-commit hook so no
+    // transition surface can forget it.
+    const guardAt = source.indexOf("['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))");
+    const seamAt = source.indexOf("require('./invoice').voidOpenInvoicesForCancelledService(jobId)");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(seamAt).toBeGreaterThan(guardAt); // seam sits inside the non-live branch
+  });
+
+  it('the already-no_show replay re-runs the money seam (r25 P1)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // A crash between the no-show status commit and its post-success block
+    // loses the seam; the idempotent same-status retry is the recovery
+    // vehicle, so it must run the helper before returning success.
+    const replayAt = source.indexOf('alreadyNoShow: true');
+    const seamAt = source.indexOf("require('../services/invoice').voidOpenInvoicesForCancelledService(svc.id)");
+    expect(replayAt).toBeGreaterThan(-1);
+    expect(seamAt).toBeGreaterThan(-1);
+    expect(seamAt).toBeLessThan(replayAt); // seam runs before the replay success returns
+  });
+
+  it('the existing-appointment accept writes booking evidence in the accept trx (r25 P1)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    // The direct-update adoption path commits a real booking; without an
+    // event the ordering guard falls back to the placeholder row's
+    // created_at and the promised credit silently never redeems.
+    expect(source).toContain("markBookingForInspectionCredit(trx, {");
+    expect(source).toContain("source: 'estimate_accept_existing_appointment'");
+  });
+
+  it('the receipt memo answers to the persisted offer, never the live gate (r25 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/invoice-email.js'), 'utf8');
+    // A recovered dark-mode resend consumes its offer-scoped idempotency
+    // key on THIS send — rendering it memo-less would permanently strand
+    // the written deadline. Offers only exist for promises made while
+    // live, so the offer row is the authority.
+    const memoFnAt = source.indexOf('async function inspectionCreditMemoForInvoice');
+    const memoFnEnd = source.indexOf('\n}', memoFnAt);
+    const memoFn = source.slice(memoFnAt, memoFnEnd);
+    expect(memoFnAt).toBeGreaterThan(-1);
+    expect(memoFn).not.toContain("isEnabled('inspectionCredit')");
+  });
+
+  it('a deterministic resend miss raises the once-per-offer office alert (r25 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // sendReceiptEmail reports no-recipient / suppressed / unavailable as
+    // { ok:false } without throwing; this resend carries the only written
+    // deadline, so a silent miss strands the promise. Deduped replays
+    // return ok:true, so replays never false-alert.
+    const sentCheckAt = source.indexOf('if (!sent?.ok) {');
+    const alertAt = source.indexOf("alertOfficeOnce('receipt_resend_failed'");
+    expect(sentCheckAt).toBeGreaterThan(-1);
+    expect(alertAt).toBeGreaterThan(sentCheckAt);
+  });
+
   it('the no-receipt office alert waits out a LIVE unpaid invoice (r24 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
     // An ordinary pay-after-service inspection has no PAID invoice at
@@ -767,7 +825,7 @@ describe('closeout route wiring — source contracts (the completion route is to
     // escalates to a human.
     const helperAt = source.indexOf('function queueCreditReceiptResend');
     const guardAt = source.indexOf("whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)", helperAt);
-    const alertAt = source.indexOf("'Inspection credit has no receipt to ride'", helperAt);
+    const alertAt = source.indexOf("alertOfficeOnce('no_receipt_channel'", helperAt);
     expect(helperAt).toBeGreaterThan(-1);
     expect(guardAt).toBeGreaterThan(helperAt);
     expect(alertAt).toBeGreaterThan(guardAt); // guard runs before the alert

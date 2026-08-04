@@ -613,11 +613,16 @@ export function completionPreferencesNeedDraft({
   backfillCloseoutDefault = false,
   backfillTimeOnSite = "",
   adjustedTimeOnSite = "",
+  offerInspectionCredit = true,
 } = {}) {
   return sendSms !== true
     || includePayLink !== true
     || requestReview !== true
     || clientPestRating != null
+    // The inspection-credit opt-out is default-ON: a cleared box that does
+    // not survive the billing/draft detour silently records a credit
+    // promise the tech explicitly declined (Codex #3178 r25 P2).
+    || offerInspectionCredit !== true
     // The backdated-closeout choices are quiet/loud state: losing a checked
     // box across a reload turns the SAME submit into a LOUD completion
     // (sends + collection rails), and the ≥7-days default is CHECKED, so it
@@ -10684,6 +10689,7 @@ export function CompletionPanel({
         backfillCloseoutDefault,
         backfillTimeOnSite,
         adjustedTimeOnSite,
+        offerInspectionCredit,
       }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) {
@@ -10711,6 +10717,10 @@ export function CompletionPanel({
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
+        // The inspection-credit opt-out survives the detour too — a cleared
+        // box restoring to the default-ON state would promise a credit the
+        // tech explicitly declined (Codex #3178 r25 P2).
+        offerInspectionCredit,
         // Backdated-closeout choices: the checked box is what keeps this
         // submit QUIET (no sends, no collection rails) and the typed minutes
         // are operator input — both must survive the billing-409 detour and
@@ -10799,6 +10809,7 @@ export function CompletionPanel({
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
+    offerInspectionCredit,
     backfillCloseout,
     backfillTimeOnSite,
     adjustedTimeOnSite,
@@ -10873,6 +10884,9 @@ export function CompletionPanel({
     // where the server's recap_only_not_allowed 409 becomes unclearable
     // (codex P2 r9).
     setOneTimeRecapOnly(isBedBugVisit ? false : !!savedDraft.oneTimeRecapOnly);
+    // Only an explicit saved `false` restores as opted-out — a legacy draft
+    // without the field keeps the default-ON promise (missing ≠ declined).
+    setOfferInspectionCredit(savedDraft.offerInspectionCredit !== false);
     // Quiet/loud choice + typed minutes come back exactly as saved; a legacy
     // draft without the fields falls back to the panel default. Consumers all
     // gate on backfillEligible, so this stays inert if the visit is somehow

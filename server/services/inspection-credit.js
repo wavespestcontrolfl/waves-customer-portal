@@ -1175,6 +1175,35 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId }) {
   if (!scheduledServiceId || !offerId) return;
   setImmediate(() => {
     void (async () => {
+      // ONE office alert per offer, whatever undeliverable shape the visit
+      // takes (no channel at all, or a paid-receipt resend that failed
+      // deterministically). Dedupes on the durable notification row —
+      // notifyAdmin has no dedupe of its own; a concurrent-replay race can
+      // at worst double an office note, never touch money or a customer.
+      const alertOfficeOnce = async (reason, body) => {
+        const offer = await db('inspection_credit_offers')
+          .where({ id: offerId })
+          .first('customer_id', 'amount', 'expires_at');
+        if (!offer) return;
+        const alreadyAlerted = await db('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'reason' IN ('no_receipt_channel', 'receipt_resend_failed')")
+          .whereRaw("metadata->>'offerId' = ?", [String(offerId)])
+          .first('id');
+        if (alreadyAlerted) return;
+        const memo = inspectionCreditReceiptMemo({
+          amount: offer.amount, expiresAt: offer.expires_at,
+        });
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Inspection credit terms were not delivered',
+          `${memo || 'An inspection credit was recorded.'} ${body}`,
+          {
+            link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
+            metadata: { offerId, scheduledServiceId, reason },
+          },
+        );
+      };
       try {
         const paidInvoice = await db('invoices')
           .where({ scheduled_service_id: scheduledServiceId, status: 'paid' })
@@ -1204,40 +1233,25 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId }) {
             .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
             .first('id');
           if (liveInvoice) return;
-          const offer = await db('inspection_credit_offers')
-            .where({ id: offerId })
-            .first('customer_id', 'amount', 'expires_at');
-          if (!offer) return;
-          // ONCE per offer: this resend is re-queued on completion replays
-          // (Codex #3178 r23 P2 keys it on offerId, not first creation).
-          // The email leg dedupes on its idempotency key; this alert leg
-          // dedupes on the durable notification row — notifyAdmin has no
-          // dedupe of its own. A concurrent-replay race can at worst double
-          // an office note; it never touches money or a customer.
-          const alreadyAlerted = await db('notifications')
-            .where({ recipient_type: 'admin' })
-            .whereRaw("metadata->>'reason' = ?", ['no_receipt_channel'])
-            .whereRaw("metadata->>'offerId' = ?", [String(offerId)])
-            .first('id');
-          if (alreadyAlerted) return;
-          const memo = inspectionCreditReceiptMemo({
-            amount: offer.amount, expiresAt: offer.expires_at,
-          });
-          await require('./notification-service').notifyAdmin(
-            'billing',
-            'Inspection credit has no receipt to ride',
-            `${memo || 'An inspection credit was recorded.'} This visit has no paid customer invoice, so the terms were not delivered — tell the customer their deadline.`,
-            {
-              link: offer.customer_id ? `/admin/customers/${offer.customer_id}` : '/admin/invoices',
-              metadata: { offerId, scheduledServiceId, reason: 'no_receipt_channel' },
-            },
-          );
+          await alertOfficeOnce('no_receipt_channel',
+            'This visit has no paid customer invoice, so the terms were not delivered — tell the customer their deadline.');
           return;
         }
         const { sendReceiptEmail } = require('./invoice-email');
-        await sendReceiptEmail(paidInvoice.id, {
+        const sent = await sendReceiptEmail(paidInvoice.id, {
           idempotencyKey: `inspection-credit-offer-${offerId}`,
         });
+        // A deterministic miss — no receipt recipient email, suppressed
+        // send, template + fallback both unavailable — returns { ok:false }
+        // without throwing (Codex #3178 r25 P2). The original receipt went
+        // out BEFORE the offer existed, so this resend carries the only
+        // written deadline; a silent miss strands the promise. Idempotent
+        // replays return ok:true (deduped), so this never false-alerts.
+        if (!sent?.ok) {
+          logger.warn(`[inspection-credit] credit receipt resend not delivered for ${scheduledServiceId}: ${sent?.error || 'unknown'}`);
+          await alertOfficeOnce('receipt_resend_failed',
+            `The paid receipt carrying these terms could not be re-sent (${sent?.error || 'send failed'}) — tell the customer their deadline.`);
+        }
       } catch (resendErr) {
         logger.warn(`[inspection-credit] credit receipt resend failed for ${scheduledServiceId}: ${resendErr.message}`);
       }

@@ -3200,6 +3200,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }
+        // The invoice-void + credit-reversal seam can also have been lost
+        // to a crash between the status commit and the post-success block
+        // (Codex #3178 r25 P1) — this replay is its recovery vehicle too.
+        // Idempotent: a seam that already ran finds nothing to void or
+        // reverse. Best-effort — never fail the idempotent success.
+        try {
+          await require('../services/invoice').voidOpenInvoicesForCancelledService(svc.id);
+        } catch (e) { logger.error(`[admin-dispatch] no-show replay money seam failed for ${svc.id}: ${e.message}`); }
         return res.json({ success: true, alreadyNoShow: true });
       }
       return res.status(409).json({

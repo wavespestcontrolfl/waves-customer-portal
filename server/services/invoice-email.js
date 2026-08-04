@@ -352,8 +352,13 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
  */
 async function inspectionCreditMemoForInvoice(invoice) {
   try {
-    const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('inspectionCredit')) return '';
+    // Deliberately NOT gated on the live feature flag (Codex #3178 r25
+    // P2): the persisted OFFER row is the authority. Offers only ever
+    // exist for promises made while the lane was live (or recovered from a
+    // committed opt-in marker), so a dark lane with no offers announces
+    // nothing — while a recovered promise's resend, whose offer-scoped
+    // idempotency key is consumed by THIS send, must carry the memo now or
+    // the customer permanently misses their written deadline.
     if (!invoice?.customer_id) return '';
     // A payer-billed invoice goes to a third party's AP inbox — never
     // announce the homeowner's credit there (Codex #3175 r4 P1).

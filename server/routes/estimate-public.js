@@ -9020,6 +9020,22 @@ router.put('/:token/accept', async (req, res, next) => {
             .update(updates);
           assertExistingAppointmentUpdateApplied(updatedCount);
           reservationCommitted = true;
+          // The adopted appointment is a REAL booking committed by THIS
+          // accept — record the inspection-credit evidence in the same trx
+          // (Codex #3178 r25 P1). The post-commit redeemer and the sweep
+          // both judge by booking EVENTS; without one, the ordering guard
+          // falls back to the row's original created_at (a placeholder
+          // that can predate the inspection closeout) and the promised
+          // credit is silently never redeemed. Savepoint-confined — a
+          // marker hiccup cannot poison the accept.
+          const adoptedCustomerId = existingAppointmentRow.customer_id || customerId;
+          if (adoptedCustomerId) {
+            await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+              customerId: adoptedCustomerId,
+              scheduledServiceId: existingAppointmentRow.id,
+              source: 'estimate_accept_existing_appointment',
+            });
+          }
           acceptedAppointmentsToRegister.push({
             ...existingAppointmentRow,
             ...updates,
