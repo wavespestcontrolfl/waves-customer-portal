@@ -8,6 +8,21 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-08-03 pest base 112 (all pest priced as light tree density)
+
+Owner ruling 2026-08-03: tree density is not a pest-pricing input and every
+pest quote prices as light tree density. Migration 20260716140000 had
+retired the trees_light -$5 modifier, which effectively raised light-tree
+(majority) homes +$5/visit; this change folds the -$5 into the base
+(117 -> 112, migration `20260803150000_pest_base_light_tree_density` +
+`pricing_changelog` entry). Local baselines recaptured
+(`CAPTURE_BASELINE=1 LOCAL=1`) for both regression suites; every pest case
+moved -$5/visit (and one-time pest -$11 at baseline via the 2.2x anchor).
+The DB baselines (`*.baseline.json`) remain pending post-deploy recapture.
+Side effect pinned in `pricing-engine-pest-margin-guard.test.js`: at the
+112 base a typical-home one-time with the recurring-customer perk now
+lands under recurring visit-1, so the designed clamp engages ($212).
+
 ## 2026-07-17 forget-all-floors ruling (later the same day)
 
 All pricing floors disarmed (owner ruling: margins surfaced, never

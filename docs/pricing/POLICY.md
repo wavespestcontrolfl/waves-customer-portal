@@ -260,17 +260,20 @@ Re-derive from operator records, update `pricing_config`, and re-run
 
 ## Base service prices
 
-### `PEST.base = 117`, `PEST.floor = 89`
+### `PEST.base = 112`, `PEST.floor = 89`
 **Meaning.** `base` is the unmodified pest control per-visit price for a
 typical 2,000 sqft footprint. `floor` is the absolute minimum after
 all footprint/feature/property-type adjustments — no estimate goes below
 this regardless of property size.
 
 **Rationale.**
-- `base` is the operator's v4.3 anchor, set against (a) average per-visit
-  COGS in 2026 ($45–55) yielding ~55-58% baseline margin and (b)
+- `base` is the operator's v4.3 anchor ($117), set against (a) average
+  per-visit COGS in 2026 ($45–55) yielding ~55-58% baseline margin and (b)
   competitive parity with TruGreen / Massey within the 1,800–2,200 sqft
-  band.
+  band — minus the $5 light-tree-density fold (owner ruling 2026-08-03:
+  tree density is not a pest-pricing input; every pest quote prices as
+  light tree density, replacing the retired `trees_light: -5` modifier;
+  migration `20260803150000`).
 - `floor` exists because tiny properties (sub-1,200 sqft condos, mobile
   homes) had pre-floor prices in the $70s, which doesn't cover loaded
   visit cost (drive + 20 min on-site + chemical + admin allocation).

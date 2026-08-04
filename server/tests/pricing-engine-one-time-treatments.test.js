@@ -48,8 +48,8 @@ describe('pricing engine one-time treatment rules', () => {
     const recurringBase = pricePestControl(p, { frequency: 'quarterly', roachType: 'none' }).basePrice;
     const result = priceOneTimePest(p, { urgency: 'NONE', afterHours: false, isRecurringCustomer: false });
 
-    expect(recurringBase).toBe(117);
-    expect(result.quarterlyPerApp).toBe(117);
+    expect(recurringBase).toBe(112);
+    expect(result.quarterlyPerApp).toBe(112);
     expect(result.multiplier).toBe(constants.ONE_TIME.pest.multiplier);
     expect(result.price).toBe(expectedOneTimePest(recurringBase));
     // One-time must cost strictly more than recurring visit 1 ($99 setup + quarterly rate).
