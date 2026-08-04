@@ -106,6 +106,98 @@ describe('ServiceSection', () => {
     expect(screen.getByText('Skip parts you don\'t need')).toBeInTheDocument();
   });
 
+  it('itemizes a server-stamped per-service discount slice inside the section (owner 2026-08-03)', () => {
+    // Multi-service split shape after stampPerServiceManualDiscountSlices:
+    // pest quarterly $100 anchor → $90 WaveGuard-net → $85.50 after the 5%
+    // plan-credit slice, with both discounts itemized in the price block.
+    render(
+      <ServiceSection
+        section={{
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          frequencies: [{
+            key: 'quarterly',
+            label: 'Quarterly',
+            monthly: 28.5,
+            annual: 342,
+            perVisit: 100,
+            perTreatment: 85.5,
+            visitsPerYear: 4,
+            billedPerApplication: true,
+            manualDiscount: {
+              type: 'PERCENT', value: 5, label: 'Custom Percentage Discount',
+              amount: 18, recurringAmount: 18, oneTimeAmount: 0, itemizedPerService: true,
+            },
+            included: [],
+            addOns: [],
+          }],
+          copy: { priceWording: {} },
+        }}
+        servicesLength={2}
+        selectedFrequencyKey="quarterly"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: true }}
+        waveGuardTier="Silver"
+        waveGuardDiscountPct={0.1}
+      />,
+    );
+
+    // Anchor struck, headline net of BOTH discounts, both itemized in-card.
+    expect(screen.getByText(/\$100\.00 \/ application/)).toBeInTheDocument();
+    expect(screen.getByText('$85.50')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Silver Discount')).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$10\.00/)).toBeInTheDocument();
+    expect(screen.getByText('Custom Percentage Discount')).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$4\.50/)).toBeInTheDocument();
+  });
+
+  it('labels a margin-capped member discount from the membership snapshot saving (owner 2026-08-04)', () => {
+    // Current-member estimate: Gold priced the section, but the margin guard
+    // capped the applied rate at 12.7% — the 15% tier pct can't reconcile the
+    // $12.70 gap; the snapshot's applied per-application saving can.
+    render(
+      <ServiceSection
+        section={{
+          key: 'pest_control',
+          label: 'Pest Control',
+          isRecurring: true,
+          isPest: true,
+          frequencies: [{
+            key: 'quarterly',
+            label: 'Quarterly',
+            monthly: 29.1,
+            annual: 349.2,
+            perVisit: 100,
+            perTreatment: 87.3,
+            visitsPerYear: 4,
+            billedPerApplication: true,
+            included: [],
+            addOns: [],
+          }],
+          copy: { priceWording: {} },
+        }}
+        servicesLength={2}
+        selectedFrequencyKey="quarterly"
+        selectedAddOns={new Set()}
+        onFrequencyChange={vi.fn()}
+        onAddOnToggle={vi.fn()}
+        renderFlags={{ showPestRecurringAddOns: false, showWaveGuardTierUi: true }}
+        waveGuardTier="Gold"
+        waveGuardDiscountPct={0.15}
+        memberPerApplicationSavings={12.7}
+      />,
+    );
+
+    expect(screen.getByText(/\$100\.00 \/ application/)).toBeInTheDocument();
+    expect(screen.getByText('$87.30')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Gold Discount')).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$12\.70/)).toBeInTheDocument();
+  });
+
   it('shows tree and shrub service cadence without changing monthly billing copy', () => {
     render(
       <ServiceSection
@@ -1413,5 +1505,14 @@ describe('ServiceSection — details-packet preview parity', () => {
     expect(screen.getByRole('button', { name: /Email me the PDF/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Text me the link/ })).toBeInTheDocument();
     expect(screen.getByText(/Preview only\./)).toBeInTheDocument();
+  });
+});
+
+describe('membership card retired (owner 2026-08-04)', () => {
+  it('exports no MembershipCard — a member estimate is price → picker → approve, savings in the price block', async () => {
+    // The member card is gone entirely; if someone reintroduces the export,
+    // this fails and points them at the in-price savings stack instead.
+    const page = await import('./EstimateViewPage');
+    expect(page.MembershipCard).toBeUndefined();
   });
 });

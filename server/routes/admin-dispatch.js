@@ -34,6 +34,7 @@ const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('.
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
 const TurfHeightOcr = require('../services/turf-height-ocr');
@@ -43,6 +44,11 @@ const {
   shouldSendServiceReportV1Delivery,
 } = require('../services/service-report/delivery');
 const { enqueueServiceReportV1EmailDelivery } = require('../services/service-report/delivery-queue');
+const {
+  REENTRY_SEND_LOCK_CLASS,
+  REENTRY_SEND_SEAL_KEY,
+  REENTRY_SEND_SEAL_TTL_MS,
+} = require('../services/service-report/email-delivery');
 const { enqueuePdfRenderJob } = require('../services/service-report/pdf-queue');
 const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
 const { buildAndStoreSmsPreviewImage } = require('../services/service-report/preview-image');
@@ -534,8 +540,8 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration }) {
-  return [blackout, nLimit, manager, calibration]
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory }) {
+  return [blackout, nLimit, manager, calibration, inventory]
     .filter((record) => record && record.advisory)
     .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
     .map((block) => block && block.message)
@@ -565,15 +571,6 @@ function blackoutLockoutBlocks(plan) {
 function annualNLockoutBlocks(plan) {
   return (plan?.propertyGate?.blocks || [])
     .filter((block) => block.code === 'annual_n_budget_exceeded');
-}
-
-function inventoryPlanLockoutBlocks(plan) {
-  return (plan?.inventory?.blocks || [])
-    .filter((block) => [
-      'inventory_product_inactive',
-      'inventory_depleted',
-      'inventory_insufficient_stock',
-    ].includes(block.code));
 }
 
 function toETNoonServiceDate(value) {
@@ -1081,6 +1078,45 @@ function timeOnSiteEditPlan({ minutes, service = {}, structuredNotes = {}, now =
   };
 }
 
+// Validation/shape plan for the after-the-fact re-entry edit (PATCH
+// /:serviceId/reentry): admin correction of a completed visit's advisory
+// re-entry windows (interior/exterior treatment dry-down). Values are whole
+// minutes; 0 is legal and removes that window from the customer report
+// ("no wait"); an omitted side is left untouched. Only completed rows
+// qualify — the advisory is persisted by the completion write, so there is
+// nothing to edit before close-out. Pure for testability (_test).
+const REENTRY_EDIT_MAX_MINUTES = 1440;
+function reentryEditPlan({ exteriorMinutes, interiorMinutes, service = {} } = {}) {
+  const invalid = {
+    status: 400,
+    error: {
+      error: `Re-entry minutes must be between 0 and ${REENTRY_EDIT_MAX_MINUTES}`,
+      code: 'reentry_invalid',
+    },
+  };
+  const parseSide = (value) => {
+    if (value === undefined || value === null || value === '') return undefined;
+    const rounded = Math.round(Number(value));
+    return Number.isFinite(rounded) && rounded >= 0 && rounded <= REENTRY_EDIT_MAX_MINUTES
+      ? rounded
+      : NaN;
+  };
+  const exterior = parseSide(exteriorMinutes);
+  const interior = parseSide(interiorMinutes);
+  if (Number.isNaN(exterior) || Number.isNaN(interior)) return invalid;
+  if (exterior === undefined && interior === undefined) return invalid;
+  if (service.status !== 'completed') {
+    return {
+      status: 409,
+      error: {
+        error: 'Re-entry can only be edited on a completed visit — close the visit out first',
+        code: 'service_not_completed',
+      },
+    };
+  }
+  return { exterior, interior };
+}
+
 // Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
 // completion transaction commits, the record's structured_notes freeze IS the
 // completion — and the request hash carries `backfill`/`timeOnSite` in a
@@ -1262,6 +1298,12 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
 // applied product carries an REI so the caller keeps the service-line default.
 // Used to make the "Exterior ready in …" countdown reflect the product label
 // instead of a flat default.
+// Fail-open by design for the COMPLETION path only: there the floor is
+// defense-in-depth over the service-line defaults being written anyway, and
+// failing the whole closeout on a catalog blip would block the visit. The
+// re-entry correction PATCH deliberately does NOT use this helper — it
+// resolves the applied products inline and fails closed (codex P1 PR #3180
+// r2/r3).
 async function maxProductReentryMinutes(knex, submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
   if (!productIds.length) return null;
@@ -1430,6 +1472,7 @@ async function deductProductInventory(trx, {
   serviceProduct,
   serviceRecord,
   scheduledService,
+  allowNegative = false,
 }) {
   const lockedProduct = await trx('products_catalog')
     .where({ id: product.id })
@@ -1483,7 +1526,14 @@ async function deductProductInventory(trx, {
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
-  if (insufficient) {
+  // allowNegative is passed ONLY for WaveGuard lawn completions, whose
+  // closeout treats inventory as advisory (owner directive 2026-08-03): the
+  // deduction proceeds, inventory_on_hand goes negative, and the
+  // movement/snapshot below record the insufficient-stock state for audit.
+  // Every other completion keeps the hard failure — this shared helper runs
+  // for pest/tree-shrub/nonmember visits too, which have no advisory lane to
+  // record the shortfall (codex P1 r1 on #3179).
+  if (insufficient && !allowNegative) {
     const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
     err.statusCode = 400;
     err.code = 'waveguard_inventory_lockout';
@@ -1871,7 +1921,22 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     zoom,
     width: liveConfig.width || 640,
     height: liveConfig.height || 340,
-  }).catch(() => ({ stations: [], nextStationNumber: 1, nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 } }));
+  })
+    // `loaded: false` distinguishes a degraded shape from a property that
+    // genuinely has no stations — both carry `stations: []` (codex P2 on
+    // #3159). Consumers that only draw pins can ignore it; anything INFERRING
+    // from the absence of stations must not treat a failed query as fact.
+    // The loader swallows its own query failure (so a station outage never
+    // takes down zone marking) and reports it via `loaded`, so this must
+    // FORWARD that value rather than stamp true — an earlier version stamped
+    // unconditionally here and the flag was inert (codex P2 round 3).
+    .then((slice) => ({ ...slice, loaded: slice.loaded !== false }))
+    .catch(() => ({
+      stations: [],
+      nextStationNumber: 1,
+      nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 },
+      loaded: false,
+    }));
 
   return {
     available: true,
@@ -1884,6 +1949,9 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
       attributionText: liveConfig.attributionText || '',
     },
     stations: stationSlice.stations,
+    // false = the station query failed and the empty array above is a
+    // fallback, not a fact about the property.
+    stationsLoaded: stationSlice.loaded !== false,
     nextStationNumber: stationSlice.nextStationNumber,
     nextStationNumberByProgram: stationSlice.nextStationNumberByProgram,
     stationCap: TermiteStations.MAX_ACTIVE_STATIONS,
@@ -2651,6 +2719,367 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       ...(timeEntryCorrected != null ? { timeEntryCorrected } : {}),
       ...(timeEntryCorrectionBlocked ? { timeEntryCorrectionBlocked } : {}),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/dispatch/:serviceId/reentry — the completed visit's stored
+// re-entry windows plus the service-line defaults a fresh completion would
+// write. Read-only seed for the appointment editor's re-entry fields; the
+// STORED advisory values are returned raw (not scope-normalized) because
+// this is the edit surface — the admin corrects what is persisted, and the
+// display surfaces keep making their own normalization call.
+router.get('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const config = getServiceLineConfig(svc.service_type);
+    const defaults = {
+      exteriorMinutes: Number(config?.advisoryDefaults?.exterior_reentry_min) || 0,
+      interiorMinutes: Number(config?.advisoryDefaults?.interior_reentry_min) || 0,
+    };
+    // Schema lookup failures PROPAGATE (same posture as the time-on-site
+    // edit): a degraded {} would silently report "no record" for a visit
+    // that has one.
+    const serviceRecordCols = await db('service_records').columnInfo();
+    if (!serviceRecordCols.advisory) return res.json({ hasRecord: false, defaults });
+    const { record, ambiguous } = await require('../services/job-costing')
+      .resolveServiceRecord(db, svc, serviceRecordCols);
+    if (ambiguous || !record) {
+      return res.json({ hasRecord: false, ...(ambiguous ? { recordAmbiguous: true } : {}), defaults });
+    }
+    // Legacy (pre-service_report_v1) records render from the old dry-time
+    // fields, not the advisory — editing one would audit a correction the
+    // customer never sees (codex P2 PR #3180). Hide the editor for them.
+    if (serviceRecordCols.report_template_version
+      && String(record.report_template_version || '') !== 'service_report_v1') {
+      return res.json({ hasRecord: false, legacyRecord: true, defaults });
+    }
+    // An incomplete-visit closeout creates a v1 record with status
+    // 'incomplete' that report delivery excludes (same gate as
+    // shouldSendServiceReportV1Delivery) — hide the editor there too, or an
+    // edit would look successful while no customer surface shows it
+    // (codex P2 PR #3180 r2).
+    {
+      const recordStatus = String(record.status || '').toLowerCase();
+      if (recordStatus !== 'completed' && recordStatus !== 'complete') {
+        return res.json({ hasRecord: false, incompleteRecord: true, defaults });
+      }
+    }
+    const advisory = parseJsonObject(record.advisory);
+    const minutesOrNull = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) && n >= 0 ? Math.round(n) : null;
+    };
+    const adjustedMarker = advisory.reentry_adjusted;
+    res.json({
+      hasRecord: true,
+      exteriorMinutes: minutesOrNull(advisory.exterior_reentry_min),
+      interiorMinutes: minutesOrNull(advisory.interior_reentry_min),
+      adjusted: adjustedMarker === true
+        || (!!adjustedMarker && typeof adjustedMarker === 'object'
+          && (adjustedMarker.exterior === true || adjustedMarker.interior === true)),
+      defaults,
+    });
+  } catch (err) { next(err); }
+});
+
+// PATCH /api/admin/dispatch/:serviceId/reentry — after-the-fact correction
+// of a completed visit's re-entry windows (interior/exterior dry-down
+// minutes on the report and its Re-Entry card). ADMIN-ONLY, and a pure data
+// correction like the time-on-site edit above: no status transition, no
+// markComplete, and NO customer communications — the completion comms
+// already fired with the advisory as it stood.
+//
+// Gates (fail-closed, nothing half-lands): completed visits only; a
+// service_report_v1 record must exist (legacy records render from the old
+// dry-time fields — an "edit" there would audit a change the customer never
+// sees); an exterior correction may not undercut the most restrictive label
+// REI of the products applied on the visit (same maxProductReentryMinutes
+// floor the completion path applies).
+//
+// What it writes (single transaction):
+//  - service_records.advisory: the typed exterior/interior minutes plus a
+//    durable PER-SIDE `reentry_adjusted: { exterior, interior }` marker that
+//    (a) makes a typed window authoritative over scope-derived zeroing in
+//    normalizeAdvisoryForTreatmentScope for ITS side only — a one-sided
+//    edit never resurrects the untouched side — and (b) is stamped beside a
+//    first-edit-only `reentry_prior` snapshot of the pre-correction values.
+//    The merge is a single-statement jsonb expression against the column's
+//    CURRENT value (same clobber-avoidance posture as the time-on-site
+//    structured_notes merge).
+//  - service_records.structured_notes: `reentryAdjusted: true` + a per-save
+//    `reentryRev` bump — the stale-render fence reentryAdjustedPdfSignature
+//    folds into every PDF-key composition site.
+//  - pdf_storage_key → NULL so the next view re-renders the report PDF.
+//  - FK-heal: a pre-FK record found through the legacy soft-join gets its
+//    scheduled_service_id stamped so later lookups are tuple-independent.
+// The audit rides the transaction (activity_log `reentry_adjusted`), and
+// record resolution runs under the scheduled_services row lock so an
+// in-flight completion finalization's fresh record is seen (same reasoning
+// as the time-on-site edit). No job-costing leg — re-entry never prices.
+router.patch('/:serviceId/reentry', requireAdmin, async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const serviceRecordCols = await db('service_records').columnInfo();
+    if (!serviceRecordCols.advisory) {
+      return res.status(409).json({
+        error: 'This deployment has no advisory column to correct',
+        code: 'advisory_unsupported',
+      });
+    }
+    const plan = reentryEditPlan({
+      exteriorMinutes: req.body?.exteriorMinutes,
+      interiorMinutes: req.body?.interiorMinutes,
+      service: svc,
+    });
+    if (plan.error) return res.status(plan.status).json(plan.error);
+
+    let outcome = null;
+    await db.transaction(async (trx) => {
+      // Row lock first: serializes with a completion finalization that is
+      // creating this visit's service_records row inside its own
+      // transaction, and with a concurrent re-entry correction.
+      const lockedSvc = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+      const { record, viaFk, ambiguous } = await require('../services/job-costing')
+        .resolveServiceRecord(trx, lockedSvc || svc, serviceRecordCols);
+      if (ambiguous) {
+        // Unlike the time-on-site edit there is nothing else to correct —
+        // the advisory lives only on the record, so an ambiguous legacy
+        // match aborts the whole correction instead of half-landing it.
+        outcome = {
+          status: 409,
+          body: {
+            error: 'Several legacy report records match this visit — correct the record manually',
+            code: 'record_ambiguous',
+          },
+        };
+        return;
+      }
+      if (!record) {
+        outcome = {
+          status: 404,
+          body: {
+            error: 'No report record found for this visit — there is no re-entry advisory to correct',
+            code: 'record_not_found',
+          },
+        };
+        return;
+      }
+      // Legacy (pre-service_report_v1) records render from the old dry-time
+      // fields, not the advisory — a "successful" edit here would audit a
+      // correction the customer never sees (codex P2 PR #3180).
+      if (serviceRecordCols.report_template_version
+        && String(record.report_template_version || '') !== 'service_report_v1') {
+        outcome = {
+          status: 409,
+          body: {
+            error: 'This visit predates the current report format — its re-entry guidance is not editable here',
+            code: 'record_legacy',
+          },
+        };
+        return;
+      }
+      // Incomplete-visit closeouts create a v1 record whose status
+      // ('incomplete') report delivery excludes — same rule as
+      // shouldSendServiceReportV1Delivery. A correction there would audit a
+      // change no customer surface shows (codex P2 PR #3180 r2).
+      const recordStatus = String(record.status || '').toLowerCase();
+      if (recordStatus !== 'completed' && recordStatus !== 'complete') {
+        outcome = {
+          status: 409,
+          body: {
+            error: 'This visit closed out as incomplete — its report is not delivered to the customer, so there is no re-entry guidance to correct',
+            code: 'record_incomplete',
+          },
+        };
+        return;
+      }
+      // Manufacturer REI floor (codex P1 PR #3180): the completion path
+      // floors the exterior window against the most restrictive label REI of
+      // the products actually applied (maxProductReentryMinutes) — a
+      // correction must not undercut it, or the permanent report says an
+      // area is ready before the label permits. Interior is not floored,
+      // matching the completion path (rei_hours is the outdoor-treatment
+      // REI). The service_products read has no soft-catch on purpose: a
+      // lookup failure 500s and the admin retries, rather than skipping a
+      // safety floor.
+      if (plan.exterior !== undefined) {
+        // Inline STRICT resolution, not maxProductReentryMinutes: the
+        // helper's .catch(() => []) posture and its filter(Boolean) both
+        // fail OPEN — a catalog lookup failure or a deleted product
+        // (ON DELETE SET NULL leaves service_products.product_id null)
+        // would resolve to a null floor and accept an exterior value the
+        // label may forbid. Here every applied row must resolve to a
+        // catalog product or the correction is refused, and a lookup
+        // failure propagates (500 → the admin retries) instead of skipping
+        // the floor (codex P1 PR #3180 r2/r3).
+        const appliedRows = await trx('service_products')
+          .where({ service_record_id: record.id })
+          .select('product_id');
+        const productIds = [...new Set(appliedRows.map((p) => p.product_id).filter(Boolean).map(String))];
+        const catalogRows = productIds.length
+          ? await trx('products_catalog').whereIn('id', productIds).select('id', 'rei_hours')
+          : [];
+        if (appliedRows.some((p) => !p.product_id) || catalogRows.length !== productIds.length) {
+          outcome = {
+            status: 409,
+            body: {
+              error: 'A product applied on this visit no longer resolves to the catalog, so its label re-entry interval can\'t be verified — the exterior window is not editable here',
+              code: 'reentry_rei_unverifiable',
+            },
+          };
+          return;
+        }
+        // A resolvable product with NO rei_hours on file carries no label
+        // REI ("until dry") — that's a real answer, not a verification
+        // failure; only finite intervals floor, most restrictive wins
+        // (same rule as the completion path's maxProductReentryMinutes).
+        let productFloor = null;
+        for (const row of catalogRows) {
+          const hours = Number(row.rei_hours);
+          if (Number.isFinite(hours) && hours >= 0) {
+            const minutes = Math.round(hours * 60);
+            if (productFloor == null || minutes > productFloor) productFloor = minutes;
+          }
+        }
+        if (productFloor != null && plan.exterior < productFloor) {
+          outcome = {
+            status: 400,
+            body: {
+              error: `Exterior re-entry can't be below ${productFloor} minutes — a product applied on this visit carries that label re-entry interval`,
+              code: 'reentry_below_product_rei',
+              productReiMinutes: productFloor,
+            },
+          };
+          return;
+        }
+      }
+      // Send-seal handshake (codex P1 PR #3180 r3): the report-email sender
+      // verifies the re-entry revision and stamps a send-window seal under
+      // this same advisory lock, then dispatches. Taking the lock HERE means
+      // this correction can commit neither inside that check-and-seal
+      // transaction nor mid-dispatch: any seal the sender committed is
+      // visible after the lock is acquired, and a fresh one refuses the
+      // correction (retry in a minute — the email will carry what the
+      // customer was actually sent). Seals older than the TTL are a crashed
+      // sender and are ignored. Lock order everywhere: scheduled_services
+      // row lock first, then this advisory lock; the sender takes only the
+      // advisory lock, so no cycle exists.
+      await trx.raw(
+        'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        [REENTRY_SEND_LOCK_CLASS, String(record.id)],
+      );
+      const sealRow = await trx('service_records')
+        .where({ id: record.id })
+        .first('structured_notes');
+      const sealAt = Date.parse(parseJsonObject(sealRow?.structured_notes)[REENTRY_SEND_SEAL_KEY] || '');
+      if (Number.isFinite(sealAt) && Date.now() - sealAt < REENTRY_SEND_SEAL_TTL_MS) {
+        outcome = {
+          status: 409,
+          body: {
+            error: 'This visit\'s report email is being sent right now — retry the re-entry correction in a minute',
+            code: 'send_in_flight',
+          },
+        };
+        return;
+      }
+      const previousAdvisory = parseJsonObject(record.advisory);
+      // Per-side authority marker (codex P1 PR #3180): a one-sided edit must
+      // not make the UNTOUCHED side authoritative — read-time scope zeroing
+      // keeps governing it (normalizeAdvisoryForTreatmentScope). The union
+      // with the prior marker is computed from the under-lock read; every
+      // advisory writer (completion, this PATCH) serializes on the
+      // scheduled_services row lock, so the shallow jsonb replace is safe.
+      const prevMarker = previousAdvisory.reentry_adjusted;
+      const prevSideAdjusted = (side) => prevMarker === true
+        || (!!prevMarker && typeof prevMarker === 'object' && prevMarker[side] === true);
+      const mergeKeys = {
+        reentry_adjusted: {
+          exterior: prevSideAdjusted('exterior') || plan.exterior !== undefined,
+          interior: prevSideAdjusted('interior') || plan.interior !== undefined,
+        },
+      };
+      if (plan.exterior !== undefined) mergeKeys.exterior_reentry_min = plan.exterior;
+      if (plan.interior !== undefined) mergeKeys.interior_reentry_min = plan.interior;
+      const recordUpdate = {
+        // ATOMIC key merge against the column's CURRENT value — a
+        // whole-column read-modify-write could erase keys a concurrent
+        // writer lands between our read and this update. reentry_prior is
+        // captured first-edit-only (`-> 'reentry_prior' IS NOT NULL`
+        // detects the key even when a side holds JSON null, which is what
+        // a no-prior first edit writes).
+        advisory: trx.raw(
+          `(COALESCE(advisory::jsonb, '{}'::jsonb) || ?::jsonb)
+           || (CASE WHEN COALESCE(advisory::jsonb, '{}'::jsonb) -> 'reentry_prior' IS NOT NULL
+                THEN '{}'::jsonb
+                ELSE jsonb_build_object('reentry_prior', jsonb_build_object(
+                  'exterior_reentry_min', COALESCE(advisory::jsonb -> 'exterior_reentry_min', 'null'::jsonb),
+                  'interior_reentry_min', COALESCE(advisory::jsonb -> 'interior_reentry_min', 'null'::jsonb)))
+              END)`,
+          [JSON.stringify(mergeKeys)],
+        ),
+        // Stale-render fence (codex P1 PR #3180): nulling pdf_storage_key
+        // alone is not durable — a render already in flight with the
+        // pre-correction advisory would write the deterministic key back and
+        // serve the old guidance forever. reentryAdjustedPdfSignature folds
+        // this per-save rev into every PDF-key composition site, so the
+        // stale renderer's key no longer matches. Lives in structured_notes
+        // (not advisory) because every composition site already loads
+        // structured_notes; same atomic-merge shape as the time-on-site
+        // fence above.
+        structured_notes: trx.raw(
+          `(COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb)
+           || jsonb_build_object('reentryRev',
+                COALESCE(NULLIF(COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'reentryRev', ''), '0')::int + 1)`,
+          [JSON.stringify({ reentryAdjusted: true })],
+        ),
+      };
+      if (serviceRecordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;
+      if (!viaFk && serviceRecordCols.scheduled_service_id) {
+        recordUpdate.scheduled_service_id = svc.id;
+      }
+      await trx('service_records').where({ id: record.id }).update(recordUpdate);
+
+      // Audit rides the correction transaction — an audit that can't be
+      // written rolls the correction back rather than leaving an unaudited
+      // change to customer safety guidance.
+      const describeSide = (label, value) => (value === undefined
+        ? null
+        : `${label} ${value === 0 ? 'cleared' : `${value} min`}`);
+      const changed = [
+        describeSide('exterior', plan.exterior),
+        describeSide('interior', plan.interior),
+      ].filter(Boolean).join(', ');
+      await trx('activity_log').insert({
+        admin_user_id: req.technicianId,
+        customer_id: svc.customer_id,
+        action: 'reentry_adjusted',
+        description: `Re-entry corrected (${changed}) for ${svc.service_type || 'service'}`,
+        metadata: JSON.stringify({
+          scheduled_service_id: svc.id,
+          service_record_id: record.id,
+          previous: {
+            exterior_reentry_min: previousAdvisory.exterior_reentry_min ?? null,
+            interior_reentry_min: previousAdvisory.interior_reentry_min ?? null,
+          },
+          new: {
+            ...(plan.exterior !== undefined ? { exterior_reentry_min: plan.exterior } : {}),
+            ...(plan.interior !== undefined ? { interior_reentry_min: plan.interior } : {}),
+          },
+        }),
+      });
+      outcome = {
+        status: 200,
+        body: {
+          success: true,
+          ...(plan.exterior !== undefined ? { exteriorMinutes: plan.exterior } : {}),
+          ...(plan.interior !== undefined ? { interiorMinutes: plan.interior } : {}),
+          recordUpdated: true,
+        },
+      };
+    });
+    res.status(outcome.status).json(outcome.body);
   } catch (err) { next(err); }
 });
 
@@ -3520,6 +3949,81 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 });
 
 // POST /api/admin/dispatch/:serviceId/complete
+// Pre-submit report reconciliation block (409) — pure for testability
+// (_test), like the other completion block-payload helpers. Returns
+// { status, payload } or null. Fail-OPEN on checker errors: this prompt
+// must never be the reason a visit cannot complete — the render-time
+// guards remain the backstop for anything it skips.
+function reportReconcileBlockPayload({
+  isIncompleteVisit,
+  reportReconcileConfirmed,
+  technicianNotes,
+  structuredFindings,
+  primaryFindingsType = null,
+  primaryActivityScore = null,
+  companionFindings,
+}) {
+  if (process.env.GATE_REPORT_RECONCILE_PROMPT !== 'true') return null;
+  if (isIncompleteVisit || reportReconcileConfirmed) return null;
+  let issues = [];
+  try {
+    issues = reportReconciliationIssues({
+      technicianNotes, structuredFindings, primaryFindingsType, primaryActivityScore, companionFindings,
+    });
+  } catch {
+    return null;
+  }
+  if (!issues.length) return null;
+  return {
+    status: 409,
+    payload: {
+      // adminFetch surfaces only error + code to the client, so the
+      // human-readable contradictions ride in the error string; the
+      // structured list stays for API consumers and tests.
+      error: issues.map((issue) => issue.message).join('\n'),
+      code: 'report_reconcile',
+      contradictions: issues,
+      confirmable: true,
+    },
+  };
+}
+
+// Lightweight side-effects poll for the completion panel (codex P1 #3187
+// r11): while a committed completion's side effects run, the client polls
+// THIS read-only status instead of replaying the media-bearing completion
+// POST (base64 photos, ~MBs) every five seconds. All derivation lives in
+// CompletionAttempts.completionStatusForService; auth = the router-wide
+// adminAuthenticate + requireTechOrAdmin.
+router.get('/:serviceId/completion-status', async (req, res) => {
+  try {
+    // Same per-visit technician boundary as the completion POST (codex P2
+    // #3187 r12): the status carries attempt state, serviceRecordId, and —
+    // same-key — the stored completion response, so a technician may read
+    // it only for their own assigned visit; admins keep office-wide reach.
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .select('id', 'technician_id')
+      .first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) {
+      return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    const status = await CompletionAttempts.completionStatusForService({
+      serviceId: req.params.serviceId,
+      idempotencyKey: String(req.query.idempotencyKey || ''),
+    });
+    res.json(status);
+  } catch (e) {
+    logger.error(`[dispatch] completion-status read failed for ${req.params.serviceId}: ${e.message}`);
+    res.status(500).json({ error: 'Failed to read completion status' });
+  }
+});
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -3585,6 +4089,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // `false` opts out; the rail itself still checks the gate and that
       // the visit is actually an inspection.
       offerInspectionCredit = true,
+      reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
     } = req.body;
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return res.status(400).json({ error: 'offerInspectionCredit must be a boolean' });
@@ -3668,7 +4173,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
     let preCommitCompletionPhotoRows = [];
-    const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
+    let completionReviewDelayMinutes;
+    try {
+      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
+    } catch (timingErr) {
+      // A committed chain replays an immutable body, and by the time a
+      // retry lands its custom reviewScheduledFor can legitimately be in
+      // the past — the freshness gate must not 400 a committed retry
+      // before it can reach the replay/resume claim (codex P2 #3187 r7).
+      // The original submit passed the strict gate, so the only reachable
+      // failure here is must-be-in-the-future; 0 = "due now" preserves the
+      // intent (the chosen time has arrived). Fresh completions keep the
+      // strict gate.
+      const committed = await CompletionAttempts
+        .hasCommittedCompletionAttempt(req.params.serviceId)
+        .catch(() => false);
+      if (!committed) throw timingErr;
+      completionReviewDelayMinutes = 0;
+    }
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedCustomerInteraction = normalizeCustomerInteractionValue(customerInteraction);
@@ -3680,6 +4202,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let waveguardNLimitApproval = null;
     let waveguardManagerApproval = null;
     let waveguardCalibrationAdvisory = null;
+    let waveguardInventoryAdvisory = null;
     let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
@@ -3874,6 +4397,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         code: 'termite_stations_cap',
       });
     }
+    // A declared trap SETUP cannot carry serviced pins: the map relabels
+    // `ok` to "Set this visit" but leaves `serviced` saying "Serviced this
+    // visit", so the frozen report would contradict its own declared stage.
+    //
+    // Scoped to the TRAPPING program, and therefore placed here rather than
+    // with the shape validation above — a combined profile can resolve to
+    // the termite/rodent bait program while a trapping companion declares a
+    // setup, and rejecting on the declaration alone blocked a legitimate
+    // serviced BAIT-STATION entry (codex P1 — a regression from the first
+    // version of this check). `trap_visit_type` only exists on the
+    // rodent_trapping schema, so its presence in any submitted section
+    // identifies the declaration.
+    if (stationProgram === 'trapping' && Array.isArray(termiteStations) && termiteStations.length) {
+      const declaresTrapSetup = [
+        structuredFindings?.values,
+        ...(Array.isArray(companionFindings) ? companionFindings.map((entry) => entry?.values) : []),
+      ].some((values) => String(values?.trap_visit_type || '').trim() === 'Initial setup');
+      const servicedError = TermiteStations.validateStationEntriesBody(termiteStations, {
+        rejectServiced: declaresTrapSetup,
+      });
+      if (servicedError) {
+        return res.status(400).json({ error: servicedError, code: 'termite_stations_invalid' });
+      }
+    }
     // Rodent consumption consistency (codex r2): station checks recording
     // bait consumption must not ship beside an explicit "None" consumption
     // select — the customer report would contradict itself. Pre-commit like
@@ -3913,6 +4460,36 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
       if (conflict) {
         return res.status(400).json({ error: conflict, code: 'trap_capture_conflict' });
+      }
+    }
+    // Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT,
+    // dark): the AI body is generated from the typed fields, the tech can
+    // keep editing them afterwards, and nothing re-runs — the render-time
+    // guards then silently degrade the copy or a missed pattern publishes
+    // a stale number. Surfacing the contradiction HERE lets the tech
+    // regenerate or confirm before anything freezes; a confirmed resubmit
+    // (same idempotency key — 409s don't reset it client-side) passes
+    // through, and the render-time guards remain the backstop.
+    {
+      const reconcileBlock = reportReconcileBlockPayload({
+        isIncompleteVisit,
+        reportReconcileConfirmed,
+        technicianNotes,
+        structuredFindings,
+        primaryFindingsType: completionProfile?.findingsType || null,
+        primaryActivityScore: activityScore,
+        companionFindings,
+      });
+      // A same-key retry of an ALREADY-COMMITTED completion (lost
+      // response, post-commit side-effect failure) must reach the
+      // replay/resume claim untouched: the frozen snapshot exists and a
+      // confirm cannot change it, so prompting would accept an override
+      // the report can never honor (codex P1). Checked only when a block
+      // exists — the clean path costs nothing — and a lookup error skips
+      // the prompt too (fail open).
+      if (reconcileBlock
+        && !(await CompletionAttempts.hasCommittedCompletionAttempt(svc.id).catch(() => true))) {
+        return res.status(reconcileBlock.status).json(reconcileBlock.payload);
       }
     }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
@@ -3964,6 +4541,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...taggedCompletionNoteLines(technicianNotes, ['found']),
           ...(Array.isArray(completionPhotos)
             ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+          // Per-application targets render verbatim in the report's
+          // product purpose copy (ReportViewPage applicationPurposeCopy) —
+          // free-form chips are customer copy too (codex P1 #3187 r16).
+          ...(Array.isArray(products)
+            ? products
+                .flatMap((prod) => (Array.isArray(prod?.targets) ? prod.targets : []))
+                .filter((t) => typeof t === 'string')
             : []),
         ];
         const untypedViolations = [...new Set(
@@ -4116,6 +4701,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(photoSummaryText ? [photoSummaryText] : []),
           ...(Array.isArray(completionPhotos)
             ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+          // Per-application targets render verbatim in the report's
+          // product purpose copy (ReportViewPage applicationPurposeCopy) —
+          // free-form chips are customer copy too (codex P1 #3187 r16).
+          ...(Array.isArray(products)
+            ? products
+                .flatMap((prod) => (Array.isArray(prod?.targets) ? prod.targets : []))
+                .filter((t) => typeof t === 'string')
             : []),
         ];
         const copyViolations = [...new Set(
@@ -4881,19 +5474,31 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             blocks: mappedNBlocks,
           };
       }
-      const inventoryBlocks = [
-        ...inventoryPlanLockoutBlocks(plan),
-        ...await actualProductInventoryBlocks(products),
-      ];
+      // Actuals only — the plan's inventory blocks describe PLANNED products,
+      // so a depleted planned product the tech removed, substituted, or
+      // under-applied would persist a shortfall advisory for a product that
+      // was never overdrawn (codex P2 r2 on #3179). What was actually
+      // submitted (here) plus what was actually deducted (the FOR UPDATE
+      // reconcile after the deduction loop) covers every applied product.
+      const inventoryBlocks = await actualProductInventoryBlocks(products);
+      // Advisory, not a lockout (owner directive 2026-08-03: the inventory
+      // gate came off the lawn closeout with the other approval ceremonies —
+      // a stale stock count must not trap the tech on the screen). The
+      // shortfall is recorded for audit and the deduction path lets
+      // inventory_on_hand go negative so the count self-reports the drift.
       if (inventoryBlocks.length) {
-        const validationErr = new Error('WaveGuard inventory lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Inventory lockout',
-          code: 'waveguard_inventory_lockout',
-          details: inventoryBlocks.map((block) => block.message),
-          blocks: inventoryBlocks,
-        });
+        waveguardInventoryAdvisory = {
+          advisory: true,
+          recordedByTechnicianId: req.technicianId,
+          recordedByRole: req.techRole || null,
+          recordedAt: new Date().toISOString(),
+          blocks: inventoryBlocks.map((block) => ({
+            code: block.code,
+            message: block.message,
+            productId: block.productId || null,
+            productName: block.productName || null,
+          })),
+        };
       }
       const managerApprovalCheck = await evaluateWaveGuardManagerApprovals(db, {
         customerId: svc.customer_id,
@@ -5084,7 +5689,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           code: 'completion_resume_missing_record',
         });
       }
-      linkedLawnAssessmentId = parseJsonObject(record.structured_notes).lawnAssessmentId || null;
+      const resumedStructuredNotes = parseJsonObject(record.structured_notes);
+      linkedLawnAssessmentId = resumedStructuredNotes.lawnAssessmentId || null;
+      // The WaveGuard advisory records were committed with the record, but
+      // the resume path skips the preflight and the deduction transaction —
+      // without this rehydrate, completionAdvisoryMessages would read the
+      // null initializers and the success UI would omit a recorded shortfall
+      // on a resumed retry (codex P2 r2 on #3179).
+      waveguardBlackoutApproval = resumedStructuredNotes.waveguardBlackoutApproval || null;
+      waveguardNLimitApproval = resumedStructuredNotes.waveguardNLimitApproval || null;
+      waveguardManagerApproval = resumedStructuredNotes.waveguardManagerApproval || null;
+      waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
+      waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
       durableCompletionCommitted = true;
     } else {
       try {
@@ -5415,6 +6031,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             waveguardNLimitApproval,
             waveguardManagerApproval,
             waveguardCalibrationAdvisory,
+            waveguardInventoryAdvisory,
             waveguardTankCleanout,
             ...(treeShrubCloseoutSummary ? {
               treeShrubCloseout: treeShrubCloseoutSummary,
@@ -5557,6 +6174,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // Primary section only — the AI report describes this visit's
               // primary work; companion sections keep their own typed copy.
               technicianReportBody,
+              // The tech confirmed the reconciliation prompt: the frozen
+              // snapshot carries the decision so neither the snapshot's own
+              // screens nor the render-time summary screen silently discard
+              // the body a person reviewed and overrode.
+              reconcileConfirmed: reportReconcileConfirmed === true,
             });
           }
           // Companion typed sections: one immutable snapshot per validated
@@ -5601,6 +6223,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 visitSequence: companionVisitSequence,
                 activity: companionActivity,
                 photoSummary: null,
+                // A standard primary with a trapping COMPANION has no typed
+                // primary snapshot to carry the confirmed override — freeze
+                // it on the trapping companion so the render-time summary
+                // screen can honor it (codex P1).
+                reconcileConfirmed: reportReconcileConfirmed === true
+                  && companion.type === 'rodent_trapping',
               });
               if (companionSnapshot) {
                 // The frozen per-section delivery rides the snapshot itself
@@ -6135,6 +6763,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               serviceProduct,
               serviceRecord: record,
               scheduledService: svc,
+              // Advisory inventory posture is scoped to WaveGuard lawn — the
+              // only closeout that records the shortfall as an advisory.
+              allowNegative: isWaveGuardLawnCompletion(svc),
             });
             inventoryDeductions.push(deduction);
           }
@@ -6189,9 +6820,68 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
 
         if (inventoryDeductions.length) {
+          // Reconcile the advisory with what the FOR UPDATE deduction actually
+          // saw: two concurrent visits can both pass the unlocked preflight
+          // read with the stock intact, so the later one can go negative
+          // without the preflight having recorded an advisory (codex P2 r1 on
+          // #3179). The locked deduction result is authoritative.
+          if (isWaveGuardLawnCompletion(svc)) {
+            const deductionStatusByProductId = new Map(
+              inventoryDeductions
+                .filter((deduction) => deduction.productId != null)
+                .map((deduction) => [String(deduction.productId), deduction.status]),
+            );
+            // Any preflight stock block whose product reached the locked
+            // deduction is superseded by that deduction's outcome: sufficient
+            // stock refutes it, and a locked shortfall replaces it with the
+            // authoritative counts — stock can move between the unlocked read
+            // and the lock in either direction, so preflight numbers must
+            // never survive a locked result (codex P2 r3+r4 on #3179).
+            // Non-stock blocks (inactive product) and preflight blocks for
+            // products the deduction never quantified are kept.
+            const keptBlocks = (waveguardInventoryAdvisory?.blocks || []).filter(
+              (block) => !(
+                block.code === 'actual_inventory_insufficient_stock'
+                && block.productId != null
+                && ['deducted', 'deducted_insufficient_stock'].includes(
+                  deductionStatusByProductId.get(String(block.productId)),
+                )
+              ),
+            );
+            const keptShortfallProductIds = new Set(
+              keptBlocks
+                .filter((block) => block.code === 'actual_inventory_insufficient_stock')
+                .map((block) => (block.productId != null ? String(block.productId) : null))
+                .filter(Boolean),
+            );
+            const shortfallBlocks = inventoryDeductions
+              .filter((deduction) => deduction.status === 'deducted_insufficient_stock'
+                && !keptShortfallProductIds.has(String(deduction.productId)))
+              .map((deduction) => ({
+                code: 'actual_inventory_insufficient_stock',
+                message: `${deduction.productName} went to ${deduction.stockAfter} ${deduction.inventoryUnit} on hand after deducting ${deduction.deductedAmount} ${deduction.inventoryUnit}.`,
+                productId: deduction.productId || null,
+                productName: deduction.productName || null,
+              }));
+            const reconciledBlocks = [...keptBlocks, ...shortfallBlocks];
+            waveguardInventoryAdvisory = reconciledBlocks.length
+              ? {
+                advisory: true,
+                recordedByTechnicianId: req.technicianId,
+                recordedByRole: req.techRole || null,
+                recordedAt: new Date().toISOString(),
+                ...(waveguardInventoryAdvisory || {}),
+                blocks: reconciledBlocks,
+              }
+              : null;
+          }
           record.structured_notes = {
             ...(record.structured_notes || {}),
             inventoryDeductions,
+            // Explicit even when null: the initial insert may have committed
+            // a preflight advisory this reconcile just refuted — a
+            // conditional spread would leave the stale record in the notes.
+            ...(isWaveGuardLawnCompletion(svc) ? { waveguardInventoryAdvisory } : {}),
           };
           await trx('service_records')
             .where({ id: record.id })
@@ -7188,6 +7878,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           nLimit: waveguardNLimitApproval,
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
+          inventory: waveguardInventoryAdvisory,
         }),
         ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
         ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -9086,7 +9777,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             payUrl: invoiceCreated && payUrl && allowCompletionInvoiceLink ? payUrl : null,
           })
           : null;
-        if (serviceReportV1SmsContext?.enabled && !invoiceCreated && !usePaidCompletionTemplate) {
+        // A billed report-v1 visit may take the report lane only when the
+        // with-invoice template is BOTH gated on and actually renderable. The
+        // probe is fail-closed (isOptInSmsTemplateEnabled), so a missing or
+        // deactivated row leaves the generic service_complete_with_invoice
+        // path exactly as it behaves today rather than arming a send that
+        // would have to fall back mid-flight. Gate/template are only consulted
+        // for a billed visit — an un-billed completion keeps its unchanged
+        // path without a per-completion template lookup.
+        const reportV1InvoiceArmed = serviceReportV1SmsContext?.enabled
+          && serviceReportV1SmsContext.smsType === 'service_report_v1_with_invoice'
+          && require('../config/feature-gates').isEnabled('reportV1InvoiceSms')
+          && await isOptInSmsTemplateEnabled('service_report_v1_with_invoice');
+        if (completionUsesReportLane({
+          reportLaneEnabled: !!serviceReportV1SmsContext?.enabled,
+          invoiceCreated,
+          usePaidCompletionTemplate,
+          reportV1InvoiceArmed,
+        })) {
           sentSmsType = serviceReportV1SmsContext.smsType;
           // Always the editable DB template (owner ruling 2026-08-01). The lawn
           // lane used to swap in a prebuilt body leading with the V2 synthesis —
@@ -9100,14 +9808,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             entity_type: 'service_record',
             entity_id: record.id,
           });
-          // A toggled-off or removed variant must not cost the customer
-          // their completion text — fall back to the base report template
-          // before giving up (owner report 2026-07-06: the since-removed
+          // A toggled-off or removed variant must not cost the customer their
+          // completion text (owner report 2026-07-06: the since-removed
           // progress variant was inactive and progress visits would have
-          // texted nothing).
-          if (!body && sentSmsType !== 'service_report_v1') {
-            sentSmsType = 'service_report_v1';
-            body = await renderTemplate(sentSmsType, serviceReportV1SmsContext.vars, {
+          // texted nothing). For the BILLED lane the bar is higher: the text
+          // must actually carry the pay link, so the RENDERED body is checked
+          // for the URL rather than trusting the arming probe.
+          // isOptInSmsTemplateEnabled only proves the row exists and is
+          // active — an operator can edit {pay_url} out of the body in /admin,
+          // and `sms_template_variants` outranks the base row anyway, so an
+          // active template can render a perfectly good text with no way to
+          // pay. Either way this falls to the generic invoice template;
+          // dropping to the base report copy would leave a customer holding an
+          // open invoice and no link. Only the un-billed lane can fall back to
+          // bare report copy (where sentSmsType is already service_report_v1
+          // and there is nothing to fall back to).
+          if (sentSmsType === 'service_report_v1_with_invoice'
+            && !reportV1InvoiceBodyCarriesPayLink(body, payUrl)) {
+            sentSmsType = 'service_complete_with_invoice';
+            body = await renderTemplate(sentSmsType, {
+              first_name: svc.first_name || '',
+              service_type: displayServiceType,
+              portal_url: reportSmsUrl || reportUrl,
+              pay_url: payUrl,
+            }, {
               workflow: 'dispatch_service_complete',
               entity_type: 'service_record',
               entity_id: record.id,
@@ -9845,6 +10569,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         nLimit: waveguardNLimitApproval,
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
+        inventory: waveguardInventoryAdvisory,
       }),
       ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
       ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -11843,6 +12568,64 @@ function completionSavedCardFallbackPolicy({
   };
 }
 
+// Does the completion SMS take the REPORT lane (service_report_v1*) or fall
+// through to the generic service_complete* family? Extracted for unit testing
+// because the route-level wiring is exactly where this decision was wrong: the
+// lane computed a pay link, handed it to buildServiceReportV1DeliveryContext,
+// and then refused to enter the branch whenever an invoice existed — so
+// service_report_v1_with_invoice was unreachable in production from the day it
+// was written, and every billed report-v1 visit silently got the generic
+// service_complete_with_invoice instead. The pure-function tests all passed:
+// they exercised serviceReportV1SmsType directly, which was never the bug.
+//
+// reportV1InvoiceArmed is the caller's short-circuit — gate ON *and* the
+// with-invoice template present and active. It is only ever true for a billed
+// visit; an un-billed one has nothing to arm.
+// Is a rendered report-lane invoice body actually usable — i.e. does it carry
+// the pay link? Arming this lane only proves the sms_templates row exists and
+// is active; it does NOT prove the body still contains {pay_url}. The body is
+// operator-editable in /admin, and an active `sms_template_variants` row
+// outranks the base row entirely, so an armed, successfully-rendered text can
+// reach a customer with an open invoice and no way to pay it. Checking the
+// rendered output (not the stored template) is what makes that unreachable.
+// The comparison MUST be scheme-normalised: getTemplate strips https:// from
+// owned portal hosts before returning the body (admin-sms-templates.js
+// stripPortalUrlScheme), so a raw `body.includes(payUrl)` never matches a
+// portal pay link and would send EVERY billed visit to the fallback — leaving
+// the gated lane permanently unreachable. Both sides go through the renderer's
+// own function so this cannot drift as SCHEMELESS_SMS_HOSTS changes.
+function reportV1InvoiceBodyCarriesPayLink(body, payUrl, normalize) {
+  const strip = typeof normalize === 'function'
+    ? normalize
+    : (typeof smsTemplatesRouter.stripPortalUrlScheme === 'function'
+      ? smsTemplatesRouter.stripPortalUrlScheme
+      : (s) => s);
+  const text = String(body || '');
+  const url = String(payUrl || '').trim();
+  if (!text) return false;
+  // No pay URL to carry means this was never the billed lane — the caller
+  // only reaches this check with one, so treat a missing URL as unusable
+  // rather than vacuously true.
+  if (!url) return false;
+  return String(strip(text)).includes(String(strip(url)));
+}
+
+function completionUsesReportLane({
+  reportLaneEnabled,
+  invoiceCreated,
+  usePaidCompletionTemplate,
+  reportV1InvoiceArmed,
+}) {
+  // A paid/prepaid completion has its own template family (receipt, prepaid,
+  // annual-prepay) and never routes through the report lane.
+  if (!reportLaneEnabled || usePaidCompletionTemplate) return false;
+  // No bill: the report lane owns the text, exactly as it always has.
+  if (!invoiceCreated) return true;
+  // Billed: only with the with-invoice template armed, so the pay link the
+  // customer needs is guaranteed to be in the body.
+  return Boolean(reportV1InvoiceArmed);
+}
+
 // completionInvoiceAmount and membershipDuesCoverVisit moved to
 // services/billing-lane.js (imported at top) — the schedule payloads'
 // completion-billing prediction must share the exact same authority.
@@ -12281,6 +13064,7 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  reportReconcileBlockPayload,
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
   completionAllowsTechnicianPestRating,
@@ -12296,6 +13080,8 @@ module.exports._test = {
   completionInvoiceAmount,
   shouldCaptureApplicationConditions,
   completionSavedCardFallbackPolicy,
+  completionUsesReportLane,
+  reportV1InvoiceBodyCarriesPayLink,
   backfillCompletionPlan,
   applyBackfillDurationPolicy,
   applyBackfillRecordTimingPolicy,
@@ -12304,6 +13090,8 @@ module.exports._test = {
   liveTimeOnSitePlan,
   adjustedCompletionEndInstant,
   timeOnSiteEditPlan,
+  reentryEditPlan,
+  REENTRY_EDIT_MAX_MINUTES,
   frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,

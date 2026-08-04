@@ -205,7 +205,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -344,14 +344,70 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const showBilledMonthlyNote = perAppNet != null && intervalMonths === 1
     && !frequency.billedPerApplication
     && cadencePrice != null && Math.abs(cadencePrice - perAppNet) >= SAVINGS_ROUNDING_NOISE;
-  // Rowless per-application cards (split-section entries carry visitsPerYear
-  // on the frequency itself, no treatment rows) have no per-row sub-label to
-  // show cadence — without a count line the customer can't tell 4 from 12
-  // applications/year (codex P2). Muted count only, no "included" phrasing;
-  // the bold headline stays removed (owner 2026-07-23).
-  const showRowlessCadenceLine = perAppNet != null
-    && (!Array.isArray(frequency.perServiceTreatments) || frequency.perServiceTreatments.length === 0)
-    && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
+  // Per-application cards show the muted applications-per-year count directly
+  // under the price. Originally rowless split-section entries only (codex P2 —
+  // no per-row sub-label to carry cadence); extended to glass single-row cards
+  // (owner 2026-08-03: pest said "4 applications per year" under its price
+  // while lawn's count hid inside the details box — the sections must read the
+  // same). The count then drops from that row's sub-label below, mirroring the
+  // existing single-row price dedup. Muted count only, no "included" phrasing;
+  // the bold headline stays removed (owner 2026-07-23). Multi-row cards keep
+  // per-row counts — there the split is the information (and visitsPerYear
+  // resolves null for differing counts anyway).
+  const isRowless = !Array.isArray(frequency.perServiceTreatments) || frequency.perServiceTreatments.length === 0;
+  const showCadenceLine = perAppNet != null
+    && Number.isFinite(visitsPerYear) && visitsPerYear > 0
+    && (isRowless || (glass && treatmentRows.length === 1));
+
+  // Savings stack (owner 2026-08-01): every discount that shapes this price,
+  // itemized in the same unit as the price, directly beneath it — rather than
+  // a struck-through anchor whose gap is never explained plus a separate
+  // discount card elsewhere on the page. Reconciles by construction, since
+  // perAppSavings is defined as anchor − net − manual slice:
+  //     anchor − WaveGuard slice − manual slice = the headline net.
+  // Recomputed from `frequency` on every render, so switching cadence restates
+  // the whole stack against the newly selected per-application price.
+  // The WaveGuard row needs a tier to name AND the tier's authoritative
+  // discount pct to corroborate the amount (codex #3183 P1): perAppSavings is
+  // only the residual anchor-to-net gap after the manual slice — preference
+  // removals and floor adjustments shape it too, and labeling those dollars
+  // "WaveGuard <tier> Discount" would misattribute them. When the residual
+  // isn't the tier slice (±$0.06 rounding budget), the anchor keeps its
+  // existing unlabeled strike-through rather than inventing a label.
+  // Current-member estimates (owner 2026-08-04, same ruling as the discounts):
+  // the membership snapshot's per-application saving for this service is the
+  // rate ACTUALLY applied at save — margin-guard caps included — so it can
+  // corroborate a residual the plan-level tier pct can't (a capped rate is
+  // below the tier pct, and the snapshot's whole-% discountPct rounds too
+  // coarsely to reconcile against dollars). Amount-match within the same
+  // rounding budget; a cadence switch away from the saved selection changes
+  // the anchor and simply falls back to the unlabeled strike-through.
+  const memberSavingsConfirmed = Number(memberPerApplicationSavings) > 0
+    && perAppSavings > 0
+    && Math.abs(perAppSavings - round2(Number(memberPerApplicationSavings))) <= 0.06;
+  const waveGuardRowConfirmed = waveGuardTier
+    && ((Number(waveGuardDiscountPct) > 0
+      && perAppSavings > 0
+      && Math.abs(perAppSavings - round2(perAppAnchor * Number(waveGuardDiscountPct))) <= 0.06)
+      || memberSavingsConfirmed);
+  const savingsStack = perAppNet != null && showSavings
+    ? [
+      waveGuardRowConfirmed
+        ? {
+          key: 'waveguard',
+          // "WaveGuard Silver Discount", not "WaveGuard Silver" (owner
+          // 2026-08-01): the tier name alone reads like the plan badge it sits
+          // under, so the row has to say outright that this is a discount —
+          // same for Gold, Platinum, and any future tier.
+          label: `WaveGuard ${glass ? glassTierDisplay(normalizedTier(waveGuardTier)) : normalizedTier(waveGuardTier)} Discount`,
+          amount: perAppSavings,
+        }
+        : null,
+      manualDiscountPerApplication > 0
+        ? { key: 'manual', label: manualDiscount?.label || 'Discount', amount: manualDiscountPerApplication }
+        : null,
+    ].filter(Boolean)
+    : [];
 
   return (
     <div style={{
@@ -427,9 +483,51 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      {showRowlessCadenceLine ? (
+      {showCadenceLine ? (
         <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
           {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year
+        </div>
+      ) : null}
+
+      {savingsStack.length ? (
+        <div style={{
+          marginTop: 14,
+          paddingTop: 12,
+          borderTop: `1px solid ${W.borderCool}`,
+          display: 'grid',
+          gap: 9,
+        }}>
+          {savingsStack.map((item) => (
+            <div
+              key={item.key}
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 12,
+                alignItems: 'baseline',
+                fontSize: 14,
+                lineHeight: 1.35,
+              }}
+            >
+              <span style={{ color: W.textBody, fontWeight: 600 }}>{item.label}</span>
+              {/* No per-row unit: the anchor and the headline directly above
+                  both read "/ application", so repeating it here only squeezed
+                  long catalog labels into three ragged lines on a phone.
+                  Navy, not green (owner 2026-08-01): the glass surface is a
+                  navy/gold system with no green in it, and these rows are part
+                  of the price block — they take the price's own color rather
+                  than reading as a separate "savings" callout. The minus sign
+                  and the struck anchor above already say these come off. */}
+              <strong style={{
+                color: W.blueDeeper,
+                fontWeight: 800,
+                whiteSpace: 'nowrap',
+                fontVariantNumeric: 'tabular-nums',
+              }}>
+                {fmtMoneySigned(-item.amount)}
+              </strong>
+            </div>
+          ))}
         </div>
       ) : null}
 
@@ -455,7 +553,12 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         </div>
       ) : null}
 
-      {manualDiscount && manualDiscountInterval > 0 ? (
+      {/* The standalone row is the fallback for cards the savings stack can't
+          serve — a flat-monthly service with no per-application price, the
+          bundle card, or a card rendered with showSavings off. When the stack
+          itemizes the discount, this would restate it a second time. */}
+      {manualDiscount && manualDiscountInterval > 0
+        && !savingsStack.some((item) => item.key === 'manual') ? (
         <div style={{
           display: 'flex',
           justifyContent: 'space-between',
@@ -501,7 +604,21 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
 
       {treatmentRows.length ? (
         <div style={{ display: 'grid', gap: 12, marginTop: 20 }}>
-          {treatmentRows.map((row, index) => (
+          {treatmentRows.map((row, index) => {
+            // When the header already shows the muted count line (glass
+            // single-row dedup, owner 2026-08-03), the sub-label keeps only
+            // the tier tag — restating the count read twice.
+            const subLabelParts = [
+              showCadenceLine && !isRowless
+                ? null
+                : (Number(row.visitsPerYear) > 0
+                  ? `${row.visitsPerYear} applications/year`
+                  : (row.displayPrice > 0 ? 'Service applications/year' : 'Billed monthly')),
+              waveGuardTier && ROW_TIER_TAG_SERVICES.has(serviceKey(row))
+                ? `WaveGuard ${glass ? glassTierDisplay(normalizedTier(waveGuardTier)) : normalizedTier(waveGuardTier)}`
+                : null,
+            ].filter(Boolean);
+            return (
             <div
               key={`${row.service || row.label || 'service'}-${index}`}
               style={{
@@ -529,14 +646,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                   </div>
                 )}
               </div>
-              <div style={{ marginTop: 4, fontSize: 12, color: W.textCaption, lineHeight: 1.35 }}>
-                {Number(row.visitsPerYear) > 0
-                  ? `${row.visitsPerYear} applications/year`
-                  : (row.displayPrice > 0 ? 'Service applications/year' : 'Billed monthly')}
-                {waveGuardTier && ROW_TIER_TAG_SERVICES.has(serviceKey(row))
-                  ? (glass ? ` · WaveGuard ${glassTierDisplay(normalizedTier(waveGuardTier))}` : ` - WaveGuard ${normalizedTier(waveGuardTier)}`)
-                  : ''}
-              </div>
+              {subLabelParts.length ? (
+                <div style={{ marginTop: 4, fontSize: 12, color: W.textCaption, lineHeight: 1.35 }}>
+                  {subLabelParts.join(glass ? ' · ' : ' - ')}
+                </div>
+              ) : null}
               <RowInclusions
                 // Glass classifies via glassServiceSlug, not serviceKey():
                 // lawn_pest_* rows are PEST (server recurringServiceKey
@@ -551,7 +665,8 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
                 collapsible={glass}
               />
             </div>
-          ))}
+            );
+          })}
         </div>
       ) : null}
     </div>

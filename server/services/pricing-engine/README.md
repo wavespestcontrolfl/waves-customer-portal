@@ -63,7 +63,7 @@ Single source of truth for what this engine prices, how, and with what constants
 
 **Formula:** `max(floor, base + footprintAdj + additionalAdj + propAdj + ageAdj) × freqMult`
 
-- `base` $117, `floor` $89
+- `base` $112 (the $117 v4.3 anchor minus the light-tree-density $5 fold, owner ruling 2026-08-03), `floor` $89
 - `initialFee` $99 WaveGuard setup/membership fee. Estimate acceptance waives it when the customer selects annual prepay.
 
 **Footprint brackets (linear interp):** 800 −$15 · 1200 −$10 · 1500 −$5 · 2000 $0 · 2500 +$3 · 3000 +$6 · 4000 +$10 · 5500 +$16

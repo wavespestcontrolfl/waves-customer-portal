@@ -34,7 +34,12 @@ const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
-const { findBannedCustomerCopy } = require('./activity-indicators');
+const {
+  findBannedCustomerCopy,
+  isInitialRodentTrapSetup,
+  setupContradictions,
+  normalizeWordNumbers,
+} = require('./activity-indicators');
 const { validateCustomerCopy } = require('./premium-experience');
 const {
   EXTRA_FORBIDDEN,
@@ -47,7 +52,9 @@ const {
 // project-report surface and is out of scope) — the prompt generalized from rodent-
 // only wording (owner ask 2026-07-27, second lane). File name kept (no
 // renames); rodent remains a thin alias over the same engine.
-const PROMPT_VERSION = 'typed_report_narrative_v3'; // v3: + HUMAN_PROSE_RULES (owner style block 07-30)
+// v4: + visitStage, so the first visit of a rodent trapping program reads as
+// the setup it is instead of a routine re-check (owner 2026-08-02).
+const PROMPT_VERSION = 'typed_report_narrative_v4';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -157,8 +164,19 @@ function activityFacts(activity = null) {
 // capture count (one trap can hold more than one capture — codex P1 #3004),
 // so the fact names say exactly what the number is and the actual capture
 // count, when recorded, arrives via the typed findings.
-function stationFacts(stationSummary = null, program = null) {
+function stationFacts(stationSummary = null, program = null, countDisputed = false) {
   if (!stationSummary || !stationSummary.total) return null;
+  // A disputed setup count (the tech's typed trap count disagrees with the
+  // pinned roster — setupCountVerified false on the map context) keeps every
+  // PIN-derived number OUT of the facts: the map card already suppresses
+  // its count line, and whatever number reaches these facts is one the model
+  // is licensed to print ("8 of 8 traps were set" beside "Traps set: 6" —
+  // codex P1 round 12). That includes the activity/capture pin count (codex
+  // P2 round 13): the pins are the disputed roster, so "a capture was
+  // recorded at 7 traps" can publish beside "Traps set: 6". The typed
+  // findings still carry the tech's own counts — captures included — and
+  // those are the ratified numbers.
+  if (countDisputed) return { program: program || null, countDisputed: true };
   const base = {
     program: program || null,
     total: stationSummary.total,
@@ -187,9 +205,11 @@ function groundingFacts({
   serviceTypeDisplay,
   reportTypeLabel = null,
   typedReport = null,
+  visitStage = null,
   activity = null,
   stationSummary = null,
   stationProgram = null,
+  stationCountDisputed = false,
   applications = [],
   photos = [],
   nextAppointment = null,
@@ -209,6 +229,27 @@ function groundingFacts({
     recap: cleanText(recap),
     serviceTypeDisplay: cleanText(serviceTypeDisplay) || 'service visit',
     reportTypeLabel: cleanText(reportTypeLabel || typedReport?.reportTypeLabel || typedReport?.typeLabel) || null,
+    // The trap-SETUP visit — the traps went out today and nothing has been
+    // re-checked yet. Without this the model reaches for the recurring "we
+    // checked the traps" story every time (owner 2026-08-02). Reads the
+    // tech's own trap_visit_type off the frozen snapshot values, so the
+    // narrative can never disagree with the ratified Today's Result. Null on
+    // every other visit/type, so those prompts are unchanged.
+    //
+    // The caller may pass this EXPLICITLY, and does so whenever it resolved
+    // the stage itself. That matters when rodent_trapping is a COMPANION to
+    // a non-trapping primary: `typedReport` is the primary, so deriving the
+    // stage from it alone returned null and the setup rules and guards never
+    // engaged, even though the companion-selected trap map was on the page
+    // (codex P1 round 10). Falls back to deriving it from typedReport for
+    // callers that don't resolve it.
+    visitStage: visitStage || (isInitialRodentTrapSetup(
+      typedReport?.type,
+      typedReport?.visitSequence,
+      typedReport?.values,
+    )
+      ? 'initial_trap_setup'
+      : null),
     todaysResult: typedReport?.todaysResult
       ? {
         headline: cleanText(typedReport.todaysResult.headline) || null,
@@ -218,7 +259,7 @@ function groundingFacts({
       : null,
     findings: findingFacts(typedReport),
     activity: activityFacts(activity),
-    stations: stationFacts(stationSummary, stationProgram),
+    stations: stationFacts(stationSummary, stationProgram, stationCountDisputed === true),
     devices: deviceFacts(applications),
     photoEvidence: photoFacts(photos),
     // The tech-reviewed consolidated photo analysis, when present — richer
@@ -258,7 +299,11 @@ function deterministicSummary(facts) {
   } else if (facts.recap) {
     parts.push(facts.recap);
   }
-  if (facts.stations && facts.stations.checked > 0) {
+  // countDisputed carries no checked count at all — the sentence still names
+  // the stage (round-9 lesson: staying silent produces re-check wording
+  // elsewhere), it just never restates a number the tech has disputed.
+  if (facts.stations && (facts.stations.checked > 0
+    || (facts.stations.countDisputed && facts.stations.program === 'trapping'))) {
     const s = facts.stations;
     if (s.program === 'trapping') {
       // Capture wording is sourced from the records that actually carry it:
@@ -269,6 +314,7 @@ function deterministicSummary(facts) {
       // rejects the reverse), and claiming "no captures" against it would
       // contradict the ratified Today's Result (codex round-3 P1).
       const typedCaptures = typedActivityState(facts, /captur/i);
+      const setup = facts.visitStage === 'initial_trap_setup';
       let clause = null;
       if (s.trapsWithCaptureRecorded > 0) {
         clause = `a capture recorded at ${s.trapsWithCaptureRecorded} trap${s.trapsWithCaptureRecorded === 1 ? '' : 's'}`;
@@ -276,10 +322,15 @@ function deterministicSummary(facts) {
         clause = `${typedCaptures.count} capture${typedCaptures.count === 1 ? '' : 's'} recorded`;
       } else if (typedCaptures.positive === true) {
         clause = 'captures recorded'; // typed positive without a count
-      } else if (typedCaptures.positive === false) {
+      } else if (typedCaptures.positive === false && !setup) {
+        // Traps placed today have had no chance to catch anything — a "no
+        // captures recorded" line on the setup visit reads as a failed check.
         clause = 'no captures recorded';
       }
-      parts.push(`${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were inspected${clause ? `, with ${clause}` : ''}.`);
+      const scaffold = s.countDisputed
+        ? `Traps were ${setup ? 'set' : 'inspected'} on this visit`
+        : `${s.checked} of ${s.total} trap${s.total === 1 ? '' : 's'} were ${setup ? 'set' : 'inspected'}`;
+      parts.push(`${scaffold}${clause ? `, with ${clause}` : ''}.`);
     } else if (s.program === 'rodent') {
       // Same sourcing rule as captures (codex round-7 P1, mirroring the
       // round-3 trapping fix): a zero-consumption claim is grounded only in
@@ -335,6 +386,7 @@ Rules:
 - Devices with a name in the facts (mechanical traps, monitoring devices) may be named. Products with a null name must only be described by their generic category — never guess or reconstruct a product name, and never mention chemicals, active ingredients, application rates, prices, or EPA details.
 - If photo evidence is provided, briefly and calmly reference what was documented — it shows the customer what the service is tracking.
 - If an activity reading is provided, work its meaning in naturally; when it is marked as a baseline, say this visit sets the baseline future visits will measure against.
+- When visitStage is "initial_trap_setup" the traps were placed today. Describe them as set/placed on this visit, say what happens next (we return to check them and adjust placements), and never write that traps were checked, re-checked, reset, or that no captures were found — nothing has had a chance to catch yet. A setup can happen on any visit of a service program, so never state or imply that this is the first visit, and never rank it against earlier visits.
 - If the ratified result copy recommends a follow-up window or care instructions, carry them faithfully — never change the timing or drop the instruction.
 - If a next visit is provided, close with it, copying the date and arrival window EXACTLY as given in the facts — never restate, recompute, or reformat them.
 - Never say eliminated, guaranteed, pest-free, eradicated, infestation, toxic, poison, safe, or solved forever. Never blame the customer.
@@ -362,26 +414,10 @@ function numberTokens(text) {
 // traps" can't route around the numeral checks (codex round-2 P1). "one" is
 // included deliberately — the partitive filter below keeps "one of the
 // traps" from tripping the count check.
-const WORD_NUMBER_RE = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/gi;
-const WORD_NUMBER_VALUES = {
-  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
-  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
-  fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
-  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
-  seventy: 70, eighty: 80, ninety: 90, hundred: 100, thousand: 1000,
-};
-
-function normalizeWordNumbers(text) {
-  return String(text || '')
-    .replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]))
-    // recombine compound word-numbers the word pass split — hyphenated
-    // ("twenty-one" → "20-1") AND space-separated ("twenty one" → "20 1")
-    // — so they can't slip a smaller grounded digit past the count
-    // validators (codex P2 r3 + P1 r8)
-    .replace(/\b(\d+)[-\s](\d)\b/g, (full, tens, ones) => (Number(tens) >= 20 && Number(tens) % 10 === 0
-      ? String(Number(tens) + Number(ones))
-      : full));
-}
+//
+// The implementation lives in activity-indicators (imported above) so this
+// lane and the technician-body count guard added in round 8 normalize
+// identically; two copies would drift and only one of them would be tested.
 
 function collectNumbers(set, value) {
   if (value == null) return;
@@ -1257,6 +1293,21 @@ function contradictedActivityWording(text, facts) {
   return problems;
 }
 
+// A trap-SETUP visit's wording is ENFORCED, not merely requested (codex P2
+// on #3159). The prompt rule alone was not a guard: on a mapped setup the
+// station facts still ground the checked count and a typed `captures: 0`
+// still grounds negative capture wording, so "we checked 8 traps and found
+// no captures" cleared every fail-closed check while flatly contradicting
+// visitStage.
+//
+// The matcher itself lives in activity-indicators (`setupContradictions`)
+// because the typed snapshot runs the SAME test over the tech's AI report
+// body — one definition, so the two lanes cannot drift apart.
+function setupWordingProblems(text, facts) {
+  if (facts.visitStage !== 'initial_trap_setup') return [];
+  return setupContradictions(text);
+}
+
 // Invented product/chemical identifiers reject independently of the
 // recorded applications (codex P2 r16): the echo guard only knows the
 // visit's own products, so an unrecorded brand or active ingredient
@@ -1366,6 +1417,7 @@ function ungroundedClaims(rawText, facts) {
   problems.push(...unpairedActionLocations(text, facts));
   problems.push(...contradictedCareCopy(text, facts));
   problems.push(...contradictedActivityWording(text, facts));
+  problems.push(...setupWordingProblems(text, facts));
   problems.push(...inventedProductIdentifiers(text, facts));
   // Score-ratio phrasing ("3 out of 5", "3/5") is banned outright: the
   // customer-copy contract keeps raw activity scores out of prose (the

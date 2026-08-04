@@ -2517,8 +2517,8 @@ function initScheduledJobs() {
     try {
       const { processDuePdfRenderJobs } = require('./service-report/pdf-queue');
       const result = await processDuePdfRenderJobs();
-      if (result.claimed || result.succeeded || result.failed || result.requeued || result.recovered) {
-        logger.info(`Service report PDF renders: ${result.succeeded} succeeded, ${result.requeued} queued for retry, ${result.failed} failed, ${result.recovered} recovered`);
+      if (result.claimed || result.succeeded || result.failed || result.requeued || result.deferred || result.recovered) {
+        logger.info(`Service report PDF renders: ${result.succeeded} succeeded, ${result.requeued} queued for retry, ${result.deferred} deferred, ${result.failed} failed, ${result.recovered} recovered`);
       }
     } catch (err) {
       logger.error(`Service report PDF render cron failed: ${err.message}`);

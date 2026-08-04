@@ -79,7 +79,12 @@ const TURF_FACTORS = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33
 const PEST = {
   // TODO(v4.4): document rationale for base/floor values (market analysis,
   // competitor comparison, or historical anchor). v4.3 operator baseline.
-  base: r(117),
+  // 112 = the 117 operator baseline with the light-tree-density -$5 baked
+  // in: every pest quote prices as light tree density (owner ruling
+  // 2026-08-03), replacing the retired trees_light feature modifier
+  // (migration 20260716140000) so the retirement stops reading as a
+  // +$5/visit increase on the (majority) light-tree homes.
+  base: r(112),
   floor: r(89),
   // Post-discount program floor DISARMED (owner ruling 2026-07-17: "forget
   // all floors" — margins are surfaced to the owner, who adjusts prices in

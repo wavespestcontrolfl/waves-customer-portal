@@ -134,11 +134,13 @@ const {
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
 const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
   putReportPdf,
   reportPdfStorageKey,
   timeOnSiteAdjustedPdfSignature,
+  reentryAdjustedPdfSignature,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature, technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const {
@@ -1220,6 +1222,25 @@ router.get('/:token/preview.jpg', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Attachment filename the customer sees on download/share/email, e.g.
+// "Waves-Service-Report-123-Main-St-2026-08-02.pdf". service_date is a
+// hydrated pg DATE — naive template interpolation printed the entire
+// Date.toString() ("Sun Aug 02 2026 00:00:00 GMT+0000 (Coordinated
+// Universal Time)") into the filename (and, via the share sheet, into the
+// customer's email subject).
+function reportPdfFileName(service, { prefix = 'Waves-Service-Report' } = {}) {
+  const datePart = dateOnlyStamp(service.service_date);
+  const addressPart = String(service.address_line1 || '')
+    .normalize('NFKD')
+    .replace(/[^\w\s-]/g, '')
+    .trim()
+    .replace(/[\s_]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .slice(0, 60)
+    .replace(/^-+|-+$/g, '');
+  return `${[prefix, addressPart, datePart].filter(Boolean).join('-')}.pdf`;
+}
+
 // GET /api/reports/:token — public PDF access (no auth)
 router.get('/:token', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) {
@@ -1298,7 +1319,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature,
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1306,7 +1327,7 @@ router.get('/:token', async (req, res, next) => {
       if (storedPdf) {
         await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+        res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service)}"`);
         res.setHeader('Cache-Control', 'no-store');
         return res.send(storedPdf);
       }
@@ -1321,6 +1342,9 @@ router.get('/:token', async (req, res, next) => {
       // the cache-lookup value; assigned inside the try so an unreadable
       // lookup fails closed through the retry path.
       let laRenderSignature = null;
+      // The payload the render was produced from — its flags decide whether
+      // this output may be cached.
+      let renderedData = null;
       try {
         // ONE canonical lookup feeds BOTH the pin and the storage-key component
         // (#3172 r1) — two lookups can straddle a selection change and cache a
@@ -1334,6 +1358,7 @@ router.get('/:token', async (req, res, next) => {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+          renderedData = data;
           pdf = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
@@ -1385,11 +1410,16 @@ router.get('/:token', async (req, res, next) => {
         // Compare against what the render was PINNED to, not the cache-lookup
         // value — the object must be keyed by the assessment it contains.
         const laAfter = await lawnAssessmentPdfSignature(service, db);
-        if (laAfter !== laRenderSignature) {
+        // Same rule as pdf-queue: a render whose week could not be FROZEN is
+        // not reproducible, so serve it but cache nothing — otherwise a later
+        // view freezes different data while this object keeps these numbers.
+        if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
+          logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
+        } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laRenderSignature,
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature,
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }
@@ -1398,7 +1428,7 @@ router.get('/:token', async (req, res, next) => {
       }
       await recordServiceReportEvent(service, 'pdf_downloaded', 'public_report', req, { source: 'direct_pdf_route' });
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `inline; filename="Waves-Service-Report-${service.service_date}.pdf"`);
+      res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service)}"`);
       res.setHeader('Cache-Control', 'no-store');
       return res.send(pdf);
     }
@@ -1641,7 +1671,7 @@ router.get('/:token/data', async (req, res, next) => {
 function generateReportPDF(service, products, weather, dryTimes, irrigation, res) {
   const doc = new PDFDocument({ size: 'LETTER', margin: 50 });
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="Waves-Report-${service.service_date}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${reportPdfFileName(service, { prefix: 'Waves-Report' })}"`);
   doc.pipe(res);
 
   // Header — logo (centered) with license + contact lines beneath. Falls

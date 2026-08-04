@@ -1291,7 +1291,70 @@ export default function DispatchPageV2({
   const [detailService, setDetailService] = useState(null);
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
-  const pendingPaymentAfterCompletionRef = useRef(null);
+  // Staged handoffs are PER SERVICE (Map serviceId → handoff): a singleton
+  // let an earlier visit's slower response overwrite the handoff already
+  // staged for the open panel, whose close then found nothing to drain and
+  // a payment-due invoice went uncollected (codex P1 #3187 r20).
+  const pendingPaymentAfterCompletionRef = useRef(new Map());
+  // Mirrors WHICH visit's completion panel is mounted, for callbacks that
+  // resolve AFTER the operator backed out (the onClose payment-ref drain
+  // only runs at close — a later response must deliver its own handoff,
+  // codex P1 #3187 r11). Tracking the service id, not a boolean: visit A's
+  // late response while visit B's panel is open must deliver A immediately,
+  // or B's own completion would overwrite A's entry in the singleton
+  // pending ref and A's payment modal would never show (codex P1 r13).
+  const completionPanelOpenServiceRef = useRef(null);
+  useEffect(() => {
+    completionPanelOpenServiceRef.current = completingService?.id || null;
+  }, [completingService]);
+  // A late handoff arriving while the tech is ACTIVELY collecting another
+  // visit must queue, not replace: MobilePaymentSheet has no visit-specific
+  // key, so swapping paymentData under an open tender would silently switch
+  // the invoice being collected (codex P1 #3187 r15). Every sheet dismissal
+  // pops the queue.
+  const paymentSheetActiveRef = useRef(false);
+  useEffect(() => {
+    paymentSheetActiveRef.current = !!paymentData;
+  }, [paymentData]);
+  const latePaymentHandoffQueueRef = useRef([]);
+  const releasePaymentSheet = useCallback(() => {
+    const next = latePaymentHandoffQueueRef.current.shift() || null;
+    // Synchronous ref update: a delivery landing before the paymentData
+    // effect re-runs must already see the sheet as occupied/free.
+    paymentSheetActiveRef.current = !!next;
+    setPaymentData(next);
+  }, []);
+  // EVERY payment-handoff delivery routes through here — the late-response
+  // path AND the panel-close drain (codex P1 #3187 r15 + r16): an active
+  // sheet queues the handoff (MobilePaymentSheet has no visit key; a
+  // paymentData swap under an open tender silently switches the invoice
+  // being collected), a free sheet opens it.
+  const deliverPaymentHandoff = useCallback((handoff) => {
+    if (!handoff) return;
+    if (paymentSheetActiveRef.current) {
+      latePaymentHandoffQueueRef.current.push(handoff);
+    } else {
+      paymentSheetActiveRef.current = true;
+      setPaymentData(handoff);
+    }
+  }, []);
+  // Close-and-drain for the completion panel — EVERY dismissal path (Back/
+  // Close AND the mobile Details swap) must clear the ownership ref
+  // synchronously and drain this visit's staged handoff, or a response
+  // landing in the effect-lag window stages an entry no drain ever reads
+  // (codex P1 #3187 r18 + r21).
+  const closeCompletionPanel = useCallback(() => {
+    completionPanelOpenServiceRef.current = null;
+    const closingServiceId = completingService?.id || null;
+    setCompletingService(null);
+    const staged = closingServiceId
+      ? pendingPaymentAfterCompletionRef.current.get(closingServiceId)
+      : null;
+    if (staged) {
+      pendingPaymentAfterCompletionRef.current.delete(closingServiceId);
+      deliverPaymentHandoff(staged);
+    }
+  }, [completingService, deliverPaymentHandoff]);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -1575,12 +1638,12 @@ export default function DispatchPageV2({
     [handleStatusChange],
   );
 
-  const handleCompleteSubmit = useCallback(
-    async (serviceId, body) => {
-      const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
+  // Post-response completion bookkeeping, shared by the POST path
+  // (handleCompleteSubmit) and the panel's status-poll resolution
+  // (onCompletionResult, codex P1 #3187 r11) — both must flip the status,
+  // invalidate the mobile week cache, and stage the payment handoff.
+  const applyCompletionResult = useCallback(
+    (serviceId, r, body) => {
       handleStatusChange(serviceId, "completed");
       // The mobile week list serves rows from its own cached /week payload —
       // completion was the one terminal transition that never invalidated
@@ -1607,16 +1670,38 @@ export default function DispatchPageV2({
         const completedService =
           (data?.services || []).find((s) => s.id === serviceId) ||
           completingService;
-        pendingPaymentAfterCompletionRef.current = {
+        const handoff = {
           service: completedService,
           invoiceId: r.invoiceId,
           invoiceToken: r.invoiceToken,
           amount: Number(r.invoiceTotal),
         };
+        if (completionPanelOpenServiceRef.current === serviceId) {
+          // Own panel still open: stage under THIS service's key — its
+          // onClose drains exactly this entry, and no other visit's
+          // response can overwrite it (codex P1 #3187 r20).
+          pendingPaymentAfterCompletionRef.current.set(serviceId, handoff);
+        } else {
+          // Panel closed or the operator moved on: deliver now through the
+          // synchronized helper (queues behind an active sheet — codex P1
+          // r11 + r13 + r15).
+          deliverPaymentHandoff(handoff);
+        }
       }
       return r;
     },
-    [completingService, handleStatusChange, isMobile, data],
+    [completingService, handleStatusChange, isMobile, data, deliverPaymentHandoff],
+  );
+
+  const handleCompleteSubmit = useCallback(
+    async (serviceId, body) => {
+      const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      return applyCompletionResult(serviceId, r, body);
+    },
+    [applyCompletionResult],
   );
 
   const handleDelete = useCallback(async (service) => {
@@ -2489,14 +2574,22 @@ export default function DispatchPageV2({
         <CompletionPanel
           service={completingService}
           products={products}
-          onClose={() => {
-            setCompletingService(null);
-            if (pendingPaymentAfterCompletionRef.current) {
-              setPaymentData(pendingPaymentAfterCompletionRef.current);
-              pendingPaymentAfterCompletionRef.current = null;
-            }
-          }}
+          onClose={closeCompletionPanel}
           onSubmit={handleCompleteSubmit}
+          onCompletedElsewhere={(serviceId) => {
+            // Cross-key completion: the visit finished under another
+            // idempotency key, so handleCompleteSubmit never resolved —
+            // run its non-payment bookkeeping (the invoice payload only
+            // travels on the same-key response, so no payment handoff).
+            handleStatusChange(serviceId, "completed");
+            setScheduleRefreshKey((k) => k + 1);
+          }}
+          onCompletionResult={(serviceId, r) =>
+            // Status-poll resolution: the stored same-key response is the
+            // completion result — run the FULL bookkeeping, payment
+            // handoff included (codex P1 #3187 r11).
+            applyCompletionResult(serviceId, r, null)
+          }
           onScheduleFollowup={async (suggestion) => {
             // Books the suggested follow-up as a PENDING appointment (the
             // normal pending → confirmed dispatch flow is the confirmation
@@ -2521,7 +2614,8 @@ export default function DispatchPageV2({
           onViewDetails={
             isMobile
               ? (svc) => {
-                  setCompletingService(null);
+                  // Same close-and-drain as Back/Close (codex P1 r21).
+                  closeCompletionPanel();
                   setDetailService(svc);
                 }
               : undefined
@@ -2905,7 +2999,12 @@ export default function DispatchPageV2({
               fetchSchedule(date, { silent: true });
               return;
             }
-            setPaymentData({ service: svc, invoiceId, invoiceToken, amount });
+            // Through the synchronized delivery helper (codex P1 #3187
+            // r19): a direct setPaymentData leaves paymentSheetActiveRef
+            // false until the passive effect runs, and a late completion
+            // handoff landing in that window would overwrite this checkout
+            // sheet instead of queueing behind it.
+            deliverPaymentHandoff({ service: svc, invoiceId, invoiceToken, amount });
           }}
           onEditServiceLine={(svc) => setEditingLineService(svc)}
         />
@@ -2946,12 +3045,17 @@ export default function DispatchPageV2({
       )}
       {paymentData && (
         <MobilePaymentSheet
+          // Invoice-keyed remount: advancing the queue must never reuse the
+          // previous invoice's local tender state (a launched Tap to Pay
+          // left `charging` stuck for the next customer — codex P2 #3187
+          // r18).
+          key={paymentData.invoiceId}
           service={paymentData.service}
           invoiceId={paymentData.invoiceId}
           invoiceToken={paymentData.invoiceToken}
           amount={paymentData.amount}
           desktopVisible
-          onClose={() => setPaymentData(null)}
+          onClose={releasePaymentSheet}
           onInvoiceSent={async () => {
             // Invoice SMS+email was just sent — the bill is now in the
             // customer's hands. Mirror the cash/check tender flow and
@@ -2961,7 +3065,11 @@ export default function DispatchPageV2({
               ...paymentData.service,
               completionInvoiceAlreadySent: true,
             };
-            setPaymentData(null);
+            // Unlike the card/cash/check tenders, MobilePaymentSheet does
+            // NOT chain onClose after onInvoiceSent — this path releases
+            // itself or the sheet stays mounted and the queue stalls
+            // (codex P1 #3187 r18).
+            releasePaymentSheet();
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];
@@ -2989,7 +3097,10 @@ export default function DispatchPageV2({
               checkoutInvoiceId: paymentData.invoiceId,
               checkoutInvoiceStatus: "paid",
             };
-            setPaymentData(null);
+            // No release here: MobilePaymentSheet always invokes onClose right
+            // after this callback, and releasing twice would shift TWO queue
+            // entries and lose one (codex P1 #3187 r17) — onClose is the
+            // sheet's single release point.
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];
@@ -3016,7 +3127,10 @@ export default function DispatchPageV2({
               checkoutInvoiceId: invoice?.id || paymentData.invoiceId,
               checkoutInvoiceStatus: invoice?.status || "paid",
             };
-            setPaymentData(null);
+            // No release here: MobilePaymentSheet always invokes onClose right
+            // after this callback, and releasing twice would shift TWO queue
+            // entries and lose one (codex P1 #3187 r17) — onClose is the
+            // sheet's single release point.
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];

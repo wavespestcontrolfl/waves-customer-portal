@@ -300,6 +300,12 @@ button, input, select, textarea, optgroup {
 .waves-skip-link:focus {
   top: calc(12px + env(safe-area-inset-top, 0px));
 }
+/* position: fixed repeats on every printed page — Chromium stamped the pill
+   onto each page of every generated report PDF. Keyboard focus doesn't exist
+   on paper; never print it. */
+@media print {
+  .waves-skip-link { display: none !important; }
+}
 
 /* Customer-facing portal cleanup. These classes intentionally sit outside
    admin shells and pair with inline React styles on the public pages. */

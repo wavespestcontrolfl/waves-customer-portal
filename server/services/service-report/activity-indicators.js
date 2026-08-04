@@ -27,12 +27,18 @@ const {
 // owner spec 2026-06-12). Snapshots are immutable — v1 snapshots keep
 // rendering with their persisted labels.
 const SCHEMA_VERSION = 2;
-const COPY_MAP_VERSION = 2;
-// Summary template v3: the generic non-gauge default composition of
-// buildTodaysResult accepts the tech-reviewed AI report copy as the body
-// (bodySource 'technician_report'); zero states and every owner story keep
-// template copy, and template-only output is unchanged from v2.
-const SUMMARY_TEMPLATE_VERSION = 3;
+// Copy map v3: rodent trapping's count label is no longer a constant — on a
+// declared trap-SETUP visit `traps_checked` persists as "Traps set" (owner
+// 2026-08-02). A v2 snapshot can never carry that label, so the version is
+// what tells fixtures and audits which generator produced a given row
+// (codex P2 on #3159).
+const COPY_MAP_VERSION = 3;
+// Summary template v4: rodent trapping joins the lanes that accept the
+// tech-reviewed AI report copy as the body (bodySource 'technician_report'),
+// and a declared setup visit composes setup wording instead of the re-check
+// story. v3 added the generic non-gauge default composition. Zero states and
+// every owner story still keep template copy in both.
+const SUMMARY_TEMPLATE_VERSION = 4;
 
 // Customer wording per score. Never expose the numeric score in customer
 // copy; banned-words rule (no "clear"/"eliminated"/"no infestation") applies.
@@ -679,7 +685,15 @@ const REQUIRED_FINDINGS_FIELDS = {
   // required in validateTypedFindings (any evidence level except 'None
   // observed') — a truthful cleared visit has no activity area to name.
   flea: ['evidence_level', 'treatment_completed', 'customer_prep'],
-  rodent_trapping: ['species'],
+  // trap_visit_type is REQUIRED (codex P2 on #3159): left optional, a blank
+  // selector showed the static "Traps checked" label on the form while the
+  // server's visitSequence fallback froze "Traps set" into the report — the
+  // tech entering a count under one meaning and the customer reading the
+  // other. The closeout pre-selects it from the property's trap registry, so
+  // requiring it costs a tap only when we genuinely cannot tell — which is
+  // exactly the case that must not be guessed. The fallback survives for
+  // snapshots that legitimately carry no value (pre-field completions).
+  rodent_trapping: ['species', 'trap_visit_type'],
   // Owner spec §1/§2/§4 marked the full checklists required; the 2026-07-23
   // simplification (same lane as the T&S closeout) retired the duplicate /
   // label-only fields, so each list is back inside the ≤4 budget. Inspection
@@ -1192,6 +1206,34 @@ function validateTypedFindings({ type, values, expectedType, enforceRequired = f
       errors.push('"No limitations" cannot be combined with other limitations');
     }
   }
+  // A declared trap SETUP cannot also have serviced traps that were not
+  // there yet (codex P2 on #3159). The deterministic body already suppresses
+  // these verbs on a setup, but trap_actions is a customer-facing finding
+  // row, so the report still published "Traps set: 8" beside "Trap service
+  // performed: Traps reset". Rejecting matches how every other rodent
+  // cross-field contradiction is handled above — this is inconsistent DATA,
+  // not a copy nicety, and the tech resolves it by correcting whichever
+  // field is wrong.
+  if (type === 'rodent_trapping' && String(values.trap_visit_type || '').trim() === 'Initial setup') {
+    const followUpOnly = String(values.trap_actions || '')
+      .split(',').map((s) => s.trim()).filter(Boolean)
+      .filter((action) => SETUP_INCOMPATIBLE_TRAP_ACTIONS.includes(action));
+    if (followUpOnly.length) {
+      errors.push(
+        `Trap actions ${followUpOnly.map((a) => `"${a}"`).join(', ')} describe traps that were already out — `
+        + 'either clear them or set this visit to "Follow-up check"'
+      );
+    }
+    // A setup that placed no traps is not a setup (codex P2 on #3159).
+    // Blank or 0 published "Traps set: 0" into the immutable report while
+    // the body still promised "we return to check them". Count fields
+    // legitimately accept 0 elsewhere (a re-check can find zero captures),
+    // so this is a stage-specific floor rather than a schema change.
+    const trapsPlaced = Number(values.traps_checked);
+    if (!Number.isInteger(trapsPlaced) || trapsPlaced < 1) {
+      errors.push('An initial setup must record how many traps were set — enter the count, or set this visit to "Follow-up check"');
+    }
+  }
   // rodent_sanitation publishes "contamination was cleaned and sanitized"
   // copy — with evidence_cleaned retired (2026-07-23), the work chips are
   // the only proof cleanup happened. A submission whose only work chip is
@@ -1494,26 +1536,44 @@ function joinPhrases(parts) {
 // wildlife), composed from the sectioned checklist (counts + action chips)
 // instead of free text. Returns null when nothing trap-related was recorded
 // so the generic fallback chain applies.
-function trapActivitySentence(values = {}) {
+//
+// `initialSetup` = the FIRST visit of a trapping program (owner 2026-08-02:
+// "typically these are first time trappings" — the copy always read as a
+// recurring re-check). On that visit the traps are being PUT OUT, so the
+// count reads "set 8 traps" instead of "checked 8 traps", and the
+// add/reset chips fold into that setup rather than restating it.
+function trapActivitySentence(values = {}, { initialSetup = false } = {}) {
   const parts = [];
   const checked = Number(values.traps_checked);
   if (Number.isInteger(checked) && checked > 0) {
-    parts.push(`checked ${checked} trap${checked === 1 ? '' : 's'}`);
+    parts.push(`${initialSetup ? 'set' : 'checked'} ${checked} trap${checked === 1 ? '' : 's'}`);
   }
   const capturesRaw = values.captures;
   const captures = Number(capturesRaw);
   if (Number.isInteger(captures) && captures > 0) {
     parts.push(`removed ${captures} capture${captures === 1 ? '' : 's'}`);
-  } else if (capturesRaw != null && capturesRaw !== '' && captures === 0 && parts.length) {
+  } else if (
+    capturesRaw != null && capturesRaw !== '' && captures === 0 && parts.length
+    // Traps that went out today have had no chance to catch anything —
+    // "found no new captures" on a setup visit reads as a failed check.
+    && !initialSetup
+  ) {
     parts.push('found no new captures');
   }
   // Both trapping vocabularies: rodent ('Traps reset', 'New traps added')
   // and wildlife ('Trap installed', 'One-way door installed').
   const actions = String(values.trap_actions || '')
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
-  if (actions.includes('trap installed')) parts.push('installed traps');
-  if (actions.includes('new traps added')) parts.push('added new traps');
-  if (actions.includes('traps reset')) parts.push('reset the traps');
+  const placedTraps = actions.includes('trap installed') || actions.includes('new traps added');
+  if (initialSetup) {
+    // The count sentence already says the traps were set — the placement
+    // chips only speak when there was no count to carry them.
+    if (placedTraps && !parts.length) parts.push('set the traps');
+  } else {
+    if (actions.includes('trap installed')) parts.push('installed traps');
+    if (actions.includes('new traps added')) parts.push('added new traps');
+  }
+  if (actions.includes('traps reset') && !initialSetup) parts.push('reset the traps');
   if (actions.includes('traps moved')) parts.push('repositioned traps');
   if (actions.includes('one-way door installed')) parts.push('installed a one-way exit device');
   if (actions.includes('bait/lure refreshed')) parts.push('refreshed the bait');
@@ -1752,6 +1812,895 @@ function composedWorkSentence(projectType, values = {}) {
 }
 
 /**
+ * Is this the rodent trapping visit where the traps GO OUT, rather than one
+ * where they get re-checked? (owner 2026-08-02: the reports "always assume
+ * it's a secondary trapping", and "it could be just the first time trapping,
+ * but it also could be the second time".)
+ *
+ * ONLY the tech's explicit `trap_visit_type` selection says so. A trapping
+ * visit is a setup or a re-check because of what happened on it, never
+ * because of where it falls in a sequence — that was the owner's whole
+ * point, and the counter is doubly wrong here because it spans the entire
+ * rodent family (a first trapping after an inspection lands on visit 2).
+ *
+ * There is deliberately NO visitSequence fallback (codex P0 on #3159). An
+ * earlier revision inferred setup from `visitSequence <= 1` whenever the
+ * field was absent, which meant EVERY pre-change snapshot — none of which
+ * carry the field — was reclassified as a setup at view time. The
+ * narrative's live grounding would then have told an already-delivered
+ * report that the traps were set today, contradicting the frozen
+ * "checked/reset" copy persisted in that same snapshot. Existing rows must
+ * keep rendering exactly as they were written (AGENTS.md: breaking existing
+ * DB rows is P0). Absent the field, this is false and every legacy report
+ * keeps its original re-check wording.
+ *
+ * Nothing is lost going forward: the field is REQUIRED on the rodent
+ * trapping schema, so every new completion carries a declaration.
+ *
+ * Wildlife trapping is deliberately excluded: its checklist carries an
+ * explicit 'Trap installed' chip that already reads right on visit 1.
+ */
+function isInitialRodentTrapSetup(projectType, _visitSequence, values = {}) {
+  if (projectType !== 'rodent_trapping') return false;
+  return String(values?.trap_visit_type || '').trim() === 'Initial setup';
+}
+
+// Wording that CONTRADICTS a declared trap setup. Lives here rather than in
+// the narrative module because two independent lanes need the same test and
+// the narrative already imports from this file (importing back would cycle):
+//   1. the LLM Visit Summary  (rodent-report-narrative's fail-closed guards)
+//   2. the tech's AI report body, which is free prose screened only for
+//      banned copy — the draft prompt never receives trap_visit_type, and the
+//      tech can flip the selector after generating, so a body saying "we
+//      checked 8 traps and found no captures" could ride onto a declared
+//      setup (codex P1 on #3159).
+//
+// Anchored to trap nouns so ordinary setup prose survives: "we checked the
+// roofline for entry points" is a legitimate sentence on a setup visit. The
+// re-verbs deliberately exclude a bare "set" — that is the wording a setup
+// visit is SUPPOSED to use (codex P2 on #3159).
+// Six rounds of pattern-list extension leaked in BOTH directions at once —
+// missing "have been checked" while rejecting "we inspected the attic and set
+// eight traps" (codex round 6). A blocklist of surface forms was the wrong
+// shape, so this classifies by OBJECT BINDING instead: a re-check verb only
+// contradicts a setup when the thing it acts on is a trap.
+const TRAP_NOUNS = /^(?:traps?|devices?)$/i;
+// Verbs that assert a trap was already in place. `set` and `place` are
+// deliberately absent — they are the wording a setup is SUPPOSED to use.
+// Inflections are spelled out rather than glued on with a generic suffix
+// group: silent-e stems ("replace" → "replaced", not "replaceed") and
+// doubling stems ("swap" → "swapped") do not survive that shortcut.
+// The `re-` prefix is per-verb, not global. Bare `check`/`inspect` are
+// already re-check claims, but bare `bait`/`fresh`/`position`/`set` are what
+// a SETUP legitimately does — only their re- forms contradict one. Writing
+// `set` as `re-?set` is what finally admits "re-set the traps" while still
+// letting "set the traps" through.
+const RECHECK_VERB = new RegExp('^(?:'
+  + 're-?set(?:ting|s)?'
+  + '|(?:re-?)?check(?:ed|ing|s)?'
+  + '|(?:re-?)?inspect(?:ed|ing|s)?'
+  // Plain synonyms of check/inspect (pre-push audit on 42406f3): a report
+  // saying the traps were examined or tested presupposes traps to examine,
+  // exactly as bare check/inspect do. Silent-e stem spelled out like
+  // `replace` above.
+  + '|(?:re-?)?examine[sd]?|(?:re-?)?examining'
+  + '|(?:re-?)?test(?:ed|ing|s)?'
+  + '|re-?bait(?:ed|ing|s)?'
+  + '|re-?fresh(?:ed|ing|es)?'
+  + '|re-?position(?:ed|ing|s)?'
+  + '|replace[sd]?|replacing'
+  + '|swap(?:ped|ping|s)?'
+  + '|move[sd]?|moving'
+  // Servicing a trap presupposes it was already out (codex P1) — a setup
+  // places traps, it does not service them.
+  + '|service[sd]?|servicing|services'
+  + ')$', 'i');
+// Per-verb `re-` prefixes, for the same reason RECHECK_VERB spells them out:
+// a single leading `(?:re-?)?` in front of a literal `rebaited` cannot match
+// the hyphenated "re-baited" (the prefix eats "re-", leaving "baited" to
+// match nothing), while bare `baited` must stay legal because baiting is
+// what a setup does. Found by the round-8 passive matrix, not by review.
+const RECHECK_PARTICIPLE = new RegExp('^(?:'
+  + 're-?set'
+  + '|(?:re-?)?checked'
+  + '|(?:re-?)?inspected'
+  + '|(?:re-?)?examined'
+  + '|(?:re-?)?tested'
+  + '|re-?baited'
+  + '|re-?freshed'
+  + '|re-?positioned'
+  + '|replaced|swapped|moved|serviced'
+  + ')$', 'i');
+// Where a verb's object phrase ENDS. Listing terminators rather than the
+// allowed modifiers is the only version that survives real prose: an
+// adjective allowlist can always be beaten by an unlisted one ("all
+// mechanical traps", "the snap traps" — codex P1 round 7), whereas the set
+// of words that start a NEW phrase is small and closed.
+//
+// Deliberately excluded: `of` (partitive — "two of the traps" is still one
+// object phrase) and particles like `out`/`up` ("swapped out the old traps").
+// `once` and `as` are subordinators exactly like the `after`/`when`/`while`
+// already here, and their absence let the passive scan run out of the trap
+// noun's phrase and bind a participle belonging to a different subject:
+// "We set traps ONCE the crawlspace was checked" read as a trap re-check
+// and discarded the body (pre-push audit P1). Note the neighbouring
+// "…AFTER the crawlspace was checked" was always correct — the set was
+// simply incomplete.
+const OBJECT_PHRASE_END = /^(?:in|on|at|for|before|after|with|without|from|to|along|near|around|under|over|behind|beside|by|into|onto|across|through|during|against|where|which|that|when|while|once|as|who|whose|because|since|until|unless|though|although)$/i;
+// (No PASSIVE_AUX constant: the passive scan no longer tests for an
+// auxiliary at all — see passiveRecheckOnTrap. Enumerating auxiliaries was
+// what made the reduced passive "8 traps checked today" invisible.)
+
+function words(text) {
+  return String(text).split(/[^A-Za-z0-9-]+/).filter(Boolean);
+}
+
+// True when a re-check VERB in this clause takes a trap as its object: read
+// forward from the verb to the end of its object phrase and look for a trap
+// noun anywhere inside. "inspected the attic" ends at the clause and never
+// sees a trap; "inspected the exterior BEFORE placing the traps" ends at
+// `before`; "checked all mechanical traps" reaches `traps` regardless of
+// which adjectives sit in between.
+// Returns EVERY object-bound hit, not the first: the caller exempts each
+// hit individually, and returning only the first let a future-governed
+// promise mask a completed claim later in the same clause — "We will
+// check the traps next week that we inspected today" returned the exempt
+// `check … traps` and never reached `inspected` (codex P1 r20).
+function activeRecheckOnTrap(clause) {
+  const toks = words(clause);
+  const hits = [];
+  for (let i = 0; i < toks.length; i += 1) {
+    if (!RECHECK_VERB.test(toks[i])) continue;
+    for (let j = i + 1; j < toks.length && !OBJECT_PHRASE_END.test(toks[j]); j += 1) {
+      if (TRAP_NOUNS.test(toks[j])) {
+        hits.push({ text: toks.slice(i, j + 1).join(' '), verbAt: i, toks });
+        break;
+      }
+    }
+  }
+  return hits;
+}
+
+// "<trap noun> … <participle>" — the trap is what the participle happened
+// to, in any number and any tense: "one trap was reset", "eight traps have
+// been checked", "the devices had been inspected".
+//
+// The participle is SEARCHED FOR, not assumed to sit immediately after the
+// auxiliary: reading only the first following token saw the adverb in "all
+// traps were carefully inspected" / "the devices have been thoroughly
+// checked" and passed them (codex P1 round 8). The active side already
+// learned this lesson in round 7 — an allowlist of intervening words is
+// always one unlisted adverb from failing — so the scan stops at the same
+// closed OBJECT_PHRASE_END set instead of guessing which modifiers are legal.
+//
+// The AUXILIARY is not required at all (codex P1 round 10). Requiring one
+// missed the reduced passive that field shorthand actually uses — "all 8
+// traps checked today" — which the active scan cannot recover either,
+// because there the trap noun PRECEDES its verb. Dropping the requirement
+// subsumes both forms in one scan; `was`/`were`/`have been` simply become
+// unremarkable tokens on the way to the participle.
+//
+// Setup verbs stay legal because RECHECK_PARTICIPLE excludes them: "8 traps
+// set today" and "the traps were set before the attic was inspected" both
+// pass (the latter stops at `before`, so the later `inspected` is never
+// bound to the traps).
+// Array-returning for the same reason as the active scan. A RELATIVE
+// pronoun (that/which/who) does not end the reach the way the other
+// subordinators do: its clause verb acts ON the head noun — "the traps
+// that we inspected" is a trap re-check (codex P1 r20). Inside the
+// relative clause only the CHECK family may bind (CHECK_VERB_PAST):
+// action verbs there read as provenance ("the traps that were moved from
+// the garage" is setup-compatible staging prose), and flagging them would
+// discard reviewed copy — the bias this stack resolves against.
+// `once`/`as`/`after` and the rest still terminate: their clause has its
+// own subject, and binding across them was the round-15 regression.
+// EVERY trap noun gets its own phrase scan — the first noun's phrase can
+// end (at a preposition) before a later noun that carries the claim: "We
+// placed traps near traps that we inspected today" found nothing when
+// only the first `traps` was scanned (pre-push P1 on d0b30f2d5).
+function passiveRecheckOnTrap(clause) {
+  const toks = words(clause);
+  const hits = [];
+  for (let trapAt = 0; trapAt < toks.length; trapAt += 1) {
+    if (!TRAP_NOUNS.test(toks[trapAt])) continue;
+    let inRelative = false;
+    for (let i = trapAt + 1; i < toks.length; i += 1) {
+      if (/^(?:that|which|who)$/i.test(toks[i])) { inRelative = true; continue; }
+      if (OBJECT_PHRASE_END.test(toks[i])) break;
+      const isHit = inRelative
+        ? RELATIVE_CHECK_VERB.test(toks[i])
+        : RECHECK_PARTICIPLE.test(toks[i]);
+      if (isHit) hits.push({ text: `${toks[trapAt]} … ${toks[i]}`, verbAt: i, toks });
+    }
+  }
+  return hits;
+}
+
+// Clause split: sentence enders plus the coordinators that introduce a NEW
+// verb phrase, so "we inspected the attic AND set eight traps" is judged as
+// two clauses rather than one 40-character window.
+//
+// `and` is the one coordinator that has to be CONDITIONAL, because it does
+// two different jobs. Splitting it unconditionally cut coordinated objects
+// in half — "we checked the snap and glue traps" became "we checked the
+// snap" (a verb with no trap) plus "glue traps today" (a trap with no verb),
+// and neither half matched, so the claim published on a declared setup
+// (codex P1 round 9). It only starts a new clause when a VERB follows it;
+// joining an object's modifiers, it does not.
+const CLAUSE_BREAK_RE = /[.!?;,]|\b(?:but|then|while|before|after|so)\b/i;
+// Verbs a SETUP legitimately performs. Not re-check claims themselves — they
+// exist only to recognize that a new predicate has started after `and`.
+const PREDICATE_VERB = /^(?:set|sets|setting|place[sd]?|placing|install(?:ed|ing|s)?|add(?:ed|ing|s)?|bait(?:ed|ing|s)?|position(?:ed|ing|s)?|remove[sd]?|removing|seal(?:ed|ing|s)?|document(?:ed|ing|s)?|note[sd]?|noting|monitor(?:ed|ing|s)?|treat(?:ed|ing|s)?|found|left)$/i;
+// Skipped when deciding what follows `and`, so "and carefully set …" is still
+// recognized as a new predicate rather than read as an object modifier.
+const ADVERBIAL = /ly$|^(?:also|again|now|today|just|already)$/i;
+// A NEW SUBJECT after `and` also starts a clause: "the traps were set today
+// and the attic was inspected" must not lend the attic's participle to the
+// traps — the unsplit window let passiveRecheckOnTrap bind `inspected` to
+// `traps` and silently discard legitimate setup copy (codex P2 round 13).
+// Recognized as an auxiliary within a few tokens of the `and` with no verb
+// before it: determiners and nouns are exactly the tokens the verb tests
+// reject, so the auxiliary is the earliest reliable signal. Coordinated
+// objects stay joined — "the snap and glue traps" has no auxiliary.
+const CLAUSE_AUX = /^(?:was|were|is|are|has|have|had|will|would|can|could|should|may|might|must)$/i;
+const NEW_SUBJECT_LOOKAHEAD = 4;
+// A REPEATED SUBJECT before the predicate — "we inspected the attic and WE
+// set eight traps" — blocked the verb test, and the new-subject scan broke
+// on the lexical verb without splitting, so the attic's `inspected` bound
+// to the later traps and valid copy was discarded (codex P2 round 14). A
+// subject pronoun followed by a predicate is unambiguous, so it is simply
+// skipped for the verb test. A determiner+noun subject with a lexical verb
+// ("and the assistant set eight traps") deliberately stays joined: without
+// a parser it is indistinguishable from a reduced participle modifying the
+// object ("the snap and glue traps placed along the wall"), and the
+// passive/auxiliary forms of such clauses are already split by CLAUSE_AUX.
+const SUBJECT_PRONOUN = /^(?:we|i|they|she|he)$/i;
+
+function splitOnPredicateAnd(piece) {
+  const toks = words(piece);
+  const out = [];
+  let start = 0;
+  for (let i = 0; i < toks.length; i += 1) {
+    if (!/^and$/i.test(toks[i])) continue;
+    let j = i + 1;
+    while (j < toks.length && ADVERBIAL.test(toks[j])) j += 1;
+    let sawPronoun = false;
+    if (SUBJECT_PRONOUN.test(toks[j] || '')) {
+      sawPronoun = true;
+      j += 1;
+      while (j < toks.length && ADVERBIAL.test(toks[j])) j += 1;
+    }
+    const next = toks[j];
+    if (!next) continue;
+    let splits = RECHECK_VERB.test(next) || PREDICATE_VERB.test(next);
+    // An auxiliary after an explicit new SUBJECT is that subject's verb, so
+    // it splits: "traps were checked and WE WILL return" must not let the
+    // second clause's future marker excuse the first clause's claim.
+    if (!splits && sawPronoun && CLAUSE_AUX.test(next)) splits = true;
+    // A future predicate after `and` is its own clause: "We inspected the
+    // attic AND WILL SET traps next visit" must not let the active scan run
+    // out of the first predicate and bind `inspected` to the second one's
+    // traps. `and` is deliberately not an object-phrase terminator (it joins
+    // coordinated objects — "the snap and glue traps"), so the split is what
+    // separates them. Uses the SAME regex as the governance test, so the two
+    // cannot drift apart — the mistake an earlier version of this made with
+    // a hand-rolled token list.
+    if (!splits && FUTURE_GOVERNOR_RE.test(next)) splits = true;
+    // Once a future marker has appeared, this `and` also starts a fresh
+    // clause, so a claim standing behind a promise is still judged.
+    if (!splits && FUTURE_INTENT_RE.test(toks.slice(start, i).join(' '))) splits = true;
+    // With no pronoun, an auxiliary IMMEDIATELY after `and` is a
+    // shared-subject verb phrase ("were set and were checked later") — that
+    // window must stay joined so the participle still binds to its trap
+    // subject. The new-subject scan starts one token later.
+    if (!splits && !CLAUSE_AUX.test(next)) {
+      for (let k = j + 1; k < Math.min(j + 1 + NEW_SUBJECT_LOOKAHEAD, toks.length); k += 1) {
+        if (RECHECK_VERB.test(toks[k]) || PREDICATE_VERB.test(toks[k])) break;
+        if (CLAUSE_AUX.test(toks[k])) { splits = true; break; }
+      }
+    }
+    if (splits) {
+      out.push(toks.slice(start, i).join(' '));
+      start = i + 1;
+    }
+  }
+  out.push(toks.slice(start).join(' '));
+  return out;
+}
+
+function clauses(text) {
+  return String(text || '')
+    .split(CLAUSE_BREAK_RE)
+    .flatMap((piece) => splitOnPredicateAnd(piece || ''))
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
+// trap_actions values that presuppose traps were ALREADY on the property,
+// so they contradict a declared setup. 'New traps added' and 'Exterior
+// inspection completed' are legitimate on a setup and stay legal.
+const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
+  'Traps reset',
+  'Traps moved',
+  'Traps replaced',
+  'Bait/lure refreshed',
+  'Damaged or missing traps found',
+];
+// Hoisted above the setup guards because BOTH families use them: the
+// count claims below and the noun-form re-check patterns that follow
+// share one definition of "what ends a trap noun phrase" rather than
+// keeping two that can drift.
+// Animals terminate the phrase ONLY when they are not naming the trap.
+// "rat traps", "mouse traps", and "rodent traps" are the ordinary compound
+// names in this trade, and treating the animal as an absolute terminator
+// meant "We checked 8 mouse traps today" extracted no claim at all — the
+// most natural phrasing there is, silently unguarded (codex P1). The
+// conditional keeps "2 rats near the traps" counting rats, not traps.
+const TRAP_ANIMAL_NOUNS = '(?:rats?|mice|mouse|rodents?|animals?)';
+// Unbounded modifier run before an ANIMAL noun, the TRAP_MODIFIER_RUN
+// philosophy applied to animal phrases: a fixed {0,2} cap missed "We
+// caught 2 large adult roof rats", so a corrected captures value never
+// reconciled and the stale 2 survived (codex P1 r20; the negated and
+// zero forms shared the cap). `of`/`the` stay ALLOWED, unlike the trap
+// run — "caught 2 of the rats" claims the caught 2 — while clause
+// connectors, prepositions, auxiliaries, and rival head nouns still
+// terminate.
+const ANIMAL_MODIFIER_RUN = '(?:\\s+(?!(?:and|or|nor|but|then|near|at|in|on|from|with|without|around|under|behind|were|was|are|is|have|has|had|been|will|would|traps?|devices?|stations?|captures?|catches)\\b)[a-z-]+)*?';
+const TRAP_PHRASE_TERMINATORS = [
+  // 1. rival head nouns + partitives/articles
+  'captures?', 'catches',
+  'droppings', 'burrows?', 'holes?', 'gaps?', 'marks?', 'signs?', 'samples?',
+  'of', 'the', 'a', 'an', 'and', 'or', 'nor', 'but',
+  // 2. prepositions
+  'with', 'without', 'near', 'at', 'in', 'on', 'for', 'from', 'around',
+  'along', 'inside', 'outside', 'behind', 'beneath', 'under', 'over', 'by',
+  'to', 'between', 'through', 'beyond', 'across', 'past', 'into', 'onto',
+  'above', 'below', 'beside', 'toward', 'towards', 'against', 'off',
+  // 3. clause connectors, auxiliaries, and unambiguous predicate verbs
+  'then', 'thus', 'plus', 'also', 'while', 'before', 'after', 'so',
+  'because', 'which', 'that', 'where', 'when', 'though', 'although',
+  'was', 'were', 'is', 'are', 'be', 'been', 'being', 'has', 'have', 'had',
+  'will', 'would', 'did', 'do', 'does', 'can', 'could', 'should', 'may',
+  'might', 'must',
+  're-?checked', 're-?check', 're-?inspected', 're-?inspect', 'examined',
+  'tested', 'serviced', 'completed', 'performed', 'documented', 'recorded',
+  'observed', 'noted', 'counted', 'found', 'saw', 'removed', 'replaced',
+  're-?set', 'swapped', 'moved',
+];
+const TRAP_MODIFIER_RUN = `(?:\\s+(?!${TRAP_ANIMAL_NOUNS}\\b(?!\\s+(?:traps?|devices?)\\b))(?!(?:${TRAP_PHRASE_TERMINATORS.join('|')})\\b)[a-z-]+)*?`;
+// A bare number is a determiner here too, so "checked 6 of 8 traps" and "6
+// of 8 traps were checked" route through the partitive rules — see
+// CHECK_PREDICATE_* below for why that matters.
+// An article may sit in FRONT of the M ("6 of the 8 traps"), which is at
+// least as natural as the bare form. Without it here the partitive rules
+// missed the phrase entirely, TRAP_COUNT_CLAIM_RE's own `of M` group
+// (which requires the digits adjacent) also missed it, and the leftover
+// tail "8 traps" matched as a bare roster claim — reconciling 8 against a
+// correctly recorded 6 and discarding the copy. Word-form numbers
+// normalize into the same shape, so "Six of the eight traps" went the same
+// way. Self-audit finding, immediately after the fix it defeats.
+const TRAP_PARTITIVE_DET = '(?:(?:the|our|these|those|all|its)(?:\\s+\\d+)?|\\d+)';
+// A CHECK predicate bound to an `N of M` claim changes which number the
+// claim is about. Without one, M is the roster ("6 of 8 traps were empty"
+// says 8 exist). With one, N is the count that was checked ("6 of 8 traps
+// were checked" says 6 were), and reconciling M against `traps_checked`
+// flagged a contradiction on prose that was exactly right — discarding the
+// technician's reviewed copy, the failure this whole stack exists to
+// prevent. Found by self-audit after round 15, not by review: the round-14
+// partitive rule reads "checked 8 of the traps" as 8 CHECKED, so the two
+// readings of one construction had drifted apart.
+// A coordinated second verb keeps the check predicate bound to its count:
+// "We checked AND REBAITED 6 of 8 traps" is still a check claim about 6.
+// The past-tense check verbs, defined ONCE for every count-governance
+// regex that embeds them (the two anchored predicates here and both
+// partitives below): when RECHECK_VERB gained examined/tested these four
+// still said checked|inspected only, so "Due to activity, we examined 8
+// traps" dropped its roster claim as a subset while "…we checked 8 traps"
+// kept it (codex P1 r17). The set stays narrower than RECHECK_VERB by
+// design — rebaited/moved/serviced/reset are setup-incompatible ACTIONS,
+// not roster scans, and must not govern counts (r14).
+const CHECK_VERB_PAST = '(?:re-?)?(?:checked|inspected|examined|tested)';
+// Token form of the same set, for the passive scan's relative clauses
+// ("the traps that we INSPECTED") — one source, see passiveRecheckOnTrap.
+const RELATIVE_CHECK_VERB = new RegExp(`^${CHECK_VERB_PAST}$`, 'i');
+// The optional `a total of` / `the count of` tail: ordinary wrappers
+// between the check verb and its numeral. Without it "we checked a total
+// of 8 traps" failed the anchor, and a cue elsewhere in the window then
+// demoted the only roster claim — the stale count published (codex P1
+// r18).
+const CHECK_PREDICATE_LEAD_RE = new RegExp(
+  `\\b${CHECK_VERB_PAST}(?:\\s+(?:and|or)\\s+[a-z-]+)*(?:\\s+(?:[a-z]+ly|all|both|just|now))*(?:\\s+(?:a|the)\\s+(?:total|count)\\s+of)?\\s*$`,
+  'i',
+);
+const CHECK_PREDICATE_TRAIL_RE = new RegExp(
+  `^(?:\\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*\\s+${CHECK_VERB_PAST}\\b`,
+  'i',
+);
+// Distributive ACTION predicates: a count they govern is the subset of
+// traps the action touched, never the roster — the same r14 ruling that
+// keeps set/reset out of the partitive rules, extended to bare counts.
+// "We checked 8 traps and reset 2 traps" read the 2 as a rival total, and
+// the deliberate more-than-one-claim bail then let the stale 8 publish
+// (codex P1 r19). A sibling of RECHECK_VERB's action forms, NOT derived
+// from it: that list also holds check/inspect/examine/test, which DO
+// govern rosters. Same anchoring and inflection spelling as the check
+// predicates above.
+const ACTION_VERB_PAST = '(?:re-?set(?:ting|s)?|re-?bait(?:ed|ing|s)?|re-?fresh(?:ed|ing|es)?'
+  + '|re-?position(?:ed|ing|s)?|replace[sd]?|replacing|swap(?:ped|ping|s)?'
+  + '|move[sd]?|moving|service[sd]?|servicing)';
+const ACTION_PREDICATE_LEAD_RE = new RegExp(
+  `\\b${ACTION_VERB_PAST}(?:\\s+(?:[a-z]+ly|all|both|just|now))*(?:\\s+(?:a|the)\\s+(?:total|count)\\s+of)?\\s*$`,
+  'i',
+);
+const ACTION_PREDICATE_TRAIL_RE = new RegExp(
+  '^(?:\\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*'
+  + '\\s+(?:re-?set|re-?baited|re-?freshed|re-?positioned|replaced|swapped|moved|serviced)\\b',
+  'i',
+);
+
+const SETUP_EMPTY_CAPTURE_RES = [
+  /\bno\s+(?:new\s+)?captures?\b/i,
+  /\bcaptures?\s+(?:were|was)\s+not\s+recorded\b/i,
+  /\b(?:traps?|devices?)\s+(?:were|was)\s+empty\b/i,
+  // Numeric and word-form zero say the same thing without the word "no":
+  // "0 captures were recorded", "There were zero captures", "caught 0
+  // rats". The count guard cannot reject these — a structured captures of
+  // 0 makes a zero CLAIM arithmetically accurate — but on a setup the
+  // traps just went out, so any zero-capture reading still implies a check
+  // that never happened (codex P1 round 12). setupContradictions runs on
+  // UN-normalized text, so both the digit and the word form are matched.
+  /\b(?:0|zero)\s+(?:new\s+)?(?:captures?|catches)\b/i,
+  /\b(?:caught|captured|removed)\s+(?:0|zero)\b/i,
+  new RegExp(`\\b(?:0|zero)${ANIMAL_MODIFIER_RUN}\\s+${TRAP_ANIMAL_NOUNS}\\b[^.!?]{0,30}?\\b(?:caught|captured|removed)\\b`, 'i'),
+  // Negated ANIMAL forms and do-not-catch verb phrases make the same claim
+  // with neither the word "captures" nor a number: "No mice were caught",
+  // "We did not catch any rodents", "no rats have been trapped". The count
+  // guard cannot see them at all — there is no numeric claim to reconcile
+  // (codex P1 round 13). "trapped" joins the verb set here only: a bare
+  // "set" stays legal, and "trapped" in the negated form is a check claim.
+  new RegExp(`\\bno${ANIMAL_MODIFIER_RUN}\\s+${TRAP_ANIMAL_NOUNS}\\b[^.!?]{0,30}?\\b(?:caught|captured|removed|trapped)\\b`, 'i'),
+  /\b(?:(?:did|do|does|have|has|had)\s+not|didn['’]t|don['’]t|doesn['’]t|haven['’]t|hasn['’]t|hadn['’]t)\s+(?:yet\s+)?(?:catch|caught|capture[ds]?|trap(?:ped)?)\b/i,
+  /\bnothing\s+(?:was\s+|has\s+been\s+|had\s+been\s+)?(?:caught|captured|trapped)\b/i,
+  // Active and partitive ways of saying the traps came up empty — all of
+  // them assert a check that a setup has not performed (codex P1). The
+  // "empty" form stays PREDICATIVE so "we set 8 traps in the empty
+  // crawlspace" is untouched: only copulas and quantifiers may sit between
+  // the trap noun and the word.
+  /\b(?:traps?|devices?)\s+(?:(?:were|was|are|is|all|still|found|sat|sit)\s+)*empty\b/i,
+  new RegExp(`\\bnone\\s+of\\s+${TRAP_PARTITIVE_DET}\\b(?:\\s+[a-z-]+){0,3}?\\s+(?:traps?|devices?)\\b`, 'i'),
+  /\b(?:produced|yielded|held|contained)\s+(?:no|zero|0)\s+(?:catches|captures|rodents?|rats?|mice)\b/i,
+];
+
+// NOUN-form re-check claims: "Trap inspection completed today", "We
+// completed a full trap inspection". The verb scans never see these —
+// there is no verb bound to a trap noun at all (codex P1 round 15).
+//
+// A completion word is REQUIRED, and that is the whole safety margin: the
+// setup's own ratified next-step sentence is "We will return for the
+// scheduled trap check", and the setup prompt explicitly asks the model to
+// say we return to check them. A bare "trap check" matcher would reject
+// exactly the copy this stage is supposed to produce. The trap noun must
+// also sit directly on the inspection noun (or be its `of` object), so
+// "exterior inspection completed" and "attic inspection" stay legal.
+const RECHECK_NOUN = '(?:re-?)?(?:inspections?|checks?|checkups?)';
+const COMPLETION_WORD = '(?:completed|complete|performed|done|finished|conducted)';
+// The gap between the trap-check noun and its completion word must stay
+// inside ONE clause and carry no future marker. Allowing it to cross a
+// comma, semicolon, or dash bound a completion word describing the SETUP
+// to a check that is merely scheduled — "Initial setup complete, trap
+// check scheduled for next week" was rejected — and with no tense test
+// "The trap check will be completed on our next visit" was too. Both are
+// ordinary setup prose; rejecting them discards the technician's copy.
+// The round-15 pass only pinned examples that happened to use a period.
+const NOT_FUTURE = '(?!\\b(?:will|shall|scheduled|upcoming|next|when|once|planned)\\b)';
+// Dashes separate clauses as readily as commas in field prose ("Trap
+// placement completed - trap check in 7 days"). A hyphen inside a word
+// ends the gap too, which only ever costs a match — the safe direction.
+const CLAUSE_GAP = (n) => `(?:${NOT_FUTURE}[^.!?,;:\\-\\u2013\\u2014])${n}`;
+const SETUP_RECHECK_NOUN_RES = [
+  new RegExp(`\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b${CLAUSE_GAP('{0,20}?')}\\b${COMPLETION_WORD}\\b`, 'i'),
+  new RegExp(`\\b${COMPLETION_WORD}\\b${CLAUSE_GAP('{0,30}?')}\\b(?:traps?|devices?)\\s+${RECHECK_NOUN}\\b`, 'i'),
+  new RegExp(`\\b${RECHECK_NOUN}\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b${CLAUSE_GAP('{0,20}?')}\\b${COMPLETION_WORD}\\b`, 'i'),
+  // Completion-first, `of` form: "We completed an inspection of the traps
+  // today". The noun-adjacent pattern above needs "trap inspection", and
+  // the `of` pattern needs its completion word to FOLLOW, so this word
+  // order fell between them. The verb scans don't catch it either —
+  // "check" doubles as a verb so "a check of the traps" is caught
+  // incidentally, but "inspection" has no verb form to match (codex P1
+  // round 16).
+  new RegExp(`\\b${COMPLETION_WORD}\\b${CLAUSE_GAP('{0,20}?')}\\b${RECHECK_NOUN}\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`, 'i'),
+];
+// A stated INTENTION to check is not a claim that checking happened — and
+// "we will return to check the traps" is exactly what the setup prompt
+// asks the model to write. The verb scans have no tense of their own, so
+// the escape hatch was the pronoun in "check THEM"; a tech writing the
+// noun instead had the body discarded. Applied per clause, ahead of the
+// verb scans, so a real claim in a neighbouring clause still rejects.
+const FUTURE_INTENT_RE = /\b(?:will|shall|going\s+to|plan(?:ning)?\s+to|expect\s+to|due\s+to|scheduled|upcoming|return\s+to|be\s+back\s+to|next\s+(?:visit|week|month|trip))\b/i;
+// Whether a future marker GOVERNS a particular verb, rather than merely
+// sharing a clause with it. Three attempts at the coarser question all
+// failed in a different direction: skipping the clause let a promise carry
+// out the claim beside it; truncating at the marker lost a claim that came
+// after it; and the coordinator rule still lost one EMBEDDED behind it —
+// "We will continue monitoring the traps WE CHECKED today", where `will`
+// governs `continue`, not `checked`.
+//
+// Governance is local: an auxiliary or infinitival head sits within a
+// couple of tokens of the verb it governs ("will inspect", "plan to
+// check", "return to check", "are going to inspect"). Anything further
+// away is governing something else. Deliberately a small window — a wider
+// one is how the last three versions swallowed neighbouring claims.
+const FUTURE_GOVERNOR_RE = /\b(?:will|shall|going|plan|planning|expect|due|return|back|scheduled|upcoming)\b/i;
+// Tokens a future predicate may legitimately put between its marker and the
+// verb it governs: the infinitival head, motion verbs, and timing. "We will
+// COME BACK NEXT WEEK TO inspect the traps" is one promise, and a flat
+// three-token window classified it as a completed re-check (codex P1) —
+// natural setup copy, silently discarded.
+const FUTURE_CHAIN_TOKEN = /^(?:to|back|again|soon|later|then|next|coming|upcoming|week|weeks|month|months|day|days|visit|trip|monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|morning|afternoon|come|comes|coming|go|goes|going|return|returns|returning|be|been|stop|stopping|swing|head|by|out|on|in|for|our|the|a|an|[a-z]+ly)$/i;
+// The walk STOPS at anything else — and the load-bearing case is a subject
+// pronoun, which is what starts an embedded clause with its own verb: in
+// "the traps WE checked", `we` ends the reach of any earlier `will`, which
+// is exactly the distinction the positional versions of this test kept
+// getting wrong.
+function futureGovernsVerb(toks, verbAt) {
+  for (let i = verbAt - 1; i >= 0 && i >= verbAt - 8; i -= 1) {
+    if (FUTURE_GOVERNOR_RE.test(toks[i])) return true;
+    if (!FUTURE_CHAIN_TOKEN.test(toks[i])) return false;
+  }
+  return false;
+}
+// Same question for the noun-form patterns, asked of the text in front of
+// the match. A coordinator ends the reach — "Follow-up scheduled next week
+// AND trap inspection completed today" is two assertions, and only the
+// first one is a promise. Inside that reach the SAME bounded chain walk as
+// the verb form decides governance: a flat three-token window missed "We
+// are scheduled next week to complete an inspection of the traps", whose
+// governor sits four tokens back behind pure chain tokens, and the valid
+// setup copy was discarded (codex P2 r17) — the exact failure mode the
+// verb side already fixed by walking instead of truncating.
+function futureGovernsMatch(text, index) {
+  const before = String(text).slice(0, index);
+  const lastBreak = Math.max(
+    before.lastIndexOf(' and '), before.lastIndexOf(' but '), before.lastIndexOf(' then '),
+  );
+  const toks = words(before.slice(lastBreak + 1));
+  return futureGovernsVerb(toks, toks.length);
+}
+
+// Word-form numbers normalized to numerals before any count check, so
+// "eight traps" is validated exactly like "8 traps". Shared with the
+// narrative module, which validates the LLM summary against the same facts
+// (it imports from this file; a copy in each would drift).
+const WORD_NUMBER_VALUES = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
+  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
+  fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
+  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90, hundred: 100, thousand: 1000,
+};
+const WORD_NUMBER_RE = new RegExp(`\\b(${Object.keys(WORD_NUMBER_VALUES).join('|')})\\b`, 'gi');
+
+function normalizeWordNumbers(text) {
+  return String(text || '')
+    .replace(WORD_NUMBER_RE, (word) => String(WORD_NUMBER_VALUES[word.toLowerCase()]))
+    // recombine compound word-numbers the word pass split — hyphenated
+    // ("twenty-one" → "20-1") AND space-separated ("twenty one" → "20 1")
+    // — so they can't slip a smaller grounded digit past the count
+    // validators (codex P2 r3 + P1 r8)
+    .replace(/\b(\d+)[-\s](\d)\b/g, (full, tens, ones) => (Number(tens) >= 20 && Number(tens) % 10 === 0
+      ? String(Number(tens) + Number(ones))
+      : full));
+}
+
+// Count claims in free prose. `N of M traps` yields M — the roster claim —
+// because the N is a subset ("6 of 8 traps were empty" claims 8 exist), and
+// bare partitives ("one of the traps") claim no total at all.
+//
+// The modifier run between the count and its trap noun is bounded by
+// MEANING, with no token cap at all: adjectives ("exterior mechanical
+// snap") extend the same noun phrase however long it runs, while anything
+// that starts a NEW phrase ends it. The old two-token cap missed "We
+// checked 8 exterior mechanical snap traps" entirely (codex P1 round 13),
+// and the interim {0,6} was the same mistake smaller — catalog prose runs
+// past any fixed cap (codex P2 round 14).
+//
+// Three terminator families, all of them closed sets (the same philosophy
+// as OBJECT_PHRASE_END — an ADJECTIVE allowlist can always be beaten by an
+// unlisted adjective, whereas the words that start a new phrase are few):
+//  1. nouns the count could belong to instead, and partitives/articles —
+//     "2 rats near the traps" counts rats, not traps.
+//  2. prepositions.
+//  3. clause connectors, auxiliaries, and the re-check verbs — removing
+//     the cap left the scan free to run through a whole predicate, so "We
+//     documented 8 fresh droppings then checked mechanical traps" read as
+//     an 8-trap roster claim (codex P2 round 15, a regression from the
+//     round-14 removal).
+// Participial ADJECTIVES a trap phrase legitimately uses (baited, placed,
+// new, sealed) are deliberately NOT terminators. Verbs that could also be
+// pre-nominal adjectives are the ambiguous middle; they resolve toward
+// terminating, which loses a claim rather than inventing one — the bias
+// this whole guard stack is built on.
+// The `of M` group tolerates an article too, so "6 of the 8 traps" is read
+// as ONE N-of-M claim rather than leaving a bare "8 traps" tail behind —
+// which is what let the check-predicate suppression below be bypassed.
+const TRAP_COUNT_CLAIM_RE = new RegExp(`\\b(\\d+)(?:\\s+(?:out\\s+of|of)\\s+(?:the|our|these|those|all|its)?\\s*(\\d+))?(${TRAP_MODIFIER_RUN})\\s+(?:traps?|devices?)\\b`, 'gi');
+// Numeric partitives WITH a check predicate claim the checked count even
+// though they never name a roster: "We checked 8 of the traps" puts 8
+// against the structured count, where a bare "one of the traps held a
+// capture" still claims nothing (codex P1 round 14). CHECK_VERB_PAST
+// forms only, deliberately: "reset 3 of the traps" is a subset ACTION on
+// some of the checked traps, and "set/placed 3 of the traps in the attic"
+// is distributive placement prose — counting either against the
+// structured total would re-create the copy-discarding false positive
+// this PR exists to fix.
+//
+// BOTH word orders, and the shared semantic modifier run rather than a
+// token cap (codex P1 round 15): the active form was the only one covered,
+// so "8 of the traps were checked" — the way a report actually reads —
+// extracted nothing.
+const TRAP_PARTITIVE_ACTIVE_RE = new RegExp(
+  `\\b${CHECK_VERB_PAST}\\s+(\\d+)\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`,
+  'gi',
+);
+// The passive predicate is matched as auxiliaries + adverbs + participle
+// rather than "the participle within N characters". Here an allowlist is
+// the SAFE shape, opposite to the object-binding scans: an unlisted adverb
+// costs a missed claim (a stale count may publish), while a loose window
+// binds a later unrelated participle — "8 of the traps were empty and the
+// attic was inspected" — and discards reviewed copy, which is worse.
+const TRAP_PARTITIVE_PASSIVE_RE = new RegExp(
+  `\\b(\\d+)\\s+of\\s+${TRAP_PARTITIVE_DET}\\b${TRAP_MODIFIER_RUN}\\s+(?:traps?|devices?)\\b`
+  + '(?:\\s+(?:were|was|have|has|had|been|all|both|now|already|just|since|then|also|[a-z]+ly))*'
+  + `\\s+${CHECK_VERB_PAST}\\b`,
+  'gi',
+);
+const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
+const CAUGHT_CLAIM_RE = new RegExp(
+  `\\b(?:caught|captured|removed)\\s+(\\d+)${ANIMAL_MODIFIER_RUN}\\s+(?:rats?|mice|mouse|rodents?|animals?)\\b`,
+  'gi',
+);
+// The PASSIVE capture claim, where the animal precedes its verb: "two mice
+// were caught", "3 rats have been removed". Neither pattern above sees it —
+// one needs the noun `captures`, the other needs the verb before the number
+// (codex P1 round 10). Same mistake as the reduced-passive trap claim: the
+// count guard was only looking at one word order.
+const CAUGHT_PASSIVE_CLAIM_RE = new RegExp(
+  `\\b(\\d+)${ANIMAL_MODIFIER_RUN}\\s+(?:rats?|mice|mouse|rodents?|animals?)\\b[^.!?]{0,30}?\\b(?:caught|captured|removed)\\b`,
+  'gi',
+);
+
+// Cues that mark a trap count as a SUBSET of the roster carrying some
+// status, rather than a claim about how many traps there are. "We checked 8
+// traps and found activity at 2 traps" claims a roster of 8 and a subset of
+// 2 — treating both as roster claims made the pair look ambiguous, and the
+// `claims.size !== 1` bail then skipped the subject entirely, so a stale 8
+// published beside a corrected "Traps checked: 6" (codex P1 round 11).
+//
+// Read from the text BEFORE the number, bounded to the current sentence so a
+// status mentioned in a previous one can't reclassify this count.
+const SUBSET_LEAD_RE = /\b(?:activity|captur|consum|access|damag|missing|sprung|empty|disturb|chew)/i;
+
+// A capture COUNT inside a window is not a status cue for the trap count
+// beside it. In "We checked 8 traps and recorded 2 captures" the trailing
+// window saw `captur`, dropped the only roster claim as a status subset,
+// and a stale 8 sailed past the guard while the capture guard separately
+// validated the 2 (codex P1 round 12; the lead window had the same hole —
+// "We recorded 2 captures and checked 8 traps"). Capture claims are masked
+// out length-preservingly BEFORE the windows are read, so indices still
+// line up and a cue survives only when it describes the trap count itself
+// ("8 traps had captures"), not when it belongs to a neighbouring capture
+// count. Masking the whole matched span (not just the cue word) also
+// covers a window that slices mid-claim.
+function maskCaptureClaims(text) {
+  return [CAPTURE_CLAIM_RE, CAUGHT_CLAIM_RE, CAUGHT_PASSIVE_CLAIM_RE].reduce(
+    (out, rx) => out.replace(new RegExp(rx.source, 'gi'), (m) => ' '.repeat(m.length)),
+    text,
+  );
+}
+
+// Trap ROSTER claims only — subset counts are recognized and dropped rather
+// than counted as competing totals.
+//
+// The cue can sit on either side of its count ("activity at 2 traps", "2
+// traps had captures"), so both windows are consulted — but each is bounded
+// by the NEIGHBOURING claims, or a cue between two counts would be read as
+// belonging to both. Text between two claims is attributed to the later
+// one's lead: "we checked 8 traps and found activity at 2 traps" puts
+// "found activity at" on the 2, leaving 8 as the roster it is.
+function trapRosterClaims(text) {
+  const re = new RegExp(TRAP_COUNT_CLAIM_RE.source, 'gi');
+  const found = [];
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    found.push({
+      index: match.index,
+      end: match.index + match[0].length,
+      first: match[1],
+      second: match[2],
+      filler: match[3],
+    });
+  }
+  const claims = new Set();
+  const cueText = maskCaptureClaims(text);
+  found.forEach((m, i) => {
+    if (/\bof\b/i.test(m.filler || '')) return; // "1 of the traps" — no total claimed
+    const lead = cueText
+      .slice(i > 0 ? found[i - 1].end : Math.max(0, m.index - 40), m.index)
+      .split(/[.!?]/).pop();
+    // Only the LAST claim owns the text after it; otherwise that text is the
+    // next claim's lead and is judged there.
+    const trail = i + 1 < found.length
+      ? ''
+      : cueText.slice(m.end, m.end + 30).split(/[.!?]/)[0];
+    // A count a distributive ACTION verb governs is the subset the action
+    // touched — "reset 2 traps" claims nothing about how many exist — and
+    // must drop before the roster logic, or it becomes a rival total that
+    // bails the whole subject (codex P1 r19).
+    if (ACTION_PREDICATE_LEAD_RE.test(lead) || ACTION_PREDICATE_TRAIL_RE.test(trail)) return;
+    // A count whose OWN predicate is a check verb is a roster assertion no
+    // matter what else shares its windows: in "Due to activity, we checked
+    // 8 traps" the cue is the REASON for the visit, not a status on the 8,
+    // and demoting the count let a stale roster publish (pre-push audit on
+    // 42406f3). The windows stay positional, but immunity binds to the verb
+    // governing the count — the same anchored check predicates the partitive
+    // branch uses, so there is no second list to drift — and "found activity
+    // at 2 traps" (no governing check verb) still reads as the subset it is.
+    const checkGoverned = CHECK_PREDICATE_LEAD_RE.test(lead) || CHECK_PREDICATE_TRAIL_RE.test(trail);
+    if (!checkGoverned && (SUBSET_LEAD_RE.test(lead) || SUBSET_LEAD_RE.test(trail))) return;
+    // `N of M` + a check predicate: N is the checked count, and the
+    // partitive rules below claim it. Reading M as the roster here would
+    // reconcile the wrong number against traps_checked.
+    if (m.second != null && checkGoverned) return;
+    claims.add(Number(m.second != null ? m.second : m.first));
+  });
+  for (const rx of [TRAP_PARTITIVE_ACTIVE_RE, TRAP_PARTITIVE_PASSIVE_RE]) {
+    const partitive = new RegExp(rx.source, 'gi');
+    let pm;
+    while ((pm = partitive.exec(text)) !== null) claims.add(Number(pm[1]));
+  }
+  return claims;
+}
+
+function claimedCounts(text, patterns) {
+  const claims = new Set();
+  for (const pattern of patterns) {
+    const re = new RegExp(pattern.source, 'gi');
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      const [, first, second, filler] = match;
+      if (/\bof\b/i.test(filler || '')) continue; // "1 of the traps" — subset, no total claimed
+      claims.add(Number(second != null ? second : first));
+    }
+  }
+  return claims;
+}
+
+/**
+ * Returns the count claims in `text` that contradict the FINAL structured
+ * values (empty when clean or unverifiable).
+ *
+ * The tech drafts the AI report, then can keep editing the typed fields
+ * before completing — nothing re-runs the draft. So a body written against
+ * 8 traps survives a correction to 6 and publishes "We checked 8 traps"
+ * beside a frozen "Traps checked: 6" and a map drawing 6 pins (codex P1
+ * round 8). Unlike the stage guards this applies to BOTH stages: the same
+ * staleness produces "We set 8 traps" on a setup.
+ *
+ * Deliberately narrow, because a false positive silently discards the
+ * technician's reviewed copy — the exact failure this PR exists to fix:
+ *  - only ONE distinct ROSTER claim per subject is enforced. Two competing
+ *    totals are a breakdown ("two snap traps and six glue traps"), and
+ *    summing them would be a guess. Status SUBSETS are not competing totals
+ *    and are dropped before this test — counting them as rivals made the
+ *    guard bail on the commonest multi-count sentence there is ("we checked
+ *    8 traps and found activity at 2 traps"), letting a stale total through
+ *    (codex P1 round 11).
+ *  - a missing, blank, or non-integer structured value is unverifiable,
+ *    not wrong.
+ */
+function countContradictions(text, values = {}) {
+  const str = normalizeWordNumbers(text);
+  const found = [];
+  const check = (claims, raw, kind) => {
+    // A CLEARED field is missing, not zero. The closeout keeps '' in values
+    // when the tech types a count and then deletes it, and both Number('')
+    // and Number(null) are 0 — which would read as "the tech recorded zero"
+    // and silently reject any body that mentions a count (codex P2 round 9).
+    // Blank has to short-circuit before the coercion, or the unverifiable
+    // case documented above does not actually cover the common way a value
+    // goes missing.
+    if (raw === null || raw === undefined || String(raw).trim() === '') return;
+    const actual = Number(raw);
+    if (!Number.isInteger(actual) || claims.size !== 1) return;
+    const [claimed] = [...claims];
+    if (claimed !== actual) found.push(`${kind}:claimed_${claimed}_recorded_${actual}`);
+  };
+  check(trapRosterClaims(str), values.traps_checked, 'trap_count_mismatch');
+  check(
+    claimedCounts(str, [CAPTURE_CLAIM_RE, CAUGHT_CLAIM_RE, CAUGHT_PASSIVE_CLAIM_RE]),
+    values.captures,
+    'capture_count_mismatch',
+  );
+  return found;
+}
+
+/**
+ * Returns the setup-contradicting phrases found in `text` (empty when clean).
+ * Callers decide what to do with them — the narrative rejects and falls back
+ * to its deterministic summary; the typed snapshot falls back to the
+ * deterministic "what we did" sentence.
+ */
+function setupContradictions(text) {
+  const str = String(text || '');
+  const found = [];
+  for (const clause of clauses(str)) {
+    // The whole clause is judged; the future exemption is applied to the
+    // matched VERB rather than to a span of text (see futureGovernsVerb).
+    const judged = clause;
+    // EVERY hit is exempted individually — a future-governed first hit
+    // must not mask a completed claim after it (codex P1 r20). One entry
+    // per clause keeps the caller's shape.
+    const hits = [...activeRecheckOnTrap(judged), ...passiveRecheckOnTrap(judged)];
+    const claim = hits.find((hit) => !futureGovernsVerb(hit.toks, hit.verbAt));
+    if (claim) {
+      found.push(`setup_recheck_claim:${claim.text.toLowerCase()}`);
+    }
+    // The noun forms run per clause under the SAME intent guard as the verb
+    // scans. Whole-string matching left them exposed to the tense hole the
+    // verb side had fixed: the gap's own future lookahead only covers text
+    // BETWEEN the two anchors, so "We WILL complete an inspection of the
+    // traps next week" — a future promise, with a clean gap — would have
+    // been read as a completed re-check by the pattern added for round 16.
+    for (const rx of SETUP_RECHECK_NOUN_RES) {
+      const nounHit = judged.match(rx);
+      if (nounHit && !futureGovernsMatch(judged, nounHit.index)) {
+        found.push(`setup_recheck_claim:${nounHit[0].trim().toLowerCase()}`);
+      }
+    }
+  }
+  for (const rx of SETUP_EMPTY_CAPTURE_RES) {
+    // EVERY occurrence is judged — an exempt conditional first match must
+    // not mask a completed claim later in the text ("If no captures are
+    // recorded at the next check, we will adjust. No captures were
+    // recorded today." — codex P1 r20).
+    const global = new RegExp(rx.source, rx.flags.includes('g') ? rx.flags : `${rx.flags}g`);
+    let match;
+    while ((match = global.exec(str)) !== null) {
+      if (!emptyCaptureExempt(str, match.index)) {
+        found.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
+      }
+    }
+  }
+  return found;
+}
+
+// Conditional or future INTENT preceding an empty-capture claim exempts
+// it: "IF no captures are recorded at the next check, we will adjust the
+// placements" is a decision rule about a future check, not a claim that
+// the new traps were already checked — and it is exactly the forward-
+// looking copy a setup should write (codex P2 r19). Only markers BEFORE
+// the match, inside its own sentence, govern: a promise AFTER a completed
+// claim must not excuse it ("No mice were caught and we will return next
+// week" still rejects — the round-16 rule, learned the hard way on the
+// verb side). Derived from FUTURE_INTENT_RE (one source) plus the
+// conditional openers, which the verb walk never needed because a verb
+// under "if" is inflected differently.
+// Bare expectation verbs join here (FUTURE_INTENT_RE only carries
+// "expect to"): "We EXPECT no captures until the first check" states an
+// expectation, not an observation.
+const EMPTY_CAPTURE_INTENT_RE = new RegExp(
+  `${FUTURE_INTENT_RE.source}|\\b(?:if|unless|in\\s+case|should|expect(?:s|ed|ing)?|anticipate[sd]?)\\b`,
+  'i',
+);
+function emptyCaptureExempt(str, index) {
+  const before = String(str).slice(0, index);
+  const sentenceStart = Math.max(
+    before.lastIndexOf('.'), before.lastIndexOf('!'),
+    before.lastIndexOf('?'), before.lastIndexOf(';'),
+  );
+  return EMPTY_CAPTURE_INTENT_RE.test(before.slice(sentenceStart + 1));
+}
+
+/**
  * Deterministic Today's Result copy (contract §6). AI may later polish the
  * recommendations field, but this template output always exists and always
  * sends — AI is never in the critical path.
@@ -1765,10 +2714,18 @@ function buildTodaysResult({
   visitSequence = 1,
   // Tech-reviewed AI report copy (the completion form's "Generate AI report"
   // output, parsed + banned-copy-screened by the complete route via
-  // technician-report-copy.js). Only the generic non-gauge default
-  // composition below uses it — zero states and every owner-specified story
-  // branch keep their approved wording.
+  // technician-report-copy.js). The generic non-gauge default composition
+  // and rodent trapping use it — zero states and every other owner-specified
+  // story branch keep their approved wording.
   technicianReportBody = null,
+  // The tech confirmed the pre-submit reconciliation prompt
+  // (GATE_REPORT_RECONCILE_PROMPT): the contradiction the matcher found
+  // was reviewed by a person and overridden, so the stage/count screens
+  // must not silently discard the body they confirmed — that is the exact
+  // outcome the prompt exists to avoid (codex P1 on the reconciliation
+  // round). Stamped onto todaysResult so render-time consumers (the
+  // report-data summary screen) honor the same decision.
+  reconcileConfirmed = false,
 }) {
   const indicator = ACTIVITY_INDICATORS[projectType];
   // Sectioned-checklist types compose "what we did" from their selections
@@ -1776,11 +2733,21 @@ function buildTodaysResult({
   // The free-text keys stay in the fallback chain so pre-v2 drafts still
   // produce a sentence.
   const isTrappingType = projectType === 'rodent_trapping' || projectType === 'wildlife_trapping';
+  // The trap-setup visit: the traps go out TODAY, so every "checked /
+  // reset / no captures yet" phrasing is wrong (owner 2026-08-02 — the
+  // reports "always assume it's a secondary trapping"). Driven by the tech's
+  // `trap_visit_type` selection, NOT by the visit number — a setup can land
+  // on any visit. Wildlife is untouched: its checklist carries an explicit
+  // 'Trap installed' chip that already reads right on visit 1.
+  const initialTrapSetup = isInitialRodentTrapSetup(projectType, visitSequence, values);
   const isBaitStationType = projectType === 'termite_bait_station' || projectType === 'rodent_bait_station';
   // Combo trapping visits (owner spec §3) append the exclusion/sanitation
   // module work to the trap sentence so the narrative covers the whole stop.
   const trapSentence = isTrappingType
-    && [trapActivitySentence(values), rodentComboModuleSentences(values)].filter(Boolean).join(' ');
+    && [
+      trapActivitySentence(values, { initialSetup: initialTrapSetup }),
+      rodentComboModuleSentences(values),
+    ].filter(Boolean).join(' ');
   const whatWeDid = trapSentence
     || (isBaitStationType && baitStationSentence(projectType, values))
     || composedWorkSentence(projectType, values)
@@ -2106,6 +3073,65 @@ function buildTodaysResult({
 
   if (indicator && activity && activity.score != null) {
     const noun = indicator.pestNoun;
+    // Rodent trapping honours the tech's reviewed "Generate AI report" copy
+    // the same way the generic default composition below does (owner
+    // 2026-08-02: the trapping report "isn't pulling in the Generate AI
+    // report" — the gauge branch silently dropped it). The headline stays
+    // deterministic and gauge-driven; only the body swaps, and only when a
+    // parsed, banned-copy-screened body exists. bodySource is stamped so the
+    // report's summary slot follows the same precedence every other typed
+    // report already uses (report-data.js).
+    //
+    // The zero score is excluded HERE, not just in the zero-state branch
+    // below — a repeat visit with a prior score always carries a trendWord,
+    // so a gauge the tech flipped to 0 reaches the trend branch first and
+    // would have published a draft written while activity still looked
+    // heavy (codex P1 on #3159). Same rule as the default composition: a
+    // draft must never outrank the typed zero it predates.
+    // A draft that contradicts the declared stage is refused outright
+    // (codex P1 on #3159): the AI-report prompt never receives
+    // trap_visit_type, and the tech can flip the selector AFTER generating,
+    // so a body reading "we checked 8 traps and found no captures" could
+    // otherwise ride onto a declared setup — stamped bodySource, published
+    // to both Today's Result and the summary slot, with the setup line
+    // appended right after it. Falls back to the deterministic sentence,
+    // which is always stage-correct because it is composed from the same
+    // declaration.
+    const rawTrappingBody = projectType === 'rodent_trapping' && activity.score !== 0
+      ? technicianReportBody
+      : null;
+    // Stage guard (setup only) AND count guard (both stages): the draft is
+    // written before the tech's last edit to the typed fields, so it can
+    // contradict the frozen findings on the stage OR on the numbers.
+    const trappingReportBody = rawTrappingBody
+      && (reconcileConfirmed
+        || (!(initialTrapSetup && setupContradictions(rawTrappingBody).length)
+          && !countContradictions(rawTrappingBody, values).length))
+      ? rawTrappingBody
+      : null;
+    // One line of expectation-setting on a trap-setup visit: nothing has
+    // been checked yet, so the customer is told what happens next instead of
+    // reading a re-check story.
+    //
+    // Dropped when the tech recorded a capture on the same visit (codex P2
+    // on #3159): "we removed 1 capture" next to "we check them and record
+    // what they catch" reads as a contradiction. The capture is the tech's
+    // observed fact and stays; the forward-looking line is the part that no
+    // longer applies. Deliberately NOT a validation rejection — a completion
+    // is never blocked on copy, and a setup that catches something the same
+    // day is a real (if rare) state.
+    //
+    // Wording note: forward-looking only. An earlier draft opened with "the
+    // traps go out on this first visit", which contradicted the trend
+    // headline on a setup declared AFTER an earlier rodent-family visit —
+    // the main case the selector exists for (trapping that follows an
+    // inspection). Restating "the traps went out today" also just echoed the
+    // sentence before it, so the line now carries only what the customer
+    // does not already know.
+    const capturesRecorded = Number(values.captures) > 0;
+    const setupLine = initialTrapSetup && !capturesRecorded
+      ? ' We return to check them, record what they catch, and adjust placements from there.'
+      : '';
     if (visitSequence > 1 && activity.trendWord) {
       // Stable needs its own sentence shape — "has about the same as the
       // last visit since our last visit" is not English (Codex P2).
@@ -2114,22 +3140,29 @@ function buildTodaysResult({
         : `${noun} activity has ${activity.trend === 'worsening' ? 'increased' : 'decreased'} since our last visit.`;
       return {
         headline,
-        body: `${whatWeDid} ${nextStep}`,
+        // setupLine belongs here too (codex P2 on #3159): a setup declared
+        // after an earlier rodent-family visit lands in THIS branch —
+        // visitSequence > 1 with a resolved trendWord — and that is the
+        // main case the selector exists for. Omitting the guidance here
+        // dropped it from exactly the reports that needed it most.
+        body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
         nextStep,
+        ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
     if (activity.score === 0) {
       return {
         headline: `No active signs of ${noun.toLowerCase()} activity observed today.`,
-        body: `${whatWeDid} Continue monitoring and contact us if activity returns.`,
+        body: `${whatWeDid}${setupLine} Continue monitoring and contact us if activity returns.`,
         nextStep,
       };
     }
     const levelWord = SCORE_LEVEL_WORDS[activity.score] || 'activity';
     return {
       headline: `${noun} activity was ${levelWord.replace(' activity', '').toLowerCase()} today.`,
-      body: `${whatWeDid} ${nextStep}`,
+      body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
       nextStep,
+      ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -2184,6 +3217,7 @@ function buildTypedReportSnapshot({
   activity = null,
   photoSummary = null,
   technicianReportBody = null,
+  reconcileConfirmed = false,
 }) {
   const config = PROJECT_TYPES[projectType];
   if (!config) return null;
@@ -2194,6 +3228,12 @@ function buildTypedReportSnapshot({
   const resolvedReportTypeLabel = visitSequence > 1 && ACTIVITY_INDICATORS[projectType]
     ? `${ACTIVITY_INDICATORS[projectType].programNoun || ACTIVITY_INDICATORS[projectType].pestNoun} Program — Progress Visit`
     : reportTypeLabel;
+
+  // On a trap-SETUP visit the traps are being put out, so the count the tech
+  // entered is the number set, not the number re-checked — the customer
+  // label follows (owner 2026-08-02). Same signal the Today's Result copy
+  // uses, so the finding row and the summary always agree.
+  const initialTrapSetup = isInitialRodentTrapSetup(projectType, visitSequence, values);
 
   const items = [];
   for (const field of config.findingsFields || []) {
@@ -2219,7 +3259,9 @@ function buildTypedReportSnapshot({
     items.push({
       fieldKey: field.key,
       technicianLabel: field.label,
-      customerLabel: customerLabelForField(field.key, field.label),
+      customerLabel: initialTrapSetup && field.key === 'traps_checked'
+        ? 'Traps set'
+        : customerLabelForField(field.key, field.label),
       value,
       customerValueLabel,
       ...(customerValueParts && customerValueParts.length ? { customerValueParts } : {}),
@@ -2234,7 +3276,14 @@ function buildTypedReportSnapshot({
     activity,
     visitSequence,
     technicianReportBody,
+    reconcileConfirmed,
   });
+  // Stamped HERE, on every snapshot shape — not per todaysResult branch —
+  // so companion-only completions (where the trapping snapshot carries no
+  // body at all) still freeze the tech's confirmed override for the
+  // render-time summary screen to honor (codex P1 on the reconciliation
+  // rounds). One stamp site, no branch drift.
+  if (reconcileConfirmed && todaysResult) todaysResult.reconcileConfirmed = true;
 
   return {
     type: projectType,
@@ -2418,5 +3467,9 @@ module.exports = {
   trendDirection,
   buildTodaysResult,
   buildTypedReportSnapshot,
+  isInitialRodentTrapSetup,
+  setupContradictions,
+  countContradictions,
+  normalizeWordNumbers,
   findingsSchemaForType,
 };

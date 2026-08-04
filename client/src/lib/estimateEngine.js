@@ -422,12 +422,22 @@ export function applyServerLawnPricingConfig(config) {
 // the WaveGuard give-back — matching the server's applyMarginGuard lift —
 // so a no-enriched-profile pest estimate can't be saved/accepted below the
 // re-armed floor (codex P2 round 8 on #2827).
-const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89 };
+const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89, basePerVisit: 112 };
 
 export function applyServerPestPricingConfig(config) {
   PEST_BASE.enforceFloorPostDiscount = (
     config?.enforce_floor_post_discount ?? config?.enforceFloorPostDiscount
   ) === true;
+  // Live-configurable per-visit base (pest_base.base) — the same value the
+  // server prices from (PEST.base, db-bridge synced), so an env whose base
+  // was admin-tuned away from the in-code 112 previews and saves fallback
+  // estimates at the SAME base the server recompute uses (pre-push codex
+  // P0 on this PR). Absent/invalid resets the in-code default — the
+  // kill-value pattern — and rounding mirrors the bridge's whole-dollar r().
+  const base = Number(config?.base);
+  PEST_BASE.basePerVisit = Number.isFinite(base) && base > 0
+    ? Math.round(base)
+    : 112;
   // Live-configurable per-visit floor (pest_base.floor) — the same value the
   // server's pestProgramFloorPerVisit reads (PEST.floor, db-bridge synced),
   // so a re-arm at a floor other than $89 stamps/gives back the SAME floor
@@ -1670,6 +1680,10 @@ export function calculateEstimate(inputs) {
     // resolution reads one shape everywhere.
     pestProgramFloorArmed: PEST_BASE.enforceFloorPostDiscount === true,
     pestProgramFloorPerVisit: PEST_BASE.floorPerVisit,
+    // The base this quote priced from (pest_base.base, DB-synced). The save
+    // gate fails closed on a mismatch — a stale bundle must not persist
+    // yesterday's base after a pricing change (codex #3182 r2 P1).
+    pestBasePerVisit: PEST_BASE.basePerVisit,
   };
   const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
   const addRoutingWarning = warning => {
@@ -2058,7 +2072,7 @@ export function calculateEstimate(inputs) {
     // db-bridge-synced from pest_base.floor, so a tuned floor must move the
     // fallback's bottom cell too or preview/persisted totals drift from the
     // server recompute (codex P2 round 10 on #2827). Default 89 unchanged.
-    const pp = Math.max(PEST_BASE.floorPerVisit, 117 + adj);
+    const pp = Math.max(PEST_BASE.floorPerVisit, PEST_BASE.basePerVisit + adj);
     const roachAddOn = 0;
     R.pestTiers = [];
     pestFrequencyTiers.forEach(ft => {
@@ -2424,7 +2438,7 @@ export function calculateEstimate(inputs) {
     // The trailing clamp keeps the loyalty perk from dropping one-time to/below a
     // recurring customer's visit-1 cost (quarterly + $99 setup) — strictly above
     // (+1, whole-dollar prices), matching the server engine.
-    const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, 117 + pestBaseAdjustment(fpEff));
+    const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, PEST_BASE.basePerVisit + pestBaseAdjustment(fpEff));
     let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));
     if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;
     otItems.push({

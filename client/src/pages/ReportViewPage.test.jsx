@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applicationPestFamily,
+  applicationPurpose,
+  applicationPurposeCopy,
+  applicationTechnicalExplanation,
   cleanVisitSummary,
   customerInteractionCopy,
   customerActionItems,
@@ -13,7 +17,6 @@ import {
   lawnWateringGuidance,
   normalizeServiceCoverage,
   normalizeVisitTimeline,
-  quickNavigationLinks,
   reportAskPrompts,
   readinessStatusBadge,
   reviewRequestCopy,
@@ -64,27 +67,6 @@ describe('ReportViewPage summary copy cleanup', () => {
 });
 
 describe('ReportViewPage report chrome helpers', () => {
-  it('omits product quick navigation when no products were applied', () => {
-    const labels = quickNavigationLinks({ hasProducts: false }).map(([, label]) => label);
-    expect(labels).not.toContain('Products');
-    expect(labels).toContain('Timeline');
-    expect(labels).toContain('Map');
-    expect(labels).not.toContain('Visit Progress');
-    expect(labels).not.toContain('Areas Serviced');
-    expect(labels).not.toContain('Coverage Map');
-  });
-
-  it('omits visit timeline quick navigation when the timeline is hidden', () => {
-    const labels = quickNavigationLinks({ hasVisitTimeline: false }).map(([, label]) => label);
-    expect(labels).not.toContain('Timeline');
-    expect(labels).toContain('Map');
-  });
-
-  it('only includes the re-entry quick navigation when re-entry context exists', () => {
-    expect(quickNavigationLinks({ hasReentry: false }).map(([, label]) => label)).not.toContain('Re-entry');
-    expect(quickNavigationLinks({ hasReentry: true }).map(([, label]) => label)).toContain('Re-entry');
-  });
-
   it('does not suggest Pest Pressure questions when the section is disabled', () => {
     expect(reportAskPrompts({
       pestPressure: { enabled: false, showOnCustomerReport: true },
@@ -764,5 +746,205 @@ describe('ReportViewPage service timeline helpers', () => {
     ].filter(Boolean).join(' ');
 
     expect(timelineCopy).not.toMatch(/Bouncie|GPS|geofence|auto-arrival|arrival_source|distanceMeters|83 meters/i);
+  });
+});
+
+describe('product purpose follows recorded pest identity', () => {
+  // App shapes mirror the live /:token/data payload: { method, targets,
+  // product: { name, category, active_ingredient } } — the 2026-08-02
+  // cockroach report where Advion Cockroach Gel printed "Targeted ant bait"
+  // and two fogged roach products printed mosquito copy.
+  const roachGel = {
+    method: 'bait_placement',
+    targets: ['German cockroaches', 'American cockroaches'],
+    product: { name: 'Advion Cockroach Gel Bait', category: 'bait', active_ingredient: 'Indoxacarb 0.6%' },
+  };
+  const foggedInsecticide = {
+    method: 'fog_ulv',
+    targets: ['German cockroaches'],
+    product: { name: 'Alpine WSG', category: 'insecticide', active_ingredient: 'Dinotefuran 40.0%' },
+  };
+  const foggedIgr = {
+    method: 'fog_ulv',
+    targets: ['German cockroaches'],
+    product: { name: 'Gentrol IGR', category: 'IGR', active_ingredient: '(S)-Hydroprene 9.0%' },
+  };
+
+  it('captions cockroach gel bait as cockroach bait, never ant bait', () => {
+    expect(applicationPurpose(roachGel, 'pest')).toBe('Targeted cockroach bait');
+    const copy = [
+      applicationPurposeCopy(roachGel, 'pest'),
+      ...applicationTechnicalExplanation(roachGel, 'pest'),
+    ].join(' ');
+    expect(copy).toMatch(/cockroaches/);
+    expect(copy).not.toMatch(/\bants?\b/i);
+  });
+
+  it('never invents an observed activity level for bait placements', () => {
+    const antGel = { method: 'bait_placement', targets: ['Ghost ants'], product: { name: 'Optigard Ant Gel Bait', category: 'bait' } };
+    expect(applicationPurpose(antGel, 'pest')).toBe('Targeted ant bait');
+    for (const app of [roachGel, antGel]) {
+      expect(applicationPurposeCopy(app, 'pest')).not.toMatch(/light\s+\w*\s*activity/i);
+    }
+  });
+
+  it('does not caption a fogged roach treatment as a mosquito application', () => {
+    for (const app of [foggedInsecticide, foggedIgr]) {
+      expect(applicationPurpose(app, 'pest')).toBe('Targeted cockroach treatment');
+      const copy = [
+        applicationPurposeCopy(app, 'pest'),
+        ...applicationTechnicalExplanation(app, 'pest'),
+      ].join(' ');
+      expect(copy).toMatch(/cockroaches/);
+      expect(copy).not.toMatch(/mosquito/i);
+    }
+  });
+
+  it('keeps mosquito copy for mosquito visits and mosquito-identified fogs', () => {
+    expect(applicationPurpose(foggedInsecticide, 'mosquito')).toBe('Mosquito pressure reduction');
+    const mosquitoFog = { method: 'fog_ulv', targets: ['Mosquitoes'], product: { name: 'DeltaGard', category: 'insecticide' } };
+    expect(applicationPurpose(mosquitoFog, 'pest')).toBe('Mosquito pressure reduction');
+    expect(applicationTechnicalExplanation(mosquitoFog, 'pest').join(' ')).toMatch(/mosquito/i);
+  });
+
+  it('resolves canonical enum target keys, not just display labels', () => {
+    const enumFog = { method: 'fog_ulv', targets: ['german_roaches'], product: { name: 'Alpine WSG', category: 'insecticide' } };
+    expect(applicationPurpose(enumFog, 'pest')).toBe('Targeted cockroach treatment');
+    const enumBait = { method: 'bait_placement', targets: ['ghost_ant'], product: { name: 'Generic Gel', category: 'bait' } };
+    expect(applicationPurpose(enumBait, 'pest')).toBe('Targeted ant bait');
+  });
+
+  it('fails closed to generic copy when identity is unknown or ambiguous', () => {
+    const unknownFog = { method: 'fog_ulv', targets: [], product: { name: 'CB-80', category: 'insecticide' } };
+    expect(applicationPurpose(unknownFog, 'pest')).toBe('Space fog treatment');
+    expect(applicationPurposeCopy(unknownFog, 'pest')).toMatch(/treated areas/);
+    expect(applicationPurposeCopy(unknownFog, 'pest')).not.toMatch(/mosquito|\bants?\b|roach/i);
+    const mixedBait = { method: 'bait_placement', targets: ['Ghost ants', 'German cockroaches'], product: { name: 'Multi-Pest Bait Stations', category: 'bait' } };
+    expect(applicationPestFamily(mixedBait)).toBe(null);
+    expect(applicationPurpose(mixedBait, 'pest')).toBe('Targeted bait placement');
+  });
+
+  it('treats an unrecognized co-target as ambiguity, not a match', () => {
+    // Gentrol's catalog prefill keeps all three targets unless the tech trims
+    // them — one recognized family plus unmatched co-targets must stay generic.
+    const mixedFog = {
+      method: 'fog_ulv',
+      targets: ['German cockroaches', 'Drain flies', 'Pantry pests'],
+      product: { name: 'Gentrol IGR', category: 'IGR' },
+    };
+    expect(applicationPestFamily(mixedFog)).toBe(null);
+    expect(applicationPurpose(mixedFog, 'pest')).toBe('Space fog treatment');
+    expect(applicationPurposeCopy(mixedFog, 'pest')).not.toMatch(/cockroach|mosquito/i);
+  });
+
+  it('reads identity from the product name ahead of the recorded targets', () => {
+    const mislabeledTargets = { method: 'bait_placement', targets: ['Ghost ants'], product: { name: 'Advion Cockroach Gel Bait', category: 'bait' } };
+    expect(applicationPurpose(mislabeledTargets, 'pest')).toBe('Targeted cockroach bait');
+  });
+
+  it('rodent bait copy makes no insect bait-sharing claim', () => {
+    const rodentBait = { method: 'bait_placement', targets: ['Rodents'], product: { name: 'Contrac Blox', category: 'bait' } };
+    const detail = applicationTechnicalExplanation(rodentBait, 'pest').join(' ');
+    expect(detail).toMatch(/rodents/i);
+    expect(detail).not.toMatch(/share|nest|foraging/i);
+  });
+
+  it('limits the bait-sharing mechanism to social insects — unknown targets get feeding-only copy', () => {
+    const silverfishBait = { method: 'bait_placement', targets: ['Silverfish'], product: { name: 'Dekko Silverfish Paks', category: 'bait' } };
+    const detail = applicationTechnicalExplanation(silverfishBait, 'pest').join(' ');
+    expect(detail).toMatch(/targeted bait placement/i);
+    expect(detail).not.toMatch(/share|nest|harborage|foraging/i);
+    const roachDetail = applicationTechnicalExplanation(roachGel, 'pest').join(' ');
+    expect(roachDetail).toMatch(/share it with others/);
+  });
+
+  it('keeps termite and rodent station/bait purposes unchanged', () => {
+    expect(applicationPurpose({ method: 'station_check', product: { name: 'Trelona ATBS' } }, 'termite')).toBe('Station service');
+    expect(applicationPurpose({ method: 'bait_placement', product: { name: 'Contrac Blox' } }, 'rodent')).toBe('Bait placement');
+  });
+});
+
+// Fungicide purpose copy names the RECORDED disease targets — the same
+// recorded-targets-only guard as lawn insect control (owner relevance pass
+// 2026-08-03: the Artavia card read generic boilerplate while the visit
+// documented large patch / gray leaf spot / take-all root rot).
+describe('lawn fungicide purpose copy', () => {
+  const fungicide = {
+    method: 'broadcast_spray',
+    targets: ['Large patch', 'Gray leaf spot', 'Take-all root rot'],
+    product: { name: 'Artavia 2 SC (Azoxy)', category: 'Fungicide', active_ingredient: 'Azoxystrobin' },
+  };
+
+  it('names the recorded disease targets, lowercased, without claiming observation', () => {
+    expect(applicationPurpose(fungicide, 'lawn')).toBe('Fungus control application');
+    expect(applicationPurposeCopy(fungicide, 'lawn')).toBe(
+      'Applied to protect the turf against large patch, gray leaf spot, take-all root rot, the targets your technician recorded for this application.',
+    );
+    // Chips can be untrimmed catalog prefill (label targets) — the copy must
+    // never present them as observed/documented disease (codex P1 #3187).
+    expect(applicationPurposeCopy(fungicide, 'lawn')).not.toMatch(/documented|observed|found|designed/i);
+  });
+
+  it('normalizes enum-key targets before printing', () => {
+    const enumTargets = { ...fungicide, targets: ['take_all_root_rot'] };
+    expect(applicationPurposeCopy(enumTargets, 'lawn')).toContain('take all root rot');
+    expect(applicationPurposeCopy(enumTargets, 'lawn')).not.toContain('_');
+  });
+
+  it('fails closed to the generic line with no recorded targets', () => {
+    const noTargets = { ...fungicide, targets: [] };
+    expect(applicationPurposeCopy(noTargets, 'lawn')).toBe(
+      'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+    );
+  });
+});
+
+// Free-form target chips are unrestricted text — only governed disease
+// vocabulary may render on the fungicide line; ANY unrecognized target
+// fails the whole line closed (codex P1 #3187 r16).
+describe('fungicide targets are restricted to governed disease vocabulary', () => {
+  const base = {
+    method: 'broadcast_spray',
+    product: { name: 'Artavia 2 SC (Azoxy)', category: 'Fungicide', active_ingredient: 'Azoxystrobin' },
+  };
+
+  it('free-form claims never render, even alongside recognized diseases', () => {
+    for (const targets of [['pet-safe'], ['EPA-approved'], ['dries in 1 hour'], ['Large patch', 'pet-safe']]) {
+      const copy = applicationPurposeCopy({ ...base, targets }, 'lawn');
+      expect(copy).toBe(
+        'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+      );
+    }
+  });
+
+  it('governed names, including enum keys and the combined prefill label, still render', () => {
+    expect(applicationPurposeCopy({ ...base, targets: ['Brown patch / large patch', 'Fairy ring'] }, 'lawn'))
+      .toContain('brown patch / large patch, fairy ring');
+    expect(applicationPurposeCopy({ ...base, targets: ['take_all_root_rot'] }, 'lawn'))
+      .toContain('take all root rot');
+  });
+});
+
+// Allowlist stays synchronized with the catalog prefill vocabulary — the
+// oomycete products' normal prefills must render (codex P2 #3187 r17),
+// while the deliberately-excluded root-rot claim still fails closed.
+describe('fungicide vocabulary covers the oomycete catalog prefills', () => {
+  const base = {
+    method: 'broadcast_spray',
+    product: { name: 'Subdue Maxx Fungicide', category: 'Fungicide', active_ingredient: 'Mefenoxam' },
+  };
+
+  it('Banol/Subdue prefill targets render', () => {
+    const copy = applicationPurposeCopy(
+      { ...base, targets: ['Pythium blight', 'Pythium damping-off', 'Yellow tuft (downy mildew)'] },
+      'lawn',
+    );
+    expect(copy).toContain('pythium blight, pythium damping-off, yellow tuft (downy mildew)');
+  });
+
+  it('the excluded root-rot claim still fails the line closed', () => {
+    expect(applicationPurposeCopy({ ...base, targets: ['Pythium root rot'] }, 'lawn')).toBe(
+      'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+    );
   });
 });

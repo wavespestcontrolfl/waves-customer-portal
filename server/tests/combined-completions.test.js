@@ -408,7 +408,10 @@ describe('validateCompanionSubmission — activity scores', () => {
       profile: profileWith([{ type: 'rodent_trapping', delivery: 'internal_only' }]),
       companionFindings: [{
         type: 'rodent_trapping',
-        values: { species: 'Roof rat' },
+        // Required core only — the point of the case is the MISSING score,
+        // so the findings themselves must be valid or the earlier
+        // companion_findings_invalid gate fires first.
+        values: { species: 'Roof rat', trap_visit_type: 'Follow-up check' },
         nextStepChips: ['Continue trapping'],
       }],
     });

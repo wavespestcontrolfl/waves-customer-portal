@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
+const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
@@ -19,7 +20,7 @@ const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
-const { fetchServiceWeekWeather } = require('./application-conditions');
+const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { validatePhotoChainRows } = require('./photo-chain');
 const { buildSatelliteTreatmentMapContext } = require('./satellite-treatment-map');
 const { computeLinearFt, computeOnSiteMin } = require('./metrics-band');
@@ -462,9 +463,19 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
 
 function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
+  // Admin re-entry correction (PATCH /admin/dispatch/:serviceId/reentry):
+  // a typed window is authoritative FOR ITS SIDE ONLY. The marker is
+  // per-side ({ exterior, interior } strict booleans; legacy plain `true`
+  // covers both) so a one-sided edit never resurrects the untouched side —
+  // e.g. correcting the interior window on an interior-only visit must not
+  // expose the stored exterior default that scope zeroing would have
+  // suppressed (codex P1 PR #3180). Only the correction endpoint writes it.
+  const adjustedMarker = normalized.reentry_adjusted;
+  const sideAdjusted = (side) => adjustedMarker === true
+    || (!!adjustedMarker && typeof adjustedMarker === 'object' && adjustedMarker[side] === true);
   const scope = treatmentScope({ service, applications, zones });
 
-  if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
+  if (!sideAdjusted('interior') && normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
   }
   // Owner rule 2026-07-27: the Exterior re-entry target exists ONLY when
@@ -479,7 +490,7 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // (trace-aware) makes the final display call, and stored zero would be
   // unrecoverable (codex P1 #3007 r11). Explicitly non-exterior scope
   // still zeroes at write.
-  if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
+  if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
     // WRITE path never zeroes exterior (codex P1 r17): a Treatment Zone
     // Mapper trace can be saved AFTER completion even when the visit
     // recorded interior locations, and a stored zero is unrecoverable.
@@ -1864,10 +1875,16 @@ class PinnedAssessmentUnavailable extends Error {
 //
 // Bumping this orphans lawn PDFs rendered under an older strategy so they
 // regenerate once. Non-lawn records return '' and are untouched: no
-// fleet-wide bust. Bump it whenever the way a lawn render CHOOSES its
-// assessment changes, not when the assessment's content changes — content is
-// already covered by the hash.
-const LAWN_RENDER_STRATEGY = 'p1';
+// fleet-wide bust. Bump it whenever the way a lawn render RESOLVES ITS INPUTS
+// changes, not when those inputs' content changes — content is already covered
+// by the hash.
+//
+// p1 → p2: the week's weather is now FROZEN at first render. A PDF cached
+// before that keeps the pre-freeze rainfall forever while /data freezes and
+// shows a different number — the emailed attachment and the live report
+// disagreeing, which is the whole failure class this lane exists to close.
+// Bumping forces those lawn PDFs through one fresh render.
+const LAWN_RENDER_STRATEGY = 'p2';
 
 async function resolveCanonicalLawnRender(service, knex = db) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
@@ -1977,6 +1994,102 @@ async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false
 // fetch and ineligible again before the post-render check slips past both
 // checks into the attachment.
 const PIN_NO_ASSESSMENT = 'none';
+
+// Persist the week's weather so a report token stops restating its rainfall
+// (owner ruling 2026-08-03).
+//
+// FIRST WRITER WINS, enforced in the UPDATE predicate rather than by a
+// read-then-write: a live view and a PDF render can render the same record
+// concurrently, and with a provider mid-flip they can resolve DIFFERENT weeks.
+// A read-modify-write would let the later one overwrite the value the customer
+// was already shown — the exact drift this exists to stop. The `?` guard means
+// at most one write per record, ever.
+//
+// Atomic jsonb merge, never a whole-column rewrite: structured_notes carries
+// completion SMS state and the frozen lawn synthesis, and a read-modify-write
+// here would clobber a concurrent write to those.
+//
+// Best-effort by design. A failed freeze must not fail a report view; the next
+// render simply tries again.
+// Returns the week the record is CANONICALLY frozen to — this render's value if
+// it won the write, the existing one if another render got there first, or null
+// when nothing could be established.
+//
+// Returning the winner's value (not a boolean) is the point. Losing the race and
+// then carrying on with our own independently fetched numbers would emit a
+// second, different version of a report that is supposed to be permanent —
+// which is the drift this whole mechanism exists to stop, reappearing in the
+// mechanism itself.
+// A frozen week belongs to the ASSESSMENT it was fetched for, not merely to
+// the record. The week is fetched against assessment.service_date, and a record
+// can carry more than one confirmed assessment — a re-do captured days later
+// becomes canonical and legitimately has a different date. Scoping the snapshot
+// to the record alone would replay the first assessment's rainfall and ET₀
+// underneath the new assessment's scores while its PDF signature correctly
+// changed: the report would show one visit's turf judged against another
+// visit's week.
+function ymd(value) {
+  if (!value) return '';
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
+}
+
+function frozenWeekMatches(frozen, assessment) {
+  return !!frozen && typeof frozen === 'object'
+    && frozen.assessmentId === assessment?.id
+    && ymd(frozen.serviceDate) === ymd(assessment?.service_date);
+}
+
+// Snapshots are stored as a MAP keyed by assessment id, never as one object per
+// record. Replacing on a differing id looked equivalent and is not: canonical
+// selection can move A → B → A (a re-do, then a pinned delivery for the
+// original), and each move would destroy the other assessment's snapshot and
+// send that report back to mutable provider data — permanence defeated by the
+// mechanism meant to provide it. Keyed, every assessment keeps its own frozen
+// week and first-writer-wins applies per key.
+function storedWeekFor(structuredNotes, assessmentId) {
+  if (!assessmentId) return null;
+  const map = parseJsonObject(structuredNotes).lawnWeekWeather;
+  if (!map || typeof map !== 'object') return null;
+  const entry = map[assessmentId];
+  return entry && typeof entry === 'object' ? entry : null;
+}
+
+async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
+  if (!serviceRecordId || !weekWeather || !weekWeather.assessmentId) return null;
+  const { assessmentId } = weekWeather;
+  try {
+    const updated = await knex('service_records')
+      .where({ id: serviceRecordId })
+      // First writer wins PER ASSESSMENT — the guard is this key's absence, in
+      // the predicate, with no preceding read.
+      .whereRaw(
+        "COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather' -> ? IS NULL",
+        [assessmentId],
+      )
+      .update({
+        // Two-level merge: the inner || adds this key to the existing map
+        // (or an empty one), the outer || puts the map back. A top-level ||
+        // with the whole object would replace every other assessment's entry.
+        structured_notes: knex.raw(
+          "COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('lawnWeekWeather',"
+          + " COALESCE(COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'lawnWeekWeather', '{}'::jsonb) || ?::jsonb)",
+          [JSON.stringify({ [assessmentId]: weekWeather })],
+        ),
+      });
+    if (updated > 0) return weekWeather;
+
+    // Lost the race for THIS key: adopt what the winner stored so both renders
+    // agree. Another assessment's entry is not ours to read.
+    const row = await knex('service_records')
+      .where({ id: serviceRecordId })
+      .first('structured_notes');
+    return storedWeekFor(row?.structured_notes, assessmentId);
+  } catch (err) {
+    logger.warn(`[report-data] lawn week-weather freeze failed for ${serviceRecordId}: ${err.message}`);
+    return null;
+  }
+}
 
 async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null } = {}) {
   if (serviceLine !== 'lawn') return null;
@@ -2147,21 +2260,144 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   let completionDailyRain = null;
   let completionRainConfidence = null;
   let completionRainSource = null;
-  try {
-    const weekWeather = await fetchServiceWeekWeather({
-      latitude: service.customer_latitude ?? service.latitude ?? service.lat,
-      longitude: service.customer_longitude ?? service.longitude ?? service.lng,
-      serviceDate: assessment.service_date,
-    });
-    completionRainfall7dInches = weekWeather.rainInches;
-    completionEt0Inches = weekWeather.et0Inches;
-    completionDailyRain = weekWeather.dailyRain;
-    // 'low' when the pinpoint week was a single-cell model spike and we fell back to
-    // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
-    completionRainConfidence = weekWeather.rainConfidence;
-    // Which provider actually supplied it — drives the customer-facing Source row.
-    completionRainSource = weekWeather.rainSource;
-  } catch (e) { /* non-blocking */ }
+  // FROZEN AT FIRST RENDER (owner ruling 2026-08-03).
+  //
+  // Keying the fetch to the service date already made this stable across
+  // renders — but only while the ANSWER for that date stayed the same. Flipping
+  // GATE_RAIN_MRMS changed the provider underneath, and issued reports silently
+  // restated their rainfall: one live token went 1.15" to 3.23" for a visit that
+  // happened days earlier. A report token is a permanent, shareable customer
+  // document; a customer reopening last week's report must not find different
+  // numbers than the ones they were sent.
+  //
+  // So the first successful render freezes the week's weather onto the record
+  // and every later render replays it. Lazy rather than written at completion,
+  // because that also settles the reports already issued: each one freezes at
+  // its next view instead of continuing to drift with the provider.
+  // Set when a week was fetched but could NOT be frozen. A render in that state
+  // is not reproducible — the next one may freeze different provider data — so
+  // it must never be durably cached (see weekWeatherUnfrozen on the payload).
+  let weekWeatherUnfrozen = false;
+  // Distinct from unfrozen: nothing FAILED, the week simply cannot be frozen
+  // YET. Suppresses caching without blocking delivery — a state time resolves
+  // on its own, so the queue waits for it rather than burning retries, and the
+  // customer's report email is not held hostage to it. Carries WHY.
+  let weekWeatherPendingReason = null;
+  const storedWeekWeather = storedWeekFor(service.structured_notes, assessment?.id);
+  // Replayed ONLY for the assessment it was frozen for — see frozenWeekMatches.
+  const frozenWeekWeather = frozenWeekMatches(storedWeekWeather, assessment) ? storedWeekWeather : null;
+  if (frozenWeekWeather) {
+    completionRainfall7dInches = frozenWeekWeather.rainInches ?? null;
+    completionEt0Inches = frozenWeekWeather.et0Inches ?? null;
+    completionDailyRain = Array.isArray(frozenWeekWeather.dailyRain) ? frozenWeekWeather.dailyRain : null;
+    completionRainConfidence = frozenWeekWeather.rainConfidence ?? null;
+    completionRainSource = frozenWeekWeather.rainSource ?? null;
+  } else {
+    const latitude = service.customer_latitude ?? service.latitude ?? service.lat;
+    const longitude = service.customer_longitude ?? service.longitude ?? service.lng;
+    // Whether a fetch was even POSSIBLE. Without coordinates there is nothing to
+    // fetch and nothing that will ever change — a blank week is the settled,
+    // reproducible answer, so it stays cacheable. Treating it as unresolved
+    // would make every render for a property with no geocode permanently
+    // uncacheable and defer its report email forever.
+    // toCoordinate, not Number.isFinite(Number(x)): Number(null) and Number('')
+    // are 0, so an ungeocoded property would read as a valid coordinate at the
+    // equator and its blank week would be misfiled as a transient failure.
+    const latN = toCoordinate(latitude);
+    const lonN = toCoordinate(longitude);
+    const hasCoordinates = latN != null && lonN != null && !(latN === 0 && lonN === 0);
+    try {
+      const weekWeather = await fetchServiceWeekWeather({
+        latitude,
+        longitude,
+        serviceDate: assessment.service_date,
+      });
+      completionRainfall7dInches = weekWeather.rainInches;
+      completionEt0Inches = weekWeather.et0Inches;
+      completionDailyRain = weekWeather.dailyRain;
+      // 'low' when the pinpoint week was a single-cell model spike and we fell back to
+      // the city-collective series — surfaced on the 7-day chart as "Limited data this week".
+      completionRainConfidence = weekWeather.rainConfidence;
+      // Which provider actually supplied it — drives the customer-facing Source row.
+      completionRainSource = weekWeather.rainSource;
+      if (!assessment?.id) {
+        // Nothing to scope the snapshot to, so it cannot be frozen safely.
+        weekWeatherPendingReason = 'no_assessment';
+      } else if (!weekWeather.windowClosed) {
+        // The service-day window is still ACCUMULATING. Same-day weather is a
+        // deliberately short-lived read (30-minute cache, full-day forecast for
+        // the remainder) so afternoon convection can still land — freezing it
+        // would pin a forecast as the permanent record of a week that has not
+        // happened yet. This also covers completion-time synthesis, which runs
+        // on the service day and would otherwise freeze before the customer's
+        // first view.
+        //
+        // Not "unfrozen": nothing failed, and blocking the day's report email
+        // over a window that is merely open would stop nearly every lawn
+        // delivery. It only suppresses durable CACHING, so tomorrow's first
+        // render freezes the settled week instead of a stale same-day object
+        // being served under a key that still matches.
+        weekWeatherPendingReason = 'open_window';
+      } else if (completionRainfall7dInches != null) {
+        const canonicalWeek = await freezeLawnWeekWeather(service.id, {
+          // The snapshot names the question it answers.
+          assessmentId: assessment.id,
+          serviceDate: ymd(assessment.service_date),
+          rainInches: completionRainfall7dInches,
+          et0Inches: completionEt0Inches,
+          dailyRain: completionDailyRain,
+          rainConfidence: completionRainConfidence,
+          rainSource: completionRainSource,
+          frozenAt: new Date().toISOString(),
+        }, knex);
+        // Adopt the canonical week even when THIS render lost the race —
+        // carrying on with our own numbers would publish a second, different
+        // version of a report that is meant to be permanent.
+        if (canonicalWeek) {
+          // Copied EXACTLY, nulls included. Falling back to this render's own
+          // values for a field the winner left null (MRMS supplied rain while an
+          // Open-Meteo outage left et0Inches null) would let the winner render a
+          // seasonal fallback target while the loser renders an ET₀-derived one
+          // — two different reports both claiming the same frozen week.
+          completionRainfall7dInches = canonicalWeek.rainInches ?? null;
+          completionEt0Inches = canonicalWeek.et0Inches ?? null;
+          completionDailyRain = Array.isArray(canonicalWeek.dailyRain) ? canonicalWeek.dailyRain : null;
+          completionRainConfidence = canonicalWeek.rainConfidence ?? null;
+          completionRainSource = canonicalWeek.rainSource ?? null;
+        } else {
+          // Neither wrote nor read back a canonical week. The live report still
+          // renders (fail soft — a customer should see their report), but this
+          // output is NOT reproducible, so it must not be cached: a later view
+          // could freeze different data while a stored PDF kept these numbers
+          // forever, and no future PDF request would retry the freeze.
+          weekWeatherUnfrozen = true;
+        }
+      } else if (!hasCoordinates) {
+        // No geocode YET. This is not settled — the hourly backstop sweep
+        // (services/geocoder.js sweepUngeocodedCustomers) actively retries
+        // coordinate-less customers and writes their coordinates later, after
+        // which /data resolves and freezes a real week. The PDF key encodes
+        // neither coordinates nor freeze state, so a blank-weather PDF cached
+        // now would keep being downloaded long after the live report showed
+        // real rainfall. Uncacheable — but not delivery-blocking, because an
+        // address that never geocodes would otherwise hold the report email
+        // forever.
+        weekWeatherPendingReason = 'no_coordinates';
+      } else {
+        // A closed window we DID try to resolve and got nothing for: the
+        // providers were unreachable or incomplete. Persisting the null would
+        // lock in "no rainfall known" forever, so nothing is frozen — but the
+        // blank result is transient, and caching it would serve an empty water
+        // card under a key that still matches once a later view freezes the
+        // real week.
+        weekWeatherUnfrozen = true;
+      }
+    } catch (e) {
+      // The fetch itself threw — transient by definition, and no week was
+      // resolved. Render soft, cache nothing.
+      weekWeatherUnfrozen = true;
+    }
+  }
   const waterContext = buildLawnWaterContext({
     assessment,
     turfProfile,
@@ -2199,6 +2435,15 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     overwateringSignal: parseJsonObject(assessment.composite_scores).overwatering_signal === true,
     fawnSnapshot,
     waterContext,
+    // NOT reproducible: the week was fetched but could not be frozen, so a
+    // later render may show different numbers. Any caller that durably caches
+    // a render must skip storing when this is true.
+    weekWeatherUnfrozen,
+    // Why the week could not be frozen yet, when nothing actually failed.
+    weekWeatherPendingReason,
+    // What CACHE sites gate on — the superset. Delivery gates on
+    // weekWeatherUnfrozen alone, so a merely-pending week never blocks a send.
+    weekWeatherUncacheable: weekWeatherUnfrozen || !!weekWeatherPendingReason,
     snapshot,
     recommendationCards,
     turfProfile: turfProfile ? {
@@ -2263,11 +2508,28 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let interiorOnlyLane = /\bbed\s*bugs?\b/i.test(
     `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
   );
+  // Rodent trapping joins the no-satellite-spray-outline lanes (owner
+  // 2026-08-02): nothing is sprayed on a trapping stop, so an exterior
+  // outline would be a claim the visit cannot support. Suppressed HERE, at
+  // the render point, rather than only by hiding the closeout button —
+  // the tech portal exposes a per-row "Trace treatment zone" action and the
+  // save endpoint accepts any service type, so a UI-only fix left three
+  // other ways to publish one, including traces saved before this change
+  // (codex P2 round 3). Same reasoning the bed-bug lane already documents.
+  // FAIL CLOSED (codex P2 on #3159): the live profile lookup can throw,
+  // return the default profile, or stop matching a repointed service — and a
+  // suppression guard that degrades OPEN republishes the exact spray outline
+  // it exists to remove. The immutable snapshot is the authority; the live
+  // profile only widens it. Seeded before the try/catch so a throw leaves
+  // the snapshot verdict standing.
+  let trapLaneNoSprayMap = parseJsonObject(service.service_data)
+    ?.typedReportSnapshot?.type === 'rodent_trapping';
   if (!interiorOnlyLane && scheduledServiceRow) {
     try {
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
       const laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
       interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
+      trapLaneNoSprayMap = trapLaneNoSprayMap || laneProfile?.findingsType === 'rodent_trapping';
     } catch { /* label fallback stands */ }
   }
   const structured = parseJsonObject(service.structured_notes);
@@ -2814,7 +3076,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // outline — a trace saved before the tracer was hidden for this lane
     // is stale exterior evidence on an interior treatment's report
     // (codex P2 r6; stable-key classification r9).
-    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id && !interiorOnlyLane) {
+    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id
+      && !interiorOnlyLane && !trapLaneNoSprayMap) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -2871,6 +3134,34 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // the VIEWER-VISIBLE snapshot types, so an internal_only companion's
   // station data never reaches the customer copy and pins never leak onto
   // unrelated (lawn / pest-only) reports for the same property.
+  // Resolved ONCE for every consumer of the trap stage. The station map and
+  // the narrative both describe the same traps, so deriving this separately
+  // in each place is how they came to disagree: the map read the companion
+  // snapshots while the narrative saw only the primary, leaving `visitStage`
+  // null on a trapping companion — so the deterministic fallback said the
+  // mapped traps "were inspected" and the model's copy was never screened by
+  // the setup guards, beside a companion finding reading "Traps set" (codex
+  // P1 round 10).
+  const trapSetupSnapshot = [typedSnapshot, ...companionSnapshots]
+    .find((snap) => require('./activity-indicators')
+      .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)) || null;
+
+  // The narrative lanes below TELL THE CUSTOMER the traps went out today, so
+  // their stage resolves only from snapshots this viewer is allowed to see.
+  // The raw lookup above stays raw for the shared map's wording (round-8
+  // ruling: whether traps went out is a fact about the visit) — but an
+  // internal_only trapping companion on an auto-sent primary must not leak
+  // "your traps were placed" into a summary whose own section is suppressed
+  // for this viewer (codex P1 round 12). Staff viewers see internal
+  // sections, so their narrative may still name the stage. The primary is
+  // always visible here: an internal_only PRIMARY never mints a report
+  // token in the first place.
+  const narrativeTrapSetupSnapshot = [
+    typedSnapshot,
+    ...companionSnapshots.filter((snap) => staffViewer || snap.delivery === 'auto_send'),
+  ].find((snap) => require('./activity-indicators')
+    .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)) || null;
+
   const stationMap = buildStationMapReportContext({
     stationRows,
     checkRows: stationCheckRows,
@@ -2883,7 +3174,65 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
     serviceDate: service.service_date || null,
+    // Read off the FROZEN snapshot that actually OWNS the trapping program —
+    // which may be a COMPANION, since typedTypes deliberately lets a
+    // non-station primary carry a rodent_trapping companion and that
+    // companion selects the map. Deriving this from the primary alone left
+    // the companion's "Traps set" finding beside a map still saying
+    // "inspected" (codex P2 on #3159). Scoped require matches this file's
+    // pattern for report-time helpers.
+    // Read off the RAW companion snapshots, not the projected
+    // `companionReports` view: that projection is built above from a fixed
+    // field list that has no `values`, so the companion arm of this lookup
+    // was structurally dead — it could only ever read `undefined` and the
+    // primary alone decided the map's wording (codex P2 round 8). The raw
+    // array is also unfiltered by delivery, which is correct here: whether
+    // the traps went out today is a fact about the visit, not about which
+    // companion sections this viewer is allowed to see.
+    initialSetup: trapSetupSnapshot != null,
+    // The trapping snapshot's own count, so the map can confirm it agrees
+    // before restating it (the tech may have hand-edited it away from the
+    // autofilled pin count). Same sourcing fix as above.
+    typedTrapCount: (() => {
+      const trapSnap = [typedSnapshot, ...companionSnapshots]
+        .find((snap) => snap?.type === 'rodent_trapping');
+      const n = Number(trapSnap?.values?.traps_checked);
+      return Number.isInteger(n) ? n : null;
+    })(),
   });
+
+  // Does the narrative's own count disagree with the map it sits beside?
+  //
+  // The map's `setupCountVerified` cannot be the only source (codex P1
+  // round 15). It is only emitted when at least one pin carries a per-visit
+  // status, and the post-completion station sync is deliberately fail-soft
+  // — so a declared setup whose check rows never landed produces a standing
+  // registry map with NO dispute flag, and a typed count of 6 beside an
+  // 8-pin fallback map licensed the model to say 8 traps were set. For an
+  // auto-sent trapping COMPANION nothing else could catch it either: the
+  // facts carry the PRIMARY's findings, so the typed 6 never reaches the
+  // grounded number set.
+  //
+  // So the comparison is made here, from the same viewer-visible snapshot
+  // the stage came from. `checked` and `total` are both acceptable matches:
+  // a synced setup agrees with checked, an unsynced one agrees with total.
+  const narrativeTrapCount = (() => {
+    const snap = [
+      typedSnapshot,
+      ...companionSnapshots.filter((s) => staffViewer || s.delivery === 'auto_send'),
+    ].find((s) => s?.type === 'rodent_trapping');
+    const n = Number(snap?.values?.traps_checked);
+    return Number.isInteger(n) ? n : null;
+  })();
+  const stationCountDisputed = (stationMap?.initialSetup === true && stationMap?.setupCountVerified === false)
+    || Boolean(
+      narrativeTrapSetupSnapshot
+      && stationMap?.program === 'trapping'
+      && stationMap?.summary
+      && narrativeTrapCount != null
+      && narrativeTrapCount !== (stationMap.summary.checked || 0)
+      && narrativeTrapCount !== (stationMap.summary.total || 0),
+    );
 
   const onSiteMin = computeOnSiteMin({
     ...service,
@@ -3511,7 +3860,51 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // snapshot) never resurfaces via the summary.
   {
     const technicianReport = technicianReportCustomerCopy(service.technician_notes);
-    const drivesSummary = technicianReport?.body
+    // A viewer-visible trapping snapshot declaring an initial setup screens
+    // the body BEFORE it wins the summary. The snapshot that accepted this
+    // body can be a different findings type entirely (a non-trapping
+    // primary with a trapping COMPANION), so its acceptance never ran the
+    // setup guard — and a body generated before the companion's selector
+    // changed can still say the traps were checked or that nothing was
+    // caught, winning the Visit Summary beside the companion's frozen
+    // "Traps set" result (codex P1 r18). Same fallback as the narrative
+    // lanes: the recap stays, and with the source left as 'recap' the
+    // gated rodent narrative below rebuilds a grounded summary instead.
+    // Uses narrativeTrapSetupSnapshot so viewer visibility matches the
+    // narrative's stage rules exactly (round 12).
+    // The COUNT screen runs from the same viewer-visible trapping snapshot
+    // regardless of stage (pre-push P1 on 256c1f9): a follow-up companion
+    // whose traps_checked or captures was corrected after the body was
+    // generated would otherwise publish the stale number in the summary.
+    // Unverifiable values (blank/missing) screen nothing, by
+    // countContradictions' own rules.
+    const visibleTrapSnapshot = [
+      typedSnapshot,
+      ...companionSnapshots.filter((snap) => staffViewer || snap.delivery === 'auto_send'),
+    ].find((snap) => snap?.type === 'rodent_trapping') || null;
+    // Scoped require matches this file's pattern for report-time helpers.
+    const indicators = require('./activity-indicators');
+    // A confirmed reconciliation prompt (frozen onto the accepting
+    // snapshot's todaysResult at completion) is a PERSON overriding the
+    // matcher — this render-time screen must honor that decision, not
+    // silently re-reject the body they reviewed (codex P1 on the
+    // reconciliation round).
+    const trapSetupScreened = typedSnapshot?.todaysResult?.reconcileConfirmed === true
+      // Companion-only completions freeze the override on the trapping
+      // companion (there is no typed primary snapshot to carry it) —
+      // viewer-filtered like everything else, since visibleTrapSnapshot is.
+      || visibleTrapSnapshot?.todaysResult?.reconcileConfirmed === true
+      || !technicianReport?.body
+      || (
+        (!narrativeTrapSetupSnapshot
+          || indicators.setupContradictions(technicianReport.body).length === 0)
+        && (!visibleTrapSnapshot
+          || indicators.countContradictions(technicianReport.body, {
+            traps_checked: visibleTrapSnapshot.values?.traps_checked,
+            captures: visibleTrapSnapshot.values?.captures,
+          }).length === 0)
+      );
+    const drivesSummary = technicianReport?.body && trapSetupScreened
       && (!typedSnapshot || typedSnapshot.todaysResult?.bodySource === 'technician_report');
     if (drivesSummary) {
       visitSummary = technicianReport.body;
@@ -3561,12 +3954,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       recap: visitSummary,
       serviceTypeDisplay: linkedServiceName,
       typedReport: typedSnapshot,
+      // Explicit, because the trapping snapshot may be a COMPANION while
+      // typedReport is the primary — the narrative cannot derive the stage
+      // from a snapshot it was never handed (codex P1 round 10). Viewer-
+      // filtered (codex P1 round 12): see narrativeTrapSetupSnapshot.
+      visitStage: narrativeTrapSetupSnapshot ? 'initial_trap_setup' : null,
       activity,
       stationSummary: stationMap?.summary || null,
       // summary.activity semantics differ by program (traps with a capture
       // vs stations with bait consumption) — the narrative names the fact
       // accordingly and must know which map this is.
       stationProgram: stationMap?.program || null,
+      // The map card suppresses its own count line when the tech's typed
+      // trap count disagrees with the pinned roster; the narrative must not
+      // resurrect the disputed number from stationSummary (codex P1 r12).
+      stationCountDisputed,
       applications,
       photos: photoPayload,
       nextAppointment,
@@ -3620,9 +4022,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       serviceTypeDisplay: linkedServiceName,
       reportTypeLabel: typedSnapshot.reportTypeLabel || typedSnapshot.typeLabel || null,
       typedReport: typedSnapshot,
+      // Same reason as the rodent lane above: a non-rodent primary can carry
+      // a rodent_trapping companion that selects the station map. Viewer-
+      // filtered for the same round-12 reason.
+      visitStage: narrativeTrapSetupSnapshot ? 'initial_trap_setup' : null,
       activity,
       stationSummary: stationMap?.summary || null,
       stationProgram: stationMap?.program || null,
+      stationCountDisputed,
       applications,
       photos: photoPayload,
       nextAppointment,
@@ -3844,6 +4251,9 @@ module.exports = {
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,
   resolveCanonicalLawnRender,
+  freezeLawnWeekWeather,
+  frozenWeekMatches,
+  storedWeekFor,
   LAWN_RENDER_STRATEGY,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,

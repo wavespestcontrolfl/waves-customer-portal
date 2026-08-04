@@ -90,16 +90,29 @@ async function maybeEnrollConfirmedQuoteLead(subscriber) {
 router.post('/unsubscribe/:token', async (req, res) => {
   try {
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(req.params.token);
-    const sub = isUuid
-      ? await db('newsletter_subscribers').where({ unsubscribe_token: req.params.token }).first()
-      : null;
-    if (sub && sub.status !== 'unsubscribed') {
-      await db('newsletter_subscribers').where({ id: sub.id }).update({
-        status: 'unsubscribed',
-        unsubscribed_at: new Date(),
-        updated_at: new Date(),
-      });
-      logger.info(`[newsletter] One-click unsubscribe for subscriber id=${sub.id}`);
+    // Atomic token consumption (Codex #3084 r45): the old read-by-token +
+    // update-by-ID pair raced the email-correction fanout — the id
+    // survives a token rotation, so a stale link delivered to a rejected
+    // mailbox could opt out the freshly RETARGETED subscriber (the
+    // r18/r41 rule: rotation revokes the old mailbox's authority), and a
+    // merge-deleted row made the id-only write a silent no-op. One
+    // conditional UPDATE keyed on the token serializes against the
+    // fanout's FOR UPDATE row locks and consumes the token only while it
+    // still owns the row; after a correction commits, the rotated/removed
+    // token correctly matches nothing.
+    let unsubRows = [];
+    if (isUuid) {
+      unsubRows = await db('newsletter_subscribers')
+        .where({ unsubscribe_token: req.params.token })
+        .whereNot({ status: 'unsubscribed' })
+        .update({
+          status: 'unsubscribed',
+          unsubscribed_at: new Date(),
+          updated_at: new Date(),
+        }, ['id', 'email']);
+      if (unsubRows.length) {
+        logger.info(`[newsletter] One-click unsubscribe for subscriber id=${unsubRows[0].id}`);
+      }
     }
 
     // A deliberate browser form submit gets a useful result page. RFC 8058
@@ -108,6 +121,13 @@ router.post('/unsubscribe/:token', async (req, res) => {
     const isFormSubmission = req.body?.confirm_unsubscribe === '1';
     if (!isFormSubmission) return res.status(200).json({ success: true });
 
+    // Page copy: a consumed token shows the unsubscribed address; an
+    // already-unsubscribed revisit stays idempotent (read-only re-check);
+    // a rotated/unknown token gets the expired message.
+    const sub = unsubRows[0]
+      || (isUuid
+        ? await db('newsletter_subscribers').where({ unsubscribe_token: req.params.token }).first()
+        : null);
     const email = sub ? escapeHtml(sub.email) : '';
     const bodyHtml = sub
       ? `<p>We won't send any more newsletters${email ? ` to <span class="email">${email}</span>` : ''}.</p>
