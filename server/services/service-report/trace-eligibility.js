@@ -461,39 +461,57 @@ function combineLineVerdicts(primaryVerdict, addonVerdicts = []) {
 // serviceName }) — shared by the live-row path (capture, legacy records)
 // and the completion-frozen path (render, codex P2 r14).
 async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) {
-  try {
-    const addons = (Array.isArray(lines) ? lines : [])
-      .map((line) => ({
-        service_id: line?.serviceId ?? line?.service_id ?? null,
-        service_name: line?.serviceName ?? line?.service_name ?? null,
-      }))
-      .filter((line) => line.service_id || line.service_name);
-    if (!addons.length || !knex) return [];
-    const catalogIds = [...new Set(addons.map((a) => a.service_id).filter(Boolean))];
-    let keyById = new Map();
-    let catalogLookupFailed = false;
-    if (catalogIds.length) {
-      try {
-        const rows = await knex('services')
-          .whereIn('id', catalogIds)
-          .select('id', 'service_key');
-        keyById = new Map(rows.map((r) => [r.id, r.service_key]));
-      } catch { catalogLookupFailed = true; }
-    }
-    // Typed add-on keys (flea_tick, lawn_aeration…) are deliberately
-    // absent from SERVICE_KEY_RULES — their identity is the typed
-    // pointer, so resolve the completion profile per key (codex P2 r12).
-    let pointerByKey = new Map();
-    const keys = [...new Set([...keyById.values()].filter(Boolean))];
-    if (keys.length) {
-      const profiles = await knex('service_completion_profiles')
-        .whereIn('service_key', keys)
-        .where({ active: true })
-        .select('service_key', 'project_type')
-        .catch(() => []);
-      pointerByKey = new Map(profiles.map((r) => [r.service_key, r.project_type]));
-    }
-    return addons.map((addon) => {
+  const addons = (Array.isArray(lines) ? lines : [])
+    .map((line) => ({
+      service_id: line?.serviceId ?? line?.service_id ?? null,
+      service_name: line?.serviceName ?? line?.service_name ?? null,
+      // Completion-FROZEN identity (codex P2 r21): lines stamped with
+      // their key + findings pointer at completion never re-resolve the
+      // mutable catalog/profile rows — a later repoint or deactivation
+      // cannot change a permanent report's verdict.
+      frozen: (typeof line?.serviceKey === 'string' && line.serviceKey)
+        ? { key: line.serviceKey, pointer: line?.findingsType || null }
+        : null,
+    }))
+    .filter((line) => line.service_id || line.service_name || line.frozen);
+  if (!addons.length || !knex) return [];
+  const catalogIds = [...new Set(addons.filter((a) => !a.frozen).map((a) => a.service_id).filter(Boolean))];
+  let keyById = new Map();
+  let catalogLookupFailed = false;
+  if (catalogIds.length) {
+    try {
+      const rows = await knex('services')
+        .whereIn('id', catalogIds)
+        .select('id', 'service_key');
+      keyById = new Map(rows.map((r) => [r.id, r.service_key]));
+    } catch { catalogLookupFailed = true; }
+  }
+  // Typed add-on keys (flea_tick, lawn_aeration…) are deliberately
+  // absent from SERVICE_KEY_RULES — their identity is the typed
+  // pointer, so resolve the completion profile per key (codex P2 r12).
+  // This lookup's failure PROPAGATES (codex P2 r21, same reasoning as
+  // the row-list query): swallowing it strips a typed add-on's only
+  // findings pointer, and the capture path's documented fail-open must
+  // see the failure instead of 403ing the rescued visit. Render callers
+  // wrap with their own fail-closed catch.
+  let pointerByKey = new Map();
+  const keys = [...new Set([...keyById.values()].filter(Boolean))];
+  if (keys.length) {
+    const profiles = await knex('service_completion_profiles')
+      .whereIn('service_key', keys)
+      .where({ active: true })
+      .select('service_key', 'project_type');
+    pointerByKey = new Map(profiles.map((r) => [r.service_key, r.project_type]));
+  }
+  return addons.map((addon) => {
+      if (addon.frozen) {
+        return resolveTraceEligibility({
+          serviceKey: addon.frozen.key,
+          findingsType: addon.frozen.pointer,
+          displayName: addon.service_name || '',
+          ...(renderSide ? { typedValues: null } : {}),
+        });
+      }
       // A SUPPLIED catalog id that cannot be resolved — transient lookup
       // failure, or the row no longer exists — must not fall to the
       // editable display name and broaden eligibility (codex P2 r18).
@@ -516,10 +534,57 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
         // permissive at capture (codex P1 r13).
         ...(renderSide ? { typedValues: null } : {}),
       });
-    });
-  } catch {
-    return [];
+  });
+}
+
+// Completion-time add-on line snapshot (codex P2 r21): each line
+// freezes its booking-time service_key_snapshot (catalog key fallback)
+// and the findings pointer ACTIVE at completion, so a later profile
+// repoint or deactivation — routine during typed cutovers — cannot
+// change a permanent report's eligibility or geometry. Frozen fields
+// are stamped only when BOTH halves resolved: a half-frozen line (key
+// without its pointer lookup) would fail typed add-ons closed forever
+// instead of falling back to live resolution. Throws propagate to the
+// caller's fail-soft catch (the completion is never blocked on this).
+async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
+  const rows = await trx('scheduled_service_addons')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('created_at', 'asc')
+    .select('service_id', 'service_name', 'service_key_snapshot');
+  const missingIds = [...new Set(rows
+    .filter((r) => !r.service_key_snapshot && r.service_id)
+    .map((r) => r.service_id))];
+  let keyById = new Map();
+  let lookupFailed = false;
+  if (missingIds.length) {
+    try {
+      const catalog = await trx('services').whereIn('id', missingIds).select('id', 'service_key');
+      keyById = new Map(catalog.map((r) => [r.id, r.service_key]));
+    } catch { lookupFailed = true; }
   }
+  const keys = [...new Set(rows
+    .map((r) => r.service_key_snapshot || keyById.get(r.service_id))
+    .filter(Boolean))];
+  let pointerByKey = new Map();
+  if (keys.length) {
+    try {
+      const profiles = await trx('service_completion_profiles')
+        .whereIn('service_key', keys)
+        .where({ active: true })
+        .select('service_key', 'project_type');
+      pointerByKey = new Map(profiles.map((r) => [r.service_key, r.project_type]));
+    } catch { lookupFailed = true; }
+  }
+  return rows.map((row) => {
+    const key = row.service_key_snapshot || keyById.get(row.service_id) || null;
+    return {
+      serviceId: row.service_id || null,
+      serviceName: row.service_name || null,
+      ...(key && !lookupFailed
+        ? { serviceKey: key, findingsType: pointerByKey.get(key) || null }
+        : {}),
+    };
+  });
 }
 
 // Live schedule rows — the CAPTURE-side truth (pre-completion) and the
@@ -632,7 +697,15 @@ async function resolveTraceRenderVerdict(record, knex) {
         serviceKey = profile?.serviceKey || null;
         findingsType = findingsType || profile?.findingsType || null;
       }
-    } catch { /* label fallback stands, same as the render path */ }
+    } catch {
+      // A LINKED row whose lookup threw must not fall to the editable
+      // display name (codex P2 r21, twin of the buildReportV1Data
+      // sentinel): every independent caller of this shared resolver —
+      // re-entry, PDF signature, completion SMS — fails closed the same
+      // way. The throw can only originate inside the linkage branch, so
+      // unlinked legacy rows still reach name fallback.
+      serviceKey = 'unresolved:linked_service';
+    }
   }
   let eligibility = resolveTraceEligibility({
     serviceKey, findingsType, displayName: names, typedValues,
@@ -670,6 +743,7 @@ module.exports = {
   combineLineVerdicts,
   resolveAddonVerdicts,
   addonVerdictsFromLines,
+  frozenAddonLinesForCompletion,
   renderAreasFromRecord,
   traceEligibilityGateOn,
   traceCaptureBlockPayload,

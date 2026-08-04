@@ -41,6 +41,11 @@ function stubKnex(fixtures = {}) {
     const query = {
       where: () => query,
       whereIn: () => query,
+      whereRaw: () => query,
+      orWhere: () => query,
+      andWhere: () => query,
+      whereNull: () => query,
+      whereNotNull: () => query,
       orderBy: () => query,
       modify: () => query,
       limit: () => query,
@@ -294,6 +299,33 @@ describe('PDF signature varies with the eligibility verdict', () => {
     );
     expect(partial).toBe(full);
     expect(partial).toMatch(/-te1spray-cmperimeter$/);
+  });
+});
+
+describe('round 21 — the shared resolver fails closed on a linked lookup failure', () => {
+  const { resolveTraceRenderVerdict } = require('../services/service-report/trace-eligibility');
+
+  const prevGate = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = prevGate;
+  });
+
+  test('linked row + throwing lookup → sentinel suppresses; unlinked keeps name fallback', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const throwingKnex = () => { throw new Error('db down'); };
+    // LINKED: the eligible-by-name label cannot rescue the failed lookup
+    const linked = await resolveTraceRenderVerdict(
+      { scheduled_service_id: 'ss-r21', service_type: 'Quarterly Pest Control', service_data: '{}' },
+      throwingKnex,
+    );
+    expect(linked.suppressed).toBe(true);
+    // UNLINKED legacy record: name fallback still stands
+    const unlinked = await resolveTraceRenderVerdict(
+      { service_type: 'Quarterly Pest Control', service_data: '{}' },
+      throwingKnex,
+    );
+    expect(unlinked.suppressed).toBe(false);
   });
 });
 

@@ -417,6 +417,37 @@ describe('classification behavior', () => {
     expect(legacy[0]).toMatchObject({ eligible: true, variant: 'spray' });
   });
 
+  test('round 21 — completion-frozen add-on identities never touch the db; typed pointer failures propagate', async () => {
+    const { addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    // frozen key + pointer resolve with a knex that would EXPLODE on any
+    // query — and the frozen identity beats a contradicting display name
+    const explodingKnex = () => { throw new Error('never queried'); };
+    const frozen = await addonVerdictsFromLines(
+      [{ serviceId: 'a1', serviceName: 'Termite Bait Quarterly', serviceKey: 'pest_general_quarterly', findingsType: null }],
+      explodingKnex,
+    );
+    expect(frozen[0]).toMatchObject({ eligible: true, variant: 'spray' });
+    // frozen typed pointer keeps both postures: permissive at capture,
+    // fail-closed at render (typedValues null)
+    const typedLine = [{ serviceId: 'a2', serviceName: 'Flea & Tick', serviceKey: 'flea_tick', findingsType: 'flea' }];
+    const captureSide = await addonVerdictsFromLines(typedLine, explodingKnex);
+    expect(captureSide[0]).toMatchObject({ eligible: true });
+    const renderSide = await addonVerdictsFromLines(typedLine, explodingKnex, { renderSide: true });
+    expect(renderSide[0]).toMatchObject({ eligible: false });
+    // UNFROZEN typed line: a service_completion_profiles failure
+    // PROPAGATES instead of silently unclassifying the add-on
+    const profilesDownKnex = (table) => {
+      if (table === 'services') {
+        return { whereIn: () => ({ select: () => Promise.resolve([{ id: 'a3', service_key: 'flea_tick' }]) }) };
+      }
+      return { whereIn: () => ({ where: () => ({ select: () => Promise.reject(new Error('profiles down')) }) }) };
+    };
+    await expect(addonVerdictsFromLines(
+      [{ serviceId: 'a3', serviceName: 'Flea & Tick' }],
+      profilesDownKnex,
+    )).rejects.toThrow('profiles down');
+  });
+
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
     // pre-untype callback: the eligible one_time_pest_treatment snapshot
     // no longer bypasses the exterior-evidence condition

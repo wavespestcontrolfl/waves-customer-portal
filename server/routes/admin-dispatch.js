@@ -6002,25 +6002,33 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // Fail-soft: a lookup error omits the field and render falls
           // back to the live rows (legacy-record behavior).
           try {
-            const completedAddonRows = await trx('scheduled_service_addons')
-              .where({ scheduled_service_id: svc.id })
-              .orderBy('created_at', 'asc')
-              .select('service_id', 'service_name');
             // The EMPTY array freezes too (codex P2 r15): an absent field
             // means "legacy record, fall back to live rows" — a
-            // zero-add-on completion must not stay mutable.
-            serviceData.completedAddonLines = completedAddonRows.map((row) => ({
-              serviceId: row.service_id || null,
-              serviceName: row.service_name || null,
-            }));
+            // zero-add-on completion must not stay mutable. Each line also
+            // freezes its key + findings pointer (codex P2 r21) via the
+            // shared freezer, so profile repoints can't rewrite history.
+            const { frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+            serviceData.completedAddonLines = await frozenAddonLinesForCompletion(svc.id, trx);
           } catch { /* render falls back to live rows */ }
           // The PRIMARY identity freezes for the same reason (codex P2
           // r15): update-details can repoint service_id/service_type after
           // completion, and a generic report has no typed snapshot to
           // counter it — the permanent report's trace verdict must reflect
-          // the service that was actually completed.
-          serviceData.completedServiceKey = completionProfile?.serviceKey || null;
-          serviceData.completedServiceName = svc.service_type || null;
+          // the service that was actually completed. Resolved from the
+          // LOCKED row (codex P2 r21, twin of the recap fix): an
+          // update-details repoint can commit between the handler's
+          // pre-transaction svc load and the row lock, and the freeze must
+          // record the service actually completing. Fail-soft on the
+          // re-resolve — the pre-lock profile (today's behavior) stands.
+          let frozenCompletionProfile = completionProfile;
+          if (lockedSvcRow && (lockedSvcRow.service_id !== svc.service_id
+            || lockedSvcRow.service_type !== svc.service_type)) {
+            try {
+              frozenCompletionProfile = await resolveCompletionProfileForScheduledService(lockedSvcRow, trx);
+            } catch { /* pre-lock profile stands */ }
+          }
+          serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
+          serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
           // Typed specialty completion: resolve trend vs the customer's prior
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders

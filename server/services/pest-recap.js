@@ -378,21 +378,15 @@ async function submitRecap({
         ? { id: serviceId, service_id: locked.service_id, service_type: locked.service_type }
         : svc;
       const recapProfile = await resolveCompletionProfileForScheduledService(lockedIdentity, trx);
-      const recapAddonRows = await trx('scheduled_service_addons')
-        .where({ scheduled_service_id: serviceId })
-        .orderBy('created_at', 'asc')
-        .select('service_id', 'service_name')
-        .catch(() => null);
+      // Lines freeze their key + findings pointer too (codex P2 r21) —
+      // shared freezer, same fail-soft posture as the /complete path.
+      const { frozenAddonLinesForCompletion } = require('./service-report/trace-eligibility');
+      const recapAddonLines = await frozenAddonLinesForCompletion(serviceId, trx).catch(() => null);
       frozenTraceIdentity = {
         completedServiceKey: recapProfile?.serviceKey || null,
         completedServiceName: (locked ? locked.service_type : svc.service_type) || null,
-        ...(Array.isArray(recapAddonRows)
-          ? {
-            completedAddonLines: recapAddonRows.map((row) => ({
-              serviceId: row.service_id || null,
-              serviceName: row.service_name || null,
-            })),
-          }
+        ...(Array.isArray(recapAddonLines)
+          ? { completedAddonLines: recapAddonLines }
           : {}),
       };
     } catch { /* legacy live-row behavior */ }
