@@ -5656,6 +5656,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // and its end-instant forcing is suppressed.
           let correctionPreservedMidFlight = false;
           if (lockedSvcRow) {
+            // Ownership re-resolve under the lock (r23 — customer-dedupe):
+            // a merge-undo that committed between the handler's svc load
+            // and this lock reverse-repointed the visit to the restored
+            // customer. Completion mints CHILDREN from svc.customer_id
+            // (invoices, service records, comms), so finishing with the
+            // stale owner splits the visit from its money. Abort with the
+            // retryable shape rather than silently adopting an owner the
+            // operator wasn't looking at.
+            if (lockedSvcRow.customer_id !== svc.customer_id) {
+              const err = new Error('This appointment\'s customer changed while completing (a merge was undone) — reload the job and complete it again.');
+              err.statusCode = 409;
+              err.isOperational = true;
+              err.code = 'VISIT_OWNER_CHANGED';
+              throw err;
+            }
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
             const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
             const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);

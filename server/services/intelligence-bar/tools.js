@@ -1048,21 +1048,11 @@ async function updateCustomer(customerId, updates) {
           'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
           [`customer-email:${emailLc}`],
         );
-        // The lock only serializes — re-run the live-claimant probe UNDER
-        // it (r20), exactly as revertMerge and the intake guard do. An
-        // address owned by another live customer (typically a just-restored
-        // merge loser) gets an explicit refusal, never a silent write.
-        const claimant = await trx('customers')
-          .whereRaw('lower(email) = ?', [emailLc])
-          .whereNot('id', customerId)
-          .where('active', true)
-          .whereNull('deleted_at')
-          .first('id');
-        if (claimant) {
-          const err = new Error('That email address belongs to another active customer — resolve the conflict (or merge the records) before assigning it.');
-          err.code = 'email_claimed_by_live_customer';
-          throw err;
-        }
+        // Serialization ONLY — deliberately NO claimant refusal (r23):
+        // customers.email is intentionally non-unique (20260417000010 —
+        // spouses/shared household addresses are supported), so an
+        // operator assigning a shared address is a supported act. The undo
+        // needs only this lock: its claim probe runs under the same key.
       }
       await trx('customers').where('id', customerId).update(clean);
       if (addressSubmitted) {
@@ -1100,9 +1090,6 @@ async function updateCustomer(customerId, updates) {
   } catch (e) {
     if (e && e.code === '23505') {
       return { error: 'That address already exists as another property on this customer.' };
-    }
-    if (e && e.code === 'email_claimed_by_live_customer') {
-      return { error: e.message };
     }
     throw e;
   }
@@ -1234,18 +1221,9 @@ async function bulkUpdateCustomers(customerIds, updates) {
             'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
             [`customer-email:${emailLc}`],
           );
-          // Same post-lock claimant re-check as updateCustomer (r20/r21).
-          const claimant = await trx('customers')
-            .whereRaw('lower(email) = ?', [emailLc])
-            .whereNot('id', customerId)
-            .where('active', true)
-            .whereNull('deleted_at')
-            .first('id');
-          if (claimant) {
-            const err = new Error('That email address belongs to another active customer — resolve the conflict (or merge the records) before assigning it.');
-            err.code = 'email_claimed_by_live_customer';
-            throw err;
-          }
+          // Serialization ONLY — no claimant refusal (r23): shared
+          // household addresses are supported (20260417000010); see
+          // updateCustomer.
         }
         await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
         if (addressSubmitted) {
@@ -1261,10 +1239,6 @@ async function bulkUpdateCustomers(customerIds, updates) {
     } catch (e) {
       if (e && e.code === '23505') {
         errors.push({ customer_id: customerId, error: 'That address already exists as another property on this customer.' });
-        continue;
-      }
-      if (e && e.code === 'email_claimed_by_live_customer') {
-        errors.push({ customer_id: customerId, error: e.message });
         continue;
       }
       throw e;

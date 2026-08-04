@@ -25,7 +25,7 @@ function makeChain(table, route) {
   const methods = [
     'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
     'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'onConflict',
-    'ignore', 'returning', 'first', 'increment',
+    'ignore', 'returning', 'first', 'increment', 'limit',
   ];
   for (const m of methods) {
     q[m] = jest.fn((...args) => { q._calls.push([m, args]); return q; });
@@ -1411,6 +1411,10 @@ describe('executeMerge', () => {
       'pm-loser-1': { is_default: true, autopay_enabled: true },
       'pm-loser-2': { is_default: false, autopay_enabled: false },
     });
+    // r23: the winner's pre-merge invoice/payment id snapshot is captured
+    // under the merge's row locks — the undo's transferred-profile gate
+    // matches new rows by set difference, never transaction timestamps.
+    expect(recorded.winner_premerge_billing_ids).toEqual({ invoices: [], payments: [] });
   });
 });
 

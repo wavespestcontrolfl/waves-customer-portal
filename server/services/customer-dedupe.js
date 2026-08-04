@@ -941,6 +941,23 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // the key and keep the conservative refusal.
     const winnerPremergePmIds = (await trx('payment_methods')
       .where({ customer_id: winnerId }).select('id')).map((r) => r.id);
+    // The winner's pre-merge BILLING row ids (r23), same exemption pattern:
+    // the undo's transferred-profile activity gate cannot trust timestamps
+    // — created_at defaults to transaction-START now(), so a payment whose
+    // transaction began before this merge, blocked on our customer row
+    // lock, and committed after carries a PRE-merge stamp. Captured here
+    // while THIS transaction holds the winner row FOR UPDATE, the id set
+    // is exact: any row not in it (and not journaled) committed after the
+    // merge, whatever its timestamps say. Over the cap → null, and the
+    // undo fails closed for that table.
+    const winnerPremergeBillingIds = {};
+    for (const billingTable of ['invoices', 'payments']) {
+      const idRows = await trx(billingTable)
+        .where({ customer_id: winnerId }).select('id').limit(REPOINT_ID_CAP + 1);
+      winnerPremergeBillingIds[billingTable] = idRows.length > REPOINT_ID_CAP
+        ? null
+        : idRows.map((r) => r.id);
+    }
     const paymentMethodFlags = {};
     for (const card of loserCards) {
       paymentMethodFlags[card.id] = {
@@ -1399,6 +1416,12 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         // The winner's own pre-merge card ids — exempt from the undo's
         // new-card-on-transferred-profile refusal (see the capture above).
         winner_premerge_pm_ids: winnerPremergePmIds,
+        // The winner's pre-merge invoice/payment ids — the undo's
+        // transferred-profile activity gate matches NEW rows by id-set
+        // difference, never by transaction timestamps (r23). null = over
+        // cap (undo fails closed); absent key = pre-upgrade journal (undo
+        // falls back to the timestamp heuristic it used before).
+        winner_premerge_billing_ids: winnerPremergeBillingIds,
         // The winner's pre-fold notes + the applied concatenations
         // ({ before, applied }) — the undo restores the winner's own notes
         // while still the merge-written text; null when nothing was folded.
@@ -1632,6 +1655,13 @@ const REVERT_FINANCIAL_TABLES = new Set([
   // (20260414000032). UNJOURNALED sequences on a journaled invoice are the
   // separate finalization gap covered by the invoice-child probe below.
   'invoice_followup_sequences',
+  // Money Stripe ACTUALLY COLLECTED when the ordinary payment insert
+  // failed (20260429000005) — the reconciliation record for a real charge,
+  // carrying customer_id + invoice_id. Splitting it from its invoice (or
+  // skipping an unverifiable row) leaves a settled charge attributed to a
+  // different customer than the invoice it paid (r23). Plain uuid `id` PK
+  // + customer_id, timestamps(true, true) — standard machinery applies.
+  'stripe_orphan_charges',
 ]);
 
 // Comms-CONSENT tables where a MISSING row semantically means "allowed":
@@ -1710,6 +1740,21 @@ const EMAIL_BOUND_SURFACES = [
     active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled']),
     label: 'queued template send(s)',
     carriesName: true,
+  },
+  {
+    // first_touch_holds.held_email is a LIVE delivery target (r23 — the
+    // merged #3084 lane): pending/releasing rows later release the
+    // new_lead drip and newsletter DOI to that stored address, and the
+    // correction fanout retargets this table. An unreleased hold at the
+    // merged-in email must block the undo's email clear exactly like a
+    // queued send. 'blocked' is the DNC terminal and 'released' rows are
+    // history — neither delivers again.
+    table: 'first_touch_holds',
+    emailColumn: 'held_email',
+    linkColumn: 'customer_id',
+    active: (q) => q.whereIn('status', ['pending', 'releasing']),
+    label: 'held first-touch send(s)',
+    carriesName: false,
   },
   {
     table: 'referral_promoters',
@@ -1850,6 +1895,11 @@ const TABLE_TIMESTAMP_COLUMNS = {
   referral_promoters: ['updated_at'],
   // timestamps(true, true) — 20260723000004.
   recipient_optin: ['created_at', 'updated_at'],
+  // explicit created_at/updated_at (20260730000030) — the first-touch hold
+  // ledger; its updated_at doubles as the release-claim fence stamp.
+  first_touch_holds: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260429000005; money-reconciliation records.
+  stripe_orphan_charges: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2114,6 +2164,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // while a transferred profile is in play. The winner's own pre-merge
       // billing is exempt (sinceOnly) and journaled rows are the loser's,
       // moving back with the undo.
+      // NEW rows are identified by ID-SET DIFFERENCE against the journal's
+      // winner_premerge_billing_ids snapshot when present (r23): created_at
+      // defaults to transaction-START now(), so a payment whose transaction
+      // began before the merge, blocked on the merge's customer row lock,
+      // and committed after carries a PRE-merge timestamp the sinceOnly
+      // heuristic would wrongly exempt. The snapshot was captured under the
+      // merge's winner row lock, so it is exact. A null table entry means
+      // the snapshot was over cap — fail closed. Pre-upgrade journals lack
+      // the key entirely and keep the timestamp heuristic.
+      const premergeBilling = recorded.winner_premerge_billing_ids || null;
       for (const table of ['invoices', 'payments']) {
         let rows = [];
         try {
@@ -2123,11 +2183,21 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         } catch (e) {
           refuse(`Cannot verify ${table} against the transferred Stripe profile (${e.message}) — refusing to revert`);
         }
-        const charged = countActivityRows(rows, {
-          journaledIds: journaledIdsFor(table), mergeAt, sinceOnly: true, table,
-        });
+        let charged;
+        if (premergeBilling && Object.prototype.hasOwnProperty.call(premergeBilling, table)) {
+          if (premergeBilling[table] === null) {
+            refuse(`The kept customer's ${table} were too numerous to snapshot at merge time — the transferred Stripe profile's activity cannot be verified; reconcile in Stripe and revert by hand`);
+          }
+          const premergeSet = new Set(premergeBilling[table]);
+          const journaled = journaledIdsFor(table);
+          charged = rows.filter((r) => !journaled.has(r.id) && !premergeSet.has(r.id)).length;
+        } else {
+          charged = countActivityRows(rows, {
+            journaledIds: journaledIdsFor(table), mergeAt, sinceOnly: true, table,
+          });
+        }
         if (charged) {
-          refuse(`${charged} ${table} row(s) were created or updated on the kept customer since the merge while it held the transferred Stripe profile — moving the profile back would hand its transaction history to the restored customer; reconcile in Stripe first, then revert`);
+          refuse(`${charged} ${table} row(s) were created on the kept customer since the merge while it held the transferred Stripe profile — moving the profile back would hand its transaction history to the restored customer; reconcile in Stripe first, then revert`);
         }
       }
     }
@@ -2297,6 +2367,17 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
           label: 'dunning follow-up sequence(s)',
           consequence: 'undoing would separate the invoice from the follow-up sequence dunning it',
+        },
+        // Orphan charges (r23): stripe-webhook records money Stripe
+        // successfully collected when the ordinary payment ledger insert
+        // failed — a post-merge row keyed to a journaled invoice is a REAL
+        // charge's only reconciliation record, and moving the invoice back
+        // without it strands the charge on the wrong customer.
+        {
+          table: 'stripe_orphan_charges',
+          query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
+          label: 'Stripe orphan charge record(s)',
+          consequence: 'undoing would separate a settled Stripe charge from the invoice it paid',
         },
       ];
       for (const probe of invoiceChildProbes) {

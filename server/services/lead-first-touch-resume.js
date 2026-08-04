@@ -27,6 +27,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 
 const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
 // Same permissive-but-real syntax class the fanout uses — releases are also
@@ -868,6 +869,16 @@ async function resumeHeldFirstTouch({
               },
               dbh: trx,
             });
+            if (enroll?.reason === 'customer_comms_busy') {
+              // A merge-undo of this customer is mid-transaction (r23):
+              // this trx already holds the hold row FOR UPDATE, so the
+              // enroll's comms acquire is a TRY-lock and a miss must not
+              // proceed unfenced. No writes — the plain re-pend below
+              // returns the row to pending and a later sweep retries
+              // against post-undo state.
+              dripSkip = { skipped: 'customer_comms_busy', plainRepen: true };
+              return;
+            }
             if (!enroll?.enrolled && enroll?.enrollmentId) {
               // Already-enrolled leaves the ACTIVE enrollment's
               // denormalized email untouched, and the scheduler sends each
@@ -1655,7 +1666,21 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
       // resolving the new card could reclaim and release A.
       const liveLease = "first_touch_holds.status = 'releasing' AND first_touch_holds.updated_at >= ?";
       const staleThreshold = new Date(Date.now() - STALE_CLAIM_MS);
-      await dbh('first_touch_holds')
+      // Rung-6 fence for hold creation (r23): held_email is a live
+      // delivery target and now an undo-probed surface (customer-dedupe
+      // EMAIL_BOUND_SURFACES) — a hold committing invisibly to the undo's
+      // absence probe re-creates the READ COMMITTED phantom the lock
+      // contract exists to close. A pool call gets a scoped locked
+      // transaction; a caller transaction (which may already hold row
+      // locks the undo takes after comms) TRY-locks and records unfenced
+      // on a miss — recording the hold outranks blocking the pipeline.
+      let commitHold = async (fn) => fn(dbh);
+      if (customerId && !dbh.isTransaction) {
+        commitHold = async (fn) => withCustomerCommsLock(dbh, customerId, fn);
+      } else if (customerId && dbh.isTransaction && !(await tryLockCustomerComms(dbh, customerId))) {
+        logger.warn(`[first-touch-hold] customer-comms lock busy for customer ${customerId} (merge-undo in flight?) — recording the hold unfenced`);
+      }
+      await commitHold((conn) => conn('first_touch_holds')
         .insert({
           call_log_id: callLogId,
           customer_id: customerId,
@@ -1731,7 +1756,7 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
             `CASE WHEN ${liveLease} THEN first_touch_holds.updated_at ELSE excluded.updated_at END`,
             [staleThreshold],
           ),
-        });
+        }));
       return true;
     } catch (err) {
       if (attempt === attempts) {

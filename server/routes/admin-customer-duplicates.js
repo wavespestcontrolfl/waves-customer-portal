@@ -307,7 +307,7 @@ router.get('/merges', async (req, res) => {
           invoiceIds: [p.linked_invoice_id, p.linked_dispute_invoice_id, p.linked_waves_invoice_id].filter(Boolean),
           row: p,
         })));
-        for (const childTable of ['customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences']) {
+        for (const childTable of ['customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences', 'stripe_orphan_charges']) {
           const childRows = await db(childTable)
             .whereIn('invoice_id', allJournaledInvoiceIds)
             .select(['id', 'invoice_id', ...activityColumnsFor(childTable)]);
@@ -445,7 +445,7 @@ router.get('/merges', async (req, res) => {
               }) > 0;
               // 2. Payment children outside the journal (invoiceChildProbes).
               if (!invoiceActivityRefuses) {
-                for (const childTable of ['payments', 'customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences']) {
+                for (const childTable of ['payments', 'customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences', 'stripe_orphan_charges']) {
                   const childRows = (invoiceChildrenByTable.get(childTable) || [])
                     .filter((c) => c.invoiceIds.some((id) => journaledInvoiceIds.has(id)))
                     .map((c) => c.row);

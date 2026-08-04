@@ -708,6 +708,20 @@ describe('EMAIL_BOUND_SURFACES', () => {
     expect(orIn[1]._table).toBe('leads');
     expect(orIn[1].args('where')).toEqual([{ customer_id: 'winner-1' }]);
   });
+
+  it('the held first-touch ledger is a probed email surface — unreleased holds block the email clear (r23)', () => {
+    // held_email is a LIVE delivery target: pending/releasing rows later
+    // release the new_lead drip and newsletter DOI to that address. Only
+    // unreleased states count — 'blocked' is the DNC terminal, 'released'
+    // is history.
+    const surface = dedupe._test.EMAIL_BOUND_SURFACES.find((s) => s.table === 'first_touch_holds');
+    expect(surface).toBeTruthy();
+    expect(surface.emailColumn).toBe('held_email');
+    expect(surface.linkColumn).toBe('customer_id');
+    const q = makeChain('first_touch_holds', () => []);
+    surface.active(q);
+    expect(q.args('whereIn')).toEqual(['status', ['pending', 'releasing']]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -753,6 +767,9 @@ describe('revertMerge', () => {
     referral_promoters: ['updated_at'],
     // created_at ONLY — append-only audit rows (20260511000002).
     customer_contract_events: ['created_at'],
+    // explicit pair (20260730000030) / timestamps(true,true) (20260429000005).
+    first_touch_holds: ['created_at', 'updated_at'],
+    stripe_orphan_charges: ['created_at', 'updated_at'],
   };
   const assertSelectableColumns = (table, q) => {
     const known = TABLE_TIMESTAMPS[table];
@@ -2100,6 +2117,52 @@ describe('revertMerge', () => {
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/while it held the transferred Stripe profile/) });
     expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('the billing-activity gate matches NEW rows by ID-SET difference, never by transaction timestamps (r23)', async () => {
+    // A payment transaction that STARTED before the merge, blocked on the
+    // merge's customer row lock, and committed after carries a PRE-merge
+    // created_at (now() = trx start). The journal's under-lock id snapshot
+    // is the only exact signal: a row outside it (and outside the journal)
+    // is post-merge, whatever its timestamps say.
+    const journal = baseJournal();
+    journal.repointed_ids.winner_premerge_billing_ids = { invoices: ['inv-pre'], payments: [] };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: {
+          stillOnWinner: ['inv-1'],
+          // inv-race: PRE-merge timestamp, NOT in the snapshot — the racing
+          // insert the timestamp heuristic wrongly exempted.
+          probeRows: [{ id: 'inv-1' }, { id: 'inv-pre', created_at: '2026-07-01T00:00:00Z' }, { id: 'inv-race', created_at: '2026-07-29T00:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/since the merge while it held the transferred Stripe profile/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('an over-cap billing snapshot (null) fails closed — the profile return is unverifiable (r23)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.winner_premerge_billing_ids = { invoices: null, payments: [] };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'], probeRows: [{ id: 'inv-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/too numerous to snapshot/) });
     expect(state.journalUpdate).toBe(null);
   });
 

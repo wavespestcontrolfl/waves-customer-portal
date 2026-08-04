@@ -2990,25 +2990,17 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
               [`customer-email:${emailLc}`],
             );
-            // The lock only serializes — it proves nothing by itself (r20):
-            // re-run the live-claimant probe UNDER it, exactly as
-            // revertMerge and the intake guard do. An address owned by
-            // another live customer (typically the just-restored loser of
-            // an undone merge) is someone else's registered mailbox — an
-            // operator assigning it gets an explicit refusal, never a
-            // silent write that makes the undo's claim check dishonest.
-            const claimant = await trx('customers')
-              .whereRaw('lower(email) = ?', [emailLc])
-              .whereNot({ id: req.params.id })
-              .where('active', true)
-              .whereNull('deleted_at')
-              .first('id');
-            if (claimant) {
-              const err = new Error('That email address belongs to another active customer — resolve the conflict (or merge the records) before assigning it.');
-              err.statusCode = 409;
-              err.code = 'email_claimed_by_live_customer';
-              throw err;
-            }
+            // Serialization ONLY — deliberately NO claimant refusal (r23):
+            // customers.email is intentionally non-unique (migration
+            // 20260417000010 dropped the constraint so spouses and shared
+            // household/business addresses work), so an operator assigning
+            // a shared address is a SUPPORTED act, not a conflict. What
+            // the undo needs is exactly this lock: its own claim probe
+            // runs under the same key, so an assignment either commits
+            // before the undo (and its probe sees it) or waits its turn.
+            // The automated-intake guard keeps its drop-the-email posture
+            // — unauthenticated input never gets to claim a live
+            // customer's mailbox; an operator can.
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
           if (addressChanged) {
@@ -3050,9 +3042,6 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             error: 'address_matches_existing_property',
             message: 'That address already exists as another property on this customer.',
           });
-        }
-        if (e && e.code === 'email_claimed_by_live_customer') {
-          return res.status(409).json({ error: e.code, message: e.message });
         }
         return next(e);
       }

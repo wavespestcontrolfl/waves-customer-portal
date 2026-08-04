@@ -3233,6 +3233,31 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // the same lock in the same position, so the #3011 customer-row →
       // series-advisory order below is unchanged relative to it.
       await lockCustomerComms(trx, customerId);
+      // Post-lock revalidation (r23): the pre-transaction snapshot loaded
+      // the customer BEFORE this acquire — if a merge-undo held the lock
+      // and cleared inherited address/service-contact fields while we
+      // waited, the zone/pricing derived from that snapshot and the
+      // unstamped visit's live-resolved comms would both bind to state the
+      // undo just removed. The lock alone proves nothing; re-read and
+      // abort with a retryable shape when the booking-relevant fields
+      // moved (an admin reloads and re-books against the live record).
+      {
+        const freshCustomer = await trx('customers')
+          .where({ id: customerId })
+          .first('address_line1', 'city', 'zip',
+            'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone');
+        const commsDep = (row) => [
+          row?.address_line1 || '', row?.city || '', row?.zip || '',
+          row?.service_contact_phone || '', row?.service_contact2_phone || '', row?.service_contact3_phone || '',
+        ].join('|');
+        if (!freshCustomer || commsDep(freshCustomer) !== commsDep(customer)) {
+          const err = new Error('The customer record changed while booking (address or service contacts moved) — reload the customer and book again.');
+          err.statusCode = 409;
+          err.isOperational = true;
+          err.code = 'CUSTOMER_CHANGED_RETRY';
+          throw err;
+        }
+      }
       // Global lock order for recurring creators: CUSTOMER ROW first, series
       // advisory lock second — the same order estimate-converter uses (it
       // updates the customer, then waits on the advisory lock). Taking the

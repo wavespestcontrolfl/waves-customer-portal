@@ -14,7 +14,7 @@
  */
 
 const db = require('../models/db');
-const { lockCustomerComms } = require('../utils/customer-comms-lock');
+const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
@@ -175,10 +175,11 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
     // mailbox (typically the restored loser holding back the inherited
     // email) and must not be enrolled. True third-party addresses are not
     // customer rows and fall through unchanged.
+    let enrollTarget = customer;
     if (customer.id) {
       const fresh = await conn('customers')
         .where({ id: customer.id })
-        .first('id', 'email', 'deleted_at');
+        .first('id', 'email', 'first_name', 'last_name', 'deleted_at');
       if (!fresh || fresh.deleted_at) return { enrolled: false, reason: 'customer gone' };
       const liveEmail = String(fresh.email || '').trim().toLowerCase();
       if (normalizedEmail !== liveEmail) {
@@ -192,12 +193,32 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
           return { enrolled: false, reason: 'address belongs to another live customer (stale pre-undo address)' };
         }
       }
+      // Names come from the POST-LOCK row when it has them (r23 P2): the
+      // caller's snapshot can carry a merge-loser name an undo just
+      // restored away, and the scheduler renders greetings from the
+      // STORED enrollment fields. The snapshot only fills a blank row
+      // (fresh call captures naming a customer the row never had).
+      enrollTarget = {
+        ...customer,
+        first_name: fresh.first_name || customer.first_name || null,
+        last_name: fresh.last_name || customer.last_name || null,
+      };
     }
-    return enrollCustomerLocked({ conn, templateKey, customer, normalizedEmail, steps });
+    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps });
   };
   if (!customer.id) return runEnrollment(dbh);
   if (dbh.isTransaction) {
-    await lockCustomerComms(dbh, customer.id);
+    // A caller transaction may ALREADY hold row locks the undo takes after
+    // customer-comms (the first-touch release holds its hold row FOR
+    // UPDATE; the undo holds comms and reverse-repoints that same row) — a
+    // late BLOCKING acquire here is an AB-BA deadlock (r23). TRY-lock: a
+    // miss means an undo of this exact customer is mid-transaction, and
+    // the caller must treat the enrollment as retryable rather than
+    // proceed unfenced (the resume engine re-pends its hold; see
+    // lead-first-touch-resume).
+    if (!(await tryLockCustomerComms(dbh, customer.id))) {
+      return { enrolled: false, reason: 'customer_comms_busy', retryable: true };
+    }
     return runEnrollment(dbh);
   }
   return db.transaction(async (trx) => {
