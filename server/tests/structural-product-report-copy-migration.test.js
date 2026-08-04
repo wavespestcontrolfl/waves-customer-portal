@@ -44,3 +44,26 @@ describe('20260803200000 structural product report copy', () => {
     await expect(migration.down()).resolves.toBeUndefined();
   });
 });
+
+describe('20260803210000 Dominion dual-use copy', () => {
+  const dominion = require('../models/migrations/20260803210000_dominion_dual_use_copy.js');
+  const parent = require('../models/migrations/20260803200000_structural_product_report_copy.js');
+
+  it('guards on the same cloned prior as the parent migration', () => {
+    expect(dominion.CLONED_PLANT_SUMMARY).toBe(parent.CLONED_PLANT_SUMMARY);
+  });
+
+  it('targets exactly the two Dominion container rows', () => {
+    expect(dominion.DOMINION_ROW_NAMES.sort()).toEqual(['Dominion 2L 1 gal', 'Dominion 2L 27.5 oz']);
+  });
+
+  it('dual-use copy names both labeled roles and makes no safety or re-entry claims', () => {
+    expect(dominion.DOMINION_DUAL_USE_SUMMARY).toMatch(/termites/i);
+    expect(dominion.DOMINION_DUAL_USE_SUMMARY).toMatch(/ornamentals or turf/i);
+    expect(dominion.DOMINION_DUAL_USE_SUMMARY).not.toMatch(/\bsafe\b|EPA-registered|re-?entry|\b\d+\s*(minutes?|hours?)\b|barrier|guarantee/i);
+  });
+
+  it('down is an explicit no-op', async () => {
+    await expect(dominion.down()).resolves.toBeUndefined();
+  });
+});
