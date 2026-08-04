@@ -537,6 +537,21 @@ export function shouldResetCompletionIdempotencyKey(error) {
   return error?.code === "lawn_assessment_stale";
 }
 
+// The completion route's pre-submit reconciliation 409 (code
+// 'report_reconcile', behind GATE_REPORT_RECONCILE_PROMPT): the server
+// packs the human-readable contradictions into the error string because
+// adminFetch surfaces only message + code. Returns the confirm() text, or
+// null for any other error so the generic handler keeps it. The 409
+// deliberately does NOT reset the idempotency key
+// (shouldResetCompletionIdempotencyKey), so a confirmed resubmit replays
+// under the same key.
+export function completionReconcilePrompt(error) {
+  if (error?.code !== "report_reconcile") return null;
+  const lead = String(error?.message || "").trim()
+    || "The report disagrees with the recorded values.";
+  return `${lead}\n\nOK — complete anyway (the recorded values stay authoritative on the report).\nCancel — go back to fix the fields or regenerate the AI report.`;
+}
+
 export function completionPreferencesNeedDraft({
   sendSms = true,
   includePayLink = true,
@@ -11531,7 +11546,7 @@ export function CompletionPanel({
     setTypedPhotoSummary("");
   }
 
-  async function handleSubmit() {
+  async function handleSubmit(reconcileConfirmed = false) {
     if (submitting) return;
     // Don't complete while an AI draft is in flight — the response is about to
     // replace the notes, and submitting now would either lose the generated copy
@@ -11935,6 +11950,9 @@ export function CompletionPanel({
       const body = {
         idempotencyKey: completionIdempotencyKeyRef.current,
         technicianNotes: notes,
+        // Set only on the resubmit after the tech OK'd the reconciliation
+        // prompt — the server then skips the 409 and completes.
+        ...(reconcileConfirmed ? { reportReconcileConfirmed: true } : {}),
         // customerRecap is intentionally NOT sent: the report summary is generated
         // server-side from the technician notes (there's no recap editor here).
         // Sending a hidden/restored stale draft would bypass that and become
@@ -12205,6 +12223,17 @@ export function CompletionPanel({
     } catch (e) {
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
+      }
+      // Reconciliation prompt (409, key preserved): the tech either
+      // confirms — one resubmit with the flag set — or goes back to fix
+      // the typed fields / regenerate the AI report.
+      const reconcileText = completionReconcilePrompt(e);
+      if (reconcileText) {
+        setSubmitting(false);
+        if (window.confirm(reconcileText)) {
+          return handleSubmit(true);
+        }
+        return;
       }
       if (e?.code === "backfill_invoice_mint_failed") {
         // The closeout committed but its REQUIRED invoice didn't mint. Mark

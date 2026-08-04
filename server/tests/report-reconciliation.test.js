@@ -1,0 +1,143 @@
+/**
+ * Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT, dark —
+ * owner ruling 2026-08-04 on the #3159 architecture escalation): the AI
+ * body is generated from the typed fields, the tech can keep editing them
+ * afterwards, and nothing re-runs. Instead of the render-time guards
+ * silently degrading the copy (or a missed pattern publishing a stale
+ * number), the completion route surfaces the contradiction to the tech —
+ * regenerate or confirm — BEFORE anything freezes. Uses the same matcher
+ * functions as the report pipeline: one source, no drift.
+ */
+const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
+const { reportReconcileBlockPayload } = require('../routes/admin-dispatch')._test;
+
+const notes = (did, foundLine) => ['WHAT WE DID', did, 'WHAT WE FOUND', foundLine].join('\n');
+
+const STALE_COUNT_NOTES = notes(
+  'We checked 8 traps and refreshed the bait at each one.',
+  'Rodent droppings were present along the north runway.',
+);
+const CAPTURE_NOTES = notes(
+  'We checked the traps in the crawlspace.',
+  'We removed 2 rats from the traps.',
+);
+const SETUP_NOTES = notes(
+  'We set eight traps along the attic runways and baited each one.',
+  'Rodent droppings were present, and we will return for the scheduled trap check.',
+);
+
+function trapping(values) {
+  return { type: 'rodent_trapping', values };
+}
+
+describe('reportReconciliationIssues', () => {
+  test('a stale trap count in the body surfaces with both numbers', () => {
+    const issues = reportReconciliationIssues({
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: null,
+      companionFindings: [trapping({ trap_visit_type: 'Follow-up check', traps_checked: 6 })],
+    });
+    expect(issues).toHaveLength(1);
+    expect(issues[0].kind).toBe('trap_count_mismatch');
+    expect(issues[0].message).toContain('8');
+    expect(issues[0].message).toContain('6');
+  });
+
+  test('a stale capture count surfaces, and the primary section is read too', () => {
+    const issues = reportReconciliationIssues({
+      technicianNotes: CAPTURE_NOTES,
+      structuredFindings: trapping({ trap_visit_type: 'Follow-up check', captures: 1 }),
+      companionFindings: null,
+    });
+    expect(issues.some((issue) => issue.kind === 'capture_count_mismatch')).toBe(true);
+  });
+
+  test('a check claim on a declared setup surfaces as a setup contradiction', () => {
+    const issues = reportReconciliationIssues({
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: null,
+      companionFindings: [trapping({ trap_visit_type: 'Initial setup', traps_checked: 8 })],
+    });
+    expect(issues.some((issue) => issue.kind === 'setup_claim')).toBe(true);
+  });
+
+  test('agreeing values, setup-appropriate copy, blank counts, and non-trapping visits are clean', () => {
+    expect(reportReconciliationIssues({
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: null,
+      companionFindings: [trapping({ trap_visit_type: 'Follow-up check', traps_checked: 8 })],
+    })).toEqual([]);
+    expect(reportReconciliationIssues({
+      technicianNotes: SETUP_NOTES,
+      structuredFindings: null,
+      companionFindings: [trapping({ trap_visit_type: 'Initial setup', traps_checked: 8 })],
+    })).toEqual([]);
+    expect(reportReconciliationIssues({
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: null,
+      companionFindings: [trapping({ trap_visit_type: 'Follow-up check', traps_checked: '' })],
+    })).toEqual([]);
+    expect(reportReconciliationIssues({
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: { type: 'one_time_pest', values: { target_pest: 'Ants' } },
+      companionFindings: null,
+    })).toEqual([]);
+  });
+
+  test('free-text notes that are not a parsed report screen nothing', () => {
+    expect(reportReconciliationIssues({
+      technicianNotes: 'Checked 8 traps, all good.',
+      structuredFindings: null,
+      companionFindings: [trapping({ trap_visit_type: 'Follow-up check', traps_checked: 6 })],
+    })).toEqual([]);
+  });
+});
+
+describe('reportReconcileBlockPayload (route gate)', () => {
+  const prevGate = process.env.GATE_REPORT_RECONCILE_PROMPT;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_REPORT_RECONCILE_PROMPT;
+    else process.env.GATE_REPORT_RECONCILE_PROMPT = prevGate;
+  });
+
+  const contradicting = {
+    isIncompleteVisit: false,
+    reportReconcileConfirmed: false,
+    technicianNotes: STALE_COUNT_NOTES,
+    structuredFindings: null,
+    companionFindings: [trapping({ trap_visit_type: 'Follow-up check', traps_checked: 6 })],
+  };
+
+  test('dark by default — no block while the gate is off', () => {
+    delete process.env.GATE_REPORT_RECONCILE_PROMPT;
+    expect(reportReconcileBlockPayload(contradicting)).toBeNull();
+  });
+
+  test('gate on: contradictions 409 with the messages in the error string', () => {
+    process.env.GATE_REPORT_RECONCILE_PROMPT = 'true';
+    const block = reportReconcileBlockPayload(contradicting);
+    expect(block).toMatchObject({
+      status: 409,
+      payload: { code: 'report_reconcile', confirmable: true },
+    });
+    expect(block.payload.error).toContain('8');
+    expect(block.payload.error).toContain('6');
+    expect(block.payload.contradictions).toHaveLength(1);
+  });
+
+  test('a confirmed resubmit and an incomplete visit both pass through', () => {
+    process.env.GATE_REPORT_RECONCILE_PROMPT = 'true';
+    expect(reportReconcileBlockPayload({ ...contradicting, reportReconcileConfirmed: true }))
+      .toBeNull();
+    expect(reportReconcileBlockPayload({ ...contradicting, isIncompleteVisit: true }))
+      .toBeNull();
+  });
+
+  test('a checker error fails OPEN — the prompt must never strand a completion', () => {
+    process.env.GATE_REPORT_RECONCILE_PROMPT = 'true';
+    expect(reportReconcileBlockPayload({
+      ...contradicting,
+      companionFindings: [{ get values() { throw new Error('boom'); } }],
+    })).toBeNull();
+  });
+});

@@ -34,6 +34,7 @@ const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('.
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
 const TurfHeightOcr = require('../services/turf-height-ocr');
@@ -3425,6 +3426,41 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 });
 
 // POST /api/admin/dispatch/:serviceId/complete
+// Pre-submit report reconciliation block (409) — pure for testability
+// (_test), like the other completion block-payload helpers. Returns
+// { status, payload } or null. Fail-OPEN on checker errors: this prompt
+// must never be the reason a visit cannot complete — the render-time
+// guards remain the backstop for anything it skips.
+function reportReconcileBlockPayload({
+  isIncompleteVisit,
+  reportReconcileConfirmed,
+  technicianNotes,
+  structuredFindings,
+  companionFindings,
+}) {
+  if (process.env.GATE_REPORT_RECONCILE_PROMPT !== 'true') return null;
+  if (isIncompleteVisit || reportReconcileConfirmed) return null;
+  let issues = [];
+  try {
+    issues = reportReconciliationIssues({ technicianNotes, structuredFindings, companionFindings });
+  } catch {
+    return null;
+  }
+  if (!issues.length) return null;
+  return {
+    status: 409,
+    payload: {
+      // adminFetch surfaces only error + code to the client, so the
+      // human-readable contradictions ride in the error string; the
+      // structured list stays for API consumers and tests.
+      error: issues.map((issue) => issue.message).join('\n'),
+      code: 'report_reconcile',
+      contradictions: issues,
+      confirmable: true,
+    },
+  };
+}
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -3484,6 +3520,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       typedPhotoSummary = null,
       zoneShapes = null,            // satellite zone marks [{ areaLabel, shape }] — OPTIONAL
       termiteStations = null,       // bait station pins/status [{ id?, shape?, status?, retire? }] — OPTIONAL
+      reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
     } = req.body;
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
@@ -3833,6 +3870,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
       if (conflict) {
         return res.status(400).json({ error: conflict, code: 'trap_capture_conflict' });
+      }
+    }
+    // Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT,
+    // dark): the AI body is generated from the typed fields, the tech can
+    // keep editing them afterwards, and nothing re-runs — the render-time
+    // guards then silently degrade the copy or a missed pattern publishes
+    // a stale number. Surfacing the contradiction HERE lets the tech
+    // regenerate or confirm before anything freezes; a confirmed resubmit
+    // (same idempotency key — 409s don't reset it client-side) passes
+    // through, and the render-time guards remain the backstop.
+    {
+      const reconcileBlock = reportReconcileBlockPayload({
+        isIncompleteVisit,
+        reportReconcileConfirmed,
+        technicianNotes,
+        structuredFindings,
+        companionFindings,
+      });
+      if (reconcileBlock) {
+        return res.status(reconcileBlock.status).json(reconcileBlock.payload);
       }
     }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
@@ -11966,6 +12023,7 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  reportReconcileBlockPayload,
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
   completionAllowsTechnicianPestRating,
