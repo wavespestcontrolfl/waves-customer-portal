@@ -1678,7 +1678,17 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
       if (customerId && !dbh.isTransaction) {
         commitHold = async (fn) => withCustomerCommsLock(dbh, customerId, fn);
       } else if (customerId && dbh.isTransaction && !(await tryLockCustomerComms(dbh, customerId))) {
-        logger.warn(`[first-touch-hold] customer-comms lock busy for customer ${customerId} (merge-undo in flight?) — recording the hold unfenced`);
+        // NEVER record unfenced (r24): an undo holding customer-comms
+        // cannot see this transaction's uncommitted hold in its absence
+        // probe — it would clear the inherited email while this hold
+        // commits with the old address, and the release path sends
+        // held_email directly. The lock stays busy for the undo's whole
+        // transaction, so retrying inside this one is useless: return the
+        // ledger-unavailable result (null) and let the OWNING transaction
+        // restart — the processor stamps extraction_failed with its capped
+        // retry budget and the sweep reprocesses against post-undo state.
+        logger.warn(`[first-touch-hold] customer-comms lock busy for customer ${customerId} (merge-undo in flight) — refusing to record the hold unfenced; the owning run retries`);
+        return null;
       }
       await commitHold((conn) => conn('first_touch_holds')
         .insert({

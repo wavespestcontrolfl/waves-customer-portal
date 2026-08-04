@@ -3244,10 +3244,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
       {
         const freshCustomer = await trx('customers')
           .where({ id: customerId })
-          .first('address_line1', 'city', 'zip',
+          .first('address_line1', 'address_line2', 'city', 'state', 'zip',
             'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone');
+        // The COMPLETE address tuple (r24): a merge can backfill ONLY
+        // address_line2 (a street-only winner absorbing the loser's
+        // apartment/unit), so a line1/city/zip comparison passes while the
+        // undo clears the unit out from under the visit — dispatch would
+        // go to the wrong unit.
         const commsDep = (row) => [
-          row?.address_line1 || '', row?.city || '', row?.zip || '',
+          row?.address_line1 || '', row?.address_line2 || '', row?.city || '', row?.state || '', row?.zip || '',
           row?.service_contact_phone || '', row?.service_contact2_phone || '', row?.service_contact3_phone || '',
         ].join('|');
         if (!freshCustomer || commsDep(freshCustomer) !== commsDep(customer)) {
