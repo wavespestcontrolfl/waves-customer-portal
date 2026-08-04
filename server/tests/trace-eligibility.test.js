@@ -484,6 +484,84 @@ describe('classification behavior', () => {
     expect(withoutPointer[1]).toMatchObject({ serviceKey: 'pest_general_quarterly', findingsType: null });
   });
 
+  test('round 23 — sentinel keys and unknown typed pointers fail closed ahead of eligible rules', () => {
+    // the unresolved sentinel beats an eligible STALE snapshot — the row
+    // we could not identify is exactly the row whose key would have
+    // overridden that snapshot
+    expect(resolveTraceEligibility({
+      serviceKey: 'unresolved:linked_service',
+      findingsType: 'one_time_pest_treatment',
+      displayName: 'Pest Re-Service',
+    })).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'unresolved:addon-123',
+      findingsType: 'one_time_pest_treatment',
+    })).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // an UNKNOWN supplied typed pointer fails closed before the eligible
+    // key rule — a typoed/new project_type must not publish through its
+    // generic key until the registry learns it
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_general_quarterly',
+      findingsType: 'brand_new_unregistered_type',
+    })).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // control: the same key with no pointer stays eligible
+    expect(resolveTraceEligibility({ serviceKey: 'pest_general_quarterly' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('round 23 — the freezer decides PER ROW: one failed lookup never stops a resolved sibling', async () => {
+    const { frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+    // catalog lookup fails, but the snapshot-keyed sibling still freezes
+    const catalogDownTrx = (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => {
+          if (table === 'services') throw new Error('catalog down');
+          return q;
+        },
+        orderBy: () => q,
+        select: () => {
+          if (table === 'scheduled_service_addons') {
+            return Promise.resolve([
+              { service_id: 'a1', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+              { service_id: 'a2', service_name: 'Mystery Add-on', service_key_snapshot: null },
+            ]);
+          }
+          if (table === 'service_completion_profiles') return Promise.resolve([]);
+          return Promise.resolve([]);
+        },
+      };
+      return q;
+    };
+    const rows = await frozenAddonLinesForCompletion('ss-r23', catalogDownTrx);
+    expect(rows[0]).toMatchObject({ serviceKey: 'pest_general_quarterly' });
+    expect(rows[1]).not.toHaveProperty('serviceKey');
+    // pointer lookup fails: typed rows stay live, rules-covered rows freeze
+    const profilesDownTrx = (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => {
+          if (table === 'service_completion_profiles') throw new Error('profiles down');
+          return q;
+        },
+        orderBy: () => q,
+        select: () => {
+          if (table === 'scheduled_service_addons') {
+            return Promise.resolve([
+              { service_id: 'a3', service_name: 'Flea & Tick', service_key_snapshot: 'flea_tick' },
+              { service_id: 'a4', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+      };
+      return q;
+    };
+    const mixed = await frozenAddonLinesForCompletion('ss-r23b', profilesDownTrx);
+    expect(mixed[0]).not.toHaveProperty('serviceKey');
+    expect(mixed[1]).toMatchObject({ serviceKey: 'pest_general_quarterly' });
+  });
+
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
     // pre-untype callback: the eligible one_time_pest_treatment snapshot
     // no longer bypasses the exterior-evidence condition

@@ -338,10 +338,32 @@ function resolveTraceEligibility({
     }
     return verdict(rule, source);
   };
+  // An unresolved SENTINEL identity — a linked lookup that failed, or a
+  // supplied catalog id that couldn't resolve — fails closed ahead of
+  // EVERYTHING, including an eligible stale snapshot (codex P2 r23): the
+  // row we could not identify is exactly the row whose key would have
+  // overridden that snapshot (a pest_re_service callback still carrying
+  // one_time_pest_treatment must not republish its map because the
+  // lookup hiccuped).
+  if (typeof serviceKey === 'string' && serviceKey.startsWith('unresolved:')) {
+    return {
+      eligible: false, variant: null, captionKey: null, reason: 'unclassified_service',
+    };
+  }
   const findingsRule = findingsType ? FINDINGS_TYPE_RULES[findingsType] : null;
   const keyRule = serviceKey ? SERVICE_KEY_RULES[serviceKey] : null;
   if (findingsRule && !findingsRule.eligible) return verdict(findingsRule, 'findings_type');
   if (keyRule && !keyRule.eligible) return verdict(keyRule, 'service_key');
+  // A supplied typed pointer that misses the registry fails closed even
+  // when the KEY alone would be eligible (codex P2 r23): a typoed or
+  // newly-added project_type must not publish a trace through its
+  // generic pest/lawn key until the registry learns the new type's
+  // semantics — the pointer, when present, IS the visit's identity.
+  if (findingsType && !findingsRule) {
+    return {
+      eligible: false, variant: null, captionKey: null, reason: 'unclassified_service',
+    };
+  }
   // Among ELIGIBLE rules the findingsType normally wins (it carries the
   // conditional semantics) — except keys marked overridesSnapshot, whose
   // geometry is more specific than a retired generic pointer (codex P1
@@ -555,12 +577,11 @@ async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
     .filter((r) => !r.service_key_snapshot && r.service_id)
     .map((r) => r.service_id))];
   let keyById = new Map();
-  let lookupFailed = false;
   if (missingIds.length) {
     try {
       const catalog = await trx('services').whereIn('id', missingIds).select('id', 'service_key');
       keyById = new Map(catalog.map((r) => [r.id, r.service_key]));
-    } catch { lookupFailed = true; }
+    } catch { /* only the rows that NEEDED the catalog stay live */ }
   }
   const keys = [...new Set(rows
     .map((r) => r.service_key_snapshot || keyById.get(r.service_id))
@@ -573,7 +594,7 @@ async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
         .where({ active: true })
         .select('service_key', 'project_type');
       pointerByKey = new Map(profiles.map((r) => [r.service_key, r.project_type]));
-    } catch { lookupFailed = true; }
+    } catch { /* typed rows stay live; rules-covered keys freeze on their own */ }
   }
   return rows.map((row) => {
     const key = row.service_key_snapshot || keyById.get(row.service_id) || null;
@@ -582,8 +603,10 @@ async function frozenAddonLinesForCompletion(scheduledServiceId, trx) {
     // make the report permanently unclassified even after the profile is
     // restored (codex P2 r22). Freeze only when the pointer was actually
     // found or SERVICE_KEY_RULES covers the key on its own; otherwise
-    // the line stays live-resolvable.
-    const freezable = key && !lookupFailed
+    // the line stays live-resolvable. The decision is PER ROW (codex P2
+    // r23): a transient failure on one lookup must not stop an already-
+    // resolved sibling (snapshot-keyed, or rules-covered) from freezing.
+    const freezable = key
       && (pointerByKey.has(key) || Object.prototype.hasOwnProperty.call(SERVICE_KEY_RULES, key));
     return {
       serviceId: row.service_id || null,
