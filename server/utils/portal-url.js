@@ -111,9 +111,19 @@ function configuredPublicPortalOrigin() {
  * vary by env config).
  */
 function publicOriginPdfSignature() {
-  const origin = configuredPublicPortalOrigin();
+  // With NO configured origin the document falls back to the renderer's
+  // own origin — which still varies with the PDF base configuration
+  // (SERVICE_REPORT_PDF_BASE_URL / CLIENT_URL, the same precedence
+  // pdf-puppeteer's serviceReportPublicBase reads), so that effective
+  // origin is hashed instead (codex P2 #3176 r20): a preview whose base
+  // moved must not keep serving PDFs that link the obsolete host. ''
+  // only when neither is set (links are then truly renderer-relative).
+  const origin = configuredPublicPortalOrigin()
+    || process.env.SERVICE_REPORT_PDF_BASE_URL
+    || process.env.CLIENT_URL
+    || '';
   if (!origin) return '';
-  const hash = require('crypto').createHash('sha1').update(origin).digest('hex').slice(0, 8);
+  const hash = require('crypto').createHash('sha1').update(normalize(origin)).digest('hex').slice(0, 8);
   return `-o${hash}`;
 }
 

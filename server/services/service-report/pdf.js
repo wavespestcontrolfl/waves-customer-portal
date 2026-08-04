@@ -167,10 +167,14 @@ async function countUnreachableReportPhotos(data, { timeoutMs = 2500 } = {}) {
   return (await Promise.all(probes)).reduce((a, b) => a + b, 0);
 }
 
+// Normalized render result: { pdf, imageFailures }. imageFailures is the
+// page's own count of image-load fallbacks (Playwright reads it after
+// page.pdf()); null = unknown — the Cloudflare renderer returns only bytes,
+// so callers fall back to the server-side URL probe there.
 async function renderReportPdf(url, { serviceRecordId } = {}) {
   const provider = selectedPdfRenderer();
   if (provider === 'cloudflare_browser_rendering') {
-    return renderReportPdfWithCloudflare(url, { serviceRecordId });
+    return { pdf: await renderReportPdfWithCloudflare(url, { serviceRecordId }), imageFailures: null };
   }
   return renderReportPdfWithBrowser(url);
 }
@@ -187,10 +191,8 @@ async function renderServiceReportV1Pdf(data, {
   const started = Date.now();
 
   try {
-    const pdf = assertPdfBuffer(
-      await renderReportPdf(url, { serviceRecordId: recordId }),
-      provider,
-    );
+    const rendered = await renderReportPdf(url, { serviceRecordId: recordId });
+    const pdf = assertPdfBuffer(rendered.pdf, provider);
     const elapsedMs = Date.now() - started;
     emitPdfRenderSuccess({
       service_record_id: recordId,
@@ -198,7 +200,9 @@ async function renderServiceReportV1Pdf(data, {
       elapsed_ms: elapsedMs,
       bytes: pdf.byteLength,
     });
-    return pdf;
+    // imageFailures: the page's own image-load outcome (null = unknown,
+    // e.g. the Cloudflare renderer) — store paths gate caching on it.
+    return { pdf, imageFailures: rendered.imageFailures ?? null };
   } catch (err) {
     const elapsedMs = Date.now() - started;
     const errText = safePdfRenderError(err);

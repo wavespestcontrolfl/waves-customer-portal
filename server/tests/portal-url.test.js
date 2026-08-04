@@ -181,7 +181,7 @@ describe('configuredPublicPortalOrigin()', () => {
 
 describe('publicOriginPdfSignature()', () => {
   const { publicOriginPdfSignature } = require('../utils/portal-url');
-  const ALL_VARS = [...VARS, 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT'];
+  const ALL_VARS = [...VARS, 'RAILWAY_ENVIRONMENT_NAME', 'RAILWAY_ENVIRONMENT', 'SERVICE_REPORT_PDF_BASE_URL'];
   let envBefore;
 
   beforeEach(() => {
@@ -196,8 +196,23 @@ describe('publicOriginPdfSignature()', () => {
     }
   });
 
-  test('empty when no origin is configured — renderer-relative links do not vary by env', () => {
+  test('empty only when NOTHING is set — links are then truly renderer-relative', () => {
     expect(publicOriginPdfSignature()).toBe('');
+  });
+
+  test('with no configured origin, the renderer base is hashed — a moved preview base re-renders (codex P2 #3176 r20)', () => {
+    process.env.CLIENT_URL = 'https://waves-portal-pr-3176.up.railway.app';
+    const before = publicOriginPdfSignature();
+    expect(before).toMatch(/^-o[0-9a-f]{8}$/);
+    process.env.CLIENT_URL = 'https://waves-portal-pr-9999.up.railway.app';
+    expect(publicOriginPdfSignature()).not.toBe(before);
+  });
+
+  test('SERVICE_REPORT_PDF_BASE_URL outranks CLIENT_URL, matching the renderer precedence', () => {
+    process.env.CLIENT_URL = 'https://client.example.com';
+    const clientOnly = publicOriginPdfSignature();
+    process.env.SERVICE_REPORT_PDF_BASE_URL = 'https://pdfbase.example.com';
+    expect(publicOriginPdfSignature()).not.toBe(clientOnly);
   });
 
   test('a configured origin yields a stable -o component', () => {

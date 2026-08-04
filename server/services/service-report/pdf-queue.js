@@ -153,6 +153,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const isDeliveryPin = !!pinnedLawnAssessmentId;
   const effectivePin = pinnedLawnAssessmentId || canonical.pin;
   let pdf;
+  // The page's own image-load failure count (null = unknown provider).
+  let renderImageFailures = null;
   // The payload the render was produced from — its flags decide whether this
   // output may be cached.
   let renderedData = null;
@@ -177,13 +179,15 @@ async function renderAndStoreServiceReportPdf(recordId, {
       pestPressureConfig,
       knex,
     });
-    pdf = await renderServiceReportV1Pdf(data, {
+    const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
       logger,
       serviceRecordId: recordId,
       pinnedLawnAssessmentId: effectivePin,
     });
+    pdf = rendered.pdf;
+    renderImageFailures = rendered.imageFailures ?? null;
 
     const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
     const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
@@ -263,12 +267,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
     }
     // A photo the browser could not load rendered as its placeholder, and
-    // that state is invisible in the returned bytes — probe the printed
-    // photo URLs before keying this output as the healthy PDF (codex P2
-    // #3176 r18). Serve it, cache nothing; the next view re-renders.
-    const unreachablePhotos = await countUnreachableReportPhotos(renderedData);
+    // that state is invisible in the returned bytes. TWO signals gate the
+    // cache (codex P2 #3176 r18+r20): the page's OWN load-outcome count
+    // (authoritative — the browser fetches its own /data, so its URLs can
+    // diverge from any payload built here), and the server-side URL probe
+    // as the floor when the count is unavailable (Cloudflare renderer,
+    // mid-deploy page bundle). Serve it, cache nothing; the next view
+    // re-renders.
+    const unreachablePhotos = renderImageFailures ?? await countUnreachableReportPhotos(renderedData);
     if (unreachablePhotos > 0) {
-      logger.warn(`[service-report-pdf] ${unreachablePhotos} report photo(s) unreachable for ${recordId} — serving without storing`);
+      logger.warn(`[service-report-pdf] ${unreachablePhotos} report image(s) failed/unreachable for ${recordId} — serving without storing`);
       return {
         key: null, pdf, rendered: true, token: reportToken, uncached: true,
         uncachedReason: 'photos_unreachable',

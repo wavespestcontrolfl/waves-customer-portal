@@ -54,6 +54,10 @@ const FLAGGED_PRODUCT_SAFETY = [
 
 // Fixed drying/re-entry timing co-occurrence.
 const FLAGGED_TIMING = [
+  // A clock time asserts the same fixed re-entry moment a duration does
+  // (codex P1 #3176 r20).
+  'safe to return after 7 PM',
+  'you can re-enter the treated area after 7:30 pm',
   // Spelled-out numbers carry the same banned figure as digits
   // (codex P1 #3176 r18): the vocabulary was a/an/one/two only.
   'avoid the treated area for five hours',
@@ -91,6 +95,10 @@ const FLAGGED_TIMING = [
 ];
 
 const CLEAN = [
+  // Clock times without a re-entry claim stay legal — business hours and
+  // scheduling copy are not fixed re-entry figures.
+  'call before 5 PM to reschedule',
+  'we are open until 5 PM on weekdays',
   // Spelled-number agronomic windows stay legitimate — the exemption is
   // clause-scoped, not defeated by the widened vocabulary.
   'avoid watering for twenty-four hours',

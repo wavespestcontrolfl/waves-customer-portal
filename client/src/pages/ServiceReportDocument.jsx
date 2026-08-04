@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
 import { cleanVisitSummary } from './ReportViewPage';
 
@@ -227,6 +227,13 @@ const REENTRY_CLAIM_RX = new RegExp(
   // (codex P1 #3176 r18) — scoped to the treated-surface nouns so "avoid
   // watering for 24 hours" stays agronomic.
   + '|avoid\\w*\\s+(the\\s+)?(treated|lawn|grass|yard|area)'
+  // "Return after 7 PM" is the clock-time phrasing of the same claim
+  // (codex P1 #3176 r20). Mirrors the server context regex's two return
+  // forms — person-subject or sentence-leading — NOT a bare "return",
+  // which would erase agronomic prose like "results return within two
+  // weeks".
+  + '|(you|your\\s+family|residents?|occupants?|everyone)\\s+(\\w+\\s+){0,3}return\\w*'
+  + '|^\\s*return(ing)?\\b'
   + '|off\\s+(the\\s+)?treated)\\b',
   'i',
 );
@@ -332,6 +339,14 @@ export default function ServiceReportDocument({ data, token }) {
     next.add(url);
     return next;
   });
+  // The headless renderer reads this after page.pdf() (codex P2 #3176 r20):
+  // the browser fetches its own /data, so the server's probe of a payload IT
+  // built can miss a divergent URL that failed here — this counter is the
+  // page's own load outcome, the only signal that describes what the
+  // artifact actually shows. Harmless on the live report.
+  useEffect(() => {
+    window.__WAVES_PDF_IMAGE_FAILURES = failedImages.size;
+  }, [failedImages]);
   const typed = data.typedReport || null;
   const result = typed?.todaysResult || null;
   const findings = Array.isArray(typed?.findings) ? typed.findings.filter((f) => (f.customerValueLabel ?? f.value) != null && String(f.customerValueLabel ?? f.value).trim() !== '') : [];

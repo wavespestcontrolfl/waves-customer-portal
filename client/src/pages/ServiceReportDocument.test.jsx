@@ -821,6 +821,17 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).toMatch(/once dry/i);
   });
 
+  it('sanitizes a clock-time return instruction (codex P1 #3176 r20)', () => {
+    const app = {
+      ...BASE_DATA.applications[0],
+      product: { ...BASE_DATA.applications[0].product, precaution_summary: 'Return after 7 PM.' },
+    };
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="tok123" />);
+    // note: /7 PM/ alone would false-match the visit's "Time in 4:27 PM"
+    expect(container.textContent).not.toMatch(/Return after/i);
+    expect(container.textContent).toMatch(/once dry/i);
+  });
+
   it('keeps label-required agronomic directions that carry time units', () => {
     // "irrigate within 14 days" is a real catalog reentry_text (LESCO seed) —
     // it has a time unit but makes no re-entry claim, so it must survive

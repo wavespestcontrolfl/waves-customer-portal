@@ -1386,6 +1386,8 @@ router.get('/:token', async (req, res, next) => {
       // the cache-lookup value; assigned inside the try so an unreadable
       // lookup fails closed through the retry path.
       let laRenderSignature = null;
+      // The page's own image-load failure count (null = unknown provider).
+      let renderImageFailures = null;
       // The payload the render was produced from — its flags decide whether
       // this output may be cached.
       let renderedData = null;
@@ -1403,7 +1405,7 @@ router.get('/:token', async (req, res, next) => {
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           renderedData = data;
-          pdf = await renderServiceReportV1Pdf(data, {
+          const rendered = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
             logger,
@@ -1416,6 +1418,8 @@ router.get('/:token', async (req, res, next) => {
             // identity, so this render stays cacheable.
             pinnedLawnAssessmentId: canonicalPin,
           });
+          pdf = rendered.pdf;
+          renderImageFailures = rendered.imageFailures ?? null;
 
           const latestPestPressureConfig = await loadActiveConfig(db).catch(() => null);
           const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
@@ -1458,10 +1462,12 @@ router.get('/:token', async (req, res, next) => {
         // not reproducible, so serve it but cache nothing — otherwise a later
         // view freezes different data while this object keeps these numbers.
         // A photo the browser could not load rendered as its placeholder,
-        // invisible in the returned bytes — probe the printed photo URLs
-        // before keying this output as the healthy PDF (codex P2 #3176
-        // r18). Serve it, cache nothing; the next view re-renders.
-        const unreachablePhotos = await countUnreachableReportPhotos(renderedData);
+        // invisible in the returned bytes. Two signals gate the cache
+        // (codex P2 #3176 r18+r20): the page's OWN load-outcome count
+        // (authoritative — the browser fetches its own /data), and the
+        // server-side URL probe as the floor when the count is unavailable
+        // (Cloudflare renderer, mid-deploy bundle). Serve, cache nothing.
+        const unreachablePhotos = renderImageFailures ?? await countUnreachableReportPhotos(renderedData);
         if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
