@@ -3583,6 +3583,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       const { buildTreeShrubAssessmentReportData } = require('../tree-shrub-assessment');
       const treeShrubAssessment = await buildTreeShrubAssessmentReportData(service, serviceLine, knex);
       if (treeShrubAssessment) {
+        // Assessment photos the builder dropped for a failed signing are
+        // expected images the artifact silently omits (codex P2 #3176 r22).
+        imageResolutionFailures += Number(treeShrubAssessment.droppedPhotoCount) || 0;
         reportV2 = buildTreeShrubReportV2({
           treeShrubAssessment,
           applications,
@@ -4076,7 +4079,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the store paths refuse to cache on it (codex P2 #3176 r21) — a
     // placeholder-free but incomplete PDF must not become the permanent
     // healthy object.
-    imageResolutionFailures,
+    // Approved moments whose media would not sign come back with a null
+    // mediaUrl and the document filters them before any <img> mounts, so
+    // neither the page counter nor the URL probe can see them (codex P2
+    // #3176 r22). Counted HERE, at the payload boundary, because the
+    // moments load long before this return. Videos are excluded — the
+    // document never renders them.
+    imageResolutionFailures: imageResolutionFailures
+      + (Array.isArray(approvedVisualMoments) ? approvedVisualMoments : [])
+        .filter((m) => m && m.mediaType !== 'video' && !m.mediaUrl).length,
     legacy: {
       // No raw technician_notes here (owner ruling 2026-07-16): the field is
       // internal — access codes, billing notes — and the only sanctioned path

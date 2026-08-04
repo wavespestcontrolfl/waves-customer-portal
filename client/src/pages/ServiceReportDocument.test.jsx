@@ -841,6 +841,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(window.__WAVES_PDF_IMAGE_FAILURES).toBe(3);
   });
 
+  it('drops the tamper-evidence claim when the payload omitted an image (codex P2 #3176 r22)', () => {
+    // A dropped photo leaves NO frame, so the surviving chained entries
+    // still satisfy every() — the claim would cover a subset of the chain.
+    const chained = {
+      ...BASE_DATA,
+      photoChain: { valid: true },
+      photos: [
+        { id: 'p1', url: 'https://cdn.example.com/a.jpg', hashSha256: 'a1' },
+        { id: 'p2', url: 'https://cdn.example.com/b.jpg', hashSha256: 'b2' },
+      ],
+    };
+    const clean = render(<ServiceReportDocument data={chained} token="t" />);
+    expect(clean.container.textContent).toMatch(/hash-chained and tamper-evident/);
+    cleanup();
+
+    const dropped = render(<ServiceReportDocument data={{ ...chained, imageResolutionFailures: 1 }} token="t" />);
+    expect(dropped.container.textContent).not.toMatch(/hash-chained and tamper-evident/);
+  });
+
   it('keeps label-required agronomic directions that carry time units', () => {
     // "irrigate within 14 days" is a real catalog reentry_text (LESCO seed) —
     // it has a time unit but makes no re-entry claim, so it must survive

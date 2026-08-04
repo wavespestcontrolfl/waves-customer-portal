@@ -1262,8 +1262,16 @@ export default function ServiceReportDocument({ data, token }) {
                 over only a hidden photo must not over-claim (the web
                 report's guard; dropping half of it was a codex P1). */}
             {/* a photo that failed to load is shown as a placeholder, so its
-                hash backs nothing the reader can see — the claim must fail. */}
+                hash backs nothing the reader can see — the claim must fail.
+                A photo the PAYLOAD dropped is worse: it leaves no frame at
+                all, so the surviving entries still satisfy every() while
+                the document publishes a subset of the validated chain
+                (codex P2 #3176 r22). Any payload-resolution failure kills
+                the claim — conservative on purpose, since a dropped moment
+                or gauge shot can't be told apart from a dropped chained
+                photo here, and under-claiming is the safe direction. */}
             {data.photoChain?.valid === true && photos.length > 0
+              && payloadDroppedImages === 0
               && photos.every((photo) => photo?.hashSha256 && !photo.unavailable)
               /* moments + the gauge shot carry no hash, so displaying one
                  correctly defeats the claim rather than over-claiming */
