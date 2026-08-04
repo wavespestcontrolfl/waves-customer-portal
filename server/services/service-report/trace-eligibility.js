@@ -553,28 +553,40 @@ async function resolveTraceRenderVerdict(record, knex) {
   // capture side (which never passes typedValues) stays permissive.
   let typedValues = null;
   let names = String(record?.service_type || '');
+  // undefined = legacy record (no completion-time freeze) → resolve the
+  // live profile below; present (even null) = the identity that was
+  // actually completed wins over later schedule edits (codex P2 r15).
+  let frozenPrimaryKey;
   try {
     const serviceData = typeof record?.service_data === 'string'
       ? JSON.parse(record.service_data || '{}')
       : (record?.service_data || {});
     findingsType = serviceData?.typedReportSnapshot?.type || null;
     typedValues = serviceData?.typedReportSnapshot?.values ?? null;
-  } catch { /* names + profile still stand */ }
-  try {
-    if (record?.scheduled_service_id && knex) {
-      const sched = await knex('scheduled_services')
-        .where({ id: record.scheduled_service_id })
-        .first('id', 'service_id', 'service_type');
-      if (sched?.service_type) names += ` ${sched.service_type}`;
-      const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
-      const profile = await resolveCompletionProfileForScheduledService(
-        sched || { id: record.scheduled_service_id },
-        knex,
-      );
-      serviceKey = profile?.serviceKey || null;
-      findingsType = findingsType || profile?.findingsType || null;
+    if (serviceData && Object.prototype.hasOwnProperty.call(serviceData, 'completedServiceKey')) {
+      frozenPrimaryKey = serviceData.completedServiceKey || null;
+      if (serviceData.completedServiceName) names += ` ${serviceData.completedServiceName}`;
     }
-  } catch { /* label fallback stands, same as the render path */ }
+  } catch { /* names + profile still stand */ }
+  if (frozenPrimaryKey !== undefined) {
+    serviceKey = frozenPrimaryKey;
+  } else {
+    try {
+      if (record?.scheduled_service_id && knex) {
+        const sched = await knex('scheduled_services')
+          .where({ id: record.scheduled_service_id })
+          .first('id', 'service_id', 'service_type');
+        if (sched?.service_type) names += ` ${sched.service_type}`;
+        const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+        const profile = await resolveCompletionProfileForScheduledService(
+          sched || { id: record.scheduled_service_id },
+          knex,
+        );
+        serviceKey = profile?.serviceKey || null;
+        findingsType = findingsType || profile?.findingsType || null;
+      }
+    } catch { /* label fallback stands, same as the render path */ }
+  }
   let eligibility = resolveTraceEligibility({
     serviceKey, findingsType, displayName: names, typedValues,
     renderAreas: renderAreasFromRecord(record),

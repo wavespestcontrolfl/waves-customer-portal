@@ -116,6 +116,45 @@ describe('trace suppression at report payload build', () => {
     expect(traced.captionKey).toBe('sprayPerimeter');
   });
 
+  test('round 15 — completion-frozen identities beat later schedule edits', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    // Frozen ineligible primary + frozen EMPTY add-ons: a pest add-on
+    // added to the schedule AFTER completion cannot republish the trace
+    const frozenRow = serviceRow('Termite Bait Quarterly');
+    frozenRow.service_data = JSON.stringify({
+      // an explicitly INELIGIBLE frozen key (the legacy station-install
+      // lane) — the pest bundle key would be eligible in its own right
+      completedServiceKey: 'termite_installation_setup',
+      completedServiceName: 'Termite Bait Station Install',
+      completedAddonLines: [],
+    });
+    const suppressed = await buildReportV1Data(
+      frozenRow,
+      'token-trace-frozen-suppressed',
+      stubKnex({
+        treatment_zone_maps: [TRACED_ROW],
+        // live rows now claim a pest add-on — must NOT rescue
+        scheduled_service_addons: [{ service_id: null, service_name: 'Quarterly Pest Control' }],
+      }),
+      { mode: 'live' },
+    );
+    expect(suppressed.treatmentMap?.traced || null).toBeNull();
+    // Frozen ELIGIBLE primary beats a live row repointed to bait
+    const keptRow = serviceRow('Termite Bait Quarterly');
+    keptRow.service_data = JSON.stringify({
+      completedServiceKey: 'pest_general_quarterly',
+      completedServiceName: 'Quarterly Pest Control',
+      completedAddonLines: [],
+    });
+    const kept = await buildReportV1Data(
+      keptRow,
+      'token-trace-frozen-kept',
+      stubKnex({ treatment_zone_maps: [TRACED_ROW] }),
+      { mode: 'live' },
+    );
+    expect(kept.treatmentMap?.traced || null).not.toBeNull();
+  });
+
   test('gate ON: an eligible add-on line rescues the report map (round 13 — the export bug path)', async () => {
     process.env.GATE_TRACE_ELIGIBILITY = 'true';
     const data = await buildReportV1Data(

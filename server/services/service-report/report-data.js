@@ -2557,10 +2557,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts,
     addonVerdictsFromLines, renderAreasFromRecord, traceEligibilityGateOn,
   } = require('./trace-eligibility');
+  // Completion-frozen primary identity wins over the live profile —
+  // update-details can repoint the schedule row after completion (codex
+  // P2 r15); legacy records (field absent) keep the live resolution.
+  const frozenTraceData = parseJsonObject(service.service_data) || {};
+  const hasFrozenPrimary = Object.prototype.hasOwnProperty.call(frozenTraceData, 'completedServiceKey');
   let traceEligibility = resolveTraceEligibility({
-    serviceKey: laneProfile?.serviceKey || null,
-    findingsType: snapshotFindingsType || laneProfile?.findingsType || null,
-    displayName: `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
+    serviceKey: hasFrozenPrimary
+      ? (frozenTraceData.completedServiceKey || null)
+      : (laneProfile?.serviceKey || null),
+    findingsType: snapshotFindingsType || (hasFrozenPrimary ? null : laneProfile?.findingsType) || null,
+    displayName: `${service.service_type || ''} ${hasFrozenPrimary ? (frozenTraceData.completedServiceName || '') : (scheduledServiceRow?.service_type || '')}`,
     // Render side: conditional lanes (roach family) need the frozen
     // snapshot's recorded treatment — null (no snapshot) fails closed —
     // and generic evidence lanes (pest_re_service) read the recorded

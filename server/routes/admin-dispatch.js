@@ -6006,13 +6006,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               .where({ scheduled_service_id: svc.id })
               .orderBy('created_at', 'asc')
               .select('service_id', 'service_name');
-            if (completedAddonRows.length) {
-              serviceData.completedAddonLines = completedAddonRows.map((row) => ({
-                serviceId: row.service_id || null,
-                serviceName: row.service_name || null,
-              }));
-            }
+            // The EMPTY array freezes too (codex P2 r15): an absent field
+            // means "legacy record, fall back to live rows" — a
+            // zero-add-on completion must not stay mutable.
+            serviceData.completedAddonLines = completedAddonRows.map((row) => ({
+              serviceId: row.service_id || null,
+              serviceName: row.service_name || null,
+            }));
           } catch { /* render falls back to live rows */ }
+          // The PRIMARY identity freezes for the same reason (codex P2
+          // r15): update-details can repoint service_id/service_type after
+          // completion, and a generic report has no typed snapshot to
+          // counter it — the permanent report's trace verdict must reflect
+          // the service that was actually completed.
+          serviceData.completedServiceKey = completionProfile?.serviceKey || null;
+          serviceData.completedServiceName = svc.service_type || null;
           // Typed specialty completion: resolve trend vs the customer's prior
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders
