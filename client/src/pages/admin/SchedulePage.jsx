@@ -9824,7 +9824,16 @@ export function CompletionPanel({
   // committed body, not a fresh rebuild (codex P1 r5); a non-committed
   // failure leaves the flag false and the next submit sends fresh state.
   const lastSubmitBodyRef = useRef(null);
-  const sideEffectsCommittedRef = useRef(false);
+  // Initialized from the DURABLE marker: a panel reopened on a marker-owed
+  // visit is mid-committed-chain even though the in-memory refs died with
+  // the previous mount — without this, the reopened panel's fresh key gets
+  // service_already_completed once the original attempt finishes and the
+  // cross-key branch would reject it as a generic failure, leaving the
+  // marker and visit repeatedly reopenable (codex P1 #3187 r9). The BODY
+  // snapshot deliberately does not persist (photos are in-memory Files);
+  // a reopened resume of a still-stranded attempt lands on the existing
+  // completion_resume_payload_mismatch handler → Billing Recovery.
+  const sideEffectsCommittedRef = useRef(completionResumeOwed(service?.id));
   // Unmount ends the quiet poll: without this, closing the panel mid-delay
   // let the stale timer re-invoke handleSubmit, whose alerts and
   // onClose(true) could then close a DIFFERENT visit the user had opened
