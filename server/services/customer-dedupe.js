@@ -1905,6 +1905,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   stripe_orphan_charges: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260515000003.
   invoice_attachments: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260401000078.
+  appointment_reminders: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2403,6 +2405,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           label: 'invoice attachment(s)',
           consequence: 'undoing would separate uploaded attachments from the invoice they document',
         },
+        // Annual-prepay terms (r26): a term carries prepay_invoice_id +
+        // customer_id and drives the annual biller — a winner-owned term
+        // minted against a journaled invoice after the merge would keep
+        // billing the winner for the restored loser's invoice.
+        {
+          table: 'annual_prepay_terms',
+          query: (q) => q.whereIn('prepay_invoice_id', journaledInvoiceIds),
+          label: 'annual prepay term(s)',
+          consequence: 'undoing would separate the prepay term from the invoice that funded it',
+        },
       ];
       for (const probe of invoiceChildProbes) {
         let rows = [];
@@ -2444,6 +2456,26 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       });
       if (minted) {
         refuse(`${minted} invoice(s) billed from this merge's appointments are outside its journal — moving the visits back would separate them from the billing they minted; reconcile by hand`);
+      }
+      // Reminder rows (r26): appointment_reminders carries BOTH
+      // scheduled_service_id and customer_id, and the self-heal sweep can
+      // mint one for a journaled visit after the merge without touching
+      // the visit — moving the visit back while the reminder stays on the
+      // winner would text the restored customer's appointment details to
+      // the kept one.
+      let reminderRows = [];
+      try {
+        reminderRows = await trx('appointment_reminders')
+          .whereIn('scheduled_service_id', journaledVisitIdsAll)
+          .select(['id', 'customer_id', ...activityColumnsFor('appointment_reminders')]);
+      } catch (e) {
+        refuse(`Cannot verify appointment reminders for this merge's visits (${e.message}) — refusing to revert`);
+      }
+      const strandedReminders = countActivityRows(reminderRows, {
+        journaledIds: journaledIdsFor('appointment_reminders'), mergeAt, table: 'appointment_reminders',
+      });
+      if (strandedReminders) {
+        refuse(`${strandedReminders} appointment reminder(s) for this merge's visits are outside its journal — moving the visits back would leave their reminders pointing at the kept customer; reconcile by hand`);
       }
     }
 

@@ -1188,6 +1188,20 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           'SELECT pg_advisory_xact_lock(?, hashtext(?))',
           [ANNUAL_PREPAY_LOCK_NS, String(invoice.customer_id)],
         );
+        // The term's owner comes from the LOCKED invoice row (Codex #3109
+        // r26): a merge-undo can repoint this invoice while the request is
+        // in flight, and a term minted with the pre-transaction owner
+        // splits from its invoice. The FOR UPDATE also serializes against
+        // the undo's reverse repoint — whichever commits second sees the
+        // other (the undo's new prepay-term child probe refuses on ours).
+        const lockedInvoiceRow = await trx('invoices')
+          .where({ id: invoice.id }).forUpdate().first('id', 'customer_id');
+        if (!lockedInvoiceRow) {
+          const notFound = new Error('Invoice not found');
+          notFound.statusCode = 404;
+          throw notFound;
+        }
+        const termCustomerId = lockedInvoiceRow.customer_id;
 
         if (coverageEnabled) {
           const ownTerm = await trx('annual_prepay_terms')
@@ -1200,7 +1214,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           const startYmd = dateOnly(start) || etDateString();
           const endYmd = dateOnly(end) || addMonthsSameDay(startYmd, 12);
           let overlapQuery = trx('annual_prepay_terms')
-            .where({ customer_id: invoice.customer_id })
+            .where({ customer_id: termCustomerId })
             .where(function overlapStatus() {
               this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
                 .orWhere(function lapsedRenewalStillInTerm() {
@@ -1222,7 +1236,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         }
 
         return AnnualPrepayRenewals.createTermForAnnualPrepay({
-          customerId: invoice.customer_id,
+          customerId: termCustomerId,
           prepayInvoiceId: invoice.id,
           planLabel: cleanOptionalText(planLabel) || invoice.title || 'Annual Prepay',
           monthlyRate: resolvedMonthly,

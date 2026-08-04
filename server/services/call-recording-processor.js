@@ -8450,7 +8450,25 @@ const CallRecordingProcessor = {
                 // never takes — no cycle); blocking is safe here, this
                 // transaction holds only advisory keys so far.
                 const { lockCustomerComms } = require('../utils/customer-comms-lock');
-                if (customer?.id) await lockCustomerComms(trx, customer.id);
+                if (customer?.id) {
+                  await lockCustomerComms(trx, customer.id);
+                  // Revalidate UNDER the fence (r26): the pre-transaction
+                  // read/validation may predate an undo this acquire just
+                  // waited out — an inherited address/name could be gone.
+                  // A fresh row that still validates drives the booking
+                  // (property linkage + confirmation render live values); a
+                  // failing one aborts into the schedErr catch, so nothing
+                  // books, no SMS goes out, and the approved-but-unbooked
+                  // review card reaches the office to book manually.
+                  const freshCallCustomer = await trx('customers').where({ id: customer.id }).first();
+                  const freshValidation = freshCallCustomer
+                    ? validatePhoneCallAppointmentCustomer(freshCallCustomer, extracted, contactPhone)
+                    : { ok: false, missing: ['customer_row'] };
+                  if (!freshValidation.ok) {
+                    throw new Error(`customer record changed while waiting on the comms fence (merge-undo in flight?) — missing ${freshValidation.missing.join(', ')}; booking held for office review`);
+                  }
+                  customer = freshCallCustomer;
+                }
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;

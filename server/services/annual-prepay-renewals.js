@@ -1804,7 +1804,10 @@ async function syncInvoiceTerm(invoiceId, termId, conn = db) {
   const cols = await invoiceColumns();
   if (!cols.annual_prepay_term_id) return;
   try {
-    await conn('invoices').where({ id: invoiceId }).update({ annual_prepay_term_id: termId });
+    // Real mutation → real stamp (Codex #3109 r26): binding a term to the
+    // invoice is billing state the merge-undo's activity gates detect by
+    // updated_at; an unstamped sync was invisible to them.
+    await conn('invoices').where({ id: invoiceId }).update({ annual_prepay_term_id: termId, updated_at: conn.fn.now() });
   } catch (err) {
     logger.warn(`[annual-prepay] invoice term sync skipped: ${err.message}`);
   }
