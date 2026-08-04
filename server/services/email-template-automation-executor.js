@@ -547,9 +547,43 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
     if (leadOwnerCustomerId) {
       return db.transaction(async (trx) => {
         await lockCustomerComms(trx, leadOwnerCustomerId);
+        // Re-resolve UNDER the lock (r22 — the resolve → lock → re-resolve
+        // idiom): the pre-lock owner lookup may predate an undo this
+        // acquisition just waited out. A repointed lead fences its NEW
+        // owner too (this trx holds only advisory keys, and an undo takes
+        // exactly one comms key — a blocking second acquire cannot cycle).
+        let ownerNow = leadOwnerCustomerId;
+        try {
+          const freshLead = await trx('leads').where({ id: recipient.id }).first('customer_id');
+          ownerNow = (freshLead && freshLead.customer_id) || null;
+          if (ownerNow && ownerNow !== leadOwnerCustomerId) await lockCustomerComms(trx, ownerNow);
+        } catch { ownerNow = leadOwnerCustomerId; }
+        // Mailbox revalidation, same rule as resolveRecipientUnderLock: an
+        // address that NOW belongs to a live customer other than the run's
+        // owner is someone else's registered mailbox — typically the
+        // restored loser of the undo we waited out, holding back the
+        // inherited email this terminal lead captured pre-undo (terminal
+        // leads are outside the undo's identity probes by design, so this
+        // post-wait check is the only gate).
+        let leadBlockReason = null;
+        const leadPayloadEmail = String(recipient.email || '').trim().toLowerCase();
+        if (leadPayloadEmail && ownerNow) {
+          try {
+            const otherOwner = await trx('customers')
+              .whereRaw('lower(email) = ?', [leadPayloadEmail])
+              .whereNot({ id: ownerNow })
+              .where('active', true)
+              .whereNull('deleted_at')
+              .first('id');
+            if (otherOwner) leadBlockReason = 'recipient address now belongs to a different live customer (stale pre-undo address)';
+          } catch { /* unreadable → keep the payload attribution (unchanged behavior) */ }
+        }
         return createRunUnlocked({
           conn: trx, automation, triggerEventKey, triggerEventId, entityType, entityId,
-          recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,
+          recipient, payload, context, idempotencyKey, runAfter,
+          status: leadBlockReason ? 'skipped' : status,
+          exitReason: leadBlockReason || exitReason,
+          retryPolicy,
         });
       });
     }

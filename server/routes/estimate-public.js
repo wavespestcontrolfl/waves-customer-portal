@@ -8605,15 +8605,26 @@ router.put('/:token/accept', async (req, res, next) => {
           if (acceptPreLockedDate) await acquireOccupancyLock(trx, acceptPreLockedDate);
         }
       }
-      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r21): an
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r21/r22): an
       // existing customer's accept graduates a held slot / books visits, so
       // it must serialize with a concurrent merge-undo BEFORE this txn's
       // first row lock (the estimates UPDATE just below; commitReservation
       // attaches customer_id with no lock of its own). A customer created
-      // later in this txn cannot be an undo's winner; the phone-matched
-      // reuse path takes a TRY-lock at resolution time instead (it resolves
-      // after the estimates row lock — see below).
-      if (estimate.customer_id) await lockCustomerComms(trx, estimate.customer_id);
+      // later in this txn cannot be an undo's winner. The initially
+      // unlinked estimate PRE-resolves its phone match here — an unlocked
+      // read while the txn holds no row locks, so a BLOCKING acquire is
+      // safe — and the authoritative phone-match below is the re-resolve
+      // under this key (the booking.js resolve → lock → re-resolve idiom).
+      let acceptPreLockedCommsId = estimate.customer_id || null;
+      if (acceptPreLockedCommsId) {
+        await lockCustomerComms(trx, acceptPreLockedCommsId);
+      } else if (estimate.customer_phone) {
+        const { match: acceptCommsPreMatch } = await matchAcceptCustomerByPhone(estimate, trx);
+        if (acceptCommsPreMatch) {
+          await lockCustomerComms(trx, acceptCommsPreMatch.id);
+          acceptPreLockedCommsId = acceptCommsPreMatch.id;
+        }
+      }
 
       const acceptedUpdates = {
         status: 'accepted',
@@ -8751,15 +8762,21 @@ router.put('/:token/accept', async (req, res, next) => {
         }
         if (existing) {
           customerId = existing.id;
-          // Rung-6 TRY-lock (r21): this resolution happens while the txn
-          // already holds the estimates row lock, and the undo locks
-          // journaled estimates AFTER customer-comms — a blocking acquire
-          // here could deadlock. Same degrade posture as annual-prepay
-          // activation: a miss proceeds unfenced with a loud log (the
-          // residual is an undo of this exact phone-matched customer
-          // mid-transaction, and it degrades comms routing, not money).
-          if (!(await tryLockCustomerComms(trx, customerId))) {
-            logger.warn(`[estimate-accept] customer-comms lock busy for phone-matched customer ${customerId} (merge-undo in flight?) — proceeding unfenced`);
+          // Re-resolve under the pre-taken lock (r22): the normal case is
+          // customerId === acceptPreLockedCommsId — already fenced by the
+          // blocking acquire above. A DIFFERENT id means a merge/undo
+          // committed between the pre-match and this authoritative match;
+          // the txn now holds the estimates row lock (which the undo locks
+          // AFTER customer-comms), so only a TRY-lock is deadlock-safe —
+          // and a miss must NOT proceed unfenced (r22): it aborts into the
+          // accept flow's retryable 409, the same recoverable shape as a
+          // lost slot.
+          if (customerId !== acceptPreLockedCommsId && !(await tryLockCustomerComms(trx, customerId))) {
+            const err = new Error('This account is being updated right now — please retry your acceptance in a moment.');
+            err.status = 409;
+            err.isOperational = true;
+            err.code = 'CUSTOMER_BUSY_RETRY';
+            throw err;
           }
         } else {
           const nameParts = (estimate.customer_name || 'New Customer').split(' ');

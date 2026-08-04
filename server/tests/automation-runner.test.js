@@ -24,6 +24,7 @@ function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   [
     'where',
     'whereRaw',
+    'whereNot',
     'whereNull',
     'whereNotNull',
     'orWhereNotNull',
@@ -329,6 +330,9 @@ describe('automation runner enrollment reactivation', () => {
     setDbQueues({
       automation_templates: [chain({ first: { key: 'flea', name: 'Flea Treatment', enabled: true } })],
       automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      // Post-lock revalidation re-read (r22): the row carries the same
+      // address the caller passed, so the enrollment proceeds.
+      customers: [chain({ first: { id: 'cust-1', email: 'new@example.com', deleted_at: null } })],
       automation_enrollments: [
         // Prior COMPLETED enrollment carrying the customer's OLD email.
         chain({ first: { id: 'enr-1', status: 'completed', email: 'old@example.com' } }),
@@ -351,6 +355,31 @@ describe('automation runner enrollment reactivation', () => {
       first_name: 'Megan',
       last_name: 'Example',
     }));
+  });
+
+  test('refuses an enrollment whose address NOW belongs to another live customer (stale pre-undo snapshot, r22)', async () => {
+    // The caller read the winner carrying the merged-in email, then blocked
+    // on the comms lock while an undo cleared it and restored the loser at
+    // that address. The post-lock revalidation must refuse — never enroll
+    // the winner's sequence into the restored loser's mailbox. Deliberately
+    // different-by-design addresses (a requester's, a tenant's) are not
+    // customer rows and still enroll.
+    const { enrollCustomer } = require('../services/automation-runner');
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'flea', name: 'Flea Treatment', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      customers: [
+        // Post-lock re-read: the undo cleared the winner's inherited email.
+        chain({ first: { id: 'cust-1', email: null, deleted_at: null } }),
+        // Claimant probe: the restored loser now owns the passed address.
+        chain({ first: { id: 'cust-loser', email: 'inherited@example.com' } }),
+      ],
+    });
+    const result = await enrollCustomer({
+      templateKey: 'flea',
+      customer: { id: 'cust-1', email: 'inherited@example.com', first_name: 'Megan' },
+    });
+    expect(result).toEqual({ enrolled: false, reason: 'address belongs to another live customer (stale pre-undo address)' });
   });
 });
 

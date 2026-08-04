@@ -164,9 +164,37 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
   // transaction (the appointment tagger) takes the same key inline.
   // Lead-email-only enrollments (no customer id) stay unfenced — the
   // undo's probes are winner-scoped.
-  const runEnrollment = async (conn) => enrollCustomerLocked({
-    conn, templateKey, customer, normalizedEmail, steps,
-  });
+  const runEnrollment = async (conn) => {
+    // Post-lock revalidation (r22 — resolve → lock → re-resolve): the
+    // caller's customer snapshot may predate an undo this acquisition just
+    // waited out. Callers legitimately pass addresses that differ from the
+    // customers row (a public-quote requester's email, a fresh call
+    // capture), so the row's value is NOT blindly adopted — instead, the
+    // resolveRecipientUnderLock rule: an address that NOW belongs to a
+    // live customer OTHER than this one is someone else's registered
+    // mailbox (typically the restored loser holding back the inherited
+    // email) and must not be enrolled. True third-party addresses are not
+    // customer rows and fall through unchanged.
+    if (customer.id) {
+      const fresh = await conn('customers')
+        .where({ id: customer.id })
+        .first('id', 'email', 'deleted_at');
+      if (!fresh || fresh.deleted_at) return { enrolled: false, reason: 'customer gone' };
+      const liveEmail = String(fresh.email || '').trim().toLowerCase();
+      if (normalizedEmail !== liveEmail) {
+        const otherOwner = await conn('customers')
+          .whereRaw('lower(email) = ?', [normalizedEmail])
+          .whereNot({ id: customer.id })
+          .where('active', true)
+          .whereNull('deleted_at')
+          .first('id');
+        if (otherOwner) {
+          return { enrolled: false, reason: 'address belongs to another live customer (stale pre-undo address)' };
+        }
+      }
+    }
+    return enrollCustomerLocked({ conn, templateKey, customer, normalizedEmail, steps });
+  };
   if (!customer.id) return runEnrollment(dbh);
   if (dbh.isTransaction) {
     await lockCustomerComms(dbh, customer.id);
