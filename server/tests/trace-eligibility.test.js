@@ -197,6 +197,16 @@ describe('classification behavior', () => {
       findingsType: 'mosquito_event',
       typedValues: { treatment_completed: ['Inspection only'] },
     })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    // codex P1 r7: source reduction is real work but not an application —
+    // tipping containers cannot honestly render as a sprayed perimeter
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Source reduction'] },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Barrier treatment', 'Source reduction'] },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
     expect(resolveTraceEligibility({
       findingsType: 'one_time_lawn_treatment',
       typedValues: { work_completed: 'Inspection completed' },

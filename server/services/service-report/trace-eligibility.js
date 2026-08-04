@@ -201,8 +201,12 @@ function recordedExteriorWork(typedValues) {
 }
 
 // Applied-work test for requiresAppliedWork rules: any recorded treatment
-// chip beyond the inspection-only completions, across the three chip
-// fields the typed schemas use.
+// chip beyond the NON-APPLICATION completions, across the three chip
+// fields the typed schemas use. "Source reduction" is mosquito's
+// non-chemical option — emptying water, flipping containers, moving items
+// under cover — real work, but not an application a satellite perimeter
+// can honestly depict (codex P1 r7).
+const NON_APPLIED_CHIP_RE = /^(?:inspection (?:only|completed)|source reduction)$/i;
 function recordedAppliedWork(typedValues) {
   const recorded = ['treatment_completed', 'treatments_completed', 'work_completed']
     .map((key) => String(typedValues?.[key] ?? ''))
@@ -211,7 +215,7 @@ function recordedAppliedWork(typedValues) {
     .split(',')
     .map((chip) => chip.trim())
     .filter(Boolean)
-    .some((chip) => !/^inspection (?:only|completed)$/i.test(chip));
+    .some((chip) => !NON_APPLIED_CHIP_RE.test(chip));
 }
 
 /**
