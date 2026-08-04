@@ -770,6 +770,7 @@ describe('revertMerge', () => {
     // explicit pair (20260730000030) / timestamps(true,true) (20260429000005).
     first_touch_holds: ['created_at', 'updated_at'],
     stripe_orphan_charges: ['created_at', 'updated_at'],
+    invoice_attachments: ['created_at', 'updated_at'],
   };
   const assertSelectableColumns = (table, q) => {
     const known = TABLE_TIMESTAMPS[table];
@@ -2137,7 +2138,9 @@ describe('revertMerge', () => {
         invoices: {
           stillOnWinner: ['inv-1'],
           // inv-race: PRE-merge timestamp, NOT in the snapshot — the racing
-          // insert the timestamp heuristic wrongly exempted.
+          // insert the timestamp heuristic wrongly exempted. inv-pre is in
+          // the snapshot and untouched — exempt (r25: a snapshotted row
+          // MUTATED post-merge is pinned separately below).
           probeRows: [{ id: 'inv-1' }, { id: 'inv-pre', created_at: '2026-07-01T00:00:00Z' }, { id: 'inv-race', created_at: '2026-07-29T00:00:00Z' }],
         },
       },
@@ -2163,6 +2166,31 @@ describe('revertMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/too numerous to snapshot/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('a SNAPSHOTTED pre-merge invoice MUTATED since the merge still refuses the profile return (r25)', async () => {
+    // The id set exempts pre-existing rows from the NEW-row check, but a
+    // pre-existing invoice can have the transferred profile attached to
+    // its PaymentIntent post-merge with no new row yet — mutation
+    // detection (updated_at) must survive alongside the id set.
+    const journal = baseJournal();
+    journal.repointed_ids.winner_premerge_billing_ids = { invoices: ['inv-pre'], payments: [] };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: {
+          stillOnWinner: ['inv-1'],
+          probeRows: [{ id: 'inv-1' }, { id: 'inv-pre', created_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/transferred Stripe profile/) });
     expect(state.journalUpdate).toBe(null);
   });
 

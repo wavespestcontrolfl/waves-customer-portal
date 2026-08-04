@@ -1737,7 +1737,10 @@ const EMAIL_BOUND_SURFACES = [
       q.where('recipient_id', String(winnerId))
         .orWhereIn('recipient_id', conn('leads').select(conn.raw('id::text')).where({ customer_id: winnerId }));
     },
-    active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled']),
+    // 'running' included (r25): a worker claims the run as 'running' and
+    // then SENDS to the stored recipient_email — a claimed-but-unsent row
+    // is still a live delivery the undo must wait out.
+    active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled', 'running']),
     label: 'queued template send(s)',
     carriesName: true,
   },
@@ -1900,6 +1903,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   first_touch_holds: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260429000005; money-reconciliation records.
   stripe_orphan_charges: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260515000003.
+  invoice_attachments: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2190,7 +2195,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           }
           const premergeSet = new Set(premergeBilling[table]);
           const journaled = journaledIdsFor(table);
-          charged = rows.filter((r) => !journaled.has(r.id) && !premergeSet.has(r.id)).length;
+          // Two blocker classes (r25): NEW rows by exact id-set difference,
+          // AND snapshotted pre-merge rows MUTATED since the merge
+          // (updated_at — a pre-existing invoice can have the transferred
+          // profile attached to its PaymentIntent post-merge without any
+          // new row existing yet). The update check keeps the timestamp
+          // heuristic's known trx-start residual; the id set closes the
+          // insert case exactly.
+          const mutatedAfter = (v) => Boolean(mergeAt && v && new Date(v).getTime() > new Date(mergeAt).getTime());
+          charged = rows.filter((r) => !journaled.has(r.id)
+            && (!premergeSet.has(r.id) || mutatedAfter(r.updated_at))).length;
         } else {
           charged = countActivityRows(rows, {
             journaledIds: journaledIdsFor(table), mergeAt, sinceOnly: true, table,
@@ -2378,6 +2392,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
           label: 'Stripe orphan charge record(s)',
           consequence: 'undoing would separate a settled Stripe charge from the invoice it paid',
+        },
+        // Attachments (r25 P2): an upload after the merge does not touch
+        // the invoice row, so no other gate sees it — moving the invoice
+        // back would leave a winner-owned attachment on the restored
+        // loser's invoice.
+        {
+          table: 'invoice_attachments',
+          query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
+          label: 'invoice attachment(s)',
+          consequence: 'undoing would separate uploaded attachments from the invoice they document',
         },
       ];
       for (const probe of invoiceChildProbes) {

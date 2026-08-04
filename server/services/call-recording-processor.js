@@ -8442,6 +8442,15 @@ const CallRecordingProcessor = {
               );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
+                // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r25):
+                // every scheduled_services insert in this transaction (the
+                // booking + linked follow-up visits) serializes against a
+                // concurrent merge-undo of this customer, BEFORE any row
+                // lock. Taken after the call-SID advisory (which the undo
+                // never takes — no cycle); blocking is safe here, this
+                // transaction holds only advisory keys so far.
+                const { lockCustomerComms } = require('../utils/customer-comms-lock');
+                if (customer?.id) await lockCustomerComms(trx, customer.id);
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;
