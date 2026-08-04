@@ -402,6 +402,37 @@ const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly
 // Agronomic aftercare timing (mowing/watering windows) is legitimate copy,
 // and cadence copy uses days — only minute/hour figures are the banned class.
 const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
+
+// Where a SUBORDINATE action starts inside a clause. Used only to decide
+// who owns the time figure — never to decide whether the clause is flagged.
+const AGRONOMIC_SPAN_SPLIT_RE = /\s+(?:before|after|until|prior\s+to|then|and|but|while|so\s+that)\s+/i;
+
+/**
+ * Does the agronomic carve-out actually govern this clause's timing?
+ *
+ * The carve-out exists for label directions whose figure belongs to an
+ * agronomic ACTION — "water in within 14 days", "avoid watering the treated
+ * lawn for 24 hours". It was applied to the whole clause, so a re-entry
+ * restriction that merely MENTIONS one kept its fixed figure: "keep pets off
+ * treated areas for 30 minutes before watering" exempted itself on the word
+ * "watering" (codex P1 #3176 r23).
+ *
+ * Decide on the sub-span that actually carries the figure: split where a
+ * subordinate action begins, and exempt only when every span holding a
+ * duration also names the agronomic action. The split is confined to this
+ * test — the clause is still flagged and stripped as a whole — so phrasings
+ * whose verb and figure sit on opposite sides of a boundary ("re-enter after
+ * 2 hours") keep the detection they already had. A figure that survives no
+ * span (boundary-straddling) falls back to the previous whole-clause
+ * behaviour rather than silently hardening the rule.
+ */
+function agronomicExemptionApplies(clause) {
+  if (!AGRONOMIC_EXEMPT_RE.test(clause)) return false;
+  const spans = String(clause).split(AGRONOMIC_SPAN_SPLIT_RE).filter((s) => s && s.trim());
+  const timed = spans.filter((s) => TIMING_DURATION_RE.test(s));
+  if (!timed.length) return true;
+  return timed.every((s) => AGRONOMIC_EXEMPT_RE.test(s));
+}
 // Product-safety co-occurrence: "safe(ly/ty)" said about products/
 // applications in ANY word order (predicate forms included). Two carve-outs
 // are stripped BEFORE testing: the approved idiom ("safe once/until/when
@@ -449,7 +480,7 @@ function complianceOverclaims(text) {
     // avoid watering …" must not let the aftercare half exempt the first.
     for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
       if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
-        && !AGRONOMIC_EXEMPT_RE.test(clause)) {
+        && !agronomicExemptionApplies(clause)) {
         issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
         break;
       }
@@ -488,7 +519,7 @@ function stripFixedReentryTiming(value, replacement = '') {
       const clause = parts[i];
       if (clause == null || !clause.trim()) continue;
       if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
-        && !AGRONOMIC_EXEMPT_RE.test(clause)) {
+        && !agronomicExemptionApplies(clause)) {
         changed = true;
         continue;
       }

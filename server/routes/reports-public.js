@@ -1470,7 +1470,11 @@ router.get('/:token', async (req, res, next) => {
         // (Cloudflare renderer, mid-deploy bundle). Serve, cache nothing.
         const unreachablePhotos = renderImageFailures
           ?? ((renderedData?.imageResolutionFailures || 0) + await countUnreachableReportPhotos(renderedData));
-        if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
+        if (renderedData?.stationMapTransientlyUnavailable) {
+          // Same rule as pdf-queue: the key can't see a transient basemap
+          // miss, so caching here would strand a map-less report (r23).
+          logger.warn(`[reports-public] station map basemap transiently unavailable for ${service.id} — not caching this render`);
+        } else if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);

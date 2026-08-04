@@ -54,6 +54,11 @@ const FLAGGED_PRODUCT_SAFETY = [
 
 // Fixed drying/re-entry timing co-occurrence.
 const FLAGGED_TIMING = [
+  // The agronomic carve-out must not rescue a re-entry restriction that
+  // merely MENTIONS an agronomic action (codex P1 #3176 r23) — the figure
+  // belongs to the restriction, not to the watering.
+  'keep pets off treated areas for 30 minutes before watering',
+  'keep off the lawn for 2 hours after watering',
   // A clock time asserts the same fixed re-entry moment a duration does
   // (codex P1 #3176 r20).
   'safe to return after 7 PM',
@@ -95,6 +100,10 @@ const FLAGGED_TIMING = [
 ];
 
 const CLEAN = [
+  // ...but a figure that genuinely belongs to the agronomic action still
+  // survives — the carve-out narrowed, it did not disappear.
+  'avoid watering the treated lawn for 24 hours',
+  'irrigate the treated areas within 14 days',
   // Clock times without a re-entry claim stay legal — business hours and
   // scheduling copy are not fixed re-entry figures.
   'call before 5 PM to reschedule',

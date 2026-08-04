@@ -4246,6 +4246,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // deployment's token only resolves on that preview, so with no explicit
     // origin configured the document falls back to its own (see portalBase).
     publicOrigin: configuredPublicPortalOrigin(),
+    // A station/trap visit whose placement section was dropped because the
+    // LIVE basemap call failed transiently (quota, network, provider config
+    // unavailable) — not because the lane is off or the visit has no
+    // stations (codex P2 #3176 r23). The cache key hashes provider/env
+    // configuration, which is unchanged by a transient miss, so without
+    // this flag the map-less PDF would be stored under exactly the key
+    // expected after the provider recovers and the report would never
+    // regain its map. Counted like an image drop: serve it, cache nothing.
+    stationMapTransientlyUnavailable: stationMap?.available === false
+      && ['satellite_unavailable', 'provider_config_unavailable', 'build_failed']
+        .includes(String(stationMap?.reason || '')),
     // Images this build EXPECTED but silently dropped (URL resolution
     // failed): the document folds this into its render-failure counter and
     // the store paths refuse to cache on it (codex P2 #3176 r21) — a

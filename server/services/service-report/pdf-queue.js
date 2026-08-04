@@ -275,6 +275,16 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // as the floor when the count is unavailable (Cloudflare renderer,
     // mid-deploy page bundle). Serve it, cache nothing; the next view
     // re-renders.
+    // A transient basemap miss drops the placement section without changing
+    // the cache key (codex P2 #3176 r23) — treat it exactly like a dropped
+    // image: serve the render, store nothing, re-render once it recovers.
+    if (renderedData?.stationMapTransientlyUnavailable) {
+      logger.warn(`[service-report-pdf] station map basemap transiently unavailable for ${recordId} — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: 'station_map_unavailable',
+      };
+    }
     const unreachablePhotos = renderImageFailures
       ?? ((renderedData?.imageResolutionFailures || 0) + await countUnreachableReportPhotos(renderedData));
     if (unreachablePhotos > 0) {
