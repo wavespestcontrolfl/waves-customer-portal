@@ -309,12 +309,17 @@ describe('existing-customer public estimate page', () => {
     expect(html).toContain('Add Pest Control for bundled pricing');
   });
 
-  test('lawn perks include seasonal rotation, lawn health scoring, and free re-service', () => {
+  test('lawn perks include seasonal rotation, lawn health scoring, and the SCOPED service-call line', () => {
     const html = renderPage('perks-token', lawnEstimate(), lawnEstimateData(), donMembership());
 
     expect(html).toContain('Seasonal product rotations matched to Southwest Florida turf cycles');
     expect(html).toContain('turf density, weeds, and color tracked over time');
-    expect(html).toContain('Re-service between visits at no charge');
+    // Owner copy ruling 2026-08-04: lawn never advertises an unscoped free
+    // re-service — that claim implies every cadence tier delivers the same
+    // outcome. Pest estimates keep the unscoped line (a pest re-service
+    // genuinely is a redo).
+    expect(html).toContain('Between-visit service calls at no charge');
+    expect(html).not.toContain('Re-service between visits at no charge');
   });
 
   test('pricing bundle drops annual prepay + waivable setup fee for existing customers', async () => {
