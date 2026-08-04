@@ -1303,6 +1303,19 @@ export default function DispatchPageV2({
   useEffect(() => {
     completionPanelOpenServiceRef.current = completingService?.id || null;
   }, [completingService]);
+  // A late handoff arriving while the tech is ACTIVELY collecting another
+  // visit must queue, not replace: MobilePaymentSheet has no visit-specific
+  // key, so swapping paymentData under an open tender would silently switch
+  // the invoice being collected (codex P1 #3187 r15). Every sheet dismissal
+  // pops the queue.
+  const paymentSheetActiveRef = useRef(false);
+  useEffect(() => {
+    paymentSheetActiveRef.current = !!paymentData;
+  }, [paymentData]);
+  const latePaymentHandoffQueueRef = useRef([]);
+  const releasePaymentSheet = useCallback(() => {
+    setPaymentData(latePaymentHandoffQueueRef.current.shift() || null);
+  }, []);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -1628,10 +1641,16 @@ export default function DispatchPageV2({
         // operator moved on to another visit): its onClose drain has run
         // or will drain a different visit's entry — deliver the payment
         // handoff now instead of stranding it in, or having it overwritten
-        // out of, the singleton ref (codex P1 #3187 r11 + r13).
+        // out of, the singleton ref (codex P1 #3187 r11 + r13). An ACTIVE
+        // payment sheet queues the delivery instead (codex P1 r15).
         if (completionPanelOpenServiceRef.current !== serviceId) {
-          setPaymentData(pendingPaymentAfterCompletionRef.current);
+          const handoff = pendingPaymentAfterCompletionRef.current;
           pendingPaymentAfterCompletionRef.current = null;
+          if (paymentSheetActiveRef.current) {
+            latePaymentHandoffQueueRef.current.push(handoff);
+          } else {
+            setPaymentData(handoff);
+          }
         }
       }
       return r;
@@ -2996,7 +3015,7 @@ export default function DispatchPageV2({
           invoiceToken={paymentData.invoiceToken}
           amount={paymentData.amount}
           desktopVisible
-          onClose={() => setPaymentData(null)}
+          onClose={releasePaymentSheet}
           onInvoiceSent={async () => {
             // Invoice SMS+email was just sent — the bill is now in the
             // customer's hands. Mirror the cash/check tender flow and
@@ -3006,7 +3025,7 @@ export default function DispatchPageV2({
               ...paymentData.service,
               completionInvoiceAlreadySent: true,
             };
-            setPaymentData(null);
+            releasePaymentSheet();
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];
@@ -3034,7 +3053,7 @@ export default function DispatchPageV2({
               checkoutInvoiceId: paymentData.invoiceId,
               checkoutInvoiceStatus: "paid",
             };
-            setPaymentData(null);
+            releasePaymentSheet();
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];
@@ -3061,7 +3080,7 @@ export default function DispatchPageV2({
               checkoutInvoiceId: invoice?.id || paymentData.invoiceId,
               checkoutInvoiceStatus: invoice?.status || "paid",
             };
-            setPaymentData(null);
+            releasePaymentSheet();
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];
