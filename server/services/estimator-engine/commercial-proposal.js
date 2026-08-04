@@ -239,6 +239,7 @@ const SERVICE_LABELS = {
   bedBug: 'Bed bug treatment',
   rodentBait: 'Rodent bait stations',
   stinging: 'Stinging insect treatment',
+  palm: 'Palm nutrition injection',
 };
 
 // Intent keys the composer vocabulary defines as SINGLE treatments, not
@@ -250,6 +251,10 @@ const ONE_TIME_SERVICE_KEYS = new Set([
   // Flat-priced multi-visit cleanout — a program of visits, but sold and
   // billed as a single engagement, never a monthly cadence.
   'germanRoach',
+  // priceFlea returns billingCadence 'one_time' (knockdown visit or
+  // two-visit elimination package) — it was never a monthly program; a
+  // scaffold stamping it monthly invited pricing a package as recurring.
+  'flea',
 ]);
 
 function serviceLabel(key) {

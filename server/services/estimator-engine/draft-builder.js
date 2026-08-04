@@ -326,6 +326,7 @@ const SERVICE_COMPS_ALIASES = {
   bedBug: 'bed bug',
   rodentBait: 'rodent',
   stinging: 'sting',
+  palm: 'palm',
 };
 
 // Single-service drafts (bundles never reach the band) filter on the
