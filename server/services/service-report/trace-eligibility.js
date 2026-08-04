@@ -31,7 +31,11 @@ const FINDINGS_TYPE_RULES = {
   // spray/spatial typed lanes
   tree_shrub: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   mosquito_event: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  flea: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Flea joins the evidence-conditional lanes (codex P1 r5): interior-only
+  // and inspection-only completions are first-class choices on its form.
+  flea: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresExteriorChip: true,
+  },
   // The roach family is CONDITIONAL (codex P1 r3+r4): exterior perimeter
   // treatment is an optional chip on these forms — a German-species
   // cockroach_control visit can be pure interior bait/IGR — so the RENDER
@@ -106,7 +110,11 @@ const SERVICE_KEY_RULES = {
   termite_liquid: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   termite_trenching: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   termite_pretreatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  termite_spot_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Localized foam/drill/wood application by catalog definition — not a
+  // perimeter treatment, so a satellite perimeter trace would be a false
+  // claim (codex P1 r5). The r4 precedence makes this ineligible KEY beat
+  // the eligible termite_treatment findings type it shares.
+  termite_spot_treatment: { eligible: false, reason: 'localized_treatment_lane' },
   // Pest-PRIMARY bundle (codex P1 r1): the combined recurring visit sprays
   // the general-pest perimeter and services the bait stations as a
   // COMPANION — the spray application is real, so the trace is too. The
@@ -127,19 +135,22 @@ const SERVICE_KEY_RULES = {
   termite_bond_10yr: { eligible: false, reason: 'billing_rider' },
 };
 
+// Every alternation fully grouped so EACH token is word-bounded (codex
+// P1 r5): ungrouped, only the first token got the leading boundary and
+// "Warranty Renewal" matched the embedded "ant".
 const INELIGIBLE_NAME_RES = [
   [/\bbed\s*bugs?\b/i, 'interior_only_lane'],
-  [/\brodent|trap(?:ping)?\b/i, 'trap_lane'],
-  [/\binspection\b/i, 'inspection_lane'],
+  [/\b(?:rodents?|trap(?:ping|s)?)\b/i, 'trap_lane'],
+  [/\binspections?\b/i, 'inspection_lane'],
   [/\bwdo\b/i, 'inspection_lane'],
 ];
 const ELIGIBLE_NAME_RES = [
-  [/\blawn|turf|fertiliz/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
+  [/\b(?:lawn|turf|fertiliz\w*)\b/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
   // Ranked ABOVE the bait check below: combined names like "Quarterly
   // Pest + Termite Bait Station" are pest-PRIMARY bundles — the spray is
   // real (codex P1 r1). A pure "Termite Bait" name matches neither of
   // these and falls to the bait rule.
-  [/\bpest|mosquito|spray|tree|shrub|flea|tick|roach|ant|wasp|bee\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
+  [/\b(?:pest|mosquito|spray|trees?|shrubs?|fleas?|ticks?|roach(?:es)?|ants?|wasps?|bees?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
 ];
 const TRAILING_INELIGIBLE_NAME_RES = [
   [/\bbait\b/i, 'bait_station_lane'],
@@ -161,7 +172,12 @@ function verdict(rule, source) {
 // frozen snapshot's treatment chips (array or CSV string — String() joins
 // arrays on commas).
 function recordedExteriorWork(typedValues) {
-  return /exterior|perimeter/i.test(String(typedValues?.treatment_completed || ''));
+  // The two chip fields the conditional lanes actually use: palmetto and
+  // flea record in `treatment_completed`, the active cockroach schema in
+  // `work_completed` (codex P1 r5). `Lawn treatment` is flea's yard
+  // application — exterior work by definition.
+  const recorded = `${String(typedValues?.treatment_completed || '')} ${String(typedValues?.work_completed || '')}`;
+  return /exterior|perimeter|\blawn\b/i.test(recorded);
 }
 
 /**

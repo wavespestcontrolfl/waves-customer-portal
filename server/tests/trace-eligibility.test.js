@@ -137,6 +137,57 @@ describe('classification behavior', () => {
     // render side, no snapshot at all — fails closed
     expect(resolveTraceEligibility({ findingsType: 'cockroach', typedValues: null }))
       .toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+    // codex P1 r5: the ACTIVE cockroach schema records in work_completed,
+    // not treatment_completed — both fields are read
+    expect(resolveTraceEligibility({
+      findingsType: 'cockroach',
+      typedValues: { work_completed: ['Bait placement', 'Exterior perimeter treatment'] },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'cockroach',
+      typedValues: { work_completed: ['Bait placement', 'Dust application'] },
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+  });
+
+  test('flea is evidence-conditional too, and its lawn chip counts as exterior (round 5)', () => {
+    expect(resolveTraceEligibility({ findingsType: 'flea' }))
+      .toMatchObject({ eligible: true }); // capture side
+    expect(resolveTraceEligibility({
+      findingsType: 'flea',
+      typedValues: { treatment_completed: ['Exterior flea treatment', 'Growth regulator'] },
+    })).toMatchObject({ eligible: true });
+    expect(resolveTraceEligibility({
+      findingsType: 'flea',
+      typedValues: { treatment_completed: 'Lawn treatment, Pet resting area treatment' },
+    })).toMatchObject({ eligible: true });
+    expect(resolveTraceEligibility({
+      findingsType: 'flea',
+      typedValues: { treatment_completed: ['Interior flea treatment', 'Growth regulator'] },
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'flea',
+      typedValues: { treatment_completed: 'Inspection only' },
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+  });
+
+  test('termite spot treatment is localized — never a perimeter trace (round 5)', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'termite_spot_treatment' }))
+      .toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+    // the ineligible KEY beats the eligible termite_treatment pointer it shares
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_spot_treatment',
+      findingsType: 'termite_treatment',
+    })).toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+  });
+
+  test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
+    for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
+      expect(resolveTraceEligibility({ displayName }))
+        .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    }
+    // real tokens still classify
+    expect(resolveTraceEligibility({ displayName: 'Fire Ant Treatment' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
   });
 
   test('display names are the last resort, in both directions', () => {
