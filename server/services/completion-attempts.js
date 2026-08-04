@@ -207,6 +207,56 @@ async function hasCommittedCompletionAttempt(serviceId, knex = db) {
   return Boolean(record);
 }
 
+// Read-only status for the panel's lightweight side-effects poll (codex P1
+// #3187 r11): reports where the service's completion stands so the client
+// re-POSTs the media-bearing completion body only to claim/resume, never as
+// a poll. Mirrors claimCompletionAttempt's precedence (a succeeded attempt
+// outranks whatever row is latest) and replays the stored response ONLY for
+// the same idempotency key — contract parity with the POST replay guard.
+// States: running (keep polling) · resumable (one full re-POST) ·
+// succeeded (same key, response attached) · succeeded_other_key ·
+// completed_no_attempt (record without attempt rows) · failed · none.
+async function completionStatusForService({ serviceId, idempotencyKey }, knex = db) {
+  const succeeded = await knex('service_completion_attempts')
+    .where({ service_id: serviceId, status: 'succeeded' })
+    .orderBy('updated_at', 'desc')
+    .first();
+  if (succeeded) {
+    if (idempotencyKey && succeeded.idempotency_key === idempotencyKey && succeeded.response) {
+      return {
+        state: 'succeeded',
+        serviceRecordId: succeeded.service_record_id || null,
+        response: { ...succeeded.response, replayed: true },
+      };
+    }
+    return { state: 'succeeded_other_key', serviceRecordId: succeeded.service_record_id || null };
+  }
+  const attempt = await knex('service_completion_attempts')
+    .where({ service_id: serviceId })
+    .orderBy('updated_at', 'desc')
+    .first();
+  if (!attempt) {
+    const record = await knex('service_records')
+      .where({ scheduled_service_id: serviceId })
+      .orderBy('created_at', 'desc')
+      .first();
+    return record
+      ? { state: 'completed_no_attempt', serviceRecordId: record.id }
+      : { state: 'none' };
+  }
+  if (attempt.status === 'side_effects_pending') return { state: 'resumable' };
+  if (attempt.status === 'side_effects_running') {
+    const stale = new Date(attempt.updated_at) < new Date(Date.now() - STALE_SIDE_EFFECTS_MS);
+    return { state: stale ? 'resumable' : 'running' };
+  }
+  if (attempt.status === 'pending') {
+    const stale = new Date(attempt.updated_at) < new Date(Date.now() - STALE_PENDING_MS);
+    return { state: stale ? 'resumable' : 'running' };
+  }
+  if (attempt.status === 'failed') return { state: 'failed', error: attempt.error || null };
+  return { state: 'running' };
+}
+
 async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }, knex = db) {
   // Per-service terminal-state guard. The unique index on
   // (service_id, idempotency_key) plus the partial pending-only
@@ -720,6 +770,7 @@ async function storeResolvedSnapshot(
 
 module.exports = {
   claimCompletionAttempt,
+  completionStatusForService,
   hashCompletionRequest,
   hasCommittedCompletionAttempt,
   // The single timer-vs-operator classification rule, shared with the

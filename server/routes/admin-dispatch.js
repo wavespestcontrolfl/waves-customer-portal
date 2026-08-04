@@ -3975,6 +3975,25 @@ function reportReconcileBlockPayload({
   };
 }
 
+// Lightweight side-effects poll for the completion panel (codex P1 #3187
+// r11): while a committed completion's side effects run, the client polls
+// THIS read-only status instead of replaying the media-bearing completion
+// POST (base64 photos, ~MBs) every five seconds. All derivation lives in
+// CompletionAttempts.completionStatusForService; auth = the router-wide
+// adminAuthenticate + requireTechOrAdmin.
+router.get('/:serviceId/completion-status', async (req, res) => {
+  try {
+    const status = await CompletionAttempts.completionStatusForService({
+      serviceId: req.params.serviceId,
+      idempotencyKey: String(req.query.idempotencyKey || ''),
+    });
+    res.json(status);
+  } catch (e) {
+    logger.error(`[dispatch] completion-status read failed for ${req.params.serviceId}: ${e.message}`);
+    res.status(500).json({ error: 'Failed to read completion status' });
+  }
+});
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;

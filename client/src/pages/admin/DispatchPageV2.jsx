@@ -1292,6 +1292,14 @@ export default function DispatchPageV2({
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
   const pendingPaymentAfterCompletionRef = useRef(null);
+  // Mirrors whether the completion panel is mounted, for callbacks that
+  // resolve AFTER the operator backed out (the onClose payment-ref drain
+  // only runs at close — a later response must deliver its own handoff,
+  // codex P1 #3187 r11).
+  const completionPanelOpenRef = useRef(false);
+  useEffect(() => {
+    completionPanelOpenRef.current = !!completingService;
+  }, [completingService]);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
   // When MarkPrepaidModal is opened from inside EditServiceModal we want to
@@ -1575,12 +1583,12 @@ export default function DispatchPageV2({
     [handleStatusChange],
   );
 
-  const handleCompleteSubmit = useCallback(
-    async (serviceId, body) => {
-      const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
+  // Post-response completion bookkeeping, shared by the POST path
+  // (handleCompleteSubmit) and the panel's status-poll resolution
+  // (onCompletionResult, codex P1 #3187 r11) — both must flip the status,
+  // invalidate the mobile week cache, and stage the payment handoff.
+  const applyCompletionResult = useCallback(
+    (serviceId, r, body) => {
       handleStatusChange(serviceId, "completed");
       // The mobile week list serves rows from its own cached /week payload —
       // completion was the one terminal transition that never invalidated
@@ -1613,10 +1621,29 @@ export default function DispatchPageV2({
           invoiceToken: r.invoiceToken,
           amount: Number(r.invoiceTotal),
         };
+        // Panel already closed (the response landed after Back): the
+        // onClose drain has already run and will not run again — deliver
+        // the payment handoff now instead of stranding it in the ref
+        // (codex P1 #3187 r11).
+        if (!completionPanelOpenRef.current) {
+          setPaymentData(pendingPaymentAfterCompletionRef.current);
+          pendingPaymentAfterCompletionRef.current = null;
+        }
       }
       return r;
     },
     [completingService, handleStatusChange, isMobile, data],
+  );
+
+  const handleCompleteSubmit = useCallback(
+    async (serviceId, body) => {
+      const r = await adminFetch(`/admin/dispatch/${serviceId}/complete`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      return applyCompletionResult(serviceId, r, body);
+    },
+    [applyCompletionResult],
   );
 
   const handleDelete = useCallback(async (service) => {
@@ -2505,6 +2532,12 @@ export default function DispatchPageV2({
             handleStatusChange(serviceId, "completed");
             setScheduleRefreshKey((k) => k + 1);
           }}
+          onCompletionResult={(serviceId, r) =>
+            // Status-poll resolution: the stored same-key response is the
+            // completion result — run the FULL bookkeeping, payment
+            // handoff included (codex P1 #3187 r11).
+            applyCompletionResult(serviceId, r, null)
+          }
           onScheduleFollowup={async (suggestion) => {
             // Books the suggested follow-up as a PENDING appointment (the
             // normal pending → confirmed dispatch flow is the confirmation

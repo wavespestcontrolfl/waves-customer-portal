@@ -8,6 +8,7 @@ import {
   completionReconcilePrompt,
   completionReviewSuppressionReason,
   completionSideEffectsRetryPlan,
+  completionStatusPlan,
   completionTimeOnSiteBody,
   completionWillReview,
   restoredBackfillChoices,
@@ -331,5 +332,26 @@ describe("cross-key completion inside a committed chain", () => {
   it("the message says completed, not failed", () => {
     expect(CROSS_KEY_COMPLETED_MESSAGE).toMatch(/completed/i);
     expect(CROSS_KEY_COMPLETED_MESSAGE).not.toMatch(/fail/i);
+  });
+});
+
+// The status-poll plan (codex P1 #3187 r11): the media-bearing completion
+// body POSTs only on "resume"; unknown states keep waiting so the poll cap
+// — not a mis-mapped state — decides the give-up.
+describe("completion status-poll plan", () => {
+  it("maps each server state to the panel's next move", () => {
+    expect(completionStatusPlan({ state: "running" })).toBe("wait");
+    expect(completionStatusPlan({ state: "succeeded" })).toBe("success");
+    expect(completionStatusPlan({ state: "succeeded_other_key" })).toBe("cross_key");
+    expect(completionStatusPlan({ state: "completed_no_attempt" })).toBe("cross_key");
+    expect(completionStatusPlan({ state: "resumable" })).toBe("resume");
+    expect(completionStatusPlan({ state: "none" })).toBe("resume");
+    expect(completionStatusPlan({ state: "failed" })).toBe("failed");
+  });
+
+  it("unknown or malformed states wait for the poll cap, never fail", () => {
+    expect(completionStatusPlan({ state: "surprise" })).toBe("wait");
+    expect(completionStatusPlan({})).toBe("wait");
+    expect(completionStatusPlan(null)).toBe("wait");
   });
 });
