@@ -239,3 +239,108 @@ describe('wdo-report-pdf', () => {
     expect(fromDataUrl.equals(fromRaw)).toBe(true);
   });
 });
+
+// Section 3 used to print EVERY category's text on the Attic row, because the
+// line pool targeted only that row's three fields while the checkboxes were
+// keyword-detected independently. A form could tick Interior/Exterior and then
+// print those limitations on the Attic line — misattributing where the
+// inspector could not see.
+describe('wdo-report-pdf Section 3 row distribution', () => {
+  const { splitInaccessibleAreas, INACCESSIBLE_ROWS } = _private;
+  const keys = (t) => [...splitInaccessibleAreas(t).ticked].sort();
+
+  test('labelled segments route to their own rows', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Attic: concealed by insulation. Interior: wall and ceiling voids. Exterior: enclosed soffits.'
+    );
+    expect(rows.attic).toBe('concealed by insulation.');
+    expect(rows.interior).toBe('wall and ceiling voids.');
+    expect(rows.exterior).toBe('enclosed soffits.');
+    expect(rows.crawlspace).toBeUndefined();
+    expect([...ticked].sort()).toEqual(['attic', 'exterior', 'interior']);
+  });
+
+  test('REGRESSION: a category the text never mentions gets neither text nor a tick', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Crawlspace: skirting closed, no access. Interior: wall voids. Exterior: soffit wrap.'
+    );
+    // The whole point: nothing lands on the Attic row and Attic stays unticked.
+    expect(rows.attic).toBeUndefined();
+    expect(ticked.has('attic')).toBe(false);
+    expect(rows.crawlspace).toBe('skirting closed, no access.');
+    expect(ticked.has('crawlspace')).toBe(true);
+  });
+
+  test('em-dash and semicolon separated labels split (legacy findings style)', () => {
+    const { rows } = splitInaccessibleAreas('Attic — insulation; Crawlspace — no hatch');
+    expect(rows.attic).toBe('insulation');
+    expect(rows.crawlspace).toBe('no hatch');
+  });
+
+  test('crawl space spelling variants all map to the Crawlspace row', () => {
+    for (const label of ['Crawl space:', 'Crawlspace:', 'Crawl Spaces:', 'crawl:']) {
+      expect(keys(`${label} no hatch`)).toEqual(['crawlspace']);
+    }
+  });
+
+  test('unlabelled text lands on the first row it matches, not the Attic row', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Areas of the interior were blocked by stored goods');
+    expect(rows.attic).toBeUndefined();
+    expect(rows.interior).toContain('stored goods');
+    expect([...ticked]).toEqual(['interior']);
+  });
+
+  test('text matching no category is disclosed under Other', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Locked utility shed was not opened');
+    expect([...ticked]).toEqual(['other']);
+    expect(rows.other).toBe('Locked utility shed was not opened');
+  });
+
+  test('preamble before the first label is kept, not dropped', () => {
+    const { rows } = splitInaccessibleAreas('Not inspected. Interior: wall voids.');
+    expect(rows.interior).toBe('Not inspected. wall voids.');
+  });
+
+  test('empty findings tick nothing', () => {
+    expect(keys('')).toEqual([]);
+    expect(keys(undefined)).toEqual([]);
+  });
+
+  // Compliance guard: a renamed/typo'd field would silently drop a whole row's
+  // text off the official filing, which is exactly the class of bug this fixes.
+  test('every mapped Section 3 field exists in the bundled FDACS template', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    const { PDFDocument } = require('pdf-lib');
+    const tpl = path.join(__dirname, '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf');
+    const doc = await PDFDocument.load(fs.readFileSync(tpl));
+    const form = doc.getForm();
+    const names = new Set(form.getFields().map((f) => f.getName()));
+    for (const row of INACCESSIBLE_ROWS) {
+      expect(names.has(row.checkbox)).toBe(true);
+      for (const f of row.fields) expect(names.has(f)).toBe(true);
+    }
+  });
+
+  test('no writing line is shared between two rows', () => {
+    const all = INACCESSIBLE_ROWS.flatMap((r) => r.fields);
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  test('renders with all five categories populated', async () => {
+    const { PDFDocument } = require('pdf-lib');
+    const project = {
+      id: 'p1',
+      project_type: 'wdo_inspection',
+      tech_name: 'Adam Tech',
+      created_at: '2026-05-20',
+      findings: {
+        wdo_finding: 'No visible signs of WDO observed',
+        inaccessible_areas: 'Attic: insulation. Interior: wall voids. Exterior: soffits. Crawlspace: skirting closed. Other: locked shed.',
+      },
+    };
+    const buf = await buildWdoReportPDFBuffer({ project, customer: {} });
+    expect(buf.slice(0, 5).toString()).toBe('%PDF-');
+    expect((await PDFDocument.load(buf)).getPageCount()).toBe(2);
+  });
+});
