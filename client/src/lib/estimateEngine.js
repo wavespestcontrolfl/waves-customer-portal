@@ -390,7 +390,11 @@ const LAWN_PRICING_V2 = {
   // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
   // _LADDER_CAP (2026-07-29): Premium 12x column retuned + cap so 12x
   // per-app never exceeds 9x per-app (server mirror).
-  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
+  // _GRID_500 (2026-08-04): 500-sqft re-grid + sub-3,000 taper + basic/4x
+  // retirement — fallback saves must stamp the schedule they priced on
+  // (codex #3190 P2), and applyServerLawnPricingConfig below syncs the live
+  // row's version so a mid-flight admin change stamps correctly too.
+  pricingVersion: 'LAWN_PRICING_V2_GRID_500',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -413,6 +417,12 @@ export function applyServerLawnPricingConfig(config) {
   // Cost-floor enforcement arm switch rides the same row — absent/non-true
   // resolves to the disarmed default, exactly like db-bridge on the server.
   LAWN_PRICING_V2.useLawnCostFloor = config?.useLawnCostFloor === true;
+  // Version stamp rides the same row too (codex #3190 P2): fallback saves
+  // stamp the pricing schedule they were priced under, so the live DB value
+  // wins over the baked default; absent/invalid resets the in-code default —
+  // the kill-value pattern.
+  const version = typeof config?.pricingVersion === 'string' ? config.pricingVersion.trim() : '';
+  LAWN_PRICING_V2.pricingVersion = version || 'LAWN_PRICING_V2_GRID_500';
   return LAWN_PRICING_V2.programMinimumMonthly;
 }
 

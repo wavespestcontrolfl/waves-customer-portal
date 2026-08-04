@@ -36,7 +36,11 @@ const CHANGELOG_IDENTITY = {
   version_from: 'v4.6',
   version_to: 'v4.6',
   changed_by: 'claude-2026-08-04',
-  category: 'price',
+  // 'cost' — pricing_changelog_category_check (20260417000004) allows only
+  // bug/leak/rule/cost/architecture/documentation/infrastructure; a price
+  // retune is 'cost' by that taxonomy (codex #3190 P1 — 'price' would
+  // violate the CHECK and fail the deploy mid-migration).
+  category: 'cost',
   summary: 'Lawn brackets re-gridded at 500 sqft with sub-3,000 taper; basic/4x tier fully retired.',
 };
 

@@ -13772,14 +13772,19 @@ function mergeAskChips(categories = []) {
 function treeShrubTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
   if (raw.includes('light') || raw === '4' || raw === '4x') return 'light';
-  if (raw.includes('standard') || raw === '6' || raw === '6x') return 'standard';
+  // Application-count label names (owner 2026-08-04: Standard/Enhanced are
+  // no longer display names) — client R.ts rows carry no machine tier key,
+  // so the new '6x applications/yr' / '9x applications/yr' names must parse
+  // here or fallback-payload public links lose their T&S tier (codex #3190
+  // P2). startsWith keeps '12x…' out of the '9x' branch below.
+  if (raw.includes('standard') || raw === '6' || raw === '6x' || raw.startsWith('6x ')) return 'standard';
   // 'enhanced' (9x) and 'premium' (12x) are retired but kept here so
   // previously-saved estimates that still carry those rows render unchanged
   // (legacy estimates aren't re-priced) AND the shared quote gate can see
   // them as retired tiers (codex P1 r5: a Premium-only ladder produced an
   // empty tierKeys set and slipped the requote gate).
-  if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
-  if (raw.includes('premium') || raw === '12' || raw === '12x') return 'premium';
+  if (raw.includes('enhanced') || raw === '9' || raw === '9x' || raw.startsWith('9x ')) return 'enhanced';
+  if (raw.includes('premium') || raw === '12' || raw === '12x' || raw.startsWith('12x ')) return 'premium';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
