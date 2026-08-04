@@ -1907,6 +1907,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   invoice_attachments: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260401000078.
   appointment_reminders: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260705010060.
+  termite_bonds: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2181,6 +2183,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // the snapshot was over cap — fail closed. Pre-upgrade journals lack
       // the key entirely and keep the timestamp heuristic.
       const premergeBilling = recorded.winner_premerge_billing_ids || null;
+      let winnerInvoiceIdsForAttempts = [];
       for (const table of ['invoices', 'payments']) {
         let rows = [];
         try {
@@ -2190,6 +2193,7 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         } catch (e) {
           refuse(`Cannot verify ${table} against the transferred Stripe profile (${e.message}) — refusing to revert`);
         }
+        if (table === 'invoices') winnerInvoiceIdsForAttempts = rows.map((r) => r.id);
         let charged;
         if (premergeBilling && Object.prototype.hasOwnProperty.call(premergeBilling, table)) {
           if (premergeBilling[table] === null) {
@@ -2214,6 +2218,30 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         }
         if (charged) {
           refuse(`${charged} ${table} row(s) were created on the kept customer since the merge while it held the transferred Stripe profile — moving the profile back would hand its transaction history to the restored customer; reconcile in Stripe first, then revert`);
+        }
+      }
+      // In-flight saved-card charges (r27): claimInvoiceSavedCardCharge
+      // commits a durable claim WITHOUT touching the invoice row, and the
+      // charge path has already captured stripeCustomerId — returning the
+      // profile while a claim is unresolved would land the kept customer's
+      // charge on the restored customer's Stripe profile. The partial
+      // index's own definition of live: resolved_at IS NULL and status
+      // claimed/ambiguous.
+      if (winnerInvoiceIdsForAttempts.length) {
+        let unresolvedAttempts = 0;
+        try {
+          const attemptRow = await trx('stripe_invoice_charge_attempts')
+            .whereIn('invoice_id', winnerInvoiceIdsForAttempts)
+            .whereNull('resolved_at')
+            .whereIn('status', ['claimed', 'ambiguous'])
+            .count('id as n')
+            .first();
+          unresolvedAttempts = Number(attemptRow?.n || 0);
+        } catch (e) {
+          refuse(`Cannot verify in-flight saved-card charge attempts (${e.message}) — refusing to revert`);
+        }
+        if (unresolvedAttempts) {
+          refuse(`${unresolvedAttempts} saved-card charge attempt(s) on the kept customer's invoices are still unresolved — a charge is mid-flight on the transferred Stripe profile; let it settle, then revert`);
         }
       }
     }
@@ -2476,6 +2504,25 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       });
       if (strandedReminders) {
         refuse(`${strandedReminders} appointment reminder(s) for this merge's visits are outside its journal — moving the visits back would leave their reminders pointing at the kept customer; reconcile by hand`);
+      }
+      // Termite bonds (r27): the lifecycle sweep materializes a bond row
+      // from a completed bond visit LATER, without touching the visit — an
+      // unjournaled winner-owned bond on a journaled visit would keep the
+      // renewal sweep billing the kept customer for the restored
+      // customer's bond.
+      let bondRows = [];
+      try {
+        bondRows = await trx('termite_bonds')
+          .whereIn('scheduled_service_id', journaledVisitIdsAll)
+          .select(['id', ...activityColumnsFor('termite_bonds')]);
+      } catch (e) {
+        refuse(`Cannot verify termite bonds for this merge's visits (${e.message}) — refusing to revert`);
+      }
+      const strandedBonds = countActivityRows(bondRows, {
+        journaledIds: journaledIdsFor('termite_bonds'), mergeAt, table: 'termite_bonds',
+      });
+      if (strandedBonds) {
+        refuse(`${strandedBonds} termite bond(s) for this merge's visits are outside its journal — moving the visits back would leave the bond on the kept customer; reconcile by hand`);
       }
     }
 
@@ -2783,6 +2830,18 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // vacating to null here. Pre-upgrade journals lack the key and keep the
     // old behavior (clear-to-null / stay-cleared).
     const priorValues = recorded.winner_prior_values || {};
+    // The ADDRESS is an atomic tuple (r27): the forward merge backfills it
+    // whole, and clearing its unchanged members while preserving one an
+    // operator edited (a corrected ZIP) would strand a partial mixed
+    // address — a ZIP with no street — that scheduling/dispatch then
+    // resolves against. If ANY member changed since the merge, the WHOLE
+    // tuple stays (every member skips as changed-since-merge).
+    const ADDRESS_TUPLE_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+    const backfilledTupleFields = ADDRESS_TUPLE_FIELDS.filter((f) =>
+      Object.prototype.hasOwnProperty.call(backfills, f)
+      && !Object.prototype.hasOwnProperty.call(priorValues, f)
+      && backfills[f] !== null && backfills[f] !== undefined);
+    const addressTupleChanged = backfilledTupleFields.some((f) => !backfillValueUnchanged(winner[f], backfills[f]));
     for (const [field, value] of Object.entries(backfills)) {
       if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;
       // Restored (not just vacated) by the prior-values pass below.
@@ -2790,6 +2849,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // Null backfills (e.g. the consent-stamp clear) copied nothing onto
       // the winner — there is nothing to vacate.
       if (value === null || value === undefined) continue;
+      if (addressTupleChanged && ADDRESS_TUPLE_FIELDS.includes(field)) {
+        skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
+        continue;
+      }
       if (backfillValueUnchanged(winner[field], value)) {
         winnerPatch[field] = null;
       } else {

@@ -881,6 +881,9 @@ describe('revertMerge', () => {
       if (table === 'payments' && q.called('whereRaw')) {
         return (tables.payments && tables.payments.invoiceChildren) || [];
       }
+      // count().first() probes (the r27 charge-attempt gate) — checked
+      // BEFORE the generic invoice_id child branch, which also matches.
+      if (q.called('count')) return (tables[table]?.countQueue || []).shift() ?? { n: 0 };
       // Invoice-child probes (credit ledger, payment plans) key on
       // invoice_id — generic so a new child probe can't dodge the stub.
       if (q.called('whereIn') && q.args('whereIn')?.[0] === 'invoice_id') {
@@ -2166,6 +2169,51 @@ describe('revertMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/too numerous to snapshot/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('an inherited address reverts as ONE tuple — an operator-edited member preserves the whole address (r27)', async () => {
+    // The forward merge backfills the address atomically; clearing the
+    // unchanged members around an operator's ZIP correction would strand
+    // a ZIP with no street for dispatch to resolve against.
+    const journal = baseJournal();
+    journal.winner_backfills = {
+      ...journal.winner_backfills,
+      address_line1: '9 Inherited Way', city: 'Sampletown', zip: '00009',
+    };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), address_line1: '9 Inherited Way', city: 'Sampletown', zip: '34209' }, // operator fixed the ZIP
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch.address_line1).toBeUndefined();
+    expect(state.winnerPatch.city).toBeUndefined();
+    expect(state.winnerPatch.zip).toBeUndefined();
+    const skippedKeys = result.skipped.map((sk) => sk.key);
+    expect(skippedKeys).toEqual(expect.arrayContaining([
+      'customers.address_line1', 'customers.city', 'customers.zip',
+    ]));
+  });
+
+  it('refuses the profile return while a saved-card charge attempt is unresolved (r27)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.winner_premerge_billing_ids = { invoices: ['inv-pre'], payments: [] };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'], probeRows: [{ id: 'inv-1' }, { id: 'inv-pre', created_at: '2026-07-01T00:00:00Z' }] },
+        stripe_invoice_charge_attempts: { countQueue: [{ n: 1 }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/charge attempt.*unresolved|unresolved.*charge/) });
     expect(state.journalUpdate).toBe(null);
   });
 

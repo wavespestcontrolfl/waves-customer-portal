@@ -316,6 +316,18 @@ router.get('/merges', async (req, res) => {
             row: c,
           })));
         }
+        // Annual-prepay terms link through prepay_invoice_id, not
+        // invoice_id (r27 P2) — without this the page offered an Undo the
+        // endpoint's term child probe deterministically 409s.
+        {
+          const termRows = await db('annual_prepay_terms')
+            .whereIn('prepay_invoice_id', allJournaledInvoiceIds)
+            .select(['id', 'prepay_invoice_id', ...activityColumnsFor('annual_prepay_terms')]);
+          invoiceChildrenByTable.set('annual_prepay_terms', termRows.map((c) => ({
+            invoiceIds: [c.prepay_invoice_id].filter(Boolean),
+            row: c,
+          })));
+        }
       } catch (invErr) {
         invoiceActivityLookupFailed = true;
         logger.warn(`[admin-customer-duplicates] invoice-activity lookup for revertible flags failed (marking affected merges non-revertible): ${invErr.message}`);
@@ -445,7 +457,7 @@ router.get('/merges', async (req, res) => {
               }) > 0;
               // 2. Payment children outside the journal (invoiceChildProbes).
               if (!invoiceActivityRefuses) {
-                for (const childTable of ['payments', 'customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences', 'stripe_orphan_charges', 'invoice_attachments']) {
+                for (const childTable of ['payments', 'customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences', 'stripe_orphan_charges', 'invoice_attachments', 'annual_prepay_terms']) {
                   const childRows = (invoiceChildrenByTable.get(childTable) || [])
                     .filter((c) => c.invoiceIds.some((id) => journaledInvoiceIds.has(id)))
                     .map((c) => c.row);

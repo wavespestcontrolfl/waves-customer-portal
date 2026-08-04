@@ -788,15 +788,21 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       await fileCoverageException(term, 'window_conflict',
         `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} now overlaps another job. The visit is on the schedule without a time — re-slot it with the customer.`);
     }
-    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — TRY-lock, same
-    // degrade posture as the occupancy try-lock above: activation already
-    // holds invoice/term row locks, and a merge-undo holds customer-comms
-    // while FOR-UPDATE-ing journaled invoices, so a blocking acquire here
-    // can deadlock. On miss, proceed unfenced and log — the residual is an
-    // undo of this exact customer mid-transaction at this instant, and it
-    // degrades comms routing only.
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — TRY-lock:
+    // activation already holds invoice/term row locks, and a merge-undo
+    // holds customer-comms while FOR-UPDATE-ing journaled invoices, so a
+    // blocking acquire here can deadlock. A miss NEVER seeds unfenced
+    // (r27): the undo cannot see the uncommitted visit in its absence
+    // probes and buildInsert snapshots neither address nor contacts.
+    // Seeding DEFERS instead — ensureCoverageRowsForTerm is idempotent and
+    // re-runs on every term refresh (activation retries, renewal sweeps),
+    // and the deduped coverage exception keeps it office-visible if no
+    // refresh comes.
     if (!(await tryLockCustomerComms(trx, term.customer_id))) {
-      logger.warn(`[annual-prepay] term ${term.id} customer-comms lock busy (merge-undo in flight?) — seeding unfenced`);
+      logger.warn(`[annual-prepay] term ${term.id} customer-comms lock busy (merge-undo in flight) — deferring visit seeding; the next term refresh retries`);
+      await fileCoverageException(term, 'comms_lock_busy',
+        'A customer-merge undo was in flight while seeding this term\'s visits — seeding deferred; the next term refresh retries automatically. If the visits are still missing tomorrow, re-save the term.');
+      return null;
     }
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
     return row;
@@ -896,12 +902,17 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         ? await seedTimedFirstVisit(conn, scheduledDate)
         : await conn.transaction((trx) => seedTimedFirstVisit(trx, scheduledDate));
     } else if (conn.isTransaction) {
-      // Same try-lock degrade as seedTimedFirstVisit: the activation trx
-      // already holds invoice/term rows (rung-6 note there).
+      // Same try-lock DEFER as seedTimedFirstVisit (r27): a miss never
+      // seeds unfenced — the date stays unseeded and the next idempotent
+      // term refresh seeds it post-undo.
       if (!(await tryLockCustomerComms(conn, term.customer_id))) {
-        logger.warn(`[annual-prepay] term ${term.id} customer-comms lock busy (merge-undo in flight?) — seeding unfenced`);
+        logger.warn(`[annual-prepay] term ${term.id} customer-comms lock busy (merge-undo in flight) — deferring visit seeding; the next term refresh retries`);
+        await fileCoverageException(term, 'comms_lock_busy',
+          'A customer-merge undo was in flight while seeding this term\'s visits — seeding deferred; the next term refresh retries automatically. If the visits are still missing tomorrow, re-save the term.');
+        created = null;
+      } else {
+        [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
       }
-      [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
     } else {
       // Fresh transaction holds nothing yet — a blocking rung-6 acquire is
       // safe here (utils/customer-comms-lock.js).
