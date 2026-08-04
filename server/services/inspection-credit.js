@@ -27,6 +27,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { postCreditMovement } = require('./customer-credit');
+const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
 
 // A booking in one of these states never earns a redemption — a cancelled
 // or no-showed visit is not the service the credit was promised toward.
@@ -93,30 +94,16 @@ function etDateOnlyToDate(value) {
  */
 function etEndOfDayAfterDays(from, days) {
   const base = from instanceof Date ? from : new Date(from);
-  const target = new Date(base.getTime() + Number(days) * 24 * 60 * 60 * 1000);
-  const etDate = target.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  // The exclusive end is ET midnight of the FOLLOWING day. ET is UTC-4 or
-  // UTC-5 depending on DST, so try both and keep whichever actually reads
-  // as 00:00 in New York — hardcoding either offset lands an hour early or
-  // an hour late half the year.
-  const dayAfter = new Date(`${etDate}T12:00:00Z`);
-  dayAfter.setUTCDate(dayAfter.getUTCDate() + 1);
-  const nextEtDate = dayAfter.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  // Identify midnight by DATE BOUNDARY, not by formatting the hour: with
-  // hour12:false some ICU builds render midnight as "24:00", so a
-  // string check for "00:00" silently fell through to the fallback on CI
-  // and expired the promise an hour into the named day.
-  const etDayOf = (d) => d.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-  for (const offset of ['04:00:00', '05:00:00']) {
-    const candidate = new Date(`${nextEtDate}T${offset}Z`);
-    // Midnight is the first instant of nextEtDate: the instant itself is
-    // on that day, and one second earlier is still the previous day.
-    if (etDayOf(candidate) === nextEtDate
-      && etDayOf(new Date(candidate.getTime() - 1000)) === etDate) {
-      return candidate;
-    }
-  }
-  return new Date(`${nextEtDate}T05:00:00Z`);
+  // ET CALENDAR-day arithmetic (addETDays), never fixed 24-hour periods
+  // (pre-push P1 r18): a late-evening `from` crossing a DST boundary
+  // shifts the wall clock an hour, and a 24h-multiple then derives a
+  // calendar date one day off the promised "N days" — an 11:30pm EST
+  // closeout crossing spring-forward printed day N+1.
+  const lastDay = addETDays(base, Number(days));
+  const dayAfter = addETDays(lastDay, 1);
+  // The exclusive end is ET midnight of the FOLLOWING day, DST-resolved
+  // by the repo helper rather than by probing fixed offsets.
+  return parseETDateTime(`${etDateString(dayAfter)}T00:00:00`);
 }
 
 function windowMs(days) {
@@ -1076,6 +1063,7 @@ function inspectionCreditReceiptMemo({ amount, expiresAt } = {}) {
 
 module.exports = {
   etDateOnlyToDate,
+  etEndOfDayAfterDays,
   markBookingForInspectionCredit,
   recordInspectionCreditOffer,
   reverseInspectionCreditForBooking,

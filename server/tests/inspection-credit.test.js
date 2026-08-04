@@ -505,6 +505,30 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('will retry next sweep'));
   });
 
+  describe('etEndOfDayAfterDays — ET calendar days, never 24h multiples (r18 pre-push P1)', () => {
+    const { etEndOfDayAfterDays } = require('../services/inspection-credit');
+    const etString = (d) => d.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+
+    it('a late-evening EST closeout crossing spring-forward keeps the calendar contract', () => {
+      // Mar 7 2026 11:30pm EST + 30 ET days = Apr 6; exclusive end = Apr 7 00:00 ET.
+      // The 24h-multiple version drifted to 12:30am Apr 7 and printed Apr 7.
+      const end = etEndOfDayAfterDays(new Date('2026-03-08T04:30:00Z'), 30);
+      expect(etString(end)).toBe('4/7/2026, 00:00:00');
+    });
+
+    it('a late-evening EDT closeout crossing fall-back keeps the calendar contract', () => {
+      // Oct 31 2026 11:30pm EDT + 30 ET days = Nov 30; end = Dec 1 00:00 ET.
+      const end = etEndOfDayAfterDays(new Date('2026-11-01T03:30:00Z'), 30);
+      expect(etString(end)).toBe('12/1/2026, 00:00:00');
+    });
+
+    it('the plain mid-season case is unchanged', () => {
+      // Aug 3 + 30 = Sep 2; end = Sep 3 00:00 ET.
+      const end = etEndOfDayAfterDays(new Date('2026-08-03T16:00:00Z'), 30);
+      expect(etString(end)).toBe('9/3/2026, 00:00:00');
+    });
+  });
+
   it('a transient reversal fault never raises the billing alert — the sweep retries it (r18 P2)', () => {
     // A deadlock or dropped connection is NOT "the money is gone": the
     // balance may fully cover the reversal, and telling the office to
