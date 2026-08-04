@@ -111,7 +111,13 @@ const SERVICE_KEY_RULES = {
   pest_general_monthly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   pest_general_quarterly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   pest_general_semiannual: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  pest_re_service: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Callback for breakthrough pressure — an interior-only re-service
+  // (kitchen/bath breakthrough) must not publish a perimeter map, so the
+  // RENDER verdict requires recorded exterior area/action evidence from
+  // the generic completion (codex P1 r13). Capture stays permissive.
+  pest_re_service: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresExteriorAreas: true,
+  },
   one_time_pest_control: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   pest_initial_cleanout: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   // Broadcast bait + mound drench priced by LAWN square footage (codex P1
@@ -200,11 +206,15 @@ const INELIGIBLE_NAME_RES = [
 ];
 const ELIGIBLE_NAME_RES = [
   [/\b(?:lawn|turf|fertiliz\w*)\b/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
+  // Yard-geometry families FIRST (codex P2 r13): identity-less fire-ant/
+  // tick/flea rows must resolve the same outline geometry their stable
+  // rules define, not the generic spray token below.
+  [/\b(?:fire\s*ants?|ticks?|fleas?)\b/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
   // Ranked ABOVE the bait check below: combined names like "Quarterly
   // Pest + Termite Bait Station" are pest-PRIMARY bundles — the spray is
   // real (codex P1 r1). A pure "Termite Bait" name matches neither of
   // these and falls to the bait rule.
-  [/\b(?:pest|mosquito|spray|trees?|shrubs?|fleas?|ticks?|roach(?:es)?|ants?|wasps?|bees?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
+  [/\b(?:pest|mosquito|spray|trees?|shrubs?|roach(?:es)?|ants?|wasps?|bees?)\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
 ];
 const TRAILING_INELIGIBLE_NAME_RES = [
   [/\bbait\b/i, 'bait_station_lane'],
@@ -271,12 +281,23 @@ function recordedAppliedWork(typedValues) {
  */
 function resolveTraceEligibility({
   serviceKey = null, findingsType = null, displayName = '', typedValues = undefined,
+  renderAreas = undefined,
 } = {}) {
   const applyConditions = (rule, source) => {
     if (rule.eligible && rule.requiresExteriorChip
       && typedValues !== undefined && !recordedExteriorWork(typedValues)) {
       return {
         eligible: false, variant: null, captionKey: null, reason: 'no_exterior_work_recorded',
+      };
+    }
+    // Generic-lane exterior evidence (codex P1 r13): render requires an
+    // exterior-ish recorded area/action; absent data fails closed at
+    // render, capture stays permissive (renderAreas undefined).
+    if (rule.eligible && rule.requiresExteriorAreas
+      && renderAreas !== undefined
+      && !/exterior|perimeter|yard|lawn|foundation|eaves|soffit|outside|garage door|fence/i.test(String(renderAreas || ''))) {
+      return {
+        eligible: false, variant: null, captionKey: null, reason: 'no_exterior_area_recorded',
       };
     }
     // Chip-matched lanes (codex P1 r11): at render, at least one recorded
@@ -402,11 +423,15 @@ function combineLineVerdicts(primaryVerdict, addonVerdicts = []) {
 // Resolve the add-on lines' verdicts for a scheduled service: catalog key
 // when the services row resolves, display name otherwise. Fail-soft — an
 // addon lookup error contributes nothing (the primary verdict stands).
-async function resolveAddonVerdicts(scheduledServiceId, knex) {
+async function resolveAddonVerdicts(scheduledServiceId, knex, { renderSide = false } = {}) {
   if (!scheduledServiceId || !knex) return [];
   try {
     const addons = await knex('scheduled_service_addons')
       .where({ scheduled_service_id: scheduledServiceId })
+      // Same deterministic order the capture feeds use — the first
+      // eligible add-on supplies the variant, so the report/PDF/re-entry
+      // pick must match the one the mapper keyed off (codex P2 r13).
+      .orderBy('created_at', 'asc')
       .select('service_id', 'service_name');
     if (!addons.length) return [];
     const catalogIds = [...new Set(addons.map((a) => a.service_id).filter(Boolean))];
@@ -437,11 +462,41 @@ async function resolveAddonVerdicts(scheduledServiceId, knex) {
         serviceKey: key,
         findingsType: (key && pointerByKey.get(key)) || null,
         displayName: addon.service_name || '',
+        // RENDER-side rescue by a conditional typed add-on requires its
+        // recorded evidence — which lives in a companion snapshot this
+        // resolver does not read — so conditional add-ons stay ineligible
+        // at render (typedValues null fails their conditions closed) and
+        // permissive at capture (codex P1 r13).
+        ...(renderSide ? { typedValues: null } : {}),
       });
     });
   } catch {
     return [];
   }
+}
+
+// The generic completion's recorded areas/actions, joined for the
+// requiresExteriorAreas render check: areas_serviced (JSON array or raw)
+// plus structured_notes.areasTreated. Fail-soft — unparseable fields
+// contribute their raw string.
+function renderAreasFromRecord(record) {
+  const parts = [];
+  try {
+    const areas = typeof record?.areas_serviced === 'string'
+      ? JSON.parse(record.areas_serviced)
+      : record?.areas_serviced;
+    if (Array.isArray(areas)) parts.push(...areas.map(String));
+    else if (areas) parts.push(String(areas));
+  } catch { parts.push(String(record?.areas_serviced || '')); }
+  try {
+    const structured = typeof record?.structured_notes === 'string'
+      ? JSON.parse(record.structured_notes || '{}')
+      : (record?.structured_notes || {});
+    const treated = structured?.areasTreated;
+    if (Array.isArray(treated)) parts.push(...treated.map(String));
+    else if (treated) parts.push(String(treated));
+  } catch { /* nothing more to add */ }
+  return parts.filter(Boolean).join(', ');
 }
 
 /**
@@ -492,11 +547,12 @@ async function resolveTraceRenderVerdict(record, knex) {
   } catch { /* label fallback stands, same as the render path */ }
   let eligibility = resolveTraceEligibility({
     serviceKey, findingsType, displayName: names, typedValues,
+    renderAreas: renderAreasFromRecord(record),
   });
   if (!eligibility.eligible) {
     eligibility = combineLineVerdicts(
       eligibility,
-      await resolveAddonVerdicts(record?.scheduled_service_id, knex),
+      await resolveAddonVerdicts(record?.scheduled_service_id, knex, { renderSide: true }),
     );
   }
   return { suppressed: !eligibility.eligible, eligibility };
@@ -506,6 +562,8 @@ module.exports = {
   resolveTraceEligibility,
   resolveTraceRenderVerdict,
   combineLineVerdicts,
+  resolveAddonVerdicts,
+  renderAreasFromRecord,
   traceEligibilityGateOn,
   traceCaptureBlockPayload,
   _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },

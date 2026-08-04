@@ -327,14 +327,43 @@ describe('classification behavior', () => {
       .toMatchObject({ eligible: false, reason: 'bait_station_lane' });
   });
 
+  test('round 13 — evidence at render for callbacks, yard names, conditional add-ons', () => {
+    // pest_re_service: capture permissive, render needs exterior areas
+    expect(resolveTraceEligibility({ serviceKey: 'pest_re_service' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_re_service',
+      renderAreas: 'Kitchen, Bathrooms',
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_area_recorded' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_re_service',
+      renderAreas: 'Kitchen, Exterior perimeter',
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({ serviceKey: 'pest_re_service', renderAreas: '' }))
+      .toMatchObject({ eligible: false, reason: 'no_exterior_area_recorded' });
+    // identity-less yard families resolve outline by NAME too
+    expect(resolveTraceEligibility({ displayName: 'Fire Ant Treatment' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({ displayName: 'Tick Control — Backyard' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({ displayName: 'Flea & Tick Yard Service' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    // conditional typed rules fail closed with null evidence — the
+    // render-side posture resolveAddonVerdicts uses for add-on lines
+    expect(resolveTraceEligibility({ findingsType: 'flea', typedValues: null }))
+      .toMatchObject({ eligible: false });
+    expect(resolveTraceEligibility({ findingsType: 'mosquito_event', typedValues: null }))
+      .toMatchObject({ eligible: false });
+  });
+
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
     for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
       expect(resolveTraceEligibility({ displayName }))
         .toMatchObject({ eligible: false, reason: 'unclassified_service' });
     }
-    // real tokens still classify
+    // real tokens still classify (yard families → outline since r13)
     expect(resolveTraceEligibility({ displayName: 'Fire Ant Treatment' }))
-      .toMatchObject({ eligible: true, variant: 'spray' });
+      .toMatchObject({ eligible: true, variant: 'outline' });
   });
 
   test('display names are the last resort, in both directions', () => {

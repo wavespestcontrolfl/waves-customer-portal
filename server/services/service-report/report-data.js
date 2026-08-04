@@ -2554,15 +2554,19 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // are the last-resort fallback. Scoped require matches this file's
   // pattern for report-time helpers.
   const {
-    resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts, traceEligibilityGateOn,
+    resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts,
+    renderAreasFromRecord, traceEligibilityGateOn,
   } = require('./trace-eligibility');
   let traceEligibility = resolveTraceEligibility({
     serviceKey: laneProfile?.serviceKey || null,
     findingsType: snapshotFindingsType || laneProfile?.findingsType || null,
     displayName: `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
     // Render side: conditional lanes (roach family) need the frozen
-    // snapshot's recorded treatment — null (no snapshot) fails closed.
+    // snapshot's recorded treatment — null (no snapshot) fails closed —
+    // and generic evidence lanes (pest_re_service) read the recorded
+    // areas/actions (codex P1 r13).
     typedValues: snapshotForTrace?.values ?? null,
+    renderAreas: renderAreasFromRecord(service),
   });
   // The customer report must reach the same multi-line verdict the PDF
   // signature and re-entry resolver reach through the shared helper — an
@@ -2572,7 +2576,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     try {
       traceEligibility = combineLineVerdicts(
         traceEligibility,
-        await resolveAddonVerdicts(service.scheduled_service_id, knex),
+        await resolveAddonVerdicts(service.scheduled_service_id, knex, { renderSide: true }),
       );
     } catch { /* primary verdict stands */ }
   }

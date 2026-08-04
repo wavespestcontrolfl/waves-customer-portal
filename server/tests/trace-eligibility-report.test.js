@@ -116,6 +116,22 @@ describe('trace suppression at report payload build', () => {
     expect(traced.captionKey).toBe('sprayPerimeter');
   });
 
+  test('gate ON: an eligible add-on line rescues the report map (round 13 — the export bug path)', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const data = await buildReportV1Data(
+      serviceRow('Termite Bait Quarterly'),
+      'token-trace-addon-rescue',
+      stubKnex({
+        treatment_zone_maps: [TRACED_ROW],
+        scheduled_service_addons: [{ service_id: null, service_name: 'Quarterly Pest Control' }],
+      }),
+      { mode: 'live' },
+    );
+    const traced = data.treatmentMap?.traced || null;
+    expect(traced).not.toBeNull();
+    expect(traced.variant).toBe('spray');
+  });
+
   test('gate ON: a lawn lane resolves the outline variant', async () => {
     process.env.GATE_TRACE_ELIGIBILITY = 'true';
     const traced = await tracedFor('Lawn Fertilization');
