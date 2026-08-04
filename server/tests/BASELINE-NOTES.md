@@ -8,6 +8,18 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-08-04 lawn 500-sqft re-grid + basic/4x retirement
+
+Owner directives 2026-08-04 (accepted/expired funnel review): lawn brackets
+re-gridded (500-sqft rows 1,500-8,000, 1,000-sqft to 12,000) with new
+sub-3,000 taper rows, st_augustine 3,000 9x softened 47 -> 44, and the
+basic/4x tier fully retired (migration `20260804200000` + changelog).
+Anchor rows keep exact prices; in-between sizes only ever move DOWN (new
+cells floor the old half-round interpolations). Golden master regenerated
+(8 of 65 cases moved — all intended taper/soften rows); local baselines
+recaptured (`CAPTURE_BASELINE=1 LOCAL=1`, one bundled-lawn case moved).
+DB baselines pending the standard post-deploy recapture.
+
 ## 2026-08-03 pest base 112 (all pest priced as light tree density)
 
 Owner ruling 2026-08-03: tree density is not a pest-pricing input and every
