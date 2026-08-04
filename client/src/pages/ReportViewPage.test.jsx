@@ -875,11 +875,14 @@ describe('lawn fungicide purpose copy', () => {
     product: { name: 'Artavia 2 SC (Azoxy)', category: 'Fungicide', active_ingredient: 'Azoxystrobin' },
   };
 
-  it('names the recorded disease targets, lowercased', () => {
+  it('names the recorded disease targets, lowercased, without claiming observation', () => {
     expect(applicationPurpose(fungicide, 'lawn')).toBe('Fungus control application');
     expect(applicationPurposeCopy(fungicide, 'lawn')).toBe(
-      'Applied to protect the turf against large patch, gray leaf spot, take-all root rot — the disease pressure documented for this lawn.',
+      'Applied to protect the turf against large patch, gray leaf spot, take-all root rot — the diseases this treatment is designed to control.',
     );
+    // Chips can be untrimmed catalog prefill (label targets) — the copy must
+    // never present them as observed/documented disease (codex P1 #3187).
+    expect(applicationPurposeCopy(fungicide, 'lawn')).not.toMatch(/documented|observed|found/i);
   });
 
   it('normalizes enum-key targets before printing', () => {

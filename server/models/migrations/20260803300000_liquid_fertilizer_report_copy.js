@@ -27,14 +27,19 @@
  * a no-op: value-matched rollbacks cannot prove authorship.
  */
 
+// Surface-neutral on purpose: several of these rows serve ornamental/plant
+// visits too (Turf & Ornamental micronutrients, the soil amendment), and
+// this field renders on the application card for whatever service line used
+// the product — "to the turf" would misdescribe a Tree & Shrub visit
+// (codex P1 #3187 r3).
 const GRANULAR_PRECAUTION = 'Granules on sidewalks or driveways are swept back into the turf or beds; watering-in follows the visit notes. No re-entry wait once watered in and dry.';
-const LIQUID_PRECAUTION = 'Applied as a liquid spray to the turf; any drift on walks or driveways is rinsed off. Watering-in follows the visit notes; no re-entry wait once dry.';
+const LIQUID_PRECAUTION = 'Applied as a liquid spray to the treated areas; any drift on walks or driveways is rinsed off. Watering-in follows the visit notes; no re-entry wait once dry.';
 
 const GRANULAR_BLEND_SUMMARY = 'A professional-grade fertilizer blend feeding the documented plants or turf — supporting density, color, root development, and recovery on a controlled release schedule.';
 const LIQUID_BLEND_SUMMARY = 'A professional-grade liquid fertilizer feeding the documented turf or plants through leaf and root uptake — supporting density, color, root development, and recovery.';
 
 const DEFICIENCY_CLAIM_SUMMARY = 'A micronutrient application that corrects the specific deficiency pattern documented on this visit — restoring leaf color and healthy new growth over the following weeks.';
-const MICRONUTRIENT_SUMMARY = 'A chelated micronutrient application supporting leaf color and healthy new growth — chelation keeps the nutrients available for the turf to take up.';
+const MICRONUTRIENT_SUMMARY = 'A chelated micronutrient application supporting leaf color and healthy new growth — chelation keeps the nutrients available for uptake.';
 
 const LIQUID_ROWS = [
   'LESCO 0-0-62 AM MOP Turfgrass Soluble Fertilize',

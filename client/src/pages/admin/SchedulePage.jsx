@@ -9795,6 +9795,11 @@ export function CompletionPanel({
   // Consecutive completion_side_effects_running retries in the current
   // submit chain — see SIDE_EFFECTS_RETRY_MS for the contract.
   const sideEffectsRetryRef = useRef(0);
+  // The exact body of the submit that opened the current retry chain: a
+  // rebuild stamps fresh volatile fields (station reference capturedAt) and
+  // the committed-attempt matcher would 409 completion_resume_payload_mismatch
+  // instead of resuming (codex P1 #3187 r3).
+  const lastSubmitBodyRef = useRef(null);
   const draftReadyRef = useRef(false);
 
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
@@ -12387,8 +12392,17 @@ export function CompletionPanel({
       if (service?.completionInvoiceAlreadySent) {
         body.invoiceAlreadySent = true;
       }
-      const result = await onSubmit(service.id, body);
+      // A side-effects retry must replay the chain-opening body byte-for-byte
+      // (same key AND same payload); every other submit sends the fresh build
+      // and becomes the new snapshot.
+      const submitBody =
+        sideEffectsRetryRef.current > 0 && lastSubmitBodyRef.current
+          ? lastSubmitBodyRef.current
+          : body;
+      lastSubmitBodyRef.current = submitBody;
+      const result = await onSubmit(service.id, submitBody);
       sideEffectsRetryRef.current = 0;
+      lastSubmitBodyRef.current = null;
       const photoResult = result?.completionPhotoUpload;
       if (photoResult?.failed > 0) {
         alert(
@@ -12444,6 +12458,14 @@ export function CompletionPanel({
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
+      // Any outcome but another quiet side-effects retry ends the retry
+      // chain — reset the chain state up front so a later MANUAL resubmit
+      // never replays the stale snapshot body over fresh edits; the retry
+      // branch below restores both from these locals.
+      const sideEffectsRetryCount = sideEffectsRetryRef.current;
+      const sideEffectsChainBody = lastSubmitBodyRef.current;
+      sideEffectsRetryRef.current = 0;
+      lastSubmitBodyRef.current = null;
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
       }
@@ -12482,20 +12504,26 @@ export function CompletionPanel({
         return;
       }
       // Committed completion, side effects still running (see the
-      // completionSideEffectsRetryPlan contract): retry the same key
-      // quietly — the button keeps showing its completing state — and only
-      // give up with honest copy after the polling window.
-      const retryPlan = completionSideEffectsRetryPlan(
-        e,
-        sideEffectsRetryRef.current,
-      );
+      // completionSideEffectsRetryPlan contract): retry the same key AND
+      // the same chain-opening body quietly — the button keeps showing its
+      // completing state — and only give up with honest copy after the
+      // polling window.
+      const retryPlan = completionSideEffectsRetryPlan(e, sideEffectsRetryCount);
       if (retryPlan?.action === "retry") {
-        sideEffectsRetryRef.current += 1;
+        sideEffectsRetryRef.current = sideEffectsRetryCount + 1;
+        lastSubmitBodyRef.current = sideEffectsChainBody;
         await new Promise((resolve) => setTimeout(resolve, retryPlan.delayMs));
         return handleSubmit(reconcileConfirmed);
       }
       if (retryPlan?.action === "give_up") {
-        sideEffectsRetryRef.current = 0;
+        // The visit is committed but its side effects may still be owed —
+        // the durable marker is what lets DispatchPageV2 reopen a COMPLETED
+        // visit's panel after a reload, so without it the give-up copy's
+        // "complete it again" instruction is impossible (codex P1 r3; same
+        // marker as backfill_invoice_mint_failed).
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage unavailable — the mounted panel's retry still works */ }
         alert(retryPlan.message);
         setSubmitting(false);
         return;
