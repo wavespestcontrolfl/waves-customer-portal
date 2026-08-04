@@ -3372,6 +3372,7 @@ export function ServiceSection({
   // a current monthly member whose accept preserves membership billing. Either
   // way the bundle card keeps its combined total (codex #3128 r6).
   billsMonthly = false,
+  waveGuardDiscountPct = null,
   selectedFrequencyKey,
   selectedAddOns = new Set(),
   onFrequencyChange,
@@ -3504,6 +3505,10 @@ export function ServiceSection({
             // palm/rodent cards badge-free, and the synthetic 'bundle'
             // fallback section never badges (see sectionTierEligible).
             waveGuardTier={sectionTierEligible ? waveGuardTier : null}
+            // Authoritative tier pct so the savings stack can corroborate the
+            // anchor gap before labeling it a WaveGuard discount (codex #3183
+            // P1) — an ambiguous gap keeps the unlabeled strike-through.
+            waveGuardDiscountPct={sectionTierEligible ? waveGuardDiscountPct : null}
             // The card corner carries the badge now — PriceCard keeps the
             // tier only for its per-row service tags.
             showTierBadge={false}
@@ -5168,6 +5173,7 @@ function EstimateViewPageInner() {
                 disabled={cardsDisabled || isLockedMirrorSection(section)}
                 renderFlags={renderFlags}
                 waveGuardTier={waveGuardTier}
+                waveGuardDiscountPct={Number(pricing.combinedRecurring?.waveGuardDiscountPct) || null}
                 // Multi-service plans embed each service's one-time work in
                 // its own box; single-service keeps the afterPrice breakdown.
                 oneTimeEmbed={services.length > 1 ? section.oneTimeContribution : null}
@@ -5205,8 +5211,11 @@ function EstimateViewPageInner() {
               2026-07-07, re-affirmed 2026-07-23) — the per-service boxes and
               the sticky book bar carry the plan's price. This renders ONLY
               to itemize a plan-wide credit (e.g. Referral Credit) and its
-              net; creditless bundles render nothing here. */}
-          {services.length > 1 ? (
+              net; creditless bundles render nothing here. When the server
+              itemized the credit INTO the per-service sections (owner ruling
+              2026-08-03: the discount shows within each section, per
+              application), this card would restate the same credit — skip. */}
+          {services.length > 1 && renderFlags.manualDiscountItemizedInSections !== true ? (
             <PlanTotalSummary
               combined={pricing.combinedRecurring}
               selectedFrequency={combinedFrequency}
