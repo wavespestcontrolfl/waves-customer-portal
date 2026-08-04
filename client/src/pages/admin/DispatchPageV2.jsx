@@ -1292,13 +1292,16 @@ export default function DispatchPageV2({
   const [checkoutService, setCheckoutService] = useState(null);
   const [paymentData, setPaymentData] = useState(null);
   const pendingPaymentAfterCompletionRef = useRef(null);
-  // Mirrors whether the completion panel is mounted, for callbacks that
+  // Mirrors WHICH visit's completion panel is mounted, for callbacks that
   // resolve AFTER the operator backed out (the onClose payment-ref drain
   // only runs at close — a later response must deliver its own handoff,
-  // codex P1 #3187 r11).
-  const completionPanelOpenRef = useRef(false);
+  // codex P1 #3187 r11). Tracking the service id, not a boolean: visit A's
+  // late response while visit B's panel is open must deliver A immediately,
+  // or B's own completion would overwrite A's entry in the singleton
+  // pending ref and A's payment modal would never show (codex P1 r13).
+  const completionPanelOpenServiceRef = useRef(null);
   useEffect(() => {
-    completionPanelOpenRef.current = !!completingService;
+    completionPanelOpenServiceRef.current = completingService?.id || null;
   }, [completingService]);
   const [editingLineService, setEditingLineService] = useState(null);
   const [prepaidService, setPrepaidService] = useState(null);
@@ -1621,11 +1624,12 @@ export default function DispatchPageV2({
           invoiceToken: r.invoiceToken,
           amount: Number(r.invoiceTotal),
         };
-        // Panel already closed (the response landed after Back): the
-        // onClose drain has already run and will not run again — deliver
-        // the payment handoff now instead of stranding it in the ref
-        // (codex P1 #3187 r11).
-        if (!completionPanelOpenRef.current) {
+        // THIS visit's panel is no longer the open one (closed, or the
+        // operator moved on to another visit): its onClose drain has run
+        // or will drain a different visit's entry — deliver the payment
+        // handoff now instead of stranding it in, or having it overwritten
+        // out of, the singleton ref (codex P1 #3187 r11 + r13).
+        if (completionPanelOpenServiceRef.current !== serviceId) {
           setPaymentData(pendingPaymentAfterCompletionRef.current);
           pendingPaymentAfterCompletionRef.current = null;
         }
