@@ -816,6 +816,43 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(alertAt).toBeGreaterThan(sentCheckAt);
   });
 
+  it('the schedule route runs the no-show seam in its ONLY reachable no-show leg (r26 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    // Fresh no_show targets are rejected (no_show_wrong_route), so a
+    // post-rejection `toStatus === 'no_show'` seam block was dead code —
+    // the idempotent already-no_show replay is the one leg that can run,
+    // and it must carry the seam.
+    const replayAt = source.indexOf('alreadyNoShow: true');
+    const seamAt = source.indexOf('no-show replay money seam');
+    expect(replayAt).toBeGreaterThan(-1);
+    expect(seamAt).toBeGreaterThan(-1);
+    expect(seamAt).toBeLessThan(replayAt); // seam precedes the replay success
+    // The unreachable block stays deleted.
+    expect(source).not.toContain('no-show invoice void sweep failed');
+  });
+
+  it('booking evidence freezes its moment at call time, not at retry time (r26 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // The post-commit retry reuses eventRow; a DB-default created_at would
+    // stamp the RETRY time and shift the ordering evidence past a deadline
+    // the booking actually beat.
+    const fnAt = source.indexOf('async function markBookingForInspectionCredit');
+    const rowAt = source.indexOf('const eventRow = {', fnAt);
+    const frozenAt = source.indexOf('created_at: new Date(),', rowAt);
+    const tryAt = source.indexOf('try {', fnAt);
+    expect(frozenAt).toBeGreaterThan(rowAt);
+    expect(frozenAt).toBeLessThan(tryAt); // frozen BEFORE the first insert attempt
+  });
+
+  it('marker-only booking paths fast-redeem after their event writes (r26 P2)', () => {
+    // A Charge Now / pay link sent before the hourly sweep would collect
+    // the full amount while the credit strands afterwards.
+    const ib = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    expect(ib).toContain("createdBy: 'system:inspection_credit_ib_booking'");
+    const confirm = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
+    expect(confirm).toContain("createdBy: 'system:inspection_credit_outbound_confirm'");
+  });
+
   it('the no-receipt office alert waits out a LIVE unpaid invoice (r24 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
     // An ordinary pay-after-service inspection has no PAID invoice at

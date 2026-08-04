@@ -1394,7 +1394,17 @@ async function createAppointment(input) {
       scheduledServiceId: appointment.id,
       source: 'intelligence_bar',
     });
-  } catch { /* evidence is best-effort; the booking stands */ }
+    // Fast redemption too, mirroring the admin-schedule/self-book paths
+    // (Codex #3178 r26 P2): the marker alone leaves the credit unminted
+    // until the hourly sweep, and a Charge Now / pay link sent in that
+    // window collects the full amount while the credit strands afterwards.
+    // Best-effort — the sweep remains the durable guarantee.
+    await require('../inspection-credit').redeemInspectionCreditForBooking({
+      customerId: customer_id,
+      scheduledServiceId: appointment.id,
+      createdBy: 'system:inspection_credit_ib_booking',
+    });
+  } catch { /* evidence/redemption are best-effort; the booking stands */ }
 
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —

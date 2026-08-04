@@ -69,6 +69,16 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       scheduledServiceId: svc.id,
       source: 'phone_call',
     });
+    // Fast redemption too, mirroring the admin-schedule/self-book paths
+    // (Codex #3178 r26 P2): confirmation is the booking moment, and a
+    // Charge Now / pay link sent before the hourly sweep would otherwise
+    // collect the full amount while the credit strands afterwards.
+    // Best-effort — the sweep remains the durable guarantee.
+    await require('./inspection-credit').redeemInspectionCreditForBooking({
+      customerId: svc.customer_id,
+      scheduledServiceId: svc.id,
+      createdBy: 'system:inspection_credit_outbound_confirm',
+    });
   } catch (e) { logger.warn(`[${routeTag}] inspection-credit booking evidence failed for ${svc.id}: ${e.message}`); }
 
   // 2. Close the originating call lead. The insert path deliberately skipped

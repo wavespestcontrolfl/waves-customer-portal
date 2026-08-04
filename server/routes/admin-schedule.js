@@ -7078,6 +7078,14 @@ router.put('/:id/status', async (req, res, next) => {
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }
+        // The invoice-void + credit-reversal seam is also recoverable here
+        // (Codex #3178 r26 P2) — this is the route's ONLY reachable
+        // no-show leg (fresh no_show targets are rejected below as
+        // no_show_wrong_route), so the idempotent replay must run the
+        // helper or a crash-lost seam stays lost until the hourly sweep.
+        try {
+          await voidOpenInvoicesForCancelledService(svc.id);
+        } catch (e) { logger.error(`[admin-schedule] no-show replay money seam failed for ${svc.id}: ${e.message}`); }
         return res.json({ success: true, alreadyNoShow: true });
       }
       return res.status(409).json({
@@ -7284,20 +7292,6 @@ router.put('/:id/status', async (req, res, next) => {
         await require('../services/appointment-card-request')
           .alertUnresolvedCancellationFee({ scheduledServiceId: svc.id, outcome: { released: false, reason: 'fee_step_error' } });
       }
-    }
-
-    // No-show: void any still-open pre-minted invoice and reverse the
-    // inspection credit IMMEDIATELY (PR #3178 r18 P1) — the credit seam
-    // rides inside the shared void helper, and this route was the one
-    // no-show surface that never called it (admin-dispatch's no-show
-    // branch does), leaving reversed money spendable until the hourly
-    // sweep. The helper is money-state-safe: applied payments and live
-    // PaymentIntents stay put, so a no-show fee already charged via the
-    // card hold is untouched. Best-effort — never fail the committed flip.
-    if (toStatus === 'no_show') {
-      try {
-        await voidOpenInvoicesForCancelledService(svc.id);
-      } catch (e) { logger.error(`[admin-schedule] no-show invoice void sweep failed for ${svc.id}: ${e.message}`); }
     }
 
     // Outbound-callback booking confirmed by the office → arm the deferred

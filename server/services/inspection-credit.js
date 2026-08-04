@@ -324,6 +324,12 @@ async function markBookingForInspectionCredit(trx, { customerId, scheduledServic
     customer_id: customerId,
     scheduled_service_id: scheduledServiceId,
     source: source ? String(source).slice(0, 40) : null,
+    // The BOOKING moment, frozen at call time (Codex #3178 r26 P2): the
+    // post-commit retry reuses this row, and letting the DB default stamp
+    // the RETRY time would shift the ordering evidence — a booking made
+    // just inside the offer deadline whose marker recovered after the
+    // boundary would compare the wrong instant and lose its credit.
+    created_at: new Date(),
   };
   try {
     await trx.transaction(async (sp) => {
