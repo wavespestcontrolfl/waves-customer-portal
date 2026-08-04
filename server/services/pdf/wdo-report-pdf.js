@@ -358,16 +358,19 @@ function splitInaccessibleAreas(value) {
     rows[key] = rows[key] ? `${rows[key]}${joiner}${piece}` : piece;
   };
 
+  // NOTE: only ever called on a preamble or an UNLABELLED clause — never on the
+  // body of an explicit label. That is what keeps "Attic: inaccessible at
+  // exterior-facing eaves" from ticking Exterior: the body never reaches here.
+  // So a hyphenated form IS a real classification signal in this context
+  // ("Exterior-facing eaves were inaccessible" is an Exterior limitation) and
+  // must not be suppressed.
   const categoriesMentionedIn = (chunk) => {
     const lower = chunk.toLowerCase();
-    return INACCESSIBLE_ROWS.filter((row) => {
-      // A category used as a hyphenated adjective ("exterior-facing eaves") is
-      // describing a location, not claiming that category as its own area — so
-      // a hyphen followed by a word normally disqualifies a match. "Crawl-space"
-      // is the exception: there the hyphen is part of the category's own name.
-      if (row.key === 'crawlspace') return /\bcrawl[-\s]?spaces?\b|\bcrawl\b(?!-\w)/i.test(lower);
-      return new RegExp(String.raw`\b${row.key}\w*\b(?!-\w)`, 'i').test(lower);
-    });
+    return INACCESSIBLE_ROWS.filter((row) => (
+      row.key === 'crawlspace'
+        ? /\bcrawl[-\s]?spaces?\b|\bcrawl\b/i.test(lower)
+        : new RegExp(String.raw`\b${row.key}\w*\b`, 'i').test(lower)
+    ));
   };
 
   // Line by line, then clause by clause within a line. The blob is built by
@@ -383,7 +386,9 @@ function splitInaccessibleAreas(value) {
 
   for (const rawLine of text.split('\n')) {
     const line = rawLine.trim();
-    if (!line) continue;
+    // A blank line is a paragraph boundary between separate entries — the next
+    // one is a new limitation, not a continuation of the last row.
+    if (!line) { lastKey = null; continue; }
 
     const clauses = line.split(';');
     for (let ci = 0; ci < clauses.length; ci += 1) {
@@ -415,8 +420,21 @@ function splitInaccessibleAreas(value) {
           // only the final "other:" is an explicit label. Routing it to that
           // label alone would leave the four named categories unticked.
           const named = categoriesMentionedIn(preamble);
-          if (named.length) for (const hit of named) append(hit.key, preamble);
-          else append(lastKey || marks[0].key, preamble, lastKey ? contJoiner : ' ');
+          if (named.length) {
+            // List shape: "Attic, interior, exterior, crawlspace, other: blocked
+            // by stored goods". The categories are the LIST and the text after
+            // the label is the shared REASON — so each listed row gets the
+            // reason. Writing the name list into those rows would tick four
+            // boxes whose FDACS rows state no limitation at all.
+            const reason = clause.slice(marks[0].bodyStart).trim();
+            const markKeys = new Set(marks.map((mk) => mk.key));
+            for (const hit of named) {
+              if (markKeys.has(hit.key)) continue; // the marks loop fills these
+              append(hit.key, reason || preamble);
+            }
+          } else {
+            append(lastKey || marks[0].key, preamble, lastKey ? contJoiner : ' ');
+          }
         }
         marks.forEach((mark, i) => {
           const end = i + 1 < marks.length ? marks[i + 1].start : clause.length;

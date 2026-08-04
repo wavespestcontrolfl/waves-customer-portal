@@ -551,3 +551,48 @@ describe('wdo-report-pdf Section 3 — category lists, wrapped lines, crawl-spac
     expect([...ticked]).toEqual(['attic']);
   });
 });
+
+// Codex #3188 round 5.
+describe('wdo-report-pdf Section 3 — shared reasons, standalone adjectives, paragraph breaks', () => {
+  const { splitInaccessibleAreas } = _private;
+
+  // P1: ticking a row whose FDACS line states no limitation is not a disclosure.
+  test('a listed category gets the shared REASON, not the category name list', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Attic, interior, exterior, crawlspace, other: blocked by stored goods'
+    );
+    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior', 'interior', 'other']);
+    for (const key of ['attic', 'interior', 'exterior', 'crawlspace', 'other']) {
+      expect(rows[key]).toBe('blocked by stored goods');
+    }
+  });
+
+  // P2: a hyphenated category IS the classification when it stands alone.
+  test('standalone hyphenated description classifies by its category', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Exterior-facing eaves were inaccessible');
+    expect([...ticked]).toEqual(['exterior']);
+    expect(rows.exterior).toBe('Exterior-facing eaves were inaccessible');
+  });
+
+  // ...but inside an explicit label it is still just prose. This holds
+  // structurally: a labelled body never reaches the mention matcher.
+  test('hyphenated adjective inside a labelled row still does not tick its category', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Attic: inaccessible at exterior-facing eaves due to insulation');
+    expect([...ticked]).toEqual(['attic']);
+    expect(rows.attic).toBe('inaccessible at exterior-facing eaves due to insulation');
+  });
+
+  // P2: a blank line separates entries; only a single wrapped line continues.
+  test('a blank line ends the carried row', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Attic: blocked by insulation\n\nLocked utility shed was not inspected');
+    expect([...ticked].sort()).toEqual(['attic', 'other']);
+    expect(rows.attic).toBe('blocked by insulation');
+    expect(rows.other).toBe('Locked utility shed was not inspected');
+  });
+
+  test('a single wrapped line still continues the row', () => {
+    const { rows } = splitInaccessibleAreas('Attic: blocked by insulation\nand HVAC ductwork');
+    expect(rows.attic).toBe('blocked by insulation and HVAC ductwork');
+    expect(rows.other).toBeUndefined();
+  });
+});
