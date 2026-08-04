@@ -469,7 +469,7 @@ describe('email template automation executor', () => {
     // Recorded for audit, but SKIPPED — a skipped row fails executeRun's
     // status claim, so no delivery to the stale address can follow.
     expect(inserted.status).toBe('skipped');
-    expect(inserted.exit_reason).toMatch(/different live customer/);
+    expect(inserted.exit_reason).toMatch(/restored to the merged-away customer/);
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 

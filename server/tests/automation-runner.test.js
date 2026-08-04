@@ -379,7 +379,35 @@ describe('automation runner enrollment reactivation', () => {
       templateKey: 'flea',
       customer: { id: 'cust-1', email: 'inherited@example.com', first_name: 'Megan' },
     });
-    expect(result).toEqual({ enrolled: false, reason: 'address belongs to another live customer (stale pre-undo address)' });
+    expect(result).toEqual({ enrolled: false, reason: 'address was restored to the merged-away customer by an undo (stale pre-undo address)' });
+  });
+
+  test('a SUPPORTED shared/different-by-design address still enrolls — another holder with NO undone-merge link is not staleness (r30)', async () => {
+    const { enrollCustomer } = require('../services/automation-runner');
+    const reactivateUpdate = chain();
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-2' }]);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'flea', name: 'Flea Treatment', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      customers: [
+        // Row's own email differs (tenant-under-landlord shape)...
+        chain({ first: { id: 'cust-1', email: 'landlord@example.com', deleted_at: null } }),
+        // ...and the tenant has their own live customer record.
+        chain({ first: { id: 'cust-tenant' } }),
+      ],
+      // No undone merge links cust-1 → cust-tenant: supported, not stale.
+      customer_merge_journal: [chain({ first: undefined })],
+      automation_enrollments: [
+        chain({ first: { id: 'enr-2', status: 'completed', email: 'old@example.com' } }),
+        reactivateUpdate,
+      ],
+    });
+    const result = await enrollCustomer({
+      templateKey: 'flea',
+      customer: { id: 'cust-1', email: 'tenant@example.com', first_name: 'Tessa' },
+    });
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-2' });
   });
 });
 

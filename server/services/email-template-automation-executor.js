@@ -491,12 +491,28 @@ async function resolveRecipientUnderLock(conn, recipient) {
         .whereNull('deleted_at')
         .first('id');
       if (otherOwner) {
-        // Recorded (audit trail) but never sent: a 'skipped' row fails
-        // executeRun's status claim, so no delivery can follow.
-        return {
-          recipient,
-          blockReason: 'recipient address now belongs to a different live customer (stale pre-undo address)',
-        };
+        // Another holder ALONE is not staleness (r30): shared household
+        // addresses and different-by-design recipients (a tenant with
+        // their own customer record) are supported. The post-undo shape
+        // has MERGE-SPECIFIC evidence — the other holder is the restored
+        // LOSER of an undone merge whose winner is this run's customer.
+        // Only that blocks; an unreadable journal blocks too (the
+        // conservative pre-r30 posture).
+        let undoneLink = { id: 'unverifiable' };
+        try {
+          undoneLink = await conn('customer_merge_journal')
+            .where({ winner_customer_id: recipient.id, loser_customer_id: otherOwner.id })
+            .whereNotNull('undone_at')
+            .first('id');
+        } catch { /* keep the conservative block */ }
+        if (undoneLink) {
+          // Recorded (audit trail) but never sent: a 'skipped' row fails
+          // executeRun's status claim, so no delivery can follow.
+          return {
+            recipient,
+            blockReason: 'recipient address was restored to the merged-away customer by an undo (stale pre-undo address)',
+          };
+        }
       }
     }
   } catch {
@@ -575,7 +591,20 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
               .where('active', true)
               .whereNull('deleted_at')
               .first('id');
-            if (otherOwner) leadBlockReason = 'recipient address now belongs to a different live customer (stale pre-undo address)';
+            if (otherOwner) {
+              // Merge-specific evidence only (r30) — see
+              // resolveRecipientUnderLock: another holder blocks solely
+              // when it is the restored loser of an undone merge whose
+              // winner is this lead's customer.
+              let undoneLink = { id: 'unverifiable' };
+              try {
+                undoneLink = await trx('customer_merge_journal')
+                  .where({ winner_customer_id: ownerNow, loser_customer_id: otherOwner.id })
+                  .whereNotNull('undone_at')
+                  .first('id');
+              } catch { /* keep the conservative block */ }
+              if (undoneLink) leadBlockReason = 'recipient address was restored to the merged-away customer by an undo (stale pre-undo address)';
+            }
           } catch { /* unreadable → keep the payload attribution (unchanged behavior) */ }
         }
         return createRunUnlocked({

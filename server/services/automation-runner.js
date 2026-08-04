@@ -190,7 +190,21 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
           .whereNull('deleted_at')
           .first('id');
         if (otherOwner) {
-          return { enrolled: false, reason: 'address belongs to another live customer (stale pre-undo address)' };
+          // Merge-specific evidence only (r30): another holder blocks
+          // solely when it is the restored loser of an undone merge whose
+          // winner is this customer — shared household addresses and
+          // different-by-design recipients with their own customer rows
+          // are supported and still enroll.
+          let undoneLink = { id: 'unverifiable' };
+          try {
+            undoneLink = await conn('customer_merge_journal')
+              .where({ winner_customer_id: customer.id, loser_customer_id: otherOwner.id })
+              .whereNotNull('undone_at')
+              .first('id');
+          } catch { /* keep the conservative block */ }
+          if (undoneLink) {
+            return { enrolled: false, reason: 'address was restored to the merged-away customer by an undo (stale pre-undo address)' };
+          }
         }
       }
       // Names come from the POST-LOCK row when it has them (r23 P2): the

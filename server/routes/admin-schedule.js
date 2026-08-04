@@ -3242,18 +3242,25 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // abort with a retryable shape when the booking-relevant fields
       // moved (an admin reloads and re-books against the live record).
       {
+        const CONTACT_SLOT_COLS = [1, 2, 3].flatMap((n) => {
+          const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
+          return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
+        });
         const freshCustomer = await trx('customers')
           .where({ id: customerId })
-          .first('address_line1', 'address_line2', 'city', 'state', 'zip',
-            'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone');
+          .first('address_line1', 'address_line2', 'city', 'state', 'zip', ...CONTACT_SLOT_COLS);
         // The COMPLETE address tuple (r24): a merge can backfill ONLY
         // address_line2 (a street-only winner absorbing the loser's
         // apartment/unit), so a line1/city/zip comparison passes while the
         // undo clears the unit out from under the visit — dispatch would
         // go to the wrong unit.
+        // ALL FOUR members of every slot (r30): email-only service contacts
+        // are supported, and name/email/role can move while the phones stay
+        // identical — a phones-only fingerprint let the undo clear an
+        // email-only slot out from under the new visit's report recipients.
         const commsDep = (row) => [
           row?.address_line1 || '', row?.address_line2 || '', row?.city || '', row?.state || '', row?.zip || '',
-          row?.service_contact_phone || '', row?.service_contact2_phone || '', row?.service_contact3_phone || '',
+          ...CONTACT_SLOT_COLS.map((c) => row?.[c] || ''),
         ].join('|');
         if (!freshCustomer || commsDep(freshCustomer) !== commsDep(customer)) {
           const err = new Error('The customer record changed while booking (address or service contacts moved) — reload the customer and book again.');

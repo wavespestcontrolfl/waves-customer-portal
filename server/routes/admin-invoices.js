@@ -1201,6 +1201,19 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           notFound.statusCode = 404;
           throw notFound;
         }
+        // The advisory overlap lock above was keyed on the PRE-transaction
+        // owner (r30): if a merge-undo repointed the invoice while this
+        // request waited, adopting the live owner while holding the OLD
+        // owner's key would let a concurrent request holding the proper
+        // key create competing coverage terms. Restart retryably — the
+        // retry keys the lock correctly from the start.
+        if (String(lockedInvoiceRow.customer_id) !== String(invoice.customer_id)) {
+          const moved = new Error("This invoice's customer changed while creating the term (a merge was undone) — reload and try again.");
+          moved.statusCode = 409;
+          moved.isOperational = true;
+          moved.code = 'INVOICE_OWNER_CHANGED';
+          throw moved;
+        }
         const termCustomerId = lockedInvoiceRow.customer_id;
 
         if (coverageEnabled) {

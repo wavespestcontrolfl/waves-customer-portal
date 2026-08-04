@@ -1914,6 +1914,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   termite_bonds: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260716000001; /secure/:token bearer state.
   appointment_card_requests: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260530000021; public-token outline state.
+  service_outline_packets: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2586,6 +2588,11 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         { table: 'estimate_card_holds', column: 'estimate_id', label: 'card hold(s)' },
         { table: 'estimate_deposits', column: 'estimate_id', label: 'deposit(s)' },
         { table: 'scheduled_services', column: 'source_estimate_id', label: 'booked appointment(s)' },
+        // r30: a service-outline packet copies estimate_id AND the
+        // estimate's then-current customer_id, mints a public token, and
+        // never updates the estimate — moving the estimate back would
+        // record the public outline under the wrong customer.
+        { table: 'service_outline_packets', column: 'estimate_id', label: 'service outline packet(s)' },
       ];
       for (const probe of estimateChildProbes) {
         let rows = [];
@@ -2680,6 +2687,27 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       });
       if (consentActivity) {
         refuse(`${consentActivity} payment-method consent record(s) tied to the returned card(s) are outside this merge's journal — post-merge authorizations cannot be split back; revert by hand`);
+      }
+      // OPEN contracts against a returning card (r30 P0): an AutoPay
+      // authorization issued to the winner against the loser's transferred
+      // card is a LIVE bearer signing link — moving the card back before
+      // it is signed leaves the contract on the winner, and the eventual
+      // signature stores a loser-owned method in the winner's autopay
+      // while the method update matches zero rows. Signed contracts are
+      // covered by the consent probe above; open ones must refuse here.
+      let openCardContracts = 0;
+      try {
+        const row = await trx('customer_contracts')
+          .whereIn('payment_method_id', pmReturnIds)
+          .whereIn('status', ['draft', 'sent', 'viewed'])
+          .count('id as n')
+          .first();
+        openCardContracts = Number(row?.n || 0);
+      } catch (e) {
+        refuse(`Cannot verify open contracts against the returned card(s) (${e.message}) — refusing to revert`);
+      }
+      if (openCardContracts) {
+        refuse(`${openCardContracts} open AutoPay contract(s) reference the card(s) this undo returns — the issued signing link would change account ownership underneath the signer; cancel or complete the contract first, then revert`);
       }
     }
 
@@ -2919,11 +2947,18 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // prior-values members both count, with baseline = what the merge
     // left the field as (the applied backfill, else empty).
     const ADDRESS_TUPLE_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
+    // allMembers (r30): the contact copy fills only fully-EMPTY slots and
+    // records only non-empty members — an untouched slot member was
+    // therefore empty at merge time, so a NOW-populated one (an operator
+    // added the missing email) is a change even though no record names it.
+    // The address deliberately stays touched-only: its fill-if-empty
+    // per-field backfills mean an untouched address member can be a
+    // legitimately pre-existing winner value, not evidence of an edit.
     const ATOMIC_FIELD_GROUPS = [
-      ADDRESS_TUPLE_FIELDS,
-      ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
-      ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'],
-      ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'],
+      { fields: ADDRESS_TUPLE_FIELDS, allMembers: false },
+      { fields: ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'], allMembers: true },
+      { fields: ['service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact2_role'], allMembers: true },
+      { fields: ['service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact3_role'], allMembers: true },
     ];
     const memberChangedSinceMerge = (f) => {
       const appliedVal = Object.prototype.hasOwnProperty.call(backfills, f) ? backfills[f] : null;
@@ -2933,11 +2968,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     };
     const frozenGroupFields = new Set();
     for (const group of ATOMIC_FIELD_GROUPS) {
-      const touched = group.filter((f) =>
+      const touched = group.fields.filter((f) =>
         Object.prototype.hasOwnProperty.call(backfills, f)
         || Object.prototype.hasOwnProperty.call(priorValues, f));
-      if (touched.length && touched.some(memberChangedSinceMerge)) {
-        for (const f of group) frozenGroupFields.add(f);
+      if (!touched.length) continue;
+      const checkSet = group.allMembers ? group.fields : touched;
+      if (checkSet.some(memberChangedSinceMerge)) {
+        for (const f of group.fields) frozenGroupFields.add(f);
       }
     }
     for (const [field, value] of Object.entries(backfills)) {
