@@ -107,7 +107,9 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
       String(data.summary || '').replace(/^Thanks for having us out today\.\s*/i, '').trim()
     );
     const lead = /[.!?]$/.test(summaryLead) ? summaryLead : 'Routine service completed.';
-    todaysResult = `${lead} No urgent homeowner action is needed today${followUp ? ', and a follow-up is already planned' : ''}.`;
+    // No follow-up clause here (owner directive 2026-08-03): the follow-up
+    // card below carries that promise; the hero states only today's outcome.
+    todaysResult = `${lead} No urgent homeowner action is needed today.`;
     warnings.push({
       severity: 'warning',
       code: 'todays_result_overclaims_clear',

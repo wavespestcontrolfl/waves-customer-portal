@@ -105,7 +105,7 @@ describe('reconciled todaysResult leads with the visit summary', () => {
     );
     expect(result.todaysResult).toBe(
       'The front and back yards received a lawn application addressing large patch and fire ants. '
-      + 'No urgent homeowner action is needed today, and a follow-up is already planned.',
+      + 'No urgent homeowner action is needed today.',
     );
   });
 
