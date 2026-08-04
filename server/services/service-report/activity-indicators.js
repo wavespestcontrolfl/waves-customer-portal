@@ -1994,19 +1994,24 @@ function activeRecheckOnTrap(clause) {
 // discard reviewed copy — the bias this stack resolves against.
 // `once`/`as`/`after` and the rest still terminate: their clause has its
 // own subject, and binding across them was the round-15 regression.
+// EVERY trap noun gets its own phrase scan — the first noun's phrase can
+// end (at a preposition) before a later noun that carries the claim: "We
+// placed traps near traps that we inspected today" found nothing when
+// only the first `traps` was scanned (pre-push P1 on d0b30f2d5).
 function passiveRecheckOnTrap(clause) {
   const toks = words(clause);
-  const trapAt = toks.findIndex((t) => TRAP_NOUNS.test(t));
-  if (trapAt === -1) return [];
   const hits = [];
-  let inRelative = false;
-  for (let i = trapAt + 1; i < toks.length; i += 1) {
-    if (/^(?:that|which|who)$/i.test(toks[i])) { inRelative = true; continue; }
-    if (OBJECT_PHRASE_END.test(toks[i])) break;
-    const isHit = inRelative
-      ? RELATIVE_CHECK_VERB.test(toks[i])
-      : RECHECK_PARTICIPLE.test(toks[i]);
-    if (isHit) hits.push({ text: `${toks[trapAt]} … ${toks[i]}`, verbAt: i, toks });
+  for (let trapAt = 0; trapAt < toks.length; trapAt += 1) {
+    if (!TRAP_NOUNS.test(toks[trapAt])) continue;
+    let inRelative = false;
+    for (let i = trapAt + 1; i < toks.length; i += 1) {
+      if (/^(?:that|which|who)$/i.test(toks[i])) { inRelative = true; continue; }
+      if (OBJECT_PHRASE_END.test(toks[i])) break;
+      const isHit = inRelative
+        ? RELATIVE_CHECK_VERB.test(toks[i])
+        : RECHECK_PARTICIPLE.test(toks[i]);
+      if (isHit) hits.push({ text: `${toks[trapAt]} … ${toks[i]}`, verbAt: i, toks });
+    }
   }
   return hits;
 }

@@ -1964,6 +1964,15 @@ describe('exempt matches do not mask later completed claims (round 20)', () => {
   ])('allows: %s', (text) => {
     expect(setupContradictions(text)).toEqual([]);
   });
+
+  // Pre-push P1 on d0b30f2d5: the first noun's phrase can end before a
+  // later noun that carries the claim — every trap noun scans its own
+  // phrase now.
+  test('a later trap noun still carries its claim', () => {
+    expect(setupContradictions('We placed traps near traps that we inspected today.').length)
+      .toBeGreaterThan(0);
+    expect(setupContradictions('We placed traps near the existing traps.')).toEqual([]);
+  });
 });
 
 describe('capture claims with long animal descriptions reconcile (round 20)', () => {
