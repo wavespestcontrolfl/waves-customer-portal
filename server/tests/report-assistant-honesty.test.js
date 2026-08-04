@@ -118,6 +118,13 @@ describe('reconciled todaysResult leads with the visit summary', () => {
     expect(result.todaysResult).toMatch(/^We treated the full lawn for chinch bugs\./);
   });
 
+  test('abbreviation periods are not sentence boundaries ("The St." must never ship)', () => {
+    const result = reconcile('The St. Augustine lawn received a preventive fungicide application. More prose follows.');
+    expect(result.todaysResult).toMatch(
+      /^The St\. Augustine lawn received a preventive fungicide application\. No urgent/,
+    );
+  });
+
   test('an over-long first sentence falls back instead of truncating with an ellipsis', () => {
     const longSentence = `The lawn received ${'a very detailed set of applications, '.repeat(8)}covering every zone.`;
     expect(reconcile(longSentence).todaysResult).toMatch(/^Routine service completed\./);

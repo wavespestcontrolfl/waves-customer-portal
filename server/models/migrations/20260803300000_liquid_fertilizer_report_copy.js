@@ -5,14 +5,21 @@
  * liquid products rendering "Granules on sidewalks or driveways are swept
  * back into the turf or beds" in SAFETY & RE-ENTRY — copy written for
  * granular fertilizer, stamped catalog-wide. A prod sweep found the same
- * granular precaution on 10 rows whose label form is liquid or
+ * granular precaution on 9 rows whose label form is liquid or
  * water-soluble spray (name carries Liquid/Soluble, or the row duplicates
  * a "...Liquid Fertilizer" row of the same product):
  *
- *   0-0-62 AM MOP Soluble · 20-0-0 60% CRN Liquid · 20-20-20 Soluble ·
- *   6-0-0 Liquid · CarbonPro-L Liquid Soil Amendment · Chelated AM +
- *   Micros Liquid Micronutrient · Chelated Iron Plus · Green Flo 6-0-0 ·
+ *   20-0-0 60% CRN Liquid · 20-20-20 Soluble · 6-0-0 Liquid ·
+ *   CarbonPro-L Liquid Soil Amendment · Chelated AM + Micros Liquid
+ *   Micronutrient · Chelated Iron Plus · Green Flo 6-0-0 ·
  *   Green Flo Phyte Plus 0-0-26 Liquid · K-Flow 0-0-25 17% S Liquid
+ *
+ * DELIBERATELY EXCLUDED: "LESCO 0-0-62 AM MOP Turfgrass Soluble
+ * Fertilize" — despite "Soluble" in the row name, the verified label
+ * metadata (20260712100000_catalog_label_rate_backfill.js, SiteOne
+ * "granular-fertilizer-50-lb-bag", lb/1,000 sq ft rate) identifies the
+ * stocked SKU as granular, so its existing granular precaution is
+ * CORRECT (codex P1 #3187 r4).
  *
  * Two service_report_summary problems ride along on the same rows:
  *   - the fertilizer blend copy promises "a controlled release schedule" —
@@ -33,7 +40,7 @@
 // the product — "to the turf" would misdescribe a Tree & Shrub visit
 // (codex P1 #3187 r3).
 const GRANULAR_PRECAUTION = 'Granules on sidewalks or driveways are swept back into the turf or beds; watering-in follows the visit notes. No re-entry wait once watered in and dry.';
-const LIQUID_PRECAUTION = 'Applied as a liquid spray to the treated areas; any drift on walks or driveways is rinsed off. Watering-in follows the visit notes; no re-entry wait once dry.';
+const LIQUID_PRECAUTION = 'Applied as a liquid spray to the treated areas; any drift on walks or driveways is rinsed off. Watering-in follows the visit notes — treated areas are ready once dry, and your technician confirms timing.';
 
 const GRANULAR_BLEND_SUMMARY = 'A professional-grade fertilizer blend feeding the documented plants or turf — supporting density, color, root development, and recovery on a controlled release schedule.';
 const LIQUID_BLEND_SUMMARY = 'A professional-grade liquid fertilizer feeding the documented turf or plants through leaf and root uptake — supporting density, color, root development, and recovery.';
@@ -42,7 +49,6 @@ const DEFICIENCY_CLAIM_SUMMARY = 'A micronutrient application that corrects the 
 const MICRONUTRIENT_SUMMARY = 'A chelated micronutrient application supporting leaf color and healthy new growth — chelation keeps the nutrients available for uptake.';
 
 const LIQUID_ROWS = [
-  'LESCO 0-0-62 AM MOP Turfgrass Soluble Fertilize',
   'LESCO 20-0-0 60% CRN Plus Micros Turfgrass Liquid Fertilizer',
   'LESCO 20-20-20 Soluble',
   'LESCO 6-0-0 Liquid',

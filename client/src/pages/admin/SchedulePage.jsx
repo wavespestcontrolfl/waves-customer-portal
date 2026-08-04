@@ -12510,6 +12510,14 @@ export function CompletionPanel({
       // polling window.
       const retryPlan = completionSideEffectsRetryPlan(e, sideEffectsRetryCount);
       if (retryPlan?.action === "retry") {
+        // The 409 itself proves the visit is COMMITTED — persist the reopen
+        // marker now, not only at give-up: a mid-poll network/5xx error
+        // exits through the generic path with the chain state cleared, and
+        // without the marker DispatchPageV2 refuses to reopen the completed
+        // visit after a reload (codex P1 r4). Success removes it.
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage unavailable — the mounted panel's retry still works */ }
         sideEffectsRetryRef.current = sideEffectsRetryCount + 1;
         lastSubmitBodyRef.current = sideEffectsChainBody;
         await new Promise((resolve) => setTimeout(resolve, retryPlan.delayMs));
