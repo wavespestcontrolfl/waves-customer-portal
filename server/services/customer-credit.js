@@ -83,6 +83,10 @@ async function postCreditMovement({
       );
       err.statusCode = 400;
       err.isOperational = true;
+      // Typed so callers can tell "the money is genuinely gone" apart from
+      // a transient DB fault — the inspection-credit reversal alerts the
+      // office ONLY on this code (PR #3178 r18 P2).
+      err.code = 'INSUFFICIENT_CREDIT';
       throw err;
     }
 

@@ -468,7 +468,12 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
       expires_at: new Date('2099-01-01'), credit_ledger_id: 'ledger-1',
     }];
     // The credit was already spent: the ledger refuses to go negative.
-    mockPostCreditMovement.mockRejectedValueOnce(new Error('insufficient balance'));
+    // Fixture mirrors the REAL postCreditMovement throw — it stamps the
+    // typed INSUFFICIENT_CREDIT code (customer-credit.js), and the alert
+    // now keys on that code, not on failure in general (r18 P2).
+    const spent = new Error('Insufficient account credit — balance is $0.00, cannot apply $75.00');
+    spent.code = 'INSUFFICIENT_CREDIT';
+    mockPostCreditMovement.mockRejectedValueOnce(spent);
     const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ reversed: 0 });
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
@@ -487,7 +492,9 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
       id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
       expires_at: new Date('2099-01-01'), credit_ledger_id: 'ledger-1',
     }];
-    mockPostCreditMovement.mockRejectedValueOnce(new Error('insufficient balance'));
+    const spent = new Error('Insufficient account credit — balance is $0.00, cannot apply $75.00');
+    spent.code = 'INSUFFICIENT_CREDIT';
+    mockPostCreditMovement.mockRejectedValueOnce(spent);
     // notifyAdmin returns null instead of throwing when its insert fails.
     mockNotifyAdmin.mockResolvedValueOnce(null);
     const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' });
@@ -496,6 +503,25 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     // — never marked as alerted when nothing landed.
     const logger = require('../services/logger');
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('will retry next sweep'));
+  });
+
+  it('a transient reversal fault never raises the billing alert — the sweep retries it (r18 P2)', () => {
+    // A deadlock or dropped connection is NOT "the money is gone": the
+    // balance may fully cover the reversal, and telling the office to
+    // collect $75 that was never missing is a false instruction a later
+    // successful retry cannot retract. Only the typed insufficient-balance
+    // refusal alerts.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      expires_at: new Date('2099-01-01'), credit_ledger_id: 'ledger-1',
+    }];
+    mockPostCreditMovement.mockRejectedValueOnce(new Error('deadlock detected'));
+    return reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-2' }).then((res) => {
+      expect(res).toEqual({ reversed: 0 });
+      expect(mockNotifyAdmin).not.toHaveBeenCalled();
+      // No alert marker claimed either — the offer stays clean for retry.
+      expect(mockUpdates.some((p) => p.reversal_alerted_at instanceof Date)).toBe(false);
+    });
   });
 });
 

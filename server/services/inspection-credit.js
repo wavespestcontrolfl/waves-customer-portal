@@ -767,6 +767,53 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
 }
 
 /**
+ * Rebind a redeemed offer to a replacement booking, serialized against a
+ * concurrent cancellation of that replacement (PR #3178 r18 P1).
+ *
+ * The unserialized version read the candidate's liveness on the pool and
+ * then wrote the offer: cancelling A and B together could interleave so
+ * B's reversal ran while the offer still pointed at A (a no-op), after
+ * which A's rebind bound the offer to the now-cancelled B — $75 spendable
+ * until the hourly stale sweep. Here the liveness check runs under the
+ * candidate's row lock in the SAME transaction as the offer write, and the
+ * offer row is locked FIRST — the same offer→booking order
+ * redeemSpecificOffer's claim uses, so the two paths cannot deadlock.
+ * A cancel that already committed makes the FOR UPDATE read see non-live
+ * and the rebind refuses; a cancel in flight waits on our commit and then
+ * sweeps the newly-bound offer normally.
+ *
+ * Returns true only when the offer actually rebound. Never throws.
+ */
+async function rebindRedeemedOffer(offerId, bookingId) {
+  try {
+    let rebound = false;
+    await db.transaction(async (trx) => {
+      const locked = await trx('inspection_credit_offers')
+        .where({ id: offerId, status: 'redeemed' })
+        .forUpdate()
+        .first('id');
+      if (!locked) return;
+      const booking = await trx('scheduled_services')
+        .where({ id: bookingId })
+        .forUpdate()
+        .first('status');
+      if (!booking
+        || NON_LIVE_APPOINTMENT_STATUSES.includes(String(booking.status || '').toLowerCase())) {
+        return;
+      }
+      await trx('inspection_credit_offers')
+        .where({ id: offerId, status: 'redeemed' })
+        .update({ redeemed_scheduled_service_id: bookingId, updated_at: trx.fn.now() });
+      rebound = true;
+    });
+    return rebound;
+  } catch (err) {
+    logger.warn(`[inspection-credit] rebind failed for offer ${offerId} → booking ${bookingId}: ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Reverse a redemption when the booking that earned it goes non-live
  * (Codex #3175 r3 P0). NON_LIVE_APPOINTMENT_STATUSES says a cancelled or
  * no-showed visit never earns the credit — without this, minting on a
@@ -882,10 +929,7 @@ async function reverseInspectionCreditForBooking({
           to: offer.expires_at,
           excludeIds: [scheduledServiceId, offer.source_scheduled_service_id],
         });
-        if (alternate) {
-          await db('inspection_credit_offers')
-            .where({ id: offer.id, status: 'redeemed' })
-            .update({ redeemed_scheduled_service_id: alternate.id, updated_at: db.fn.now() });
+        if (alternate && await rebindRedeemedOffer(offer.id, alternate.id)) {
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live booking ${alternate.id} instead of reversing`);
           continue;
         }
@@ -911,10 +955,7 @@ async function reverseInspectionCreditForBooking({
         } catch (childErr) {
           logger.warn(`[inspection-credit] series-child probe failed for ${scheduledServiceId}: ${childErr.message}`);
         }
-        if (seriesChild) {
-          await db('inspection_credit_offers')
-            .where({ id: offer.id, status: 'redeemed' })
-            .update({ redeemed_scheduled_service_id: seriesChild.id, updated_at: db.fn.now() });
+        if (seriesChild && await rebindRedeemedOffer(offer.id, seriesChild.id)) {
           logger.info(`[inspection-credit] offer ${offer.id} rebound to live series child ${seriesChild.id} — anchor cancelled, series continues`);
           continue;
         }
@@ -954,17 +995,24 @@ async function reverseInspectionCreditForBooking({
         logger.info(`[inspection-credit] offer ${offer.id} reversed — booking ${scheduledServiceId} went non-live`);
       } catch (err) {
         if (err?.inspectionCreditSkip === 'claim_lost') continue;
-        // The credit is fungible: once spent on an invoice the balance can
-        // be below the reversal amount, and postCreditMovement refuses to
-        // go negative. That money cannot be clawed back automatically, so
-        // it becomes an OFFICE decision (collect or write off) rather than
-        // a log line nobody reads — the same posture as every other
-        // unreversible money event in this codebase (Codex #3175 r4 P0).
         logger.error(`[inspection-credit] reversal FAILED for offer ${offer.id}: ${err.message}`);
-        await alertReversalNeedsOffice(offer, scheduledServiceId, {
-          reason: 'credit_already_spent',
-          body: `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
-        });
+        // The office alert is reserved for the one failure that is a
+        // BILLING fact, not an operational one (PR #3178 r18 P2): the
+        // typed insufficient-balance refusal from postCreditMovement —
+        // the credit is fungible, so once spent the balance can't cover
+        // the reversal, the money cannot be clawed back automatically,
+        // and it becomes an OFFICE decision (collect or write off) rather
+        // than a log line nobody reads (Codex #3175 r4 P0). A deadlock,
+        // dropped connection or ledger fault is NOT that: the balance may
+        // be fine, the hourly sweep retries it, and telling the office to
+        // collect $75 that was never missing would be a false instruction
+        // a later successful retry cannot retract.
+        if (err?.code === 'INSUFFICIENT_CREDIT') {
+          await alertReversalNeedsOffice(offer, scheduledServiceId, {
+            reason: 'credit_already_spent',
+            body: `A $${round2(offer.amount).toFixed(2)} inspection credit was applied to a booking that is now cancelled, but it has already been spent — the balance can't cover the reversal. Collect it on the next invoice or write it off.`,
+          });
+        }
       }
     }
     return { reversed };

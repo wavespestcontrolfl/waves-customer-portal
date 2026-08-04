@@ -7274,6 +7274,20 @@ router.put('/:id/status', async (req, res, next) => {
       }
     }
 
+    // No-show: void any still-open pre-minted invoice and reverse the
+    // inspection credit IMMEDIATELY (PR #3178 r18 P1) — the credit seam
+    // rides inside the shared void helper, and this route was the one
+    // no-show surface that never called it (admin-dispatch's no-show
+    // branch does), leaving reversed money spendable until the hourly
+    // sweep. The helper is money-state-safe: applied payments and live
+    // PaymentIntents stay put, so a no-show fee already charged via the
+    // card hold is untouched. Best-effort — never fail the committed flip.
+    if (toStatus === 'no_show') {
+      try {
+        await voidOpenInvoicesForCancelledService(svc.id);
+      } catch (e) { logger.error(`[admin-schedule] no-show invoice void sweep failed for ${svc.id}: ${e.message}`); }
+    }
+
     // Outbound-callback booking confirmed by the office → arm the deferred
     // reminders, convert the originating call lead, resolve the review card.
     // Shared hook (services/outbound-review-confirm) so the admin-dispatch
