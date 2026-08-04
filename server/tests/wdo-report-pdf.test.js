@@ -428,7 +428,7 @@ describe('wdo-report-pdf Section 3 — text placement', () => {
     expect(new Set(all).size).toBe(all.length);
   });
 
-  test('end-to-end: a McHale-shaped report builds and stays two pages', async () => {
+  test('end-to-end: a real-filing-shaped report builds and stays two pages', async () => {
     const { PDFDocument } = require('pdf-lib');
     const project = {
       id: 'p1',
