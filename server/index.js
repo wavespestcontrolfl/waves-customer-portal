@@ -547,6 +547,10 @@ app.use('/api/public/track', require('./routes/track-public'));
 // GATE_GROWTHBOOK inside the route (404 when off), own per-route rate limit.
 app.use('/api/public/experiments', require('./routes/experiments-public'));
 app.use('/api/public/reschedule', require('./routes/reschedule-public'));
+// Customer self-serve re-service scheduler (standing customer link).
+// Token-gated on customers.reservice_token; every route 404s until
+// GATE_RESERVICE_SELF_SERVE is on.
+app.use('/api/public/reservice', require('./routes/reservice-public'));
 // Customer appointment page (24h reminder + booking confirmation link
 // target). Token-gated on the same reschedule_token; every route 404s
 // until GATE_APPOINTMENT_PAGE is on.

@@ -89,13 +89,22 @@ function isAppointmentPath(reqPath = '') {
   return /^\/appointment\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
 }
 
+// Public self-serve re-service scheduler (/reservice/<64-hex>) — the token
+// is customers.reservice_token, a STANDING bearer credential for the life of
+// the customer (like the /card token), and the page renders the customer's
+// first name and open slots around their address. Same contract as the card
+// shell: never indexed/archived, token never leaks via Referer, no caching.
+function isReservicePath(reqPath = '') {
+  return /^\/reservice\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+}
+
 function applySensitiveSpaHeaders(reqPath, res) {
   if (isServiceOutlinePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     return;
   }
-  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath)) {
+  if (isLawnReportPath(reqPath) || isPestReportPath(reqPath) || isServiceReportPath(reqPath) || isEstimatePath(reqPath) || isCardPath(reqPath) || isSecureCardPath(reqPath) || isPriceChangeNoticePath(reqPath) || isContractPath(reqPath) || isAppointmentPath(reqPath) || isReservicePath(reqPath)) {
     res.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.set('Referrer-Policy', 'no-referrer');
     res.set('Cache-Control', 'no-store');
@@ -114,4 +123,5 @@ module.exports = {
   isPriceChangeNoticePath,
   isContractPath,
   isAppointmentPath,
+  isReservicePath,
 };

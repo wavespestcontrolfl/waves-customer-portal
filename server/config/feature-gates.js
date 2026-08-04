@@ -398,6 +398,19 @@ const gates = {
   // shows. Dark until Adam flips it in prod.
   bookingCustomersOnly: isProd ? process.env.GATE_BOOKING_CUSTOMERS_ONLY === 'true' : true,
 
+  // Customer self-serve re-service scheduler — the standing /reservice/:token
+  // link (customers.reservice_token) that lets an active recurring / WaveGuard
+  // customer book their free pest/lawn re-service callback themselves, on the
+  // same route-aware availability engine as /book and /reschedule. Gates the
+  // WHOLE surface: the public route 404s, buildReserviceLink mints nothing,
+  // the portal schedule payload omits its reservice block, and the admin
+  // comms composer helper 404s. Customer-facing scheduling surface, so opt-in
+  // in EVERY environment (fail-closed ==='true', like securePlanChoice).
+  // Kill switch: unset GATE_RESERVICE_SELF_SERVE — the surface goes dark
+  // again with no data cleanup needed (booked callbacks are ordinary
+  // is_callback visits the office already manages).
+  reserviceSelfServe: process.env.GATE_RESERVICE_SELF_SERVE === 'true',
+
   // Portal "Pay now" — authenticated /billing/balance includes the
   // customer's open-invoice pay links (`openInvoices`) so the Billing tab
   // can offer the existing tokenized /pay checkout in-app instead of the

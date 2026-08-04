@@ -1292,7 +1292,18 @@ async function createSelfBooking(payload = {}) {
       payAtVisit,
       customersOnly,
       authedCustomer,
+      callbackVisit,
     } = payload;
+
+    // callbackVisit is INTERNAL-ONLY (reservice-public.js): a server-resolved
+    // { serviceKey, serviceId, serviceType, durationMinutes } describing a
+    // free re-service callback (services/re-service.js). It swaps the funnel
+    // catalog resolution for the caller's catalog row, marks the committed
+    // visit is_callback so completion never bills it, and skips the
+    // funnel-only follow-ons (signed-offer gate, card-capture step, ad
+    // attribution). Like authedCustomer/payAtVisit, it must be set AFTER the
+    // body spread at every public call site (/confirm nulls it) — a crafted
+    // body must never mint itself a free callback or skip the offer sig.
 
     if (!slot_date || !slot_start) {
       return { ok: false, status: 400, error: 'slot_date and slot_start required' };
@@ -1637,10 +1648,20 @@ async function createSelfBooking(payload = {}) {
     // window. The key preference (service_id → service_type → quoted label)
     // matches what the funnel actually posts: the catalog id rides
     // service_id; service_type carries the display label.
-    const serviceKey = normalizeBookingServiceKey(service_id)
-      || normalizeBookingServiceKey(service_type)
-      || normalizeBookingServiceKey(quoted_service_label);
-    const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
+    // A callback visit's key/duration are server-resolved by the internal
+    // caller from the re-service catalog row — the funnel normalize map
+    // deliberately does NOT know the re-service keys (they stay
+    // booking_enabled:false for the public funnel), so a public /confirm
+    // can't reach them: without callbackVisit these keys normalize to ''
+    // and fail the signed-offer gate below.
+    const serviceKey = callbackVisit
+      ? String(callbackVisit.serviceKey || '')
+      : (normalizeBookingServiceKey(service_id)
+        || normalizeBookingServiceKey(service_type)
+        || normalizeBookingServiceKey(quoted_service_label));
+    const duration = callbackVisit
+      ? resolveBookingDuration(callbackVisit.durationMinutes, config, '')
+      : resolveBookingDuration(duration_minutes, config, serviceKey);
 
     // End time is ALWAYS start + server-resolved duration. A provided
     // slot_end must agree — a forged early end would slide under the
@@ -1696,7 +1717,15 @@ async function createSelfBooking(payload = {}) {
     // public offer routes derive a key the same way) — refuse outright so a
     // sig harvested from a non-redeeming builder call (reschedule/voice
     // lookups sign with serviceKey '') can't clear this gate.
-    if (!serviceKey || !verifySlotOfferField({
+    //
+    // Internal callback bookings skip the sig: their offer proof is the
+    // CALLER's fresh single-day availability rebuild immediately before this
+    // call (the same anti-forgery model reschedule-public.js uses for its
+    // commits), and callbackVisit is unreachable from public POST bodies
+    // (/confirm pins it null after the spread). Every transactional re-check
+    // below — blackout, date bounds, geometry, day cap, conflict + global
+    // occupancy — still runs for them.
+    if (!callbackVisit && (!serviceKey || !verifySlotOfferField({
       surface: 'booking',
       scopeId: '',
       serviceKey,
@@ -1705,7 +1734,7 @@ async function createSelfBooking(payload = {}) {
       startMinutes: timeToMin(slot_start),
       technicianId: technician_id || null,
       durationMinutes: duration,
-    }, slot_sig)) {
+    }, slot_sig))) {
       return { ok: false, status: 409, error: 'That time slot is no longer available — please pick your time again.' };
     }
 
@@ -1900,7 +1929,11 @@ async function createSelfBooking(payload = {}) {
     // posted values, then from the server-side estimate row. A crafted
     // ?service_label= string ("FREE Termite Treatment call 941-…") must never
     // land on the confirmation page, owner SMS, or dispatch surfaces.
-    const resolvedServiceType = canonicalBookingServiceLabel(serviceKey)
+    // Internal callback bookings carry a server-owned catalog name (the
+    // caller read it from the services row) — same trust level as the
+    // allowlist labels, never client-influenced.
+    const resolvedServiceType = (callbackVisit && cleanBookingServiceLabel(callbackVisit.serviceType))
+      || canonicalBookingServiceLabel(serviceKey)
       || canonicalBookingServiceLabel(quoted_service_label)
       || canonicalBookingServiceLabel(service_type)
       || cleanBookingServiceLabel(estimate?.services?.[0])
@@ -2221,6 +2254,17 @@ async function createSelfBooking(payload = {}) {
         // flag so the visit invoices on completion; the AMOUNT still comes from
         // estimated_price (projectCompletionInvoiceAmount returns it first).
         create_invoice_on_complete: paymentPref === 'pay_at_visit',
+        // Free re-service callback (internal callers only — see callbackVisit
+        // in the payload contract): the persisted is_callback flag is what
+        // drives callback reporting AND the completion path's monthly-dues
+        // invoice suppression (same server-side derivation admin-schedule
+        // performs from the catalog row); service_id keys completion-profile
+        // resolution to the re-service catalog row.
+        ...(callbackVisit ? {
+          is_callback: true,
+          service_id: callbackVisit.serviceId || null,
+          create_invoice_on_complete: false,
+        } : {}),
       }).returning('*');
 
       // Mark abandoned-booking recovery intents converted ATOMICALLY with the
@@ -2489,8 +2533,14 @@ async function createSelfBooking(payload = {}) {
       const startLabel = minToTime12(timeToMin(slot_start));
 
       if (process.env.ADAM_PHONE) {
+        // Callbacks announce themselves as what they are — the office reads
+        // "re-service" and knows the 5-business-day callback protocol
+        // (original tech first) applies, instead of parsing a generic booking.
+        const alertHead = callbackVisit
+          ? '🔁 Free re-service self-booked:'
+          : '📱 New self-booked appointment:';
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
-          `📱 New self-booked appointment:\n${customer.first_name} ${customer.last_name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city}\nSource: ${source || 'portal'}\nCode: ${confCode}`,
+          `${alertHead}\n${customer.first_name} ${customer.last_name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city}\nSource: ${source || 'portal'}\nCode: ${confCode}`,
           { messageType: 'internal_alert' }
         );
       }
@@ -2557,21 +2607,26 @@ async function createSelfBooking(payload = {}) {
     // won leads for ad-tracked bookers with no lead on file. A booking that
     // just converted an existing lead records nothing here: the bridge
     // advanced that lead's own attribution row to booked already.
-    try {
-      const { attributeSelfBooking } = require('../services/lead-estimate-link');
-      await attributeSelfBooking({
-        customerId: custId,
-        attribution,
-        serviceInterest: resolvedServiceType,
-        // Only a customer this booking just created is a fresh paid acquisition;
-        // a resolved existing customer is a repeat booker, not a new lead.
-        customerCreated: !!createdCustomerId,
-        selfBookedAppointmentId: booking?.id || null,
-        bookingSource: source || null,
-        leadConverted: !!leadConversion?.converted,
-      });
-    } catch (err) {
-      logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
+    // Callback visits skip attribution outright: a free re-service on an
+    // existing plan is in-plan care, not an acquisition or re-engagement
+    // journey — recording a funnel row would pollute channel reporting.
+    if (!callbackVisit) {
+      try {
+        const { attributeSelfBooking } = require('../services/lead-estimate-link');
+        await attributeSelfBooking({
+          customerId: custId,
+          attribution,
+          serviceInterest: resolvedServiceType,
+          // Only a customer this booking just created is a fresh paid acquisition;
+          // a resolved existing customer is a repeat booker, not a new lead.
+          customerCreated: !!createdCustomerId,
+          selfBookedAppointmentId: booking?.id || null,
+          bookingSource: source || null,
+          leadConverted: !!leadConversion?.converted,
+        });
+      } catch (err) {
+        logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);
+      }
     }
 
     // Card-on-file spec §3 Phase 5.4: the /book wizard's card step. The
@@ -2581,8 +2636,10 @@ async function createSelfBooking(payload = {}) {
     // The funnel owns gate/exemptions/saved-card/dedup — exempt and
     // auto-secured bookings yield no step. Best-effort: the booking is
     // already committed, so a funnel failure never fails the response.
+    // Callback visits skip it entirely: asking for a card to "secure" a
+    // FREE re-service reads as a charge threat and the visit never invoices.
     let secureCard = null;
-    try {
+    if (!callbackVisit) try {
       const { requestCardForAppointment } = require('../services/appointment-card-request');
       const cardReq = await requestCardForAppointment({
         scheduledServiceId: serviceRow.id,
@@ -2676,6 +2733,10 @@ router.post('/confirm', bookingConfirmLimiter, bookingConfirmDailyLimiter, async
       // submitted service address against the account's properties before
       // binding the booking, so it needs the bearer's customer record.
       authedCustomer: authedCustomer || null,
+      // INTERNAL-ONLY option (reservice-public.js) — pinned null after the
+      // spread so a crafted body can neither mint itself a free is_callback
+      // visit nor skip the signed-offer gate.
+      callbackVisit: null,
     });
     if (!result.ok) {
       return res.status(result.status).json({
