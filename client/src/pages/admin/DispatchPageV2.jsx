@@ -3043,7 +3043,10 @@ export default function DispatchPageV2({
               ...paymentData.service,
               completionInvoiceAlreadySent: true,
             };
-            releasePaymentSheet();
+            // No release here: MobilePaymentSheet always invokes onClose right
+            // after this callback, and releasing twice would shift TWO queue
+            // entries and lose one (codex P1 #3187 r17) — onClose is the
+            // sheet's single release point.
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];
@@ -3071,7 +3074,10 @@ export default function DispatchPageV2({
               checkoutInvoiceId: paymentData.invoiceId,
               checkoutInvoiceStatus: "paid",
             };
-            releasePaymentSheet();
+            // No release here: MobilePaymentSheet always invokes onClose right
+            // after this callback, and releasing twice would shift TWO queue
+            // entries and lose one (codex P1 #3187 r17) — onClose is the
+            // sheet's single release point.
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];
@@ -3098,7 +3104,10 @@ export default function DispatchPageV2({
               checkoutInvoiceId: invoice?.id || paymentData.invoiceId,
               checkoutInvoiceStatus: invoice?.status || "paid",
             };
-            releasePaymentSheet();
+            // No release here: MobilePaymentSheet always invokes onClose right
+            // after this callback, and releasing twice would shift TWO queue
+            // entries and lose one (codex P1 #3187 r17) — onClose is the
+            // sheet's single release point.
             setCheckoutService(null);
             setDetailService(null);
             const serviceDate = String(svc.scheduledDate || date).split("T")[0];

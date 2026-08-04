@@ -924,3 +924,27 @@ describe('fungicide targets are restricted to governed disease vocabulary', () =
       .toContain('take all root rot');
   });
 });
+
+// Allowlist stays synchronized with the catalog prefill vocabulary — the
+// oomycete products' normal prefills must render (codex P2 #3187 r17),
+// while the deliberately-excluded root-rot claim still fails closed.
+describe('fungicide vocabulary covers the oomycete catalog prefills', () => {
+  const base = {
+    method: 'broadcast_spray',
+    product: { name: 'Subdue Maxx Fungicide', category: 'Fungicide', active_ingredient: 'Mefenoxam' },
+  };
+
+  it('Banol/Subdue prefill targets render', () => {
+    const copy = applicationPurposeCopy(
+      { ...base, targets: ['Pythium blight', 'Pythium damping-off', 'Yellow tuft (downy mildew)'] },
+      'lawn',
+    );
+    expect(copy).toContain('pythium blight, pythium damping-off, yellow tuft (downy mildew)');
+  });
+
+  it('the excluded root-rot claim still fails the line closed', () => {
+    expect(applicationPurposeCopy({ ...base, targets: ['Pythium root rot'] }, 'lawn')).toBe(
+      'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+    );
+  });
+});

@@ -1001,8 +1001,12 @@ export function recordedTargetsText(app = {}) {
 // r16; the completion intake gate also rejects banned copy in targets,
 // this is the render-side backstop for records that predate it).
 // Vocabulary mirrors the catalog prefill lists (20260723000001 /
-// 20260801300000).
-const LAWN_DISEASE_TARGET_RE = /^(?:brown patch(?: ?\/ ?large patch)?|large patch|gray leaf spot|grey leaf spot|take[- ]?all root rot|fairy ring|dollar spot|anthracnose|pythium(?: (?:blight|root rot))?|rust|leaf spot|melting out|summer patch|powdery mildew|slime mold)$/i;
+// 20260801300000) — including the oomycete set (Pythium blight /
+// damping-off, yellow tuft) so Banol/Subdue prefills render (codex P2
+// r17). "Pythium root rot" is deliberately absent: that migration's own
+// pre-push P1 keeps root-rot claims off lawn reports (ornamental-label
+// use only).
+const LAWN_DISEASE_TARGET_RE = /^(?:brown patch(?: ?\/ ?large patch)?|large patch|gray leaf spot|grey leaf spot|take[- ]?all root rot|fairy ring|dollar spot|anthracnose|pythium(?: (?:blight|damping[- ]?off))?|yellow tuft(?: \(downy mildew\))?|rust|leaf spot|melting out|summer patch|powdery mildew|slime mold)$/i;
 
 export function recognizedDiseaseTargetsText(app = {}) {
   const targets = (Array.isArray(app.targets) ? app.targets : [])
