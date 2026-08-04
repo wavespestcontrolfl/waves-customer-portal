@@ -2993,7 +2993,12 @@ export default function DispatchPageV2({
               fetchSchedule(date, { silent: true });
               return;
             }
-            setPaymentData({ service: svc, invoiceId, invoiceToken, amount });
+            // Through the synchronized delivery helper (codex P1 #3187
+            // r19): a direct setPaymentData leaves paymentSheetActiveRef
+            // false until the passive effect runs, and a late completion
+            // handoff landing in that window would overwrite this checkout
+            // sheet instead of queueing behind it.
+            deliverPaymentHandoff({ service: svc, invoiceId, invoiceToken, amount });
           }}
           onEditServiceLine={(svc) => setEditingLineService(svc)}
         />
