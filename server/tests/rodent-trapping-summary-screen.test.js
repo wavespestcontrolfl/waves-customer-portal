@@ -201,4 +201,27 @@ describe('technician summaries screen against visible companion setup stages (ro
     expect(result.summarySource).toBe('technician_report');
     expect(result.summary).toBe(CONTRADICTING_BODY);
   });
+
+  // Round on 6c46f21bb (P1): a standard recurring primary has NO typed
+  // snapshot, so the confirmation freezes on the trapping COMPANION —
+  // the screen must honor it there too.
+  test('a companion-only completion honors the confirmation frozen on the companion', async () => {
+    const companion = trappingCompanion('auto_send', { traps_checked: 6 });
+    companion.todaysResult = { ...companion.todaysResult, reconcileConfirmed: true };
+    const row = serviceRow(companion, STALE_COUNT_NOTES);
+    const data = JSON.parse(row.service_data);
+    delete data.typedReportSnapshot;
+    row.service_data = JSON.stringify(data);
+    const result = await buildReportV1Data(row, 'token-screen-companion-confirmed', stubKnex(), { mode: 'live' });
+    expect(result.summarySource).toBe('technician_report');
+  });
+
+  test('the same companion-only completion without the flag is still screened', async () => {
+    const row = serviceRow(trappingCompanion('auto_send', { traps_checked: 6 }), STALE_COUNT_NOTES);
+    const data = JSON.parse(row.service_data);
+    delete data.typedReportSnapshot;
+    row.service_data = JSON.stringify(data);
+    const result = await buildReportV1Data(row, 'token-screen-companion-plain', stubKnex(), { mode: 'live' });
+    expect(result.summarySource).not.toBe('technician_report');
+  });
 });

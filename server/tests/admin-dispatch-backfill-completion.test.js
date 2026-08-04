@@ -823,7 +823,14 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
 
   test('the segment split stays exact: telemetry+key out entirely; backfill always in the MODE segment, timeOnSite only when typed', () => {
     const attemptsSource = fs.readFileSync(path.join(__dirname, '../services/completion-attempts.js'), 'utf8');
-    expect(attemptsSource).toMatch(/const \{ idempotencyKey, timeOnSite, completionTelemetry, backfill, \.\.\.stableBody \} = body \|\| \{\};/);
+    // reportReconcileConfirmed joined the exclusion set on the
+    // reconciliation round: it controls only the pre-claim prompt, and
+    // hashing it stranded confirmed same-key retries on a payload
+    // mismatch. The pin keeps asserting the EXACT set so any further
+    // drift is a deliberate edit here, not an accident.
+    expect(attemptsSource).toMatch(
+      /const \{\s*idempotencyKey, timeOnSite, completionTelemetry, backfill,\s*reportReconcileConfirmed, \.\.\.stableBody\s*\} = body \|\| \{\};/,
+    );
     // Fix round 13: a NORMAL completion's timeOnSite is the panel's
     // auto-elapsed timer STRING (ticks every second) — hashing it turned
     // any transient pre-commit failure into idempotency_key_mismatch on the

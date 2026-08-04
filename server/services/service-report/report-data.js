@@ -3515,6 +3515,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // silently re-reject the body they reviewed (codex P1 on the
     // reconciliation round).
     const trapSetupScreened = typedSnapshot?.todaysResult?.reconcileConfirmed === true
+      // Companion-only completions freeze the override on the trapping
+      // companion (there is no typed primary snapshot to carry it) —
+      // viewer-filtered like everything else, since visibleTrapSnapshot is.
+      || visibleTrapSnapshot?.todaysResult?.reconcileConfirmed === true
       || !technicianReport?.body
       || (
         (!narrativeTrapSetupSnapshot

@@ -3147,9 +3147,7 @@ function buildTodaysResult({
         // dropped it from exactly the reports that needed it most.
         body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
         nextStep,
-        ...(trappingReportBody
-        ? { bodySource: 'technician_report', ...(reconcileConfirmed ? { reconcileConfirmed: true } : {}) }
-        : {}),
+        ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
       };
     }
     if (activity.score === 0) {
@@ -3164,9 +3162,7 @@ function buildTodaysResult({
       headline: `${noun} activity was ${levelWord.replace(' activity', '').toLowerCase()} today.`,
       body: `${trappingReportBody || whatWeDid}${setupLine} ${nextStep}`,
       nextStep,
-      ...(trappingReportBody
-        ? { bodySource: 'technician_report', ...(reconcileConfirmed ? { reconcileConfirmed: true } : {}) }
-        : {}),
+      ...(trappingReportBody ? { bodySource: 'technician_report' } : {}),
     };
   }
 
@@ -3199,9 +3195,7 @@ function buildTodaysResult({
     headline: `${reportTypeLabel.replace(/ Summary$/, '')} completed today`,
     body: `${technicianReportBody || whatWeDid} ${nextStep}`,
     nextStep,
-    ...(technicianReportBody
-      ? { bodySource: 'technician_report', ...(reconcileConfirmed ? { reconcileConfirmed: true } : {}) }
-      : {}),
+    ...(technicianReportBody ? { bodySource: 'technician_report' } : {}),
   };
 }
 
@@ -3284,6 +3278,12 @@ function buildTypedReportSnapshot({
     technicianReportBody,
     reconcileConfirmed,
   });
+  // Stamped HERE, on every snapshot shape — not per todaysResult branch —
+  // so companion-only completions (where the trapping snapshot carries no
+  // body at all) still freeze the tech's confirmed override for the
+  // render-time summary screen to honor (codex P1 on the reconciliation
+  // rounds). One stamp site, no branch drift.
+  if (reconcileConfirmed && todaysResult) todaysResult.reconcileConfirmed = true;
 
   return {
     type: projectType,

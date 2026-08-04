@@ -35,10 +35,21 @@ const COUNT_MESSAGES = {
  * messages are shown verbatim to the tech in the completion prompt.
  */
 function reportReconciliationIssues({
-  technicianNotes, structuredFindings, primaryFindingsType = null, companionFindings,
+  technicianNotes, structuredFindings, primaryFindingsType = null,
+  primaryActivityScore = null, companionFindings,
 }) {
   const report = technicianReportCustomerCopy(technicianNotes);
   if (!report || !report.body) return [];
+  // A PRIMARY trapping report with a final activity score of 0 never
+  // admits the reviewed body — buildTodaysResult keeps the zero-state
+  // template even when confirmed — so prompting would ask the tech to
+  // confirm an override that cannot appear (codex P2 on the
+  // reconciliation rounds). Explicit zero only: a null/absent score must
+  // not read as zero (Number(null) === 0 trap).
+  if (primaryFindingsType === 'rodent_trapping'
+    && primaryActivityScore != null && Number(primaryActivityScore) === 0) {
+    return [];
+  }
   // rodent_trapping ONLY, matched by TYPE: wildlife_trapping shares the
   // traps_checked/captures field names, but the report pipeline never
   // admits the reviewed body for it (the wildlife gauge branch keeps

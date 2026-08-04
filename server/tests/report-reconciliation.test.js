@@ -162,8 +162,10 @@ describe('reportReconcileBlockPayload (route gate)', () => {
 // screen honors the frozen decision, and a confirmed retry hashes
 // identically to its original attempt.
 describe('a confirmed prompt is honored downstream', () => {
-  const { buildTodaysResult } = require('../services/service-report/activity-indicators');
-  const { hashCompletionRequest } = require('../services/completion-attempts');
+  const {
+    buildTodaysResult, buildTypedReportSnapshot,
+  } = require('../services/service-report/activity-indicators');
+  const { hashCompletionRequest, hasCommittedCompletionAttempt } = require('../services/completion-attempts');
 
   const trappingArgs = {
     projectType: 'rodent_trapping',
@@ -179,13 +181,84 @@ describe('a confirmed prompt is honored downstream', () => {
     expect(screened.bodySource).toBeUndefined();
     const confirmed = buildTodaysResult({ ...trappingArgs, reconcileConfirmed: true });
     expect(confirmed.bodySource).toBe('technician_report');
-    expect(confirmed.reconcileConfirmed).toBe(true);
     expect(confirmed.body).toContain('We checked 8 traps');
+  });
+
+  test('the snapshot stamps the confirmation — including on a body-less companion snapshot', () => {
+    const primary = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      values: trappingArgs.values,
+      visitSequence: 2,
+      activity: trappingArgs.activity,
+      technicianReportBody: trappingArgs.technicianReportBody,
+      reconcileConfirmed: true,
+    });
+    expect(primary.todaysResult.reconcileConfirmed).toBe(true);
+    // companion-only: no technicianReportBody, the flag must still freeze
+    const companion = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      values: trappingArgs.values,
+      visitSequence: 1,
+      reconcileConfirmed: true,
+    });
+    expect(companion.todaysResult.reconcileConfirmed).toBe(true);
+    const unconfirmed = buildTypedReportSnapshot({
+      projectType: 'rodent_trapping',
+      values: trappingArgs.values,
+      visitSequence: 1,
+    });
+    expect(unconfirmed.todaysResult.reconcileConfirmed).toBeUndefined();
   });
 
   test('the confirmation bit does not change the completion request hash', () => {
     const base = { idempotencyKey: 'k1', technicianNotes: 'x', visitOutcome: 'completed' };
     expect(hashCompletionRequest({ ...base, reportReconcileConfirmed: true }))
       .toBe(hashCompletionRequest(base));
+  });
+
+  test('committed evidence is detected so retries reach replay, not the prompt', async () => {
+    const stub = (attemptRow, recordRow) => {
+      const builder = (rows) => {
+        const q = {
+          where: () => q,
+          whereIn: () => q,
+          first: () => Promise.resolve(rows),
+        };
+        return q;
+      };
+      return (table) => builder(table === 'service_completion_attempts' ? attemptRow : recordRow);
+    };
+    await expect(hasCommittedCompletionAttempt('svc-1', stub({ id: 'a1' }, null))).resolves.toBe(true);
+    await expect(hasCommittedCompletionAttempt('svc-1', stub(null, { id: 'r1' }))).resolves.toBe(true);
+    await expect(hasCommittedCompletionAttempt('svc-1', stub(null, null))).resolves.toBe(false);
+  });
+});
+
+// Round on 6c46f21bb (P2): a primary trapping report whose final activity
+// score is 0 never admits the reviewed body — the zero-state template
+// wins even when confirmed — so the prompt must not ask for an override
+// that cannot appear. Explicit zero only: an absent score is not zero.
+describe('zero-score primary trapping reports never prompt', () => {
+  test('score 0 skips, score 2 and absent score do not', () => {
+    const args = {
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: trapping({ trap_visit_type: 'Follow-up check', traps_checked: 6 }),
+      primaryFindingsType: 'rodent_trapping',
+      companionFindings: null,
+    };
+    expect(reportReconciliationIssues({ ...args, primaryActivityScore: 0 })).toEqual([]);
+    expect(reportReconciliationIssues({ ...args, primaryActivityScore: 2 }).length)
+      .toBeGreaterThan(0);
+    expect(reportReconciliationIssues({ ...args }).length).toBeGreaterThan(0);
+  });
+
+  test('a companion trapping section still prompts regardless of the primary score', () => {
+    expect(reportReconciliationIssues({
+      technicianNotes: STALE_COUNT_NOTES,
+      structuredFindings: { type: 'one_time_pest', values: { target_pest: 'Ants' } },
+      primaryFindingsType: 'one_time_pest',
+      primaryActivityScore: 0,
+      companionFindings: [trapping({ trap_visit_type: 'Follow-up check', traps_checked: 6 })],
+    }).length).toBeGreaterThan(0);
   });
 });

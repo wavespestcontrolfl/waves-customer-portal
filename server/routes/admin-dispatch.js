@@ -3437,6 +3437,7 @@ function reportReconcileBlockPayload({
   technicianNotes,
   structuredFindings,
   primaryFindingsType = null,
+  primaryActivityScore = null,
   companionFindings,
 }) {
   if (process.env.GATE_REPORT_RECONCILE_PROMPT !== 'true') return null;
@@ -3444,7 +3445,7 @@ function reportReconcileBlockPayload({
   let issues = [];
   try {
     issues = reportReconciliationIssues({
-      technicianNotes, structuredFindings, primaryFindingsType, companionFindings,
+      technicianNotes, structuredFindings, primaryFindingsType, primaryActivityScore, companionFindings,
     });
   } catch {
     return null;
@@ -3890,9 +3891,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         technicianNotes,
         structuredFindings,
         primaryFindingsType: completionProfile?.findingsType || null,
+        primaryActivityScore: activityScore,
         companionFindings,
       });
-      if (reconcileBlock) {
+      // A same-key retry of an ALREADY-COMMITTED completion (lost
+      // response, post-commit side-effect failure) must reach the
+      // replay/resume claim untouched: the frozen snapshot exists and a
+      // confirm cannot change it, so prompting would accept an override
+      // the report can never honor (codex P1). Checked only when a block
+      // exists — the clean path costs nothing — and a lookup error skips
+      // the prompt too (fail open).
+      if (reconcileBlock
+        && !(await CompletionAttempts.hasCommittedCompletionAttempt(svc.id).catch(() => true))) {
         return res.status(reconcileBlock.status).json(reconcileBlock.payload);
       }
     }
@@ -5551,6 +5561,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 visitSequence: companionVisitSequence,
                 activity: companionActivity,
                 photoSummary: null,
+                // A standard primary with a trapping COMPANION has no typed
+                // primary snapshot to carry the confirmed override — freeze
+                // it on the trapping companion so the render-time summary
+                // screen can honor it (codex P1).
+                reconcileConfirmed: reportReconcileConfirmed === true
+                  && companion.type === 'rodent_trapping',
               });
               if (companionSnapshot) {
                 // The frozen per-section delivery rides the snapshot itself

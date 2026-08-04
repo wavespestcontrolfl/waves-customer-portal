@@ -189,6 +189,24 @@ async function claimSideEffectsRun(row, requestHash, knex = db) {
   return { action: 'resume', attempt: claimed, serviceRecordId: claimed.service_record_id };
 }
 
+// True when committed evidence exists for the service — a succeeded or
+// side-effects-phase attempt, or a service record. The reconciliation
+// prompt (GATE_REPORT_RECONCILE_PROMPT) must never intercept a retry of
+// an already-committed completion (codex P1 on the reconciliation
+// rounds): the frozen snapshot exists, a confirm cannot change it, and
+// the retry needs to reach replay/resume untouched.
+async function hasCommittedCompletionAttempt(serviceId, knex = db) {
+  const attempt = await knex('service_completion_attempts')
+    .where({ service_id: serviceId })
+    .whereIn('status', ['succeeded', 'side_effects_pending', 'side_effects_running'])
+    .first();
+  if (attempt) return true;
+  const record = await knex('service_records')
+    .where({ scheduled_service_id: serviceId })
+    .first();
+  return Boolean(record);
+}
+
 async function claimCompletionAttempt({ serviceId, idempotencyKey, requestHash }, knex = db) {
   // Per-service terminal-state guard. The unique index on
   // (service_id, idempotency_key) plus the partial pending-only
@@ -703,6 +721,7 @@ async function storeResolvedSnapshot(
 module.exports = {
   claimCompletionAttempt,
   hashCompletionRequest,
+  hasCommittedCompletionAttempt,
   // The single timer-vs-operator classification rule, shared with the
   // completion route's intake gate (liveTimeOnSitePlan) so the idempotency
   // hash and the authorization gate can never disagree about what counts
