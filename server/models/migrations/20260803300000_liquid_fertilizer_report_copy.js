@@ -48,7 +48,11 @@ const GRANULAR_PRECAUTION = 'Granules on sidewalks or driveways are swept back i
 const LIQUID_PRECAUTION = 'Applied in liquid form to the treated areas. If any reaches walks or driveways, it rinses off with water. Watering-in follows the visit notes — treated areas are ready once dry, and your technician confirms timing.';
 
 const GRANULAR_BLEND_SUMMARY = 'A professional-grade fertilizer blend feeding the documented plants or turf — supporting density, color, root development, and recovery on a controlled release schedule.';
-const LIQUID_BLEND_SUMMARY = 'A professional-grade liquid fertilizer feeding the documented turf or plants through leaf and root uptake — supporting density, color, root development, and recovery.';
+// Uptake-neutral like the precaution above (codex P2 #3187 r14): the same
+// catalog row serves soil_drench (root-only) and foliar_spray (leaf-only)
+// applications, and the report renders this verbatim — the summary must
+// not name an uptake path the recorded method didn't use.
+const LIQUID_BLEND_SUMMARY = 'A professional-grade liquid fertilizer feeding the documented turf or plants — supporting density, color, root development, and recovery.';
 
 const DEFICIENCY_CLAIM_SUMMARY = 'A micronutrient application that corrects the specific deficiency pattern documented on this visit — restoring leaf color and healthy new growth over the following weeks.';
 const MICRONUTRIENT_SUMMARY = 'A chelated micronutrient application supporting leaf color and healthy new growth — chelation keeps the nutrients available for uptake.';
