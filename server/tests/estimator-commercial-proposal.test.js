@@ -270,13 +270,15 @@ describe('maybeBuildCommercialProposalDraft', () => {
   test('one-time intent keys scaffold as one_time lines, never monthly', async () => {
     mockDispatch.mockResolvedValue({ ok: false, failures: [] });
     await maybeBuildCommercialProposalDraft(buildArgs({
-      intent: INTENT({ services: { pest: { frequency: 'monthly' }, lawnPestControl: {}, oneTimeMosquito: {} } }),
+      intent: INTENT({ services: { pest: { frequency: 'monthly' }, lawnPestControl: {}, oneTimeMosquito: {}, germanRoach: { severity: 'moderate' } } }),
     }));
     const data = JSON.parse(mockState.inserts[0].payload.estimate_data);
     const byDesc = Object.fromEntries(data.proposal.buildings[0].lineItems.map((li) => [li.description, li.frequency]));
     expect(byDesc['Pest control program — scope and pricing after walkthrough']).toBe('monthly');
     expect(byDesc['Lawn insect knockdown — scope and pricing after walkthrough']).toBe('one_time');
     expect(byDesc['One-time mosquito treatment — scope and pricing after walkthrough']).toBe('one_time');
+    // Flat multi-visit cleanout: labeled, and never stamped monthly.
+    expect(byDesc['German roach cleanout — scope and pricing after walkthrough']).toBe('one_time');
   });
 
   test('a dollar figure ANYWHERE in the brief rejects the whole brief (scaffold survives)', async () => {

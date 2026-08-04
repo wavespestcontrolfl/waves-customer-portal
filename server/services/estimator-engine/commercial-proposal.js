@@ -227,6 +227,7 @@ async function composeProspectBrief({ intent, propertyFacts, facts, context, rea
 const SERVICE_LABELS = {
   pest: 'Pest control',
   oneTimePest: 'One-time pest treatment',
+  germanRoach: 'German roach cleanout',
   lawn: 'Lawn care',
   oneTimeLawn: 'One-time lawn treatment',
   lawnPestControl: 'Lawn insect knockdown',
@@ -246,6 +247,9 @@ const SERVICE_LABELS = {
 // invite the operator to price a one-off as a recurring proposal.
 const ONE_TIME_SERVICE_KEYS = new Set([
   'oneTimePest', 'oneTimeLawn', 'oneTimeMosquito', 'lawnPestControl', 'bedBug', 'stinging',
+  // Flat-priced multi-visit cleanout — a program of visits, but sold and
+  // billed as a single engagement, never a monthly cadence.
+  'germanRoach',
 ]);
 
 function serviceLabel(key) {

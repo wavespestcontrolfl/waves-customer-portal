@@ -32,7 +32,8 @@ Output ONLY a single JSON object (no markdown fences, no commentary) matching th
 
 SERVICE VOCABULARY (the only keys allowed in "services"):
 - pest: recurring general pest control. Options: frequency (monthly|bimonthly|quarterly — default quarterly; use what was discussed; semiannual/annual cadences are NOT offered — if the caller insists on one, skip with reason), roachType (none|german|american — set german when German cockroaches are an active problem).
-- oneTimePest: single pest treatment, no recurring program.
+- oneTimePest: single pest treatment, no recurring program. For an active GERMAN cockroach infestation use germanRoach instead — a generic one-time treatment does not deliver the multi-visit cleanout the infestation needs.
+- germanRoach: German Roach Cleanout — flat-priced multi-visit program for an active German cockroach infestation WITHOUT a recurring pest program. severity REQUIRED (light = contained sightings in one or two spots | moderate = established activity across multiple rooms/areas | heavy = widespread or heavy infestation). If the call did not establish how bad the infestation is, skip with reason — the pricer's default is a guess, not a quote. A caller who wants German roaches handled AND ongoing service belongs on pest with roachType=german, not here.
 - lawn: recurring lawn health program. Options: track (st_augustine|bahia|zoysia|bermuda|paspalum — from what the caller says about their grass; default st_augustine when unknown in SW Florida), tier (basic|standard|enhanced|premium — default enhanced).
 - oneTimeLawn: one-off lawn treatment. Options: treatmentType (fertilizer|weed).
 - lawnPestControl: ONE-TIME lawn insect knockdown (chinch bugs, grubs) — a single treatment, NOT a recurring program. A caller wanting ONGOING lawn insect control belongs on the lawn program (its tiers include insect control); if they explicitly want a recurring insect-only lawn program, skip with reason.
