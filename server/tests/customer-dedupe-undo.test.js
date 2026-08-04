@@ -893,10 +893,15 @@ describe('revertMerge', () => {
       if (q.called('whereIn') && q.args('whereIn')?.[0] === 'contract_id') {
         return (tables[table] && tables[table].fromContracts) || [];
       }
-      // Invoices minted BY a journaled visit (real scheduled_service_id FK).
-      if (table === 'invoices' && q.called('whereIn')
-        && q.args('whereIn')?.[0] === 'scheduled_service_id') {
-        return (tables.invoices && tables.invoices.mintedFromVisits) || [];
+      // Children keyed to a journaled visit: invoices minted from it, and
+      // the r26-r28 visit-child probes (reminders, bonds, card requests).
+      if (q.called('whereIn') && q.args('whereIn')?.[0] === 'scheduled_service_id') {
+        if (table === 'invoices') return (tables.invoices && tables.invoices.mintedFromVisits) || [];
+        return (tables[table] && tables[table].fromVisits) || [];
+      }
+      // Follow-up visits referencing a journaled source (r28).
+      if (q.called('whereIn') && q.args('whereIn')?.[0] === 'followup_source_service_id') {
+        return (tables[table] && tables[table].followupsOfVisits) || [];
       }
       // Email-bound artifact probes — every EMAIL_BOUND_SURFACES table (the
       // fanout-registry mirror). Status filters may use whereIn — still a
@@ -1019,7 +1024,8 @@ describe('revertMerge', () => {
     // Financial rows verify under FOR UPDATE; history rows don't need the lock.
     expect(state.verified).toEqual(expect.arrayContaining([
       { table: 'invoices', forUpdate: true },
-      { table: 'leads', forUpdate: false },
+      // r28: leads are activity-checked — conversion stamps updated_at.
+      { table: 'leads', forUpdate: true },
     ]));
     expect(state.journalUpdate.undone_at).toBeTruthy();
     expect(state.journalUpdate.undone_by).toBe('admin:test');
@@ -1069,7 +1075,8 @@ describe('revertMerge', () => {
       { table: 'scheduled_services', forUpdate: true },
       { table: 'customer_contracts', forUpdate: true },
       // History tables still verify lock-free.
-      { table: 'leads', forUpdate: false },
+      // r28: leads are activity-checked — conversion stamps updated_at.
+      { table: 'leads', forUpdate: true },
     ]));
 
     // r17: the reverse repoint BUMPS updated_at on activity-checked rows.
@@ -1087,7 +1094,10 @@ describe('revertMerge', () => {
     // Non-activity-checked repoints stay bare — bumping e.g. invoices would
     // make the /merges invoice-activity mirror read the undo itself as
     // activity on other journals sharing the row.
-    expect(byTable.leads.payload).toEqual({ customer_id: LOSER });
+    // r28: leads joined the activity-checked set, so their reverse repoint
+    // stamps updated_at like estimates/visits/contracts (the bare-repoint
+    // rule stays for FINANCIAL tables, whose /merges mirror reads it).
+    expect(byTable.leads.payload).toEqual({ customer_id: LOSER, updated_at: 'NOW()' });
   });
 
   it('refuses (409) when a dunning follow-up sequence outside the journal keys on a journaled invoice (r17 — finalization schedules even without winning the invoice update)', async () => {
@@ -1711,17 +1721,19 @@ describe('revertMerge', () => {
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
-    // Tuple fields with a journaled prior RESTORE instead of nulling out —
-    // the pre-r3 undo permanently lost e.g. the winner's original ZIP.
-    expect(state.winnerPatch.city).toBe('Sarasota');
-    expect(state.winnerPatch.state).toBe('FL');
-    // No prior recorded → plain vacate.
-    expect(state.winnerPatch.address_line1).toBe(null);
-    expect(state.winnerPatch.address_line2).toBe(null);
-    // Edited since the merge → untouched, reported.
+    // r28 tuple atomicity SUPERSEDES the old per-field behavior: the
+    // admin-corrected ZIP freezes the WHOLE tuple — no member vacates, no
+    // member restores, every member reports — because restoring Sarasota
+    // around a corrected ZIP is exactly the partial mixed address
+    // (city from one address, ZIP from another) dispatch must never see.
+    expect(state.winnerPatch.city).toBeUndefined();
+    expect(state.winnerPatch.state).toBeUndefined();
+    expect(state.winnerPatch.address_line1).toBeUndefined();
+    expect(state.winnerPatch.address_line2).toBeUndefined();
     expect(state.winnerPatch.zip).toBeUndefined();
-    expect(result.skipped).toEqual(expect.arrayContaining([
-      expect.objectContaining({ key: 'customers.zip', reason: 'winner_value_changed_since_merge' }),
+    const skippedKeys = result.skipped.map((sk) => sk.key);
+    expect(skippedKeys).toEqual(expect.arrayContaining([
+      'customers.address_line1', 'customers.address_line2', 'customers.city', 'customers.state', 'customers.zip',
     ]));
   });
 
@@ -2071,6 +2083,31 @@ describe('revertMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/invoice\(s\) billed from this merge's appointments/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses when a SECURE-CARD REQUEST exists for a journaled visit outside the journal (r28 P0 — /secure token would split from its appointment)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['scheduled_services.customer_id'] = ['visit-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        scheduled_services: { stillOnWinner: ['visit-1'] },
+        appointment_card_requests: {
+          // Minted with the winner's customer_id after the merge — the
+          // /secure/:token page resolves payer/cards through THIS row.
+          fromVisits: [{ id: 'card-req-1', created_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/secure-card request/) });
     expect(state.repointedBack).toHaveLength(0);
     expect(state.journalUpdate).toBe(null);
   });

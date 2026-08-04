@@ -1498,7 +1498,7 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
       await require('./notification-service').notifyAdmin(
         'customer',
         `${results.merged.length} duplicate customer${results.merged.length === 1 ? '' : 's'} auto-merged`,
-        `Merged into: ${names}${more}. Same phone, matching identity, no billing on the duplicates. All reversible — full snapshots in the merge journal.`,
+        `Merged into: ${names}${more}. Same phone, matching identity, no billing on the duplicates. Full snapshots in the merge journal — most merges can be undone from Recent merges, though an undo refuses once state has moved on.`,
         {
           // The SPA registers /admin/customers and opens Customer 360
           // via ?customerId= — a /admin/customers/<uuid> path 404s.
@@ -1684,7 +1684,10 @@ const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin']);
 // updated_at is the signal (each verified to carry updated_at in
 // TABLE_TIMESTAMP_COLUMNS). Terminal-status transitions matter here
 // precisely BECAUSE the identity-surface probes exclude terminal rows.
-const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'customer_contracts']);
+const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'customer_contracts',
+  // r28: lead conversion stamps updated_at and mints a visit — a journaled
+  // lead converted since the merge must refuse, not silently repoint back.
+  'leads']);
 
 // The undo's email-clear guard probes every surface that delivers to a
 // denormalized copy of the customer email. This table MIRRORS the canonical
@@ -1909,6 +1912,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   appointment_reminders: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260705010060.
   termite_bonds: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260716000001; /secure/:token bearer state.
+  appointment_card_requests: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2524,6 +2529,46 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (strandedBonds) {
         refuse(`${strandedBonds} termite bond(s) for this merge's visits are outside its journal — moving the visits back would leave the bond on the kept customer; reconcile by hand`);
       }
+      // Secure-card requests (r28 P0): /secure/:token resolves name,
+      // payer, saved cards, and the eventual enrollment through the
+      // REQUEST's customer_id — a request minted (or a journaled pending
+      // one COMPLETED, which stamps updated_at) since the merge is an
+      // already-issued payment-adjacent bearer link. Moving the visit
+      // back while the request stays (or moved with stale payment state)
+      // leaves that link operating on a different account from its
+      // appointment. The standard activity shape covers both cases:
+      // unjournaled rows on presence, journaled rows on updated_at.
+      let cardRequestRows = [];
+      try {
+        cardRequestRows = await trx('appointment_card_requests')
+          .whereIn('scheduled_service_id', journaledVisitIdsAll)
+          .select(['id', ...activityColumnsFor('appointment_card_requests')]);
+      } catch (e) {
+        refuse(`Cannot verify secure-card requests for this merge's visits (${e.message}) — refusing to revert`);
+      }
+      const strandedCardRequests = countActivityRows(cardRequestRows, {
+        journaledIds: journaledIdsFor('appointment_card_requests'), mergeAt, table: 'appointment_card_requests',
+      });
+      if (strandedCardRequests) {
+        refuse(`${strandedCardRequests} secure-card request(s) for this merge's visits were created or completed since the merge — the /secure link's payment state would split from its appointment; resolve the card request first, then revert`);
+      }
+      // Follow-up visits (r28): a follow-up minted on the winner whose
+      // followup_source_service_id points at a JOURNALED visit splits from
+      // its source when the source moves back.
+      let followupRows = [];
+      try {
+        followupRows = await trx('scheduled_services')
+          .whereIn('followup_source_service_id', journaledVisitIdsAll)
+          .select(['id', ...activityColumnsFor('scheduled_services')]);
+      } catch (e) {
+        refuse(`Cannot verify follow-up visits for this merge's appointments (${e.message}) — refusing to revert`);
+      }
+      const strandedFollowups = countActivityRows(followupRows, {
+        journaledIds: journaledIdsFor('scheduled_services'), mergeAt, table: 'scheduled_services',
+      });
+      if (strandedFollowups) {
+        refuse(`${strandedFollowups} follow-up visit(s) reference this merge's appointments as their source — moving the source visits back would split the follow-ups from them; reconcile by hand`);
+      }
     }
 
     // Children MINTED by a journaled ESTIMATE accepted since the merge:
@@ -2775,6 +2820,35 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key: 'customer_properties.linked_property', reason: 'row_missing_or_moved' });
       }
     }
+    // EVERY journaled property row gets the same reference guard (r28):
+    // the generic plans loop above reverse-repointed the loser's own
+    // customer_properties rows, but a post-merge winner appointment can
+    // reference one of them (property pickers list the merged account's
+    // properties) — after the repoint that visit's property_id points at
+    // the restored loser's property. Same posture as the linked-property
+    // block: the plans' UPDATE holds the property row locks through this
+    // transaction (a concurrent booking's FK KEY SHARE blocks), so probe
+    // the referencing visits FOR UPDATE and refuse unless every reference
+    // will belong to the loser after the undo.
+    {
+      const journaledPropertyIds = [...journaledIdsFor('customer_properties')]
+        .filter((id) => id !== recorded.linked_property_id);
+      if (journaledPropertyIds.length) {
+        let propertyReferencingVisits = [];
+        try {
+          propertyReferencingVisits = await trx('scheduled_services')
+            .whereIn('property_id', journaledPropertyIds)
+            .forUpdate()
+            .select('id', 'customer_id');
+        } catch (e) {
+          refuse(`Cannot verify appointments referencing this merge's properties (${e.message}) — refusing to revert`);
+        }
+        const strandedPropertyVisits = propertyReferencingVisits.filter((v) => v.customer_id !== loserId);
+        if (strandedPropertyVisits.length) {
+          refuse(`${strandedPropertyVisits.length} appointment(s) reference properties this undo returns to the restored customer but would stay on another account — moving visits between customers has billing/comms side effects; rebook or reassign them first, then revert`);
+        }
+      }
+    }
 
     // Winner-side undo: the transferred Stripe id (only when it provably
     // still sits on the winner), a primary-profile demotion, the moved
@@ -2837,11 +2911,22 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // resolves against. If ANY member changed since the merge, the WHOLE
     // tuple stays (every member skips as changed-since-merge).
     const ADDRESS_TUPLE_FIELDS = ['address_line1', 'address_line2', 'city', 'state', 'zip'];
-    const backfilledTupleFields = ADDRESS_TUPLE_FIELDS.filter((f) =>
+    // EVERY merge-touched member participates (r28): null-applied members
+    // (the loser's address had no unit — the replacement wrote
+    // address_line2 = NULL, recorded in backfills) and prior-values
+    // members (the merge overwrote a pre-merge winner value) are part of
+    // the tuple too. Baseline per member = what the merge left it as:
+    // the applied backfill when one exists, else empty for a null-apply —
+    // the same still-merge-written rule the restore pass uses.
+    const mergeTouchedTupleFields = ADDRESS_TUPLE_FIELDS.filter((f) =>
       Object.prototype.hasOwnProperty.call(backfills, f)
-      && !Object.prototype.hasOwnProperty.call(priorValues, f)
-      && backfills[f] !== null && backfills[f] !== undefined);
-    const addressTupleChanged = backfilledTupleFields.some((f) => !backfillValueUnchanged(winner[f], backfills[f]));
+      || Object.prototype.hasOwnProperty.call(priorValues, f));
+    const addressTupleChanged = mergeTouchedTupleFields.some((f) => {
+      const appliedVal = Object.prototype.hasOwnProperty.call(backfills, f) ? backfills[f] : null;
+      return (appliedVal === null || appliedVal === undefined)
+        ? !(winner[f] === null || winner[f] === undefined || String(winner[f]).trim() === '')
+        : !backfillValueUnchanged(winner[f], appliedVal);
+    });
     for (const [field, value] of Object.entries(backfills)) {
       if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;
       // Restored (not just vacated) by the prior-values pass below.
@@ -2920,8 +3005,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // them out from under that history is not an exact restoration →
     // REFUSE. The winner's own pre-merge artifacts are exempt (sinceOnly):
     // they existed under the winner's original identity.
+    // Clears AND prior-value RESTORES both count (r28): restoring the
+    // winner's pre-merge payer/mode/fee changes how post-merge visits
+    // created under the inherited values will bill at completion — the
+    // same orphaning as a clear-to-null.
     const clearingBillingIdentity = ['billing_mode', 'per_application_fee', 'payer_id']
-      .some((f) => Object.prototype.hasOwnProperty.call(winnerPatch, f) && winnerPatch[f] === null);
+      .some((f) => Object.prototype.hasOwnProperty.call(winnerPatch, f));
     if (clearingBillingIdentity) {
       for (const table of ['scheduled_services', 'invoices']) {
         let rows = [];
@@ -2985,6 +3074,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // and is reported.
     for (const [field, prior] of Object.entries(priorValues)) {
       if (prior === null || prior === undefined) continue;
+      // Tuple atomicity (r28): a changed address member freezes the WHOLE
+      // tuple — restores included, or the unchanged members would revert
+      // around the operator's edit and recreate the partial mixed address.
+      if (addressTupleChanged && ADDRESS_TUPLE_FIELDS.includes(field)) {
+        skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
+        continue;
+      }
       const current = winner[field];
       const appliedVal = Object.prototype.hasOwnProperty.call(backfills, field) ? backfills[field] : null;
       const stillMergeWritten = (appliedVal === null || appliedVal === undefined)

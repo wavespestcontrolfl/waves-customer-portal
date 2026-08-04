@@ -1279,7 +1279,22 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       // serialize against a concurrent merge-undo BEFORE this trx's
       // customers-row update and the insert. A customer CREATED inside this
       // trx cannot be an undo's winner, so only the reuse path locks.
-      if (!needsCustomer) await lockCustomerComms(trx, customerId);
+      if (!needsCustomer) {
+        await lockCustomerComms(trx, customerId);
+        // Re-resolve UNDER the lock (r28): a merge-undo that held this key
+        // first can have reverse-repointed the lead to the restored
+        // customer while we waited — converting with the pre-lock
+        // lead/customer would book the visit on the stale owner and stamp
+        // the lead back to it, silently reversing the undo's restoration.
+        const freshLead = await trx('leads').where({ id: lead.id }).first('customer_id');
+        if (!freshLead || (freshLead.customer_id && String(freshLead.customer_id) !== String(customerId))) {
+          const err = new Error("This lead's customer changed while converting (a merge was undone) — reload the lead and convert again.");
+          err.statusCode = 409;
+          err.isOperational = true;
+          err.code = 'LEAD_OWNER_CHANGED';
+          throw err;
+        }
+      }
       if (needsCustomer) {
         const account = await ensureCustomerAccount(trx, {
           firstName: fallbackName,

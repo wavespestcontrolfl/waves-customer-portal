@@ -10668,7 +10668,25 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       // customer around the insert — this path had no transaction, and a
       // bare pg_advisory_xact_lock outside one releases at statement end
       // and fences nothing (utils/customer-comms-lock.js).
-      [appointment] = await withCustomerCommsLock(db, svc.customer_id, (trx) => trx('scheduled_services').insert(insertData).returning('*'));
+      // Ownership from the LOCKED source visit (r28): a merge-undo can
+      // reverse-repoint the source while this request waits on the key —
+      // inserting the pre-lock svc.customer_id would leave a follow-up on
+      // the kept customer pointing at the restored customer's visit. A
+      // moved owner aborts retryably (a second blocking comms acquire
+      // while holding the source row would deadlock against the undo).
+      [appointment] = await withCustomerCommsLock(db, svc.customer_id, async (trx) => {
+        const lockedSource = await trx('scheduled_services')
+          .where({ id: svc.id }).forUpdate().first('customer_id');
+        if (!lockedSource || !lockedSource.customer_id
+          || String(lockedSource.customer_id) !== String(svc.customer_id)) {
+          const err = new Error("This appointment's customer changed while booking the follow-up (a merge was undone) — reload the job and try again.");
+          err.statusCode = 409;
+          err.isOperational = true;
+          err.code = 'VISIT_OWNER_CHANGED';
+          throw err;
+        }
+        return trx('scheduled_services').insert(insertData).returning('*');
+      });
     } catch (err) {
       // Partial unique index on followup_source_service_id — a concurrent
       // CTA tap lost the race; return the winner's booking idempotently.
