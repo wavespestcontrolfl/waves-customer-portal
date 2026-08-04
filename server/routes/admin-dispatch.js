@@ -5493,7 +5493,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 inspectionCreditTerms: (() => {
                   const InspectionCredit = require('../services/inspection-credit');
                   return {
-                    amount: InspectionCredit.configuredCreditAmount(),
+                    // Service-aware: rodent credits its quoted $125 fee,
+                    // not the flat default (owner ruling 2026-08-04).
+                    amount: InspectionCredit.configuredCreditAmountForServiceKey(completionProfile?.serviceKey || null),
                     windowDays: InspectionCredit.creditWindowDaysForServiceKey(completionProfile?.serviceKey || null),
                   };
                 })(),
@@ -6531,11 +6533,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // hand a weeks-old inspection a fresh 30 days. ET wall-clock noon
         // so a date-only value can't slip a day.
         const inspectionMoment = InspectionCredit.etDateOnlyToDate(record.service_date);
+        // The TERMS the closeout froze with the consent marker (Codex
+        // #3178 r23 P2): a crash-resume can run after a pricing-config
+        // change, and reading the live amount/window here would mint a
+        // different monetary promise than the closeout made. Same source
+        // the recovery sweep uses; on a first run the stored terms ARE the
+        // live config, written moments ago in the same request.
+        const frozenCreditTerms = parseJsonObject(record.service_data)?.inspectionCreditTerms || null;
         inspectionCreditOffer = await InspectionCredit.recordInspectionCreditOffer({
           customerId: svc.customer_id,
           scheduledServiceId: svc.id,
           serviceRecordId: record.id,
           serviceKey: completionProfile?.serviceKey || null,
+          ...(Number(frozenCreditTerms?.amount) > 0 ? { amount: Number(frozenCreditTerms.amount) } : {}),
+          ...(Number(frozenCreditTerms?.windowDays) > 0 ? { windowDays: Number(frozenCreditTerms.windowDays) } : {}),
           createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,
           // The promise moment is when the completion COMMITTED —
           // record.created_at — not when this code runs (pre-push P0): on a
@@ -6559,7 +6570,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // invoice (an unpaid one gets the memo on its normal receipt).
       // Shared helper: the sweep's recovery path (which can be the first
       // successful creation of the same promise) sends the same resend.
-      if (inspectionCreditOffer?.recorded && inspectionCreditOffer.offerId) {
+      // Keyed on offerId, NOT `recorded` (Codex #3178 r23 P2): a crash
+      // after the offer insert but before this queue leaves the retry
+      // returning `already_offered` — same promise, memo still unsent, and
+      // the recovery sweep skips the visit because its offer exists. The
+      // resend is idempotent per offer, so re-queueing a delivered one is
+      // a no-op.
+      if (inspectionCreditOffer?.offerId) {
         require('../services/inspection-credit').queueCreditReceiptResend({
           scheduledServiceId: svc.id,
           offerId: inspectionCreditOffer.offerId,

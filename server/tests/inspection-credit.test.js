@@ -36,10 +36,17 @@ jest.mock('../models/db', () => {
   const makeChain = (table) => {
     const chain = {};
     let joined = false;
-    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning', 'forUpdate']) {
+    // The scheduled_service_id this chain filtered on, when it did — lets
+    // an events read distinguish "is THIS row proven" probes (the r23
+    // rebound-child fix makes two of them with different ids in one pass).
+    let whereScheduledId;
+    for (const m of ['where', 'whereNot', 'whereIn', 'whereNotIn', 'orderBy', 'orderByRaw', 'limit', 'whereNotNull', 'join', 'leftJoin', 'whereNull', 'whereRaw', 'select', 'onConflict', 'ignore', 'returning', 'forUpdate']) {
       chain[m] = jest.fn((...args) => {
         mockChainCalls.push({ m, args });
         if (m === 'join' || m === 'leftJoin') joined = true;
+        if (m === 'where' && args[0] && typeof args[0] === 'object' && 'scheduled_service_id' in args[0]) {
+          whereScheduledId = args[0].scheduled_service_id;
+        }
         return chain;
       });
     }
@@ -54,7 +61,12 @@ jest.mock('../models/db', () => {
     const isEventsTable = t.includes('inspection_credit_booking_events');
     const isBookings = t.includes('scheduled_services') && !isEventsTable;
     const isInvoices = t === 'invoices' || t.startsWith('invoices ');
-    const pickRows = () => (isEventsTable ? (joined ? mockAlternates : mockEvents)
+    // A plain events read honors the id it filtered on: rows carrying a
+    // scheduled_service_id only match their own probe; rows without one
+    // match any probe (legacy fixtures).
+    const eventRows = () => mockEvents.filter((e) => !('scheduled_service_id' in e)
+      || whereScheduledId === undefined || e.scheduled_service_id === whereScheduledId);
+    const pickRows = () => (isEventsTable ? (joined ? mockAlternates : eventRows())
       : (isBookings ? mockBookings : (isInvoices ? mockInvoices : mockOffers)));
     chain.then = (res, rej) => Promise.resolve(pickRows()).then(res, rej);
     chain.first = jest.fn(async () => pickRows()[0] || null);
@@ -85,6 +97,7 @@ const {
   inspectionCreditReceiptMemo,
   etEndOfDayAfterDays,
   creditWindowDaysForServiceKey,
+  configuredCreditAmountForServiceKey,
   DEFAULT_CREDIT_WINDOW_DAYS,
 } = require('../services/inspection-credit');
 
@@ -124,6 +137,24 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
     });
     expect(res.recorded).toBe(true);
     expect(res.amount).toBe(75);
+  });
+
+  it('a rodent inspection credits its QUOTED fee, never the flat default (r23 P0, owner ruling 2026-08-04)', async () => {
+    // The public estimator has promised "$125 inspection (creditable for
+    // 14 days toward remediation work)" on tokenized estimates since before
+    // this feature — an in-flight estimate is a keep-working surface, so
+    // freezing the flat $75 onto a rodent offer would short a promise
+    // already sent.
+    const res = await recordInspectionCreditOffer({
+      customerId: 'cust-1', scheduledServiceId: 'svc-1', serviceKey: 'rodent_inspection',
+    });
+    expect(res.recorded).toBe(true);
+    expect(res.amount).toBe(125); // RODENT.inspection.fee — the estimator's number
+    expect(res.windowDays).toBe(14); // and rodent's own window
+    // The override is rodent-specific: everything else keeps the flat default.
+    expect(configuredCreditAmountForServiceKey('rodent_inspection')).toBe(125);
+    expect(configuredCreditAmountForServiceKey('wdo_inspection')).toBe(75);
+    expect(configuredCreditAmountForServiceKey(null)).toBe(75);
   });
 
   it('honors terms frozen at closeout over the current configuration (r21 P2)', async () => {
@@ -305,6 +336,21 @@ describe('sweepInspectionCreditRedemptions — the durable guarantee', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
+  it('fresh cancellations get first claim on the reversal batch; alerted rows only fill the remainder (r23 P2)', async () => {
+    // A durably-failed reversal (credit spent, invoice unresolved) stays
+    // `redeemed` with reversal_alerted_at set until the office resolves it.
+    // Enough of those in one unordered batch would monopolize every hourly
+    // run and newer cancellations would never be reversed.
+    await sweepInspectionCreditRedemptions();
+    const nullAt = mockChainCalls.findIndex((c) => c.m === 'whereNull' && c.args[0] === 'o.reversal_alerted_at');
+    const notNullAt = mockChainCalls.findIndex((c) => c.m === 'whereNotNull' && c.args[0] === 'o.reversal_alerted_at');
+    expect(nullAt).toBeGreaterThan(-1);
+    expect(notNullAt).toBeGreaterThan(nullAt); // never-alerted rows selected first
+    // Retries are sampled randomly, so no fixed subset of permanent
+    // failures can permanently shadow the rest of the alerted set.
+    expect(mockChainCalls.some((c) => c.m === 'orderByRaw' && /random/.test(String(c.args[0])))).toBe(true);
+  });
+
   it('the mint re-validates the booking UNDER LOCK — a cancel that wins the race stops the money', async () => {
     // Every caller's liveness read happens before the claim transaction
     // starts; a cancellation can commit in between and its reversal finds
@@ -417,6 +463,29 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(res).toEqual({ reversed: 0 });
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
     expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-child' });
+  });
+
+  it('cancelling a REBOUND seeded child rebinds to a live sibling of the proven anchor (r23 P1)', async () => {
+    // Lifecycle: proven anchor A cancels → offer rebinds to seeded child B.
+    // B then cancels while sibling C stays live. B has no booking event of
+    // its own — its PARENT does — so provenance must resolve through
+    // recurring_parent_id before the money is clawed back from a series
+    // that is still going.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = []; // no standalone proven alternate
+    // Only the ANCHOR is proven — the cancelled child's own probe finds nothing.
+    mockEvents = [{ id: 'evt-anchor', scheduled_service_id: 'svc-anchor' }];
+    // Serves the parent lookup (recurring_parent_id), the sibling search,
+    // and the rebind's liveness re-read.
+    mockBookings = [{ id: 'svc-child-c', status: 'confirmed', recurring_parent_id: 'svc-anchor' }];
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-child-b' });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-child-c' });
   });
 
   it('an UNPROVEN cancelled row never rebinds through its children', async () => {
@@ -638,6 +707,30 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).toContain("...(record?.created_at ? { now: new Date(record.created_at) } : {}),");
     // And the expiry window stays anchored to the inspection's service date.
     expect(source).toContain('...(inspectionMoment ? { windowAnchor: inspectionMoment } : {}),');
+  });
+
+  it('a completion resume re-promises the CLOSEOUT terms, never the live config (r23 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // A crash-resume can run after a pricing-config change; the offer must
+    // carry the amount and window frozen with the consent marker — the same
+    // source the recovery sweep reads.
+    expect(source).toContain("const frozenCreditTerms = parseJsonObject(record.service_data)?.inspectionCreditTerms || null;");
+    expect(source).toContain('...(Number(frozenCreditTerms?.amount) > 0 ? { amount: Number(frozenCreditTerms.amount) } : {}),');
+    expect(source).toContain('...(Number(frozenCreditTerms?.windowDays) > 0 ? { windowDays: Number(frozenCreditTerms.windowDays) } : {}),');
+    // And the terms frozen at closeout are themselves service-aware —
+    // rodent freezes its quoted fee, not the flat default (r23 P0).
+    expect(source).toContain('amount: InspectionCredit.configuredCreditAmountForServiceKey(');
+    expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmount(),');
+  });
+
+  it('the receipt resend keys on the OFFER, not on first creation (r23 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // A crash between the offer insert and the resend queue leaves the
+    // retry returning already_offered with the memo still unsent — and the
+    // recovery sweep skips the visit because its offer exists. The resend
+    // is idempotent per offer, so it queues whenever an offerId is known.
+    expect(source).toContain('if (inspectionCreditOffer?.offerId) {');
+    expect(source).not.toContain('inspectionCreditOffer?.recorded && inspectionCreditOffer.offerId');
   });
 });
 

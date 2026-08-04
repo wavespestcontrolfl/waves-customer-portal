@@ -62,6 +62,27 @@ function configuredCreditAmount() {
 }
 
 /**
+ * The credit amount for a specific service. Rodent inspections credit their
+ * QUOTED fee, not the flat default (owner ruling 2026-08-04): the public
+ * estimator has been promising "$125 inspection (creditable for 14 days
+ * toward remediation work)" on tokenized estimates since before this
+ * feature existed, and an in-flight estimate is a keep-working surface —
+ * freezing the flat $75 onto a rodent offer would short a promise already
+ * sent. pricing_config stays authoritative for both values via the
+ * db-bridge overlay.
+ */
+function configuredCreditAmountForServiceKey(serviceKey) {
+  try {
+    if (String(serviceKey || '') === 'rodent_inspection') {
+      const { RODENT } = require('./pricing-engine/constants');
+      const fee = Number(RODENT?.inspection?.fee);
+      if (Number.isFinite(fee) && fee > 0) return round2(fee);
+    }
+  } catch { /* fall through to the flat default */ }
+  return configuredCreditAmount();
+}
+
+/**
  * A date-only value (YYYY-MM-DD) as an ET wall-clock instant.
  *
  * `new Date('2026-08-03')` anchors at UTC midnight, which in Eastern time is
@@ -180,7 +201,7 @@ async function recordInspectionCreditOffer({
   if (!customerId || !scheduledServiceId) {
     return { recorded: false, reason: 'missing_identifiers' };
   }
-  const frozenAmount = amount != null ? round2(amount) : configuredCreditAmount();
+  const frozenAmount = amount != null ? round2(amount) : configuredCreditAmountForServiceKey(serviceKey);
   if (!(frozenAmount > 0)) {
     // Only reachable if the configured amount is misconfigured to 0 — a
     // zero credit is not a promise worth recording.
@@ -579,12 +600,31 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
     // whose booking is ALREADY non-live (Codex #3175 r4 P0). Scanning the
     // redeemed set blindly meant >500 still-live historical rows could
     // starve a later cancellation forever.
-    const stale = await db('inspection_credit_offers as o')
+    // FRESH cancellations first (Codex #3178 r23 P2): a row that failed
+    // reversal durably — credit already spent, invoice unresolved — stays
+    // `redeemed` with `reversal_alerted_at` set until the office resolves
+    // it, and enough of those would fill an unordered batch forever,
+    // starving every newer cancellation. Never-alerted rows get first
+    // claim on the batch; alerted rows are RETRIES (the office may have
+    // resolved since) and only fill the remaining capacity, in random
+    // order so no fixed subset of permanent failures can permanently
+    // shadow the rest.
+    const staleBase = () => db('inspection_credit_offers as o')
       .join('scheduled_services as s', 's.id', 'o.redeemed_scheduled_service_id')
       .where('o.status', 'redeemed')
-      .whereIn('s.status', NON_LIVE_APPOINTMENT_STATUSES)
+      .whereIn('s.status', NON_LIVE_APPOINTMENT_STATUSES);
+    const stale = await staleBase()
+      .whereNull('o.reversal_alerted_at')
       .limit(limit)
       .select('o.id as id', 'o.redeemed_scheduled_service_id as booking_id');
+    const retryCapacity = limit - stale.length;
+    if (retryCapacity > 0) {
+      stale.push(...await staleBase()
+        .whereNotNull('o.reversal_alerted_at')
+        .orderByRaw('random()')
+        .limit(retryCapacity)
+        .select('o.id as id', 'o.redeemed_scheduled_service_id as booking_id'));
+    }
     for (const row of stale) {
       try {
         const rev = await reverseInspectionCreditForBooking({
@@ -662,7 +702,10 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         // receipt-resend must ride it too (PR #3178 r17 P2) — otherwise an
         // already-paid, non-payer inspection in exactly the transient-
         // failure case this recovery exists for never sees its deadline.
-        if (created?.recorded && created.offerId) {
+        // Keyed on offerId, not `recorded` (Codex #3178 r23 P2): a crash
+        // between a prior insert and its resend leaves `already_offered`
+        // with the memo still unsent; the resend itself is idempotent.
+        if (created?.offerId) {
           queueCreditReceiptResend({ scheduledServiceId: visit.id, offerId: created.offerId });
         }
         // The offer arrived LATE, so a qualifying booking may already have
@@ -959,12 +1002,35 @@ async function reverseInspectionCreditForBooking({
         // still never qualifies.
         let seriesChild = null;
         try {
+          // The proven anchor is either the cancelled booking itself, or —
+          // when the cancelled booking is a seeded child the offer was
+          // REBOUND to after its anchor cancelled (Codex #3178 r23 P1) —
+          // the child's recurring parent. A seeded child carries no booking
+          // event of its own, so judging provenance by the cancelled row
+          // alone reversed the credit while live siblings kept the series
+          // going.
+          let provenAnchorId = null;
           const anchorProven = await db('inspection_credit_booking_events')
             .where({ scheduled_service_id: scheduledServiceId })
             .first('id');
           if (anchorProven) {
+            provenAnchorId = scheduledServiceId;
+          } else {
+            const cancelledRow = await db('scheduled_services')
+              .where({ id: scheduledServiceId })
+              .first('recurring_parent_id');
+            const parentId = cancelledRow?.recurring_parent_id;
+            if (parentId) {
+              const parentProven = await db('inspection_credit_booking_events')
+                .where({ scheduled_service_id: parentId })
+                .first('id');
+              if (parentProven) provenAnchorId = parentId;
+            }
+          }
+          if (provenAnchorId) {
             seriesChild = await db('scheduled_services')
-              .where({ recurring_parent_id: scheduledServiceId })
+              .where({ recurring_parent_id: provenAnchorId })
+              .whereNot({ id: scheduledServiceId })
               .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
               .orderBy('scheduled_date', 'asc')
               .first('id');
@@ -1083,6 +1149,18 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId }) {
             .where({ id: offerId })
             .first('customer_id', 'amount', 'expires_at');
           if (!offer) return;
+          // ONCE per offer: this resend is re-queued on completion replays
+          // (Codex #3178 r23 P2 keys it on offerId, not first creation).
+          // The email leg dedupes on its idempotency key; this alert leg
+          // dedupes on the durable notification row — notifyAdmin has no
+          // dedupe of its own. A concurrent-replay race can at worst double
+          // an office note; it never touches money or a customer.
+          const alreadyAlerted = await db('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'reason' = ?", ['no_receipt_channel'])
+            .whereRaw("metadata->>'offerId' = ?", [String(offerId)])
+            .first('id');
+          if (alreadyAlerted) return;
           const memo = inspectionCreditReceiptMemo({
             amount: offer.amount, expiresAt: offer.expires_at,
           });
@@ -1144,6 +1222,7 @@ module.exports = {
   reverseInspectionCreditForBooking,
   sweepInspectionCreditRedemptions,
   configuredCreditAmount,
+  configuredCreditAmountForServiceKey,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
   queueCreditReceiptResend,

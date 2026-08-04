@@ -2009,8 +2009,11 @@ const CARD_HOLD = {
 // is "the inspection is worth $75 toward service", not "we refund what you
 // paid". Frozen onto the offer at closeout, so a later change here never
 // moves a promise already made. DB-authoritative via pricing_config key
-// `inspection_credit`. Per-service windows (rodent's creditableWithinDays)
-// still win where they exist.
+// `inspection_credit`. Per-service overrides still win where they exist:
+// rodent's creditableWithinDays (14) AND its amount — a rodent inspection
+// credits its quoted RODENT.inspection.fee ($125), because the public
+// estimator promises that fee as creditable on tokenized estimates
+// (owner ruling 2026-08-04).
 const INSPECTION_CREDIT = {
   amount: 75,
   creditableWithinDays: 30,
