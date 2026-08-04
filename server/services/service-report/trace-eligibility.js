@@ -89,9 +89,14 @@ const SERVICE_KEY_RULES = {
   termite_trenching: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   termite_pretreatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   termite_spot_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Pest-PRIMARY bundle (codex P1 r1): the combined recurring visit sprays
+  // the general-pest perimeter and services the bait stations as a
+  // COMPANION — the spray application is real, so the trace is too. The
+  // station map coexists on the same report; a pure bait stop routes
+  // through the termite_bait_station typed pointer above instead.
+  pest_termite_bait_quarterly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   // never lanes
   bed_bug_treatment: { eligible: false, reason: 'interior_only_lane' },
-  pest_termite_bait_quarterly: { eligible: false, reason: 'bait_station_lane' },
   termite_slab_pretreat: { eligible: false, reason: 'compliance_project_lane' },
   wdo_inspection: { eligible: false, reason: 'inspection_lane' },
   lawn_inspection: { eligible: false, reason: 'inspection_lane' },
@@ -107,13 +112,19 @@ const SERVICE_KEY_RULES = {
 const INELIGIBLE_NAME_RES = [
   [/\bbed\s*bugs?\b/i, 'interior_only_lane'],
   [/\brodent|trap(?:ping)?\b/i, 'trap_lane'],
-  [/\bbait\b/i, 'bait_station_lane'],
   [/\binspection\b/i, 'inspection_lane'],
   [/\bwdo\b/i, 'inspection_lane'],
 ];
 const ELIGIBLE_NAME_RES = [
   [/\blawn|turf|fertiliz/i, { variant: 'outline', captionKey: 'lawnCoverage' }],
+  // Ranked ABOVE the bait check below: combined names like "Quarterly
+  // Pest + Termite Bait Station" are pest-PRIMARY bundles — the spray is
+  // real (codex P1 r1). A pure "Termite Bait" name matches neither of
+  // these and falls to the bait rule.
   [/\bpest|mosquito|spray|tree|shrub|flea|tick|roach|ant|wasp|bee\b/i, { variant: 'spray', captionKey: 'sprayPerimeter' }],
+];
+const TRAILING_INELIGIBLE_NAME_RES = [
+  [/\bbait\b/i, 'bait_station_lane'],
 ];
 
 function verdict(rule, source) {
@@ -142,12 +153,23 @@ function resolveTraceEligibility({
   if (serviceKey && SERVICE_KEY_RULES[serviceKey]) {
     return verdict(SERVICE_KEY_RULES[serviceKey], 'service_key');
   }
+  // A SUPPLIED stable identity that missed both registries fails CLOSED —
+  // label fallback is reserved for legacy rows with no stable identity at
+  // all. Falling through here would let an admin-added key become
+  // eligible because its editable label contains "pest", which is the
+  // exact accident this module exists to end (codex P1 r1).
+  if (serviceKey || findingsType) {
+    return { eligible: false, variant: null, captionKey: null, reason: 'unclassified_service' };
+  }
   const name = String(displayName || '');
   for (const [re, reason] of INELIGIBLE_NAME_RES) {
     if (re.test(name)) return { eligible: false, variant: null, captionKey: null, reason };
   }
   for (const [re, rule] of ELIGIBLE_NAME_RES) {
     if (re.test(name)) return verdict({ eligible: true, ...rule }, 'display_name');
+  }
+  for (const [re, reason] of TRAILING_INELIGIBLE_NAME_RES) {
+    if (re.test(name)) return { eligible: false, variant: null, captionKey: null, reason };
   }
   return { eligible: false, variant: null, captionKey: null, reason: 'unclassified_service' };
 }

@@ -72,7 +72,12 @@ describe('classification behavior', () => {
       .toMatchObject({ eligible: true, variant: 'outline' });
     expect(resolveTraceEligibility({ serviceKey: 'termite_liquid' }))
       .toMatchObject({ eligible: true, variant: 'spray' });
+    // pest-PRIMARY bundle (codex P1 r1): the combined visit sprays; the
+    // bait work is a companion — a pure bait stop routes through the
+    // termite_bait_station typed pointer instead
     expect(resolveTraceEligibility({ serviceKey: 'pest_termite_bait_quarterly' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({ findingsType: 'termite_bait_station' }))
       .toMatchObject({ eligible: false, reason: 'bait_station_lane' });
     expect(resolveTraceEligibility({ findingsType: 'rodent_trapping' }))
       .toMatchObject({ eligible: false, reason: 'trap_lane' });
@@ -101,6 +106,21 @@ describe('classification behavior', () => {
       .toMatchObject({ eligible: true, variant: 'spray' });
     expect(resolveTraceEligibility({ displayName: 'Lawn Fertilization Round 3' }))
       .toMatchObject({ eligible: true, variant: 'outline' });
+    // combined pest+bait names are pest-primary bundles; pure bait is not
+    expect(resolveTraceEligibility({ displayName: 'Quarterly Pest + Termite Bait Station' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({ displayName: 'Termite Bait Quarterly' }))
+      .toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+  });
+
+  test('a SUPPLIED stable key that missed the registry fails closed — labels cannot rescue it', () => {
+    // codex P1 r1: an admin-added key whose editable label says "Pest"
+    // must not become eligible by name — fallback is for rows with no
+    // stable identity at all.
+    expect(resolveTraceEligibility({ serviceKey: 'pest_consultation', displayName: 'Pest Consultation' }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    expect(resolveTraceEligibility({ findingsType: 'future_new_schema', displayName: 'Lawn Something' }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
   });
 });
 
@@ -122,13 +142,13 @@ describe('capture-side block payload (tech write routes)', () => {
     jest.isolateModules(() => {});
     jest.doMock('../services/service-completion-profiles', () => ({
       resolveCompletionProfileForScheduledService: jest.fn(async () => ({
-        serviceKey: 'pest_termite_bait_quarterly', findingsType: null,
+        serviceKey: null, findingsType: 'termite_bait_station',
       })),
     }));
     let block;
     await jest.isolateModulesAsync(async () => {
       const mod = require('../services/service-report/trace-eligibility');
-      block = await mod.traceCaptureBlockPayload({ service_type: 'Termite Bait Quarterly' }, null);
+      block = await mod.traceCaptureBlockPayload({ service_type: 'Termite Bait Station Check' }, null);
     });
     expect(block).toMatchObject({
       status: 403,

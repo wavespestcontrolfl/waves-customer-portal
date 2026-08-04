@@ -13676,7 +13676,14 @@ export function CompletionPanel({
                 Rodent trapping skips it too — nothing is sprayed on a trapping
                 stop, and the trap map below is that visit's spatial story
                 (owner 2026-08-02). */}
-            {!quickComplete && !isBedBugVisit && !isRodentTrappingVisit && (
+            {/* traceEligible rides the schedule feed (GATE_TRACE_ELIGIBILITY):
+                bait/inspection/exclusion visits hide the tracer here too —
+                the standalone TechHome button was only one of the two entry
+                points, and inviting a trace the save route will 403 is a
+                dead end (codex P2 r1). Absent flag (other feeds, gate off)
+                keeps today's behavior; the named lane checks stay as belt. */}
+            {!quickComplete && !isBedBugVisit && !isRodentTrappingVisit
+              && service.traceEligible !== false && (
               <Field label="Treatment zone map">
                 <button
                   type="button"

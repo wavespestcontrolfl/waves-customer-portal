@@ -219,7 +219,43 @@ async function treatmentZonePdfSignature(service, knex = db) {
       .first('updated_at', 'created_at');
     if (!row) return '';
     const stamp = new Date(row.updated_at || row.created_at || 0).getTime();
-    return `-tz${Number.isFinite(stamp) ? stamp : 0}`;
+    // Trace-eligibility component (GATE_TRACE_ELIGIBILITY): the live view
+    // suppresses ineligible traces at render, and a cached PDF must not
+    // keep serving the old spray map after the flip — owner ruling
+    // 2026-08-04: invalidate on next open, no bulk regen. Appended ONLY
+    // when the gate is on, so pre-flip keys are untouched and each traced
+    // record re-renders exactly once on its next open. Mirrors the render
+    // inputs (snapshot findingsType is the authority, live profile widens,
+    // display names last) — the verdict itself comes from the shared
+    // resolver, so registry changes invalidate here for free.
+    let eligibilityComponent = '';
+    const { resolveTraceEligibility, traceEligibilityGateOn } = require('./service-report/trace-eligibility');
+    if (traceEligibilityGateOn()) {
+      let serviceKey = null;
+      let findingsType = null;
+      let names = String(service?.service_type || '');
+      try {
+        const serviceData = typeof service?.service_data === 'string'
+          ? JSON.parse(service.service_data || '{}')
+          : (service?.service_data || {});
+        findingsType = serviceData?.typedReportSnapshot?.type || null;
+      } catch { /* names + profile still stand */ }
+      try {
+        const sched = await knex('scheduled_services')
+          .where({ id: scheduledServiceId })
+          .first('id', 'service_id', 'service_type');
+        if (sched?.service_type) names += ` ${sched.service_type}`;
+        const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+        const profile = await resolveCompletionProfileForScheduledService(sched || { id: scheduledServiceId }, knex);
+        serviceKey = profile?.serviceKey || null;
+        findingsType = findingsType || profile?.findingsType || null;
+      } catch { /* label fallback stands, same as the render path */ }
+      const traceVerdict = resolveTraceEligibility({ serviceKey, findingsType, displayName: names });
+      eligibilityComponent = traceVerdict.eligible
+        ? `-te1${traceVerdict.variant || ''}`
+        : '-te0';
+    }
+    return `-tz${Number.isFinite(stamp) ? stamp : 0}${eligibilityComponent}`;
   } catch {
     return '';
   }

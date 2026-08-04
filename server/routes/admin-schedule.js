@@ -2103,6 +2103,12 @@ router.get('/', async (req, res, next) => {
         scheduledDate: date,
         traceEligible: !traceEligibilityGateOn() || rowTraceEligibility({
           serviceKey: serviceKeyByServiceId.get(s.service_id) || null,
+          // The already-resolved typed profile (loaded above for every row)
+          // — typed keys absent from the key registry classify by their
+          // findings pointer, exactly like the write and report paths
+          // (codex P2 r1: lawn_aeration's raw "Aeration" label matches no
+          // fallback regex, but its one_time_lawn_treatment pointer does).
+          findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
           displayName: s.service_type || '',
         }).eligible,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,

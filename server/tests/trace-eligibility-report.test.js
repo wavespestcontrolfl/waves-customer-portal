@@ -115,3 +115,38 @@ describe('trace suppression at report payload build', () => {
     expect(traced.variant).toBe('outline');
   });
 });
+
+// Owner ruling (b): stale cached PDFs invalidate on next open. The PDF
+// cache key's treatment-zone component must change when the gate flips or
+// the verdict differs — otherwise cached PDFs keep publishing the old
+// spray map forever (codex P1 r1).
+describe('PDF signature varies with the eligibility verdict', () => {
+  const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
+  const prevGate = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = prevGate;
+  });
+
+  const signatureFor = (serviceType) => treatmentZonePdfSignature(
+    { scheduled_service_id: 'sched-trace-1', service_type: serviceType, service_data: '{}' },
+    stubKnex({
+      treatment_zone_maps: [TRACED_ROW],
+      scheduled_services: [{ id: 'sched-trace-1', service_id: null, service_type: serviceType }],
+    }),
+  );
+
+  test('gate off: pre-flip keys are untouched', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    expect(await signatureFor('Termite Bait Quarterly')).toMatch(/^-tz\d+$/);
+  });
+
+  test('gate on: suppressed and eligible verdicts key differently', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const bait = await signatureFor('Termite Bait Quarterly');
+    const pest = await signatureFor('Quarterly Pest Control');
+    expect(bait).toMatch(/-te0$/);
+    expect(pest).toMatch(/-te1spray$/);
+    expect(bait).not.toBe(pest);
+  });
+});
