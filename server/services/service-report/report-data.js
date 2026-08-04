@@ -2533,8 +2533,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // it exists to remove. The immutable snapshot is the authority; the live
   // profile only widens it. Seeded before the try/catch so a throw leaves
   // the snapshot verdict standing.
-  const snapshotFindingsType = parseJsonObject(service.service_data)
-    ?.typedReportSnapshot?.type || null;
+  const snapshotForTrace = parseJsonObject(service.service_data)?.typedReportSnapshot || null;
+  const snapshotFindingsType = snapshotForTrace?.type || null;
   let trapLaneNoSprayMap = snapshotFindingsType === 'rodent_trapping';
   let laneProfile = null;
   if (!interiorOnlyLane && scheduledServiceRow) {
@@ -2558,6 +2558,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceKey: laneProfile?.serviceKey || null,
     findingsType: snapshotFindingsType || laneProfile?.findingsType || null,
     displayName: `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
+    // Render side: conditional lanes (roach family) need the frozen
+    // snapshot's recorded treatment — null (no snapshot) fails closed.
+    typedValues: snapshotForTrace?.values ?? null,
   });
   const traceSuppressed = traceEligibilityGateOn() && !traceEligibility.eligible;
   const structured = parseJsonObject(service.structured_notes);

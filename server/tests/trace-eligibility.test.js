@@ -94,14 +94,49 @@ describe('classification behavior', () => {
       .toMatchObject({ eligible: true, variant: 'spray' });
   });
 
-  test('the typed pointer outranks the catalog key', () => {
-    // A combined profile can resolve a spray-ish key while the frozen
-    // snapshot is a trapping report — the snapshot's findingsType wins
-    // (the trap-lane snapshot-is-authority rule).
+  test('ineligible verdicts win in BOTH precedence directions', () => {
+    // A frozen trapping snapshot widens suppression over a spray key
+    // (snapshot-is-authority)…
     expect(resolveTraceEligibility({
       serviceKey: 'pest_general_quarterly',
       findingsType: 'rodent_trapping',
     })).toMatchObject({ eligible: false, reason: 'trap_lane' });
+    // …and an explicitly ineligible key overrides a STALE eligible
+    // snapshot (codex P1 r4: lawn_inspection completed during that key's
+    // brief typed era must not keep a treatment trace).
+    expect(resolveTraceEligibility({
+      serviceKey: 'lawn_inspection',
+      findingsType: 'one_time_lawn_treatment',
+    })).toMatchObject({ eligible: false, reason: 'inspection_lane' });
+  });
+
+  test('the membership billing row never traces', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'waveguard_membership' }))
+      .toMatchObject({ eligible: false, reason: 'billing_rider' });
+  });
+
+  test('roach-family eligibility is conditional on recorded exterior work at render', () => {
+    // capture side (no typedValues): the tech in the field may trace
+    expect(resolveTraceEligibility({ findingsType: 'cockroach' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // render side, exterior chip recorded (array and CSV shapes)
+    expect(resolveTraceEligibility({
+      findingsType: 'cockroach',
+      typedValues: { treatment_completed: ['Bait placement', 'Exterior perimeter treatment'] },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'palmetto_roach_knockdown',
+      typedValues: { treatment_completed: 'Interior crack & crevice, Exterior perimeter treatment' },
+    })).toMatchObject({ eligible: true });
+    // render side, interior-only work — the German-species case on the
+    // active cockroach_control lane (codex P1 r4)
+    expect(resolveTraceEligibility({
+      findingsType: 'cockroach',
+      typedValues: { treatment_completed: ['Bait placement', 'IGR application'] },
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+    // render side, no snapshot at all — fails closed
+    expect(resolveTraceEligibility({ findingsType: 'cockroach', typedValues: null }))
+      .toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
   });
 
   test('display names are the last resort, in both directions', () => {

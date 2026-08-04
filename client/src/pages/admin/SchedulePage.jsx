@@ -13716,7 +13716,7 @@ export function CompletionPanel({
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
-                  {isLawn
+                  {traceOutlineMode
                     ? "Auto-trace the lawn on the satellite photo — it renders as a highlighted treated-area outline on the customer report."
                     : "Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report."}
                 </span>

@@ -32,14 +32,24 @@ const FINDINGS_TYPE_RULES = {
   tree_shrub: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   mosquito_event: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   flea: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  cockroach: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // The roach family is CONDITIONAL (codex P1 r3+r4): exterior perimeter
+  // treatment is an optional chip on these forms — a German-species
+  // cockroach_control visit can be pure interior bait/IGR — so the RENDER
+  // verdict requires the recorded exterior chip in the frozen snapshot's
+  // treatment values. Capture stays allowed (typedValues absent at
+  // capture time → eligible): the tech tracing mid-visit knows what they
+  // treated, and the render screen is the customer-facing guarantee.
+  cockroach: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresExteriorChip: true,
+  },
+  palmetto_roach_knockdown: {
+    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresExteriorChip: true,
+  },
   // German knockdown is an INTERIOR bait/IGR program (rooms, harborage,
-  // prep — no exterior or perimeter work in its treatment choices), so a
-  // satellite perimeter trace would be a false exterior claim (codex P1
-  // r3). Palmetto knockdown differs: its lane explicitly includes
-  // exterior harborage + perimeter treatment, so it stays eligible.
+  // prep — no exterior or perimeter work in its treatment choices at all),
+  // so a satellite perimeter trace would be a false exterior claim (codex
+  // P1 r3).
   german_roach_knockdown: { eligible: false, reason: 'interior_only_lane' },
-  palmetto_roach_knockdown: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   one_time_pest_treatment: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   one_time_lawn_treatment: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   // liquid termite family (trench/rod/spot) — a perimeter application IS
@@ -81,7 +91,10 @@ const SERVICE_KEY_RULES = {
   // mosquito programs
   mosquito_monthly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   mosquito_seasonal: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
-  waveguard_membership: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Billing construct, not a visit (zero duration, booking disabled) —
+  // WaveGuard's actual stops book as the mosquito programs above (codex
+  // P2 r4).
+  waveguard_membership: { eligible: false, reason: 'billing_rider' },
   // lawn programs — coverage outline/highlight, not a spray-mist replay
   lawn_care_6week: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
   lawn_care_monthly: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
@@ -144,20 +157,45 @@ function verdict(rule, source) {
   return { eligible: false, variant: null, captionKey: null, reason: rule.reason };
 }
 
+// The recorded-exterior-work test for requiresExteriorChip rules: the
+// frozen snapshot's treatment chips (array or CSV string — String() joins
+// arrays on commas).
+function recordedExteriorWork(typedValues) {
+  return /exterior|perimeter/i.test(String(typedValues?.treatment_completed || ''));
+}
+
 /**
- * Pure resolver. Precedence: findingsType (typed pointer, most specific) →
- * serviceKey → display-name regex (last resort, admin-editable labels) →
+ * Pure resolver. Precedence: INELIGIBLE verdicts win in either direction —
+ * a frozen snapshot's findingsType may WIDEN suppression over a spray key
+ * (the trap-lane snapshot-authority rule), and an explicitly ineligible
+ * key overrides a stale eligible snapshot (codex P1 r4: a lawn_inspection
+ * completed during that key's brief typed era must not keep a treatment
+ * trace). Among eligible rules the findingsType wins (it carries the
+ * variant). Then display-name regex (last resort, admin-editable labels) →
  * ineligible 'unclassified_service'.
+ *
+ * `typedValues` (the frozen snapshot's findings values) resolves the
+ * conditional roach-family rules: absent (capture side) → eligible;
+ * present without recorded exterior work → ineligible.
  */
 function resolveTraceEligibility({
-  serviceKey = null, findingsType = null, displayName = '',
+  serviceKey = null, findingsType = null, displayName = '', typedValues = undefined,
 } = {}) {
-  if (findingsType && FINDINGS_TYPE_RULES[findingsType]) {
-    return verdict(FINDINGS_TYPE_RULES[findingsType], 'findings_type');
-  }
-  if (serviceKey && SERVICE_KEY_RULES[serviceKey]) {
-    return verdict(SERVICE_KEY_RULES[serviceKey], 'service_key');
-  }
+  const applyConditions = (rule, source) => {
+    if (rule.eligible && rule.requiresExteriorChip
+      && typedValues !== undefined && !recordedExteriorWork(typedValues)) {
+      return {
+        eligible: false, variant: null, captionKey: null, reason: 'no_exterior_work_recorded',
+      };
+    }
+    return verdict(rule, source);
+  };
+  const findingsRule = findingsType ? FINDINGS_TYPE_RULES[findingsType] : null;
+  const keyRule = serviceKey ? SERVICE_KEY_RULES[serviceKey] : null;
+  if (findingsRule && !findingsRule.eligible) return verdict(findingsRule, 'findings_type');
+  if (keyRule && !keyRule.eligible) return verdict(keyRule, 'service_key');
+  if (findingsRule) return applyConditions(findingsRule, 'findings_type');
+  if (keyRule) return applyConditions(keyRule, 'service_key');
   // A SUPPLIED stable identity that missed both registries fails CLOSED —
   // label fallback is reserved for legacy rows with no stable identity at
   // all. Falling through here would let an admin-added key become
@@ -234,12 +272,17 @@ async function resolveTraceRenderVerdict(record, knex) {
   }
   let serviceKey = null;
   let findingsType = null;
+  // null (not undefined) when no snapshot exists: at RENDER time a
+  // conditional lane with no recorded evidence fails closed — only the
+  // capture side (which never passes typedValues) stays permissive.
+  let typedValues = null;
   let names = String(record?.service_type || '');
   try {
     const serviceData = typeof record?.service_data === 'string'
       ? JSON.parse(record.service_data || '{}')
       : (record?.service_data || {});
     findingsType = serviceData?.typedReportSnapshot?.type || null;
+    typedValues = serviceData?.typedReportSnapshot?.values ?? null;
   } catch { /* names + profile still stand */ }
   try {
     if (record?.scheduled_service_id && knex) {
@@ -256,7 +299,9 @@ async function resolveTraceRenderVerdict(record, knex) {
       findingsType = findingsType || profile?.findingsType || null;
     }
   } catch { /* label fallback stands, same as the render path */ }
-  const eligibility = resolveTraceEligibility({ serviceKey, findingsType, displayName: names });
+  const eligibility = resolveTraceEligibility({
+    serviceKey, findingsType, displayName: names, typedValues,
+  });
   return { suppressed: !eligibility.eligible, eligibility };
 }
 
