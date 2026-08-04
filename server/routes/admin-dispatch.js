@@ -6095,9 +6095,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // inspections closed out before the feature existed.
             // visitOutcome must be a real completion — an 'incomplete'
             // visit performed no inspection to credit.
+            // Shared predicate, not the bare category (Codex #3178 r24
+            // P0): rodent_inspection's typed profile is category 'rodent',
+            // and the category-only gate silently excluded it.
             ...(offerInspectionCredit
               && visitOutcome === 'completed'
-              && String(completionProfile?.category || '') === 'inspection'
+              && require('../services/inspection-credit').isCreditableInspectionProfile(completionProfile)
               && require('../config/feature-gates').isEnabled('inspectionCredit')
               ? {
                 inspectionCreditOptIn: true,
@@ -7215,7 +7218,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       : offerInspectionCredit;
     if (inspectionCreditConsented
       && visitOutcome === 'completed'
-      && String(completionProfile?.category || '') === 'inspection') {
+      // Shared predicate, not the bare category (Codex #3178 r24 P0):
+      // rodent_inspection's typed profile is category 'rodent'.
+      && require('../services/inspection-credit').isCreditableInspectionProfile(completionProfile)) {
       try {
         const InspectionCredit = require('../services/inspection-credit');
         // The window starts when the INSPECTION happened, not when it was
@@ -7249,6 +7254,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // also not back-date the ordering guard).
           ...(record?.created_at ? { now: new Date(record.created_at) } : {}),
           ...(inspectionMoment ? { windowAnchor: inspectionMoment } : {}),
+          // A durable marker means the promise was made while the lane was
+          // LIVE — a resume after the gate went dark must still honor it
+          // (Codex #3178 r24 P2). First runs without a marker keep the
+          // live-gate check inside recordInspectionCreditOffer.
+          honorCommittedMarker: parseJsonObject(record.service_data)?.inspectionCreditOptIn === true,
         });
       } catch (creditErr) {
         logger.error(`[dispatch] inspection credit offer failed for ${svc.id}: ${creditErr.message}`);

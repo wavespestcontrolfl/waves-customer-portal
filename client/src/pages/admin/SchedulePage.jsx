@@ -9910,7 +9910,11 @@ export function CompletionPanel({
   // never shows the tech a promise that will be silently dropped. The
   // server independently re-checks the category too, so a crafted payload
   // can't promise a credit on a treatment visit.
-  const isInspectionVisit = service.completionProfile?.category === "inspection"
+  // Category OR the rodent key: rodent_inspection's typed profile carries
+  // category 'rodent', mirroring the server's isCreditableInspectionProfile
+  // (Codex #3178 r24 P0) — the server still re-checks independently.
+  const isInspectionVisit = (service.completionProfile?.category === "inspection"
+    || service.completionProfile?.serviceKey === "rodent_inspection")
     && service.inspectionCreditAvailable === true;
   const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
     || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());

@@ -81,6 +81,10 @@ jest.mock('../models/db', () => {
     return chain;
   };
   const db = jest.fn((table) => makeChain(table));
+  // Pass-through: select(db.raw(...)) must not throw — without this the
+  // recovery query died at arg-evaluation time and the catch swallowed it,
+  // so recovery paths were silently untested.
+  db.raw = jest.fn((sql) => sql);
   db.fn = { now: () => 'NOW' };
   db.transaction = jest.fn(async (cb) => cb(db));
   // Savepoint support: a nested transaction on the same handle.
@@ -98,6 +102,7 @@ const {
   etEndOfDayAfterDays,
   creditWindowDaysForServiceKey,
   configuredCreditAmountForServiceKey,
+  isCreditableInspectionProfile,
   DEFAULT_CREDIT_WINDOW_DAYS,
 } = require('../services/inspection-credit');
 
@@ -436,7 +441,9 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(res).toEqual({ reversed: 0 });
     // Money stays with the customer — they still have a qualifying booking.
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
-    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-other' });
+    // A rebind starts a NEW booking lifecycle: the old booking's stale
+    // alert marker must not suppress the new booking's one alert (r24 P2).
+    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-other', reversal_alerted_at: null });
   });
 
   it('a lapsed offer closes out instead of dangling reopened', async () => {
@@ -590,7 +597,11 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
 
   describe('etEndOfDayAfterDays — ET calendar days, never 24h multiples (r18 pre-push P1)', () => {
     const { etEndOfDayAfterDays } = require('../services/inspection-credit');
-    const etString = (d) => d.toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+    // hourCycle 'h23', NEVER hour12:false (Codex #3178 r24 P2): hour12:false
+    // resolves to the h24 cycle on Node 20's ICU, which renders these
+    // midnight boundaries as "24:00:00" ON THE PREVIOUS DATE — the assertions
+    // below would fail on CI while the computed instant is correct.
+    const etString = (d) => d.toLocaleString('en-US', { timeZone: 'America/New_York', hourCycle: 'h23' });
 
     it('a late-evening EST closeout crossing spring-forward keeps the calendar contract', () => {
       // Mar 7 2026 11:30pm EST + 30 ET days = Apr 6; exclusive end = Apr 7 00:00 ET.
@@ -732,6 +743,35 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).toContain('if (inspectionCreditOffer?.offerId) {');
     expect(source).not.toContain('inspectionCreditOffer?.recorded && inspectionCreditOffer.offerId');
   });
+
+  it('both closeout gates use the shared inspection predicate, never the bare category (r24 P0)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // rodent_inspection's typed profile is category 'rodent' — a bare
+    // category === 'inspection' gate silently excludes it, so neither the
+    // durable marker nor the offer ever fires for the one service whose
+    // estimator promise the credit must honor.
+    const matches = source.match(/isCreditableInspectionProfile\(completionProfile\)/g) || [];
+    expect(matches.length).toBe(2); // marker freeze + offer creation
+    expect(source).not.toMatch(/completionProfile\?\.category \|\| ''\) === 'inspection'/);
+    // The client renders the opt-out for rodent inspections too.
+    const client = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/SchedulePage.jsx'), 'utf8');
+    expect(client).toContain('service.completionProfile?.serviceKey === "rodent_inspection"');
+  });
+
+  it('the no-receipt office alert waits out a LIVE unpaid invoice (r24 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // An ordinary pay-after-service inspection has no PAID invoice at
+    // closeout, but its unpaid invoice delivers the memo on its own receipt
+    // when it settles — alerting then would page billing on every normal
+    // visit. Only a visit with no deliverable customer invoice at all
+    // escalates to a human.
+    const helperAt = source.indexOf('function queueCreditReceiptResend');
+    const guardAt = source.indexOf("whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)", helperAt);
+    const alertAt = source.indexOf("'Inspection credit has no receipt to ride'", helperAt);
+    expect(helperAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeGreaterThan(helperAt);
+    expect(alertAt).toBeGreaterThan(guardAt); // guard runs before the alert
+  });
 });
 
 describe('kill-switch posture — what must keep working while dark', () => {
@@ -757,9 +797,41 @@ describe('kill-switch posture — what must keep working while dark', () => {
     // not stay spendable through a kill-switch period).
     expect(res).toHaveProperty('reversed');
   });
+
+  it('recovers a COMMITTED opt-in marker while dark — the kill switch stops new promises, not old ones (r24 P2)', async () => {
+    // A closeout that committed its marker while the lane was LIVE, whose
+    // offer insert then crashed, must not stay stranded because the gate
+    // went dark before the hourly recovery ran. Redemption stays gated —
+    // the offer row is the record of the promise, not money.
+    mockGateOn = false;
+    mockOffers = [{
+      id: 'svc-9', customer_id: 'cust-1', service_id: 'svcdef-1',
+      record_id: 'rec-1', service_date: '2026-08-01',
+      closed_out_at: new Date('2026-08-01T20:00:00Z'),
+      frozen_terms: { amount: 75, windowDays: 30 },
+    }];
+    const res = await sweepInspectionCreditRedemptions();
+    expect(res.recovered).toBe(1);
+    expect(res.reason).toBe('feature_disabled');
+    // Still NO money while dark.
+    expect(res.redeemed).toBe(0);
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
 });
 
 describe('window + receipt copy', () => {
+  it('rodent_inspection is a creditable inspection despite its family category (r24 P0)', () => {
+    // The typed rodent-family cutover filed rodent_inspection's profile
+    // under category 'rodent' — gating the credit on the category alone
+    // silently excluded the one service whose estimator promise ($125
+    // creditable) the credit must honor.
+    expect(isCreditableInspectionProfile({ category: 'inspection', serviceKey: 'wdo_walkthrough' })).toBe(true);
+    expect(isCreditableInspectionProfile({ category: 'rodent', serviceKey: 'rodent_inspection' })).toBe(true);
+    expect(isCreditableInspectionProfile({ category: 'rodent', serviceKey: 'rodent_trapping_exclusion' })).toBe(false);
+    expect(isCreditableInspectionProfile({ category: 'pest', serviceKey: 'pest_control' })).toBe(false);
+    expect(isCreditableInspectionProfile(null)).toBe(false);
+  });
+
   it('honors the existing rodent precedent, defaults everything else', () => {
     // rodent_inspection carries creditable_within_days in pricing_config.
     expect(creditWindowDaysForServiceKey('rodent_inspection')).toBeGreaterThan(0);

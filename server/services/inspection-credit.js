@@ -83,6 +83,22 @@ function configuredCreditAmountForServiceKey(serviceKey) {
 }
 
 /**
+ * Whether a completion profile describes an inspection visit that earns the
+ * credit. The CATEGORY covers generic inspections, but typed family
+ * profiles carry their family's category instead — `rodent_inspection`'s
+ * active profile row is category 'rodent' since the rodent-family typed
+ * cutover (20260612000012), so gating on the category alone silently
+ * excluded the one service whose estimator promise the credit must honor
+ * (Codex #3178 r24 P0). Keyed on the STABLE service key, matching how the
+ * amount/window overrides key.
+ */
+function isCreditableInspectionProfile(profile) {
+  if (!profile) return false;
+  if (String(profile.category || '') === 'inspection') return true;
+  return String(profile.serviceKey || '') === 'rodent_inspection';
+}
+
+/**
  * A date-only value (YYYY-MM-DD) as an ET wall-clock instant.
  *
  * `new Date('2026-08-03')` anchors at UTC midnight, which in Eastern time is
@@ -196,8 +212,14 @@ async function recordInspectionCreditOffer({
   // service date, so a booking made that afternoon — but BEFORE the
   // closeout — could pass the ordering guard and mint a credit it preceded.
   windowAnchor = null,
+  // TRUE only when a durable `inspectionCreditOptIn` marker already exists
+  // for this visit — i.e. the promise was made while the lane was LIVE and
+  // this call is recovery/resume, not a new opt-in (Codex #3178 r24 P2).
+  // A gate turned off must stop NEW promises, not strand ones already
+  // committed; redemption stays gated, so no money moves while dark.
+  honorCommittedMarker = false,
 }) {
-  if (!gateOn()) return { recorded: false, reason: 'feature_disabled' };
+  if (!gateOn() && !honorCommittedMarker) return { recorded: false, reason: 'feature_disabled' };
   if (!customerId || !scheduledServiceId) {
     return { recorded: false, reason: 'missing_identifiers' };
   }
@@ -590,6 +612,7 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
   let redeemed = 0;
   let expired = 0;
   let reversed = 0;
+  let recovered = 0;
   try {
     // Every still-open offer, INCLUDING lapsed ones: redemption is judged
     // by when the customer BOOKED, not by when this sweep runs (Codex
@@ -613,18 +636,18 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       .join('scheduled_services as s', 's.id', 'o.redeemed_scheduled_service_id')
       .where('o.status', 'redeemed')
       .whereIn('s.status', NON_LIVE_APPOINTMENT_STATUSES);
-    const stale = await staleBase()
+    const freshStale = await staleBase()
       .whereNull('o.reversal_alerted_at')
       .limit(limit)
       .select('o.id as id', 'o.redeemed_scheduled_service_id as booking_id');
-    const retryCapacity = limit - stale.length;
-    if (retryCapacity > 0) {
-      stale.push(...await staleBase()
+    const retryCapacity = limit - freshStale.length;
+    const stale = retryCapacity > 0
+      ? freshStale.concat(await staleBase()
         .whereNotNull('o.reversal_alerted_at')
         .orderByRaw('random()')
         .limit(retryCapacity)
-        .select('o.id as id', 'o.redeemed_scheduled_service_id as booking_id'));
-    }
+        .select('o.id as id', 'o.redeemed_scheduled_service_id as booking_id'))
+      : freshStale;
     for (const row of stale) {
       try {
         const rev = await reverseInspectionCreditForBooking({
@@ -638,17 +661,18 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       }
     }
 
-    if (!creditingOn) {
-      if (reversed) logger.info(`[inspection-credit] sweep (gate off): ${reversed} reversed`);
-      return { redeemed: 0, expired: 0, reversed, reason: 'feature_disabled' };
-    }
-
     // Closeout recovery, driven ONLY by the durable opt-in marker the
     // completion transaction wrote (Codex #3175 r5 P0). Inferring a promise
     // from "an inspection was completed" could not distinguish a transient
     // offer-write failure from the tech clearing the box, and on first gate
     // enablement it would have swept up every historical inspection and
     // turned them into real account credit.
+    // Runs even while DARK (Codex #3178 r24 P2): a marker is only ever
+    // written while the lane is live, so recovering its offer row honors a
+    // promise already made — the kill switch stops NEW opt-ins and all
+    // redemption (below), never the record of an existing promise. Skipping
+    // this while dark stranded a committed closeout whose offer insert
+    // crashed until someone re-enabled the gate.
     try {
       const missing = await db('service_records as r')
         .join('scheduled_services as s', 's.id', 'r.scheduled_service_id')
@@ -696,7 +720,12 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           // value parsed as UTC midnight lands on the previous ET day).
           now: visit.closed_out_at ? new Date(visit.closed_out_at) : now,
           windowAnchor: etDateOnlyToDate(visit.service_date) || now,
+          // The working set IS the durable-marker query — every visit here
+          // carries a committed opt-in, so recovery proceeds even while
+          // the gate is dark (r24 P2).
+          honorCommittedMarker: true,
         });
+        if (created?.recorded) recovered += 1;
         // This recovery insert can be the FIRST successful creation of the
         // promise (the closeout-time insert failed), so the prepaid
         // receipt-resend must ride it too (PR #3178 r17 P2) — otherwise an
@@ -734,6 +763,13 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       }
     } catch (err) {
       logger.error(`[inspection-credit] closeout recovery failed: ${err.message}`);
+    }
+
+    // Everything below MOVES OR EXPIRES MONEY-BEARING STATE — that is what
+    // the kill switch pauses.
+    if (!creditingOn) {
+      if (reversed || recovered) logger.info(`[inspection-credit] sweep (gate off): ${reversed} reversed, ${recovered} recovered`);
+      return { redeemed: 0, expired: 0, reversed, recovered, reason: 'feature_disabled' };
     }
 
     // Redemption is EVIDENCE-FIRST (PR #3178 r17 P2): the working set is
@@ -805,13 +841,13 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       logger.error(`[inspection-credit] expiry pass failed: ${expireErr.message}`);
     }
 
-    if (redeemed || expired || reversed) {
-      logger.info(`[inspection-credit] sweep: ${redeemed} redeemed, ${reversed} reversed, ${expired} expired`);
+    if (redeemed || expired || reversed || recovered) {
+      logger.info(`[inspection-credit] sweep: ${redeemed} redeemed, ${reversed} reversed, ${expired} expired, ${recovered} recovered`);
     }
-    return { redeemed, expired, reversed };
+    return { redeemed, expired, reversed, recovered };
   } catch (err) {
     logger.error(`[inspection-credit] sweep FAILED: ${err.message}`);
-    return { redeemed, expired, reversed, reason: 'error', error: err.message };
+    return { redeemed, expired, reversed, recovered, reason: 'error', error: err.message };
   }
 }
 
@@ -852,7 +888,16 @@ async function rebindRedeemedOffer(offerId, bookingId) {
       }
       await trx('inspection_credit_offers')
         .where({ id: offerId, status: 'redeemed' })
-        .update({ redeemed_scheduled_service_id: bookingId, updated_at: trx.fn.now() });
+        .update({
+          redeemed_scheduled_service_id: bookingId,
+          // A rebind starts a NEW booking lifecycle (Codex #3178 r24 P2):
+          // a marker left by the OLD booking's failed reversal would
+          // suppress the one alert the new booking's own failed reversal
+          // is allowed to raise — same reset the successful-reversal claim
+          // performs.
+          reversal_alerted_at: null,
+          updated_at: trx.fn.now(),
+        });
       rebound = true;
     });
     return rebound;
@@ -1145,6 +1190,20 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId }) {
           // deadline. Deliberately NOT an automated customer send: new
           // customer-facing comms are the owner's call, and which channel
           // should carry these terms is a copy decision (flagged on the PR).
+          // A LIVE unpaid customer invoice will carry the memo on its own
+          // receipt when it settles — the memo lookup reads the offer at
+          // render time. Alerting here would page billing for every
+          // ordinary pay-after-service inspection (Codex #3178 r24 P2).
+          // Only a visit with NO deliverable customer invoice at all
+          // (comped / never-invoiced / payer-billed-only) has no written
+          // channel and needs a human.
+          const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+          const liveInvoice = await db('invoices')
+            .where({ scheduled_service_id: scheduledServiceId })
+            .whereNull('payer_id')
+            .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+            .first('id');
+          if (liveInvoice) return;
           const offer = await db('inspection_credit_offers')
             .where({ id: offerId })
             .first('customer_id', 'amount', 'expires_at');
@@ -1223,6 +1282,7 @@ module.exports = {
   sweepInspectionCreditRedemptions,
   configuredCreditAmount,
   configuredCreditAmountForServiceKey,
+  isCreditableInspectionProfile,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
   queueCreditReceiptResend,
