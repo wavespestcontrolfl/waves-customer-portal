@@ -259,12 +259,23 @@ async function purgeStalePendingSubscribers() {
 async function confirmByToken(token) {
   const initial = await lookupByToken(token);
   if (initial.action !== 'pending') return initial;
-  // status === 'pending' — flip to active.
-  await db('newsletter_subscribers').where({ id: initial.subscriber.id }).update({
-    status: 'active',
-    confirmed_at: new Date(),
-    updated_at: new Date(),
-  });
+  // status === 'pending' — flip to active. The flip is an atomic CAS on
+  // the token AND the pending status (Codex #3084 r41): an email
+  // correction can rotate this row's tokens between the lookup and this
+  // write — the old link was DELIVERED to a rejected/typo mailbox, and an
+  // id-only update would let that stale link activate the freshly
+  // retargeted row (a third party confirming an address that isn't
+  // theirs). Zero rows means the token no longer owns the row; re-run the
+  // lookup so the caller sees the current truth (the stale link reads
+  // 'not_found'; a concurrent same-token confirm reads 'already_active').
+  const flipped = await db('newsletter_subscribers')
+    .where({ id: initial.subscriber.id, confirmation_token: token, status: 'pending' })
+    .update({
+      status: 'active',
+      confirmed_at: new Date(),
+      updated_at: new Date(),
+    });
+  if (!flipped) return lookupByToken(token);
   await linkToCustomer(initial.subscriber.email);
   const fresh = await db('newsletter_subscribers').where({ id: initial.subscriber.id }).first();
   return { subscriber: fresh, action: 'confirmed' };

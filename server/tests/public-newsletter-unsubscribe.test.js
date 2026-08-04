@@ -8,11 +8,16 @@ const publicNewsletterRouter = require('../routes/public-newsletter');
 
 const TOKEN = '11111111-2222-3333-4444-555555555555';
 
-function query(subscriber) {
+function query(subscriber, { tokenRotated = false } = {}) {
   const q = {};
   q.where = jest.fn(() => q);
-  q.first = jest.fn(async () => subscriber);
-  q.update = jest.fn(async () => 1);
+  q.whereNot = jest.fn(() => q);
+  q.first = jest.fn(async () => (tokenRotated ? null : subscriber));
+  // The r45 atomic consumption returns the updated rows (id, email) — a
+  // rotated/removed token matches nothing.
+  q.update = jest.fn(async () => (
+    (subscriber && !tokenRotated) ? [{ id: subscriber.id, email: subscriber.email }] : []
+  ));
   return q;
 }
 
@@ -55,8 +60,33 @@ describe('public newsletter unsubscribe scanner safety', () => {
       body: { confirm_unsubscribe: '1' },
     }, res);
     expect(res.statusCode).toBe(200);
-    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'unsubscribed' }));
+    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'unsubscribed' }), ['id', 'email']);
     expect(res.body).toContain("You're unsubscribed.");
+  });
+
+  test('the opt-out is consumed atomically by TOKEN, never by a separate id write', async () => {
+    // A correction rotating the tokens between a read and an id-keyed
+    // update let a stale link opt out the freshly retargeted subscriber
+    // (Codex #3084 r45) — the single conditional UPDATE keys on the token
+    // and serializes against the fanout's row locks.
+    const q = query({ id: 'sub-1', email: 'reader@example.com', status: 'active' });
+    db.mockReturnValue(q);
+    await routeHandler('post')({ params: { token: TOKEN }, body: {} }, response());
+    expect(q.where).toHaveBeenCalledWith({ unsubscribe_token: TOKEN });
+    expect(q.whereNot).toHaveBeenCalledWith({ status: 'unsubscribed' });
+    expect(q.where).not.toHaveBeenCalledWith(expect.objectContaining({ id: expect.anything() }));
+  });
+
+  test('a token rotated away mid-flight is a no-op with the expired page — never a retargeted opt-out', async () => {
+    const q = query({ id: 'sub-1', email: 'reader@example.com', status: 'active' }, { tokenRotated: true });
+    db.mockReturnValue(q);
+    const res = response();
+    await routeHandler('post')({
+      params: { token: TOKEN },
+      body: { confirm_unsubscribe: '1' },
+    }, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('expired or invalid');
   });
 
   test('RFC one-click POST keeps the uniform JSON response', async () => {
