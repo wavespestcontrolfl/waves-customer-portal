@@ -397,29 +397,28 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
   } catch {
     return null;
   }
+  // The posted capture mode must agree with the FINAL combined verdict's
+  // geometry (codex P2 r19, extended to the add-on rescue path in r20):
+  // the render path trusts capture_mode for its presentation. Absent mode
+  // (legacy clients) passes.
+  const modeMismatchBlock = (variant) => {
+    if (captureMode === undefined || captureMode === null || captureMode === '') return null;
+    const lawnMode = captureMode === 'lawn' || captureMode === 'lawn_highlight';
+    const wantsLawn = variant === 'outline';
+    if (lawnMode === wantsLawn) return null;
+    return {
+      status: 400,
+      payload: {
+        error: wantsLawn
+          ? 'This service maps the treated area — use the lawn outline workflow, not the perimeter tracer.'
+          : 'This service maps the treated perimeter — use the perimeter tracer, not the lawn outline workflow.',
+        code: 'trace_capture_mode_mismatch',
+        reason: variant,
+      },
+    };
+  };
   if (eligibility.eligible) {
-    // The posted capture mode must agree with the resolved geometry
-    // (codex P2 r19): the render path trusts capture_mode for its
-    // presentation, so a stale client posting `lawn` on a spray-only
-    // visit would relabel the bitmap as treated lawn coverage. Absent
-    // mode (legacy clients) passes.
-    if (captureMode !== undefined && captureMode !== null && captureMode !== '') {
-      const lawnMode = captureMode === 'lawn' || captureMode === 'lawn_highlight';
-      const wantsLawn = eligibility.variant === 'outline';
-      if (lawnMode !== wantsLawn) {
-        return {
-          status: 400,
-          payload: {
-            error: wantsLawn
-              ? 'This service maps the treated area — use the lawn outline workflow, not the perimeter tracer.'
-              : 'This service maps the treated perimeter — use the perimeter tracer, not the lawn outline workflow.',
-            code: 'trace_capture_mode_mismatch',
-            reason: eligibility.variant,
-          },
-        };
-      }
-    }
-    return null;
+    return modeMismatchBlock(eligibility.variant);
   }
   // An eligible ADD-ON line rescues the capture too (codex P2 r11) —
   // fail-open on lookup errors, same posture as the rest of this helper.
@@ -428,7 +427,7 @@ async function traceCaptureBlockPayload(scheduledService, knex, { captureMode = 
       eligibility,
       await resolveAddonVerdicts(scheduledService?.id, knex),
     );
-    if (combined.eligible) return null;
+    if (combined.eligible) return modeMismatchBlock(combined.variant);
   } catch { return null; }
   return {
     status: 403,
@@ -528,18 +527,19 @@ async function addonVerdictsFromLines(lines, knex, { renderSide = false } = {}) 
 // frozen with the completion.
 async function resolveAddonVerdicts(scheduledServiceId, knex, { renderSide = false } = {}) {
   if (!scheduledServiceId || !knex) return [];
-  try {
-    const rows = await knex('scheduled_service_addons')
-      .where({ scheduled_service_id: scheduledServiceId })
-      // Same deterministic order the capture feeds use — the first
-      // eligible add-on supplies the variant, so the report/PDF/re-entry
-      // pick must match the one the mapper keyed off (codex P2 r13).
-      .orderBy('created_at', 'asc')
-      .select('service_id', 'service_name');
-    return addonVerdictsFromLines(rows, knex, { renderSide });
-  } catch {
-    return [];
-  }
+  // Row-list errors PROPAGATE (codex P2 r20): the capture path's
+  // documented fail-open depends on seeing the failure — swallowing it as
+  // an empty list turned a transient outage into a misleading 403 for a
+  // legitimately rescued visit. Render callers wrap with their own
+  // fail-closed catch.
+  const rows = await knex('scheduled_service_addons')
+    .where({ scheduled_service_id: scheduledServiceId })
+    // Same deterministic order the capture feeds use — the first
+    // eligible add-on supplies the variant, so the report/PDF/re-entry
+    // pick must match the one the mapper keyed off (codex P2 r13).
+    .orderBy('created_at', 'asc')
+    .select('service_id', 'service_name');
+  return addonVerdictsFromLines(rows, knex, { renderSide });
 }
 
 // The generic completion's recorded areas/actions, joined for the
@@ -653,12 +653,13 @@ async function resolveTraceRenderVerdict(record, knex) {
         frozenLines = serviceData.completedAddonLines;
       }
     } catch { /* live-row fallback */ }
-    eligibility = combineLineVerdicts(
-      eligibility,
-      frozenLines !== null
+    let addonVerdicts = [];
+    try {
+      addonVerdicts = frozenLines !== null
         ? await addonVerdictsFromLines(frozenLines, knex, { renderSide: true })
-        : await resolveAddonVerdicts(record?.scheduled_service_id, knex, { renderSide: true }),
-    );
+        : await resolveAddonVerdicts(record?.scheduled_service_id, knex, { renderSide: true });
+    } catch { /* render fails closed: the primary verdict stands */ }
+    eligibility = combineLineVerdicts(eligibility, addonVerdicts);
   }
   return { suppressed: !eligibility.eligible, eligibility };
 }

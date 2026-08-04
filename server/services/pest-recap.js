@@ -280,7 +280,7 @@ async function submitRecap({
     const locked = await trx('scheduled_services')
       .where({ id: serviceId })
       .forUpdate()
-      .first('id', 'status', 'scheduled_date');
+      .first('id', 'status', 'scheduled_date', 'service_id', 'service_type');
     // Re-read status under the lock — svc.status was read before the lock
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
@@ -370,7 +370,14 @@ async function submitRecap({
     let frozenTraceIdentity = {};
     try {
       const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-      const recapProfile = await resolveCompletionProfileForScheduledService(svc, trx);
+      // Resolve from the LOCKED row's identity (codex P2 r20): an
+      // update-details transaction can repoint service_id/service_type
+      // between the pre-lock read and this lock — the freeze must record
+      // the service that is actually completing.
+      const lockedIdentity = locked
+        ? { id: serviceId, service_id: locked.service_id, service_type: locked.service_type }
+        : svc;
+      const recapProfile = await resolveCompletionProfileForScheduledService(lockedIdentity, trx);
       const recapAddonRows = await trx('scheduled_service_addons')
         .where({ scheduled_service_id: serviceId })
         .orderBy('created_at', 'asc')
@@ -378,7 +385,7 @@ async function submitRecap({
         .catch(() => null);
       frozenTraceIdentity = {
         completedServiceKey: recapProfile?.serviceKey || null,
-        completedServiceName: svc.service_type || null,
+        completedServiceName: (locked ? locked.service_type : svc.service_type) || null,
         ...(Array.isArray(recapAddonRows)
           ? {
             completedAddonLines: recapAddonRows.map((row) => ({

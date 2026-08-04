@@ -230,7 +230,24 @@ async function treatmentZonePdfSignature(service, knex = db) {
     // resolver, so registry changes invalidate here for free.
     let eligibilityComponent = '';
     const { resolveTraceRenderVerdict } = require('./service-report/trace-eligibility');
-    const verdict = await resolveTraceRenderVerdict(service, knex);
+    // Callers with PARTIAL rows (the PDF lookup path selects a narrow
+    // column set) must still key on the same evidence the renderer sees —
+    // a missing areas_serviced column made the lookup verdict diverge
+    // from the stored one and forced a browser re-render on every
+    // attachment fetch (codex P2 r20). Fail-soft: an unloadable row just
+    // uses what the caller passed.
+    let verdictRecord = service;
+    if (service?.id
+      && (service.areas_serviced === undefined || service.structured_notes === undefined
+        || service.service_data === undefined)) {
+      try {
+        const fullRow = await knex('service_records')
+          .where({ id: service.id })
+          .first('areas_serviced', 'structured_notes', 'service_data', 'service_type');
+        if (fullRow) verdictRecord = { ...fullRow, ...service };
+      } catch { /* partial row stands */ }
+    }
+    const verdict = await resolveTraceRenderVerdict(verdictRecord, knex);
     if (verdict.eligibility) {
       eligibilityComponent = verdict.suppressed
         ? '-te0'

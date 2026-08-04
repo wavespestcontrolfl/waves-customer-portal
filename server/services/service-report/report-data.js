@@ -2553,13 +2553,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const snapshotFindingsType = snapshotForTrace?.type || null;
   let trapLaneNoSprayMap = snapshotFindingsType === 'rodent_trapping';
   let laneProfile = null;
+  let laneProfileLookupFailed = false;
   if (!interiorOnlyLane && scheduledServiceRow) {
     try {
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
       laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
       interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
       trapLaneNoSprayMap = trapLaneNoSprayMap || laneProfile?.findingsType === 'rodent_trapping';
-    } catch { /* label fallback stands */ }
+    } catch { laneProfileLookupFailed = true; /* label fallback stands for the legacy belts */ }
   }
   // Centralized trace eligibility (GATE_TRACE_ELIGIBILITY, dark): ONE
   // registry decides whether this report may carry a spray trace,
@@ -2579,9 +2580,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const frozenTraceData = parseJsonObject(service.service_data) || {};
   const hasFrozenPrimary = Object.prototype.hasOwnProperty.call(frozenTraceData, 'completedServiceKey');
   let traceEligibility = resolveTraceEligibility({
+    // A LINKED row whose profile lookup failed must not fall to the
+    // editable display name — the unresolvable sentinel reuses the
+    // supplied-identity fail-closed rule (codex P2 r20). Unlinked legacy
+    // rows (no scheduledServiceRow) keep name fallback.
     serviceKey: hasFrozenPrimary
       ? (frozenTraceData.completedServiceKey || null)
-      : (laneProfile?.serviceKey || null),
+      : (laneProfile?.serviceKey
+        || (laneProfileLookupFailed ? 'unresolved:linked_service' : null)),
     findingsType: snapshotFindingsType || (hasFrozenPrimary ? null : laneProfile?.findingsType) || null,
     displayName: `${service.service_type || ''} ${hasFrozenPrimary ? (frozenTraceData.completedServiceName || '') : (scheduledServiceRow?.service_type || '')}`,
     // Render side: conditional lanes (roach family) need the frozen
