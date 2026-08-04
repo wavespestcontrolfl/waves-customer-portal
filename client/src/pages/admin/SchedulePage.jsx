@@ -9795,11 +9795,16 @@ export function CompletionPanel({
   // Consecutive completion_side_effects_running retries in the current
   // submit chain — see SIDE_EFFECTS_RETRY_MS for the contract.
   const sideEffectsRetryRef = useRef(0);
-  // The exact body of the submit that opened the current retry chain: a
-  // rebuild stamps fresh volatile fields (station reference capturedAt) and
-  // the committed-attempt matcher would 409 completion_resume_payload_mismatch
-  // instead of resuming (codex P1 #3187 r3).
+  // The exact body of the submit that COMMITTED (first side-effects 409):
+  // a rebuild stamps fresh volatile fields (station reference capturedAt)
+  // and the committed-attempt matcher would 409
+  // completion_resume_payload_mismatch instead of resuming (codex P1 #3187
+  // r3). The committed flag — not the body ref — gates the replay, and it
+  // survives give-up so the instructed MANUAL retry also replays the
+  // committed body, not a fresh rebuild (codex P1 r5); a non-committed
+  // failure leaves the flag false and the next submit sends fresh state.
   const lastSubmitBodyRef = useRef(null);
+  const sideEffectsCommittedRef = useRef(false);
   const draftReadyRef = useRef(false);
 
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
@@ -12392,16 +12397,18 @@ export function CompletionPanel({
       if (service?.completionInvoiceAlreadySent) {
         body.invoiceAlreadySent = true;
       }
-      // A side-effects retry must replay the chain-opening body byte-for-byte
-      // (same key AND same payload); every other submit sends the fresh build
-      // and becomes the new snapshot.
+      // Once the completion is KNOWN COMMITTED, every submit — automatic
+      // retry or the manual one after give-up — must replay the committed
+      // body byte-for-byte (same key AND same payload); until then each
+      // submit sends the fresh build and becomes the candidate snapshot.
       const submitBody =
-        sideEffectsRetryRef.current > 0 && lastSubmitBodyRef.current
+        sideEffectsCommittedRef.current && lastSubmitBodyRef.current
           ? lastSubmitBodyRef.current
           : body;
       lastSubmitBodyRef.current = submitBody;
       const result = await onSubmit(service.id, submitBody);
       sideEffectsRetryRef.current = 0;
+      sideEffectsCommittedRef.current = false;
       lastSubmitBodyRef.current = null;
       const photoResult = result?.completionPhotoUpload;
       if (photoResult?.failed > 0) {
@@ -12459,13 +12466,11 @@ export function CompletionPanel({
       }
     } catch (e) {
       // Any outcome but another quiet side-effects retry ends the retry
-      // chain — reset the chain state up front so a later MANUAL resubmit
-      // never replays the stale snapshot body over fresh edits; the retry
-      // branch below restores both from these locals.
+      // COUNT — the committed flag and body snapshot deliberately survive
+      // (see the ref declarations): after a committed 409, even the manual
+      // resubmit the give-up copy instructs must replay the committed body.
       const sideEffectsRetryCount = sideEffectsRetryRef.current;
-      const sideEffectsChainBody = lastSubmitBodyRef.current;
       sideEffectsRetryRef.current = 0;
-      lastSubmitBodyRef.current = null;
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
       }
@@ -12493,7 +12498,10 @@ export function CompletionPanel({
         // A marker-resume rebuilt from the draft can differ from the
         // committed body (photos live only in memory). The closeout itself
         // is saved; the office bills the visit from Billing Recovery — stop
-        // re-offering a resume that can never match.
+        // re-offering a resume that can never match, and drop the committed
+        // snapshot with it.
+        sideEffectsCommittedRef.current = false;
+        lastSubmitBodyRef.current = null;
         try {
           localStorage.removeItem(completionResumeOwedKey(service.id));
         } catch { /* ignore */ }
@@ -12518,8 +12526,8 @@ export function CompletionPanel({
         try {
           localStorage.setItem(completionResumeOwedKey(service.id), "1");
         } catch { /* storage unavailable — the mounted panel's retry still works */ }
+        sideEffectsCommittedRef.current = true;
         sideEffectsRetryRef.current = sideEffectsRetryCount + 1;
-        lastSubmitBodyRef.current = sideEffectsChainBody;
         await new Promise((resolve) => setTimeout(resolve, retryPlan.delayMs));
         return handleSubmit(reconcileConfirmed);
       }

@@ -125,6 +125,13 @@ describe('reconciled todaysResult leads with the visit summary', () => {
     );
   });
 
+  test('initialism periods are not sentence boundaries ("The U.S." must never ship)', () => {
+    const result = reconcile('The U.S. EPA-registered product was applied to the full lawn. More prose follows.');
+    expect(result.todaysResult).toMatch(
+      /^The U\.S\. EPA-registered product was applied to the full lawn\. No urgent/,
+    );
+  });
+
   test('an over-long first sentence falls back instead of truncating with an ellipsis', () => {
     const longSentence = `The lawn received ${'a very detailed set of applications, '.repeat(8)}covering every zone.`;
     expect(reconcile(longSentence).todaysResult).toMatch(/^Routine service completed\./);

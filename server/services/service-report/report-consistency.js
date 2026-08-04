@@ -23,7 +23,11 @@
 // hero "The St." — codex P1 #3187 r4) and decimals ("2.77 in"), and
 // anything over the cap returns '' (caller falls back to the neutral
 // lead) rather than truncating.
-const LEAD_ABBREVIATIONS = /\b(?:St|Mr|Mrs|Ms|Dr|Sr|Jr|vs|etc|approx|Ave|Blvd|Rd|Ft|Mt|No)\.$/i;
+// Single letters cover initialisms letter-by-letter ("U.S." ends "S.",
+// "e.g." ends "g.") — a genuine sentence ending in a single-letter word is
+// rare, and the miss just merges into the next boundary or falls back to
+// the neutral lead (codex P2 #3187 r5).
+const LEAD_ABBREVIATIONS = /\b(?:St|Mr|Mrs|Ms|Dr|Sr|Jr|vs|etc|approx|Ave|Blvd|Rd|Ft|Mt|No|[A-Za-z])\.$/i;
 
 function leadSentence(text, max = 220) {
   const t = String(text || '').replace(/\s+/g, ' ').trim();

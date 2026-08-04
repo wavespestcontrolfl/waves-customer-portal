@@ -72,8 +72,13 @@ exports.up = async function up(knex) {
     }
   }
 
+  // CarbonPro-L is a soil amendment/biostimulant (pricing.csv, lawn
+  // protocols), not a fertilizer — it gets the liquid PRECAUTION fix above
+  // but must never receive the "liquid fertilizer … leaf and root uptake"
+  // summary, even defensively (codex P1 #3187 r5).
+  const fertilizerRows = LIQUID_ROWS.filter((name) => !name.includes('CarbonPro-L'));
   const blendUpdated = await knex('products_catalog')
-    .whereIn('name', LIQUID_ROWS)
+    .whereIn('name', fertilizerRows)
     .where({ service_report_summary: GRANULAR_BLEND_SUMMARY })
     .update({ service_report_summary: LIQUID_BLEND_SUMMARY, updated_at: knex.fn.now() });
   console.log(`[20260803300000] controlled-release summary replaced on ${blendUpdated} liquid rows.`);
