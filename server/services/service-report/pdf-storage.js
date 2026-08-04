@@ -25,7 +25,11 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // mode, accordion "Details" chrome and the shell skip-link are print-hidden,
 // product cards keep together across page breaks; cached PDFs would keep the
 // old junk chrome without a re-render.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p2-print-clean-20260802';
+// 20260803: product-purpose copy now follows the recorded pest identity
+// (product name / technician targets) instead of equipment keywords — cached
+// PDFs would keep captioning cockroach gel as ant bait and fogged roach
+// products as mosquito applications without a re-render.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p3-product-purpose-20260803';
 
 const s3 = new S3Client({
   region: config.s3?.region,
@@ -83,6 +87,30 @@ function timeOnSiteAdjustedPdfSignature(service) {
     const rev = Number(notes.timeOnSiteRev);
     const revPart = Number.isFinite(rev) && rev > 0 ? `r${rev}` : '';
     return `-tos${minutesFromElapsed(notes.timeOnSite) || 0}${revPart}`;
+  } catch {
+    return '';
+  }
+}
+
+// Re-entry correction key component (codex P1 PR #3180) — same stale-render
+// fence as the time-on-site signature above: nulling pdf_storage_key alone
+// lets an in-flight render that loaded the pre-correction advisory write the
+// deterministic key back and serve the old re-entry guidance forever. The
+// correction PATCH stamps structured_notes.reentryAdjusted and bumps
+// structured_notes.reentryRev on EVERY save (structured_notes, not advisory,
+// because every key composition site already loads structured_notes), so the
+// stale renderer's key — computed from the old record — can no longer match.
+// Empty for every uncorrected record: no fleet-wide cache bust. Must ride in
+// EVERY composition site that builds the storage-key signature (pdf-queue
+// renderAndStore + getOrRender, reports-public expected + store).
+function reentryAdjustedPdfSignature(service) {
+  try {
+    const notes = typeof service?.structured_notes === 'string'
+      ? JSON.parse(service.structured_notes)
+      : (service?.structured_notes || {});
+    if (notes?.reentryAdjusted !== true) return '';
+    const rev = Number(notes.reentryRev);
+    return Number.isFinite(rev) && rev > 0 ? `-rer${rev}` : '';
   } catch {
     return '';
   }
@@ -197,4 +225,5 @@ module.exports = {
   reportPdfStorageKey,
   storedReportPdfLooksBroken,
   timeOnSiteAdjustedPdfSignature,
+  reentryAdjustedPdfSignature,
 };

@@ -33,7 +33,10 @@ const SERVICE_LINE_CONFIGS = {
     requiredPhotoCount: 4,
     advisoryDefaults: {
       exterior_reentry_min: 30,
-      interior_reentry_min: 120,
+      // Owner rule 2026-08-03: interior spray re-entry defaults to 30 min
+      // (was 120). Per-visit corrections go through the admin re-entry edit
+      // (PATCH /admin/dispatch/:serviceId/reentry).
+      interior_reentry_min: 30,
       irrigation_hold_hr: 24,
       pet_advisory: 'Keep pets off treated zones until dry.',
     },

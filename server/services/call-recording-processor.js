@@ -1184,6 +1184,224 @@ function isNonLeadCallContent(extracted = {}) {
   return NON_LEAD_CALL_TYPES.has(callType);
 }
 
+// A stale worker that lost its processing_token claim must not record or
+// merge first-touch holds (Codex #3084 r44): the peer that reclaimed the
+// call mints the fresh review card and records extraction B — a late merge
+// from this worker would overwrite the pending ledger target with the stale
+// extraction A, and resolving the visible B card would then release
+// first-touch mail to the unreviewed A address. The r44 read-only
+// pre-check was itself a TOCTOU (Codex #3084 r45): a worker could pass
+// it, stall past the reclaim threshold, and still merge late. The ledger
+// write now runs inside a transaction whose FIRST statement locks the
+// call_log row conditioned on the token — a reclaim's token rotation
+// queues behind that row lock until the merge commits, so ownership holds
+// THROUGH the write. Returns the record result when owned, 'claim_lost'
+// when the token no longer matches (the reclaiming peer's own Step 6/8
+// owns the ledger record), or null on a failed/unverifiable write (the
+// end-of-run retry re-attempts).
+async function recordFirstTouchHoldOwned(args, procToken) {
+  // Retry around the WHOLE transaction (Codex #3084 r47): a statement
+  // error ABORTS the transaction, so the helper's internal per-attempt
+  // retries could only fail with 25P02 in here — each attempt gets a
+  // fresh transaction instead (the helper runs single-attempt inside it),
+  // keeping the advertised transient-failure tolerance before the run is
+  // pushed into extraction recovery.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const outcome = await db.transaction(async (trx) => {
+        // Lock ORDER matters (Codex #3084 r46): the email-correction fanout
+        // locks first_touch_holds FOR UPDATE and then UPDATES the same
+        // call's call_log row (the review_status sync) — locking call_log
+        // first here was the reverse acquisition order, a deadlock Postgres
+        // breaks by aborting one side (a 500 on the operator's correction).
+        // Take the call's existing hold rows FIRST, then the
+        // token-conditioned call_log lock — the same
+        // first_touch_holds → call_log order the fanout uses, with hold
+        // INSERTS on both paths coming only after their call_log access.
+        if (await trx.schema.hasTable('first_touch_holds')) {
+          await trx('first_touch_holds')
+            .where({ call_log_id: args.callLogId })
+            .forUpdate()
+            .select('id');
+        }
+        const owned = await trx('call_log')
+          .where({ id: args.callLogId })
+          .where('processing_token', procToken)
+          .forUpdate()
+          .first('id');
+        if (!owned) {
+          logger.info('[call-proc] processing claim lost — skipping the hold ledger write (the owner records it)');
+          return 'claim_lost';
+        }
+        const { recordFirstTouchHold } = require('./lead-first-touch-resume');
+        return await recordFirstTouchHold({ ...args, dbh: trx, attempts: 1 });
+      });
+      if (outcome !== null) return outcome; // recorded, or 'claim_lost'
+      // null: the single in-transaction attempt failed and was swallowed —
+      // fall through to a fresh transaction.
+    } catch (claimErr) {
+      logger.warn(`[call-proc] token-fenced hold record attempt ${attempt} failed: ${claimErr.message}`);
+    }
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+  }
+  logger.warn('[call-proc] token-fenced hold record failed after 3 transactions — the end-of-run retry re-attempts');
+  return null;
+}
+
+// Mint email read-back cards ATOMICALLY with the release-claim invalidation
+// (Codex #3084 r54): an autocommit card insert followed by a separate repen
+// left a window where a release — its one card question already answered
+// under the send lock — could see the fresh card commit while the
+// invalidation still waited on its hold-row lock, and send the DOI/drip to
+// the now-unreviewed address before committing. One transaction, r52 shape:
+// hold-row locks FIRST, then the processing_token-conditioned call_log lock
+// (a stale worker aborts the mint entirely — the owner files its own card),
+// then the card writes, then repenHoldsForFreshEmailReview riding the same
+// transaction as a savepoint. The card and the invalidation now commit or
+// roll back TOGETHER, so r44's dangerous half-state (card durably filed,
+// claims still valid) cannot exist; a failed mint leaves no card, which the
+// token-fenced end-of-run recovery covers. repen's r44 durable-state error
+// still propagates (the caller fails the run retryably).
+async function mintEmailReviewCardsFenced({ callLogId, procToken, cards, callSid, invalidateClaims = true }) {
+  if (!cards.length) return;
+  try {
+    const minted = await db.transaction(async (trx) => {
+      // Advisory lock FIRST (Codex #3084 r55): with no hold rows yet — the
+      // normal early-processing state — the FOR UPDATE below locks nothing,
+      // and the mint would take call_log before triage_items while the
+      // fanout/admin-triage writers hold cards and then update call_log:
+      // an insert conflicting with a still-open card would deadlock. The
+      // shared per-call advisory lock serializes this mint against every
+      // card writer regardless of what rows exist.
+      await lockTriageCall(trx, callLogId);
+      if (await trx.schema.hasTable('first_touch_holds')) {
+        await trx('first_touch_holds')
+          .where({ call_log_id: callLogId })
+          .forUpdate()
+          .select('id');
+      }
+      const owned = await trx('call_log')
+        .where({ id: callLogId })
+        .where('processing_token', procToken)
+        .forUpdate()
+        .first('id');
+      if (!owned) return false;
+      for (const card of cards) {
+        await trx('triage_items')
+          .insert(card)
+          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+          .ignore();
+      }
+      if (invalidateClaims) {
+        const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
+        await repenHoldsForFreshEmailReview(callLogId, trx);
+      }
+      return true;
+    });
+    if (!minted) {
+      logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — skipping the email card mint (the owner files it)`);
+    }
+  } catch (mintErr) {
+    if (mintErr.emailReviewStateUnavailable) throw mintErr;
+    // EVERY mint failure fails the run (Codex #3084 r55): continuing
+    // without the card leaves a window where the new hold records with no
+    // live current-cycle card — if an older cycle has a RESOLVED email
+    // card, the ledger sweep can read that historical disposition as
+    // approval and release the fresh extraction before the end-of-run
+    // recovery ever files its card. Retryable, same path as the r44
+    // durable-state failures.
+    logger.error(`[call-proc] fenced email card mint failed for ${maskSid(callSid)}: ${mintErr.message} — failing the run (retryable)`);
+    const stateErr = new Error('email_review_state_unavailable');
+    stateErr.emailReviewStateUnavailable = true;
+    throw stateErr;
+  }
+}
+
+// True when the call has a live email read-back card — the extracted address
+// is a transcription guess and must not receive first-touch email until the
+// office confirms it. 'in_progress' counts as live (canonical open-review set,
+// admin-triage.js). Fails toward HOLD on a lookup error: a bounce to a wrong
+// guess burns sender reputation and mints a suppression on an address the
+// customer may later confirm; a held send is recoverable from the review card.
+async function shouldHoldLeadEmailEnrollment(callLogId, { procToken = null, callSid = null, extractedEmail = null } = {}) {
+  try {
+    const open = await db('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('status', ['open', 'in_progress'])
+      .whereIn('reason_code', ['email_unverified', 'email_invalid'])
+      .first('id');
+    return !!open;
+  } catch (err) {
+    logger.warn(`[call-proc] email-review lookup failed — holding first-touch email: ${err.message}`);
+    // Persist a recovery marker (Codex #3084): without a live card the
+    // standard resume paths (triage resolve / email correction) have nothing
+    // to release, and the lead would stay silently outside the drip forever.
+    //
+    // The marker rides mintEmailReviewCardsFenced (r56): the old shape
+    // autocommitted the card and THEN invalidated claims in a separate
+    // transaction — a releaser could lock the hold and pass its card check
+    // in that gap, then enroll/send while the invalidation waited on its
+    // lock. Card + invalidation now commit or roll back together under the
+    // advisory/token fence, same as both bridge sites.
+    try {
+      // The card must SHOW the address it approves (the r53 contract):
+      // TriageInboxTabV2 renders only email_as_heard/email_candidates/
+      // confirmation_question, and resolving this card releases the HELD
+      // targets — surface them. Read in the same failure domain as the
+      // mint: if the holds table is also unreadable, the catch below fails
+      // the run (r44 posture) rather than filing an evidence-free card.
+      const holdRows = await db('first_touch_holds')
+        .where({ call_log_id: callLogId })
+        .select('held_email');
+      // On the FIRST Step-6 failure no hold row exists yet (r57 —
+      // recordFirstTouchHoldOwned runs after this helper returns, and the
+      // run will record extracted.email as the held target): the current
+      // extraction IS the address this card would release, so it stands
+      // in as the evidence when the ledger has nothing.
+      const heldEmails = [...new Set(holdRows.map((r) => String(r.held_email || '').trim()).filter(Boolean))];
+      if (!heldEmails.length && extractedEmail && String(extractedEmail).trim()) {
+        heldEmails.push(String(extractedEmail).trim());
+      }
+      const { buildTriageItem } = require('./call-routing-gates');
+      await mintEmailReviewCardsFenced({
+        callLogId,
+        procToken,
+        callSid,
+        cards: [buildTriageItem({
+          callLogId,
+          flag: 'email_unverified',
+          extraction: { meta: { call_summary: null } },
+          severity: 'advisory',
+          extraPayload: {
+            hold_reason: 'email_review_lookup_error',
+            ...(heldEmails.length ? {
+              email_as_heard: heldEmails[0],
+              email_candidates: heldEmails,
+              confirmation_question: 'The email review-state lookup failed mid-run — read this address back with the customer before releasing.',
+            } : {}),
+          },
+        })],
+      });
+      // Claim lost (stale worker): the current owner files its own card
+      // for its cycle — holding without our card is safe, our run's later
+      // token CAS will fail anyway.
+    } catch (markerErr) {
+      if (markerErr.emailReviewStateUnavailable) throw markerErr;
+      // Neither the review state nor a recovery marker is available — a
+      // silent `true` here would durably hold both sends with no card
+      // visible to an operator and no resolution trigger left (Codex #3084
+      // r12). Fail the run instead: the outer procErr catch stamps
+      // extraction_failed with the capped retry budget, and the sweep
+      // re-processes the call when the DB recovers.
+      logger.error(`[call-proc] email-hold recovery marker insert failed: ${markerErr.message}`);
+      const stateErr = new Error('email_review_state_unavailable');
+      stateErr.emailReviewStateUnavailable = true;
+      throw stateErr;
+    }
+    return true;
+  }
+}
+
 // Word-of-mouth referral detection from the AI call extraction. The prompt sets
 // referred_by to the referrer's name (or 'unnamed') ONLY on an explicit referral.
 // Returns that name, or '' when there's no referral — used to override the dialed-
@@ -2128,12 +2346,77 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
 
   let confirmationEmailSent = null;
   if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
+    // The subscriber row is re-verified and LOCKED through the provider
+    // call (Codex #3084 r51 — the same pending/token lock-through-send
+    // discipline as resendPendingConfirmation): subscribeOrResubscribe
+    // pre-stamps confirmation_sent_at in its own committed statement, so a
+    // one-click/admin unsubscribe could otherwise commit in the gap and
+    // still be mailed the confirmation. Under the row lock the unsubscribe
+    // queues and lands strictly after the send decision. A refused
+    // re-verify skips the send: the row is no longer OUR pending payload
+    // (unsubscribed, or rotated — the rotation's own callback owns its
+    // delivery), and the conditional stamp-clear below no-ops for the same
+    // reason. A commit error AFTER a successful send is harmless — the
+    // transaction held only the row lock, and the pre-stamp is already
+    // durable.
+    let sendRefused = false;
     try {
-      await sendConfirmationEmail(result.subscriber);
-      confirmationEmailSent = true;
+      await db.transaction(async (trx) => {
+        const liveSubscriber = await trx('newsletter_subscribers')
+          .where({
+            id: result.subscriber.id,
+            confirmation_token: result.subscriber.confirmation_token,
+            status: 'pending',
+          })
+          .whereRaw('LOWER(email) = ?', [String(result.subscriber.email || emailLc).trim().toLowerCase()])
+          .forUpdate()
+          .first('id');
+        if (!liveSubscriber) {
+          sendRefused = true;
+          return;
+        }
+        await sendConfirmationEmail(result.subscriber);
+        confirmationEmailSent = true;
+      });
+      if (sendRefused) {
+        logger.info(`[call-proc] Newsletter confirmation skipped for customer ${customerId}: subscriber no longer pending at the locked re-verify`);
+        confirmationEmailSent = false;
+      }
     } catch (e) {
-      logger.warn(`[call-proc] Newsletter confirmation email failed for customer ${customerId}`);
-      confirmationEmailSent = false;
+      if (confirmationEmailSent === true) {
+        // The provider accepted the message and only the (write-free)
+        // transaction commit failed — the DOI is out and the pre-stamp is
+        // durable; do NOT clear it or the retry double-mails.
+        logger.warn(`[call-proc] newsletter send transaction commit errored after the send for customer ${customerId}: ${e.code || e.name || 'db_error'} — pre-stamp stands`);
+        e = null;
+      }
+      if (e) {
+        logger.warn(`[call-proc] Newsletter confirmation email failed for customer ${customerId}`);
+        confirmationEmailSent = false;
+        // subscribeOrResubscribe stamps confirmation_sent_at BEFORE the send —
+        // clear it on failure so retry paths (the first-touch-resume DOI
+        // dedupe guard, the stale-pending sweep) never read the pre-send
+        // stamp as delivery (Codex #3084 r13). Scoped to the ATTEMPTED
+        // email/token/status (Codex #3084 r27): a correction rotating the
+        // subscriber mid-send pre-stamps its OWN DOI, and an id-only clear
+        // would null the rotated token's timestamp — making the newer mailed
+        // token permanent (no expiry, purge-exempt). Zero rows = rotated →
+        // the rotation's own callback owns its stamp.
+        if (result.subscriber?.id) {
+          try {
+            await db('newsletter_subscribers')
+              .where({
+                id: result.subscriber.id,
+                confirmation_token: result.subscriber.confirmation_token,
+                status: 'pending',
+              })
+              .whereRaw('LOWER(email) = ?', [String(result.subscriber.email || emailLc).trim().toLowerCase()])
+              .update({ confirmation_sent_at: null, updated_at: new Date() });
+          } catch (clearErr) {
+            logger.warn(`[call-proc] confirmation_sent_at clear failed for subscriber ${result.subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
+          }
+        }
+      }
     }
   }
 
@@ -2141,6 +2424,11 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
   return {
     action: result.action,
     subscriberId: result.subscriber?.id || null,
+    // The attempted token rides the outcome (Codex #3084 r32) so a send
+    // failure can be verified against the EXACT attempt — corrections
+    // rotate the token, and an A→B→A rotation restores id+email with a
+    // newer token whose DOI may already be delivered.
+    confirmationToken: result.subscriber?.confirmation_token || null,
     confirmationEmailSent,
   };
 }
@@ -4431,6 +4719,7 @@ const CallRecordingProcessor = {
    * Called from recording-status webhook or manually from admin.
    */
   async processRecording(callSid, opts = {}) {
+    const processingStartedAt = new Date();
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) throw new Error(`Call not found: ${callSid}`);
 
@@ -5255,6 +5544,10 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    // In-run email-review signal: set the moment either bridge branch decides
+    // the extracted email needs read-back, BEFORE any card insert — so a
+    // failed triage insert cannot release the first-touch email hold below.
+    let emailReviewHeldThisRun = false;
 
     // ── Contact-field dictation decoder (runs in EVERY mode, BEFORE the
     // routing gate so enforce mode benefits too) ──────────────────────────
@@ -5840,6 +6133,9 @@ const CallRecordingProcessor = {
             logger.info(`[call-proc-bridge] Skipped email domain correction — corrected address on file for another contact (${maskSid(callSid)})`);
           }
         }
+        if (needsConfirmation.includes('email_unverified') || needsConfirmation.includes('email_invalid')) {
+          emailReviewHeldThisRun = true;
+        }
         if (needsConfirmation.length) {
           bridgeNeedsConfirmation.push(...needsConfirmation);
           logger.info(`[call-proc-bridge] ${callSid} needs confirmation: ${needsConfirmation.join(', ')} (av=${v2AddressValidation?.status || 'n/a'})`);
@@ -5854,6 +6150,11 @@ const CallRecordingProcessor = {
               // bare "could not be verified".
               const isAddressFlag = flag === 'address_unverified' || flag === 'address_recovered';
               const isEmailFlag = flag === 'email_unverified' || flag === 'email_invalid';
+              // Email cards are minted in the FENCED transaction below
+              // (Codex #3084 r54) — their insert must be atomic with the
+              // release-claim invalidation, or an in-flight release can
+              // send between the card commit and the repen.
+              if (isEmailFlag) continue;
               await db('triage_items')
                 .insert(buildTriageItem({
                   callLogId: call.id,
@@ -5871,7 +6172,7 @@ const CallRecordingProcessor = {
                     ...(flag === 'address_recovered' ? recoveryPassStamp : {}),
                     ...(contactDictation?.addresses?.[0]?.confirmation_question
                       ? { confirmation_question: contactDictation.addresses[0].confirmation_question } : {}),
-                  } : (isEmailFlag ? dictationEmailPayload : null),
+                  } : null,
                 }))
                 .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
                 .ignore();
@@ -5879,8 +6180,31 @@ const CallRecordingProcessor = {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
           }
+          // Card mint + claim invalidation ride ONE token-fenced
+          // transaction (Codex #3084 r54 — see mintEmailReviewCardsFenced;
+          // r43's invalidation and r44's durable-state error semantics
+          // both preserved, now atomic with the card writes).
+          await mintEmailReviewCardsFenced({
+            callLogId: call.id,
+            procToken,
+            callSid,
+            cards: needsConfirmation.slice(0, 10)
+              .filter((flag) => flag === 'email_unverified' || flag === 'email_invalid')
+              .map((flag) => buildTriageItem({
+                callLogId: call.id,
+                flag,
+                extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+                severity: 'advisory',
+                extraPayload: dictationEmailPayload,
+              })),
+          });
         }
       } catch (bridgeErr) {
+        // The bridge is advisory EXCEPT for the r44 invalidation: with the
+        // card durably inserted and the hold claims NOT invalidated, an
+        // in-flight release can send the unreviewed address — that state
+        // must fail the run, not be skipped.
+        if (bridgeErr.emailReviewStateUnavailable) throw bridgeErr;
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
       }
     } else {
@@ -5926,31 +6250,36 @@ const CallRecordingProcessor = {
             logger.info(`[call-proc] Skipped email domain correction — corrected address on file for another contact (${maskSid(callSid)})`);
           }
         }
+        if (emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid')) {
+          emailReviewHeldThisRun = true;
+        }
         if (emailReasons.length) {
           bridgeNeedsConfirmation.push(...emailReasons);
           // Same Needs Review surfacing as the shadow branch: the inbox is
           // driven by triage_items rows, so without these an auto-routed call
           // in enforce/V2-off mode would never show the read-back prompt.
-          for (const flag of emailReasons.slice(0, 10)) {
-            try {
-              await db('triage_items')
-                .insert(buildTriageItem({
-                  callLogId: call.id,
-                  flag,
-                  extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
-                  severity: 'advisory',
-                  // Same decoder evidence as the shadow branch — candidates +
-                  // the exact question to ask on the read-back.
-                  extraPayload: dictationEmailPayload,
-                }))
-                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-                .ignore();
-            } catch (triageErr) {
-              logger.warn(`[call-proc] email triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
-            }
-          }
+          // Same fenced mint as the shadow branch (Codex #3084 r54): the
+          // card writes and the r43 claim invalidation ride one
+          // token-fenced transaction; r44's durable-state error still
+          // throws into the extraction_failed retry. Decoder evidence
+          // (candidates + the exact read-back question) rides each card.
+          await mintEmailReviewCardsFenced({
+            callLogId: call.id,
+            procToken,
+            callSid,
+            invalidateClaims: emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid'),
+            cards: emailReasons.slice(0, 10).map((flag) => buildTriageItem({
+              callLogId: call.id,
+              flag,
+              extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
+              severity: 'advisory',
+              extraPayload: dictationEmailPayload,
+            })),
+          });
         }
       } catch (emailErr) {
+        // Advisory EXCEPT the r44 invalidation — see the shadow branch.
+        if (emailErr.emailReviewStateUnavailable) throw emailErr;
         logger.warn(`[call-proc] email review skipped for ${maskSid(callSid)}: ${emailErr.message}`);
       }
     }
@@ -6206,25 +6535,62 @@ const CallRecordingProcessor = {
             phone,
             email: extracted.email || null,
           });
-          const [newCust] = await db('customers').insert(applyContactNormalization({
-            account_id: account.accountId,
-            is_primary_profile: !account.existingCustomer,
-            profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-            first_name: extracted.first_name,
-            last_name: extracted.last_name || null,
-            phone,
-            email: extracted.email || null,
-            address_line1: addrLine || null,
-            city: addrCity || null,
-            state: addrState,
-            zip: addrZip || null,
-            referral_code: code,
-            lead_source: leadSource.source || 'phone_call',
-            lead_source_detail: leadSource.detail || numberConfig?.domain || 'inbound call',
-            pipeline_stage: 'new_lead',
-            pipeline_stage_changed_at: new Date(),
-            nearest_location_id: loc.id,
-          })).returning('*');
+          // Customer creation and its call-creation provenance marker are
+          // ONE transaction (Codex #3084 r23/r25): a crash before the
+          // Step-4 link update leaves the new customer matchable by phone,
+          // and the reclaiming run (createdCustomerFromCall=false) could
+          // never prove authorship — the rebuild would skip the newsletter
+          // DOI forever. Customer row exists ⇒ marker exists; the marker
+          // keys the retry rebuild (never timestamps — a customer someone
+          // else created in the window must not be auto-subscribed). The
+          // customer-link update later in the run re-asserts it (r24).
+          // call_log.customer_id is set HERE too (pre-push P0, r54): the
+          // email-correction fanout discovers its scope — cards, hold
+          // rows, advisory locks — through call_log.customer_id, so a
+          // customer visible before the link left a window where an
+          // operator correcting the brand-new record missed this call
+          // entirely, and the run could later record the stale extracted
+          // address with the correction's evidence nowhere on the call.
+          // Token-fenced: a worker that lost the claim rolls the whole
+          // creation back (the owning run creates and links its own).
+          let newCust;
+          await db.transaction(async (trx) => {
+            [newCust] = await trx('customers').insert(applyContactNormalization({
+              account_id: account.accountId,
+              is_primary_profile: !account.existingCustomer,
+              profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
+              first_name: extracted.first_name,
+              last_name: extracted.last_name || null,
+              phone,
+              email: extracted.email || null,
+              address_line1: addrLine || null,
+              city: addrCity || null,
+              state: addrState,
+              zip: addrZip || null,
+              referral_code: code,
+              lead_source: leadSource.source || 'phone_call',
+              lead_source_detail: leadSource.detail || numberConfig?.domain || 'inbound call',
+              pipeline_stage: 'new_lead',
+              pipeline_stage_changed_at: new Date(),
+              nearest_location_id: loc.id,
+            })).returning('*');
+            const linked = await trx('call_log')
+              .where({ id: call.id })
+              .where('processing_token', procToken)
+              .update({
+                customer_id: newCust.id,
+                metadata: trx.raw(
+                  "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
+                  [JSON.stringify(String(newCust.id))],
+                ),
+                updated_at: new Date(),
+              });
+            if (!linked) {
+              const lost = new Error('processing claim lost during customer creation — rolled back');
+              lost.claimLost = true;
+              throw lost;
+            }
+          });
           customerId = newCust.id;
           createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);
@@ -6666,6 +7032,17 @@ const CallRecordingProcessor = {
     let finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
     await db('call_log').where({ id: call.id }).update({
       customer_id: customerId || call.customer_id,
+      // Call-creation provenance rides the SAME durable write that links
+      // the customer (Codex #3084 r24): customer_id persisted ⇒ marker
+      // persisted, so a recovery run can never see a call-created customer
+      // whose newsletter rebuild marker is missing. (The creation-time
+      // stamp above is a best-effort early copy for mid-run readers.)
+      ...(createdCustomerFromCall && customerId ? {
+        metadata: db.raw(
+          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
+          [JSON.stringify(String(customerId))],
+        ),
+      } : {}),
       ai_extraction: JSON.stringify(extracted),
       call_summary: extracted.call_summary || null,
       sentiment: extracted.sentiment || null,
@@ -9392,9 +9769,59 @@ const CallRecordingProcessor = {
     // Variable name kept as `beehiivResult` for schema/log continuity;
     // carries the local enrollment result now.
     let beehiivResult = null;
+    // Ledger-write outcomes for the two hold sites — null means the durable
+    // record FAILED (after internal retries) and the end-of-run
+    // reconciliation must re-attempt it (Codex #3084 r8): the ledger row is
+    // the only thing the release paths read.
+    let dripHoldRecorded = null;
+    let newsletterHoldRecorded = null;
     if (customerId && extracted.email && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
       beehiivResult = { skipped: 'v2_tcpa_gate' };
+    } else if (customerId && extracted.email
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
+      // Owner rule 2026-07-30 (the spelled-email bounce incident): a
+      // call-captured email flagged for read-back (email_unverified /
+      // email_invalid) is a transcription GUESS — the live incident's
+      // spelled-out address hard-bounced within a minute of the first drip
+      // send, burning sender reputation and landing a SendGrid suppression
+      // on a wrong address. Hold the first-touch drip until the office
+      // confirms the address; the fanout resumes it on confirmation. The
+      // in-run flag covers a failed review-card insert; the DB check covers
+      // admin force-reprocess after the run.
+      logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email is under read-back review`);
+      beehiivResult = { skipped: 'email_under_review' };
+      // Ledger row carries the address ACTUALLY held (post dictation/
+      // arbiter/domain correction) — the release engine sends to this, never
+      // to a matched customer's stale stored email. runStartedAt lets the
+      // helper keep a live earlier-run card's address (the one the operator
+      // is reviewing) instead of overwriting it with a fresh unreviewed guess.
+      // Token-fenced with the claim held THROUGH the merge (Codex #3084
+      // r44/r45): a stale worker must not merge its extraction over the
+      // reclaiming peer's ledger record. null keeps the end-of-run retry
+      // eligible (which re-checks ownership itself).
+      dripHoldRecorded = await recordFirstTouchHoldOwned(
+        { callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt },
+        procToken,
+      );
+    } else if (customerId && !extracted.email && extracted.email_raw && !v2EmailBlocked
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
+      // A DEMOTED address (dictation policy moved the unconfirmed guess to
+      // email_raw) still owes this customer the first-touch drip once the
+      // office confirms the real spelling (Codex #3084 r18): without a
+      // held_drip row the email-correction fanout would resume only the
+      // newsletter hold Step 8 records. The EMPTY held address is inert to
+      // every automated release — the invalid-address guard blocks sends
+      // and the sweep skips empty-address rows — so only the correction's
+      // explicit address releases it.
+      logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email was demoted to read-back review`);
+      beehiivResult = { skipped: 'email_under_review' };
+      // Token-fenced through the merge (r44/r45) — see the primary
+      // drip-hold site above.
+      dripHoldRecorded = await recordFirstTouchHoldOwned(
+        { callLogId: call.id, customerId, heldEmail: '', heldDrip: true, runStartedAt: processingStartedAt },
+        procToken,
+      );
     } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
@@ -9411,6 +9838,106 @@ const CallRecordingProcessor = {
       } catch (err) {
         logger.error(`[call-proc] new_lead enroll failed: ${err.message}`);
         beehiivResult = { error: err.message };
+      }
+    }
+
+    // A RETRY run (extraction_failed → reprocess) re-enters with
+    // call_log.customer_id already persisted by the failed attempt, so the
+    // creation branch above never rebuilds newsletterCandidate — and the
+    // whole newsletter chain below would be skipped, leaving the
+    // call-created customer without a DOI or a held_newsletter flag forever
+    // (Codex #3084 r20). Reconstruct the candidate for customers CREATED BY
+    // THIS CALL (durable provenance marker below, r23), reading the CURRENT
+    // stored email so a correction made during the failed window wins.
+    // Matched pre-existing customers keep the old behavior: no
+    // auto-subscribe.
+    // Gated on the pre-claim processing_status (Codex #3084 r21):
+    // `call.processing_status` was read BEFORE the claim, so it still says
+    // whether THIS run is a recovery pass — the extraction_failed retry, or
+    // a stale-claim reclaim ('processing': a worker died after persisting
+    // customer_id but before the newsletter step, Codex #3084 r22). An
+    // admin force reprocess of a PROCESSED call must not rebuild — its
+    // subscribe path re-sends the pending DOI (confirmation_resent) on
+    // every force.
+    // Runs BEFORE Step 7's customer_interactions insert (Codex #3084 r39):
+    // this block can THROW into the extraction_failed retry path, and the
+    // unguarded timeline insert below is not idempotent — each replay
+    // would duplicate the interaction entry, so the only throwing recovery
+    // step sits ahead of it.
+    if (!newsletterCandidate && customerId && !createdCustomerFromCall
+        && ['extraction_failed', 'processing'].includes(call.processing_status)) {
+      try {
+        // ACTUAL call-creation provenance, not timestamps (Codex #3084
+        // r23): the creation branch stamps created_customer_id into
+        // call_log.metadata, so a customer someone else created between
+        // the call row and the failed attempt (merely matched by it) can
+        // never be classified as call-created and auto-subscribed.
+        const rebuildMeta = typeof call.metadata === 'string'
+          ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+          : (call.metadata || {});
+        const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name');
+        if (custRow && String(rebuildMeta?.created_customer_id || '') === String(customerId)) {
+          // Honor DELIVERY EVIDENCE before rebuilding (Codex #3084
+          // r46/r47): the dead worker may have died AFTER its DOI send but
+          // before the final call_log status write — every recovery pass
+          // would then take subscribeOrResubscribe's confirmation_resent
+          // path and mail the same confirmation again. The evidence is the
+          // POST-PROVIDER completion marker Step 8 stamps into
+          // call_log.metadata only after sendConfirmationEmail returned —
+          // never the subscriber's confirmation_sent_at, which is written
+          // BEFORE the provider call and cannot prove delivery (r47): a
+          // crash in that pre-stamp→send window now correctly REPLAYS the
+          // send instead of stranding the customer pending forever.
+          const doiRecentlySent = rebuildMeta?.newsletter_doi_sent_at
+            && (Date.now() - new Date(rebuildMeta.newsletter_doi_sent_at).getTime()) < 24 * 60 * 60 * 1000;
+          // A HELD newsletter released by ANY OTHER path is delivery
+          // evidence too (Codex #3084 r48): the mid-run card release, the
+          // triage resolve, the ledger sweep and the correction fanout all
+          // send the held DOI through resumeHeldFirstTouch, and none of
+          // them writes this run's post-provider marker — only Step 8's own
+          // send does. Without the ledger a recovery pass on a call whose
+          // hold was already released rebuilds the candidate and
+          // subscribeNewCallCustomerToNewsletter mails confirmation_resent
+          // to an inbox that just received the confirmation. The ledger IS
+          // the durable per-call record: released_newsletter is written
+          // only on a newsletterDelivered() outcome (the DOI went out, or
+          // the helper deliberately skipped with nothing left to send), so
+          // it is exactly the "nothing more to mail for this call" signal —
+          // and unlike the marker it is untimed, because a released hold
+          // settles the question permanently for this call.
+          let ledgerReleased = false;
+          if (!doiRecentlySent && await db.schema.hasTable('first_touch_holds')) {
+            ledgerReleased = !!(await db('first_touch_holds')
+              .where({ call_log_id: call.id, held_newsletter: true, released_newsletter: true })
+              .first('id'));
+          }
+          if (doiRecentlySent || ledgerReleased) {
+            newsletterResult = newsletterResult || { skipped: 'confirmation_recently_sent' };
+            logger.info(`[call-proc] Skipping newsletter rebuild on retry — the held DOI already went out (${ledgerReleased ? 'hold ledger' : 'completion marker'}; ${maskSid(callSid)})`);
+          } else {
+            newsletterCandidate = {
+              customerId,
+              email: custRow.email || extracted.email || null,
+              firstName: custRow.first_name || (extracted.first_name ? capitalizeName(extracted.first_name) : null),
+              lastName: custRow.last_name || null,
+            };
+            logger.info(`[call-proc] Rebuilt newsletter candidate for call-created customer on retry (${maskSid(callSid)})`);
+          }
+        }
+      } catch (rebuildErr) {
+        logger.warn(`[call-proc] newsletter candidate rebuild failed for ${maskSid(callSid)}: ${rebuildErr.code || rebuildErr.name || 'db_error'}`);
+        // A recovery run that cannot rebuild the candidate must NOT
+        // finalize 'processed' (Codex #3084 r30): the retry sweep never
+        // revisits a processed call, so a transient customers-read failure
+        // here would permanently cost the call-created customer its DOI
+        // and its durable held_newsletter record. Same contract as the
+        // ledger-unavailable throw in the reconciliation below: land in
+        // the outer procErr catch, which stamps extraction_failed with the
+        // capped retry budget — this branch only runs on recovery passes,
+        // so a normal first attempt is never affected.
+        const recoverErr = new Error('newsletter_rebuild_unavailable');
+        recoverErr.newsletterRebuildUnavailable = true;
+        throw recoverErr;
       }
     }
 
@@ -9478,6 +10005,27 @@ const CallRecordingProcessor = {
 
     if (newsletterCandidate && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
+    } else if (newsletterCandidate
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
+      // Same hold as the new_lead drip: the newsletter double-opt-in
+      // confirmation is ALSO a first-touch email to the unconfirmed address.
+      logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: extracted email is under read-back review`);
+      newsletterResult = { skipped: 'email_under_review' };
+      // runStartedAt: if an operator already SETTLED this call's hold during
+      // the run (email correction / accept verdict), the helper re-pends the
+      // newsletter hold against that settled address — never the stale
+      // in-memory candidate captured before the correction.
+      // The hold's address is the CURRENTLY REVIEWED extraction — never the
+      // candidate's stored email (Codex #3084 r21): on a retry run the
+      // rebuilt candidate carries the customer's OLDER stored address, and
+      // recording it here would let the new card's resolution release both
+      // sends to an address the operator never read back. No extracted
+      // email (demoted) → empty inert address, correction-only release.
+      // Token-fenced through the merge (r44/r45) — see the drip-hold sites.
+      newsletterHoldRecorded = await recordFirstTouchHoldOwned(
+        { callLogId: call.id, customerId, heldEmail: extracted.email || '', heldNewsletter: true, runStartedAt: processingStartedAt },
+        procToken,
+      );
     } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
@@ -9486,12 +10034,233 @@ const CallRecordingProcessor = {
       if (stillOwned) {
         try {
           newsletterResult = await subscribeNewCallCustomerToNewsletter(newsletterCandidate);
+          if (newsletterResult?.confirmationEmailSent === true) {
+            // POST-PROVIDER completion marker (Codex #3084 r47): the
+            // subscriber's confirmation_sent_at is stamped BEFORE the
+            // provider call, so it cannot prove delivery — this durable
+            // per-call marker is written only after sendConfirmationEmail
+            // returned, and the recovery rebuild keys its skip on it.
+            // Token-fenced; best-effort: a lost write costs one duplicate
+            // DOI on a recovery pass, never a missed one.
+            try {
+              await db('call_log')
+                .where({ id: call.id })
+                .where('processing_token', procToken)
+                .update({
+                  metadata: db.raw(
+                    "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{newsletter_doi_sent_at}', ?::jsonb, true)",
+                    [JSON.stringify(new Date().toISOString())],
+                  ),
+                  updated_at: new Date(),
+                });
+            } catch (markErr) {
+              logger.warn(`[call-proc] DOI completion marker write failed for ${maskSid(callSid)}: ${markErr.code || markErr.name || 'db_error'}`);
+            }
+          }
         } catch (e) {
           logger.warn(`[call-proc] Newsletter subscribe failed for customer ${newsletterCandidate.customerId}`);
           newsletterResult = { error: 'newsletter_subscribe_failed' };
         }
       } else {
         logger.warn(`[call-proc] Skipped newsletter subscribe for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+      }
+    }
+
+    // Mid-run release race (Codex #3084 r3): the email review card is
+    // inserted minutes before the customer link and the holds above — an
+    // admin who accepts the visible card during THIS run resolves it while
+    // the in-run flag still forces the hold, and no later release exists.
+    // Reconcile at the end of the run: if anything was held but no live
+    // card remains, release now (consent is re-checked inside the helper).
+    if (customerId
+        && (beehiivResult?.skipped === 'email_under_review' || newsletterResult?.skipped === 'email_under_review')) {
+      try {
+        // A hold without its ledger row is unreleasable — the release paths
+        // read only first_touch_holds. If either write failed (after the
+        // helper's own retries), re-attempt once more before the run can
+        // finish (Codex #3084 r8).
+        const dripHeld = beehiivResult?.skipped === 'email_under_review';
+        const newsHeld = newsletterResult?.skipped === 'email_under_review';
+        if ((dripHeld && dripHoldRecorded === null) || (newsHeld && newsletterHoldRecorded === null)) {
+          // Token-fenced through the merge (Codex #3084 r44/r45): a lost
+          // claim hands the ledger to the reclaiming peer's own run — the
+          // retry (and its six-failures escalation) applies only while
+          // this worker still owns the call.
+          const retried = await recordFirstTouchHoldOwned({
+            callLogId: call.id,
+            customerId,
+            // Currently reviewed extraction only (Codex #3084 r21) — a
+            // rebuilt candidate's stored email must never become the held
+            // target of a card the operator hasn't read back.
+            heldEmail: extracted.email || '',
+            heldDrip: dripHeld && dripHoldRecorded === null,
+            heldNewsletter: newsHeld && newsletterHoldRecorded === null,
+            runStartedAt: processingStartedAt,
+          }, procToken);
+          if (retried === 'claim_lost') {
+            logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — the reclaiming peer records the hold ledger`);
+          } else if (retried === null) {
+            logger.error(`[call-proc] first-touch hold ledger write STILL failing for ${maskSid(callSid)} — held send(s) have no durable release record`);
+            // Six straight write failures — without this row the held
+            // send(s) can never be released, so the run must NOT complete
+            // as processed. Throwing lands in the outer procErr catch,
+            // which stamps extraction_failed with the capped retry budget:
+            // the sweep re-processes the call (reprocessing is
+            // bounded-safe) and re-attempts the ledger write.
+            const ledgerErr = new Error('first_touch_hold_ledger_unavailable');
+            ledgerErr.holdLedgerUnavailable = true;
+            throw ledgerErr;
+          }
+        }
+        if (!(await shouldHoldLeadEmailEnrollment(call.id, { procToken, callSid, extractedEmail: extracted.email }))) {
+          // No LIVE card. Two very different reasons (Codex #3084 r4):
+          //   - an admin resolved the card mid-run → release now;
+          //   - the card insert FAILED, so no card ever existed → the
+          //     address is still unverified; persist the recovery marker
+          //     and stay held (the standard resume paths release it).
+          // Resolved DURING this run (Codex #3084 r6): a force-reprocess of
+          // a call whose card resolved in an EARLIER cycle must not read
+          // that historical row as a fresh operator confirmation.
+          // Created BY this run too (Codex #3084 r49): when a force-reprocess
+          // overlaps an OPEN card from an earlier cycle, this run's card
+          // insert is absorbed by the partial unique index — the operator
+          // who resolves that surviving card mid-run reviewed the OLD
+          // cycle's payload, not this run's extraction, so a wall-clock
+          // resolved_at test alone would release a newly extracted,
+          // unverified address. Requiring the resolved card to have been
+          // created after processingStartedAt binds the release to a card
+          // whose payload THIS run wrote. The overlap case falls through to
+          // the recovery-marker branch below: a fresh card describing the
+          // current extraction is filed, the hold stays pending, and the
+          // operator's resolve of THAT card releases it.
+          const resolvedCard = await db('triage_items')
+            .where({ call_log_id: call.id })
+            .whereIn('reason_code', ['email_unverified', 'email_invalid'])
+            .whereIn('status', ['resolved'])
+            .where('resolved_at', '>=', processingStartedAt)
+            .where('created_at', '>=', processingStartedAt)
+            .first('id');
+          if (resolvedCard) {
+            // Scoped to THIS call (Codex #3084 r8): releasing by customerId
+            // alone would claim every pending hold for the customer,
+            // including other calls whose read-back cards are still open.
+            const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
+            await resumeHeldFirstTouch({ callLogId: call.id, customerId, source: 'mid_run_card_release' });
+          } else {
+            try {
+            const { buildTriageItem } = require('./call-routing-gates');
+            // The recovery card must SHOW the address it approves (Codex
+            // #3084 r53): resolving it releases the drip/DOI to the run's
+            // current extraction (the retarget below makes that the held
+            // target), and the Needs Review card renders email_as_heard /
+            // email_candidates / confirmation_question — a payload with
+            // only the call summary asks the operator to approve an
+            // address they never saw. Carry the dictation decoder's full
+            // evidence when it exists, and always surface the current
+            // extraction as a candidate so the release target is on the
+            // card verbatim.
+            const recoveryEmailEvidence = { ...(dictationEmailPayload || {}) };
+            if (extracted.email) {
+              const existingCandidates = Array.isArray(recoveryEmailEvidence.email_candidates)
+                ? recoveryEmailEvidence.email_candidates : [];
+              const heldLc = String(extracted.email).trim().toLowerCase();
+              if (!existingCandidates.some((c) => String(c?.value || '').trim().toLowerCase() === heldLc)) {
+                recoveryEmailEvidence.email_candidates = [{ value: extracted.email }, ...existingCandidates];
+              }
+            }
+            // The WHOLE recovery — card insert, ledger retarget, claim
+            // invalidation — rides ONE token-fenced transaction (Codex
+            // #3084 r52, completing r51): a worker stalled past the
+            // reclaim window must not file an extraction-A card that
+            // absorbs the reclaiming peer's own insert (partial unique
+            // index), must not overwrite the peer's held target, and must
+            // not re-pend the peer's holds. Ownership lost = all three
+            // abort; the owner's run records its own card and target.
+            // Same r46 lock order — hold rows first, then the
+            // token-conditioned call_log lock, then the card write.
+            //
+            // Retarget semantics (r50): the replacement card describes
+            // THIS run's extraction — Step 6 preserved a prior cycle's
+            // address while that cycle's card was still live, and with
+            // the old card resolved mid-run, resolving the replacement
+            // card would otherwise release the OLD — still unverified,
+            // possibly hard-bounced — target. Pending/releasing rows
+            // only (a released row's held_email is r19 delivery
+            // evidence); never over an operator's explicit correction
+            // (corrected_at, the r39 marker); no updated_at bump (the
+            // r12 rule — the repen owns lease invalidation).
+            const recoveryOwned = await db.transaction(async (trx) => {
+              // Advisory lock FIRST (Codex #3084 r57): same rule as
+              // mintEmailReviewCardsFenced — without it, this trx can own
+              // the hold while an admin verdict holds the advisory lock
+              // and bulk-resolves the fresh card the moment it commits,
+              // releasing a target the operator never reviewed. Taking
+              // lockTriageCall first serializes recovery-card creation
+              // with every card writer.
+              await lockTriageCall(trx, call.id);
+              await trx('first_touch_holds')
+                .where({ call_log_id: call.id })
+                .forUpdate()
+                .select('id');
+              const owned = await trx('call_log')
+                .where({ id: call.id })
+                .where('processing_token', procToken)
+                .forUpdate()
+                .first('id');
+              if (!owned) return false;
+              await trx('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag: 'email_unverified',
+                  extraction: { meta: { call_summary: extracted.call_summary || null } },
+                  severity: 'advisory',
+                  extraPayload: {
+                    ...recoveryEmailEvidence,
+                    hold_reason: 'review_card_insert_failed',
+                    held_drip: beehiivResult?.skipped === 'email_under_review',
+                    held_newsletter: newsletterResult?.skipped === 'email_under_review',
+                  },
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore();
+              await trx('first_touch_holds')
+                .where({ call_log_id: call.id })
+                .whereIn('status', ['pending', 'releasing'])
+                .whereNull('corrected_at')
+                .update({ held_email: extracted.email || '' });
+              // The recovery card is a live review too — invalidate any
+              // in-flight release claim for the call (Codex #3084 r43),
+              // inside the same fence (r52). A failure throws (r44), rolls
+              // back the card and retarget with it, and the catch below
+              // fails the run.
+              const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
+              await repenHoldsForFreshEmailReview(call.id, trx);
+              return true;
+            });
+            if (!recoveryOwned) {
+              logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — skipping the recovery card, retarget, and re-pend (the owner records them)`);
+            }
+            } catch (markerErr) {
+              // Without this card the pending hold is invisible to
+              // operators AND ineligible for the sweep (no resolved card
+              // ever exists) — neither send would have a release trigger
+              // left (Codex #3084 r17). Fail the run like the other
+              // durable-state failures: the outer catch stamps
+              // extraction_failed and the retry re-attempts the insert.
+              logger.error(`[call-proc] end-of-run recovery card insert failed for ${maskSid(callSid)}: ${markerErr.message}`);
+              const stateErr = new Error('email_review_state_unavailable');
+              stateErr.emailReviewStateUnavailable = true;
+              throw stateErr;
+            }
+          }
+        }
+      } catch (reconcileErr) {
+        // Reconciliation is best-effort EXCEPT when durable hold state
+        // cannot be persisted at all — an unwritable ledger or an
+        // undeterminable review state with no recovery marker must fail the
+        // run (retryable) rather than complete with an invisible hold.
+        if (reconcileErr.holdLedgerUnavailable || reconcileErr.emailReviewStateUnavailable) throw reconcileErr;
+        logger.warn(`[call-proc] first-touch hold reconciliation failed for ${maskSid(callSid)}: ${reconcileErr.message}`);
       }
     }
 
@@ -9952,6 +10721,11 @@ const CallRecordingProcessor = {
   },
 };
 
+// Named production export for the first-touch resume lane (2026-07-30): the
+// held newsletter subscribe is re-driven from lead-first-touch-resume once
+// the office settles the email read-back question.
+CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustomerToNewsletter;
+
 CallRecordingProcessor._test = {
   isImplausibleTranscript,
   recheckCallBookingConflicts,
@@ -9989,6 +10763,8 @@ CallRecordingProcessor._test = {
   leadContactCompleteness,
   hasWorkableLeadSignal,
   voicemailCallbackAlertPlan,
+  shouldHoldLeadEmailEnrollment,
+  mintEmailReviewCardsFenced,
   transcribeRecording,
   extractCallDataV2,
   CALL_EXTRACTION_ROUTE,

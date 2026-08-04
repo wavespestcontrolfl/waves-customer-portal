@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  applicationPestFamily,
+  applicationPurpose,
+  applicationPurposeCopy,
+  applicationTechnicalExplanation,
   cleanVisitSummary,
   customerInteractionCopy,
   customerActionItems,
@@ -742,5 +746,120 @@ describe('ReportViewPage service timeline helpers', () => {
     ].filter(Boolean).join(' ');
 
     expect(timelineCopy).not.toMatch(/Bouncie|GPS|geofence|auto-arrival|arrival_source|distanceMeters|83 meters/i);
+  });
+});
+
+describe('product purpose follows recorded pest identity', () => {
+  // App shapes mirror the live /:token/data payload: { method, targets,
+  // product: { name, category, active_ingredient } } — the 2026-08-02
+  // cockroach report where Advion Cockroach Gel printed "Targeted ant bait"
+  // and two fogged roach products printed mosquito copy.
+  const roachGel = {
+    method: 'bait_placement',
+    targets: ['German cockroaches', 'American cockroaches'],
+    product: { name: 'Advion Cockroach Gel Bait', category: 'bait', active_ingredient: 'Indoxacarb 0.6%' },
+  };
+  const foggedInsecticide = {
+    method: 'fog_ulv',
+    targets: ['German cockroaches'],
+    product: { name: 'Alpine WSG', category: 'insecticide', active_ingredient: 'Dinotefuran 40.0%' },
+  };
+  const foggedIgr = {
+    method: 'fog_ulv',
+    targets: ['German cockroaches'],
+    product: { name: 'Gentrol IGR', category: 'IGR', active_ingredient: '(S)-Hydroprene 9.0%' },
+  };
+
+  it('captions cockroach gel bait as cockroach bait, never ant bait', () => {
+    expect(applicationPurpose(roachGel, 'pest')).toBe('Targeted cockroach bait');
+    const copy = [
+      applicationPurposeCopy(roachGel, 'pest'),
+      ...applicationTechnicalExplanation(roachGel, 'pest'),
+    ].join(' ');
+    expect(copy).toMatch(/cockroaches/);
+    expect(copy).not.toMatch(/\bants?\b/i);
+  });
+
+  it('never invents an observed activity level for bait placements', () => {
+    const antGel = { method: 'bait_placement', targets: ['Ghost ants'], product: { name: 'Optigard Ant Gel Bait', category: 'bait' } };
+    expect(applicationPurpose(antGel, 'pest')).toBe('Targeted ant bait');
+    for (const app of [roachGel, antGel]) {
+      expect(applicationPurposeCopy(app, 'pest')).not.toMatch(/light\s+\w*\s*activity/i);
+    }
+  });
+
+  it('does not caption a fogged roach treatment as a mosquito application', () => {
+    for (const app of [foggedInsecticide, foggedIgr]) {
+      expect(applicationPurpose(app, 'pest')).toBe('Targeted cockroach treatment');
+      const copy = [
+        applicationPurposeCopy(app, 'pest'),
+        ...applicationTechnicalExplanation(app, 'pest'),
+      ].join(' ');
+      expect(copy).toMatch(/cockroaches/);
+      expect(copy).not.toMatch(/mosquito/i);
+    }
+  });
+
+  it('keeps mosquito copy for mosquito visits and mosquito-identified fogs', () => {
+    expect(applicationPurpose(foggedInsecticide, 'mosquito')).toBe('Mosquito pressure reduction');
+    const mosquitoFog = { method: 'fog_ulv', targets: ['Mosquitoes'], product: { name: 'DeltaGard', category: 'insecticide' } };
+    expect(applicationPurpose(mosquitoFog, 'pest')).toBe('Mosquito pressure reduction');
+    expect(applicationTechnicalExplanation(mosquitoFog, 'pest').join(' ')).toMatch(/mosquito/i);
+  });
+
+  it('resolves canonical enum target keys, not just display labels', () => {
+    const enumFog = { method: 'fog_ulv', targets: ['german_roaches'], product: { name: 'Alpine WSG', category: 'insecticide' } };
+    expect(applicationPurpose(enumFog, 'pest')).toBe('Targeted cockroach treatment');
+    const enumBait = { method: 'bait_placement', targets: ['ghost_ant'], product: { name: 'Generic Gel', category: 'bait' } };
+    expect(applicationPurpose(enumBait, 'pest')).toBe('Targeted ant bait');
+  });
+
+  it('fails closed to generic copy when identity is unknown or ambiguous', () => {
+    const unknownFog = { method: 'fog_ulv', targets: [], product: { name: 'CB-80', category: 'insecticide' } };
+    expect(applicationPurpose(unknownFog, 'pest')).toBe('Space fog treatment');
+    expect(applicationPurposeCopy(unknownFog, 'pest')).toMatch(/treated areas/);
+    expect(applicationPurposeCopy(unknownFog, 'pest')).not.toMatch(/mosquito|\bants?\b|roach/i);
+    const mixedBait = { method: 'bait_placement', targets: ['Ghost ants', 'German cockroaches'], product: { name: 'Multi-Pest Bait Stations', category: 'bait' } };
+    expect(applicationPestFamily(mixedBait)).toBe(null);
+    expect(applicationPurpose(mixedBait, 'pest')).toBe('Targeted bait placement');
+  });
+
+  it('treats an unrecognized co-target as ambiguity, not a match', () => {
+    // Gentrol's catalog prefill keeps all three targets unless the tech trims
+    // them — one recognized family plus unmatched co-targets must stay generic.
+    const mixedFog = {
+      method: 'fog_ulv',
+      targets: ['German cockroaches', 'Drain flies', 'Pantry pests'],
+      product: { name: 'Gentrol IGR', category: 'IGR' },
+    };
+    expect(applicationPestFamily(mixedFog)).toBe(null);
+    expect(applicationPurpose(mixedFog, 'pest')).toBe('Space fog treatment');
+    expect(applicationPurposeCopy(mixedFog, 'pest')).not.toMatch(/cockroach|mosquito/i);
+  });
+
+  it('reads identity from the product name ahead of the recorded targets', () => {
+    const mislabeledTargets = { method: 'bait_placement', targets: ['Ghost ants'], product: { name: 'Advion Cockroach Gel Bait', category: 'bait' } };
+    expect(applicationPurpose(mislabeledTargets, 'pest')).toBe('Targeted cockroach bait');
+  });
+
+  it('rodent bait copy makes no insect bait-sharing claim', () => {
+    const rodentBait = { method: 'bait_placement', targets: ['Rodents'], product: { name: 'Contrac Blox', category: 'bait' } };
+    const detail = applicationTechnicalExplanation(rodentBait, 'pest').join(' ');
+    expect(detail).toMatch(/rodents/i);
+    expect(detail).not.toMatch(/share|nest|foraging/i);
+  });
+
+  it('limits the bait-sharing mechanism to social insects — unknown targets get feeding-only copy', () => {
+    const silverfishBait = { method: 'bait_placement', targets: ['Silverfish'], product: { name: 'Dekko Silverfish Paks', category: 'bait' } };
+    const detail = applicationTechnicalExplanation(silverfishBait, 'pest').join(' ');
+    expect(detail).toMatch(/targeted bait placement/i);
+    expect(detail).not.toMatch(/share|nest|harborage|foraging/i);
+    const roachDetail = applicationTechnicalExplanation(roachGel, 'pest').join(' ');
+    expect(roachDetail).toMatch(/share it with others/);
+  });
+
+  it('keeps termite and rodent station/bait purposes unchanged', () => {
+    expect(applicationPurpose({ method: 'station_check', product: { name: 'Trelona ATBS' } }, 'termite')).toBe('Station service');
+    expect(applicationPurpose({ method: 'bait_placement', product: { name: 'Contrac Blox' } }, 'rodent')).toBe('Bait placement');
   });
 });
