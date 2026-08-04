@@ -240,65 +240,80 @@ describe('wdo-report-pdf', () => {
   });
 });
 
-// Section 3 used to print EVERY category's text on the Attic row, because the
-// line pool targeted only that row's three fields while the checkboxes were
-// keyword-detected independently. A form could tick Interior/Exterior and then
-// print those limitations on the Attic line — misattributing where the
-// inspector could not see.
-describe('wdo-report-pdf Section 3 row distribution', () => {
-  const { splitInaccessibleAreas, INACCESSIBLE_ROWS } = _private;
-  const keys = (t) => [...splitInaccessibleAreas(t).ticked].sort();
+// Section 3 used to print EVERY category's text on the Attic row: the line
+// pool targeted only that row's three fields while the checkboxes were
+// keyword-detected independently, so a form could tick Interior/Exterior and
+// then print those limitations beside the empty Attic box.
+//
+// The fix deliberately does NOT parse the blob into per-row segments. Eight
+// review rounds on a free-text category parser each traded one defect for
+// another (a comma is both a list separator and a clause delimiter; a period
+// ends a sentence, abbreviates a unit, and opens a decimal), and the final
+// round produced an input that LOST ticked boxes relative to the shipped
+// rule. Instead the shipped permissive tick rule is kept bit-for-bit — ticks
+// can never regress — and only the text placement changes: the whole blob
+// prints on the FIRST ticked row.
+describe('wdo-report-pdf Section 3 — ticks (parity with the shipped rule)', () => {
+  const { inaccessibleTickedKeys } = _private;
+  const keys = (t) => inaccessibleTickedKeys({ inaccessible_areas: t });
 
-  test('labelled segments route to their own rows', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Attic: concealed by insulation. Interior: wall and ceiling voids. Exterior: enclosed soffits.'
-    );
-    expect(rows.attic).toBe('concealed by insulation.');
-    expect(rows.interior).toBe('wall and ceiling voids.');
-    expect(rows.exterior).toBe('enclosed soffits.');
-    expect(rows.crawlspace).toBeUndefined();
-    expect([...ticked].sort()).toEqual(['attic', 'exterior', 'interior']);
+  // Independent literal transcription of the rule as it has always shipped
+  // (applyCheckboxes on main). Any drift in inaccessibleTickedKeys fails here.
+  function shippedRule(text) {
+    const inacc = String(text == null ? '' : text).trim().toLowerCase();
+    if (!inacc) return [];
+    const ticked = [];
+    const attic = inacc.includes('attic');
+    const interior = inacc.includes('interior');
+    const exterior = inacc.includes('exterior');
+    const crawl = inacc.includes('crawl');
+    if (attic) ticked.push('attic');
+    if (interior) ticked.push('interior');
+    if (exterior) ticked.push('exterior');
+    if (crawl) ticked.push('crawlspace');
+    if (inacc.includes('other') || !(attic || interior || exterior || crawl)) ticked.push('other');
+    return ticked;
+  }
+
+  // The adversarial corpus accumulated across all eight review rounds of the
+  // abandoned parser, plus the shipped placeholder and the real filing text.
+  const CORPUS = [
+    'Attic: blocked by insulation, interior and exterior were blocked by stored goods',
+    'Attic — insulation; Crawlspace — no hatch',
+    'Crawlspace: skirting closed, no access. Interior: wall voids. Exterior: soffit wrap.',
+    'Areas of the interior and exterior were blocked by stored goods',
+    'Attic, interior, exterior and crawlspace areas were not fully accessible',
+    'Attic, interior, exterior, crawlspace, other: specific areas and reasons',
+    'Attic: insulation; interior and exterior were blocked',
+    'Attic: insulation. Interior and exterior were blocked by stored goods',
+    'Interior: .5-inch opening was inaccessible',
+    'Crawlspace present — verify access and clearance on site.',
+    'Crawlspace: N/A — slab-on-grade foundation.',
+    'Locked utility shed was not opened',
+    'Attic: inaccessible at exterior-facing eaves due to insulation',
+    'Exterior-facing eaves were inaccessible',
+    'Attic: North side blocked by insulation\nand HVAC ductwork',
+    'Not inspected. Interior: wall voids.',
+    'Crawl-space: no hatch',
+    'Crawl space: no hatch',
+    'Other: locked shed. 6 in. gap at meter box.',
+    'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected. '
+      + 'Interior: wall and ceiling voids. Exterior: soffit and fascia wrap.',
+  ];
+
+  test.each(CORPUS)('tick parity with the shipped rule: %p', (input) => {
+    expect(keys(input)).toEqual(shippedRule(input));
   });
 
-  test('REGRESSION: a category the text never mentions gets neither text nor a tick', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Crawlspace: skirting closed, no access. Interior: wall voids. Exterior: soffit wrap.'
-    );
-    // The whole point: nothing lands on the Attic row and Attic stays unticked.
-    expect(rows.attic).toBeUndefined();
-    expect(ticked.has('attic')).toBe(false);
-    expect(rows.crawlspace).toBe('skirting closed, no access.');
-    expect(ticked.has('crawlspace')).toBe(true);
+  // The input that killed the parser approach: under it, two disclosed
+  // limitations lost their checkbox relative to the shipped rule.
+  test('REGRESSION (parser r8): multi-category prose after a labelled clause keeps every tick', () => {
+    expect(keys('Attic: blocked by insulation, interior and exterior were blocked by stored goods'))
+      .toEqual(['attic', 'interior', 'exterior']);
   });
 
-  test('em-dash and semicolon separated labels split (legacy findings style)', () => {
-    const { rows } = splitInaccessibleAreas('Attic — insulation; Crawlspace — no hatch');
-    expect(rows.attic).toBe('insulation');
-    expect(rows.crawlspace).toBe('no hatch');
-  });
-
-  test('crawl space spelling variants all map to the Crawlspace row', () => {
-    for (const label of ['Crawl space:', 'Crawlspace:', 'Crawl Spaces:', 'crawl:']) {
-      expect(keys(`${label} no hatch`)).toEqual(['crawlspace']);
-    }
-  });
-
-  test('unlabelled text lands on the first row it matches, not the Attic row', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Areas of the interior were blocked by stored goods');
-    expect(rows.attic).toBeUndefined();
-    expect(rows.interior).toContain('stored goods');
-    expect([...ticked]).toEqual(['interior']);
-  });
-
-  test('text matching no category is disclosed under Other', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Locked utility shed was not opened');
-    expect([...ticked]).toEqual(['other']);
-    expect(rows.other).toBe('Locked utility shed was not opened');
-  });
-
-  test('preamble before the first label is kept, not dropped', () => {
-    const { rows } = splitInaccessibleAreas('Not inspected. Interior: wall voids.');
-    expect(rows.interior).toBe('Not inspected. wall voids.');
+  test('keys come back in form row order (topmost ticked row first)', () => {
+    expect(keys('Exterior soffits and attic insulation')).toEqual(['attic', 'exterior']);
   });
 
   test('empty findings tick nothing', () => {
@@ -306,11 +321,97 @@ describe('wdo-report-pdf Section 3 row distribution', () => {
     expect(keys(undefined)).toEqual([]);
   });
 
-  // Compliance guard: a renamed/typo'd field would silently drop a whole row's
-  // text off the official filing, which is exactly the class of bug this fixes.
+  test('text naming no category is disclosed under Other', () => {
+    expect(keys('Locked utility shed was not opened')).toEqual(['other']);
+  });
+
+  test('an "other:" convention ticks Other alongside named categories', () => {
+    expect(keys('Attic: insulation. Other: locked shed.')).toEqual(['attic', 'other']);
+  });
+});
+
+describe('wdo-report-pdf Section 3 — text placement', () => {
+  const { fillInaccessibleAreas, INACCESSIBLE_ROWS } = _private;
+  const fs = require('fs');
+  const path = require('path');
+
+  async function fillSection3(text) {
+    const { PDFDocument, StandardFonts } = require('pdf-lib');
+    const bytes = fs.readFileSync(path.join(__dirname, '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf'));
+    const doc = await PDFDocument.load(bytes);
+    const form = doc.getForm();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const overflows = [];
+    fillInaccessibleAreas(form, font, { inaccessible_areas: text }, overflows);
+    const rowText = {};
+    for (const row of INACCESSIBLE_ROWS) {
+      rowText[row.key] = row.fields
+        .map((f) => form.getTextField(f).getText() || '')
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+    }
+    return { rowText, overflows };
+  }
+
+  test('REGRESSION: text never again prints on an unticked Attic row', async () => {
+    // Mentions interior/exterior/crawl but never "attic" — the shipped bug put
+    // this whole statement on the Attic row.
+    const { rowText } = await fillSection3(
+      'Crawlspace: skirting closed, no access. Interior: wall voids. Exterior: soffit wrap.'
+    );
+    expect(rowText.attic).toBe('');
+    // First ticked row in form order is Interior — the blob prints there, whole.
+    const printed = rowText.interior;
+    expect(printed).toContain('skirting closed');
+    expect(printed).toContain('wall voids');
+    expect(printed).toContain('soffit wrap');
+  });
+
+  test('when Attic is ticked, placement is exactly the shipped behavior', async () => {
+    const { rowText } = await fillSection3('Attic — insulation; Crawlspace — no hatch');
+    expect(rowText.attic).toContain('insulation');
+    expect(rowText.attic).toContain('no hatch');
+    expect(rowText.interior).toBe('');
+    expect(rowText.crawlspace).toBe('');
+  });
+
+  test('exactly one row carries the text', async () => {
+    const { rowText } = await fillSection3(
+      'Areas of the interior and exterior were blocked by stored goods'
+    );
+    const nonEmpty = INACCESSIBLE_ROWS.filter((r) => rowText[r.key]);
+    expect(nonEmpty.map((r) => r.key)).toEqual(['interior']);
+  });
+
+  test('text naming no category prints on the Other row', async () => {
+    const { rowText } = await fillSection3('Locked utility shed was not opened');
+    expect(rowText.other).toContain('Locked utility shed');
+    expect(rowText.attic).toBe('');
+  });
+
+  test('a leading decimal survives to the form (.5-inch is not 5-inch)', async () => {
+    const { rowText } = await fillSection3('Interior: .5-inch opening was inaccessible');
+    expect(rowText.interior).toContain('.5-inch');
+  });
+
+  test('empty findings write nothing and record no overflow', async () => {
+    const { rowText, overflows } = await fillSection3('');
+    for (const row of INACCESSIBLE_ROWS) expect(rowText[row.key]).toBe('');
+    expect(overflows).toEqual([]);
+  });
+
+  test('overflow continues under the section label, not a per-category one', async () => {
+    const long = Array.from({ length: 60 }, (_, i) => `Interior limitation detail ${i + 1};`).join(' ');
+    const { overflows } = await fillSection3(long);
+    expect(overflows).toHaveLength(1);
+    expect(overflows[0].label).toBe('Section 3 - Obstructions / inaccessible areas (specific areas and reasons)');
+    expect(overflows[0].text).toContain('Interior limitation detail 60');
+  });
+
+  // Compliance guard: a renamed/typo'd field would silently drop the whole
+  // entry off the official filing.
   test('every mapped Section 3 field exists in the bundled FDACS template', async () => {
-    const fs = require('fs');
-    const path = require('path');
     const { PDFDocument } = require('pdf-lib');
     const tpl = path.join(__dirname, '..', 'assets', 'forms', 'fdacs-13645-fillable.pdf');
     const doc = await PDFDocument.load(fs.readFileSync(tpl));
@@ -327,7 +428,7 @@ describe('wdo-report-pdf Section 3 row distribution', () => {
     expect(new Set(all).size).toBe(all.length);
   });
 
-  test('renders with all five categories populated', async () => {
+  test('end-to-end: a McHale-shaped report builds and stays two pages', async () => {
     const { PDFDocument } = require('pdf-lib');
     const project = {
       id: 'p1',
@@ -336,7 +437,9 @@ describe('wdo-report-pdf Section 3 row distribution', () => {
       created_at: '2026-05-20',
       findings: {
         wdo_finding: 'No visible signs of WDO observed',
-        inaccessible_areas: 'Attic: insulation. Interior: wall voids. Exterior: soffits. Crawlspace: skirting closed. Other: locked shed.',
+        inaccessible_areas:
+          'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected. '
+          + 'Interior: wall and ceiling voids. Exterior: soffit and fascia wrap.',
       },
     };
     const buf = await buildWdoReportPDFBuffer({ project, customer: {} });
@@ -345,353 +448,3 @@ describe('wdo-report-pdf Section 3 row distribution', () => {
   });
 });
 
-// Codex #3188 P1: the property-intelligence emitter
-// (client/src/lib/wdoProfileToFindings.js) appends whole LINES where a filler
-// word sits between the category and the dash. With a separator-required-only
-// parser, such a note folded into the preceding labelled segment and its box
-// never ticked — reintroducing the exact misattribution this PR fixes.
-describe('wdo-report-pdf Section 3 — generated property-intelligence notes', () => {
-  const { splitInaccessibleAreas } = _private;
-
-  // Verbatim strings emitted by applyProfileToWdoFindings().
-  const CRAWL_PRESENT = 'Crawlspace present — verify access and clearance on site.';
-  const CRAWL_SLAB = 'Crawlspace: N/A — slab-on-grade foundation.';
-
-  test('generated crawlspace note keeps its own row alongside a tech label', () => {
-    const { rows, ticked } = splitInaccessibleAreas(`Attic: concealed by insulation.\n${CRAWL_PRESENT}`);
-    expect(rows.attic).toBe('concealed by insulation.');
-    // sanitizeText normalises the em-dash to WinAnsi before it reaches the form.
-    expect(rows.crawlspace).toBe('present - verify access and clearance on site.');
-    expect(ticked.has('crawlspace')).toBe(true);
-    expect([...ticked].sort()).toEqual(['attic', 'crawlspace']);
-  });
-
-  test('generated slab note keeps its own row alongside a tech label', () => {
-    const { rows, ticked } = splitInaccessibleAreas(`Interior: wall voids.\n${CRAWL_SLAB}`);
-    expect(rows.interior).toBe('wall voids.');
-    expect(rows.crawlspace).toBe('N/A - slab-on-grade foundation.');
-    expect([...ticked].sort()).toEqual(['crawlspace', 'interior']);
-  });
-
-  test('generated note alone still routes to Crawlspace', () => {
-    const { rows, ticked } = splitInaccessibleAreas(CRAWL_PRESENT);
-    expect([...ticked]).toEqual(['crawlspace']);
-    expect(rows.crawlspace).toBe('present - verify access and clearance on site.');
-  });
-
-  test('a bare category word mid-sentence still does NOT split a segment', () => {
-    // "interior" here is prose, not a label — it must not start a new row.
-    const { rows, ticked } = splitInaccessibleAreas('Attic: areas of the interior hatch were blocked.');
-    expect(rows.attic).toBe('areas of the interior hatch were blocked.');
-    expect([...ticked]).toEqual(['attic']);
-  });
-
-  test('multiple generated lines each keep their own row', () => {
-    const { ticked } = splitInaccessibleAreas(
-      `Attic: insulation.\n${CRAWL_PRESENT}\nExterior soffit wrap conceals the fascia.`
-    );
-    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior']);
-  });
-});
-
-// Codex #3188 round 2.
-describe('wdo-report-pdf Section 3 — multi-category and hyphen handling', () => {
-  const { splitInaccessibleAreas } = _private;
-
-  // P1: the findings textarea is documented as holding several categories at
-  // once, and the old checkbox matcher ticked every one it saw. Selecting a
-  // single row would silently drop a disclosed limitation off a signed filing.
-  test('unlabelled text mentioning several categories ticks and states ALL of them', () => {
-    const text = 'Areas of the interior and exterior were blocked by stored goods';
-    const { rows, ticked } = splitInaccessibleAreas(text);
-    expect([...ticked].sort()).toEqual(['exterior', 'interior']);
-    expect(rows.interior).toBe(text);
-    expect(rows.exterior).toBe(text);
-  });
-
-  test('unlabelled text naming all four named categories ticks all four', () => {
-    const { ticked } = splitInaccessibleAreas(
-      'Attic, interior, exterior and crawlspace areas were not fully accessible'
-    );
-    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior', 'interior']);
-  });
-
-  // P2: a bare hyphen inside a compound must not read as a label separator.
-  test('hyphenated compounds do not split a segment', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Attic: inaccessible at exterior-facing eaves due to insulation'
-    );
-    expect([...ticked]).toEqual(['attic']);
-    expect(rows.attic).toBe('inaccessible at exterior-facing eaves due to insulation');
-    expect(rows.exterior).toBeUndefined();
-  });
-
-  test('spaced dashes still separate labels', () => {
-    const { rows } = splitInaccessibleAreas('Attic - insulation. Exterior - soffit wrap.');
-    expect(rows.attic).toBe('insulation.');
-    expect(rows.exterior).toBe('soffit wrap.');
-  });
-
-  test('slab-on-grade compound survives inside a labelled segment', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Crawlspace: N/A — slab-on-grade foundation.');
-    expect([...ticked]).toEqual(['crawlspace']);
-    expect(rows.crawlspace).toBe('N/A - slab-on-grade foundation.');
-  });
-});
-
-// Codex #3188 round 3.
-describe('wdo-report-pdf Section 3 — mixed syntax and decimal safety', () => {
-  const { splitInaccessibleAreas } = _private;
-
-  // P1: an explicit label followed by prose naming other categories.
-  test('prose categories after an explicit label are still ticked', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Attic: insulation; interior and exterior were blocked');
-    expect([...ticked].sort()).toEqual(['attic', 'exterior', 'interior']);
-    expect(rows.attic).toBe('insulation');
-    expect(rows.interior).toBe('interior and exterior were blocked');
-    expect(rows.exterior).toBe('interior and exterior were blocked');
-  });
-
-  // P2: a leading decimal point is data, not separator noise. Stripping it
-  // turns ".5-inch" into "5-inch" — a tenfold error on a signed filing.
-  test('leading decimal point is preserved in row text', () => {
-    const { rows } = splitInaccessibleAreas('Interior: .5-inch opening was inaccessible');
-    expect(rows.interior).toBe('.5-inch opening was inaccessible');
-  });
-
-  test('leading separator punctuation is still stripped', () => {
-    const { rows } = splitInaccessibleAreas('Interior: . wall voids');
-    expect(rows.interior).toBe('wall voids');
-  });
-
-  // An unlabelled clause naming NO category continues the previous claim
-  // rather than opening an Other row.
-  test('semicolon continuation stays on the labelled row and keeps its semicolon', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected.'
-    );
-    expect([...ticked]).toEqual(['crawlspace']);
-    expect(rows.crawlspace).toBe(
-      'skirting was closed at the time of inspection; the area beneath was not inspected.'
-    );
-  });
-
-  test('hyphenated category adjective still does not tick its category', () => {
-    const { ticked } = splitInaccessibleAreas('Attic: inaccessible at exterior-facing eaves due to insulation');
-    expect([...ticked]).toEqual(['attic']);
-  });
-});
-
-// Caught by rendering the PDF, not by the unit tests above: when a clause has
-// BOTH a continuation preamble and later inline labels, the preamble belongs
-// to the previous clause's row, not to the first label in this one.
-describe('wdo-report-pdf Section 3 — continuation before a later label', () => {
-  const { splitInaccessibleAreas } = _private;
-
-  test('continuation sentence stays with the previous row when a label follows', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected. '
-      + 'Interior: wall and ceiling voids. Exterior: soffit and fascia wrap.'
-    );
-    expect([...ticked].sort()).toEqual(['crawlspace', 'exterior', 'interior']);
-    expect(rows.crawlspace).toBe(
-      'skirting was closed at the time of inspection; the area beneath was not inspected.'
-    );
-    expect(rows.interior).toBe('wall and ceiling voids.');
-    expect(rows.exterior).toBe('soffit and fascia wrap.');
-  });
-
-  test('with no previous row the preamble still attaches to the first label', () => {
-    const { rows } = splitInaccessibleAreas('Not inspected. Interior: wall voids.');
-    expect(rows.interior).toBe('Not inspected. wall voids.');
-  });
-});
-
-// Codex #3188 round 4.
-describe('wdo-report-pdf Section 3 — category lists, wrapped lines, crawl-space spelling', () => {
-  const { splitInaccessibleAreas } = _private;
-
-  // P1: the repo's OWN placeholder shape. Only "other:" is an explicit label,
-  // so routing the preamble to it alone left four categories unticked.
-  test("the repo's placeholder shape ticks every category it lists", () => {
-    const { ticked } = splitInaccessibleAreas(
-      'Attic, interior, exterior, crawlspace, other: specific areas and reasons'
-    );
-    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior', 'interior', 'other']);
-  });
-
-  // P2: a wrapped reason must not split across two rows.
-  test('a manual line break inside one reason stays on the same row', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Attic: North side blocked by insulation\nand HVAC ductwork');
-    expect([...ticked]).toEqual(['attic']);
-    expect(rows.attic).toBe('North side blocked by insulation and HVAC ductwork');
-    expect(rows.other).toBeUndefined();
-  });
-
-  test('a labelled later line still overrides the carried row', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Attic: insulation\nand ductwork\nInterior: wall voids'
-    );
-    expect([...ticked].sort()).toEqual(['attic', 'interior']);
-    expect(rows.attic).toBe('insulation and ductwork');
-    expect(rows.interior).toBe('wall voids');
-  });
-
-  // P2: "Crawl-space" is a common spelling; the old includes('crawl') caught it.
-  test.each(['Crawl-space: no hatch', 'crawl-space was inaccessible', 'Crawl space: no hatch'])(
-    'crawl-space spelling %p routes to Crawlspace, not Other',
-    (input) => {
-      const { ticked } = splitInaccessibleAreas(input);
-      expect([...ticked]).toEqual(['crawlspace']);
-    }
-  );
-
-  test('hyphenated adjective guard still holds for other categories', () => {
-    const { ticked } = splitInaccessibleAreas('Attic: inaccessible at exterior-facing eaves due to insulation');
-    expect([...ticked]).toEqual(['attic']);
-  });
-});
-
-// Codex #3188 round 5.
-describe('wdo-report-pdf Section 3 — shared reasons, standalone adjectives, paragraph breaks', () => {
-  const { splitInaccessibleAreas } = _private;
-
-  // P1: ticking a row whose FDACS line states no limitation is not a disclosure.
-  test('a listed category gets the shared REASON, not the category name list', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Attic, interior, exterior, crawlspace, other: blocked by stored goods'
-    );
-    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior', 'interior', 'other']);
-    for (const key of ['attic', 'interior', 'exterior', 'crawlspace', 'other']) {
-      expect(rows[key]).toBe('blocked by stored goods');
-    }
-  });
-
-  // P2: a hyphenated category IS the classification when it stands alone.
-  test('standalone hyphenated description classifies by its category', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Exterior-facing eaves were inaccessible');
-    expect([...ticked]).toEqual(['exterior']);
-    expect(rows.exterior).toBe('Exterior-facing eaves were inaccessible');
-  });
-
-  // ...but inside an explicit label it is still just prose. This holds
-  // structurally: a labelled body never reaches the mention matcher.
-  test('hyphenated adjective inside a labelled row still does not tick its category', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Attic: inaccessible at exterior-facing eaves due to insulation');
-    expect([...ticked]).toEqual(['attic']);
-    expect(rows.attic).toBe('inaccessible at exterior-facing eaves due to insulation');
-  });
-
-  // P2: a blank line separates entries; only a single wrapped line continues.
-  test('a blank line ends the carried row', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Attic: blocked by insulation\n\nLocked utility shed was not inspected');
-    expect([...ticked].sort()).toEqual(['attic', 'other']);
-    expect(rows.attic).toBe('blocked by insulation');
-    expect(rows.other).toBe('Locked utility shed was not inspected');
-  });
-
-  test('a single wrapped line still continues the row', () => {
-    const { rows } = splitInaccessibleAreas('Attic: blocked by insulation\nand HVAC ductwork');
-    expect(rows.attic).toBe('blocked by insulation and HVAC ductwork');
-    expect(rows.other).toBeUndefined();
-  });
-});
-
-// Codex #3188 round 6: a label may name SEVERAL categories sharing one
-// separator. Matching only the last one appended the rest to the previous row.
-describe('wdo-report-pdf Section 3 — grouped labels', () => {
-  const { splitInaccessibleAreas } = _private;
-
-  test('a grouped label gives its reason to every category it names', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Attic: insulation. Interior and exterior: blocked by stored goods'
-    );
-    expect([...ticked].sort()).toEqual(['attic', 'exterior', 'interior']);
-    expect(rows.attic).toBe('insulation.');
-    expect(rows.interior).toBe('blocked by stored goods');
-    expect(rows.exterior).toBe('blocked by stored goods');
-  });
-
-  test.each([
-    ['Interior, exterior: blocked', ['exterior', 'interior']],
-    ['Interior & exterior: blocked', ['exterior', 'interior']],
-    ['Attic, interior, and crawlspace: blocked', ['attic', 'crawlspace', 'interior']],
-  ])('grouped label %p ticks every member', (input, expected) => {
-    const { ticked } = splitInaccessibleAreas(input);
-    expect([...ticked].sort()).toEqual(expected);
-  });
-
-  test('a comma list terminated by one label still shares the reason', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Attic, interior, exterior, crawlspace, other: blocked by stored goods'
-    );
-    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior', 'interior', 'other']);
-    for (const k of ['attic', 'interior', 'exterior', 'crawlspace', 'other']) {
-      expect(rows[k]).toBe('blocked by stored goods');
-    }
-  });
-
-  test('an unlabelled category list is still not a label', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Interior and exterior were blocked by stored goods');
-    expect([...ticked].sort()).toEqual(['exterior', 'interior']);
-    expect(rows.interior).toBe('Interior and exterior were blocked by stored goods');
-  });
-});
-
-// Codex #3188 round 7.
-describe('wdo-report-pdf Section 3 — sentence delimiters and grouped continuations', () => {
-  const { splitInaccessibleAreas } = _private;
-
-  // P1: a limitation is delimited by an ordinary sentence period too, not only
-  // by a semicolon.
-  test('a period-delimited category claim routes independently', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Attic: insulation. Interior and exterior were blocked by stored goods'
-    );
-    expect([...ticked].sort()).toEqual(['attic', 'exterior', 'interior']);
-    expect(rows.attic).toBe('insulation.');
-    expect(rows.interior).toBe('Interior and exterior were blocked by stored goods');
-    expect(rows.exterior).toBe('Interior and exterior were blocked by stored goods');
-  });
-
-  // P2: a grouped label keeps ALL its rows active for continuations.
-  test('a continuation after a grouped label reaches every row in the group', () => {
-    const { rows } = splitInaccessibleAreas(
-      'Interior and exterior: blocked by stored goods; shelving prevented access'
-    );
-    expect(rows.interior).toBe('blocked by stored goods; shelving prevented access');
-    expect(rows.exterior).toBe('blocked by stored goods; shelving prevented access');
-  });
-
-  test('a wrapped-line continuation also reaches every row in the group', () => {
-    const { rows } = splitInaccessibleAreas('Interior and exterior: blocked by stored goods\nand shelving');
-    expect(rows.interior).toBe('blocked by stored goods and shelving');
-    expect(rows.exterior).toBe('blocked by stored goods and shelving');
-  });
-
-  // The sentence splitter must never treat a decimal point as a boundary.
-  test('a decimal point is not a sentence boundary', () => {
-    const { rows } = splitInaccessibleAreas('Interior: .5-inch opening was inaccessible');
-    expect(rows.interior).toBe('.5-inch opening was inaccessible');
-    expect(rows.other).toBeUndefined();
-  });
-
-  test('a lead-in sentence still attaches to the first label on its line', () => {
-    const { rows, ticked } = splitInaccessibleAreas('Not inspected. Interior: wall voids.');
-    expect([...ticked]).toEqual(['interior']);
-    expect(rows.interior).toBe('Not inspected. wall voids.');
-  });
-
-  // The real inspection text this branch exists for.
-  test('a full real-world Section 3 entry routes to three distinct rows', () => {
-    const { rows, ticked } = splitInaccessibleAreas(
-      'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected. '
-      + 'Interior: wall and ceiling voids. Exterior: soffit and fascia wrap.'
-    );
-    expect([...ticked].sort()).toEqual(['crawlspace', 'exterior', 'interior']);
-    expect(rows.crawlspace).toBe('skirting was closed at the time of inspection; the area beneath was not inspected.');
-    expect(rows.interior).toBe('wall and ceiling voids.');
-    expect(rows.exterior).toBe('soffit and fascia wrap.');
-    expect(rows.attic).toBeUndefined();
-  });
-});

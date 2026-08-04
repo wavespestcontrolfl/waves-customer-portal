@@ -203,8 +203,8 @@ const LINE_POOLS = {
       'use additional page if needed 7',
     ],
   },
-  // Section 3 is NOT a LINE_POOLS entry — its findings value is one blob that
-  // has to be split across five independently-checkboxed rows. See
+  // Section 3 is NOT a LINE_POOLS entry — which of its five checkboxed rows
+  // carries the text depends on which boxes are ticked. See
   // INACCESSIBLE_ROWS / fillInaccessibleAreas below.
   // "List what was observed" line 1 is the field auto-named from the label
   // text ('EVIDENCE of previous treatment observed'); the previously-mapped
@@ -241,242 +241,57 @@ const LINE_POOLS = {
 // 'SPECIFIC AREAS_n' sits on the REASON line and 'REASON_n' on the row's
 // third line. Mapping by name instead of geometry puts text a line low.
 //
-// The findings collect ONE free-text blob, so it has to be split back out per
-// row — otherwise every category's text prints on the Attic row and the form
-// reads as if wall voids / soffits / substructure were all attic limitations.
+// The findings collect ONE free-text blob for all of Section 3. It is NOT
+// parsed into per-row segments: eight review rounds on free-text category
+// parsing each traded one mis-tick for another (a comma is both a list
+// separator and a clause delimiter; a period ends a sentence, abbreviates a
+// unit, and opens a decimal), and the final round produced an input that LOST
+// a ticked box relative to the shipped rule. Ticks therefore keep the shipped
+// permissive keyword rule (inaccessibleTickedKeys below), and the blob prints
+// whole on the first ticked row instead of unconditionally on the Attic row.
 const INACCESSIBLE_ROWS = [
   {
     key: 'attic',
     checkbox: 'Attic',
-    label: 'Section 3 - Attic (specific areas and reasons)',
-    order: 30,
     fields: [
       'not visible andor accessible for inspection The descriptions and reasons for inaccessibility are stated below',
       'SPECIFIC AREAS',
       'REASON',
     ],
   },
-  {
-    key: 'interior',
-    checkbox: 'Interior',
-    label: 'Section 3 - Interior (specific areas and reasons)',
-    order: 31,
-    fields: ['undefined_2', 'SPECIFIC AREAS_2', 'REASON_2'],
-  },
-  {
-    key: 'exterior',
-    checkbox: 'Exterior',
-    label: 'Section 3 - Exterior (specific areas and reasons)',
-    order: 32,
-    fields: ['undefined_3', 'SPECIFIC AREAS_3', 'REASON_3'],
-  },
-  {
-    key: 'crawlspace',
-    checkbox: 'Crawlspace',
-    label: 'Section 3 - Crawlspace (specific areas and reasons)',
-    order: 33,
-    fields: ['undefined_4', 'SPECIFIC AREAS_4', 'REASON_4'],
-  },
-  {
-    key: 'other',
-    checkbox: 'Other',
-    label: 'Section 3 - Other (specific areas and reasons)',
-    order: 34,
-    fields: ['undefined_5', 'SPECIFIC AREAS_5', 'REASON_5'],
-  },
+  { key: 'interior', checkbox: 'Interior', fields: ['undefined_2', 'SPECIFIC AREAS_2', 'REASON_2'] },
+  { key: 'exterior', checkbox: 'Exterior', fields: ['undefined_3', 'SPECIFIC AREAS_3', 'REASON_3'] },
+  { key: 'crawlspace', checkbox: 'Crawlspace', fields: ['undefined_4', 'SPECIFIC AREAS_4', 'REASON_4'] },
+  { key: 'other', checkbox: 'Other', fields: ['undefined_5', 'SPECIFIC AREAS_5', 'REASON_5'] },
 ];
 
-// Category labels as written in the findings blob. Longest-first so
-// "crawl space" wins over a bare "crawl", and the alternation can't match a
-// prefix of a longer label.
-//
-// TWO forms, because the findings blob has two writers:
-//  1. Line-anchored, separator OPTIONAL — the property-intelligence emitter
-//     (client/src/lib/wdoProfileToFindings.js) appends whole lines like
-//     "Crawlspace present — verify access and clearance on site.", where a
-//     filler word sits between the category and the dash. Each appended note
-//     is its own line, so a line STARTING with a category word is that
-//     category's row. Without this, such a note folds into whatever labelled
-//     segment preceded it and its box never ticks.
-//  2. Inline, separator REQUIRED — "Attic: insulation. Interior: wall voids."
-//     typed by the tech. A bare category word mid-sentence ("areas of the
-//     interior") must NOT split, so here the colon/dash is mandatory.
-// A dash separator MUST have whitespace on both sides. Without that, ordinary
-// hyphenated compounds parse as labels: "inaccessible at exterior-facing
-// eaves" split at "exterior-", stranding "inaccessible at" on the Attic row
-// and ticking Exterior with the remainder. A colon needs no surrounding space.
-const INACCESSIBLE_CATEGORY_WORDS = String.raw`crawl[-\s]*spaces?|crawlspaces?|crawl|attics?|interiors?|exteriors?|other`;
-// A label may name SEVERAL categories sharing one separator — "Interior and
-// exterior: blocked by stored goods", and the repo's own placeholder
-// "Attic, interior, exterior, crawlspace, other: specific areas and reasons".
-// Matching the whole group as ONE label is what keeps every named category
-// ticked with the shared reason; matching only the last one silently appends
-// the rest to whatever row came before.
-const INACCESSIBLE_GROUP = String.raw`(?:${INACCESSIBLE_CATEGORY_WORDS})(?:[ \t]*(?:,[ \t]*and|,|&|and)[ \t]*(?:${INACCESSIBLE_CATEGORY_WORDS}))*`;
-const INACCESSIBLE_LABEL_PATTERN = new RegExp(
-  // Line-anchored: a colon, OR whitespace when a spaced dash follows one filler
-  // word — the emitter's "Crawlspace present — …" shape (the lookahead keeps
-  // "present" in the row text). Requiring one of those is what stops a sentence
-  // that merely BEGINS with a category word ("Attic, interior and exterior
-  // areas were blocked") from being read as a single-category label, which
-  // would drop the other categories.
-  String.raw`(?:^|\n)[\s;,]*(${INACCESSIBLE_GROUP})\b(?:[ \t]*:[ \t]*|[ \t]+(?=\w+[ \t]+[—–-][ \t]+))`
-  // Inline: colon, or a dash with whitespace on BOTH sides.
-  + String.raw`|\b(${INACCESSIBLE_GROUP})\b(?:[ \t]*:[ \t]*|\s+[—–-]\s+)`,
-  'gi'
-);
-
-function inaccessibleRowKeyFor(word) {
-  const w = word.toLowerCase().replace(/\s+/g, '');
-  if (w.startsWith('crawl')) return 'crawlspace';
-  if (w.startsWith('attic')) return 'attic';
-  if (w.startsWith('interior')) return 'interior';
-  if (w.startsWith('exterior')) return 'exterior';
-  return 'other';
-}
-
-// Split a matched label group ("Interior and exterior") into its row keys,
-// in order, without duplicates.
-function inaccessibleRowKeysFor(group) {
-  const re = new RegExp(INACCESSIBLE_CATEGORY_WORDS, 'gi');
-  const keys = [];
-  let m;
-  while ((m = re.exec(group)) !== null) {
-    const key = inaccessibleRowKeyFor(m[0]);
-    if (!keys.includes(key)) keys.push(key);
-  }
-  return keys;
-}
+// Continuation-page heading for Section 3 overflow — deliberately the section
+// label, not a per-category one: the blob is one shared statement, so an
+// "Interior (specific areas)" heading over it would misattribute the whole
+// entry to one row.
+const INACCESSIBLE_POOL = {
+  label: 'Section 3 - Obstructions / inaccessible areas (specific areas and reasons)',
+  order: 30,
+};
 
 /**
- * Split the single Section 3 findings blob into per-row text.
- *
- * ONE parser drives BOTH the checkboxes and the line routing — a second
- * independent matcher would drift out of sync and re-create the exact bug this
- * fixes (a row ticked with its text printed on a different row).
- *
- * Labelled form ("Attic: insulation. Interior: wall voids.") routes each
- * segment to its own row. Unlabelled text falls back to keyword detection and
- * is written to the FIRST matching row, so the text always lands on a row that
- * is actually ticked. Text matching nothing goes to Other.
- *
- * Returns { rows: {key: text}, ticked: Set<key> }.
+ * Which Section 3 boxes to tick, in form row order. This is the permissive
+ * keyword rule that has always shipped, kept bit-for-bit so no input can lose
+ * a checkbox (an unticked disclosed limitation on a signed FDACS filing):
+ * every category the text mentions anywhere is ticked, and Other is ticked
+ * for an "other:" convention or when nothing matched. The same list drives
+ * checkboxes AND text placement so a tick and its text cannot drift apart.
  */
-function splitInaccessibleAreas(value) {
-  const text = formText(value);
-  const rows = {};
-  const ticked = new Set();
-  if (!text) return { rows, ticked };
-
-  const append = (key, chunk, joiner = ' ') => {
-    // Strip separator punctuation the label split leaves behind. A period is
-    // only separator noise when it is NOT a decimal point — stripping the one
-    // in "Interior: .5-inch opening" would record "5-inch" and misstate a
-    // measurement by a factor of ten on a signed filing.
-    const piece = chunk.trim().replace(/^(?:[;,\s]|\.(?!\d))+/, '').replace(/[;,\s]+$/, '').trim();
-    if (!piece) return;
-    rows[key] = rows[key] ? `${rows[key]}${joiner}${piece}` : piece;
-  };
-  const appendAll = (keys, chunk, joiner) => keys.forEach((k) => append(k, chunk, joiner));
-
-  // NOTE: only ever called on a preamble or an UNLABELLED segment — never on
-  // the body of an explicit label. That is what keeps "Attic: inaccessible at
-  // exterior-facing eaves" from ticking Exterior: the body never reaches here.
-  const categoriesMentionedIn = (chunk) => {
-    const lower = chunk.toLowerCase();
-    return INACCESSIBLE_ROWS
-      .filter((row) => (row.key === 'crawlspace'
-        ? /\bcrawl[-\s]?spaces?\b|\bcrawl\b/i.test(lower)
-        : new RegExp(String.raw`\b${row.key}\w*\b`, 'i').test(lower)))
-      .map((row) => row.key);
-  };
-
-  // A limitation is delimited by a semicolon OR an ordinary sentence period —
-  // techs write both ("Attic: insulation. Interior and exterior were blocked").
-  // The period lookbehind refuses a digit so a decimal like ".5-inch" is never
-  // a boundary.
-  const segmentsOf = (line) => {
-    const out = [];
-    line.split(';').forEach((clause, ci) => {
-      clause.split(/(?<=[^\d]\.)\s+(?=[A-Za-z])/).forEach((sentence, si) => {
-        const t = sentence.trim();
-        // Only the first sentence of a semicolon clause rejoins with "; ";
-        // sentence and line-wrap continuations rejoin with a plain space.
-        if (t) out.push({ text: t, joiner: ci > 0 && si === 0 ? '; ' : ' ' });
-      });
-    });
-    return out;
-  };
-
-  // The rows the previous segment spoke about, so an unlabelled segment naming
-  // no category reads as a CONTINUATION of them. A grouped label keeps ALL its
-  // rows active, or a continuation would land on only the last one.
-  let lastKeys = [];
-
-  for (const rawLine of text.split('\n')) {
-    const line = rawLine.trim();
-    // A blank line is a paragraph boundary between separate entries.
-    if (!line) { lastKeys = []; continue; }
-
-    // Uncategorised text seen before this line's first label — held so
-    // "Not inspected. Interior: wall voids." keeps its lead-in on the
-    // Interior row instead of opening an Other row.
-    let pending = '';
-
-    for (const seg of segmentsOf(line)) {
-      INACCESSIBLE_LABEL_PATTERN.lastIndex = 0;
-      const marks = [];
-      let m;
-      while ((m = INACCESSIBLE_LABEL_PATTERN.exec(seg.text)) !== null) {
-        // m[1] = line-anchored form, m[2] = inline form (see the pattern above).
-        marks.push({ keys: inaccessibleRowKeysFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
-      }
-
-      if (marks.length) {
-        const preamble = `${pending ? `${pending} ` : ''}${seg.text.slice(0, marks[0].start)}`;
-        if (preamble.trim()) {
-          if (lastKeys.length) appendAll(lastKeys, preamble, seg.joiner);
-          else appendAll(marks[0].keys, preamble);
-        }
-        pending = '';
-        marks.forEach((mark, i) => {
-          const end = i + 1 < marks.length ? marks[i + 1].start : seg.text.length;
-          appendAll(mark.keys, seg.text.slice(mark.bodyStart, end));
-        });
-        lastKeys = marks[marks.length - 1].keys;
-        continue;
-      }
-
-      // Unlabelled. If it NAMES categories it is a shared statement and must
-      // tick every one — quietly dropping one removes a disclosed inspection
-      // limitation from a signed FDACS filing.
-      const hits = categoriesMentionedIn(seg.text);
-      if (hits.length) {
-        appendAll(hits, seg.text);
-        lastKeys = hits;
-        pending = '';
-      } else if (lastKeys.length) {
-        appendAll(lastKeys, seg.text, seg.joiner);
-      } else {
-        pending = pending ? `${pending} ${seg.text}` : seg.text;
-      }
-    }
-
-    if (pending.trim()) {
-      append('other', pending);
-      lastKeys = ['other'];
-    }
-  }
-
-  for (const row of INACCESSIBLE_ROWS) {
-    if (formText(rows[row.key])) ticked.add(row.key);
-  }
-  // Uncategorised text still has to be disclosed under some box.
-  if (!ticked.size) {
-    append('other', text);
-    ticked.add('other');
-  }
-  return { rows, ticked };
+function inaccessibleTickedKeys(findings) {
+  const inacc = clean(findings.inaccessible_areas).toLowerCase();
+  if (!inacc) return [];
+  const keys = [];
+  if (inacc.includes('attic')) keys.push('attic');
+  if (inacc.includes('interior')) keys.push('interior');
+  if (inacc.includes('exterior')) keys.push('exterior');
+  if (inacc.includes('crawl')) keys.push('crawlspace');
+  if (inacc.includes('other') || !keys.length) keys.push('other');
+  return keys;
 }
 
 // Findings-driven single-blank fields: fitted at FORM_FONT_FLOOR with overflow
@@ -671,15 +486,16 @@ function selectRadio(form, name, option) {
 }
 
 /**
- * Section 3: route each category's text onto its OWN row's writing lines.
- * Each row overflows independently, so a long Interior note continues under an
- * "Interior" heading on the continuation page instead of silently truncating.
+ * Section 3: the whole blob prints on the FIRST ticked row's writing lines
+ * (overflowing to the continuation page like every other pool). When Attic is
+ * ticked that is exactly the shipped behavior; when it isn't, the text now
+ * sits beside a box that is actually ticked instead of on the empty Attic row.
  */
 function fillInaccessibleAreas(form, font, findings, overflows) {
-  const { rows } = splitInaccessibleAreas(findings.inaccessible_areas);
-  for (const row of INACCESSIBLE_ROWS) {
-    fillLinePool(form, font, row, rows[row.key], overflows);
-  }
+  const [firstKey] = inaccessibleTickedKeys(findings);
+  if (!firstKey) return;
+  const row = INACCESSIBLE_ROWS.find((r) => r.key === firstKey);
+  fillLinePool(form, font, { ...INACCESSIBLE_POOL, fields: row.fields }, findings.inaccessible_areas, overflows);
 }
 
 function applyCheckboxes(form, findings) {
@@ -697,12 +513,10 @@ function applyCheckboxes(form, findings) {
     if (clean(findings.wdo_damage)) checkBox(form, '3 DAMAGE caused by WDOs was observed and noted as follows');
   }
 
-  // Inaccessible / obstructed areas — tick exactly the rows that splitInaccessibleAreas
-  // routed text to. Sharing that one parser is what keeps a ticked box and its
-  // printed text on the SAME row.
-  const { ticked } = splitInaccessibleAreas(findings.inaccessible_areas);
-  for (const row of INACCESSIBLE_ROWS) {
-    if (ticked.has(row.key)) checkBox(form, row.checkbox);
+  // Inaccessible / obstructed areas — the same tick list that decides where
+  // the text prints (see fillInaccessibleAreas).
+  for (const key of inaccessibleTickedKeys(findings)) {
+    checkBox(form, INACCESSIBLE_ROWS.find((r) => r.key === key).checkbox);
   }
 
   // Treatment method
@@ -1057,7 +871,8 @@ module.exports = {
     cutToFit,
     LINE_POOLS,
     FITTED_FIELDS,
-    splitInaccessibleAreas,
+    inaccessibleTickedKeys,
+    fillInaccessibleAreas,
     INACCESSIBLE_ROWS,
   },
 };
