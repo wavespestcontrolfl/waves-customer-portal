@@ -563,6 +563,18 @@ export function completionSideEffectsRetryPlan(error, retryCount) {
   return { action: "give_up", message: SIDE_EFFECTS_GIVE_UP_MESSAGE };
 }
 
+// Cross-key resolution of a committed chain: the server's resumable claim
+// matches by SERVICE (any key), but success replay is same-key only — so a
+// chain whose 409s were held under key A (panel reloaded / second device)
+// sees `service_already_completed` once the original attempt (key B)
+// finishes. Inside a committed chain that response IS completion, never a
+// failure (codex P1 #3187 r6).
+export const CROSS_KEY_COMPLETED_MESSAGE =
+  "This visit is completed and saved — the original submission finished while this screen was retrying. No further action is needed.";
+export function completionCrossKeyCompleted(error, chainCommitted) {
+  return chainCommitted === true && error?.code === "service_already_completed";
+}
+
 // The completion route's pre-submit reconciliation 409 (code
 // 'report_reconcile', behind GATE_REPORT_RECONCILE_PROMPT): the server
 // packs the human-readable contradictions into the error string because
@@ -12516,6 +12528,23 @@ export function CompletionPanel({
       // the same chain-opening body quietly — the button keeps showing its
       // completing state — and only give up with honest copy after the
       // polling window.
+      if (completionCrossKeyCompleted(e, sideEffectsCommittedRef.current)) {
+        // Terminal SUCCESS, not failure (see completionCrossKeyCompleted):
+        // the visit is completed and its side effects finished under the
+        // original key — clear every chain artifact so the completed visit
+        // stops being reopenable, and close out.
+        sideEffectsCommittedRef.current = false;
+        lastSubmitBodyRef.current = null;
+        completionIdempotencyKeyRef.current = null;
+        localStorage.removeItem(completionDraftKey(service.id));
+        try {
+          localStorage.removeItem(completionResumeOwedKey(service.id));
+        } catch { /* ignore */ }
+        alert(CROSS_KEY_COMPLETED_MESSAGE);
+        setSubmitting(false);
+        onClose(true);
+        return;
+      }
       const retryPlan = completionSideEffectsRetryPlan(e, sideEffectsRetryCount);
       if (retryPlan?.action === "retry") {
         // The 409 itself proves the visit is COMMITTED — persist the reopen

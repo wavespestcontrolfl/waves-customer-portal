@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CROSS_KEY_COMPLETED_MESSAGE,
   SIDE_EFFECTS_GIVE_UP_MESSAGE,
+  completionCrossKeyCompleted,
   completionPreferencesNeedDraft,
   completionReconcilePrompt,
   completionReviewSuppressionReason,
@@ -299,5 +301,35 @@ describe("completion side-effects auto-retry", () => {
 
   it("the retried key survives the 409 (pairs with the reset rule)", () => {
     expect(shouldResetCompletionIdempotencyKey(sideEffects409)).toBe(false);
+  });
+});
+
+// Cross-key resolution of a committed chain (codex P1 #3187 r6): once a
+// committed side-effects 409 has been observed, service_already_completed
+// means the ORIGINAL key's attempt finished — terminal success, never the
+// generic failure path.
+describe("cross-key completion inside a committed chain", () => {
+  it("service_already_completed after a committed 409 is completion", () => {
+    expect(
+      completionCrossKeyCompleted({ status: 409, code: "service_already_completed" }, true),
+    ).toBe(true);
+  });
+
+  it("without a committed chain the existing handlers keep it", () => {
+    expect(
+      completionCrossKeyCompleted({ status: 409, code: "service_already_completed" }, false),
+    ).toBe(false);
+  });
+
+  it("other codes never resolve as cross-key completion", () => {
+    expect(
+      completionCrossKeyCompleted({ status: 409, code: "completion_side_effects_running" }, true),
+    ).toBe(false);
+    expect(completionCrossKeyCompleted(null, true)).toBe(false);
+  });
+
+  it("the message says completed, not failed", () => {
+    expect(CROSS_KEY_COMPLETED_MESSAGE).toMatch(/completed/i);
+    expect(CROSS_KEY_COMPLETED_MESSAGE).not.toMatch(/fail/i);
   });
 });
