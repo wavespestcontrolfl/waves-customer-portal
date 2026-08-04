@@ -301,10 +301,21 @@ const INACCESSIBLE_ROWS = [
 //  2. Inline, separator REQUIRED — "Attic: insulation. Interior: wall voids."
 //     typed by the tech. A bare category word mid-sentence ("areas of the
 //     interior") must NOT split, so here the colon/dash is mandatory.
+// A dash separator MUST have whitespace on both sides. Without that, ordinary
+// hyphenated compounds parse as labels: "inaccessible at exterior-facing
+// eaves" split at "exterior-", stranding "inaccessible at" on the Attic row
+// and ticking Exterior with the remainder. A colon needs no surrounding space.
 const INACCESSIBLE_CATEGORY_WORDS = String.raw`crawl\s*spaces?|crawlspaces?|crawl|attics?|interiors?|exteriors?|other`;
 const INACCESSIBLE_LABEL_PATTERN = new RegExp(
-  String.raw`(?:^|\n)[\s;,]*(${INACCESSIBLE_CATEGORY_WORDS})\b[ \t]*(?::|—|–|-)?[ \t]*`
-  + String.raw`|\b(${INACCESSIBLE_CATEGORY_WORDS})\b\s*(?::|—|–|-)+\s*`,
+  // Line-anchored: a colon, OR whitespace when a spaced dash follows one filler
+  // word — the emitter's "Crawlspace present — …" shape (the lookahead keeps
+  // "present" in the row text). Requiring one of those is what stops a sentence
+  // that merely BEGINS with a category word ("Attic, interior and exterior
+  // areas were blocked") from being read as a single-category label, which
+  // would drop the other categories.
+  String.raw`(?:^|\n)[\s;,]*(${INACCESSIBLE_CATEGORY_WORDS})\b(?:[ \t]*:[ \t]*|[ \t]+(?=\w+[ \t]+[—–-][ \t]+))`
+  // Inline: colon, or a dash with whitespace on BOTH sides.
+  + String.raw`|\b(${INACCESSIBLE_CATEGORY_WORDS})\b(?:[ \t]*:[ \t]*|\s+[—–-]\s+)`,
   'gi'
 );
 
@@ -337,14 +348,6 @@ function splitInaccessibleAreas(value) {
   const ticked = new Set();
   if (!text) return { rows, ticked };
 
-  INACCESSIBLE_LABEL_PATTERN.lastIndex = 0;
-  const marks = [];
-  let m;
-  while ((m = INACCESSIBLE_LABEL_PATTERN.exec(text)) !== null) {
-    // m[1] = line-anchored form, m[2] = inline form (see the pattern above).
-    marks.push({ key: inaccessibleRowKeyFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
-  }
-
   const append = (key, chunk) => {
     // Strip separator punctuation the label split leaves behind. Trailing
     // periods are sentence punctuation and stay.
@@ -353,26 +356,45 @@ function splitInaccessibleAreas(value) {
     rows[key] = rows[key] ? `${rows[key]} ${piece}` : piece;
   };
 
-  if (marks.length) {
-    // Text before the first label belongs to nothing in particular — attach it
-    // to the first labelled row rather than dropping it on the floor.
-    const preamble = text.slice(0, marks[0].start);
-    marks.forEach((mark, i) => {
-      const end = i + 1 < marks.length ? marks[i + 1].start : text.length;
-      append(mark.key, text.slice(mark.bodyStart, end));
-    });
-    if (preamble.trim()) {
-      const first = marks[0].key;
-      rows[first] = `${preamble.trim()} ${rows[first] || ''}`.trim();
+  // Line by line. The findings blob is built by appending whole lines (the
+  // property-intelligence emitter) and by a tech typing prose, so a line is
+  // the meaningful unit: a labelled line owns its row, and an UNLABELLED line
+  // is a shared statement that must tick every category it names.
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    INACCESSIBLE_LABEL_PATTERN.lastIndex = 0;
+    const marks = [];
+    let m;
+    while ((m = INACCESSIBLE_LABEL_PATTERN.exec(line)) !== null) {
+      // m[1] = line-anchored form, m[2] = inline form (see the pattern above).
+      marks.push({ key: inaccessibleRowKeyFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
     }
-  } else {
-    // No labels — keyword-detect, and put the whole blob on the first row that
-    // matched so the printed text sits under a ticked box.
-    const lower = text.toLowerCase();
-    const hit = INACCESSIBLE_ROWS.find((row) => (
-      row.key === 'crawlspace' ? /crawl/.test(lower) : lower.includes(row.key)
-    ));
-    append(hit ? hit.key : 'other', text);
+
+    if (marks.length) {
+      // Text before the first label belongs to nothing in particular — attach
+      // it to the first labelled row rather than dropping it on the floor.
+      const preamble = line.slice(0, marks[0].start);
+      if (preamble.trim()) append(marks[0].key, preamble);
+      marks.forEach((mark, i) => {
+        const end = i + 1 < marks.length ? marks[i + 1].start : line.length;
+        append(mark.key, line.slice(mark.bodyStart, end));
+      });
+    } else {
+      // Unlabelled — repeat the shared statement on EVERY category it mentions.
+      // The single findings textarea is documented as holding several
+      // categories at once ("Attic, interior, exterior, crawlspace, other:
+      // specific areas and reasons" — project-types.js) and the previous
+      // checkbox matcher ticked all of them. Picking one row would silently
+      // drop a disclosed inspection limitation off a signed FDACS filing.
+      const lower = line.toLowerCase();
+      const hits = INACCESSIBLE_ROWS.filter((row) => (
+        row.key === 'crawlspace' ? /crawl/.test(lower) : lower.includes(row.key)
+      ));
+      if (hits.length) for (const hit of hits) append(hit.key, line);
+      else append('other', line);
+    }
   }
 
   for (const row of INACCESSIBLE_ROWS) {

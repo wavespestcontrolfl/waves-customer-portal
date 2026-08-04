@@ -393,3 +393,48 @@ describe('wdo-report-pdf Section 3 — generated property-intelligence notes', (
     expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior']);
   });
 });
+
+// Codex #3188 round 2.
+describe('wdo-report-pdf Section 3 — multi-category and hyphen handling', () => {
+  const { splitInaccessibleAreas } = _private;
+
+  // P1: the findings textarea is documented as holding several categories at
+  // once, and the old checkbox matcher ticked every one it saw. Selecting a
+  // single row would silently drop a disclosed limitation off a signed filing.
+  test('unlabelled text mentioning several categories ticks and states ALL of them', () => {
+    const text = 'Areas of the interior and exterior were blocked by stored goods';
+    const { rows, ticked } = splitInaccessibleAreas(text);
+    expect([...ticked].sort()).toEqual(['exterior', 'interior']);
+    expect(rows.interior).toBe(text);
+    expect(rows.exterior).toBe(text);
+  });
+
+  test('unlabelled text naming all four named categories ticks all four', () => {
+    const { ticked } = splitInaccessibleAreas(
+      'Attic, interior, exterior and crawlspace areas were not fully accessible'
+    );
+    expect([...ticked].sort()).toEqual(['attic', 'crawlspace', 'exterior', 'interior']);
+  });
+
+  // P2: a bare hyphen inside a compound must not read as a label separator.
+  test('hyphenated compounds do not split a segment', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Attic: inaccessible at exterior-facing eaves due to insulation'
+    );
+    expect([...ticked]).toEqual(['attic']);
+    expect(rows.attic).toBe('inaccessible at exterior-facing eaves due to insulation');
+    expect(rows.exterior).toBeUndefined();
+  });
+
+  test('spaced dashes still separate labels', () => {
+    const { rows } = splitInaccessibleAreas('Attic - insulation. Exterior - soffit wrap.');
+    expect(rows.attic).toBe('insulation.');
+    expect(rows.exterior).toBe('soffit wrap.');
+  });
+
+  test('slab-on-grade compound survives inside a labelled segment', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Crawlspace: N/A — slab-on-grade foundation.');
+    expect([...ticked]).toEqual(['crawlspace']);
+    expect(rows.crawlspace).toBe('N/A - slab-on-grade foundation.');
+  });
+});
