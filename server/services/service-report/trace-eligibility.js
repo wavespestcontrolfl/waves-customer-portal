@@ -418,10 +418,27 @@ async function resolveAddonVerdicts(scheduledServiceId, knex) {
         .catch(() => []);
       keyById = new Map(rows.map((r) => [r.id, r.service_key]));
     }
-    return addons.map((addon) => resolveTraceEligibility({
-      serviceKey: keyById.get(addon.service_id) || null,
-      displayName: addon.service_name || '',
-    }));
+    // Typed add-on keys (flea_tick, lawn_aeration…) are deliberately
+    // absent from SERVICE_KEY_RULES — their identity is the typed
+    // pointer, so resolve the completion profile per key (codex P2 r12).
+    let pointerByKey = new Map();
+    const keys = [...new Set([...keyById.values()].filter(Boolean))];
+    if (keys.length) {
+      const profiles = await knex('service_completion_profiles')
+        .whereIn('service_key', keys)
+        .where({ active: true })
+        .select('service_key', 'project_type')
+        .catch(() => []);
+      pointerByKey = new Map(profiles.map((r) => [r.service_key, r.project_type]));
+    }
+    return addons.map((addon) => {
+      const key = keyById.get(addon.service_id) || null;
+      return resolveTraceEligibility({
+        serviceKey: key,
+        findingsType: (key && pointerByKey.get(key)) || null,
+        displayName: addon.service_name || '',
+      });
+    });
   } catch {
     return [];
   }

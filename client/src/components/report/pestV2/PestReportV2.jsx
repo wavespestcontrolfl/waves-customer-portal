@@ -185,16 +185,34 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
           {/* The server's eligibility variant rides on the traced payload
               (GATE_TRACE_ELIGIBILITY): outline lanes (fire ant, flea —
               yard-geometry treatments) must not carry the spray-perimeter
-              heading, copy, or mist animation (codex P1 r9). Absent
+              heading, copy, or mist animation (codex P1 r9). The AREA
+              claim additionally requires a lawn-family captureMode (codex
+              P1 r12): a LEGACY perimeter bitmap on a now-outline lane
+              must not be described as "today's treated coverage" — it
+              gets neutral wording until the visit is retraced, matching
+              TracedTreatmentZoneMap's own mismatch handling. Absent
               variant (older payloads, gate off) keeps the spray copy. */}
-          <div data-gt="eyebrow" style={eyebrow}>
-            {tracedMap.variant === 'outline' ? 'Where we treated' : 'Where we sprayed'}
-          </div>
-          <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '6px 0 10px' }}>
-            {tracedMap.variant === 'outline'
-              ? 'Today’s treated area — the highlighted zone outlines the coverage your technician marked on-site.'
-              : 'A replay of today’s application — the blue band traces the treatment your technician applied on-site.'}
-          </p>
+          {(() => {
+            const outlineCoverage = tracedMap.variant === 'outline'
+              && (tracedMap.captureMode === 'lawn' || tracedMap.captureMode === 'lawn_highlight');
+            const legacyOutlineMismatch = tracedMap.variant === 'outline' && !outlineCoverage;
+            return (
+              <>
+                <div data-gt="eyebrow" style={eyebrow}>
+                  {outlineCoverage ? 'Where we treated'
+                    : legacyOutlineMismatch ? 'Treatment map'
+                      : 'Where we sprayed'}
+                </div>
+                <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '6px 0 10px' }}>
+                  {outlineCoverage
+                    ? 'Today’s treated area — the highlighted zone outlines the coverage your technician marked on-site.'
+                    : legacyOutlineMismatch
+                      ? 'The area your technician traced on-site during this visit.'
+                      : 'A replay of today’s application — the blue band traces the treatment your technician applied on-site.'}
+                </p>
+              </>
+            );
+          })()}
           <TracedTreatmentZoneMap
             traced={tracedMap}
             live={tracedLive}

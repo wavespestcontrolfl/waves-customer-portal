@@ -2553,8 +2553,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // snapshot-is-authority rule the trap lane ratified — and display names
   // are the last-resort fallback. Scoped require matches this file's
   // pattern for report-time helpers.
-  const { resolveTraceEligibility, traceEligibilityGateOn } = require('./trace-eligibility');
-  const traceEligibility = resolveTraceEligibility({
+  const {
+    resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts, traceEligibilityGateOn,
+  } = require('./trace-eligibility');
+  let traceEligibility = resolveTraceEligibility({
     serviceKey: laneProfile?.serviceKey || null,
     findingsType: snapshotFindingsType || laneProfile?.findingsType || null,
     displayName: `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
@@ -2562,6 +2564,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // snapshot's recorded treatment — null (no snapshot) fails closed.
     typedValues: snapshotForTrace?.values ?? null,
   });
+  // The customer report must reach the same multi-line verdict the PDF
+  // signature and re-entry resolver reach through the shared helper — an
+  // eligible ADD-ON line rescues an ineligible primary here too (codex
+  // P2 r12). Fail-soft: an addon lookup error leaves the primary verdict.
+  if (traceEligibilityGateOn() && !traceEligibility.eligible) {
+    try {
+      traceEligibility = combineLineVerdicts(
+        traceEligibility,
+        await resolveAddonVerdicts(service.scheduled_service_id, knex),
+      );
+    } catch { /* primary verdict stands */ }
+  }
   const traceSuppressed = traceEligibilityGateOn() && !traceEligibility.eligible;
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);

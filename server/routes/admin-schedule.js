@@ -1935,6 +1935,7 @@ router.get('/', async (req, res, next) => {
       traceEligibilityGateOn,
     } = require('../services/service-report/trace-eligibility');
     let serviceKeyByServiceId = new Map();
+    let dayPointerByKey = new Map();
     if (traceEligibilityGateOn()) {
       // Primary AND add-on catalog ids in one batch — a grouped visit with
       // an ineligible primary but a spray-capable add-on line still traces
@@ -1949,6 +1950,21 @@ router.get('/', async (req, res, next) => {
           .select('id', 'service_key')
           .catch(() => []);
         serviceKeyByServiceId = new Map(catalogRows.map((r) => [r.id, r.service_key]));
+        // Typed add-on keys are absent from the key rules by design —
+        // resolve their pointers in one batch (codex P2 r12).
+        const addonOnlyKeys = [...new Set(
+          [...addonsByServiceId.values()].flat()
+            .map((a) => serviceKeyByServiceId.get(a.serviceId))
+            .filter(Boolean),
+        )];
+        if (addonOnlyKeys.length) {
+          const profileRows = await db('service_completion_profiles')
+            .whereIn('service_key', addonOnlyKeys)
+            .where({ active: true })
+            .select('service_key', 'project_type')
+            .catch(() => []);
+          dayPointerByKey = new Map(profileRows.map((r) => [r.service_key, r.project_type]));
+        }
       }
     }
 
@@ -2114,10 +2130,14 @@ router.get('/', async (req, res, next) => {
             findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
             displayName: s.service_type || '',
           }),
-          (addonsByServiceId.get(s.id) || []).map((addon) => rowTraceEligibility({
-            serviceKey: serviceKeyByServiceId.get(addon.serviceId) || null,
-            displayName: addon.serviceName || '',
-          })),
+          (addonsByServiceId.get(s.id) || []).map((addon) => {
+            const addonKey = serviceKeyByServiceId.get(addon.serviceId) || null;
+            return rowTraceEligibility({
+              serviceKey: addonKey,
+              findingsType: (addonKey && dayPointerByKey.get(addonKey)) || null,
+              displayName: addon.serviceName || '',
+            });
+          }),
         )
         : null;
       return {
@@ -2402,6 +2422,34 @@ router.get('/week', async (req, res, next) => {
         combineLineVerdicts: weekCombineVerdicts,
         traceEligibilityGateOn: weekTraceGateOn,
       } = require('../services/service-report/trace-eligibility');
+      // Add-on lines resolve by CATALOG KEY + typed pointer, like the day
+      // feed — name-only classification gave fire_ant/flea_tick add-ons
+      // the fallback spray variant when their rules require lawn outline
+      // geometry, and the mapper workflow keys off this payload (codex P2
+      // r12). One batch for keys, one for typed pointers.
+      let weekKeyByCatalogId = new Map();
+      let weekPointerByKey = new Map();
+      if (weekTraceGateOn()) {
+        const addonCatalogIds = [...new Set(
+          [...addonsByServiceId.values()].flat().map((a) => a.serviceId).filter(Boolean),
+        )];
+        if (addonCatalogIds.length) {
+          const catalogRows = await db('services')
+            .whereIn('id', addonCatalogIds)
+            .select('id', 'service_key')
+            .catch(() => []);
+          weekKeyByCatalogId = new Map(catalogRows.map((r) => [r.id, r.service_key]));
+          const addonKeys = [...new Set([...weekKeyByCatalogId.values()].filter(Boolean))];
+          if (addonKeys.length) {
+            const profileRows = await db('service_completion_profiles')
+              .whereIn('service_key', addonKeys)
+              .where({ active: true })
+              .select('service_key', 'project_type')
+              .catch(() => []);
+            weekPointerByKey = new Map(profileRows.map((r) => [r.service_key, r.project_type]));
+          }
+        }
+      }
 
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
@@ -2533,9 +2581,14 @@ router.get('/week', async (req, res, next) => {
                   findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
                   displayName: s.service_type || '',
                 }),
-                serviceAddons.map((addon) => weekTraceEligibility({
-                  displayName: addon.serviceName || '',
-                })),
+                serviceAddons.map((addon) => {
+                  const addonKey = weekKeyByCatalogId.get(addon.serviceId) || null;
+                  return weekTraceEligibility({
+                    serviceKey: addonKey,
+                    findingsType: (addonKey && weekPointerByKey.get(addonKey)) || null,
+                    displayName: addon.serviceName || '',
+                  });
+                }),
               )
               : null;
             return {
