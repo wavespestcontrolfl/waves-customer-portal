@@ -82,3 +82,65 @@ describe('consistency layer never fabricates a planned follow-up from sign-off p
     expect(result.followUp.reason).toContain('Recheck the mid-lawn');
   });
 });
+
+// Today's-result reconciliation leads with THIS visit's story (owner
+// feedback 2026-08-03): the summary's first sentence is already vetted
+// customer copy rendered verbatim in Visit Summary, so it can't introduce a
+// new claim. Anything unusable keeps the neutral lead — never a truncated
+// or thank-you-first hero line.
+describe('reconciled todaysResult leads with the visit summary', () => {
+  function reconcile(dataSummary) {
+    const lawnAssessment = {
+      scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 77, stressDamage: 35, overallScore: 68 },
+      aiSummary: 'We flagged the mid-lawn zone and a follow-up is planned to recheck it.',
+      recommendations: { nextVisitFocus: 'Recheck the mid-lawn zone.' },
+    };
+    const reportV2 = buildLawnReportV2({ lawnAssessment });
+    return reconcileLawnReport({ data: { lawnAssessment, summary: dataSummary }, reportV2 });
+  }
+
+  test('uses the summary first sentence as the lead', () => {
+    const result = reconcile(
+      'The front and back yards received a lawn application addressing large patch and fire ants. More prose follows.',
+    );
+    expect(result.todaysResult).toBe(
+      'The front and back yards received a lawn application addressing large patch and fire ants. '
+      + 'No urgent homeowner action is needed today.',
+    );
+  });
+
+  test('empty summary keeps the neutral lead', () => {
+    expect(reconcile('').todaysResult).toMatch(/^Routine service completed\./);
+  });
+
+  test('a thank-you greeting never opens the hero line', () => {
+    const result = reconcile('Thanks for having us out today. We treated the full lawn for chinch bugs.');
+    expect(result.todaysResult).toMatch(/^We treated the full lawn for chinch bugs\./);
+  });
+
+  test('abbreviation periods are not sentence boundaries ("The St." must never ship)', () => {
+    const result = reconcile('The St. Augustine lawn received a preventive fungicide application. More prose follows.');
+    expect(result.todaysResult).toMatch(
+      /^The St\. Augustine lawn received a preventive fungicide application\. No urgent/,
+    );
+  });
+
+  test('initialism periods are not sentence boundaries ("The U.S." must never ship)', () => {
+    const result = reconcile('The U.S. EPA-registered product was applied to the full lawn. More prose follows.');
+    expect(result.todaysResult).toMatch(
+      /^The U\.S\. EPA-registered product was applied to the full lawn\. No urgent/,
+    );
+  });
+
+  test('a single-letter product suffix IS a sentence end ("Heritage G.")', () => {
+    const result = reconcile('We applied Heritage G. A follow-up is planned to recheck the flagged areas.');
+    expect(result.todaysResult).toMatch(/^We applied Heritage G\. No urgent/);
+    expect(result.todaysResult).not.toMatch(/A follow-up is planned/);
+  });
+
+  test('an over-long first sentence falls back instead of truncating with an ellipsis', () => {
+    const longSentence = `The lawn received ${'a very detailed set of applications, '.repeat(8)}covering every zone.`;
+    expect(reconcile(longSentence).todaysResult).toMatch(/^Routine service completed\./);
+    expect(reconcile(longSentence).todaysResult).not.toContain('…');
+  });
+});

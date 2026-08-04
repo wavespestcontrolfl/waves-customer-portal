@@ -3975,6 +3975,42 @@ function reportReconcileBlockPayload({
   };
 }
 
+// Lightweight side-effects poll for the completion panel (codex P1 #3187
+// r11): while a committed completion's side effects run, the client polls
+// THIS read-only status instead of replaying the media-bearing completion
+// POST (base64 photos, ~MBs) every five seconds. All derivation lives in
+// CompletionAttempts.completionStatusForService; auth = the router-wide
+// adminAuthenticate + requireTechOrAdmin.
+router.get('/:serviceId/completion-status', async (req, res) => {
+  try {
+    // Same per-visit technician boundary as the completion POST (codex P2
+    // #3187 r12): the status carries attempt state, serviceRecordId, and —
+    // same-key — the stored completion response, so a technician may read
+    // it only for their own assigned visit; admins keep office-wide reach.
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .select('id', 'technician_id')
+      .first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) {
+      return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    const status = await CompletionAttempts.completionStatusForService({
+      serviceId: req.params.serviceId,
+      idempotencyKey: String(req.query.idempotencyKey || ''),
+    });
+    res.json(status);
+  } catch (e) {
+    logger.error(`[dispatch] completion-status read failed for ${req.params.serviceId}: ${e.message}`);
+    res.status(500).json({ error: 'Failed to read completion status' });
+  }
+});
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -4115,7 +4151,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
     let preCommitCompletionPhotoRows = [];
-    const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
+    let completionReviewDelayMinutes;
+    try {
+      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
+    } catch (timingErr) {
+      // A committed chain replays an immutable body, and by the time a
+      // retry lands its custom reviewScheduledFor can legitimately be in
+      // the past — the freshness gate must not 400 a committed retry
+      // before it can reach the replay/resume claim (codex P2 #3187 r7).
+      // The original submit passed the strict gate, so the only reachable
+      // failure here is must-be-in-the-future; 0 = "due now" preserves the
+      // intent (the chosen time has arrived). Fresh completions keep the
+      // strict gate.
+      const committed = await CompletionAttempts
+        .hasCommittedCompletionAttempt(req.params.serviceId)
+        .catch(() => false);
+      if (!committed) throw timingErr;
+      completionReviewDelayMinutes = 0;
+    }
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedCustomerInteraction = normalizeCustomerInteractionValue(customerInteraction);
@@ -4467,6 +4520,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(Array.isArray(completionPhotos)
             ? completionPhotos.map((p) => p?.caption).filter(Boolean)
             : []),
+          // Per-application targets render verbatim in the report's
+          // product purpose copy (ReportViewPage applicationPurposeCopy) —
+          // free-form chips are customer copy too (codex P1 #3187 r16).
+          ...(Array.isArray(products)
+            ? products
+                .flatMap((prod) => (Array.isArray(prod?.targets) ? prod.targets : []))
+                .filter((t) => typeof t === 'string')
+            : []),
         ];
         const untypedViolations = [...new Set(
           untypedCopySources.flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry)),
@@ -4618,6 +4679,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(photoSummaryText ? [photoSummaryText] : []),
           ...(Array.isArray(completionPhotos)
             ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+          // Per-application targets render verbatim in the report's
+          // product purpose copy (ReportViewPage applicationPurposeCopy) —
+          // free-form chips are customer copy too (codex P1 #3187 r16).
+          ...(Array.isArray(products)
+            ? products
+                .flatMap((prod) => (Array.isArray(prod?.targets) ? prod.targets : []))
+                .filter((t) => typeof t === 'string')
             : []),
         ];
         const copyViolations = [...new Set(

@@ -537,6 +537,58 @@ export function shouldResetCompletionIdempotencyKey(error) {
   return error?.code === "lawn_assessment_stale";
 }
 
+// completion_side_effects_running means the completion COMMITTED (the claim
+// only returns it for an attempt that already has a service_record) and the
+// server is still running its post-commit side effects — usually the
+// original request finishing while this client's response got lost in the
+// field. A same-key retry resolves every outcome (replay once it succeeds,
+// resume if it failed), so the panel retries quietly instead of surfacing a
+// dead-end "Failed to complete service" dialog. ~2 minutes of polling covers
+// any live run; a crash-stranded claim only frees after the server's
+// 10-minute stale window, which is what the give-up copy points at.
+const SIDE_EFFECTS_RETRY_MS = 5000;
+const SIDE_EFFECTS_MAX_RETRIES = 24;
+export const SIDE_EFFECTS_GIVE_UP_MESSAGE =
+  "This visit is saved — its report and billing steps are still wrapping up on the server. You can leave this screen; if the visit still shows incomplete in about 10 minutes, open it and complete it again to finish up.";
+
+// The retry decision for a submit error, given how many quiet retries this
+// submit chain has already made: retry (same key, fixed delay), give up with
+// the honest saved-not-finalized copy, or null for every other error so the
+// existing handlers keep it.
+export function completionSideEffectsRetryPlan(error, retryCount) {
+  if (error?.code !== "completion_side_effects_running") return null;
+  if (retryCount < SIDE_EFFECTS_MAX_RETRIES) {
+    return { action: "retry", delayMs: SIDE_EFFECTS_RETRY_MS };
+  }
+  return { action: "give_up", message: SIDE_EFFECTS_GIVE_UP_MESSAGE };
+}
+
+// Cross-key resolution of a committed chain: the server's resumable claim
+// matches by SERVICE (any key), but success replay is same-key only — so a
+// chain whose 409s were held under key A (panel reloaded / second device)
+// sees `service_already_completed` once the original attempt (key B)
+// finishes. Inside a committed chain that response IS completion, never a
+// failure (codex P1 #3187 r6).
+export const CROSS_KEY_COMPLETED_MESSAGE =
+  "This visit is completed and saved — the original submission finished while this screen was retrying. If today's invoice is due for collection, open the visit's billing to take payment.";
+export function completionCrossKeyCompleted(error, chainCommitted) {
+  return chainCommitted === true && error?.code === "service_already_completed";
+}
+
+// Maps the completion-status poll response (GET /:serviceId/completion-status,
+// codex P1 #3187 r11) to the panel's next move. The media-bearing completion
+// body POSTs only to claim/resume ("resume"); everything else resolves from
+// the lightweight status. Unknown states keep waiting — the poll cap turns
+// persistent nonsense into the honest give-up, never a false failure.
+export function completionStatusPlan(status) {
+  const state = status?.state;
+  if (state === "succeeded") return "success";
+  if (state === "succeeded_other_key" || state === "completed_no_attempt") return "cross_key";
+  if (state === "resumable" || state === "none") return "resume";
+  if (state === "failed") return "failed";
+  return "wait";
+}
+
 // The completion route's pre-submit reconciliation 409 (code
 // 'report_reconcile', behind GATE_REPORT_RECONCILE_PROMPT): the server
 // packs the human-readable contradictions into the error string because
@@ -8950,6 +9002,19 @@ export function CompletionPanel({
   // Typed specialty completion (PR 4): parent-owned success-screen
   // follow-up CTA (the button only renders when provided).
   onScheduleFollowup,
+  // Cross-key completion (codex P1 #3187 r8): the visit completed under a
+  // DIFFERENT idempotency key (original attempt finished while this panel
+  // polled), so onSubmit never resolved and the parent's normal success
+  // bookkeeping (status flip, schedule cache refresh) never ran — this
+  // callback is its equivalent. The mobile payment handoff cannot run here
+  // (the invoice payload only travels on the same-key response), which the
+  // cross-key copy tells the tech.
+  onCompletedElsewhere,
+  // Status-poll resolution (codex P1 #3187 r11): when the completion
+  // resolves via the lightweight status route's stored response instead of
+  // a resolved onSubmit, the parent runs its full success bookkeeping —
+  // including the mobile payment handoff — through this callback.
+  onCompletionResult,
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -9766,6 +9831,38 @@ export function CompletionPanel({
   const recapAbortRef = useRef(null);
   const draftSnapshotRef = useRef(null);
   const completionIdempotencyKeyRef = useRef(null);
+  // Consecutive completion_side_effects_running retries in the current
+  // submit chain — see SIDE_EFFECTS_RETRY_MS for the contract.
+  const sideEffectsRetryRef = useRef(0);
+  // The exact body of the submit that COMMITTED (first side-effects 409):
+  // a rebuild stamps fresh volatile fields (station reference capturedAt)
+  // and the committed-attempt matcher would 409
+  // completion_resume_payload_mismatch instead of resuming (codex P1 #3187
+  // r3). The committed flag — not the body ref — gates the replay, and it
+  // survives give-up so the instructed MANUAL retry also replays the
+  // committed body, not a fresh rebuild (codex P1 r5); a non-committed
+  // failure leaves the flag false and the next submit sends fresh state.
+  const lastSubmitBodyRef = useRef(null);
+  // Initialized from the DURABLE marker: a panel reopened on a marker-owed
+  // visit is mid-committed-chain even though the in-memory refs died with
+  // the previous mount — without this, the reopened panel's fresh key gets
+  // service_already_completed once the original attempt finishes and the
+  // cross-key branch would reject it as a generic failure, leaving the
+  // marker and visit repeatedly reopenable (codex P1 #3187 r9). The BODY
+  // snapshot deliberately does not persist (photos are in-memory Files);
+  // a reopened resume of a still-stranded attempt lands on the existing
+  // completion_resume_payload_mismatch handler → Billing Recovery.
+  const sideEffectsCommittedRef = useRef(completionResumeOwed(service?.id));
+  // Unmount ends the quiet poll: without this, closing the panel mid-delay
+  // let the stale timer re-invoke handleSubmit, whose alerts and
+  // onClose(true) could then close a DIFFERENT visit the user had opened
+  // meanwhile (codex P2 #3187 r7).
+  const sideEffectsPollTimerRef = useRef(null);
+  const completionPanelClosedRef = useRef(false);
+  useEffect(() => () => {
+    completionPanelClosedRef.current = true;
+    window.clearTimeout(sideEffectsPollTimerRef.current);
+  }, []);
   const draftReadyRef = useRef(false);
 
   // Typed jobs use the findings form — lawn/WaveGuard closeout sections
@@ -11729,8 +11826,185 @@ export function CompletionPanel({
     setTypedPhotoSummary("");
   }
 
-  async function handleSubmit(reconcileConfirmed = false) {
-    if (submitting) return;
+  // Shared success handling for BOTH resolution paths — a resolved onSubmit
+  // POST and a status-poll replay of the stored response. Returns "closed"
+  // when the panel unmounted mid-flight (caller stops without touching
+  // submitting state on the stale mount), else "done".
+  function finishCompletionSuccess(result) {
+    sideEffectsRetryRef.current = 0;
+    sideEffectsCommittedRef.current = false;
+    lastSubmitBodyRef.current = null;
+    // Panel closed while the request was in flight (codex P2 r10): unmount
+    // can't abort a fetch. The completion is durable server-side and the
+    // parent's bookkeeping already ran (onSubmit / onCompletionResult) —
+    // clear the local artifacts, but never alert or onClose from a stale
+    // mount (they'd target whichever visit the operator opened next).
+    if (completionPanelClosedRef.current) {
+      localStorage.removeItem(completionDraftKey(service.id));
+      try {
+        localStorage.removeItem(completionResumeOwedKey(service.id));
+      } catch { /* ignore */ }
+      return "closed";
+    }
+    const photoResult = result?.completionPhotoUpload;
+    if (photoResult?.failed > 0) {
+      alert(
+        `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
+      );
+    }
+    // A live time-on-site override syncs the technician's linked job
+    // timer server-side; when that sync is blocked the inflated span
+    // survives in Timesheets/utilization — say so, since the corrected
+    // value seeds the edit modal and no later save will retry it.
+    if (result?.timeEntryCorrected === false) {
+      const timerReason =
+        result?.timeEntryCorrectionBlocked === "exceeds_elapsed"
+          ? "the corrected minutes exceed the time elapsed since its clock-in"
+          : result?.timeEntryCorrectionBlocked === "entry_conflict"
+            ? "it was edited by someone else at the same moment"
+          : result?.timeEntryCorrectionBlocked === "entry_open"
+            ? "its timer is still running"
+          : result?.timeEntryCorrectionBlocked === "approved_week"
+            ? "its week is already approved"
+            : result?.timeEntryCorrectionBlocked === "multiple_job_entries"
+              ? "several timer entries are linked to this visit"
+              : "it could not be edited automatically";
+      alert(
+        `Service completed with the corrected duration, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
+      );
+    }
+    localStorage.removeItem(completionDraftKey(service.id));
+    try {
+      localStorage.removeItem(completionResumeOwedKey(service.id));
+    } catch { /* storage unavailable — marker never existed either */ }
+    setCompletionResult(result || null);
+    setSuccess(true);
+    const smsNeedsAttention = ["blocked", "failed"].includes(
+      result?.completionSmsStatus,
+    );
+    // A required follow-up suggestion keeps the success overlay open so
+    // the tech can act on the CTA — it dismisses via the Done button.
+    // Keep the panel open when a pest recap is pending — it renders async and the
+    // tech approves/sends it from the success overlay (the approve UI is otherwise
+    // unreachable once the panel auto-closes).
+    // Completion advisories also hold the overlay open (codex P2 r2 on
+    // #3179): the 1.2s auto-dismiss isn't enough to read even one
+    // shortfall message — the tech dismisses via the Done button instead.
+    const advisoriesNeedReading =
+      Array.isArray(result?.completionAdvisories) &&
+      result.completionAdvisories.length > 0;
+    if (
+      !result?.followupSuggestion?.required &&
+      !recapEligible &&
+      !advisoriesNeedReading
+    ) {
+      setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
+    }
+    return "done";
+  }
+
+  // Terminal SUCCESS for a committed chain resolved under ANOTHER key (see
+  // completionCrossKeyCompleted): clear every chain artifact so the
+  // completed visit stops being reopenable, run the parent-equivalent
+  // bookkeeping, and close out — never the generic failure path.
+  function resolveCrossKeyCompleted() {
+    sideEffectsCommittedRef.current = false;
+    lastSubmitBodyRef.current = null;
+    completionIdempotencyKeyRef.current = null;
+    localStorage.removeItem(completionDraftKey(service.id));
+    try {
+      localStorage.removeItem(completionResumeOwedKey(service.id));
+    } catch { /* ignore */ }
+    // Parent-equivalent success bookkeeping — onSubmit never resolved, so
+    // the parent's own status flip / cache refresh never ran.
+    if (onCompletedElsewhere) onCompletedElsewhere(service.id);
+    // Stale-mount guard (codex P2 r10): bookkeeping and storage cleanup
+    // above are safe post-close; the dialog and onClose(true) are not.
+    if (!completionPanelClosedRef.current) {
+      alert(CROSS_KEY_COMPLETED_MESSAGE);
+      setSubmitting(false);
+      onClose(true);
+    }
+  }
+
+  // Lightweight side-effects poll (codex P1 #3187 r11): while the server
+  // runs a committed completion's side effects, poll the read-only status
+  // route instead of replaying the media-bearing completion POST (base64
+  // photos = ~MBs per submit) every five seconds. The full body re-POSTs
+  // exactly once per "resumable" verdict, through handleSubmit's normal
+  // committed-replay machinery.
+  async function pollCompletionSideEffects(reconcileConfirmed) {
+    while (sideEffectsRetryRef.current < SIDE_EFFECTS_MAX_RETRIES) {
+      sideEffectsRetryRef.current += 1;
+      await new Promise((resolve) => {
+        sideEffectsPollTimerRef.current = window.setTimeout(
+          resolve,
+          SIDE_EFFECTS_RETRY_MS,
+        );
+      });
+      // Panel closed during the delay — stop quietly; the durable reopen
+      // marker (set when the chain committed) carries the resume.
+      if (completionPanelClosedRef.current) return;
+      let status = null;
+      try {
+        status = await adminFetch(
+          `/admin/dispatch/${service.id}/completion-status?idempotencyKey=${encodeURIComponent(completionIdempotencyKeyRef.current || "")}`,
+        );
+      } catch {
+        // Transient poll failure — the attempt state is durable
+        // server-side; the next tick re-reads it.
+        continue;
+      }
+      if (completionPanelClosedRef.current) return;
+      const action = completionStatusPlan(status);
+      if (action === "wait") continue;
+      if (action === "success") {
+        // The stored response IS the completion result — run the parent's
+        // bookkeeping (status flip, cache refresh, payment handoff) that a
+        // resolved onSubmit would have run, then the shared success path.
+        const result = onCompletionResult
+          ? await onCompletionResult(service.id, status.response)
+          : status.response;
+        if (finishCompletionSuccess(result || status.response) === "closed") return;
+        setSubmitting(false);
+        return;
+      }
+      if (action === "cross_key") return resolveCrossKeyCompleted();
+      if (action === "resume") {
+        return handleSubmit(reconcileConfirmed, { resumingPoll: true });
+      }
+      if (action === "failed") {
+        // Pre-commit failure (e.g. a stale claim was reclaimed-as-failed):
+        // a fresh manual submit is correct — drop the chain so it rebuilds.
+        sideEffectsCommittedRef.current = false;
+        lastSubmitBodyRef.current = null;
+        if (!completionPanelClosedRef.current) {
+          alert(
+            "Completion needs another try: " +
+              (status.error || "the previous attempt did not finish."),
+          );
+          setSubmitting(false);
+        }
+        return;
+      }
+    }
+    // Polling window exhausted — honest give-up; the reopen marker was set
+    // when the chain committed.
+    sideEffectsRetryRef.current = 0;
+    if (!completionPanelClosedRef.current) {
+      alert(SIDE_EFFECTS_GIVE_UP_MESSAGE);
+      setSubmitting(false);
+    }
+  }
+
+  async function handleSubmit(reconcileConfirmed = false, { resumingPoll = false } = {}) {
+    // The status poll's "resumable" verdict re-enters here while submitting
+    // is STILL true (the button stayed in its completing state through the
+    // whole chain) — that re-entry is the continuation of the same logical
+    // submission, not a double-tap, so it bypasses the guard (codex P1
+    // #3187 r18: the guard silently swallowed the resume POST and left the
+    // button disabled forever).
+    if (submitting && !resumingPoll) return;
     // Don't complete while an AI draft is in flight — the response is about to
     // replace the notes, and submitting now would either lose the generated copy
     // or rebuild the structured fields from soon-to-be-overwritten notes.
@@ -12059,7 +12333,18 @@ export function CompletionPanel({
       alert("Choose a review request time.");
       return;
     }
-    if (!oneTimeRecapOnly && willReview && reviewTiming === "custom") {
+    // The ONLY time-dependent pre-submit gate — skipped for a committed
+    // chain retry: the replayed body is immutable and the server ignores
+    // its review timing on replay/resume, so Date.now() advancing past a
+    // custom review time mid-poll must not strand the poll behind this
+    // alert with the button stuck on submitting (codex P2 #3187 r7). All
+    // other gates are pure over form state the poll never changes.
+    if (
+      !sideEffectsCommittedRef.current &&
+      !oneTimeRecapOnly &&
+      willReview &&
+      reviewTiming === "custom"
+    ) {
       const target = new Date(reviewCustomAt);
       if (
         !reviewCustomAt ||
@@ -12358,62 +12643,24 @@ export function CompletionPanel({
       if (service?.completionInvoiceAlreadySent) {
         body.invoiceAlreadySent = true;
       }
-      const result = await onSubmit(service.id, body);
-      const photoResult = result?.completionPhotoUpload;
-      if (photoResult?.failed > 0) {
-        alert(
-          `Service completed, but ${photoResult.failed} photo${photoResult.failed === 1 ? "" : "s"} failed to upload.`,
-        );
-      }
-      // A live time-on-site override syncs the technician's linked job
-      // timer server-side; when that sync is blocked the inflated span
-      // survives in Timesheets/utilization — say so, since the corrected
-      // value seeds the edit modal and no later save will retry it.
-      if (result?.timeEntryCorrected === false) {
-        const timerReason =
-          result?.timeEntryCorrectionBlocked === "exceeds_elapsed"
-            ? "the corrected minutes exceed the time elapsed since its clock-in"
-            : result?.timeEntryCorrectionBlocked === "entry_conflict"
-              ? "it was edited by someone else at the same moment"
-            : result?.timeEntryCorrectionBlocked === "entry_open"
-              ? "its timer is still running"
-            : result?.timeEntryCorrectionBlocked === "approved_week"
-              ? "its week is already approved"
-              : result?.timeEntryCorrectionBlocked === "multiple_job_entries"
-                ? "several timer entries are linked to this visit"
-                : "it could not be edited automatically";
-        alert(
-          `Service completed with the corrected duration, but the technician's linked job timer was NOT changed (${timerReason}) — it still shows the old span in Timesheets until corrected there.`,
-        );
-      }
-      localStorage.removeItem(completionDraftKey(service.id));
-      try {
-        localStorage.removeItem(completionResumeOwedKey(service.id));
-      } catch { /* storage unavailable — marker never existed either */ }
-      setCompletionResult(result || null);
-      setSuccess(true);
-      const smsNeedsAttention = ["blocked", "failed"].includes(
-        result?.completionSmsStatus,
-      );
-      // A required follow-up suggestion keeps the success overlay open so
-      // the tech can act on the CTA — it dismisses via the Done button.
-      // Keep the panel open when a pest recap is pending — it renders async and the
-      // tech approves/sends it from the success overlay (the approve UI is otherwise
-      // unreachable once the panel auto-closes).
-      // Completion advisories also hold the overlay open (codex P2 r2 on
-      // #3179): the 1.2s auto-dismiss isn't enough to read even one
-      // shortfall message — the tech dismisses via the Done button instead.
-      const advisoriesNeedReading =
-        Array.isArray(result?.completionAdvisories) &&
-        result.completionAdvisories.length > 0;
-      if (
-        !result?.followupSuggestion?.required &&
-        !recapEligible &&
-        !advisoriesNeedReading
-      ) {
-        setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
-      }
+      // Once the completion is KNOWN COMMITTED, every submit — automatic
+      // retry or the manual one after give-up — must replay the committed
+      // body byte-for-byte (same key AND same payload); until then each
+      // submit sends the fresh build and becomes the candidate snapshot.
+      const submitBody =
+        sideEffectsCommittedRef.current && lastSubmitBodyRef.current
+          ? lastSubmitBodyRef.current
+          : body;
+      lastSubmitBodyRef.current = submitBody;
+      const result = await onSubmit(service.id, submitBody);
+      if (finishCompletionSuccess(result) === "closed") return;
     } catch (e) {
+      // Any outcome but another quiet side-effects retry ends the retry
+      // COUNT — the committed flag and body snapshot deliberately survive
+      // (see the ref declarations): after a committed 409, even the manual
+      // resubmit the give-up copy instructs must replay the committed body.
+      const sideEffectsRetryCount = sideEffectsRetryRef.current;
+      sideEffectsRetryRef.current = 0;
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
       }
@@ -12441,7 +12688,10 @@ export function CompletionPanel({
         // A marker-resume rebuilt from the draft can differ from the
         // committed body (photos live only in memory). The closeout itself
         // is saved; the office bills the visit from Billing Recovery — stop
-        // re-offering a resume that can never match.
+        // re-offering a resume that can never match, and drop the committed
+        // snapshot with it.
+        sideEffectsCommittedRef.current = false;
+        lastSubmitBodyRef.current = null;
         try {
           localStorage.removeItem(completionResumeOwedKey(service.id));
         } catch { /* ignore */ }
@@ -12451,7 +12701,45 @@ export function CompletionPanel({
         setSubmitting(false);
         return;
       }
-      alert("Failed to complete service: " + e.message);
+      // Committed completion, side effects still running (see the
+      // completionSideEffectsRetryPlan contract): retry the same key AND
+      // the same chain-opening body quietly — the button keeps showing its
+      // completing state — and only give up with honest copy after the
+      // polling window.
+      if (completionCrossKeyCompleted(e, sideEffectsCommittedRef.current)) {
+        return resolveCrossKeyCompleted();
+      }
+      const retryPlan = completionSideEffectsRetryPlan(e, sideEffectsRetryCount);
+      if (retryPlan?.action === "retry") {
+        // The 409 itself proves the visit is COMMITTED — persist the reopen
+        // marker now, not only at give-up: a mid-poll network/5xx error
+        // exits through the generic path with the chain state cleared, and
+        // without the marker DispatchPageV2 refuses to reopen the completed
+        // visit after a reload (codex P1 r4). Success removes it.
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage unavailable — the mounted panel's retry still works */ }
+        sideEffectsCommittedRef.current = true;
+        sideEffectsRetryRef.current = sideEffectsRetryCount;
+        return pollCompletionSideEffects(reconcileConfirmed);
+      }
+      if (retryPlan?.action === "give_up") {
+        // Reached when the 409 lands with the poll budget already spent —
+        // the durable marker is what lets DispatchPageV2 reopen a COMPLETED
+        // visit's panel after a reload (codex P1 r3; same marker as
+        // backfill_invoice_mint_failed).
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage unavailable — the mounted panel's retry still works */ }
+        if (!completionPanelClosedRef.current) {
+          alert(retryPlan.message);
+          setSubmitting(false);
+        }
+        return;
+      }
+      if (!completionPanelClosedRef.current) {
+        alert("Failed to complete service: " + e.message);
+      }
     }
     setSubmitting(false);
   }

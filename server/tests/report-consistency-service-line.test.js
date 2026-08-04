@@ -68,7 +68,10 @@ describe('reconcileLawnReport — lawn (unchanged full pass)', () => {
     const fix = reconcileLawnReport(reportInput({ allReady: true }));
     expect(fix.reentry.petAdvisory).toBe('Treated turf has dried — pets and family are fine on it now.');
     expect(fix.followUp).toBeTruthy();
-    expect(fix.todaysResult).toMatch(/follow-up is already planned/);
+    // The hero line states only today's outcome — the follow-up promise
+    // lives on the followUp card alone (owner directive 2026-08-03).
+    expect(fix.todaysResult).toMatch(/No urgent homeowner action is needed today\.$/);
+    expect(fix.todaysResult).not.toMatch(/follow-up/i);
   });
 
   test('explicit lawn matches the default', () => {
