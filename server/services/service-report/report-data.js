@@ -476,9 +476,19 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
 
 function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
+  // Admin re-entry correction (PATCH /admin/dispatch/:serviceId/reentry):
+  // a typed window is authoritative FOR ITS SIDE ONLY. The marker is
+  // per-side ({ exterior, interior } strict booleans; legacy plain `true`
+  // covers both) so a one-sided edit never resurrects the untouched side —
+  // e.g. correcting the interior window on an interior-only visit must not
+  // expose the stored exterior default that scope zeroing would have
+  // suppressed (codex P1 PR #3180). Only the correction endpoint writes it.
+  const adjustedMarker = normalized.reentry_adjusted;
+  const sideAdjusted = (side) => adjustedMarker === true
+    || (!!adjustedMarker && typeof adjustedMarker === 'object' && adjustedMarker[side] === true);
   const scope = treatmentScope({ service, applications, zones });
 
-  if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
+  if (!sideAdjusted('interior') && normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
   }
   // Owner rule 2026-07-27: the Exterior re-entry target exists ONLY when
@@ -493,7 +503,7 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // (trace-aware) makes the final display call, and stored zero would be
   // unrecoverable (codex P1 #3007 r11). Explicitly non-exterior scope
   // still zeroes at write.
-  if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
+  if (!sideAdjusted('exterior') && normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
     // WRITE path never zeroes exterior (codex P1 r17): a Treatment Zone
     // Mapper trace can be saved AFTER completion even when the visit
     // recorded interior locations, and a stored zero is unrecoverable.
@@ -2517,11 +2527,28 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let interiorOnlyLane = /\bbed\s*bugs?\b/i.test(
     `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
   );
+  // Rodent trapping joins the no-satellite-spray-outline lanes (owner
+  // 2026-08-02): nothing is sprayed on a trapping stop, so an exterior
+  // outline would be a claim the visit cannot support. Suppressed HERE, at
+  // the render point, rather than only by hiding the closeout button —
+  // the tech portal exposes a per-row "Trace treatment zone" action and the
+  // save endpoint accepts any service type, so a UI-only fix left three
+  // other ways to publish one, including traces saved before this change
+  // (codex P2 round 3). Same reasoning the bed-bug lane already documents.
+  // FAIL CLOSED (codex P2 on #3159): the live profile lookup can throw,
+  // return the default profile, or stop matching a repointed service — and a
+  // suppression guard that degrades OPEN republishes the exact spray outline
+  // it exists to remove. The immutable snapshot is the authority; the live
+  // profile only widens it. Seeded before the try/catch so a throw leaves
+  // the snapshot verdict standing.
+  let trapLaneNoSprayMap = parseJsonObject(service.service_data)
+    ?.typedReportSnapshot?.type === 'rodent_trapping';
   if (!interiorOnlyLane && scheduledServiceRow) {
     try {
       const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
       const laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
       interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
+      trapLaneNoSprayMap = trapLaneNoSprayMap || laneProfile?.findingsType === 'rodent_trapping';
     } catch { /* label fallback stands */ }
   }
   const structured = parseJsonObject(service.structured_notes);
@@ -3072,7 +3099,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // outline — a trace saved before the tracer was hidden for this lane
     // is stale exterior evidence on an interior treatment's report
     // (codex P2 r6; stable-key classification r9).
-    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id && !interiorOnlyLane) {
+    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id
+      && !interiorOnlyLane && !trapLaneNoSprayMap) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -3133,6 +3161,34 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // the VIEWER-VISIBLE snapshot types, so an internal_only companion's
   // station data never reaches the customer copy and pins never leak onto
   // unrelated (lawn / pest-only) reports for the same property.
+  // Resolved ONCE for every consumer of the trap stage. The station map and
+  // the narrative both describe the same traps, so deriving this separately
+  // in each place is how they came to disagree: the map read the companion
+  // snapshots while the narrative saw only the primary, leaving `visitStage`
+  // null on a trapping companion — so the deterministic fallback said the
+  // mapped traps "were inspected" and the model's copy was never screened by
+  // the setup guards, beside a companion finding reading "Traps set" (codex
+  // P1 round 10).
+  const trapSetupSnapshot = [typedSnapshot, ...companionSnapshots]
+    .find((snap) => require('./activity-indicators')
+      .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)) || null;
+
+  // The narrative lanes below TELL THE CUSTOMER the traps went out today, so
+  // their stage resolves only from snapshots this viewer is allowed to see.
+  // The raw lookup above stays raw for the shared map's wording (round-8
+  // ruling: whether traps went out is a fact about the visit) — but an
+  // internal_only trapping companion on an auto-sent primary must not leak
+  // "your traps were placed" into a summary whose own section is suppressed
+  // for this viewer (codex P1 round 12). Staff viewers see internal
+  // sections, so their narrative may still name the stage. The primary is
+  // always visible here: an internal_only PRIMARY never mints a report
+  // token in the first place.
+  const narrativeTrapSetupSnapshot = [
+    typedSnapshot,
+    ...companionSnapshots.filter((snap) => staffViewer || snap.delivery === 'auto_send'),
+  ].find((snap) => require('./activity-indicators')
+    .isInitialRodentTrapSetup(snap?.type, snap?.visitSequence, snap?.values)) || null;
+
   const stationMap = buildStationMapReportContext({
     stationRows,
     checkRows: stationCheckRows,
@@ -3145,7 +3201,65 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     typedTypes: [typedSnapshot?.type, ...companionReports.map((companion) => companion.type)].filter(Boolean),
     serviceDate: service.service_date || null,
+    // Read off the FROZEN snapshot that actually OWNS the trapping program —
+    // which may be a COMPANION, since typedTypes deliberately lets a
+    // non-station primary carry a rodent_trapping companion and that
+    // companion selects the map. Deriving this from the primary alone left
+    // the companion's "Traps set" finding beside a map still saying
+    // "inspected" (codex P2 on #3159). Scoped require matches this file's
+    // pattern for report-time helpers.
+    // Read off the RAW companion snapshots, not the projected
+    // `companionReports` view: that projection is built above from a fixed
+    // field list that has no `values`, so the companion arm of this lookup
+    // was structurally dead — it could only ever read `undefined` and the
+    // primary alone decided the map's wording (codex P2 round 8). The raw
+    // array is also unfiltered by delivery, which is correct here: whether
+    // the traps went out today is a fact about the visit, not about which
+    // companion sections this viewer is allowed to see.
+    initialSetup: trapSetupSnapshot != null,
+    // The trapping snapshot's own count, so the map can confirm it agrees
+    // before restating it (the tech may have hand-edited it away from the
+    // autofilled pin count). Same sourcing fix as above.
+    typedTrapCount: (() => {
+      const trapSnap = [typedSnapshot, ...companionSnapshots]
+        .find((snap) => snap?.type === 'rodent_trapping');
+      const n = Number(trapSnap?.values?.traps_checked);
+      return Number.isInteger(n) ? n : null;
+    })(),
   });
+
+  // Does the narrative's own count disagree with the map it sits beside?
+  //
+  // The map's `setupCountVerified` cannot be the only source (codex P1
+  // round 15). It is only emitted when at least one pin carries a per-visit
+  // status, and the post-completion station sync is deliberately fail-soft
+  // — so a declared setup whose check rows never landed produces a standing
+  // registry map with NO dispute flag, and a typed count of 6 beside an
+  // 8-pin fallback map licensed the model to say 8 traps were set. For an
+  // auto-sent trapping COMPANION nothing else could catch it either: the
+  // facts carry the PRIMARY's findings, so the typed 6 never reaches the
+  // grounded number set.
+  //
+  // So the comparison is made here, from the same viewer-visible snapshot
+  // the stage came from. `checked` and `total` are both acceptable matches:
+  // a synced setup agrees with checked, an unsynced one agrees with total.
+  const narrativeTrapCount = (() => {
+    const snap = [
+      typedSnapshot,
+      ...companionSnapshots.filter((s) => staffViewer || s.delivery === 'auto_send'),
+    ].find((s) => s?.type === 'rodent_trapping');
+    const n = Number(snap?.values?.traps_checked);
+    return Number.isInteger(n) ? n : null;
+  })();
+  const stationCountDisputed = (stationMap?.initialSetup === true && stationMap?.setupCountVerified === false)
+    || Boolean(
+      narrativeTrapSetupSnapshot
+      && stationMap?.program === 'trapping'
+      && stationMap?.summary
+      && narrativeTrapCount != null
+      && narrativeTrapCount !== (stationMap.summary.checked || 0)
+      && narrativeTrapCount !== (stationMap.summary.total || 0),
+    );
 
   const onSiteMin = computeOnSiteMin({
     ...service,
@@ -3782,7 +3896,51 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // snapshot) never resurfaces via the summary.
   {
     const technicianReport = technicianReportCustomerCopy(service.technician_notes);
-    const drivesSummary = technicianReport?.body
+    // A viewer-visible trapping snapshot declaring an initial setup screens
+    // the body BEFORE it wins the summary. The snapshot that accepted this
+    // body can be a different findings type entirely (a non-trapping
+    // primary with a trapping COMPANION), so its acceptance never ran the
+    // setup guard — and a body generated before the companion's selector
+    // changed can still say the traps were checked or that nothing was
+    // caught, winning the Visit Summary beside the companion's frozen
+    // "Traps set" result (codex P1 r18). Same fallback as the narrative
+    // lanes: the recap stays, and with the source left as 'recap' the
+    // gated rodent narrative below rebuilds a grounded summary instead.
+    // Uses narrativeTrapSetupSnapshot so viewer visibility matches the
+    // narrative's stage rules exactly (round 12).
+    // The COUNT screen runs from the same viewer-visible trapping snapshot
+    // regardless of stage (pre-push P1 on 256c1f9): a follow-up companion
+    // whose traps_checked or captures was corrected after the body was
+    // generated would otherwise publish the stale number in the summary.
+    // Unverifiable values (blank/missing) screen nothing, by
+    // countContradictions' own rules.
+    const visibleTrapSnapshot = [
+      typedSnapshot,
+      ...companionSnapshots.filter((snap) => staffViewer || snap.delivery === 'auto_send'),
+    ].find((snap) => snap?.type === 'rodent_trapping') || null;
+    // Scoped require matches this file's pattern for report-time helpers.
+    const indicators = require('./activity-indicators');
+    // A confirmed reconciliation prompt (frozen onto the accepting
+    // snapshot's todaysResult at completion) is a PERSON overriding the
+    // matcher — this render-time screen must honor that decision, not
+    // silently re-reject the body they reviewed (codex P1 on the
+    // reconciliation round).
+    const trapSetupScreened = typedSnapshot?.todaysResult?.reconcileConfirmed === true
+      // Companion-only completions freeze the override on the trapping
+      // companion (there is no typed primary snapshot to carry it) —
+      // viewer-filtered like everything else, since visibleTrapSnapshot is.
+      || visibleTrapSnapshot?.todaysResult?.reconcileConfirmed === true
+      || !technicianReport?.body
+      || (
+        (!narrativeTrapSetupSnapshot
+          || indicators.setupContradictions(technicianReport.body).length === 0)
+        && (!visibleTrapSnapshot
+          || indicators.countContradictions(technicianReport.body, {
+            traps_checked: visibleTrapSnapshot.values?.traps_checked,
+            captures: visibleTrapSnapshot.values?.captures,
+          }).length === 0)
+      );
+    const drivesSummary = technicianReport?.body && trapSetupScreened
       && (!typedSnapshot || typedSnapshot.todaysResult?.bodySource === 'technician_report');
     if (drivesSummary) {
       visitSummary = technicianReport.body;
@@ -3832,12 +3990,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       recap: visitSummary,
       serviceTypeDisplay: linkedServiceName,
       typedReport: typedSnapshot,
+      // Explicit, because the trapping snapshot may be a COMPANION while
+      // typedReport is the primary — the narrative cannot derive the stage
+      // from a snapshot it was never handed (codex P1 round 10). Viewer-
+      // filtered (codex P1 round 12): see narrativeTrapSetupSnapshot.
+      visitStage: narrativeTrapSetupSnapshot ? 'initial_trap_setup' : null,
       activity,
       stationSummary: stationMap?.summary || null,
       // summary.activity semantics differ by program (traps with a capture
       // vs stations with bait consumption) — the narrative names the fact
       // accordingly and must know which map this is.
       stationProgram: stationMap?.program || null,
+      // The map card suppresses its own count line when the tech's typed
+      // trap count disagrees with the pinned roster; the narrative must not
+      // resurrect the disputed number from stationSummary (codex P1 r12).
+      stationCountDisputed,
       applications,
       photos: photoPayload,
       nextAppointment,
@@ -3891,9 +4058,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       serviceTypeDisplay: linkedServiceName,
       reportTypeLabel: typedSnapshot.reportTypeLabel || typedSnapshot.typeLabel || null,
       typedReport: typedSnapshot,
+      // Same reason as the rodent lane above: a non-rodent primary can carry
+      // a rodent_trapping companion that selects the station map. Viewer-
+      // filtered for the same round-12 reason.
+      visitStage: narrativeTrapSetupSnapshot ? 'initial_trap_setup' : null,
       activity,
       stationSummary: stationMap?.summary || null,
       stationProgram: stationMap?.program || null,
+      stationCountDisputed,
       applications,
       photos: photoPayload,
       nextAppointment,

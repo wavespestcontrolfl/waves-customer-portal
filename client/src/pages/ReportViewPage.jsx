@@ -826,7 +826,7 @@ function dynamicHeroSummary(data) {
   return 'Your routine service is complete.';
 }
 
-function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource = null } = {}) {
+function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
   // Lawn reports show the week's rain (the number the water card and 7-day
   // chart are built from) so every rain figure on the page agrees; other
   // lines keep the trailing-24h capture (owner 2026-07-30).
@@ -834,26 +834,15 @@ function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource 
   const rainRow = usingWeeklyRain
     ? ['Rain this week', weeklyRainIn, ' in']
     : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
-  // Credit the weekly figure's ACTUAL provider when it differs from the
-  // point-capture source — the property-week series is Open-Meteo, but the
-  // area-snapshot fallback's rainfall is local area records, not Open-Meteo
-  // (codex P2 #3093 ×2).
-  const sourceValue = usingWeeklyRain && weeklyRainSource
-    ? (conditions.source
-      ? (String(conditions.source).toLowerCase().includes(String(weeklyRainSource).toLowerCase())
-        ? conditions.source
-        : `${conditions.source} + ${weeklyRainSource}`)
-      // No point-capture source on the record — the weekly figure still has
-      // a known provider, and the Source row must credit it (codex P2 r14).
-      : weeklyRainSource)
-    : conditions.source;
+  // No Source row: the provider credit is internal provenance, not customer
+  // information (owner directive 2026-08-03 — supersedes the codex #3093/r14
+  // crediting rules, which now apply to nothing rendered here).
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
     ['Humidity', conditions.humidity_pct ?? conditions.humidity, '%'],
     ['Wind', conditions.wind_mph ?? conditions.wind, ' mph'],
     rainRow,
     ['Sky', conditions.sky ?? conditions.cloudCover, ''],
-    ['Source', sourceValue, ''],
   ];
   return rows
     .filter(([, value]) => value !== null && value !== undefined && value !== '')
@@ -893,7 +882,53 @@ function formatEnumLabel(value) {
   )).join(' ');
 }
 
-function applicationPurpose(app = {}, serviceLine = 'pest') {
+// Pest identity for purpose copy comes from what was RECORDED — the product's
+// own name first (the SKU says what it is), then the technician's target list.
+// Ambiguity or no match fails CLOSED to null and the copy stays generic: a
+// wrong pest on a customer report is worse than a generic line (Advion
+// COCKROACH Gel was captioned "Targeted ant bait" and two fogged roach
+// products read "Mosquito pressure reduction" on a live cockroach report,
+// 2026-08-02 — method keywords like bait/fog say the equipment, not the pest).
+const APPLICATION_PEST_FAMILIES = [
+  { noun: 'cockroach', plural: 'cockroaches', pattern: /\b(?:cock)?roach(?:es)?\b/i },
+  { noun: 'ant', plural: 'ants', pattern: /\bants?\b/i },
+  { noun: 'mosquito', plural: 'mosquitoes', pattern: /\bmosquito(?:e?s)?\b/i },
+  { noun: 'termite', plural: 'termites', pattern: /\btermites?\b/i },
+  { noun: 'flea', plural: 'fleas', pattern: /\bfleas?\b/i },
+  { noun: 'bed bug', plural: 'bed bugs', pattern: /\bbed\s*bugs?\b/i },
+  { noun: 'spider', plural: 'spiders', pattern: /\bspiders?\b/i },
+  { noun: 'rodent', plural: 'rodents', pattern: /\brodents?\b|\bmice\b|\bmouse\b|\brats?\b/i },
+];
+
+function matchedPestFamilies(text = '') {
+  if (!text) return [];
+  // Live targets arrive both as display labels ("German cockroaches") and as
+  // canonical enum keys ("german_roaches", "ghost_ant") — `_` is a regex word
+  // character, so \b patterns silently miss the keys without this.
+  const normalized = String(text).replace(/[_-]+/g, ' ');
+  return APPLICATION_PEST_FAMILIES.filter((family) => family.pattern.test(normalized));
+}
+
+export function applicationPestFamily(app = {}) {
+  const byName = matchedPestFamilies(String(app.product?.name || ''));
+  if (byName.length) return byName.length === 1 ? byName[0] : null;
+  const targets = (Array.isArray(app.targets) ? app.targets : [])
+    .map((target) => String(target || '').trim()).filter(Boolean);
+  if (!targets.length) return null;
+  // Matched per target, not on the joined text: an unrecognized co-target
+  // (e.g. Gentrol's prefill of cockroaches + drain flies + pantry pests)
+  // means the recorded scope is wider than any one family — that is
+  // ambiguity, not a match (codex P1, PR #3181 r1).
+  const families = new Set();
+  for (const target of targets) {
+    const matched = matchedPestFamilies(target);
+    if (matched.length !== 1) return null;
+    families.add(matched[0]);
+  }
+  return families.size === 1 ? families.values().next().value : null;
+}
+
+export function applicationPurpose(app = {}, serviceLine = 'pest') {
   const method = String(app.method || '').toLowerCase();
   const product = String(app.product?.name || '').toLowerCase();
   const category = String(app.product?.category || '').toLowerCase();
@@ -932,33 +967,95 @@ function applicationPurpose(app = {}, serviceLine = 'pest') {
     if (method.includes('station')) return 'Station service';
     if (method.includes('bait')) return 'Bait placement';
   }
-  if (method.includes('bait') || product.includes('bait') || product.includes('gel')) return 'Targeted ant bait';
+  if (method.includes('bait') || product.includes('bait') || product.includes('gel')) {
+    const family = applicationPestFamily(app);
+    return family ? `Targeted ${family.noun} bait` : 'Targeted bait placement';
+  }
   if (method.includes('perimeter') || method.includes('broadcast')) return 'Perimeter protection';
   if (method.includes('spot') || method.includes('pin')) return 'Targeted treatment';
-  if (method.includes('fog')) return 'Mosquito pressure reduction';
+  if (method.includes('fog')) {
+    const family = applicationPestFamily(app);
+    if (family?.noun === 'mosquito') return 'Mosquito pressure reduction';
+    return family ? `Targeted ${family.noun} treatment` : 'Space fog treatment';
+  }
   return 'Treatment application';
 }
 
-function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
+// Recorded per-application targets as customer-readable text. Targets arrive
+// both as display labels ("Large patch") and canonical enum keys
+// ("take_all_root_rot") — convert underscores (enum separators) to spaces so
+// keys never print raw, but KEEP hyphens: display labels like "Take-all root
+// rot" spell them deliberately (unlike matchedPestFamilies, which only
+// matches and can flatten both).
+export function recordedTargetsText(app = {}) {
+  const targets = (Array.isArray(app.targets) ? app.targets : [])
+    .map((t) => String(t || '').replace(/_+/g, ' ').trim())
+    .filter(Boolean);
+  return targets.length ? targets.join(', ').toLowerCase() : '';
+}
+
+// Governed disease vocabulary for the fungicide purpose line: target chips
+// accept unrestricted free text (ProductTargetsPicker), so only names
+// recognized as turf diseases may render — ANY unrecognized target fails
+// the WHOLE line closed to the generic copy, mirroring
+// applicationPestFamily's unrecognized-co-target rule (codex P1 #3187
+// r16; the completion intake gate also rejects banned copy in targets,
+// this is the render-side backstop for records that predate it).
+// Vocabulary mirrors the catalog prefill lists (20260723000001 /
+// 20260801300000) — including the oomycete set (Pythium blight /
+// damping-off, yellow tuft) so Banol/Subdue prefills render (codex P2
+// r17). "Pythium root rot" is deliberately absent: that migration's own
+// pre-push P1 keeps root-rot claims off lawn reports (ornamental-label
+// use only).
+const LAWN_DISEASE_TARGET_RE = /^(?:brown patch(?: ?\/ ?large patch)?|large patch|gray leaf spot|grey leaf spot|take[- ]?all root rot|fairy ring|dollar spot|anthracnose|pythium(?: (?:blight|damping[- ]?off))?|yellow tuft(?: \(downy mildew\))?|rust|leaf spot|melting out|summer patch|powdery mildew|slime mold)$/i;
+
+export function recognizedDiseaseTargetsText(app = {}) {
+  const targets = (Array.isArray(app.targets) ? app.targets : [])
+    .map((t) => String(t || '').replace(/_+/g, ' ').trim())
+    .filter(Boolean);
+  if (!targets.length) return '';
+  if (!targets.every((t) => LAWN_DISEASE_TARGET_RE.test(t))) return '';
+  return targets.join(', ').toLowerCase();
+}
+
+export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   const purpose = applicationPurpose(app, serviceLine);
   if (purpose === 'Targeted weed treatment') return 'Applied where visible weed pressure or service notes called for targeted control.';
   if (purpose === 'Lawn insect control') {
     // Name only the RECORDED targets — a hardcoded "chinch bugs and grubs"
     // example could describe an off-target use or imply unsupported history
     // when the application was tagged for something else (codex P2 #3038 r4).
-    const insectTargets = (Array.isArray(app.targets) ? app.targets : []).map((t) => String(t || '').trim()).filter(Boolean);
-    return insectTargets.length
-      ? `Applied to protect the turf from ${insectTargets.join(', ').toLowerCase()}, where activity, history, or seasonal pressure called for it.`
+    const insectTargets = recordedTargetsText(app);
+    return insectTargets
+      ? `Applied to protect the turf from ${insectTargets}, where activity, history, or seasonal pressure called for it.`
       : 'Applied to protect the turf from lawn-damaging insects where activity, history, or seasonal pressure called for it.';
   }
   if (purpose === 'Weed prevention application') return 'Applied to stop new weeds before they sprout, ahead of the season when they spread fastest.';
-  if (purpose === 'Fungus control application') return 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';
+  if (purpose === 'Fungus control application') {
+    // Recognized-disease-vocabulary guard: the names come from the
+    // completion form's target chips — untrimmed catalog prefill (never
+    // claim OBSERVED, codex P1 r3), hand-typed free text (never claim the
+    // label DESIGNED it, r10; never render unvetted claims at all, r16).
+    // Only governed disease names print; recording is the only claim made.
+    const diseaseTargets = recognizedDiseaseTargetsText(app);
+    return diseaseTargets
+      ? `Applied to protect the turf against ${diseaseTargets}, the targets your technician recorded for this application.`
+      : 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';
+  }
   if (purpose === 'Lawn nutrient application') return 'Used to support turf density, color, and recovery within the documented lawn program.';
   if (purpose === 'Lawn treatment application') return 'Recorded as part of today’s lawn care visit and treatment plan.';
   if (purpose === 'Station service') return 'Checked or serviced at the documented station locations.';
   if (purpose === 'Bait placement') return 'Placed at documented activity or monitoring points.';
   if (purpose === 'Perimeter protection') return 'Used along treated exterior zones to maintain the protective band.';
-  if (purpose === 'Targeted ant bait') return 'Placed for light ant activity at the documented active zone.';
+  const pestFamily = applicationPestFamily(app);
+  if (pestFamily && purpose === `Targeted ${pestFamily.noun} bait`) {
+    return `Placed in small amounts where ${pestFamily.plural} travel and hide, at the placement points documented for this visit.`;
+  }
+  if (purpose === 'Targeted bait placement') return 'Placed at documented activity or monitoring points.';
+  if (pestFamily && purpose === `Targeted ${pestFamily.noun} treatment`) {
+    return `Applied as a fine mist within the treated areas for the ${pestFamily.plural} documented on this visit.`;
+  }
+  if (purpose === 'Space fog treatment') return 'Applied as a fine mist within the treated areas documented for this visit.';
   if (purpose === 'Targeted treatment') return 'Applied only where activity or conditions called for treatment.';
   if (purpose === 'Mosquito pressure reduction') return 'Applied to reduce resting adult mosquito pressure around target areas.';
   const targets = (Array.isArray(app.targets) ? app.targets : []).filter(Boolean);
@@ -986,7 +1083,7 @@ function productIdentifierDetails(app = {}) {
   return details;
 }
 
-function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
+export function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
   const method = String(app.method || '').toLowerCase();
   const productName = String(app.product?.name || 'This product');
   const active = String(app.product?.active_ingredient || '').trim();
@@ -1016,8 +1113,22 @@ function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
   }
 
   if (method.includes('bait') || product.includes('bait') || product.includes('gel')) {
-    details.push(`${productName} is a targeted bait placement. Foraging ants feed on the bait and can carry it back to other ants, which helps reduce activity at the source instead of only addressing the visible trail.`);
-    details.push('Bait depends on foraging behavior, so light activity near the placement for a short period can be normal while ants locate and share the bait.');
+    const family = applicationPestFamily(app);
+    // The transfer/sharing mechanism is only documented for social or
+    // aggregating insects (ants, cockroaches, termites); rodents get
+    // travel-route copy, and every other or unknown target gets feeding-only
+    // copy — the fail-closed path must not invent a treatment mechanism
+    // either (pre-push P1, 2026-08-03).
+    if (family?.noun === 'rodent') {
+      details.push(`${productName} is a targeted bait placement, positioned along documented travel routes and activity points so rodents encounter it where they already move.`);
+    } else if (['ant', 'cockroach', 'termite'].includes(family?.noun)) {
+      details.push(`${productName} is a targeted bait placement. Foraging ${family.plural} feed on the bait and can share it with others in the nest or harborage, which helps reduce activity at the source instead of only where it is visible.`);
+      details.push(`Bait depends on foraging behavior, so some activity near the placement for a short period can be normal while ${family.plural} find and feed on the bait.`);
+    } else {
+      const feeders = family ? family.plural : 'the target pests';
+      details.push(`${productName} is a targeted bait placement. It works as ${feeders} feed on it at the placement points, which helps reduce activity at the source instead of only where it is visible.`);
+      details.push(`Bait depends on feeding behavior, so some activity near the placement for a short period can be normal while ${feeders} find and feed on the bait.`);
+    }
     details.push(...productIdentifierDetails(app));
     return details;
   }
@@ -1038,8 +1149,19 @@ function applicationTechnicalExplanation(app = {}, serviceLine = 'pest') {
     return details;
   }
 
-  if (serviceLine === 'mosquito' || method.includes('fog')) {
+  if (serviceLine === 'mosquito' || (method.includes('fog') && applicationPestFamily(app)?.noun === 'mosquito')) {
     details.push(`${productName} was documented for mosquito pressure reduction around target resting areas. Mosquito applications are interpreted with weather, shade, moisture, foliage, and recurring pressure because outdoor pressure can rebuild from nearby breeding or resting sites.`);
+    details.push(...productIdentifierDetails(app));
+    return details;
+  }
+
+  if (method.includes('fog')) {
+    // A fog on a pest visit is not a mosquito application — the pest, when
+    // known, comes from the recorded identity, never from the equipment. The
+    // copy states only what is documented: the method, the treated areas,
+    // and the recorded target (no reach/performance claims).
+    const family = applicationPestFamily(app);
+    details.push(`${productName} was applied as a fine fog, distributing the treatment as fine droplets across the areas documented for this visit${family ? ` for the recorded ${family.plural}` : ''}.`);
     details.push(...productIdentifierDetails(app));
     return details;
   }
@@ -1116,7 +1238,9 @@ function applicationZoneText(app = {}, zoneById = new Map(), serviceLine = 'pest
   return app.applicationArea || 'Treated area recorded';
 }
 
-function applicationGroupPurposeCopy(purpose, serviceLine = 'pest') {
+// `app` is any application in the group — the group key includes the purpose
+// string, so every member resolves the same pest family by construction.
+function applicationGroupPurposeCopy(purpose, serviceLine = 'pest', app = {}) {
   if (purpose === 'Perimeter protection') {
     return 'These products were used along treated exterior zones to help maintain the protective band.';
   }
@@ -1138,6 +1262,15 @@ function applicationGroupPurposeCopy(purpose, serviceLine = 'pest') {
   if (purpose === 'Mosquito pressure reduction') {
     return 'These products were applied to reduce mosquito pressure around target resting areas.';
   }
+  const family = applicationPestFamily(app);
+  if (family && purpose === `Targeted ${family.noun} bait`) {
+    return `These bait placements target ${family.plural} where they travel and hide.`;
+  }
+  if (family && purpose === `Targeted ${family.noun} treatment`) {
+    return `These products were applied as a fine mist within the treated areas for the ${family.plural} documented on this visit.`;
+  }
+  if (purpose === 'Targeted bait placement') return 'These products were placed at documented activity or monitoring points.';
+  if (purpose === 'Space fog treatment') return 'These products were applied as a fine mist within the treated areas documented for this visit.';
   return applicationPurposeCopy({ method: '', product: {} }, serviceLine).replace(/^Application recorded.*$/i, 'These products were documented for this service visit.');
 }
 
@@ -1155,7 +1288,7 @@ function groupApplicationsByPurpose(applications = [], data = {}) {
         purpose,
         method,
         zones,
-        copy: applicationGroupPurposeCopy(purpose, data.serviceLine),
+        copy: applicationGroupPurposeCopy(purpose, data.serviceLine, app),
         products: [],
       });
     }
@@ -2035,22 +2168,6 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             // r32).
             ? (data.reportV2?.water?.rainInches ?? data.lawnAssessment?.waterContext?.rainfallInches7d ?? null)
             : null}
-          weeklyRainSource={{
-            // MRMS is NOAA's gauge-corrected radar estimate; a mixed week
-            // takes measurements where radar had them and the model on the
-            // gaps, and the Source row has to say so rather than crediting
-            // one provider for both. Unmapped keys fall through to null (no
-            // Source row) instead of printing a raw enum at the customer.
-            open_meteo: 'Open-Meteo',
-            fawn: 'FAWN',
-            area: 'local area rain records',
-            mrms: 'NOAA radar + rain gauges',
-            'mrms+open_meteo': 'NOAA radar + rain gauges, with Open-Meteo on gaps',
-            property_point: 'Open-Meteo',
-            city_collective: 'Open-Meteo (local area)',
-          }[
-            data.reportV2?.water?.rainProvider || data.lawnAssessment?.waterContext?.rainfall7dProvider
-          ] || null}
         />
       </div>
     </section>
@@ -2217,8 +2334,8 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null, weeklyRainSource = null }) {
-  const rows = conditionRows(conditions, { weeklyRainIn, weeklyRainSource });
+function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null }) {
+  const rows = conditionRows(conditions, { weeklyRainIn });
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);

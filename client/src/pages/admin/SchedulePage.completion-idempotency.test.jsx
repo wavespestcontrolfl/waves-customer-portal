@@ -1,13 +1,49 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CROSS_KEY_COMPLETED_MESSAGE,
+  SIDE_EFFECTS_GIVE_UP_MESSAGE,
+  completionCrossKeyCompleted,
   completionPreferencesNeedDraft,
+  completionReconcilePrompt,
   completionReviewSuppressionReason,
+  completionSideEffectsRetryPlan,
+  completionStatusPlan,
   completionTimeOnSiteBody,
   completionWillReview,
   restoredBackfillChoices,
   shouldResetCompletionIdempotencyKey,
 } from "./SchedulePage.jsx";
+
+// Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT): the
+// server 409s with code 'report_reconcile' and the contradictions packed
+// into the error message. The prompt helper must render them, other
+// errors must pass through untouched — and the 409 must PRESERVE the
+// idempotency key so the confirmed resubmit replays under the same key.
+describe("completion reconcile prompt", () => {
+  it("renders the server's contradictions with the confirm/cancel guidance", () => {
+    const text = completionReconcilePrompt({
+      status: 409,
+      code: "report_reconcile",
+      message: "Your report says 8 traps; this visit records 6.",
+    });
+    expect(text).toContain("8 traps");
+    expect(text).toContain("records 6");
+    expect(text).toContain("OK — complete anyway");
+    expect(text).toContain("Cancel — go back");
+  });
+
+  it("ignores every other error", () => {
+    expect(completionReconcilePrompt(null)).toBeNull();
+    expect(completionReconcilePrompt({ code: "trap_capture_conflict", message: "x" })).toBeNull();
+    expect(completionReconcilePrompt(new Error("network"))).toBeNull();
+  });
+
+  it("the reconcile 409 preserves the idempotency key for the confirmed resubmit", () => {
+    expect(shouldResetCompletionIdempotencyKey({ status: 409, code: "report_reconcile" }))
+      .toBe(false);
+  });
+});
 
 describe("completion idempotency retry keys", () => {
   it("resets the key for ordinary client errors", () => {
@@ -235,5 +271,87 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     expect(
       completionReviewSuppressionReason({ isIncompleteVisit: true, backfillQuietCloseout: true }),
     ).toBe("incomplete");
+  });
+});
+
+// completion_side_effects_running means the completion COMMITTED and the
+// server is still running post-commit side effects — the panel retries the
+// same key quietly instead of surfacing a dead-end failure dialog (field
+// report, 2026-08-03), and only gives up with saved-not-finalized copy.
+describe("completion side-effects auto-retry", () => {
+  const sideEffects409 = { status: 409, code: "completion_side_effects_running" };
+
+  it("retries with a fixed delay while under the polling window", () => {
+    const plan = completionSideEffectsRetryPlan(sideEffects409, 0);
+    expect(plan).toMatchObject({ action: "retry" });
+    expect(plan.delayMs).toBeGreaterThan(0);
+  });
+
+  it("gives up with the honest saved-copy after the window", () => {
+    const plan = completionSideEffectsRetryPlan(sideEffects409, 24);
+    expect(plan).toEqual({ action: "give_up", message: SIDE_EFFECTS_GIVE_UP_MESSAGE });
+    expect(plan.message).toMatch(/saved/i);
+    expect(plan.message).not.toMatch(/fail/i);
+  });
+
+  it("leaves every other error to the existing handlers", () => {
+    expect(completionSideEffectsRetryPlan({ status: 409, code: "completion_pending" }, 0)).toBeNull();
+    expect(completionSideEffectsRetryPlan(new Error("network"), 0)).toBeNull();
+    expect(completionSideEffectsRetryPlan(null, 0)).toBeNull();
+  });
+
+  it("the retried key survives the 409 (pairs with the reset rule)", () => {
+    expect(shouldResetCompletionIdempotencyKey(sideEffects409)).toBe(false);
+  });
+});
+
+// Cross-key resolution of a committed chain (codex P1 #3187 r6): once a
+// committed side-effects 409 has been observed, service_already_completed
+// means the ORIGINAL key's attempt finished — terminal success, never the
+// generic failure path.
+describe("cross-key completion inside a committed chain", () => {
+  it("service_already_completed after a committed 409 is completion", () => {
+    expect(
+      completionCrossKeyCompleted({ status: 409, code: "service_already_completed" }, true),
+    ).toBe(true);
+  });
+
+  it("without a committed chain the existing handlers keep it", () => {
+    expect(
+      completionCrossKeyCompleted({ status: 409, code: "service_already_completed" }, false),
+    ).toBe(false);
+  });
+
+  it("other codes never resolve as cross-key completion", () => {
+    expect(
+      completionCrossKeyCompleted({ status: 409, code: "completion_side_effects_running" }, true),
+    ).toBe(false);
+    expect(completionCrossKeyCompleted(null, true)).toBe(false);
+  });
+
+  it("the message says completed, not failed", () => {
+    expect(CROSS_KEY_COMPLETED_MESSAGE).toMatch(/completed/i);
+    expect(CROSS_KEY_COMPLETED_MESSAGE).not.toMatch(/fail/i);
+  });
+});
+
+// The status-poll plan (codex P1 #3187 r11): the media-bearing completion
+// body POSTs only on "resume"; unknown states keep waiting so the poll cap
+// — not a mis-mapped state — decides the give-up.
+describe("completion status-poll plan", () => {
+  it("maps each server state to the panel's next move", () => {
+    expect(completionStatusPlan({ state: "running" })).toBe("wait");
+    expect(completionStatusPlan({ state: "succeeded" })).toBe("success");
+    expect(completionStatusPlan({ state: "succeeded_other_key" })).toBe("cross_key");
+    expect(completionStatusPlan({ state: "completed_no_attempt" })).toBe("cross_key");
+    expect(completionStatusPlan({ state: "resumable" })).toBe("resume");
+    expect(completionStatusPlan({ state: "none" })).toBe("resume");
+    expect(completionStatusPlan({ state: "failed" })).toBe("failed");
+  });
+
+  it("unknown or malformed states wait for the poll cap, never fail", () => {
+    expect(completionStatusPlan({ state: "surprise" })).toBe("wait");
+    expect(completionStatusPlan({})).toBe("wait");
+    expect(completionStatusPlan(null)).toBe("wait");
   });
 });

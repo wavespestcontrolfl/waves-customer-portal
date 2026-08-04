@@ -387,6 +387,32 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false } = {}
   return { subject, html, text };
 }
 
+// Re-entry send-seal contract, shared with the correction PATCH
+// (admin-dispatch.js). Both sides take the same advisory lock, so a
+// correction can never commit between this sender's revision check and its
+// seal becoming visible; while a fresh seal exists the PATCH refuses, so
+// the immutable email body/attachment can't go stale mid-dispatch
+// (codex P1 PR #3180 r3). The TTL is the crash guard: dispatch normally
+// clears the seal, and a seal older than this is ignored by the PATCH.
+const REENTRY_SEND_LOCK_CLASS = 'reentry-send';
+const REENTRY_SEND_SEAL_KEY = 'reentrySendStartedAt';
+const REENTRY_SEND_SEAL_TTL_MS = 5 * 60 * 1000;
+
+// Re-entry correction revision of a record's structured_notes (0 = never
+// corrected). Used by the pre-dispatch fence below; mirrors the parsing in
+// reentryAdjustedPdfSignature (pdf-storage.js).
+function reentryRevFromNotes(structuredNotes) {
+  try {
+    const notes = typeof structuredNotes === 'string'
+      ? JSON.parse(structuredNotes)
+      : (structuredNotes || {});
+    const rev = Number(notes.reentryRev);
+    return Number.isFinite(rev) && rev > 0 ? rev : 0;
+  } catch {
+    return 0;
+  }
+}
+
 async function loadServiceRecord(recordId) {
   return db('service_records')
     .where({ 'service_records.id': recordId })
@@ -427,6 +453,10 @@ async function sendServiceReportV1Email(recordId, {
   if (!shouldSendServiceReportV1Delivery(service)) {
     return { ok: false, skipped: true, error: 'Not a completed service report v1 record' };
   }
+  // Version boundary for the re-entry correction fence below: the body and
+  // the attachment both derive from THIS row load, so the rev it carries is
+  // the rev of what would be dispatched.
+  const preSendReentryRev = reentryRevFromNotes(service.structured_notes);
   const prefs = await db('notification_prefs').where({ customer_id: service.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
   const recipients = getServiceReportEmailRecipients({
     id: service.customer_id,
@@ -528,6 +558,42 @@ async function sendServiceReportV1Email(recordId, {
       return { ok: false, error: 'Report copy changed during render — deferring send', retryable: true };
     }
   }
+
+  // Re-entry correction fence + send seal (codex P1 PR #3180 r2/r3): an
+  // admin correction landing while this email built/rendered would dispatch
+  // pre-correction guidance in the immutable body and attachment — the
+  // reentryRev PDF-key component only fences the storage cache, not this
+  // send. Under a short advisory-locked transaction: re-read the revision
+  // (a mismatch defers retryably so the retry rebuilds from the corrected
+  // row) and stamp the send-window seal. The correction PATCH takes the
+  // SAME lock and refuses while a fresh seal exists, so it can commit
+  // neither between this check and the seal becoming visible, nor while
+  // dispatch is settling. No soft-catch anywhere in the fence: failing to
+  // prove the revision must defer, never send unverified.
+  const sealFresh = await db.transaction(async (trx) => {
+    await trx.raw(
+      'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+      [REENTRY_SEND_LOCK_CLASS, String(recordId)],
+    );
+    const liveNotesRow = await trx('service_records')
+      .where({ id: recordId })
+      .first('structured_notes');
+    if (reentryRevFromNotes(liveNotesRow?.structured_notes) !== preSendReentryRev) return false;
+    // Atomic key merge — a concurrent structured_notes writer's keys must
+    // survive the seal stamp (same clobber-avoidance rule as every other
+    // structured_notes write).
+    await trx('service_records').where({ id: recordId }).update({
+      structured_notes: trx.raw(
+        `COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('${REENTRY_SEND_SEAL_KEY}', to_jsonb(?::text))`,
+        [new Date().toISOString()],
+      ),
+    });
+    return true;
+  });
+  if (!sealFresh) {
+    return { ok: false, error: 'Re-entry guidance corrected during render — deferring send', retryable: true };
+  }
+  try {
 
   const serviceLabel = serviceDisplayName(data);
   const templateOutcomes = await Promise.allSettled(
@@ -702,9 +768,23 @@ async function sendServiceReportV1Email(recordId, {
     blockedCount: totalBlocked,
     attachedPdf: !!pdf,
   };
+
+  } finally {
+    // Release the send seal however dispatch ended — every return above
+    // passes through here. Best-effort: a failed release leaves the seal
+    // to expire via the PATCH-side TTL rather than failing the send.
+    await db('service_records').where({ id: recordId }).update({
+      structured_notes: db.raw(`(COALESCE(structured_notes::jsonb, '{}'::jsonb) - '${REENTRY_SEND_SEAL_KEY}')`),
+    }).catch((sealErr) => {
+      logger.warn(`[service-report-v1-email] send-seal release failed for ${recordId}: ${sealErr.message}`);
+    });
+  }
 }
 
 module.exports = {
   buildServiceReportV1Email,
   sendServiceReportV1Email,
+  REENTRY_SEND_LOCK_CLASS,
+  REENTRY_SEND_SEAL_KEY,
+  REENTRY_SEND_SEAL_TTL_MS,
 };

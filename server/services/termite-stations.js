@@ -174,7 +174,15 @@ function sanitizeActions(value) {
 // string (400 material) or null when acceptable. `allowStatus: false` is the
 // office desk flow — there is no visit to hang a check on, so a status there
 // would silently vanish; reject it instead.
-function validateStationEntriesBody(entries, { allowStatus = true, program = null } = {}) {
+// `rejectServiced` is set when the visit DECLARES an initial trap setup.
+// The map relabels an `ok` pin to "Set this visit", but `serviced` keeps
+// its own label and its own summary line, so a setup could publish an
+// immutable report reading "Traps set" beside "Serviced this visit" and
+// "N serviced" (codex P1). Servicing presupposes the trap was already out
+// — the same reason the prose guard treats "serviced" as a re-check verb —
+// so the two are inconsistent DATA, resolved by the tech correcting
+// whichever field is wrong rather than by relabelling the pin.
+function validateStationEntriesBody(entries, { allowStatus = true, program = null, rejectServiced = false } = {}) {
   if (entries == null) return null;
   if (!Array.isArray(entries)) return 'termiteStations must be an array';
   if (entries.length > MAX_STATION_ENTRIES) {
@@ -222,6 +230,9 @@ function validateStationEntriesBody(entries, { allowStatus = true, program = nul
         if (!allowStatus) return 'station status only applies during a completion — the office save takes positions only';
         if (!STATION_STATUSES.includes(entry.status)) {
           return `station status must be one of: ${STATION_STATUSES.join(', ')}`;
+        }
+        if (rejectServiced && entry.status === 'serviced') {
+          return 'a trap marked "Serviced" contradicts an initial setup — the traps went out on this visit; clear the serviced mark or set this visit to "Follow-up check"';
         }
       }
       if (entry.actions != null && !Array.isArray(entry.actions)) {
@@ -565,10 +576,15 @@ async function syncStationsForCompletion(db, { customerId, serviceRecordId, entr
 // numbering for new pins matches what the sync will allocate in payload
 // order; `nextStationNumber` keeps the termite value for shape stability.
 async function loadStationsForPropertyMap(db, customerId, imageContext) {
+  // The query failure is swallowed here so a station outage never takes down
+  // zone marking — but callers that INFER from an empty roster need to tell
+  // "no stations" from "we could not look" (codex P2 on #3159). Every return
+  // shape below carries `loaded`; consumers that only draw pins ignore it.
+  let loaded = true;
   const rows = await db('termite_stations')
     .where({ customer_id: customerId })
     .orderBy('station_number')
-    .catch(() => []);
+    .catch(() => { loaded = false; return []; });
   const nextStationNumberByProgram = {};
   for (const program of STATION_PROGRAMS) {
     nextStationNumberByProgram[program] = rows
@@ -577,7 +593,9 @@ async function loadStationsForPropertyMap(db, customerId, imageContext) {
   }
   const active = rows.filter((row) => row.is_active !== false);
   if (!active.length) {
-    return { stations: [], nextStationNumber: nextStationNumberByProgram.termite, nextStationNumberByProgram };
+    return {
+      stations: [], nextStationNumber: nextStationNumberByProgram.termite, nextStationNumberByProgram, loaded,
+    };
   }
   const resolved = resolveZoneRowsImageDrift(active, imageContext);
   return {
@@ -591,6 +609,7 @@ async function loadStationsForPropertyMap(db, customerId, imageContext) {
     })),
     nextStationNumber: nextStationNumberByProgram.termite,
     nextStationNumberByProgram,
+    loaded,
   };
 }
 
@@ -659,6 +678,15 @@ function buildStationMapReportContext({
   imageContext = {},
   typedTypes = [],
   serviceDate = null,
+  // Declared trap SETUP: the pins went out on THIS visit, so every default
+  // 'ok' pin means "set today", not "checked, nothing caught" — and the
+  // summary counted them as inspected. Left unset, the map keeps its
+  // re-check wording, so legacy reports are untouched (codex P1 on #3159).
+  initialSetup = false,
+  // The frozen typed traps_checked, when the snapshot carries one. Used only
+  // to confirm the map and the typed finding agree before the map restates
+  // that count in setup wording.
+  typedTrapCount = null,
 } = {}) {
   if (!isStationMapReportEnabled()) return { available: false, reason: 'disabled' };
   // The visit's typed flow picks the PROGRAM: a rodent bait report renders
@@ -733,6 +761,42 @@ function buildStationMapReportContext({
   return {
     available: true,
     program,
+    // Trapping only: a setup declaration has no meaning for bait stations,
+    // which are installed once and checked forever.
+    //
+    // A count disagreement suppresses only the NUMBER, never the stage. An
+    // earlier revision withheld `initialSetup` entirely on a mismatch, on the
+    // theory that the map then stayed neutral — it does not. Without the flag
+    // the card falls back to re-check wording ("Checked — no capture",
+    // "8 of 8 stations inspected"), so a declared setup published inspection
+    // language beside "Traps set: 6" — a worse contradiction than the one the
+    // withholding was meant to avoid (codex P2 round 9).
+    //
+    // The stage is declared by the tech and is not in dispute; only the count
+    // is. The closeout autofills traps_checked from the pins but RELINQUISHES
+    // the field once the tech hand-edits it, so the two can legitimately
+    // diverge. So: keep the setup labels, and let the card drop the summary
+    // line that would restate the disputed number.
+    // Requires at least one PER-VISIT status. The post-completion station
+    // sync is deliberately fail-soft, so a declared setup on a property that
+    // already had mapped traps can persist its typed snapshot while writing
+    // no check rows at all; selection then falls back to the standing
+    // registry and every pin carries a null status. The setup intro would
+    // say "the traps went out on this visit" over pins reading "On file (not
+    // checked this visit)" (codex P2 round 10).
+    //
+    // This is NOT the round-9 mistake in reverse. There, withholding the
+    // flag produced ACTIVE re-check wording ("Checked — no capture") because
+    // the pins carried 'ok' statuses. Here they carry none, so the fallback
+    // is genuinely neutral — "N stations on file" — and claims no
+    // inspection. Dropping the setup treatment is the honest reading when
+    // nothing records which pins participated.
+    ...(initialSetup && program === 'trapping' && pins.some((pin) => pin.status)
+      ? {
+        initialSetup: true,
+        setupCountVerified: typedTrapCount == null || typedTrapCount === summary.checked,
+      }
+      : {}),
     image: {
       url: satelliteMap.live.url,
       width: satelliteMap.live.width || 640,

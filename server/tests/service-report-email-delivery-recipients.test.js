@@ -3,6 +3,14 @@ jest.mock('../models/db', () => {
   // loadServiceRecord selects db.raw(...) stamped-address expressions —
   // mirror knex's raw so building the select can't throw.
   mock.raw = (sql) => ({ toString: () => sql });
+  // The re-entry send seal (codex P1 PR #3180 r3) wraps its revision check
+  // and seal stamp in an advisory-locked transaction — delegate to the
+  // table mock so the fence reads the same scripted rows.
+  mock.transaction = async (fn) => {
+    const trx = (table) => mock(table);
+    trx.raw = mock.raw;
+    return fn(trx);
+  };
   return mock;
 });
 jest.mock('../services/logger', () => ({
@@ -54,6 +62,9 @@ function query(result) {
     leftJoin: jest.fn(() => chain),
     select: jest.fn(() => chain),
     first: jest.fn(() => Promise.resolve(result)),
+    // The send seal stamps/clears structured_notes on service_records — a
+    // real Promise so both `await` and `.catch` (the best-effort clear) work.
+    update: jest.fn(() => Promise.resolve(1)),
     catch: jest.fn((handler) => Promise.resolve(result).catch(handler)),
   };
   return chain;

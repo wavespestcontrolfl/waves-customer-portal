@@ -229,7 +229,7 @@ describe('deprecated client estimator pricing drift guards', () => {
     // and the WaveGuard give-back on that switch — never stamp or lift while
     // disarmed — and (c) keep the pestProgramFloorApplied field in the return
     // shape (false while disarmed) so stored-payload consumers don't lose it.
-    expect(source).toContain('const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89 };');
+    expect(source).toContain('const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89, basePerVisit: 112 };');
     expect(source).toContain('const pestFloorMeta = PEST_BASE.enforceFloorPostDiscount === true');
     expect(source).toContain('if (PEST_BASE.enforceFloorPostDiscount === true');
     expect(source).toContain('let pestProgramFloorApplied = false;');
@@ -496,7 +496,7 @@ describe('deprecated client estimator pricing drift guards', () => {
 
   test('one-time pest mirrors the server: quarterly base × 2.2, floored at $199', () => {
     // Must match server/services/pricing-engine ONE_TIME.pest model (pure multiple).
-    expect(source).toContain('const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, 117 + pestBaseAdjustment(fpEff));');
+    expect(source).toContain('const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, PEST_BASE.basePerVisit + pestBaseAdjustment(fpEff));');
     expect(source).toContain('let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));');
     expect(source).toContain('if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;');
     expect(source).toContain("service: 'one_time_pest'");
@@ -517,7 +517,7 @@ describe('deprecated client estimator pricing drift guards', () => {
     const item = estimate.oneTime.items.find((row) => row.service === 'one_time_pest');
     expect(item).toEqual(expect.objectContaining({
       name: 'One-Time Pest Control',
-      price: 257,
+      price: 246,
     }));
   });
 

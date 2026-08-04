@@ -10,6 +10,7 @@ const {
   putReportPdf,
   reportPdfStorageKey,
   timeOnSiteAdjustedPdfSignature,
+  reentryAdjustedPdfSignature,
 } = require('./pdf-storage');
 const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-pressure/store');
 const { summaryCopySignature } = require('./technician-report-copy');
@@ -284,7 +285,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + laSignature + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -420,7 +421,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

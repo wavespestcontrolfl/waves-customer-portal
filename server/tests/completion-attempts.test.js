@@ -1,5 +1,6 @@
 const {
   claimCompletionAttempt,
+  completionStatusForService,
   hashCompletionRequest,
   requestHashMatches,
   resumeHashMatches,
@@ -837,5 +838,69 @@ describe('request hash fits its column', () => {
     expect(hash).toMatch(/^[0-9a-f]{64}:[0-9a-f]{64}$/);
     expect(hash.length).toBe(129);
     expect(hash.length).toBeLessThanOrEqual(REQUEST_HASH_COLUMN_WIDTH);
+  });
+});
+
+// Lightweight side-effects poll (codex P1 #3187 r11): the panel polls this
+// read-only status instead of replaying the media-bearing completion POST.
+// Same-key response replay parity with claimCompletionAttempt is the
+// load-bearing contract here.
+describe('completionStatusForService (lightweight side-effects poll)', () => {
+  test('same-key succeeded replays the stored response', async () => {
+    const knex = makeKnex([
+      { first: { status: 'succeeded', idempotency_key: 'k1', response: { ok: true }, service_record_id: 'sr1' } },
+    ]);
+    const status = await completionStatusForService({ serviceId: 's1', idempotencyKey: 'k1' }, knex);
+    expect(status).toEqual({ state: 'succeeded', serviceRecordId: 'sr1', response: { ok: true, replayed: true } });
+  });
+
+  test('different-key success never attaches the stored response', async () => {
+    const knex = makeKnex([
+      { first: { status: 'succeeded', idempotency_key: 'kB', response: { ok: true }, service_record_id: 'sr1' } },
+    ]);
+    const status = await completionStatusForService({ serviceId: 's1', idempotencyKey: 'kA' }, knex);
+    expect(status).toEqual({ state: 'succeeded_other_key', serviceRecordId: 'sr1' });
+    expect(status.response).toBeUndefined();
+  });
+
+  test('fresh side_effects_running polls as running; stale becomes resumable', async () => {
+    const fresh = makeKnex([
+      { first: undefined },
+      { first: { status: 'side_effects_running', updated_at: new Date().toISOString() } },
+    ]);
+    expect((await completionStatusForService({ serviceId: 's1' }, fresh)).state).toBe('running');
+    const stale = makeKnex([
+      { first: undefined },
+      { first: { status: 'side_effects_running', updated_at: new Date(Date.now() - 11 * 60 * 1000).toISOString() } },
+    ]);
+    expect((await completionStatusForService({ serviceId: 's1' }, stale)).state).toBe('resumable');
+  });
+
+  test('side_effects_pending is immediately resumable; failed reports the error', async () => {
+    const pending = makeKnex([
+      { first: undefined },
+      { first: { status: 'side_effects_pending' } },
+    ]);
+    expect((await completionStatusForService({ serviceId: 's1' }, pending)).state).toBe('resumable');
+    const failed = makeKnex([
+      { first: undefined },
+      { first: { status: 'failed', error: 'boom' } },
+    ]);
+    expect(await completionStatusForService({ serviceId: 's1' }, failed)).toEqual({ state: 'failed', error: 'boom' });
+  });
+
+  test('no attempts: a bare record maps to completed_no_attempt, nothing maps to none', async () => {
+    const withRecord = makeKnex([
+      { first: undefined },
+      { first: undefined },
+      { first: { id: 'sr9' } },
+    ]);
+    expect(await completionStatusForService({ serviceId: 's1' }, withRecord)).toEqual({ state: 'completed_no_attempt', serviceRecordId: 'sr9' });
+    const empty = makeKnex([
+      { first: undefined },
+      { first: undefined },
+      { first: undefined },
+    ]);
+    expect(await completionStatusForService({ serviceId: 's1' }, empty)).toEqual({ state: 'none' });
   });
 });
