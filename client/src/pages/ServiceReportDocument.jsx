@@ -76,9 +76,16 @@ const STATION_OK_LEGEND = {
   trapping: 'Checked — no capture',
 };
 
-function stationStatusMeta(status, program) {
+function stationStatusMeta(status, program, initialSetup = false) {
   const base = STATION_STATUS_META[status] || STATION_ON_FILE_META;
   if (status === 'activity') return { ...base, label: STATION_ACTIVITY_LEGEND[program] || base.label };
+  // On a declared trap SETUP the pins went out on THIS visit — "Checked — no
+  // capture" claims an inspection that never happened and contradicts the
+  // same report's trap-setup finding (codex P2 #3176 r25; mirrors
+  // StationMapCard's rule, which shipped for the identical bug on #3159).
+  if (status === 'ok' && program === 'trapping' && initialSetup) {
+    return { ...base, label: 'Set this visit' };
+  }
   if (status === 'ok' && STATION_OK_LEGEND[program]) return { ...base, label: STATION_OK_LEGEND[program] };
   return base;
 }
@@ -1105,14 +1112,14 @@ export default function ServiceReportDocument({ data, token }) {
               {stationMap.stations.map((station) => (
                 <span
                   key={station.id || station.number}
-                  className={`doc-station-pin ${stationStatusMeta(station.status, stationMap.program).cls}`.trim()}
+                  className={`doc-station-pin ${stationStatusMeta(station.status, stationMap.program, stationMap.initialSetup === true).cls}`.trim()}
                   style={{ left: `${(station.cx * 100).toFixed(2)}%`, top: `${(station.cy * 100).toFixed(2)}%` }}
                 >{station.number}</span>
               ))}
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6, fontSize: 9.5, color: MUTED }}>
               {['ok', 'serviced', 'activity', 'inaccessible', 'on_file']
-                .map((status) => (status === 'on_file' ? STATION_ON_FILE_META : stationStatusMeta(status, stationMap.program)))
+                .map((status) => (status === 'on_file' ? STATION_ON_FILE_META : stationStatusMeta(status, stationMap.program, stationMap.initialSetup === true)))
                 .map(({ cls, label }) => (
                 <span key={label} style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                   <span className={`doc-station-pin ${cls}`} style={{ position: 'static', transform: 'none', width: 11, height: 11, fontSize: 0 }} aria-hidden="true" />
@@ -1124,7 +1131,16 @@ export default function ServiceReportDocument({ data, token }) {
               <div style={{ marginTop: 5, fontSize: 10.5, color: MUTED }}>
                 {[
                   `${stationMap.summary.total} ${stationMap.program === 'trapping' ? 'traps' : 'stations'}`,
-                  stationMap.summary.checked != null ? `${stationMap.summary.checked} checked` : null,
+                  // Traps placed today were SET, not inspected — and on a
+                  // declared setup whose count the report disputes the number
+                  // is withheld entirely, because restating a figure that
+                  // disagrees with the typed finding is the contradiction
+                  // being avoided (mirrors stationSummaryLine).
+                  stationMap.summary.checked != null
+                    ? (stationMap.initialSetup === true
+                      ? (stationMap.setupCountVerified === false ? null : `${stationMap.summary.checked} set this visit`)
+                      : `${stationMap.summary.checked} checked`)
+                    : null,
                   stationMap.summary.serviced ? `${stationMap.summary.serviced} serviced this visit` : null,
                   stationMap.summary.activity ? `${stationMap.summary.activity} ${STATION_ACTIVITY_SUMMARY[stationMap.program] || 'with activity'}` : null,
                   stationMap.summary.inaccessible ? `${stationMap.summary.inaccessible} inaccessible` : null,

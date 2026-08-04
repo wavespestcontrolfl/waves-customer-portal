@@ -860,6 +860,37 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(dropped.container.textContent).not.toMatch(/hash-chained and tamper-evident/);
   });
 
+  it('says traps were SET on a declared setup visit, never "checked" (codex P2 #3176 r25)', () => {
+    const setup = {
+      ...BASE_DATA,
+      serviceLine: 'rodent',
+      stationMap: {
+        available: true, program: 'trapping', initialSetup: true, setupCountVerified: true,
+        image: { url: 'https://maps.googleapis.com/x', width: 640, height: 340 },
+        stations: [{ id: 's1', number: 1, cx: 0.3, cy: 0.4, status: 'ok' }],
+        summary: { total: 1, checked: 1, activity: 0, inaccessible: 0 },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={setup} token="t" />);
+    expect(container.textContent).toContain('Set this visit');
+    expect(container.textContent).not.toContain('Checked — no capture');
+    expect(container.textContent).toContain('1 set this visit');
+    expect(container.textContent).not.toContain('1 checked');
+    cleanup();
+
+    // A disputed setup count withholds the number rather than restating one
+    // that disagrees with the typed finding.
+    const disputed = render(<ServiceReportDocument data={{ ...setup, stationMap: { ...setup.stationMap, setupCountVerified: false } }} token="t" />);
+    expect(disputed.container.textContent).not.toMatch(/\d+ set this visit/);
+    expect(disputed.container.textContent).toContain('Set this visit');
+    cleanup();
+
+    // An ordinary re-check keeps the check wording.
+    const recheck = render(<ServiceReportDocument data={{ ...setup, stationMap: { ...setup.stationMap, initialSetup: false } }} token="t" />);
+    expect(recheck.container.textContent).toContain('Checked — no capture');
+    expect(recheck.container.textContent).toContain('1 checked');
+  });
+
   it('keeps label-required agronomic directions that carry time units', () => {
     // "irrigate within 14 days" is a real catalog reentry_text (LESCO seed) —
     // it has a time unit but makes no re-entry claim, so it must survive
