@@ -94,6 +94,14 @@ describe('trace suppression at report payload build', () => {
     expect(traced).not.toBeNull();
   });
 
+  test('gate OFF: the registry variant stays dark too — payloads render as today (round 11)', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    const traced = await tracedFor('Quarterly Pest Control');
+    expect(traced).not.toBeNull();
+    expect(traced.variant).toBeNull();
+    expect(traced.captionKey).toBeNull();
+  });
+
   test('gate ON: the same bait-lane trace is suppressed, legacy row untouched', async () => {
     process.env.GATE_TRACE_ELIGIBILITY = 'true';
     expect(await tracedFor('Termite Bait Quarterly')).toBeNull();

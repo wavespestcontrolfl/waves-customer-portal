@@ -3153,11 +3153,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
               .map((p) => ({ x: numberOrNull(p?.px?.x), y: numberOrNull(p?.px?.y) }))
               .filter((p) => p.x != null && p.y != null),
             // Server-decided render variant/caption from the eligibility
-            // registry — the client falls back to its legacy inline
-            // service-line switch when these are absent (older cached
-            // payloads, gate off on an unclassified lane).
-            variant: traceEligibility.eligible ? traceEligibility.variant : null,
-            captionKey: traceEligibility.eligible ? traceEligibility.captionKey : null,
+            // registry — GATE-SCOPED (codex P1 r11): with the gate off the
+            // fields stay null so gate-off payloads render exactly as
+            // today (the client's legacy serviceLine switch), matching the
+            // legacy capture mode those visits were traced with. The
+            // variant goes live with the same flip that changes capture.
+            variant: (traceEligibilityGateOn() && traceEligibility.eligible)
+              ? traceEligibility.variant : null,
+            captionKey: (traceEligibilityGateOn() && traceEligibility.eligible)
+              ? traceEligibility.captionKey : null,
           };
         }
       }
