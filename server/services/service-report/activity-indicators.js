@@ -1941,15 +1941,24 @@ function words(text) {
 // sees a trap; "inspected the exterior BEFORE placing the traps" ends at
 // `before`; "checked all mechanical traps" reaches `traps` regardless of
 // which adjectives sit in between.
+// Returns EVERY object-bound hit, not the first: the caller exempts each
+// hit individually, and returning only the first let a future-governed
+// promise mask a completed claim later in the same clause — "We will
+// check the traps next week that we inspected today" returned the exempt
+// `check … traps` and never reached `inspected` (codex P1 r20).
 function activeRecheckOnTrap(clause) {
   const toks = words(clause);
+  const hits = [];
   for (let i = 0; i < toks.length; i += 1) {
     if (!RECHECK_VERB.test(toks[i])) continue;
     for (let j = i + 1; j < toks.length && !OBJECT_PHRASE_END.test(toks[j]); j += 1) {
-      if (TRAP_NOUNS.test(toks[j])) return { text: toks.slice(i, j + 1).join(' '), verbAt: i, toks };
+      if (TRAP_NOUNS.test(toks[j])) {
+        hits.push({ text: toks.slice(i, j + 1).join(' '), verbAt: i, toks });
+        break;
+      }
     }
   }
-  return null;
+  return hits;
 }
 
 // "<trap noun> … <participle>" — the trap is what the participle happened
@@ -1975,14 +1984,31 @@ function activeRecheckOnTrap(clause) {
 // set today" and "the traps were set before the attic was inspected" both
 // pass (the latter stops at `before`, so the later `inspected` is never
 // bound to the traps).
+// Array-returning for the same reason as the active scan. A RELATIVE
+// pronoun (that/which/who) does not end the reach the way the other
+// subordinators do: its clause verb acts ON the head noun — "the traps
+// that we inspected" is a trap re-check (codex P1 r20). Inside the
+// relative clause only the CHECK family may bind (CHECK_VERB_PAST):
+// action verbs there read as provenance ("the traps that were moved from
+// the garage" is setup-compatible staging prose), and flagging them would
+// discard reviewed copy — the bias this stack resolves against.
+// `once`/`as`/`after` and the rest still terminate: their clause has its
+// own subject, and binding across them was the round-15 regression.
 function passiveRecheckOnTrap(clause) {
   const toks = words(clause);
   const trapAt = toks.findIndex((t) => TRAP_NOUNS.test(t));
-  if (trapAt === -1) return null;
-  for (let i = trapAt + 1; i < toks.length && !OBJECT_PHRASE_END.test(toks[i]); i += 1) {
-    if (RECHECK_PARTICIPLE.test(toks[i])) return { text: `${toks[trapAt]} … ${toks[i]}`, verbAt: i, toks };
+  if (trapAt === -1) return [];
+  const hits = [];
+  let inRelative = false;
+  for (let i = trapAt + 1; i < toks.length; i += 1) {
+    if (/^(?:that|which|who)$/i.test(toks[i])) { inRelative = true; continue; }
+    if (OBJECT_PHRASE_END.test(toks[i])) break;
+    const isHit = inRelative
+      ? RELATIVE_CHECK_VERB.test(toks[i])
+      : RECHECK_PARTICIPLE.test(toks[i]);
+    if (isHit) hits.push({ text: `${toks[trapAt]} … ${toks[i]}`, verbAt: i, toks });
   }
-  return null;
+  return hits;
 }
 
 // Clause split: sentence enders plus the coordinators that introduce a NEW
@@ -2105,6 +2131,15 @@ const SETUP_INCOMPATIBLE_TRAP_ACTIONS = [
 // most natural phrasing there is, silently unguarded (codex P1). The
 // conditional keeps "2 rats near the traps" counting rats, not traps.
 const TRAP_ANIMAL_NOUNS = '(?:rats?|mice|mouse|rodents?|animals?)';
+// Unbounded modifier run before an ANIMAL noun, the TRAP_MODIFIER_RUN
+// philosophy applied to animal phrases: a fixed {0,2} cap missed "We
+// caught 2 large adult roof rats", so a corrected captures value never
+// reconciled and the stale 2 survived (codex P1 r20; the negated and
+// zero forms shared the cap). `of`/`the` stay ALLOWED, unlike the trap
+// run — "caught 2 of the rats" claims the caught 2 — while clause
+// connectors, prepositions, auxiliaries, and rival head nouns still
+// terminate.
+const ANIMAL_MODIFIER_RUN = '(?:\\s+(?!(?:and|or|nor|but|then|near|at|in|on|from|with|without|around|under|behind|were|was|are|is|have|has|had|been|will|would|traps?|devices?|stations?|captures?|catches)\\b)[a-z-]+)*?';
 const TRAP_PHRASE_TERMINATORS = [
   // 1. rival head nouns + partitives/articles
   'captures?', 'catches',
@@ -2159,6 +2194,9 @@ const TRAP_PARTITIVE_DET = '(?:(?:the|our|these|those|all|its)(?:\\s+\\d+)?|\\d+
 // design — rebaited/moved/serviced/reset are setup-incompatible ACTIONS,
 // not roster scans, and must not govern counts (r14).
 const CHECK_VERB_PAST = '(?:re-?)?(?:checked|inspected|examined|tested)';
+// Token form of the same set, for the passive scan's relative clauses
+// ("the traps that we INSPECTED") — one source, see passiveRecheckOnTrap.
+const RELATIVE_CHECK_VERB = new RegExp(`^${CHECK_VERB_PAST}$`, 'i');
 // The optional `a total of` / `the count of` tail: ordinary wrappers
 // between the check verb and its numeral. Without it "we checked a total
 // of 8 traps" failed the anchor, and a cue elsewhere in the window then
@@ -2207,14 +2245,14 @@ const SETUP_EMPTY_CAPTURE_RES = [
   // UN-normalized text, so both the digit and the word form are matched.
   /\b(?:0|zero)\s+(?:new\s+)?(?:captures?|catches)\b/i,
   /\b(?:caught|captured|removed)\s+(?:0|zero)\b/i,
-  /\b(?:0|zero)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed)\b/i,
+  new RegExp(`\\b(?:0|zero)${ANIMAL_MODIFIER_RUN}\\s+${TRAP_ANIMAL_NOUNS}\\b[^.!?]{0,30}?\\b(?:caught|captured|removed)\\b`, 'i'),
   // Negated ANIMAL forms and do-not-catch verb phrases make the same claim
   // with neither the word "captures" nor a number: "No mice were caught",
   // "We did not catch any rodents", "no rats have been trapped". The count
   // guard cannot see them at all — there is no numeric claim to reconcile
   // (codex P1 round 13). "trapped" joins the verb set here only: a bare
   // "set" stays legal, and "trapped" in the negated form is a check claim.
-  /\bno\s+(?:[a-z-]+\s+){0,2}?(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed|trapped)\b/i,
+  new RegExp(`\\bno${ANIMAL_MODIFIER_RUN}\\s+${TRAP_ANIMAL_NOUNS}\\b[^.!?]{0,30}?\\b(?:caught|captured|removed|trapped)\\b`, 'i'),
   /\b(?:(?:did|do|does|have|has|had)\s+not|didn['’]t|don['’]t|doesn['’]t|haven['’]t|hasn['’]t|hadn['’]t)\s+(?:yet\s+)?(?:catch|caught|capture[ds]?|trap(?:ped)?)\b/i,
   /\bnothing\s+(?:was\s+|has\s+been\s+|had\s+been\s+)?(?:caught|captured|trapped)\b/i,
   // Active and partitive ways of saying the traps came up empty — all of
@@ -2411,13 +2449,19 @@ const TRAP_PARTITIVE_PASSIVE_RE = new RegExp(
   'gi',
 );
 const CAPTURE_CLAIM_RE = /\b(\d+)\s+(?:captures?|catches)\b/gi;
-const CAUGHT_CLAIM_RE = /\b(?:caught|captured|removed)\s+(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b/gi;
+const CAUGHT_CLAIM_RE = new RegExp(
+  `\\b(?:caught|captured|removed)\\s+(\\d+)${ANIMAL_MODIFIER_RUN}\\s+(?:rats?|mice|mouse|rodents?|animals?)\\b`,
+  'gi',
+);
 // The PASSIVE capture claim, where the animal precedes its verb: "two mice
 // were caught", "3 rats have been removed". Neither pattern above sees it —
 // one needs the noun `captures`, the other needs the verb before the number
 // (codex P1 round 10). Same mistake as the reduced-passive trap claim: the
 // count guard was only looking at one word order.
-const CAUGHT_PASSIVE_CLAIM_RE = /\b(\d+)(?:\s+[a-z-]+){0,2}?\s+(?:rats?|mice|mouse|rodents?|animals?)\b[^.!?]{0,30}?\b(?:caught|captured|removed)\b/gi;
+const CAUGHT_PASSIVE_CLAIM_RE = new RegExp(
+  `\\b(\\d+)${ANIMAL_MODIFIER_RUN}\\s+(?:rats?|mice|mouse|rodents?|animals?)\\b[^.!?]{0,30}?\\b(?:caught|captured|removed)\\b`,
+  'gi',
+);
 
 // Cues that mark a trap count as a SUBSET of the roster carrying some
 // status, rather than a claim about how many traps there are. "We checked 8
@@ -2587,9 +2631,13 @@ function setupContradictions(text) {
     // The whole clause is judged; the future exemption is applied to the
     // matched VERB rather than to a span of text (see futureGovernsVerb).
     const judged = clause;
-    const hit = activeRecheckOnTrap(judged) || passiveRecheckOnTrap(judged);
-    if (hit && !futureGovernsVerb(hit.toks, hit.verbAt)) {
-      found.push(`setup_recheck_claim:${hit.text.toLowerCase()}`);
+    // EVERY hit is exempted individually — a future-governed first hit
+    // must not mask a completed claim after it (codex P1 r20). One entry
+    // per clause keeps the caller's shape.
+    const hits = [...activeRecheckOnTrap(judged), ...passiveRecheckOnTrap(judged)];
+    const claim = hits.find((hit) => !futureGovernsVerb(hit.toks, hit.verbAt));
+    if (claim) {
+      found.push(`setup_recheck_claim:${claim.text.toLowerCase()}`);
     }
     // The noun forms run per clause under the SAME intent guard as the verb
     // scans. Whole-string matching left them exposed to the tense hole the
@@ -2605,9 +2653,16 @@ function setupContradictions(text) {
     }
   }
   for (const rx of SETUP_EMPTY_CAPTURE_RES) {
-    const match = str.match(rx);
-    if (match && !emptyCaptureExempt(str, match.index)) {
-      found.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
+    // EVERY occurrence is judged — an exempt conditional first match must
+    // not mask a completed claim later in the text ("If no captures are
+    // recorded at the next check, we will adjust. No captures were
+    // recorded today." — codex P1 r20).
+    const global = new RegExp(rx.source, rx.flags.includes('g') ? rx.flags : `${rx.flags}g`);
+    let match;
+    while ((match = global.exec(str)) !== null) {
+      if (!emptyCaptureExempt(str, match.index)) {
+        found.push(`setup_empty_capture_claim:${match[0].trim().toLowerCase()}`);
+      }
     }
   }
   return found;

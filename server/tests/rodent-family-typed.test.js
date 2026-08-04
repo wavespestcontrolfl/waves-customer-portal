@@ -1939,6 +1939,55 @@ describe('empty-capture claims under conditional or future intent (round 19)', (
   });
 });
 
+// Round 20 (codex P1 ×3): first-match-wins scans let an EXEMPT match mask
+// a completed claim after it, and the fixed {0,2} animal-modifier caps
+// missed longer capture claims entirely.
+describe('exempt matches do not mask later completed claims (round 20)', () => {
+  const { setupContradictions } = require('../services/service-report/activity-indicators');
+
+  test.each([
+    // conditional first occurrence, completed claim second
+    'If no captures are recorded at the next check, we will adjust placements. No captures were recorded today.',
+    // future-governed verb hit first, completed relative-clause claim after
+    'We will check the traps next week that we inspected today.',
+  ])('rejects: %s', (text) => {
+    expect(setupContradictions(text).length).toBeGreaterThan(0);
+  });
+
+  test.each([
+    'If no captures are recorded at the next check, we will adjust the placements.',
+    'We will return to check the traps in one week.',
+    // relative-clause binding is CHECK-family only: provenance prose stays legal
+    'We set the traps that were moved from the garage.',
+    // subordinators with their own subject still terminate (round-15 rule)
+    'We set traps once the crawlspace was checked.',
+  ])('allows: %s', (text) => {
+    expect(setupContradictions(text)).toEqual([]);
+  });
+});
+
+describe('capture claims with long animal descriptions reconcile (round 20)', () => {
+  const { countContradictions } = require('../services/service-report/activity-indicators');
+
+  test('modifier runs no longer hide a stale capture count', () => {
+    expect(countContradictions('We caught 2 large adult roof rats today.', { captures: 1 }).length)
+      .toBeGreaterThan(0);
+    expect(countContradictions('Two large adult roof rats were caught.', { captures: 1 }).length)
+      .toBeGreaterThan(0);
+    // agreeing counts still pass
+    expect(countContradictions('We caught 2 large adult roof rats today.', { captures: 2 }))
+      .toEqual([]);
+  });
+
+  test('the partitive object stays a claim, and rival nouns still terminate', () => {
+    expect(countContradictions('We removed 2 of the rats.', { captures: 1 }).length)
+      .toBeGreaterThan(0);
+    // "2 ... traps" must not reach a later animal noun
+    expect(countContradictions('We checked 2 traps where rats were caught.', { captures: 1 }))
+      .toEqual([]);
+  });
+});
+
 // Pre-push audit on 42406f3: examine and test are plain synonyms of
 // check/inspect — a report saying the traps were examined or tested
 // presupposes traps to examine, exactly as bare check/inspect do — but
