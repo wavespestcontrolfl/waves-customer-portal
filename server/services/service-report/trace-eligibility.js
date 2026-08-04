@@ -42,8 +42,11 @@ const FINDINGS_TYPE_RULES = {
   },
   // Flea joins the evidence-conditional lanes (codex P1 r5): interior-only
   // and inspection-only completions are first-class choices on its form.
+  // OUTLINE geometry (codex P1 r9): the active flea_tick service is a
+  // full-yard broadcast (interior as add-on) and the form records "Lawn
+  // treatment" — the treated area is the yard, not the building line.
   flea: {
-    eligible: true, variant: 'spray', captionKey: 'sprayPerimeter', requiresExteriorChip: true,
+    eligible: true, variant: 'outline', captionKey: 'lawnCoverage', requiresExteriorChip: true,
   },
   // The roach family is CONDITIONAL (codex P1 r3+r4): exterior perimeter
   // treatment is an optional chip on these forms — a German-species
@@ -214,12 +217,13 @@ function recordedExteriorWork(typedValues) {
 }
 
 // Applied-work test for requiresAppliedWork rules: any recorded treatment
-// chip beyond the NON-APPLICATION completions, across the three chip
-// fields the typed schemas use. "Source reduction" is mosquito's
-// non-chemical option — emptying water, flipping containers, moving items
-// under cover — real work, but not an application a satellite perimeter
-// can honestly depict (codex P1 r7).
-const NON_APPLIED_CHIP_RE = /^(?:inspection (?:only|completed)|source reduction)$/i;
+// chip that a satellite AREA TRACE can honestly depict, across the three
+// chip fields the typed schemas use. Excluded: the inspection labels;
+// "Source reduction" (emptying water / flipping containers — real work,
+// no application; codex P1 r7); and "Larvicide applied" (localized
+// application to water-holding areas — an application, but not one a
+// perimeter or area trace can substantiate; codex P1 r9).
+const NON_APPLIED_CHIP_RE = /^(?:inspection (?:only|completed)|source reduction|larvicide applied)$/i;
 function recordedAppliedWork(typedValues) {
   const recorded = ['treatment_completed', 'treatments_completed', 'work_completed']
     .map((key) => String(typedValues?.[key] ?? ''))

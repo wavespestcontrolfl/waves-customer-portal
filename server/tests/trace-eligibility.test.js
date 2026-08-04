@@ -155,7 +155,7 @@ describe('classification behavior', () => {
     expect(resolveTraceEligibility({
       findingsType: 'flea',
       typedValues: { treatment_completed: ['Exterior flea treatment', 'Growth regulator'] },
-    })).toMatchObject({ eligible: true });
+    })).toMatchObject({ eligible: true, variant: 'outline' }); // yard geometry (r9)
     expect(resolveTraceEligibility({
       findingsType: 'flea',
       typedValues: { treatment_completed: 'Lawn treatment, Pet resting area treatment' },
@@ -255,6 +255,17 @@ describe('classification behavior', () => {
       serviceKey: 'termite_cartridge_replacement',
       findingsType: 'termite_treatment',
     })).toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+  });
+
+  test('larvicide-only mosquito visits cannot substantiate a perimeter trace (round 9)', () => {
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Larvicide applied'] },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Larvicide applied', 'Barrier treatment'] },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
   });
 
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {

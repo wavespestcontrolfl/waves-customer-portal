@@ -182,12 +182,24 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
           (owner 2026-07-21; short intro line owner 2026-07-30). */}
       {tracedMap ? (
         <div style={{ marginTop: 14 }}>
-          <div data-gt="eyebrow" style={eyebrow}>Where we sprayed</div>
+          {/* The server's eligibility variant rides on the traced payload
+              (GATE_TRACE_ELIGIBILITY): outline lanes (fire ant, flea —
+              yard-geometry treatments) must not carry the spray-perimeter
+              heading, copy, or mist animation (codex P1 r9). Absent
+              variant (older payloads, gate off) keeps the spray copy. */}
+          <div data-gt="eyebrow" style={eyebrow}>
+            {tracedMap.variant === 'outline' ? 'Where we treated' : 'Where we sprayed'}
+          </div>
           <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '6px 0 10px' }}>
-            A replay of today&rsquo;s application — the blue band traces the treatment
-            your technician applied on-site.
+            {tracedMap.variant === 'outline'
+              ? 'Today’s treated area — the highlighted zone outlines the coverage your technician marked on-site.'
+              : 'A replay of today’s application — the blue band traces the treatment your technician applied on-site.'}
           </p>
-          <TracedTreatmentZoneMap traced={tracedMap} live={tracedLive} />
+          <TracedTreatmentZoneMap
+            traced={tracedMap}
+            live={tracedLive}
+            variant={tracedMap.variant || 'spray'}
+          />
         </div>
       ) : null}
     </section>
