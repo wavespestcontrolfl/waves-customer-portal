@@ -4916,6 +4916,13 @@ function priceOneTimeLawn(property, options = {}) {
     service: 'one_time_lawn',
     price,
     treatmentType: normalizedTreatment,
+    // The track the underlying lawn pricer ACTUALLY priced (its grass
+    // normalizer silently coerces unknown tracks to the St. Augustine
+    // table). classifyLane compares this against the intent's requested
+    // track so a coerced one-time-only quote parks yellow like the
+    // recurring line does.
+    track: lawnResult.track,
+    grassType: lawnResult.grassType,
     urgency,
     afterHours,
     isRecurringCustomer,

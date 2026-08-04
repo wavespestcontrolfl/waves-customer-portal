@@ -545,6 +545,15 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (intentLawnTrack && lawnLine?.track && lawnLine.track !== intentLawnTrack) {
     reasons.push(`caller's grass track '${intentLawnTrack}' is not in the pricing vocabulary — priced on the ${lawnLine.grassType || lawnLine.track} table; verify program fit before send`);
   }
+  // One-time lawn prices through the same coercing normalizer, and a
+  // one-time-only intent has no recurring lawn line for the guard above to
+  // catch — without this check a paspalum one-time quote green-laned on the
+  // St. Augustine table.
+  const intentOneTimeLawnTrack = intent.services?.oneTimeLawn?.track;
+  const oneTimeLawnLine = lines.find((l) => l.service === 'one_time_lawn');
+  if (intentOneTimeLawnTrack && oneTimeLawnLine?.track && oneTimeLawnLine.track !== intentOneTimeLawnTrack) {
+    reasons.push(`caller's grass track '${intentOneTimeLawnTrack}' is not in the pricing vocabulary — priced on the ${oneTimeLawnLine.grassType || oneTimeLawnLine.track} table; verify program fit before send`);
+  }
   if ((intent.constraint_flags || []).length) {
     reasons.push(`constraints the engine can't express: ${intent.constraint_flags.map((f) => f.flag).join(', ')}`);
   }

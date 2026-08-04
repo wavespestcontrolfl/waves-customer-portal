@@ -257,6 +257,11 @@ const ONE_TIME_SERVICE_KEYS = new Set([
   'flea',
 ]);
 
+// Recurring program keys whose billing cadence is not monthly. Palm
+// nutrition is one application per year — a monthly-stamped scaffold row
+// would 12× annualize whatever per-occurrence price the operator fills in.
+const SERVICE_CADENCE_OVERRIDES = { palm: 'annual' };
+
 function serviceLabel(key) {
   return SERVICE_LABELS[key] || (key.charAt(0).toUpperCase() + key.slice(1));
 }
@@ -291,7 +296,9 @@ function buildProposalScaffold({ intent, facts }) {
 
   const programs = Object.keys(intent.services || {}).map((key) => ({
     name: ONE_TIME_SERVICE_KEYS.has(key) ? serviceLabel(key) : `${serviceLabel(key)} program`,
-    cadence: ONE_TIME_SERVICE_KEYS.has(key) ? 'one_time' : 'monthly',
+    cadence: ONE_TIME_SERVICE_KEYS.has(key)
+      ? 'one_time'
+      : (SERVICE_CADENCE_OVERRIDES[key] || 'monthly'),
     scope: 'scope and pricing after walkthrough',
   }));
   const lineItems = (programs.length ? programs : [{

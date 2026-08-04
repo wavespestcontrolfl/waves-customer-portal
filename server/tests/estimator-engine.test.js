@@ -976,6 +976,17 @@ describe('review fixes', () => {
     expect(bareLine).toBeTruthy();
     expect(loadedLine).toBeTruthy();
     expect(loadedLine.total).toBeGreaterThan(bareLine.total);
+    // oneTimeLawn: the priced line carries the track the lawn pricer
+    // actually used — the coercion guard in classifyLane reads it, so this
+    // passthrough is what keeps a coerced paspalum one-off out of green.
+    const oneTimeLawnResult = generateEstimate(buildEngineInput({
+      intent: { ...baseIntent(), services: { oneTimeLawn: { treatmentType: 'weed', track: 'paspalum' } } },
+      propertyFacts: factsFixture(),
+      context: {},
+    }));
+    const otLawnLine = (oneTimeLawnResult.lineItems || []).find((l) => l.service === 'one_time_lawn');
+    expect(otLawnLine).toBeTruthy();
+    expect(otLawnLine.track).toBe('st_augustine'); // coerced — differs from the intent's paspalum
   });
 
   test('structural lookup facts and the graduated water multiplier reach the engine input', () => {

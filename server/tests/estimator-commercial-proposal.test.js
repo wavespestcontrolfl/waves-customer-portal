@@ -282,8 +282,9 @@ describe('maybeBuildCommercialProposalDraft', () => {
     // priceFlea bills one_time (knockdown/two-visit package) — pre-existing
     // mislabel: the scaffold stamped it monthly before this set included it.
     expect(byDesc['Flea & tick — scope and pricing after walkthrough']).toBe('one_time');
-    // Palm nutrition injection is a recurring annual program.
-    expect(byDesc['Palm nutrition injection program — scope and pricing after walkthrough']).toBe('monthly');
+    // Palm nutrition is one application per year — a monthly-stamped row
+    // would 12× annualize the operator's per-occurrence price.
+    expect(byDesc['Palm nutrition injection program — scope and pricing after walkthrough']).toBe('annual');
   });
 
   test('a dollar figure ANYWHERE in the brief rejects the whole brief (scaffold survives)', async () => {
