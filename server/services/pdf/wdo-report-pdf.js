@@ -377,111 +377,94 @@ function splitInaccessibleAreas(value) {
     if (!piece) return;
     rows[key] = rows[key] ? `${rows[key]}${joiner}${piece}` : piece;
   };
+  const appendAll = (keys, chunk, joiner) => keys.forEach((k) => append(k, chunk, joiner));
 
-  // NOTE: only ever called on a preamble or an UNLABELLED clause — never on the
-  // body of an explicit label. That is what keeps "Attic: inaccessible at
+  // NOTE: only ever called on a preamble or an UNLABELLED segment — never on
+  // the body of an explicit label. That is what keeps "Attic: inaccessible at
   // exterior-facing eaves" from ticking Exterior: the body never reaches here.
-  // So a hyphenated form IS a real classification signal in this context
-  // ("Exterior-facing eaves were inaccessible" is an Exterior limitation) and
-  // must not be suppressed.
   const categoriesMentionedIn = (chunk) => {
     const lower = chunk.toLowerCase();
-    return INACCESSIBLE_ROWS.filter((row) => (
-      row.key === 'crawlspace'
+    return INACCESSIBLE_ROWS
+      .filter((row) => (row.key === 'crawlspace'
         ? /\bcrawl[-\s]?spaces?\b|\bcrawl\b/i.test(lower)
-        : new RegExp(String.raw`\b${row.key}\w*\b`, 'i').test(lower)
-    ));
+        : new RegExp(String.raw`\b${row.key}\w*\b`, 'i').test(lower)))
+      .map((row) => row.key);
   };
 
-  // Line by line, then clause by clause within a line. The blob is built by
-  // appending whole lines (the property-intelligence emitter) and by a tech
-  // typing prose, and a semicolon starts a new claim inside a line.
-  // The row the previous clause spoke about, so an unlabelled clause naming no
-  // category reads as a CONTINUATION of it ("Crawlspace: skirting was closed;
-  // the area beneath was not inspected") rather than a new area. It carries
-  // ACROSS lines too — a tech wrapping one reason onto a second line is still
-  // describing the same row. A line that is labelled, or that names a
-  // category, overrides it.
-  let lastKey = null;
+  // A limitation is delimited by a semicolon OR an ordinary sentence period —
+  // techs write both ("Attic: insulation. Interior and exterior were blocked").
+  // The period lookbehind refuses a digit so a decimal like ".5-inch" is never
+  // a boundary.
+  const segmentsOf = (line) => {
+    const out = [];
+    line.split(';').forEach((clause, ci) => {
+      clause.split(/(?<=[^\d]\.)\s+(?=[A-Za-z])/).forEach((sentence, si) => {
+        const t = sentence.trim();
+        // Only the first sentence of a semicolon clause rejoins with "; ";
+        // sentence and line-wrap continuations rejoin with a plain space.
+        if (t) out.push({ text: t, joiner: ci > 0 && si === 0 ? '; ' : ' ' });
+      });
+    });
+    return out;
+  };
+
+  // The rows the previous segment spoke about, so an unlabelled segment naming
+  // no category reads as a CONTINUATION of them. A grouped label keeps ALL its
+  // rows active, or a continuation would land on only the last one.
+  let lastKeys = [];
 
   for (const rawLine of text.split('\n')) {
     const line = rawLine.trim();
-    // A blank line is a paragraph boundary between separate entries — the next
-    // one is a new limitation, not a continuation of the last row.
-    if (!line) { lastKey = null; continue; }
+    // A blank line is a paragraph boundary between separate entries.
+    if (!line) { lastKeys = []; continue; }
 
-    const clauses = line.split(';');
-    for (let ci = 0; ci < clauses.length; ci += 1) {
-      const clause = clauses[ci].trim();
-      if (!clause) continue;
-      // A semicolon-split clause rejoins with its semicolon; a wrapped LINE
-      // (ci === 0) is mid-sentence and rejoins with a plain space.
-      const contJoiner = ci === 0 ? ' ' : '; ';
+    // Uncategorised text seen before this line's first label — held so
+    // "Not inspected. Interior: wall voids." keeps its lead-in on the
+    // Interior row instead of opening an Other row.
+    let pending = '';
 
+    for (const seg of segmentsOf(line)) {
       INACCESSIBLE_LABEL_PATTERN.lastIndex = 0;
       const marks = [];
       let m;
-      while ((m = INACCESSIBLE_LABEL_PATTERN.exec(clause)) !== null) {
+      while ((m = INACCESSIBLE_LABEL_PATTERN.exec(seg.text)) !== null) {
         // m[1] = line-anchored form, m[2] = inline form (see the pattern above).
         marks.push({ keys: inaccessibleRowKeysFor(m[1] || m[2]), start: m.index, bodyStart: m.index + m[0].length });
       }
 
       if (marks.length) {
-        // Text before the first label continues the PREVIOUS clause's row when
-        // there is one ("Crawlspace: skirting closed; the area beneath was not
-        // inspected. Interior: ..." — that middle sentence is crawlspace, not
-        // interior). With no previous row it attaches to the first label rather
-        // than being dropped.
-        const preamble = clause.slice(0, marks[0].start);
+        const preamble = `${pending ? `${pending} ` : ''}${seg.text.slice(0, marks[0].start)}`;
         if (preamble.trim()) {
-          // A preamble that NAMES categories is a list, not stray text — the
-          // repo's own placeholder is exactly this shape ("Attic, interior,
-          // exterior, crawlspace, other: specific areas and reasons"), where
-          // only the final "other:" is an explicit label. Routing it to that
-          // label alone would leave the four named categories unticked.
-          const named = categoriesMentionedIn(preamble);
-          if (named.length) {
-            // List shape: "Attic, interior, exterior, crawlspace, other: blocked
-            // by stored goods". The categories are the LIST and the text after
-            // the label is the shared REASON — so each listed row gets the
-            // reason. Writing the name list into those rows would tick four
-            // boxes whose FDACS rows state no limitation at all.
-            const reason = clause.slice(marks[0].bodyStart).trim();
-            const markKeys = new Set(marks.flatMap((mk) => mk.keys));
-            for (const hit of named) {
-              if (markKeys.has(hit.key)) continue; // the marks loop fills these
-              append(hit.key, reason || preamble);
-            }
-          } else {
-            append(lastKey || marks[0].keys[0], preamble, lastKey ? contJoiner : ' ');
-          }
+          if (lastKeys.length) appendAll(lastKeys, preamble, seg.joiner);
+          else appendAll(marks[0].keys, preamble);
         }
+        pending = '';
         marks.forEach((mark, i) => {
-          const end = i + 1 < marks.length ? marks[i + 1].start : clause.length;
-          const body = clause.slice(mark.bodyStart, end);
-          for (const key of mark.keys) append(key, body);
+          const end = i + 1 < marks.length ? marks[i + 1].start : seg.text.length;
+          appendAll(mark.keys, seg.text.slice(mark.bodyStart, end));
         });
-        const lastGroup = marks[marks.length - 1].keys;
-        lastKey = lastGroup[lastGroup.length - 1];
+        lastKeys = marks[marks.length - 1].keys;
         continue;
       }
 
-      // Unlabelled clause. If it NAMES categories it is a shared statement and
-      // must tick every one of them — the checkbox matcher this replaced did,
-      // and quietly dropping one removes a disclosed inspection limitation
-      // from a signed FDACS filing.
-      const hits = categoriesMentionedIn(clause);
+      // Unlabelled. If it NAMES categories it is a shared statement and must
+      // tick every one — quietly dropping one removes a disclosed inspection
+      // limitation from a signed FDACS filing.
+      const hits = categoriesMentionedIn(seg.text);
       if (hits.length) {
-        for (const hit of hits) append(hit.key, clause);
-        lastKey = hits[hits.length - 1].key;
-      } else if (lastKey) {
-        // One sentence continuing — keep the semicolon that split it, or a
-        // plain space when the break was a line wrap.
-        append(lastKey, clause, contJoiner);
+        appendAll(hits, seg.text);
+        lastKeys = hits;
+        pending = '';
+      } else if (lastKeys.length) {
+        appendAll(lastKeys, seg.text, seg.joiner);
       } else {
-        append('other', clause);
-        lastKey = 'other';
+        pending = pending ? `${pending} ${seg.text}` : seg.text;
       }
+    }
+
+    if (pending.trim()) {
+      append('other', pending);
+      lastKeys = ['other'];
     }
   }
 

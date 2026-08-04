@@ -637,3 +637,61 @@ describe('wdo-report-pdf Section 3 — grouped labels', () => {
     expect(rows.interior).toBe('Interior and exterior were blocked by stored goods');
   });
 });
+
+// Codex #3188 round 7.
+describe('wdo-report-pdf Section 3 — sentence delimiters and grouped continuations', () => {
+  const { splitInaccessibleAreas } = _private;
+
+  // P1: a limitation is delimited by an ordinary sentence period too, not only
+  // by a semicolon.
+  test('a period-delimited category claim routes independently', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Attic: insulation. Interior and exterior were blocked by stored goods'
+    );
+    expect([...ticked].sort()).toEqual(['attic', 'exterior', 'interior']);
+    expect(rows.attic).toBe('insulation.');
+    expect(rows.interior).toBe('Interior and exterior were blocked by stored goods');
+    expect(rows.exterior).toBe('Interior and exterior were blocked by stored goods');
+  });
+
+  // P2: a grouped label keeps ALL its rows active for continuations.
+  test('a continuation after a grouped label reaches every row in the group', () => {
+    const { rows } = splitInaccessibleAreas(
+      'Interior and exterior: blocked by stored goods; shelving prevented access'
+    );
+    expect(rows.interior).toBe('blocked by stored goods; shelving prevented access');
+    expect(rows.exterior).toBe('blocked by stored goods; shelving prevented access');
+  });
+
+  test('a wrapped-line continuation also reaches every row in the group', () => {
+    const { rows } = splitInaccessibleAreas('Interior and exterior: blocked by stored goods\nand shelving');
+    expect(rows.interior).toBe('blocked by stored goods and shelving');
+    expect(rows.exterior).toBe('blocked by stored goods and shelving');
+  });
+
+  // The sentence splitter must never treat a decimal point as a boundary.
+  test('a decimal point is not a sentence boundary', () => {
+    const { rows } = splitInaccessibleAreas('Interior: .5-inch opening was inaccessible');
+    expect(rows.interior).toBe('.5-inch opening was inaccessible');
+    expect(rows.other).toBeUndefined();
+  });
+
+  test('a lead-in sentence still attaches to the first label on its line', () => {
+    const { rows, ticked } = splitInaccessibleAreas('Not inspected. Interior: wall voids.');
+    expect([...ticked]).toEqual(['interior']);
+    expect(rows.interior).toBe('Not inspected. wall voids.');
+  });
+
+  // The real inspection text this branch exists for.
+  test('a full real-world Section 3 entry routes to three distinct rows', () => {
+    const { rows, ticked } = splitInaccessibleAreas(
+      'Crawlspace: skirting was closed at the time of inspection; the area beneath was not inspected. '
+      + 'Interior: wall and ceiling voids. Exterior: soffit and fascia wrap.'
+    );
+    expect([...ticked].sort()).toEqual(['crawlspace', 'exterior', 'interior']);
+    expect(rows.crawlspace).toBe('skirting was closed at the time of inspection; the area beneath was not inspected.');
+    expect(rows.interior).toBe('wall and ceiling voids.');
+    expect(rows.exterior).toBe('soffit and fascia wrap.');
+    expect(rows.attic).toBeUndefined();
+  });
+});
