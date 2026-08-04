@@ -18,7 +18,9 @@ retired the trees_light -$5 modifier, which effectively raised light-tree
 `pricing_changelog` entry). Local baselines recaptured
 (`CAPTURE_BASELINE=1 LOCAL=1`) for both regression suites; every pest case
 moved -$5/visit (and one-time pest -$11 at baseline via the 2.2x anchor).
-The DB baselines (`*.baseline.json`) remain pending post-deploy recapture.
+The DB baselines (`*.baseline.json`) were recaptured 2026-08-04 against the
+live prod pricing config (post-#3182-deploy; both suites green in diff
+mode against the same config).
 Side effect pinned in `pricing-engine-pest-margin-guard.test.js`: at the
 112 base a typical-home one-time with the recurring-customer perk now
 lands under recurring visit-1, so the designed clamp engages ($212).
