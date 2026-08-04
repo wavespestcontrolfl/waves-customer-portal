@@ -101,7 +101,14 @@ const SERVICE_KEY_RULES = {
   pest_initial_cleanout: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   // Broadcast bait + mound drench priced by LAWN square footage (codex P1
   // r6) — the treated geometry is the yard, not the building perimeter.
-  fire_ant: { eligible: true, variant: 'outline', captionKey: 'lawnCoverage' },
+  // overridesSnapshot (codex P1 r8): visits completed before the pest
+  // un-type migration carry a generic one_time_pest_treatment snapshot
+  // whose 'spray' variant would repaint the saved lawn trace as a
+  // building perimeter — this key's geometry is more specific than that
+  // retired generic pointer.
+  fire_ant: {
+    eligible: true, variant: 'outline', captionKey: 'lawnCoverage', overridesSnapshot: true,
+  },
   tick_control: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
   // Individual-nest removal with localized residual on eaves/soffits —
   // never a property-perimeter application (codex P1 r6).
@@ -141,6 +148,12 @@ const SERVICE_KEY_RULES = {
   // bait as a companion, so its permanent reports keep their legitimate
   // spray maps.
   pest_rodent_quarterly: { eligible: true, variant: 'spray', captionKey: 'sprayPerimeter' },
+  // Legacy station keys repointed to termite_bait_station by the typed
+  // bait-station cutover — reports completed BEFORE it retain the old
+  // eligible termite_treatment snapshot, and only an explicit ineligible
+  // KEY rule overrides that stale pointer (codex P1 r8).
+  termite_installation_setup: { eligible: false, reason: 'bait_station_lane' },
+  termite_cartridge_replacement: { eligible: false, reason: 'bait_station_lane' },
   // never lanes
   bed_bug_treatment: { eligible: false, reason: 'interior_only_lane' },
   termite_slab_pretreat: { eligible: false, reason: 'compliance_project_lane' },
@@ -254,6 +267,13 @@ function resolveTraceEligibility({
   const keyRule = serviceKey ? SERVICE_KEY_RULES[serviceKey] : null;
   if (findingsRule && !findingsRule.eligible) return verdict(findingsRule, 'findings_type');
   if (keyRule && !keyRule.eligible) return verdict(keyRule, 'service_key');
+  // Among ELIGIBLE rules the findingsType normally wins (it carries the
+  // conditional semantics) — except keys marked overridesSnapshot, whose
+  // geometry is more specific than a retired generic pointer (codex P1
+  // r8: pre-untype fire_ant snapshots say one_time_pest_treatment).
+  if (keyRule && keyRule.eligible && keyRule.overridesSnapshot) {
+    return applyConditions(keyRule, 'service_key');
+  }
   if (findingsRule) return applyConditions(findingsRule, 'findings_type');
   if (keyRule) return applyConditions(keyRule, 'service_key');
   // A SUPPLIED stable identity that missed both registries fails CLOSED —

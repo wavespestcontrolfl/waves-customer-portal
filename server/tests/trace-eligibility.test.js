@@ -229,6 +229,34 @@ describe('classification behavior', () => {
       .toMatchObject({ eligible: true, variant: 'spray' });
   });
 
+  test('stale historical snapshots do not defeat key-specific semantics (round 8)', () => {
+    // fire_ant completed pre-untype carries a one_time_pest_treatment
+    // snapshot — the key's LAWN geometry overrides that retired generic
+    // pointer (overridesSnapshot)
+    expect(resolveTraceEligibility({
+      serviceKey: 'fire_ant',
+      findingsType: 'one_time_pest_treatment',
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+    // …but a key WITHOUT the override never steals conditional semantics
+    // from its typed pointer: an inspection-only T&S combo still suppresses
+    expect(resolveTraceEligibility({
+      serviceKey: 'lawn_tree_shrub_combo',
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: 'Inspection only' },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    // legacy station keys repointed by the bait-station cutover: the
+    // explicit ineligible KEY rule overrides the old termite_treatment
+    // snapshot
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_installation_setup',
+      findingsType: 'termite_treatment',
+    })).toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_cartridge_replacement',
+      findingsType: 'termite_treatment',
+    })).toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+  });
+
   test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
     for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
       expect(resolveTraceEligibility({ displayName }))
