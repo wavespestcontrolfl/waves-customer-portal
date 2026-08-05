@@ -280,7 +280,7 @@ async function submitRecap({
     const locked = await trx('scheduled_services')
       .where({ id: serviceId })
       .forUpdate()
-      .first('id', 'status', 'scheduled_date');
+      .first('id', 'status', 'scheduled_date', 'service_id', 'service_type');
     // Re-read status under the lock — svc.status was read before the lock
     // and may be stale once a concurrent submit has completed the visit.
     const lockedStatus = locked ? locked.status : svc.status;
@@ -320,7 +320,7 @@ async function submitRecap({
     const existing = await trx('service_records')
       .where({ scheduled_service_id: serviceId })
       .orderBy('created_at', 'desc')
-      .first('id', 'status', 'recap_sms_sent_at', 'structured_notes');
+      .first('id', 'status', 'recap_sms_sent_at', 'structured_notes', 'service_data');
 
     // At-most-once recap text: claim recap_sms_sent_at here, inside the
     // lock. If a prior submit already sent (column set), this one skips —
@@ -359,10 +359,74 @@ async function submitRecap({
     willSendSms = wantSms && !alreadyTexted;
     const smsClaim = willSendSms ? { recap_sms_sent_at: new Date() } : {};
 
+    // Trace-identity freeze, same as the full /complete handler (codex
+    // P2 on #3189): this lightweight path also completes permanent report
+    // records, and without the frozen identities a later update-details
+    // edit would re-resolve the mutable schedule rows. Computed for BOTH
+    // branches (codex P2 r19): a recap that completes a pre-existing
+    // draft/legacy record must freeze too, merging only when the fields
+    // are absent so an earlier full completion's freeze is never
+    // overwritten. Fail-soft — a lookup error omits the fields.
+    let frozenTraceIdentity = {};
+    try {
+      const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+      // Resolve from the LOCKED row's identity (codex P2 r20): an
+      // update-details transaction can repoint service_id/service_type
+      // between the pre-lock read and this lock — the freeze must record
+      // the service that is actually completing.
+      const lockedIdentity = locked
+        ? { id: serviceId, service_id: locked.service_id, service_type: locked.service_type }
+        : svc;
+      const recapProfile = await resolveCompletionProfileForScheduledService(lockedIdentity, trx);
+      // Lines freeze their key + findings pointer too (codex P2 r21) —
+      // shared freezer, same fail-soft posture as the /complete path.
+      const { frozenAddonLinesForCompletion } = require('./service-report/trace-eligibility');
+      const recapAddonLines = await frozenAddonLinesForCompletion(serviceId, trx).catch(() => null);
+      // The freeze must be SAFE for the key's classification family —
+      // typed and pointer-required keys stay live-resolvable without
+      // their pointer, same as the /complete path (codex P2 r28/r29).
+      const { primaryIdentityFreezable } = require('./service-report/trace-eligibility');
+      frozenTraceIdentity = {
+        ...(!primaryIdentityFreezable(recapProfile || {})
+          ? {}
+          : {
+            completedServiceKey: recapProfile?.serviceKey || null,
+            completedServiceName: (locked ? locked.service_type : svc.service_type) || null,
+          }),
+        ...(Array.isArray(recapAddonLines)
+          ? { completedAddonLines: recapAddonLines }
+          : {}),
+      };
+    } catch { /* legacy live-row behavior */ }
+
     if (existing) {
+      let mergedServiceData;
+      try {
+        const existingData = typeof existing.service_data === 'string'
+          ? JSON.parse(existing.service_data || '{}')
+          : (existing.service_data || {});
+        // Fields merge INDEPENDENTLY (codex P2 r28): a /complete whose
+        // add-on freezer transiently failed leaves completedServiceKey
+        // present but completedAddonLines absent — the recap fills only
+        // what is missing, never overwriting an existing freeze.
+        const missing = {};
+        if (!Object.prototype.hasOwnProperty.call(existingData, 'completedServiceKey')
+          && Object.prototype.hasOwnProperty.call(frozenTraceIdentity, 'completedServiceKey')) {
+          missing.completedServiceKey = frozenTraceIdentity.completedServiceKey;
+          missing.completedServiceName = frozenTraceIdentity.completedServiceName;
+        }
+        if (!Object.prototype.hasOwnProperty.call(existingData, 'completedAddonLines')
+          && Object.prototype.hasOwnProperty.call(frozenTraceIdentity, 'completedAddonLines')) {
+          missing.completedAddonLines = frozenTraceIdentity.completedAddonLines;
+        }
+        if (Object.keys(missing).length) {
+          mergedServiceData = JSON.stringify({ ...existingData, ...missing });
+        }
+      } catch { /* leave service_data untouched */ }
       await trx('service_records').where({ id: existing.id }).update({
         technician_notes: note || null,
         status: 'completed',
+        ...(mergedServiceData ? { service_data: mergedServiceData } : {}),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,
         updated_at: new Date(),
@@ -377,6 +441,9 @@ async function submitRecap({
         service_type: svc.service_type || 'Pest Control',
         status: 'completed',
         technician_notes: note || null,
+        ...(Object.keys(frozenTraceIdentity).length
+          ? { service_data: JSON.stringify(frozenTraceIdentity) }
+          : {}),
         ...(clientPestRating != null ? { client_pest_rating: clientPestRating } : {}),
         ...smsClaim,
         field_flags: JSON.stringify({ recap: true, recap_source: actorType || 'admin' }),

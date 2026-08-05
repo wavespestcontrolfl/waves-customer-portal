@@ -1658,7 +1658,10 @@ async function loadAddonsByServiceId(serviceIds) {
   try {
     const rows = await db('scheduled_service_addons')
       .whereIn('scheduled_service_id', ids)
-      .orderBy('created_at', 'asc');
+      // id tiebreaker: same-transaction lines share created_at, and the
+      // FIRST eligible add-on picks the trace variant (codex P2 r24)
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc');
     const map = new Map();
     for (const row of rows) {
       const key = row.scheduled_service_id;
@@ -1716,13 +1719,19 @@ async function loadProjectCompletionContextByServiceId(services) {
   const rows = Array.isArray(services) ? services : [];
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const entries = await Promise.all(rows.map(async (service) => {
+    let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
       .catch((e) => {
         logger.warn(`[schedule] completion profile lookup failed for ${service.id}: ${e.message}`);
+        completionProfileLookupFailed = true;
         return null;
       });
     return [service.id, {
       completionProfile,
+      // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
+      // fails open on this flag — the write path catches the same
+      // failure and fails open, so the feed must not hide the mapper.
+      completionProfileLookupFailed,
       // Typed-findings schema embedded alongside the profile so the
       // CompletionPanel (fed by this endpoint on desktop AND mobile) can
       // render the typed form without a registry round-trip. Null for
@@ -1923,6 +1932,57 @@ router.get('/', async (req, res, next) => {
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
+    // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
+    // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
+    // in ONE batch query; gate off keeps every row eligible so the UI is
+    // unchanged. This is a UI affordance only — the tech-track write route
+    // enforces the same registry with a 403, and the report render
+    // suppresses ineligible traces regardless.
+    const {
+      resolveTraceEligibility: rowTraceEligibility,
+      combineLineVerdicts: combineRowVerdicts,
+      traceEligibilityGateOn,
+    } = require('../services/service-report/trace-eligibility');
+    let serviceKeyByServiceId = new Map();
+    let dayPointerByKey = new Map();
+    // Pointer OUTAGE ≠ no pointer rows (codex P2 r27): on failure the
+    // verdict is omitted (fail open, matching the write path's fail-open
+    // catch) instead of unclassifying typed add-ons. A CATALOG failure
+    // still fails closed via the unresolved sentinel — capture's own
+    // catalog rule (r18) rejects those ids the same way.
+    let dayPointerLookupFailed = false;
+    if (traceEligibilityGateOn()) {
+      // Primary AND add-on catalog ids in one batch — a grouped visit with
+      // an ineligible primary but a spray-capable add-on line still traces
+      // (codex P2 r11).
+      const catalogIds = [...new Set([
+        ...services.map((s) => s.service_id),
+        ...[...addonsByServiceId.values()].flat().map((a) => a.serviceId),
+      ].filter(Boolean))];
+      if (catalogIds.length) {
+        const catalogRows = await db('services')
+          .whereIn('id', catalogIds)
+          .select('id', 'service_key')
+          .catch(() => []);
+        serviceKeyByServiceId = new Map(catalogRows.map((r) => [r.id, r.service_key]));
+        // Typed add-on keys are absent from the key rules by design —
+        // resolve their pointers in one batch (codex P2 r12).
+        const addonOnlyKeys = [...new Set(
+          [...addonsByServiceId.values()].flat()
+            .map((a) => serviceKeyByServiceId.get(a.serviceId))
+            .filter(Boolean),
+        )];
+        if (addonOnlyKeys.length) {
+          const profileRows = await db('service_completion_profiles')
+            .whereIn('service_key', addonOnlyKeys)
+            .where({ active: true })
+            .select('service_key', 'project_type')
+            .catch(() => { dayPointerLookupFailed = true; return []; });
+          dayPointerByKey = new Map(profileRows.map((r) => [r.service_key, r.project_type]));
+        }
+      }
+    }
+
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -2076,9 +2136,45 @@ router.get('/', async (req, res, next) => {
         }),
       };
 
+      const rowTraceVerdict = traceEligibilityGateOn()
+        && !dayPointerLookupFailed
+        && !projectCompletionContext?.completionProfileLookupFailed
+        ? combineRowVerdicts(
+          rowTraceEligibility({
+            serviceKey: serviceKeyByServiceId.get(s.service_id)
+              || projectCompletionContext?.completionProfile?.serviceKey
+              || null,
+            findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
+            displayName: s.service_type || '',
+          }),
+          (addonsByServiceId.get(s.id) || []).map((addon) => {
+            // A LINKED add-on whose batched catalog lookup failed or
+            // omitted it fails closed via the unresolved sentinel — the
+            // save route's shared resolver rejects the same id, so name
+            // fallback here would show a tracer the save then 403s
+            // (codex P2 r24). Unlinked lines keep name fallback.
+            const addonKey = addon.serviceId
+              ? (serviceKeyByServiceId.get(addon.serviceId) || `unresolved:${addon.serviceId}`)
+              : null;
+            return rowTraceEligibility({
+              serviceKey: addonKey,
+              findingsType: (addonKey && dayPointerByKey.get(addonKey)) || null,
+              displayName: addon.serviceName || '',
+            });
+          }),
+        )
+        : null;
       return {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
+        // Verdict computed once per row; traceVariant drives the tracer's
+        // capture mode client-side (codex P2 r3: typed lawn visits must
+        // outline the lawn, not run the building-perimeter workflow).
+        // Unlinked rows (null service_id) fall back to the profile's
+        // resolved key (codex P2 r2), and typed keys classify by their
+        // findings pointer (codex P2 r1).
+        traceEligible: !rowTraceVerdict || rowTraceVerdict.eligible,
+        traceVariant: rowTraceVerdict?.eligible ? rowTraceVerdict.variant : null,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
@@ -2341,6 +2437,45 @@ router.get('/week', async (req, res, next) => {
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
       const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
       const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+      // Same trace-eligibility flag the day feed carries (codex P2 r2):
+      // the mobile Week view opens the shared CompletionPanel straight off
+      // these rows, so the tracer-gating verdict must ride here too. The
+      // resolved profile supplies both identities — no extra queries.
+      const {
+        resolveTraceEligibility: weekTraceEligibility,
+        combineLineVerdicts: weekCombineVerdicts,
+        traceEligibilityGateOn: weekTraceGateOn,
+      } = require('../services/service-report/trace-eligibility');
+      // Add-on lines resolve by CATALOG KEY + typed pointer, like the day
+      // feed — name-only classification gave fire_ant/flea_tick add-ons
+      // the fallback spray variant when their rules require lawn outline
+      // geometry, and the mapper workflow keys off this payload (codex P2
+      // r12). One batch for keys, one for typed pointers.
+      let weekKeyByCatalogId = new Map();
+      let weekPointerByKey = new Map();
+      // Same fail-open-on-outage rule as the day feed (codex P2 r27)
+      let weekPointerLookupFailed = false;
+      if (weekTraceGateOn()) {
+        const addonCatalogIds = [...new Set(
+          [...addonsByServiceId.values()].flat().map((a) => a.serviceId).filter(Boolean),
+        )];
+        if (addonCatalogIds.length) {
+          const catalogRows = await db('services')
+            .whereIn('id', addonCatalogIds)
+            .select('id', 'service_key')
+            .catch(() => []);
+          weekKeyByCatalogId = new Map(catalogRows.map((r) => [r.id, r.service_key]));
+          const addonKeys = [...new Set([...weekKeyByCatalogId.values()].filter(Boolean))];
+          if (addonKeys.length) {
+            const profileRows = await db('service_completion_profiles')
+              .whereIn('service_key', addonKeys)
+              .where({ active: true })
+              .select('service_key', 'project_type')
+              .catch(() => { weekPointerLookupFailed = true; return []; });
+            weekPointerByKey = new Map(profileRows.map((r) => [r.service_key, r.project_type]));
+          }
+        }
+      }
 
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
@@ -2464,6 +2599,34 @@ router.get('/week', async (req, res, next) => {
           // "Tree & Shrub Care", which would drop every lawn target.
           serviceTypeRaw: s.service_type,
           serviceCategory: detectServiceCategory(svcType),
+          ...(() => {
+            const v = weekTraceGateOn()
+              && !weekPointerLookupFailed
+              && !projectCompletionContext?.completionProfileLookupFailed
+              ? weekCombineVerdicts(
+                weekTraceEligibility({
+                  serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
+                  findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
+                  displayName: s.service_type || '',
+                }),
+                serviceAddons.map((addon) => {
+                  // Same unresolved-sentinel rule as the day feed (codex P2 r24)
+                  const addonKey = addon.serviceId
+                    ? (weekKeyByCatalogId.get(addon.serviceId) || `unresolved:${addon.serviceId}`)
+                    : null;
+                  return weekTraceEligibility({
+                    serviceKey: addonKey,
+                    findingsType: (addonKey && weekPointerByKey.get(addonKey)) || null,
+                    displayName: addon.serviceName || '',
+                  });
+                }),
+              )
+              : null;
+            return {
+              traceEligible: !v || v.eligible,
+              traceVariant: v?.eligible ? v.variant : null,
+            };
+          })(),
           status: s.status,
           techName: s.tech_name, zone: s.zone,
           tier: s.waveguard_tier,

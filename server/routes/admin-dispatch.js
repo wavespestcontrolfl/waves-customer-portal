@@ -2263,7 +2263,36 @@ router.get('/:date?', async (req, res, next) => {
         autopay_payment_method_id: s.autopay_payment_method_id,
         ach_status: s.ach_status,
       });
-      const completionProfile = await resolveCompletionProfileForScheduledService(s).catch(() => null);
+      let dispatchProfileLookupFailed = false;
+      const completionProfile = await resolveCompletionProfileForScheduledService(s)
+        .catch(() => { dispatchProfileLookupFailed = true; return null; });
+      // Trace verdict for the dispatch surface (codex P2 r24):
+      // CompletionPanel opened from DispatchPageV2 reads THIS feed, and
+      // the client treats an absent flag as eligible — without the
+      // verdict, gate-on dispatch completions still exposed the tracer
+      // on ineligible lanes (the save route then 403s) and ran outline
+      // lanes through the perimeter workflow into the capture-mode
+      // validator. Same shared helpers as the schedule feeds; fail-soft
+      // (absent flags = eligible; capture stays the fail-open surface).
+      let dispatchTraceVerdict = null;
+      try {
+        const {
+          resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts, traceEligibilityGateOn,
+        } = require('../services/service-report/trace-eligibility');
+        // A profile OUTAGE omits the verdict (fail open, codex P2 r28)
+        // instead of classifying a typed primary from its editable label
+        // — the save route catches the same outage and fails open.
+        if (traceEligibilityGateOn() && !dispatchProfileLookupFailed) {
+          dispatchTraceVerdict = combineLineVerdicts(
+            resolveTraceEligibility({
+              serviceKey: completionProfile?.serviceKey || null,
+              findingsType: completionProfile?.findingsType || null,
+              displayName: s.service_type || '',
+            }),
+            await resolveAddonVerdicts(s.id, db),
+          );
+        }
+      } catch { dispatchTraceVerdict = null; }
       // Only fan out the series-context lookup for visits that are actually
       // prepaid — most rows aren't, and we don't want N extra family-fetches
       // per day on the dispatch list.
@@ -2325,6 +2354,8 @@ router.get('/:date?', async (req, res, next) => {
         isCallback: !!s.is_callback,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
+        traceEligible: !dispatchTraceVerdict || dispatchTraceVerdict.eligible,
+        traceVariant: dispatchTraceVerdict?.eligible ? dispatchTraceVerdict.variant : null,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
@@ -6061,6 +6092,60 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               recommendations: reportRecommendations,
             },
           };
+          // Freeze the appointment's add-on line identities with the
+          // completion (codex P2 on #3189): schedule add-on rows are
+          // MUTABLE after completion (the update-details route replaces
+          // them), and the trace-eligibility render verdict must reflect
+          // the lines completed on the visit, not later edits — an add-on
+          // added afterwards must not republish a suppressed trace, and
+          // one removed must not hide a legitimately completed map.
+          // Fail-soft: a lookup error omits the field and render falls
+          // back to the live rows (legacy-record behavior).
+          try {
+            // The EMPTY array freezes too (codex P2 r15): an absent field
+            // means "legacy record, fall back to live rows" — a
+            // zero-add-on completion must not stay mutable. Each line also
+            // freezes its key + findings pointer (codex P2 r21) via the
+            // shared freezer, so profile repoints can't rewrite history.
+            const { frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+            serviceData.completedAddonLines = await frozenAddonLinesForCompletion(svc.id, trx);
+          } catch { /* render falls back to live rows */ }
+          // The PRIMARY identity freezes for the same reason (codex P2
+          // r15): update-details can repoint service_id/service_type after
+          // completion, and a generic report has no typed snapshot to
+          // counter it — the permanent report's trace verdict must reflect
+          // the service that was actually completed. Resolved from the
+          // LOCKED row (codex P2 r21, twin of the recap fix): an
+          // update-details repoint can commit between the handler's
+          // pre-transaction svc load and the row lock, and the freeze must
+          // record the service actually completing. Fail-soft on the
+          // re-resolve — the pre-lock profile (today's behavior) stands.
+          let frozenCompletionProfile = completionProfile;
+          let primaryFreezeTrusted = true;
+          if (lockedSvcRow && (lockedSvcRow.service_id !== svc.service_id
+            || lockedSvcRow.service_type !== svc.service_type)) {
+            try {
+              frozenCompletionProfile = await resolveCompletionProfileForScheduledService(lockedSvcRow, trx);
+            } catch {
+              // Repoint DETECTED but the locked re-resolve failed: the
+              // pre-lock profile is known-stale, so freezing it would pin
+              // the WRONG identity permanently (codex P2 r27). Omit the
+              // freeze — the render's live fallback resolves the current
+              // row, the legacy-record behavior.
+              primaryFreezeTrusted = false;
+            }
+          }
+          // The freeze must be SAFE for the key's classification family
+          // (codex P2 r28/r29, mirroring the add-on freezer): a typed key
+          // (flea_tick, lawn_aeration…) or a pointer-required key frozen
+          // WITHOUT its pointer would pin the permanent report to the
+          // wrong verdict forever — render treats the frozen key as
+          // authoritative and never re-queries the restored profile.
+          const { primaryIdentityFreezable } = require('../services/service-report/trace-eligibility');
+          if (primaryFreezeTrusted && primaryIdentityFreezable(frozenCompletionProfile || {})) {
+            serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
+            serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
+          }
           // Typed specialty completion: resolve trend vs the customer's prior
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders
