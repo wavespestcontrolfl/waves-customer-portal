@@ -267,8 +267,10 @@ async function runInner({ now = new Date() } = {}) {
       { customer_id: g.customerId, fixable: g.fixable },
       // The fields to fix live on the customer record, not dispatch — and an
       // active trailing-evidence gap may have no dispatch row at all (Codex
-      // #3209 post-merge P3).
-      { link: `/admin/customers/${g.customerId}` },
+      // #3209 post-merge P3). Query-param form, NOT /admin/customers/<id>:
+      // the SPA registers no path route for a bare id — CustomersPageV2
+      // opens Customer 360 from the customerId query param (Codex #3215).
+      { link: `/admin/customers?customerId=${encodeURIComponent(g.customerId)}` },
     );
   }
 
