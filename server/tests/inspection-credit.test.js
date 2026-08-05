@@ -998,6 +998,18 @@ describe('closeout route wiring — source contracts (the completion route is to
     // — a repoint between closeout and retry must not re-key the offer
     // away from the standing-promise classification.
     expect(dispatch).toContain('serviceKey: frozenCreditTerms?.serviceKey || effectiveCompletionProfile?.serviceKey || null,');
+    // Adopted existing appointments RESTAMP their booking moment to the
+    // accept (r37 P2) — a pre-offer placeholder event would otherwise make
+    // the ordering guard reject the promised credit; every other surface
+    // keeps first-write-wins.
+    const estimate = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(estimate).toContain('restamp: true,');
+    const service = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    expect(service).toContain('await insertQ.merge({ created_at: eventRow.created_at, source: eventRow.source });');
+    // And the call-processor's idempotency replay fast-redeems like the
+    // self-book replay (r37 P2).
+    const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(callProc).toContain("createdBy: 'system:inspection_credit_call_booking_replay'");
   });
 
   it('both schedule serializers forward the lookup-failed marker (r34 P2)', () => {

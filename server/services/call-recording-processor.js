@@ -9093,6 +9093,23 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
+              } else if (!outboundReviewBooking) {
+                // Idempotency-conflict REPLAY of a call booking (Codex
+                // #3178 r37 P2): the first attempt committed the visit +
+                // evidence but may have died before its side-effects ran —
+                // this retry is the recovery path, and reminders are
+                // already registered, but the fast redemption must re-run
+                // or a Charge Now / pay link in the next hour collects the
+                // full amount. Best-effort; the sweep stays the guarantee.
+                try {
+                  await require('./inspection-credit').redeemInspectionCreditForBooking({
+                    customerId,
+                    scheduledServiceId: svc.id,
+                    createdBy: 'system:inspection_credit_call_booking_replay',
+                  });
+                } catch (replayErr) {
+                  logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
+                }
               }
               if (!svc.technician_id) {
                 // A confirmed, customer-notified booking assigned to NOBODY

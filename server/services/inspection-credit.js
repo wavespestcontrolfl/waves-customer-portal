@@ -347,7 +347,17 @@ async function recordInspectionCreditOffer({
  * down the booking or estimate conversion that hosts it. The savepoint
  * confines a failure to this write.
  */
-async function markBookingForInspectionCredit(trx, { customerId, scheduledServiceId, source = null }) {
+async function markBookingForInspectionCredit(trx, {
+  customerId, scheduledServiceId, source = null,
+  // RESTAMP the booking moment on conflict (Codex #3178 r37 P2) — for the
+  // estimate-accept ADOPTION of an existing appointment, whose row may
+  // already carry a pre-offer event from its original scheduling. The
+  // accept is the purchase this credit rides, and it is always LATER than
+  // the original event, so a restamp only moves the moment forward; every
+  // other surface keeps first-write-wins (ignore), because there the first
+  // event IS the booking moment.
+  restamp = false,
+} = {}) {
   // Deliberately UNGATED (Codex #3178 r5 P0): the event is just a fact
   // ("this customer booked"), costs nothing, and grants no money on its
   // own. Skipping it while dark would mean an offer promised before a
@@ -367,10 +377,14 @@ async function markBookingForInspectionCredit(trx, { customerId, scheduledServic
   };
   try {
     await trx.transaction(async (sp) => {
-      await sp('inspection_credit_booking_events')
+      const insertQ = sp('inspection_credit_booking_events')
         .insert(eventRow)
-        .onConflict('scheduled_service_id')
-        .ignore();
+        .onConflict('scheduled_service_id');
+      if (restamp) {
+        await insertQ.merge({ created_at: eventRow.created_at, source: eventRow.source });
+      } else {
+        await insertQ.ignore();
+      }
     });
     return 1;
   } catch (err) {

@@ -9039,6 +9039,12 @@ router.put('/:token/accept', async (req, res, next) => {
               customerId: adoptedCustomerId,
               scheduledServiceId: existingAppointmentRow.id,
               source: 'estimate_accept_existing_appointment',
+              // RESTAMP (Codex #3178 r37 P2): the row may carry a
+              // pre-offer event from its original scheduling; the ACCEPT
+              // is the purchase this credit rides, so the moment moves
+              // forward to now — an ignore would leave the old timestamp
+              // and the ordering guard would reject the promised credit.
+              restamp: true,
             });
           }
           acceptedAppointmentsToRegister.push({
