@@ -46,13 +46,15 @@ function laneForCoverageRow({ category, serviceType } = {}) {
   if (cat) return null;
   const label = String(serviceType || '').toLowerCase();
   if (!label) return null;
-  if (/\blawn\b|\bturf\b/.test(label)) return 'lawn';
   // Out-of-lane families whose legacy labels can still contain "pest"
   // ("Rodent Pest Control" is rodent_general_one_time's canonical label —
   // same rodent-led carve-out toQualifyingKeys makes for tier math), plus
-  // families that are never re-service lanes. Checked BEFORE the pest
-  // regex so the fallback can't grant the pest lane to office-handled work.
+  // families that are never re-service lanes. Checked BEFORE BOTH lane
+  // regexes so a combined label ("Commercial Turf Treatment Program",
+  // "One-Time Lawn Care") can't grant a self-bookable lane to
+  // office-handled work (codex #3194 r1 P2 + r2 P2).
   if (/rodent|termite|mosquito|tree|shrub|commercial|one[\s_-]?time|onetime/.test(label)) return null;
+  if (/\blawn\b|\bturf\b/.test(label)) return 'lawn';
   if (/\bpest\b|waveguard/.test(label)) return 'pest';
   return null;
 }
@@ -67,20 +69,47 @@ function laneForCallbackRow({ serviceKey, serviceType } = {}) {
 }
 
 /**
+ * Pest-backed evidence for a WaveGuard membership: any recurring
+ * pest-classified row in the account's service history — completed rows
+ * count, because "between seeded extensions" (no upcoming rows yet) is
+ * exactly the case the membership grant exists for. Callback/re-service rows
+ * never count (same exclusion the coverage loop applies).
+ */
+async function membershipPestEvidence(customerId) {
+  const rows = await db('scheduled_services as hist')
+    .leftJoin('services as sv', 'hist.service_id', 'sv.id')
+    .where('hist.customer_id', customerId)
+    .where('hist.is_recurring', true)
+    .select('hist.service_type', 'hist.is_callback', 'sv.service_key', 'sv.category')
+    .orderBy('hist.scheduled_date', 'desc')
+    .limit(500);
+  return rows.some((row) => row.is_callback !== true
+    && !isReService({ serviceKey: row.service_key, serviceType: row.service_type })
+    && laneForCoverageRow({ category: row.category, serviceType: row.service_type }) === 'pest');
+}
+
+/**
  * Which re-service lanes this customer may self-book, from LIVE plan state:
  * upcoming (today-or-later, non-terminal) recurring coverage rows classify
  * into pest/lawn; an active WaveGuard membership row (tier / legacy
- * monthly_rate — isMembershipCustomerRow) grants the pest lane even when the
- * series is between seeded extensions. Callback rows themselves never count
- * as coverage (a free re-service must not entitle the next one on its own —
- * same exclusion serviceRowCountsTowardWaveGuard applies for tier math).
+ * monthly_rate — isMembershipCustomerRow) grants the pest lane across
+ * seeded-extension gaps, but ONLY when the membership is pest-backed: with
+ * auto tier enrollment (GATE_AUTO_WAVEGUARD_TIER) waveguard_tier can be
+ * stamped from any qualifying family (mosquito / tree-shrub / termite-bait),
+ * and those families get no lane (codex #3194 r2 P1). Callback rows
+ * themselves never count as coverage (a free re-service must not entitle the
+ * next one on its own — same exclusion serviceRowCountsTowardWaveGuard
+ * applies for tier math).
+ *
+ * Fail-closed: a lookup error grants nothing (friendly not-eligible card,
+ * never a free visit) — it must not 500 the portal payload, and the public
+ * route re-checks at commit.
  *
  * Returns ['pest'], ['lawn'], ['pest','lawn'], or [] (not eligible).
  */
 async function reserviceLanesForCustomer(customer) {
   if (!customer?.id) return [];
   const lanes = new Set();
-  if (isMembershipCustomerRow(customer)) lanes.add('pest');
   try {
     const rows = await db('scheduled_services as s')
       .leftJoin('services as sv', 's.service_id', 'sv.id')
@@ -96,9 +125,11 @@ async function reserviceLanesForCustomer(customer) {
       const lane = laneForCoverageRow({ category: row.category, serviceType: row.service_type });
       if (lane) lanes.add(lane);
     }
+    if (!lanes.has('pest') && isMembershipCustomerRow(customer)
+        && await membershipPestEvidence(customer.id)) {
+      lanes.add('pest');
+    }
   } catch (err) {
-    // Fail toward the membership-row answer only — a query hiccup must not
-    // 500 the portal payload; the public route still re-checks at commit.
     logger.warn(`[reservice-scheduler] lane lookup failed for customer ${customer.id}: ${err.message}`);
   }
   return ['pest', 'lawn'].filter((lane) => lanes.has(lane));

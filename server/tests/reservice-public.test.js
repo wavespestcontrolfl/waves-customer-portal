@@ -94,6 +94,11 @@ describe('lane classification', () => {
     expect(laneForCoverageRow({ serviceType: 'Rodent Pest Control' })).toBe(null);
     expect(laneForCoverageRow({ serviceType: 'Commercial Pest Program' })).toBe(null);
     expect(laneForCoverageRow({ serviceType: 'One-Time Pest Control' })).toBe(null);
+    // Exclusions beat the LAWN fallback too — a combined label from an
+    // excluded family must not become a self-bookable lawn lane (codex r2 P2).
+    expect(laneForCoverageRow({ serviceType: 'Commercial Turf Treatment Program' })).toBe(null);
+    expect(laneForCoverageRow({ serviceType: 'One-Time Lawn Care' })).toBe(null);
+    expect(laneForCoverageRow({ serviceType: 'Tree & Shrub + Lawn Bundle' })).toBe(null);
     expect(laneForCoverageRow({})).toBe(null);
   });
 
@@ -107,10 +112,32 @@ describe('lane classification', () => {
     expect(laneForCallbackRow({ serviceType: 'General Pest Control' })).toBe('pest');
   });
 
-  test('an active WaveGuard membership row grants the pest lane even with no upcoming seeded rows', async () => {
-    listResults.scheduled_services = [];
-    const lanes = await reserviceLanesForCustomer({ id: CUST_ID, waveguard_tier: 'Silver' });
-    expect(lanes).toEqual(['pest']);
+  test('a WaveGuard membership grants the pest lane across seeded-extension gaps — but only PEST-BACKED (codex r2 P1)', async () => {
+    // No upcoming coverage rows (between seeded extensions)…
+    listResults['scheduled_services as s'] = [];
+    // …but completed recurring pest history backs the membership.
+    listResults['scheduled_services as hist'] = [
+      { service_type: 'General Pest Control', is_callback: false, service_key: null, category: null },
+    ];
+    expect(await reserviceLanesForCustomer({ id: CUST_ID, waveguard_tier: 'Silver' })).toEqual(['pest']);
+
+    // Auto tier enrollment can stamp waveguard_tier from ANY qualifying
+    // family — a mosquito-only member's history classifies to no lane, so
+    // the tier label alone must not unlock a free pest callback.
+    listResults['scheduled_services as hist'] = [
+      { service_type: 'Mosquito Control', is_callback: false, service_key: null, category: 'mosquito' },
+    ];
+    expect(await reserviceLanesForCustomer({ id: CUST_ID, waveguard_tier: 'Silver' })).toEqual([]);
+
+    // A free callback in the history is not coverage evidence either.
+    listResults['scheduled_services as hist'] = [
+      { service_type: 'Pest Control Re-Service', is_callback: true, service_key: 'pest_re_service', category: 'pest_control' },
+    ];
+    expect(await reserviceLanesForCustomer({ id: CUST_ID, waveguard_tier: 'Silver' })).toEqual([]);
+
+    // Tier with zero service history: conservative no-lane (office-handled).
+    listResults['scheduled_services as hist'] = [];
+    expect(await reserviceLanesForCustomer({ id: CUST_ID, waveguard_tier: 'Silver' })).toEqual([]);
   });
 
   test('coverage rows add lanes; callback and re-service rows never count as coverage', async () => {
@@ -282,5 +309,18 @@ describe('lane dedupe atomicity (source guards, codex P1 #3194)', () => {
 
   test('live callbacks (en_route/on_site) still block the lane — dedupe uses the open-status set (codex P2)', () => {
     expect(OPEN_CALLBACK_STATUSES).toEqual(['pending', 'confirmed', 'en_route', 'on_site']);
+  });
+
+  test('a $0 re-service callback never converts abandoned-booking intents — both marks carve out callbackVisit (codex r2 P2)', () => {
+    // In-transaction mark: gated on !callbackVisit.
+    expect(bookingSrc).toMatch(/if \(!callbackVisit && bookedTen\.length === 10\) \{/);
+    // Replay-path helper: early-returns for callbackVisit before touching
+    // booking_intents.
+    const helperIdx = bookingSrc.indexOf('const markBookingIntentsConverted = async (bookingId) => {');
+    const carveOutIdx = bookingSrc.indexOf('if (callbackVisit) return;', helperIdx);
+    const helperUpdateIdx = bookingSrc.indexOf("await db('booking_intents')", helperIdx);
+    expect(helperIdx).toBeGreaterThan(-1);
+    expect(carveOutIdx).toBeGreaterThan(helperIdx);
+    expect(carveOutIdx).toBeLessThan(helperUpdateIdx);
   });
 });

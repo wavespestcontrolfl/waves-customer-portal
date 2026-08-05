@@ -2302,9 +2302,12 @@ async function createSelfBooking(payload = {}) {
       // booking commits. A post-commit update would leave a window where the
       // recovery cron — having SELECTed the intent before commit — could still
       // win the claim and text "your spot isn't reserved yet" to someone who
-      // just booked.
+      // just booked. A $0 re-service callback must NOT convert intents: an
+      // open paid /book drop-off was not completed by this free visit, and
+      // stamping converted_booking_id here would suppress its recovery and
+      // corrupt the conversion record (codex #3194 r2 P2).
       const bookedTen = String(customer.phone || '').replace(/\D/g, '').slice(-10);
-      if (bookedTen.length === 10) {
+      if (!callbackVisit && bookedTen.length === 10) {
         await trx('booking_intents')
           .whereNull('converted_at')
           .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [bookedTen])
@@ -2348,6 +2351,9 @@ async function createSelfBooking(payload = {}) {
     // request, so a best-effort re-mark here closes out any intent captured since.
     const markBookingIntentsConverted = async (bookingId) => {
       try {
+        // Same callbackVisit carve-out as the in-transaction mark above — a
+        // replayed free re-service must not convert a paid /book drop-off.
+        if (callbackVisit) return;
         const ten = String(customer.phone || '').replace(/\D/g, '').slice(-10);
         if (ten.length !== 10) return;
         await db('booking_intents')
