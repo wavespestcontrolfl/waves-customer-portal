@@ -36,6 +36,7 @@ const db = require('../models/db');
 const {
   runPending,
   skipStaleTouches,
+  firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,
 } = require('../services/invoice-followups');
 
@@ -125,6 +126,52 @@ describe('runPending stale routing (the branch condition)', () => {
     expect(transaction).toHaveBeenCalledTimes(1);
     expect(result.sent).toBe(1);
     expect(result.skipped).toBe(0);
+  });
+
+  test('a weekend/Monday-anchored touch fires on its first eligible Tuesday (Codex r1 P1)', async () => {
+    // Due Monday 08-03 10:00 — no Monday run exists; Tuesday 10:16 is its
+    // FIRST chance and must send, not stale-skip (routine weekend cadence).
+    jest.setSystemTime(new Date('2026-08-04T14:16:00Z')); // Tue 10:16 ET
+    const row = seqRow({ next_touch_at: touchAt('2026-08-03') });
+    const { transaction } = setupDb({ batchRows: [row] });
+
+    const result = await runPending();
+
+    expect(transaction).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ sent: 1, skipped: 0 });
+  });
+
+  test('a stale skip landing on a step due today fires it in the same run (Codex r1 P2)', async () => {
+    // Invoice sent Wed 07-29: d3 due Sat 08-01 (eligible Tue 08-04 — missed,
+    // stale by Wed), d7 due today Wed 08-05. The skip persists step 1 due
+    // today; leaving it unsent would strand it as stale on Thursday's tick.
+    const row = seqRow({
+      invoice_sent_at: new Date('2026-07-29T14:00:00Z'),
+      invoice_created_at: new Date('2026-07-29T13:00:00Z'),
+      created_at: touchAt('2026-07-29'),
+      next_touch_at: touchAt('2026-08-01'),
+    });
+    const { seqUpdate, transaction } = setupDb({ batchRows: [row] });
+
+    const result = await runPending();
+
+    expect(seqUpdate).toHaveBeenCalledWith(expect.objectContaining({
+      step_index: 1,
+      next_touch_at: new Date('2026-08-05T14:00:00Z'),
+      status: 'active',
+    }));
+    expect(transaction).toHaveBeenCalledTimes(1); // the landing d7 fires now
+    expect(result).toEqual({ sent: 1, skipped: 1 });
+  });
+});
+
+describe('firstEligibleFireAt', () => {
+  test('Sat/Sun/Mon anchors roll to Tuesday 10:00 NY; Tue–Fri are themselves', () => {
+    const tue = '2026-08-04T14:00:00.000Z';
+    expect(firstEligibleFireAt(touchAt('2026-08-01')).toISOString()).toBe(tue); // Sat
+    expect(firstEligibleFireAt(touchAt('2026-08-02')).toISOString()).toBe(tue); // Sun
+    expect(firstEligibleFireAt(touchAt('2026-08-03')).toISOString()).toBe(tue); // Mon
+    expect(firstEligibleFireAt(touchAt('2026-08-05')).toISOString()).toBe('2026-08-05T14:00:00.000Z'); // Wed
   });
 });
 

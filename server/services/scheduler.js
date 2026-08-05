@@ -1966,7 +1966,8 @@ function initScheduledJobs() {
   // Fires the next due touch for each unpaid invoice's automated chain.
   //
   // The 10am-ET jobs are STAGGERED (:00 late-payment, :03 review-followups,
-  // :07 billing-retries, :12 renewal-reminders, :16 this, :20 seasonal) —
+  // :07 billing-retries, :12 renewal-reminders, :16 this, :20 seasonal,
+  // :31 payer-statement dunning) —
   // until 2026-08-04 six of them fired at exactly 10:00, each runExclusive
   // holds a pool connection for its advisory lock for the whole run, and the
   // pileup exhausted the pool (this job failed 4 straight days; touches are
@@ -2013,13 +2014,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10:15AM (Tue–Fri) — Payer statement dunning (Phase 2 — P4)
+  // DAILY 10:31AM (Tue–Fri) — Payer statement dunning (Phase 2 — P4)
   // Fires the next due AP reminder for each unpaid NET-terms statement past its
   // due date. Gated behind GATE_PAYER_STATEMENTS (runPending no-ops when off).
-  // Staggered 15m after the per-invoice sequences so they don't contend for the
-  // connection pool. Never contacts the homeowner — AP inbox only.
+  // Staggered 15m after the per-invoice sequences (now at :16 in the 10am
+  // stagger plan) so the two dunning sweeps never contend for the pool.
+  // Never contacts the homeowner — AP inbox only.
   // =========================================================================
-  cron.schedule('15 10 * * 2-5', async () => {
+  cron.schedule('31 10 * * 2-5', async () => {
     logger.info('Running: payer statement dunning');
     try {
       await runExclusive('payer-statement-followups', async () => {
