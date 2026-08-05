@@ -606,12 +606,14 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   // finite 0, which rendered as `Irrigation 0"` — a claim the customer didn't
   // water, not the truth that we don't know (owner 2026-08-04). Show "Not on
   // file" instead and keep the zero-width segment out of the bar/legend.
-  // scheduleOnFile undefined (older cached payloads) keeps the numeric row,
-  // and so does a stale POSITIVE irrigation figure: the server can carry
-  // prefs-only inches into the total, and "Not on file" beside a total that
-  // includes them would overstate the mystery (codex P2 r3) — a real number
-  // in the payload renders as a number.
-  const irrOnFile = water.scheduleOnFile !== false || irrigation > 0;
+  // scheduleOnFile undefined (older cached payloads) keeps the numeric row.
+  // An explicit false is AUTHORITATIVE, even over a stale positive prefs-only
+  // inches value — the customer disabling their irrigation system must not be
+  // reversed by leftover numbers (codex P2 r30). The r3 concern this clause
+  // once served ("Not on file" beside a Total that includes those inches) is
+  // closed by hasTotal requiring irrOnFile (codex P2 r9): with the schedule
+  // off, the Total row is suppressed alongside the numeric irrigation row.
+  const irrOnFile = water.scheduleOnFile !== false;
   // Nothing measurable → don't draw an empty chart… unless the missing
   // schedule is the reason: the add-schedule CTA + explanation must survive
   // an all-missing payload or the customer never learns how to fix it

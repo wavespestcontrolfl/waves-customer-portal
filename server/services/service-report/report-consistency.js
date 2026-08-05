@@ -104,6 +104,19 @@ const toNum = (v) => {
 
 const formatInches = (n) => String(Math.round(n * 100) / 100);
 
+// The rain matcher accepts spelled amounts ("one inch", "one and a half
+// inches", "half an inch") alongside digits (codex P2 r30) — this converts
+// either form to its numeric value; NaN for anything unrecognized.
+const SPELLED_INCH_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+function spelledOrNumericInches(raw) {
+  const s = String(raw).toLowerCase().replace(/\s+/g, ' ').trim();
+  if (/^[\d.]/.test(s)) return Number(s);
+  if (s === 'half a' || s === 'half an') return 0.5;
+  const m = s.match(/^([a-z]+)( and a half)?$/);
+  if (!m || SPELLED_INCH_WORDS[m[1]] == null) return NaN;
+  return SPELLED_INCH_WORDS[m[1]] + (m[2] ? 0.5 : 0);
+}
+
 // Sentence splitter shared by the reconciliation passes. The lookbehind
 // keeps a unit abbreviation's period ("2.72 in. this week") from reading as
 // a sentence boundary — splitting there strands the rain figure and the
@@ -157,10 +170,14 @@ function reconcileRainFigure(text, canonicalRain) {
     // The gap accepts a hyphen so adjectival totals ("The 2.72-inch rainfall
     // total") reconcile too (codex P2 r14). Typographic inch marks — the
     // double prime ″ and the smart quote ” generated prose / pasted copy can
-    // carry — are units exactly like the ASCII " (codex P2 r29).
-    return sentence.replace(/(?<![\d.])(\d+(?:\.\d+)?|\.\d+)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|["″”])/gi, (match, value, gap, unit, offset) => {
+    // carry — are units exactly like the ASCII " (codex P2 r29). SPELLED
+    // amounts qualify too — the narrative prompt doesn't require digit
+    // formatting, so "one inch" / "one and a half inches" / "half an inch"
+    // can carry the stale total (codex P2 r30); they rewrite to the digit
+    // form of the canonical figure.
+    return sentence.replace(/(?<![\d.])(\d+(?:\.\d+)?|\.\d+|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)(?:\s+and\s+a\s+half)?\b|\bhalf\s+an?\b)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|["″”])/gi, (match, value, gap, unit, offset) => {
       if (done) return match;
-      const v = Number(value);
+      const v = spelledOrNumericInches(value);
       if (!Number.isFinite(v)) return match;
       // A figure inside a target/goal phrase ("below the 0.75 inches target",
       // "target of 0.75 inch", "recommended 1 inch") is never a rain total —
@@ -230,6 +247,11 @@ function reconcileRainFigure(text, canonicalRain) {
       // must not become "under 2.96 inches" (codex P2 r27); skipped without
       // consuming.
       if (/\b(?:under|below|less\s+than|at\s+most|no\s+more\s+than|at\s+least|more\s+than|over|above|exceed(?:ed|ing|s)?)\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+)?$/i.test(before)) return match;
+      // A week-over-week CHANGE is a delta, not the total — "Rainfall
+      // increased by 1 inch this week to a total of 2.72 inches" must keep
+      // the change amount and let the later total reconcile (codex P2 r30).
+      // Skipped without consuming the attempt.
+      if (/\b(?:increased?|increasing|ros[e]|risen|rising|climbed|jumped|grew|grown|dropped|fell|fallen|decreased?|(?:was|were|is|are)\s+(?:up|down))\s+(?:[a-z'’-]+\s+){0,2}by\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+|almost\s+)?$/i.test(before)) return match;
       // A per-day AVERAGE is not the weekly total either — "Average daily
       // rainfall this week was 0.4 inches" / "averaged 0.4 inches per day"
       // must keep the average and let a later weekly figure reconcile
@@ -265,7 +287,9 @@ function reconcileRainFigure(text, canonicalRain) {
       // …including compact ASCII-hyphen ranges ("1-2 inches" — codex P2
       // r26): a digit + hyphen right before the figure is a range, not a
       // total.
-      if (/\d[\s"″”]*(?:(?:inch(?:es)?|in\.?)\s+)?(?:to|–|—|through|and)\s*$/i.test(before)) return match;
+      // The first endpoint can be spelled now that spelled amounts match
+      // ("between one and two inches" — codex P2 r30).
+      if (/(?:\d|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\b)[\s"″”]*(?:(?:inch(?:es)?|in\.?)\s+)?(?:to|–|—|through|and)\s*$/i.test(before)) return match;
       if (/\d\s*-\s*$/.test(before)) return match;
       if (/\b(?:between|from)\s+(?:the\s+|about\s+|around\s+|roughly\s+)?$/i.test(before)) return match;
       // The after-guard also allows an explicit target FIGURE between the
@@ -428,7 +452,17 @@ function replaceDroughtHypothesis(text) {
       // are observation verbs here exactly as in the dry-area branches
       // below — "Drought stress symptoms are visible along the edge" is
       // observed evidence, never rewritten to coverage copy (codex P2 r29).
-      if (/^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence.slice(offset + m.length))) return m;
+      // "confirmed" joins them, and STATE adjectives (present/evident/
+      // apparent) veto only behind an indicative copula — "is present" is a
+      // confirmed observation, while "may be present" keeps the modal
+      // hypothesis reading and still reconciles (codex P1 r30).
+      if (/^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded|visible|showing|confirmed|(?:is|are|was|were|remains?|stays?)\s+(?:clearly\s+|still\s+|now\s+|very\s+)?(?:present|evident|apparent))\b/i.test(sentence.slice(offset + m.length))) return m;
+      // A PRE-phrase observation verb is the same confirmed-evidence claim
+      // from the other side — "We confirmed drought stress along the edge"
+      // must not become a coverage assertion (codex P1 r30). Punctuation
+      // between the verb and the phrase breaks the attachment, so "No pests
+      // were seen; drought stress remains possible" still reconciles.
+      if (/\b(?:noted|observed|saw|seen|found|documented|recorded|confirmed|verified)\s+(?:[a-z'’-]+\s+){0,2}$/i.test(sentence.slice(0, offset))) return m;
       // …but a CLAUSE-LEADING dry-area phrase with a same-clause cue right
       // AFTER it is still a hypothesis — "Dry spots could be contributing to
       // the thinning" (codex P2 r20), including unresolved tails ("Dry spots

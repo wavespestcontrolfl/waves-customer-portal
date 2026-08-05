@@ -178,6 +178,25 @@ describe('reconcileRainFigure', () => {
     )).toBe('Over the past 14 days rainfall totaled 4.2 inches, but this week rain totaled 2.96 inches.');
   });
 
+  test('a week-over-week rain delta is preserved (codex P2 r30)', () => {
+    expect(reconcileRainFigure(
+      'Rainfall increased by 1 inch this week to a total of 2.72 inches.',
+      2.96,
+    )).toBe('Rainfall increased by 1 inch this week to a total of 2.96 inches.');
+    expect(reconcileRainFigure('Rainfall was up by 0.4 inches this week.', 2.96)).toBeNull();
+  });
+
+  test('spelled-out weekly totals reconcile (codex P2 r30)', () => {
+    expect(reconcileRainFigure('Rainfall totaled one inch this week.', 2.96))
+      .toBe('Rainfall totaled 2.96 inches this week.');
+    expect(reconcileRainFigure('Rainfall totaled one and a half inches this week.', 2.96))
+      .toBe('Rainfall totaled 2.96 inches this week.');
+    expect(reconcileRainFigure('Rainfall totaled half an inch this week.', 2.96))
+      .toBe('Rainfall totaled 2.96 inches this week.');
+    // Spelled range endpoints stay a range, exactly like digit endpoints.
+    expect(reconcileRainFigure('Rainfall was between one and two inches this week.', 2.96)).toBeNull();
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -519,6 +538,17 @@ describe('replaceDroughtHypothesis', () => {
   test('cue-less or observed drought conditions stay preserved (codex P2 r29)', () => {
     expect(replaceDroughtHypothesis('Drought conditions were noted in the thin strip.')).toBeNull();
     expect(replaceDroughtHypothesis('Drought conditions have eased after this week’s rain on the stressed strip.')).toBeNull();
+  });
+
+  test('confirmed/present drought stress is preserved (codex P1 r30)', () => {
+    expect(replaceDroughtHypothesis('Drought stress was confirmed along the stressed edge.')).toBeNull();
+    expect(replaceDroughtHypothesis('Drought stress is present in the thin strip.')).toBeNull();
+    expect(replaceDroughtHypothesis('Drought stress is still evident near the walkway patches.')).toBeNull();
+    // Pre-phrase observation verbs make the same confirmed-evidence claim.
+    expect(replaceDroughtHypothesis('We confirmed drought stress along the thin edge.')).toBeNull();
+    // A modal keeps the hypothesis reading — "may be present" still reconciles.
+    expect(replaceDroughtHypothesis('Drought stress may be present in the thin areas.'))
+      .toBe('Uneven sprinkler coverage may be present in the thin areas.');
   });
 
   test('"not ruled out" is unresolved and still reconciles (codex P2 r25)', () => {

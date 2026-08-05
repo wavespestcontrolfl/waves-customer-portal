@@ -96,16 +96,15 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(parseFloat(marker.style.left)).toBeLessThan(30);
   });
 
-  it('a stale positive irrigation figure stays numeric so the total adds up (codex P2 r3)', () => {
-    // scheduleOnFile false but inches present (prefs-only schedule): the total
-    // includes them, so the row must show the number, not "Not on file".
+  it('an explicit scheduleOnFile:false wins over stale positive inches (codex P2 r30, supersedes r3)', () => {
+    // The customer disabled their irrigation system but a prefs-only inches
+    // value survived in the payload: the explicit false is authoritative —
+    // no numeric row, no Total that includes the stale inches (hasTotal is
+    // gated on irrOnFile per r9, so the r3 contradiction can't render).
     render(<WaterIntakeBar water={{ rainInches: 1, irrigationInches: 1.25, totalInches: 2.25, targetInches: 0.75, status: 'high', confidence: 'medium', scheduleOnFile: false }} />);
-    expect(screen.getByText('1.25"')).toBeInTheDocument();
-    expect(screen.queryByText('Not on file')).not.toBeInTheDocument();
-    expect(screen.queryByText('Irrigation not on file')).not.toBeInTheDocument();
-    // …and the add-schedule CTA can't sit under a numeric irrigation row
-    // claiming we don't have the schedule (codex P2 r4).
-    expect(screen.queryByText(/Add your watering schedule/)).not.toBeInTheDocument();
+    expect(screen.queryByText('1.25"')).not.toBeInTheDocument();
+    expect(screen.getByText('Not on file')).toBeInTheDocument();
+    expect(screen.queryByText('Total')).not.toBeInTheDocument();
   });
 
   it('older payloads without scheduleOnFile keep the numeric row (no false "Not on file")', () => {
