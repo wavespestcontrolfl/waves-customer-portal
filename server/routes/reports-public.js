@@ -345,6 +345,7 @@ async function buildServiceReportV1ResponseData(service, token, {
           // Rain-contradicted drought hypotheses reworded in place (null = untouched).
           insights: fix.insights || data.reportV2.insights,
           photoSummary: fix.photoSummary || data.reportV2.photoSummary,
+          snapshot: fix.snapshot || data.reportV2.snapshot,
           consistencyWarnings: fix.warnings || [],
         };
         // Stale weekly-rain figure in the AI summary rewritten to the widget's

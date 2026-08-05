@@ -602,8 +602,12 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   // finite 0, which rendered as `Irrigation 0"` — a claim the customer didn't
   // water, not the truth that we don't know (owner 2026-08-04). Show "Not on
   // file" instead and keep the zero-width segment out of the bar/legend.
-  // scheduleOnFile undefined (older cached payloads) keeps the numeric row.
-  const irrOnFile = water.scheduleOnFile !== false;
+  // scheduleOnFile undefined (older cached payloads) keeps the numeric row,
+  // and so does a stale POSITIVE irrigation figure: the server can carry
+  // prefs-only inches into the total, and "Not on file" beside a total that
+  // includes them would overstate the mystery (codex P2 r3) — a real number
+  // in the payload renders as a number.
+  const irrOnFile = water.scheduleOnFile !== false || irrigation > 0;
   // Nothing measurable → don't draw an empty chart.
   if (!hasRain && !hasIrr) return null;
 
@@ -1192,7 +1196,7 @@ function bandAccent(v, lo, hi) { return v >= lo && v <= hi ? COLORS.glassNavy : 
 function gapAccent(v) { return Math.abs(Number(v)) <= 0.25 ? COLORS.glassNavy : COLORS.glassNavy; }
 const lastVal = (pts = []) => { const f = [...pts].reverse().find((p) => Number.isFinite(toScore(p.value))); return f ? toScore(f.value) : NaN; };
 
-export function LawnTrends({ trends = {}, baselineScore = null }) {
+export function LawnTrends({ trends = {}, baselineScore = null, hasNextVisit = false }) {
   const { overall, waterGap, mowing, weed, stress, coverage, color, seasonalNote } = trends;
   // The server emits [null, null] when no ideal band is known for the grass —
   // a destructure default only covers undefined, so [null, null] used to ride
@@ -1232,13 +1236,18 @@ export function LawnTrends({ trends = {}, baselineScore = null }) {
     // null-check BEFORE Number(): Number(null) === 0 is finite — the same
     // trap the mowing band guard above documents.
     if (baselineScore == null || !Number.isFinite(Number(baselineScore))) return null;
+    // "Starting with your next visit" only when the payload backs a real
+    // next visit (the server omits snapshot.nextVisit when it can't) — a
+    // one-time visit must not promise a visit that isn't scheduled
+    // (codex P2 r3).
     return (
       <Card>
         <CardTitle sub="Visit-to-visit progress for your lawn.">Progress Tracking</CardTitle>
         <p style={{ margin: 0, fontSize: 14, color: BODY, lineHeight: 1.55 }}>
           Today’s visit sets your lawn’s baseline at {Math.round(Number(baselineScore))}/100.
-          Starting with your next visit, this section will chart how your overall score,
-          color, coverage, weeds, and stress signals move over time.
+          {hasNextVisit
+            ? ' Starting with your next visit, this section will chart how your overall score, color, coverage, weeds, and stress signals move over time.'
+            : ' When your lawn is next assessed, this section will chart how your overall score, color, coverage, weeds, and stress signals move over time.'}
         </p>
       </Card>
     );

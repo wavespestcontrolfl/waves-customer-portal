@@ -105,8 +105,7 @@ const formatInches = (n) => String(Math.round(n * 100) / 100);
 // telling the customer "2.72 inches" and "2.96 in" at once (owner 2026-08-04).
 // Sentence-scoped: only a weekly-total rain sentence is touched, only its first
 // inch figure, and only when it's in the canonical figure's neighborhood (a
-// target mention like "0.75 inch" is below half the canonical and never
-// rewritten; a sentence naming the target is skipped entirely).
+// target/goal figure is identified by its naming words and never rewritten).
 function reconcileRainFigure(text, canonicalRain) {
   const t = String(text || '');
   if (!t || canonicalRain == null) return null;
@@ -116,9 +115,8 @@ function reconcileRainFigure(text, canonicalRain) {
     if (!/\bweek\b|\b7[- ]day\b|\bpast seven\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
     // No sentence-level target bailout (codex P2 #3197 r1): "totaling 2.72
     // inches was above the 0.75 inch target" is the exact comparison this
-    // pass reconciles. The per-number guards do the work instead — a figure
-    // below half the canonical (the target mention) is skipped, and only the
-    // FIRST qualifying figure is rewritten; a skipped figure does not consume
+    // pass reconciles. Per-number word guards do the work; only the FIRST
+    // qualifying figure is rewritten, and a skipped figure does not consume
     // the attempt.
     let done = false;
     // `inch(?:es)?` — a singular "1 inch" total must match too (codex P2 r2).
@@ -126,21 +124,24 @@ function reconcileRainFigure(text, canonicalRain) {
       if (done) return match;
       const v = Number(value);
       if (!Number.isFinite(v)) return match;
-      // A figure inside a target phrase ("below the 0.75 inches target",
-      // "target of 0.75 inch") is never a rain total — skip it WITHOUT
-      // consuming the attempt (codex P2 r2: on a low-rain week the half-
-      // canonical guard alone let the scan rewrite the target itself).
+      // A figure inside a target/goal phrase ("below the 0.75 inches target",
+      // "target of 0.75 inch", "recommended 1 inch") is never a rain total —
+      // skip it WITHOUT consuming the attempt. This word-level guard replaces
+      // the old below-half-canonical value guard, which also skipped
+      // genuinely stale LOW totals (0.2" stale vs 0.8" canonical — codex P2
+      // r3): a target is identified by how it's named, not by being small.
       // Before-guard: the target word must DIRECTLY precede this number (no
       // other digits between) — "target of 0.75" is a target, but "0.75 inch
       // target, rain totaled 2.72" must still let 2.72 qualify.
       const before = sentence.slice(Math.max(0, offset - 24), offset);
       const after = sentence.slice(offset + match.length, offset + match.length + 24);
-      if (/\btarget\b[^.\d]{0,12}$/i.test(before) || /^\s*(?:weekly\s+)?target\b/i.test(after)) return match;
+      const TARGET_WORD = '(?:target|goal|aim(?:ing)?|recommend(?:ed|s)?|ideal)';
+      if (new RegExp(`\\b${TARGET_WORD}\\b[^.\\d]{0,12}$`, 'i').test(before)
+        || new RegExp(`^\\s*(?:weekly\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
       // The sentence already quotes the canonical figure → it agrees with the
       // widget; stop scanning so a later, different number (e.g. the target)
       // is never mistaken for a stale total.
       if (Math.abs(v - canonicalRain) <= 0.05) { done = true; return match; }
-      if (v < canonicalRain * 0.5) return match;
       done = true;
       changed = true;
       return `${formatInches(canonicalRain)}${gap}${unit}`;
@@ -169,7 +170,11 @@ function replaceDroughtHypothesis(text) {
   let changed = false;
   const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
     if (!/chinch|stress|thin|tan\b|patch|scuff/i.test(sentence)) return sentence;
-    if (/\bno\b[^.]{0,30}\b(?:drought|dry)\b/i.test(sentence)) return sentence;
+    // The negation must attach to the drought/dry wording itself ("no
+    // drought stress", "no signs of drought", "not drought-related") — an
+    // unrelated "No pests; drought stress remains possible" must still be
+    // reconciled (codex P2 r3).
+    if (/\b(?:no|not|isn['’]t|without)\s+(?:(?:visible|apparent|obvious|active|significant|clear)\s+|(?:signs?|evidence|indications?)\s+of\s+){0,2}(?:localized\s+)?(?:drought|dry)/i.test(sentence)) return sentence;
     const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, 'uneven sprinkler coverage');
     if (replaced !== sentence) changed = true;
     return replaced;
@@ -223,6 +228,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   const rainWellAboveTarget = canonicalRain != null && rainTarget != null && canonicalRain >= rainTarget + 1;
   let insights = rawInsights;
   let photoSummary = null;
+  let snapshot = null;
   const droughtWarn = (where) => warnings.push({
     severity: 'warning',
     code: 'drought_hypothesis_contradicts_rainfall',
@@ -247,6 +253,24 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     if (patched.some((p, idx) => p !== insights[idx])) { insights = patched; droughtWarn('A priority finding'); }
     photoSummary = replaceDroughtHypothesis(reportV2.photoSummary);
     if (photoSummary) droughtWarn('The photo narrative');
+    // The hero snapshot COPIES insight strings at build time (watching =
+    // headlines, mainWatch = top whatWeSaw, wavesNext / customerAction from
+    // the top issue) — patching only the insights left the hero telling the
+    // customer to recheck drought stress (codex P2 r3).
+    const snap = reportV2.snapshot;
+    if (snap) {
+      const fields = {};
+      let touched = false;
+      for (const f of ['statusHeadline', 'scoreExplanation', 'rootCause', 'mainWatch', 'wavesNext', 'customerAction']) {
+        const replaced = replaceDroughtHypothesis(snap[f]);
+        if (replaced) { fields[f] = replaced; touched = true; }
+      }
+      if (Array.isArray(snap.watching)) {
+        const watching = snap.watching.map((w) => replaceDroughtHypothesis(w) || w);
+        if (watching.some((w, idx) => w !== snap.watching[idx])) { fields.watching = watching; touched = true; }
+      }
+      if (touched) { snapshot = { ...snap, ...fields }; droughtWarn('The hero snapshot'); }
+    }
   }
 
   // ── Follow-up detection (lawn only — see serviceLine doc above) ──────────
@@ -334,6 +358,7 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     // these over the payload; null means "keep what the payload already has".
     summary,
     photoSummary,
+    snapshot,
     insights: insights === rawInsights ? null : insights,
   };
 }

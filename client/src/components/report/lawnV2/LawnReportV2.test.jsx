@@ -46,6 +46,15 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.queryByText('Irrigation not on file')).not.toBeInTheDocument();
   });
 
+  it('a stale positive irrigation figure stays numeric so the total adds up (codex P2 r3)', () => {
+    // scheduleOnFile false but inches present (prefs-only schedule): the total
+    // includes them, so the row must show the number, not "Not on file".
+    render(<WaterIntakeBar water={{ rainInches: 1, irrigationInches: 1.25, totalInches: 2.25, targetInches: 0.75, status: 'high', confidence: 'medium', scheduleOnFile: false }} />);
+    expect(screen.getByText('1.25"')).toBeInTheDocument();
+    expect(screen.queryByText('Not on file')).not.toBeInTheDocument();
+    expect(screen.queryByText('Irrigation not on file')).not.toBeInTheDocument();
+  });
+
   it('older payloads without scheduleOnFile keep the numeric row (no false "Not on file")', () => {
     render(<WaterIntakeBar water={{ rainInches: 1.2, irrigationInches: 0, totalInches: 1.2, targetInches: 0.75, status: 'high', confidence: 'low' }} />);
     expect(screen.getByText('0"')).toBeInTheDocument();
@@ -56,10 +65,17 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
 
 describe('LawnTrends first-visit baseline (owner 2026-08-04)', () => {
   it('no chartable series + a real score → baseline card, not silence', () => {
-    render(<LawnTrends trends={{}} baselineScore={74} />);
+    render(<LawnTrends trends={{}} baselineScore={74} hasNextVisit />);
     expect(screen.getByText('Progress Tracking')).toBeInTheDocument();
     expect(screen.getByText(/baseline at 74\/100/)).toBeInTheDocument();
-    expect(screen.getByText(/next visit/i)).toBeInTheDocument();
+    expect(screen.getByText(/Starting with your next visit/)).toBeInTheDocument();
+  });
+
+  it('no scheduled next visit → the copy never promises one (codex P2 r3)', () => {
+    render(<LawnTrends trends={{}} baselineScore={74} />);
+    expect(screen.getByText('Progress Tracking')).toBeInTheDocument();
+    expect(screen.queryByText(/Starting with your next visit/)).not.toBeInTheDocument();
+    expect(screen.getByText(/When your lawn is next assessed/)).toBeInTheDocument();
   });
 
   it('no score → still renders nothing (an unscored visit makes no baseline claim)', () => {

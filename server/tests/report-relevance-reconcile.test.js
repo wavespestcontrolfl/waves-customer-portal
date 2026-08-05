@@ -81,6 +81,20 @@ describe('reconcileRainFigure', () => {
   test('no canonical figure → no-op', () => {
     expect(reconcileRainFigure('Rain totaled 2.72 inches this week.', null)).toBeNull();
   });
+
+  test('a genuinely stale LOW total is rewritten (codex P2 r3)', () => {
+    // Open same-day window: 0.2" at completion, 0.8" by view time — the old
+    // below-half-canonical guard wrongly skipped this exact drift.
+    expect(reconcileRainFigure('Rainfall totaled 0.2 inches this week.', 0.8))
+      .toBe('Rainfall totaled 0.8 inches this week.');
+  });
+
+  test('goal/recommended phrasing guards like target does', () => {
+    expect(reconcileRainFigure(
+      'Rain this week totaled 0.2 inches against the recommended 0.75 inches.',
+      0.8,
+    )).toBe('Rain this week totaled 0.8 inches against the recommended 0.75 inches.');
+  });
 });
 
 describe('replaceDroughtHypothesis', () => {
@@ -105,6 +119,11 @@ describe('replaceDroughtHypothesis', () => {
 
   test('"drought stress tolerance" never partially rewrites (codex P2 r2)', () => {
     expect(replaceDroughtHypothesis('Potassium supports drought stress tolerance in stressed turf.')).toBeNull();
+  });
+
+  test('an unrelated negation does not shield the drought phrase (codex P2 r3)', () => {
+    expect(replaceDroughtHypothesis('No pests were seen; drought stress remains possible in the thin areas.'))
+      .toBe('No pests were seen; uneven sprinkler coverage remains possible in the thin areas.');
   });
 
   test('a sentence not about the stress signals is left alone', () => {
@@ -175,6 +194,29 @@ describe('reconcileLawnReport — relevance pass integration', () => {
     input.reportV2.insights[0].nextVisitPlan = 'Recheck the sidewalk edge for chinch bug or drought stress.';
     const fix = reconcileLawnReport(input);
     expect(fix.insights[0].nextVisitPlan).toBe('Recheck the sidewalk edge for chinch bug or uneven sprinkler coverage.');
+  });
+
+  test('hero snapshot copies of insight text are patched too (codex P2 r3)', () => {
+    const input = base();
+    input.reportV2.snapshot = {
+      overallScore: 74,
+      mainWatch: 'Thin patches that could line up with chinch bug activity or a dry pocket.',
+      wavesNext: 'Recheck the flagged edge for drought stress next visit.',
+      watching: ['Stress patches from chinch bugs or a dry pocket', 'Mowing height'],
+      customerAction: 'Watch the thin patches for spread.',
+    };
+    const fix = reconcileLawnReport(input);
+    expect(fix.snapshot.mainWatch).toMatch(/uneven sprinkler coverage/);
+    expect(fix.snapshot.wavesNext).toMatch(/uneven sprinkler coverage/);
+    expect(fix.snapshot.watching[0]).toMatch(/uneven sprinkler coverage/);
+    expect(fix.snapshot.watching[1]).toBe('Mowing height');
+    expect(fix.snapshot.customerAction).toBe('Watch the thin patches for spread.');
+  });
+
+  test('untouched snapshot returns null (payload keeps its own)', () => {
+    const input = base();
+    input.reportV2.snapshot = { overallScore: 74, mainWatch: 'Mowing a bit tall.' };
+    expect(reconcileLawnReport(input).snapshot).toBeNull();
   });
 
   test('todaysResult carries no fixed "No urgent homeowner action" clause', () => {
