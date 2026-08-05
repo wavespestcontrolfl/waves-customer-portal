@@ -107,6 +107,30 @@ function keywordSegments(keyword) {
       && policy._internals.meaningfulTokens(segment).size > 0);
 }
 
+/**
+ * Plan-time approximation of the executor's relevance gate, used only to
+ * RANK matches before the site-wide cap — the executor still runs the real
+ * gate on its own pageFacts. Source facts come from the page frontmatter
+ * plus the snippet around the matched anchor.
+ */
+function planTimeRelevance(page, target, targetFront = {}, snippet = '') {
+  const front = fm.parse(String(page.body || '')).data || {};
+  return policy.scoreTopicalRelevance(
+    {
+      topic: front.primary_keyword || front.target_keyword || front.title || null,
+      topic_cluster: front.category || front.service || null,
+      title: front.title || null,
+      body_excerpt: snippet,
+    },
+    {
+      topic: targetFront.primary_keyword || targetFront.target_keyword || target.keyword || null,
+      topic_cluster: targetFront.category || targetFront.service || null,
+      keyword: target.keyword || null,
+      title: target.title || null,
+    }
+  );
+}
+
 // ── corpus scanner ──────────────────────────────────────────────────
 
 /**
@@ -349,40 +373,52 @@ class InternalLinkPlanner {
     // Resolve the target's content file from the corpus while we have it —
     // the executor can't reliably re-derive it from the URL alone (a
     // root-slug blog post and a location page have identical URL shapes).
-    const targetFile = corpus.find(
+    const targetPage = corpus.find(
       (page) => sameUrl(page.url || deriveUrlFromSourceFile(page.file, page.body), targetPath)
-    )?.file || null;
-    const tasks = [];
+    ) || null;
+    const targetFile = targetPage?.file || null;
+    const targetFront = targetPage ? (fm.parse(String(targetPage.body || '')).data || {}) : {};
+    const matches = [];
     const perFileCount = new Map();
 
+    // Scan the WHOLE corpus before applying the site-wide cap. Taking the
+    // first N matches in corpus order let a common-but-weak segment fill
+    // every slot with sources the executor's relevance gate then skips,
+    // while a genuinely relevant later page was never planned.
     for (const page of corpus) {
-      if (tasks.length >= cap) break;
       const pageUrl = page.url || deriveUrlFromSourceFile(page.file, page.body);
       if (sameUrl(pageUrl, targetPath)) continue; // never link page to itself
       if (!eligibleLinkSource(page)) continue; // never patch spoke-rendered or spoke-canonical pages
       if (pageAlreadyLinksTo(page.body, targetPath)) continue;
 
-      for (const { phrase } of candidates) {
+      for (const { phrase, priority } of candidates) {
         if ((perFileCount.get(page.file) || 0) >= perPageCap) break;
         const occ = findFirstUnlinkedOccurrence(page.body, phrase);
         if (!occ) continue;
         // Preserve the original casing from the matched text rather
         // than the candidate phrase.
         const actualAnchor = page.body.slice(occ.index, occ.index + occ.length);
-        tasks.push({
-          source_file: page.file,
-          target_url: targetPath,
-          target_file: targetFile,
-          anchor_text: actualAnchor,
-          context_snippet: occ.snippet,
-          source_offset: occ.index,
-          opportunity_id: opportunityId,
+        matches.push({
+          priority,
+          relevance: planTimeRelevance(page, target, targetFront, occ.snippet),
+          task: {
+            source_file: page.file,
+            target_url: targetPath,
+            target_file: targetFile,
+            anchor_text: actualAnchor,
+            context_snippet: occ.snippet,
+            source_offset: occ.index,
+            opportunity_id: opportunityId,
+          },
         });
         perFileCount.set(page.file, (perFileCount.get(page.file) || 0) + 1);
         break; // only one anchor per page per target
       }
     }
-    return tasks;
+    // Fill the cap best-first: plan-time relevance (the executor gates on
+    // it), then anchor priority; ties keep corpus order (sort is stable).
+    matches.sort((a, b) => (b.relevance - a.relevance) || (b.priority - a.priority));
+    return matches.slice(0, cap).map((m) => m.task);
   }
 
   /**
@@ -557,6 +593,7 @@ module.exports._internals = {
   anchorCandidates,
   serviceAnchorPhrase,
   keywordSegments,
+  planTimeRelevance,
   maskExcludedRegions,
   maskNonContentRegions,
   blankRegion,

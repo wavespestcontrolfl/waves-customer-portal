@@ -545,6 +545,43 @@ describe('planForTarget', () => {
     const tasks = planner.planForTarget(target, { corpus: big, cap: 3 });
     expect(tasks.length).toBe(3);
   });
+  test('fills the cap best-first: a relevant late page beats weak earlier matches', () => {
+    // Three weak matches (segment occurs, but frontmatter shares no topical
+    // tokens with the target) come FIRST in corpus order; a topically
+    // aligned page comes last. With cap=2 the aligned page must win a slot —
+    // corpus-order capping would have burned both slots on weak matches.
+    const weak = (i) => ({
+      file: `src/content/blog/weak-${i}.md`,
+      body: [
+        '---',
+        `title: Pool Cage Repairs Part ${i}`,
+        'category: home-maintenance',
+        'primary_keyword: pool cage repair',
+        '---',
+        'One reader mentioned bed bug bites while asking about screens.',
+      ].join('\n'),
+      url: `/blog/weak-${i}/`,
+    });
+    const relevant = {
+      file: 'src/content/blog/bed-bug-signs.md',
+      body: [
+        '---',
+        'title: Early Signs of Bed Bugs',
+        'category: pest-control',
+        'primary_keyword: bed bug signs',
+        '---',
+        'Waking up with bed bug bites is often the first sign, and flea bites look similar.',
+      ].join('\n'),
+      url: '/blog/bed-bug-signs/',
+    };
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [weak(1), weak(2), weak(3), relevant], cap: 2 }
+    );
+    expect(tasks.length).toBe(2);
+    expect(tasks.map((t) => t.source_file)).toContain('src/content/blog/bed-bug-signs.md');
+    expect(tasks[0].source_file).toBe('src/content/blog/bed-bug-signs.md');
+  });
   test('uses service alias anchors instead of partial service fragments', () => {
     const tasks = planner.planForTarget({
       url: '/pest-control-bradenton-fl/',
