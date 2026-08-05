@@ -3,7 +3,8 @@
  *
  * Each unpaid invoice has one row in `invoice_followup_sequences` that tracks
  * which step fires next and when. The cron calls `runPending()` Tue–Fri at
- * 10 AM to send due touches. The Stripe webhook calls `stopOnPayment()` the
+ * 10:16 AM (touches stay anchored to 10:00; the tick is staggered off :00 —
+ * see the scheduler block) to send due touches. The Stripe webhook calls `stopOnPayment()` the
  * instant payment succeeds — no "thanks for paying" + "you owe us" crossing.
  *
  * See server/config/invoice-followups.js for step timing + copy.
@@ -51,6 +52,14 @@ const FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID = {
 
 const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'refunded', 'canceled', 'cancelled'];
 const NON_SCHEDULABLE_INVOICE_STATUSES = [...TERMINAL_INVOICE_STATUSES, 'draft'];
+
+// A dunning touch fires on its scheduled calendar day or not at all (owner
+// ruling 2026-08-04, after the 07-29→08-04 cron outage left 17 sequences due).
+// Touches are anchored to 10:00 AM NY and the cron ticks minutes later, so a
+// healthy fire is minutes overdue; anything past this grace missed its day
+// (the next chance is ≥24h later) and is skipped forward, never sent late —
+// a revived cron must not burst a week of stale payment reminders.
+const STALE_TOUCH_GRACE_MS = 20 * 60 * 60 * 1000;
 
 function clean(value) {
   return String(value || '').trim();
@@ -377,6 +386,11 @@ async function runPending() {
   let sent = 0, skipped = 0;
   for (const row of rows) {
     try {
+      if (now.getTime() - new Date(row.next_touch_at).getTime() > STALE_TOUCH_GRACE_MS) {
+        await skipStaleTouches(row, now);
+        skipped++;
+        continue;
+      }
       await fireStep(row);
       sent++;
     } catch (err) {
@@ -386,6 +400,46 @@ async function runPending() {
   }
   logger.info(`[invoice-followups] runPending: ${sent} sent, ${skipped} skipped`);
   return { sent, skipped };
+}
+
+/**
+ * Advance a sequence past touches whose scheduled day already passed, without
+ * sending them. Walks the same anchored timeline fireTouch advances along
+ * until it finds a step still in the future; no future step left = completed.
+ * The update is a single guarded statement predicated on the batch snapshot
+ * (status/step/due unchanged), so it no-ops — and the next tick re-decides —
+ * if an admin edit or a manual sendNextTouchNow moved the sequence meanwhile.
+ * Deliberately no customer_interactions row: nothing customer-facing happened.
+ */
+async function skipStaleTouches(row, now) {
+  const anchorAt = row.anchor_at || row.invoice_sent_at || row.invoice_sms_sent_at
+    || row.invoice_created_at || row.created_at;
+  let nextIndex = row.step_index;
+  let nextAt = new Date(row.next_touch_at);
+  const skippedSteps = [];
+  while (nextAt && now.getTime() - nextAt.getTime() > STALE_TOUCH_GRACE_MS) {
+    skippedSteps.push(config.steps[nextIndex]?.id || `step_${nextIndex}`);
+    nextIndex += 1;
+    nextAt = computeNextTouchAt(anchorAt, nextIndex);
+  }
+  const updated = await db('invoice_followup_sequences')
+    .where({ id: row.id, status: 'active', step_index: row.step_index })
+    .where('next_touch_at', row.next_touch_at)
+    .update({
+      updated_at: db.fn.now(),
+      step_index: nextIndex,
+      next_touch_at: nextAt,
+      status: nextAt ? 'active' : 'completed',
+    });
+  if (updated) {
+    logger.info(
+      `[invoice-followups] skipped stale touch(es) [${skippedSteps.join(', ')}] for invoice ${row.invoice_id} — `
+      + `sequence ${nextAt ? `resumes at step ${nextIndex} (${new Date(nextAt).toISOString()})` : 'completed (no future steps)'}`,
+    );
+  } else {
+    logger.info(`[invoice-followups] stale-skip no-op for invoice ${row.invoice_id} — sequence changed since batch select`);
+  }
+  return { skippedSteps, nextIndex, nextAt: nextAt || null, updated: !!updated };
 }
 
 /**
@@ -1008,4 +1062,6 @@ module.exports = {
   sendNextTouchNow,
   hasActiveSequence,
   isDunningStopped,
+  skipStaleTouches,
+  STALE_TOUCH_GRACE_MS,
 };

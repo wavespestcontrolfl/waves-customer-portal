@@ -1962,10 +1962,18 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10AM (Tue–Fri) — Per-invoice follow-up sequences
+  // DAILY 10:16AM (Tue–Fri) — Per-invoice follow-up sequences
   // Fires the next due touch for each unpaid invoice's automated chain.
+  //
+  // The 10am-ET jobs are STAGGERED (:00 late-payment, :03 review-followups,
+  // :07 billing-retries, :12 renewal-reminders, :16 this, :20 seasonal) —
+  // until 2026-08-04 six of them fired at exactly 10:00, each runExclusive
+  // holds a pool connection for its advisory lock for the whole run, and the
+  // pileup exhausted the pool (this job failed 4 straight days; touches are
+  // anchored to 10:00 so a staggered tick is still same-day). Keep any new
+  // 10am job off :00.
   // =========================================================================
-  cron.schedule('0 10 * * 2-5', async () => {
+  cron.schedule('16 10 * * 2-5', async () => {
     logger.info('Running: invoice follow-up sequences');
     try {
       await runExclusive('invoice-followups', async () => {
@@ -3963,11 +3971,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10:00AM — Review follow-up reminders (Day 3 after initial request)
+  // DAILY 10:03AM — Review follow-up reminders (Day 3 after initial request)
   // Lands the followup on the 3rd ET-calendar-day after the original review
   // SMS was sent. Eligibility logic is in processFollowups().
   // =========================================================================
-  cron.schedule('0 10 * * *', async () => {
+  cron.schedule('3 10 * * *', async () => {
     logger.info('Running: review follow-up reminders');
     try {
       await runExclusive('review-followups', async () => {
@@ -4135,7 +4143,7 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  cron.schedule('0 10 * * *', async () => {
+  cron.schedule('7 10 * * *', async () => {
     try {
       await runExclusive('billing-retries', async () => {
         const BillingCron = require('./billing-cron');
@@ -4317,11 +4325,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10AM — Renewal reminders (termite bond ONLY — owner ruling
+  // DAILY 10:12AM — Renewal reminders (termite bond ONLY — owner ruling
   // 2026-07-13: no-term services never get "renewal" language) + the
   // annual-prepay payment reminders/sweeps that ride the same run.
   // =========================================================================
-  cron.schedule('0 10 * * *', async () => {
+  cron.schedule('12 10 * * *', async () => {
     logger.info('Running: renewal reminders');
     try {
       await runExclusive('renewal-reminders', async () => {
@@ -4342,7 +4350,7 @@ function initScheduledJobs() {
   // NEVER sends. Writes message_drafts status='pending' rows for owner
   // approval when GATE_CAMPAIGN_DRAFTS is on; gate off = shadow-log candidate
   // counts only. Sending happens exclusively through the drafts approve route.
-  cron.schedule('0 10 * * 1', async () => {
+  cron.schedule('20 10 * * 1', async () => {
     logger.info('Running: seasonal reactivation campaign');
     try {
       await runExclusive('seasonal-reactivation', async () => {
