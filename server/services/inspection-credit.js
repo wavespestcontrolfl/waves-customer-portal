@@ -569,7 +569,14 @@ async function redeemInspectionCreditForBooking({
   createdBy = 'system:inspection_credit_rebook',
   now = new Date(),
 }) {
-  if (!gateOn()) return { redeemed: 0, reason: 'feature_disabled' };
+  // NOT an early return on the gate (Codex #3178 r34 P0): standing-promise
+  // offers (rodent — the estimator's $125-creditable pledge on already-sent
+  // tokenized estimates) exist and print their memo even while dark, so a
+  // remediation booked before the flip must still redeem them or the
+  // invoice collects the full amount over a written promise. While dark
+  // the open-offer query below is RESTRICTED to standing-promise sources;
+  // the kill switch keeps its full meaning for the generic lane.
+  const creditingOn = gateOn();
   if (!customerId || !scheduledServiceId) return { redeemed: 0, reason: 'missing_identifiers' };
   if (bookingStatus && NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingStatus).toLowerCase())) {
     return { redeemed: 0, reason: 'booking_not_live' };
@@ -609,7 +616,7 @@ async function redeemInspectionCreditForBooking({
   }
 
   try {
-    const open = await db('inspection_credit_offers')
+    const openQ = db('inspection_credit_offers')
       .where({ customer_id: customerId })
       // 'expired' included on purpose — provisional, and the time-window
       // guards below (re-validated under the claim) are the real arbiter.
@@ -618,8 +625,17 @@ async function redeemInspectionCreditForBooking({
       .where('created_at', '<=', bookedAt)
       .where('expires_at', '>=', bookedAt)
       .whereNot({ source_scheduled_service_id: scheduledServiceId })
-      .orderBy('expires_at', 'asc')
-      .select('id', 'amount');
+      .orderBy('expires_at', 'asc');
+    if (!creditingOn) {
+      // Dark = STANDING-PROMISE offers only (r34 P0): sourced from a
+      // service whose credit pledge is gate-independent.
+      openQ.whereIn('source_scheduled_service_id', function standingSources() {
+        this.select('ss.id').from('scheduled_services as ss')
+          .join('services as sv', 'sv.id', 'ss.service_id')
+          .where('sv.service_key', 'rodent_inspection');
+      });
+    }
+    const open = await openQ.select('id', 'amount');
     if (!open.length) return { redeemed: 0, reason: 'no_open_offer' };
 
     let redeemed = 0;
@@ -910,12 +926,28 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       // resend; re-queue it (idempotent — a concurrent send dedupes).
       // Pre-filtered in SQL so PDF generation only runs for the rare
       // genuinely-undelivered offer, never per-offer per-hour.
+      // "Delivered" = ANY templated receipt for the visit's paid invoice
+      // sent AFTER the offer existed (Codex #3178 r34 P2): the normal
+      // pay-after-service receipt goes out under receipt_email_auto:<id> —
+      // and every receipt rendered post-offer carries the memo — so keying
+      // on the offer-scoped idempotency key alone re-emailed a duplicate
+      // receipt to every ordinary customer. trigger_event_id
+      // ('invoice_receipt:<invoiceId>') is stamped on every templated
+      // receipt send, keyed or not, which also covers manual resends.
       const undelivered = await db('inspection_credit_offers as o')
         .where('o.status', 'offered')
         .where('o.expires_at', '>=', now)
         .where('o.created_at', '<=', auditCutoff)
         .whereRaw("EXISTS (SELECT 1 FROM invoices i WHERE i.scheduled_service_id = o.source_scheduled_service_id AND i.status = 'paid' AND i.payer_id IS NULL)")
-        .whereRaw("NOT EXISTS (SELECT 1 FROM email_messages m WHERE m.idempotency_key = 'inspection-credit-offer-' || o.id::text)")
+        .whereRaw(`NOT EXISTS (
+          SELECT 1 FROM email_messages m
+          WHERE m.created_at >= o.created_at
+            AND (m.idempotency_key = 'inspection-credit-offer-' || o.id::text
+              OR m.trigger_event_id IN (
+                SELECT 'invoice_receipt:' || i2.id::text FROM invoices i2
+                WHERE i2.scheduled_service_id = o.source_scheduled_service_id
+                  AND i2.status = 'paid' AND i2.payer_id IS NULL))
+        )`)
         .limit(limit)
         .select('o.id as id', 'o.source_scheduled_service_id as visit_id');
       for (const row of undelivered) {
@@ -923,13 +955,6 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       }
     } catch (auditErr) {
       logger.error(`[inspection-credit] receipt-channel audit failed: ${auditErr.message}`);
-    }
-
-    // Everything below MOVES OR EXPIRES MONEY-BEARING STATE — that is what
-    // the kill switch pauses.
-    if (!creditingOn) {
-      if (reversed || recovered) logger.info(`[inspection-credit] sweep (gate off): ${reversed} reversed, ${recovered} recovered`);
-      return { redeemed: 0, expired: 0, reversed, recovered, reason: 'feature_disabled' };
     }
 
     // Redemption is EVIDENCE-FIRST (PR #3178 r17 P2): the working set is
@@ -945,7 +970,7 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
     // everything under the lock; redeemed rows leave the working set, so
     // it cannot starve.
     try {
-      const provable = await db('inspection_credit_booking_events as e')
+      const provableQ = db('inspection_credit_booking_events as e')
         .join('inspection_credit_offers as o', 'o.customer_id', 'e.customer_id')
         .join('scheduled_services as s', 's.id', 'e.scheduled_service_id')
         .whereIn('o.status', ['offered', 'expired'])
@@ -960,7 +985,19 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         // the limit on unmintable rows every run and starve real recovery.
         .whereRaw('COALESCE(s.is_callback, false) = false')
         .orderBy('e.created_at', 'asc')
-        .limit(limit)
+        .limit(limit);
+      if (!creditingOn) {
+        // Dark = STANDING-PROMISE offers only (r34 P0): rodent's
+        // estimator-quoted credit exists independent of the gate, prints
+        // its memo, and must redeem before the flip or the remediation
+        // invoice collects the full amount over a written promise. The
+        // generic lane stays fully paused.
+        provableQ
+          .join('scheduled_services as src', 'src.id', 'o.source_scheduled_service_id')
+          .join('services as sv', 'sv.id', 'src.service_id')
+          .where('sv.service_key', 'rodent_inspection');
+      }
+      const provable = await provableQ
         .select('o.id as offer_id', 'o.customer_id as customer_id', 'o.amount as amount',
           'e.scheduled_service_id as booking_id', 'e.created_at as booked_at');
       for (const row of provable) {
@@ -978,6 +1015,15 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       }
     } catch (redeemErr) {
       logger.error(`[inspection-credit] evidence-first redemption failed: ${redeemErr.message}`);
+    }
+
+    // The EXPIRY pass is what the kill switch still fully pauses while
+    // dark — closing out offers is generic-lane bookkeeping, and leaving
+    // them provisionally open costs nothing (ordering is judged by
+    // booking time, never by sweep time).
+    if (!creditingOn) {
+      if (reversed || recovered || redeemed) logger.info(`[inspection-credit] sweep (gate off): ${reversed} reversed, ${recovered} recovered, ${redeemed} standing-promise redeemed`);
+      return { redeemed, expired: 0, reversed, recovered, reason: 'feature_disabled' };
     }
 
     // Expiry pass, equally starvation-proof: only offers whose window has

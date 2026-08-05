@@ -2219,6 +2219,11 @@ router.get('/', async (req, res, next) => {
         // Dispatch V2 completes from this payload — the closeout promise
         // checkbox renders only on true (Codex #3178 r21 P1).
         inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+        // A resolver OUTAGE must reach the client's omit-the-field guard
+        // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
+        // hidden credit toggle falls through to a fabricated default
+        // opt-in the tech never saw.
+        completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
         linkedProject: projectCompletionContext.linkedProject || null,
@@ -2679,6 +2684,8 @@ router.get('/week', async (req, res, next) => {
           completionProfile: projectCompletionContext.completionProfile || null,
           // Same field as the day view above — both feed the V2 closeout.
           inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+          // Resolver-outage marker — same contract as the day view (r34 P2).
+          completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
           linkedProject: projectCompletionContext.linkedProject || null,

@@ -222,11 +222,24 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
 });
 
 describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
-  it('is inert while the gate is dark', async () => {
+  it('while dark, redeems ONLY standing-promise offers — the estimator pledge does not wait for the flip (r34 P0)', async () => {
+    // A rodent customer can complete the inspection and book remediation
+    // before GATE_INSPECTION_CREDIT is ever enabled; the offer exists and
+    // the receipt memo printed, so the booking must redeem it or the
+    // invoice collects the full amount over a written promise. The open
+    // query is RESTRICTED to standing-promise sources while dark — the
+    // generic lane's kill switch keeps its meaning.
     mockGateOn = false;
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
+    mockOffers = [{ id: 'offer-1', amount: '125.00', expires_at: new Date('2099-01-01') }];
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
-    expect(res).toEqual({ redeemed: 0, reason: 'feature_disabled' });
-    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(res).toEqual({ redeemed: 1, amount: 125 });
+    expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
+    // The dark-mode restriction was applied: a subquery on the offer's
+    // SOURCE visit limits the working set to standing-promise services.
+    expect(mockChainCalls.some((c) => c.m === 'whereIn'
+      && c.args[0] === 'source_scheduled_service_id'
+      && typeof c.args[1] === 'function')).toBe(true);
   });
 
   it('does not redeem against a cancelled/no-show booking', async () => {
@@ -931,13 +944,36 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).toContain("NOT EXISTS (SELECT 1 FROM inspection_credit_booking_events e WHERE e.scheduled_service_id = (notifications.metadata->>'scheduledServiceId')::uuid)");
   });
 
-  it('the durable audit also re-queues PAID-invoice resends that never landed (r31 P2)', () => {
+  it('the durable audit re-queues undelivered PAID resends without double-mailing normal receipts (r31/r34 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
-    // email_messages.idempotency_key is the durable send record — a paid
-    // visit's offer with no message row is exactly an undelivered resend
-    // (crash between offer insert and setImmediate), which both marker
-    // recovery and the no-channel tier skip.
-    expect(source).toContain("NOT EXISTS (SELECT 1 FROM email_messages m WHERE m.idempotency_key = 'inspection-credit-offer-' || o.id::text)");
+    // email_messages is the durable send record. "Delivered" = the
+    // offer-scoped key OR any templated receipt for the visit's paid
+    // invoice (trigger_event_id 'invoice_receipt:<id>') sent AFTER the
+    // offer existed — the ordinary post-closeout receipt already carries
+    // the memo, and keying on the offer key alone re-emailed every normal
+    // customer a duplicate.
+    expect(source).toContain("m.idempotency_key = 'inspection-credit-offer-' || o.id::text");
+    expect(source).toContain("'invoice_receipt:' || i2.id::text");
+    expect(source).toContain('m.created_at >= o.created_at');
+  });
+
+  it('while dark the sweep redeems standing-promise offers only; expiry stays paused (r34 P0)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // Both the fast path and the sweep restrict dark redemption to
+    // standing-promise sources via the offer's source visit.
+    const restrictions = source.match(/'sv\.service_key', 'rodent_inspection'/g) || [];
+    expect(restrictions.length).toBe(2); // redeem fast path + sweep provable join
+    // And the dark return still precedes the expiry pass.
+    const darkReturnAt = source.indexOf("reason: 'feature_disabled' };", source.indexOf('standing-promise redeemed'));
+    const expiryAt = source.indexOf('Expiry pass, equally starvation-proof');
+    expect(darkReturnAt).toBeGreaterThan(-1);
+    expect(darkReturnAt).toBeLessThan(expiryAt);
+  });
+
+  it('both schedule serializers forward the lookup-failed marker (r34 P2)', () => {
+    const schedule = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const matches = schedule.match(/completionProfileLookupFailed: projectCompletionContext\.completionProfileLookupFailed === true/g) || [];
+    expect(matches.length).toBe(2); // day + week views
   });
 
   it('marker-only booking paths fast-redeem after their event writes (r26/r27 P2)', () => {
