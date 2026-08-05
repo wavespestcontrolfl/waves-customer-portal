@@ -22,6 +22,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const bounceRecovery = require('../services/email-bounce-recovery');
+const bounceRescue = require('../services/email-bounce-rescue');
 const providerRetry = require('../services/transactional-email-provider-retry');
 
 const SIG_HEADER = 'x-twilio-email-event-webhook-signature';
@@ -307,10 +308,18 @@ async function handleEvent(ev) {
   // ONLY when the address is on file for a customer/open lead, which filters
   // marketing-list cruft. Fire-and-forget for the same batch-stall reason as
   // attemptRecovery; the 168h notification dedupe absorbs webhook redeliveries.
-  const alertUntrackedHardBounce = () => {
+  const alertUntrackedHardBounce = ({ rescue = true } = {}) => {
     if (!bounceRecovery.isHardBounceEvent(ev)) return;
     bounceRecovery.alertBouncedContactAddress(email, ev)
       .catch((err) => logger.error(`[sendgrid-webhook] bounced-contact alert failed: ${err.message}`));
+    // Untracked bounces have no email_messages row for domain recovery, but
+    // the transcript rescue only needs the address — same fire-and-forget
+    // contract; the rescue ledger's UNIQUE(bounced_email) absorbs replays.
+    // Newsletter deliveries pass rescue:false — marketing-stream bounces are
+    // owned by the suppression ledger and must never rewrite contact emails.
+    if (!rescue) return;
+    bounceRescue.rescueBouncedAddress(email, { appliedBy: 'webhook' })
+      .catch((err) => logger.error(`[sendgrid-webhook] bounce rescue failed: ${err.message}`));
   };
 
   if (newsletterDelivery) {
@@ -319,12 +328,32 @@ async function handleEvent(ev) {
     // branch below); the notification dedupe + idempotent lead stamp remain
     // the backstop for the fully-untracked branch, which has no event ledger.
     const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleNewsletterEvent(ev, newsletterDelivery, trx));
-    if (processedNew) alertUntrackedHardBounce();
+    if (processedNew) alertUntrackedHardBounce({ rescue: false });
     return;
   }
   if (automationSend) {
     const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
-    if (processedNew) alertUntrackedHardBounce();
+    if (processedNew) {
+      // Automations span both streams: newsletter-group templates
+      // (cold_lead nurture, referral nudges) are MARKETING — their bounces
+      // stay with the suppression/enrollment lane and must never enter the
+      // contact-rewriting rescue. Resolve the step's template asm_group;
+      // fail CLOSED (no rescue) when it can't be resolved.
+      let newsletterAutomation = true;
+      try {
+        const step = automationSend.step_id
+          ? await db('automation_steps').where({ id: automationSend.step_id }).first()
+          : null;
+        const template = step?.template_key
+          ? await db('automation_templates').where({ key: step.template_key }).first()
+          : null;
+        newsletterAutomation = !template
+          || String(template.asm_group || 'service').trim().toLowerCase() === 'newsletter';
+      } catch (err) {
+        logger.warn(`[sendgrid-webhook] automation asm_group lookup failed (rescue withheld): ${err.message}`);
+      }
+      alertUntrackedHardBounce({ rescue: !newsletterAutomation });
+    }
     return;
   }
   if (emailMessage) {
@@ -343,7 +372,17 @@ async function handleEvent(ev) {
           .catch((err) => logger.error(`[sendgrid-webhook] provider-retry alert failed for ${messageId}: ${err.message}`));
       } else if (bounceRecovery.isHardBounceEvent(ev)) {
         bounceRecovery.attemptRecovery(emailMessage, ev)
-          .catch((err) => logger.error(`[sendgrid-webhook] bounce recovery failed for ${messageId}: ${err.message}`));
+          .then((result) => {
+            // Recovery handles DOMAIN typos; when it re-sent (`resent:
+            // true` is the actual success shape), its own delivery/bounce
+            // feedback decides the address — rescue must not race it.
+            // Everything recovery could NOT act on falls through to the
+            // transcript rescue, except streams rescue must never touch.
+            if (result?.resent || result?.status === 'resent') return null;
+            if (['marketing_stream', 'test_message'].includes(result?.skipped)) return null;
+            return bounceRescue.rescueBouncedAddress(email, { appliedBy: 'webhook' });
+          })
+          .catch((err) => logger.error(`[sendgrid-webhook] bounce recovery/rescue failed for ${messageId}: ${err.message}`));
       } else if (String(ev.event || '').toLowerCase() === 'delivered' && bounceRecovery.isRecoveryMessage(emailMessage)) {
         bounceRecovery.commitRecoveryOnDelivery(emailMessage)
           .catch((err) => logger.error(`[sendgrid-webhook] recovery commit failed for ${messageId}: ${err.message}`));
