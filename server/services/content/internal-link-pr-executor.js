@@ -870,26 +870,14 @@ const SERVICE_HUB_SLUGS = new Set([
 ]);
 
 function inferPageType(file, frontmatter = {}) {
-  if (frontmatter.page_type || frontmatter.content_type) return String(frontmatter.page_type || frontmatter.content_type);
-  const normalized = String(file || '').replace(/\\/g, '/');
-  if (normalized.includes('/blog/')) return 'supporting-blog';
-  if (normalized.includes('/services/')) return /-fl\.mdx?$/.test(normalized) ? 'city-service' : 'service';
-  if (normalized.includes('/locations/')) return 'location';
-  return 'unknown';
+  // Delegates to the planner — plan-time ranking builds facts with the same
+  // inference so its scores equal this gate's scores.
+  return planner._internals.inferPageType(file, frontmatter);
 }
 
 function inferCluster(file, frontmatter = {}) {
-  const text = [
-    frontmatter.category,
-    frontmatter.service,
-    frontmatter.primary_keyword,
-    frontmatter.title,
-    file,
-  ].filter(Boolean).join(' ').toLowerCase();
-  for (const cluster of ['termite', 'mosquito', 'rodent', 'lawn', 'tree', 'shrub', 'pest']) {
-    if (text.includes(cluster)) return cluster === 'tree' || cluster === 'shrub' ? 'tree-shrub' : cluster;
-  }
-  return null;
+  // Delegates to the planner — see inferPageType.
+  return planner._internals.inferCluster(file, frontmatter);
 }
 
 function robotsNoindex(frontmatter = {}) {

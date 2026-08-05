@@ -581,8 +581,9 @@ describe('planForTarget', () => {
       { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
       { corpus: [weak(1), weak(2), weak(3), relevant], cap: 2 }
     );
-    expect(tasks.length).toBe(2);
-    expect(tasks.map((t) => t.source_file)).toContain('src/content/blog/bed-bug-signs.md');
+    // The weak matches score below the 0.75 gate floor and are not planned
+    // at all; the aligned page wins regardless of corpus position.
+    expect(tasks.length).toBe(1);
     expect(tasks[0].source_file).toBe('src/content/blog/bed-bug-signs.md');
   });
   test('never plans a match whose paragraph already has a link (executor would skip it)', () => {
@@ -606,7 +607,7 @@ describe('planForTarget', () => {
         'category: pest-control',
         'primary_keyword: overnight itching',
         '---',
-        'Bed bug bites that appear overnight are worth a closer look.',
+        'Bed bug bites that appear overnight are worth a closer look, especially compared with flea bites.',
       ].join('\n'),
       url: '/blog/clean-paragraph/',
     };
@@ -642,7 +643,7 @@ describe('planForTarget', () => {
         'primary_keyword: hedge health',
         '---',
         '',
-        'Regular shrub care keeps hedges dense and healthy through summer.',
+        'Regular shrub care keeps Florida yards dense and healthy through summer.',
       ].join('\n'),
       url: '/blog/hedge-health/',
     };
@@ -680,7 +681,7 @@ describe('planForTarget', () => {
         'primary_keyword: overnight itching',
         '---',
         '',
-        'Bed bug bites that appear overnight are worth a closer look.',
+        'Bed bug bites that appear overnight are worth a closer look, especially compared with flea bites.',
       ].join('\n'),
       url: '/blog/indexable-page/',
     };
@@ -732,7 +733,7 @@ describe('planForTarget', () => {
         'primary_keyword: overnight itching',
         '---',
         '',
-        'Bed bug bites that appear overnight are worth a closer look.',
+        'Bed bug bites that appear overnight are worth a closer look, especially compared with flea bites.',
       ].join('\n'),
       url: '/blog/clean-source/',
     };

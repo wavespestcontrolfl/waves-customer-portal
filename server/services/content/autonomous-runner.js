@@ -3191,7 +3191,7 @@ class AutonomousRunner {
           { corpus, opportunityId: run.opportunity_id }
         );
         if (!tasks.length) {
-          logger.warn(`[autonomous-runner] internal-link planner found ZERO anchor opportunities for freshly published ${out.published_url} (keyword: ${brief.target_keyword || 'none'}) across ${corpus.length} corpus pages — the new post will have no inbound links`);
+          logger.warn(`[autonomous-runner] internal-link planner planned ZERO NEW link tasks for freshly published ${out.published_url} (keyword: ${brief.target_keyword || 'none'}) across ${corpus.length} corpus pages`);
         }
         for (const task of tasks) {
           await db('content_internal_link_tasks').insert(task).onConflict(['source_file', 'target_url', 'anchor_text']).ignore().catch(() => {});

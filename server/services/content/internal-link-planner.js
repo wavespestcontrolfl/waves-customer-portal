@@ -111,27 +111,48 @@ function keywordSegments(keyword) {
 }
 
 /**
- * Plan-time approximation of the executor's relevance gate, used only to
- * RANK matches before the site-wide cap — the executor still runs the real
- * gate on its own pageFacts. Source facts come from the page frontmatter
- * plus the same paragraph context the executor scores.
+ * Same page-type/cluster inference the executor's fact builder uses (it
+ * delegates here) — ranking with different facts than the gate re-opens the
+ * cap-burn bug where mis-scored matches consume slots.
  */
-function planTimeRelevance(page, target, targetFront = {}, snippet = '') {
-  const front = fm.parse(String(page.body || '')).data || {};
-  return policy.scoreTopicalRelevance(
-    {
-      topic: front.primary_keyword || front.target_keyword || front.title || null,
-      topic_cluster: front.category || front.service || null,
-      title: front.title || null,
-      body_excerpt: snippet,
-    },
-    {
-      topic: targetFront.primary_keyword || targetFront.target_keyword || target.keyword || null,
-      topic_cluster: targetFront.category || targetFront.service || null,
-      keyword: target.keyword || null,
-      title: target.title || null,
-    }
-  );
+function inferPageType(file, frontmatter = {}) {
+  if (frontmatter.page_type || frontmatter.content_type) return String(frontmatter.page_type || frontmatter.content_type);
+  const normalized = String(file || '').replace(/\\/g, '/');
+  if (normalized.includes('/blog/')) return 'supporting-blog';
+  if (normalized.includes('/services/')) return /-fl\.mdx?$/.test(normalized) ? 'city-service' : 'service';
+  if (normalized.includes('/locations/')) return 'location';
+  return 'unknown';
+}
+
+function inferCluster(file, frontmatter = {}) {
+  const text = [
+    frontmatter.category,
+    frontmatter.service,
+    frontmatter.primary_keyword,
+    frontmatter.title,
+    file,
+  ].filter(Boolean).join(' ').toLowerCase();
+  for (const cluster of ['termite', 'mosquito', 'rodent', 'lawn', 'tree', 'shrub', 'pest']) {
+    if (text.includes(cluster)) return cluster === 'tree' || cluster === 'shrub' ? 'tree-shrub' : cluster;
+  }
+  return null;
+}
+
+/**
+ * The topical facts scoreTopicalRelevance consumes, built with the SAME
+ * field precedence as the executor's pageFromAstroFile/pageFacts — when the
+ * target page exists in the corpus the plan-time score equals the gate's
+ * score exactly.
+ */
+function topicalFacts(file, frontmatter = {}, { bodyExcerpt = null } = {}) {
+  return {
+    page_type: inferPageType(file, frontmatter),
+    topic: frontmatter.primary_keyword || frontmatter.target_keyword || frontmatter.title || null,
+    topic_cluster: frontmatter.category || frontmatter.service || frontmatter.target_service || inferCluster(file, frontmatter),
+    title: frontmatter.title || null,
+    keyword: frontmatter.primary_keyword || frontmatter.target_keyword || null,
+    body_excerpt: bodyExcerpt,
+  };
 }
 
 // ── corpus scanner ──────────────────────────────────────────────────
@@ -437,7 +458,14 @@ class InternalLinkPlanner {
    * Returns [{ source_file, target_url, anchor_text, context_snippet,
    *            source_offset, opportunity_id }]
    */
-  planForTarget(target, { corpus = [], opportunityId = null, cap = DEFAULT_LINK_CAP, perPageCap = DEFAULT_PER_PAGE_CAP, maxSourceContextualLinks = DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS } = {}) {
+  planForTarget(target, {
+    corpus = [],
+    opportunityId = null,
+    cap = DEFAULT_LINK_CAP,
+    perPageCap = DEFAULT_PER_PAGE_CAP,
+    maxSourceContextualLinks = DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS,
+    minTopicalRelevance = Number(process.env.AUTONOMOUS_INTERNAL_LINK_MIN_TOPICAL_RELEVANCE ?? 0.75),
+  } = {}) {
     if (!target?.url) return [];
     const candidates = anchorCandidates(target);
     if (!candidates.length) return [];
@@ -452,8 +480,18 @@ class InternalLinkPlanner {
     ) || null;
     const targetFile = targetPage?.file || null;
     const targetFront = targetPage ? (fm.parse(String(targetPage.body || '')).data || {}) : {};
+    // When the target page is in the corpus these facts equal the executor's
+    // exactly. A not-yet-merged target gets a synthetic frontmatter from the
+    // brief (the executor would skip everything as target_body_missing in
+    // that state anyway, so the approximation cannot cause divergence).
+    const targetFacts = targetPage
+      ? topicalFacts(targetFile, targetFront)
+      : topicalFacts(targetPath, {
+        primary_keyword: target.keyword || undefined,
+        title: target.title || undefined,
+        service: target.service || undefined,
+      });
     const matches = [];
-    const perFileCount = new Map();
 
     // Scan the WHOLE corpus before applying the site-wide cap. Taking the
     // first N matches in corpus order let a common-but-weak segment fill
@@ -472,8 +510,13 @@ class InternalLinkPlanner {
       if (pageAlreadyLinksTo(page.body, targetPath)) continue;
       if (countInternalLinks(page.body) > maxSourceContextualLinks) continue;
 
+      // Evaluate EVERY candidate phrase for this page and keep the best
+      // per-page match(es) by relevance — committing to the first matching
+      // phrase let a low-relevance early candidate (e.g. a bare "roof rat")
+      // shadow a later fully-relevant segment on the same page, queueing a
+      // task the executor's relevance gate then rejects.
+      const pageMatches = [];
       for (const { phrase, priority } of candidates) {
-        if ((perFileCount.get(page.file) || 0) >= perPageCap) break;
         const occ = findFirstUnlinkedOccurrence(page.body, phrase);
         if (!occ) continue;
         // The executor re-locates each phrase's FIRST occurrence and skips
@@ -491,9 +534,16 @@ class InternalLinkPlanner {
         // care") or leave a dangling geo qualifier — both only detectable
         // in context. The same phrase may still be clean on another page.
         if (!policy.validateAnchorPolicy(actualAnchor, { surroundingText: paragraph }).ok) continue;
-        matches.push({
+        const relevance = policy.scoreTopicalRelevance(
+          topicalFacts(page.file, front, { bodyExcerpt: paragraph }),
+          targetFacts
+        );
+        // Below the gate's floor the executor is certain to reject — with
+        // identical facts on both sides the scores match, so skip here.
+        if (relevance < minTopicalRelevance) continue;
+        pageMatches.push({
           priority,
-          relevance: planTimeRelevance(page, target, targetFront, paragraph),
+          relevance,
           task: {
             source_file: page.file,
             target_url: targetPath,
@@ -504,9 +554,9 @@ class InternalLinkPlanner {
             opportunity_id: opportunityId,
           },
         });
-        perFileCount.set(page.file, (perFileCount.get(page.file) || 0) + 1);
-        break; // only one anchor per page per target
       }
+      pageMatches.sort((a, b) => (b.relevance - a.relevance) || (b.priority - a.priority));
+      matches.push(...pageMatches.slice(0, perPageCap));
     }
     // Fill the cap best-first: plan-time relevance (the executor gates on
     // it), then anchor priority; ties keep corpus order (sort is stable).
@@ -686,7 +736,9 @@ module.exports._internals = {
   anchorCandidates,
   serviceAnchorPhrase,
   keywordSegments,
-  planTimeRelevance,
+  inferPageType,
+  inferCluster,
+  topicalFacts,
   maskExcludedRegions,
   maskNonContentRegions,
   blankRegion,
