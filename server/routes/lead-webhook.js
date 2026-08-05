@@ -1,5 +1,6 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const TwilioService = require('../services/twilio');
@@ -668,18 +669,28 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // to new customer rows, but the same person can produce a second
     // "new" row (phone stored in a different format, deleted/merged
     // record, double submission racing the 5-min window — 20 phones got
-    // the menu text twice in prod). Dedup on any prior auto_reply row in
-    // sms_log by phone digits, same matching rule the inbound-SMS
-    // customer lookup uses. Fails CLOSED: if the check errors we skip
-    // the send — a missed greeting beats texting a customer twice.
-    // Later inbound replies are still classified by
-    // server/services/lead-intake.js. Edit copy in the admin UI.
+    // the menu text twice in prod). See hasPriorLeadAutoReply for the
+    // dedup predicate; a per-phone advisory xact lock serializes
+    // concurrent webhook POSTs so both can't pass the check before
+    // either send lands (the audit row is committed by the time
+    // sendCustomerMessage resolves, i.e. before the lock releases).
+    // Lock hold spans one template render + one Twilio call at lead
+    // volume (~2/day) — pool impact is negligible. Fails CLOSED: any
+    // error in the check or lock path skips the send — a missed
+    // greeting beats texting a customer twice. Later inbound replies
+    // are still classified by server/services/lead-intake.js. Edit
+    // copy in the admin UI.
     try {
-      const alreadyAutoReplied = await hasPriorLeadAutoReply(phoneFormatted);
+      await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
+          `lead_auto_reply:${String(phoneFormatted).slice(-10)}`,
+        ]);
 
-      if (alreadyAutoReplied) {
-        logger.info(`[lead-webhook] Auto-reply skipped for customer ${customer.id}: already sent once to this phone`);
-      } else {
+        if (await hasPriorLeadAutoReply(phoneFormatted, trx)) {
+          logger.info(`[lead-webhook] Auto-reply skipped for customer ${customer.id}: already sent once to this phone`);
+          return;
+        }
+
         const replyMsg = await renderRequiredSmsTemplate(
           'lead_auto_reply_biz',
           { first_name: firstName },
@@ -704,7 +715,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         if (!smsResult.sent) {
           logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
         }
-      }
+      });
 
       // Seed the intake state machine so the customer's next inbound SMS
       // gets routed through server/services/lead-intake.js (classify →
@@ -1464,23 +1475,51 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
 
 /**
  * The lead auto-reply (lead_auto_reply_biz) is sent AT MOST ONCE per
- * person, ever (owner ruling 2026-08-05). Matches prior sends by the
- * last 10 phone digits — the same rule the inbound-SMS customer lookup
- * uses — so a re-created customer row or a differently-formatted phone
- * can't earn a second copy of the same menu text.
+ * person, ever (owner ruling 2026-08-05).
  *
- * FAIL CLOSED: if the dedup query errors, report "already sent" so the
- * caller skips the send. A missed greeting is recoverable (the lead
- * alert to the operator still fires); texting a customer the same
+ * Primary source of truth: messaging_audit_log rows with
+ * entry_point='lead_webhook_auto_reply' — this route is the ONLY sender
+ * of the menu template, so the entry point identifies it exactly
+ * (sms_log.message_type='auto_reply' is shared with the public-quote
+ * booking invite and can't distinguish templates). Only rows with a
+ * non-null sent_at count: blocked and provider-failed attempts never
+ * reached the customer and must not suppress a real first send.
+ * to_hash is sha256 of the wrapper-normalized recipient
+ * (+1XXXXXXXXXX for NANP — see normalizeRecipient in
+ * services/messaging/send-customer-message.js and sha256 in
+ * services/messaging/audit.js); phoneFormatted here is built the same
+ * way, so the hashes line up.
+ *
+ * Legacy leg: 36 menu sends predate the first audit row
+ * (2026-05-04T11:16:45Z). For rows STRICTLY BEFORE that instant we
+ * fall back to the old sms_log signature. The bound is a fixed UTC
+ * instant (not an ET business-day window), so comparing against the
+ * raw timestamptz is correct. Post-cutover sms_log rows are never
+ * consulted — that's what keeps quote-wizard sends from
+ * false-positively suppressing the menu.
+ *
+ * FAIL CLOSED: if either dedup query errors, report "already sent" so
+ * the caller skips the send. A missed greeting is recoverable (the
+ * operator lead alert still fires); texting a customer the same
  * automated message twice is the failure this guard exists to prevent.
  */
-async function hasPriorLeadAutoReply(phoneFormatted) {
+const LEAD_AUTO_REPLY_AUDIT_CUTOVER = new Date('2026-05-04T11:16:45Z');
+
+async function hasPriorLeadAutoReply(phoneFormatted, dbc = db) {
   try {
-    const prior = await db('sms_log')
+    const toHash = crypto.createHash('sha256').update(String(phoneFormatted || ''), 'utf8').digest('hex');
+    const auditHit = await dbc('messaging_audit_log')
+      .where({ entry_point: 'lead_webhook_auto_reply', to_hash: toHash })
+      .whereNotNull('sent_at')
+      .first();
+    if (auditHit) return true;
+
+    const legacyHit = await dbc('sms_log')
       .where({ direction: 'outbound', message_type: 'auto_reply' })
+      .where('created_at', '<', LEAD_AUTO_REPLY_AUDIT_CUTOVER)
       .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [String(phoneFormatted).slice(-10)])
       .first();
-    return !!prior;
+    return !!legacyHit;
   } catch (dedupErr) {
     logger.warn(`[lead-webhook] auto-reply dedup check failed — skipping send (fail closed): ${dedupErr.message}`);
     return true;
