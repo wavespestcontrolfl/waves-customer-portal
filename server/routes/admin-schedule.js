@@ -9598,7 +9598,19 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       outcome = { status: 404, body: { error: 'parent service not found' } };
       return;
     }
-    if (parent.customer_id !== parentPeek.customer_id) await lockCustomerComms(trx, parent.customer_id);
+    if (parent.customer_id !== parentPeek.customer_id) {
+      await lockCustomerComms(trx, parent.customer_id);
+      // r43 (same seam as the maintenance path): that second acquire can
+      // sit behind the very undo repointing the parent — re-read after it.
+      // A row that moved AGAIN aborts retryably; an unchanged owner adopts
+      // the fresh row so the spawn inserts copy post-undo values.
+      const relocked = await trx('scheduled_services').where({ id: parentId }).first();
+      if (!relocked || relocked.customer_id !== parent.customer_id) {
+        outcome = { status: 409, body: { error: 'The series owner changed while processing (a customer merge was undone). Retry the action.', code: 'VISIT_OWNER_CHANGED' } };
+        return;
+      }
+      parent = relocked;
+    }
     if (parent.status === 'cancelled') {
       outcome = { status: 409, body: { error: 'series has been cancelled' } };
       return;

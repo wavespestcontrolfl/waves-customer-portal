@@ -787,6 +787,9 @@ describe('revertMerge', () => {
     // created_at ONLY — 20260401000020 (the review_requests regression
     // class: a wrong updated_at select must raise 42703 like prod).
     property_application_history: ['created_at'],
+    tree_shrub_assessments: ['created_at', 'updated_at'],
+    // created_at ONLY — 20260401000073.
+    job_costs: ['created_at'],
   };
   const assertSelectableColumns = (table, q) => {
     const known = TABLE_TIMESTAMPS[table];

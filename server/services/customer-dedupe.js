@@ -1958,6 +1958,10 @@ const TABLE_TIMESTAMP_COLUMNS = {
   // created_at ONLY — 20260401000020 (the compliance-enhanced migration
   // adds DACS fields, never updated_at).
   property_application_history: ['created_at'],
+  // explicit pair — 20260624000100.
+  tree_shrub_assessments: ['created_at', 'updated_at'],
+  // created_at ONLY — 20260401000073.
+  job_costs: ['created_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2723,6 +2727,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           // FDACS application-limit ledger rows with the record's current
           // customer_id — stranding them mis-attributes regulatory history.
           { table: 'property_application_history', label: 'compliance ledger row(s)' },
+          // r43: the completion/report path persists a V2 Tree & Shrub
+          // assessment (report loading requires it to match the record's
+          // current customer), and calculateJobCost inserts a cost/revenue
+          // ledger row — both stamp customer_id + service_record_id
+          // without touching the record.
+          { table: 'tree_shrub_assessments', label: 'tree & shrub assessment(s)' },
+          { table: 'job_costs', label: 'job cost ledger row(s)' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];
