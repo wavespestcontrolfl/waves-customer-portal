@@ -142,7 +142,7 @@ const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
 // intent (codex #3222 r3) — same shape as NEGATED_ROACH_RE: negation word +
 // up to four plain-word fillers; adversative conjunctions break the run so
 // "don't want the quarterly but do want a re-service" keeps its affirmative.
-const NEGATED_RE_SERVICE_RE = new RegExp(`\\b(?:no|not|isn['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|wouldn['’]?t|never|without|rather\\s+than|instead\\s+of)\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${RE_SERVICE_PHRASE}\\b`, 'gi');
+const NEGATED_RE_SERVICE_RE = new RegExp(`\\b(?:no|not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|haven['’]?t|hasn['’]?t|won['’]?t|wouldn['’]?t|never|without|rather\\s+than|instead\\s+of)\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${RE_SERVICE_PHRASE}\\b`, 'gi');
 
 // Historical context is not intent either (codex #3222 r5): "schedule my
 // quarterly; last month's re-service worked great" is a PLAN booking that
@@ -157,7 +157,7 @@ const RE_SERVICE_HISTORY_CUE = "(?:last\\s+(?:time|visit|week|month|year)|previo
 // asks. Both strip windows refuse to cross a causal / complaint / request
 // cue — same refusal-window technique as the rodent onset-verb and
 // contrast-cue guards.
-const RE_SERVICE_HISTORY_BREAK = "(?:because|since|but|now|please|again|need(?:s|ed)?|want(?:s|ed)?|missed|skipped|failed|didn['’]?t|doesn['’]?t|wasn['’]?t|not)";
+const RE_SERVICE_HISTORY_BREAK = "(?:because|since|but|now|please|again|missed|skipped|failed|didn['’]?t|doesn['’]?t|wasn['’]?t|not)";
 const RE_SERVICE_HISTORY_WINDOW = `(?:(?!\\b${RE_SERVICE_HISTORY_BREAK}\\b)[^.!?\\n]){0,40}?`;
 const HISTORICAL_RE_SERVICE_RE = new RegExp(`\\b${RE_SERVICE_HISTORY_CUE}\\b${RE_SERVICE_HISTORY_WINDOW}${RE_SERVICE_PHRASE}\\b`, 'gi');
 const RE_SERVICE_HISTORICAL_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b${RE_SERVICE_HISTORY_WINDOW}\\b(?:${RE_SERVICE_HISTORY_CUE}|ago)\\b`, 'gi');
@@ -382,8 +382,13 @@ function resolveCallBookingCatalogService({
     }
   }
 
-  if (byModelPick) return byModelPick;
-  return keywordRow;
+  // A GENERIC model pick is outranked by a deterministic keyword match
+  // (codex #3222 r7): "rodent inspection re-visit" with a
+  // Waves-Appointment pick books the inspection, not the generic anything-
+  // row. A replaceable lane-family PLAN pick is still a SPECIFIC service the
+  // model chose exactly — it keeps its precedence over keyword rules.
+  if (byModelPick && !isGenericCallCatalogRow(byModelPick)) return byModelPick;
+  return keywordRow || byModelPick || null;
 }
 
 function sanitizeQuotedCallPrice(value) {

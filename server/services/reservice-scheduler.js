@@ -145,6 +145,38 @@ async function reserviceLanesForCustomer(customer) {
   return ['pest', 'lawn'].filter((lane) => lanes.has(lane));
 }
 
+/**
+ * Property-scoped lane coverage (the phone re-service path's multi-property
+ * guard — codex #3222 r7): true when the lane's LIVE coverage includes a
+ * recurring row FOR THIS PROPERTY. A null propertyId means the customer's
+ * primary/on-file address, which the account-level lane grant already
+ * represents — only an explicit non-null property (a rental, a second home)
+ * needs its own qualifying coverage, or a covered-primary customer could
+ * book the free callback at an uncovered address. Fail-closed: a lookup
+ * error covers nothing.
+ */
+async function reserviceLaneCoversProperty(customerId, lane, propertyId) {
+  if (!propertyId) return true;
+  if (!customerId || !RESERVICE_LANES[lane]) return false;
+  try {
+    const rows = await db('scheduled_services as s')
+      .leftJoin('services as sv', 's.service_id', 'sv.id')
+      .where('s.customer_id', customerId)
+      .where('s.property_id', propertyId)
+      .where('s.is_recurring', true)
+      .whereNotIn('s.status', TERMINAL_STATUSES)
+      .where('s.scheduled_date', '>=', etDateString())
+      .select('s.service_type', 's.is_callback', 'sv.service_key', 'sv.category')
+      .limit(100);
+    return rows.some((row) => row.is_callback !== true
+      && !isReService({ serviceKey: row.service_key, serviceType: row.service_type })
+      && laneForCoverageRow({ category: row.category, serviceType: row.service_type }) === lane);
+  } catch (err) {
+    logger.warn(`[reservice-scheduler] property lane coverage lookup failed for customer ${customerId}: ${err.message}`);
+    return false;
+  }
+}
+
 // Statuses that keep a callback "open" for the lane dedupe: booked
 // (pending/confirmed) AND live (en_route/on_site) — a tech already on the
 // way is the strongest possible reason not to book a second free visit in
@@ -227,6 +259,7 @@ module.exports = {
   laneForCoverageRow,
   laneForCallbackRow,
   reserviceLanesForCustomer,
+  reserviceLaneCoversProperty,
   openReserviceCallbacks,
   openCallbackExistsForLane,
 };

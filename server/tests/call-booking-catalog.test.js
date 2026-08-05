@@ -625,6 +625,49 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(both).toBeNull();
   });
 
+  test('contraction negations (aren\'t/weren\'t/haven\'t/hasn\'t) are not intent (codex r7)', () => {
+    expect(hasCallReServiceIntent({}, "we aren't asking for a re-service; schedule our regular quarterly visit")).toBe(false);
+    expect(hasCallReServiceIntent({}, "we haven't needed a re-service before, book the regular visit")).toBe(false);
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'General Pest Control (Quarterly)', requested_service: "we aren't asking for a re-service; schedule our regular quarterly visit" },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row?.service_key).toBe('pest_general_quarterly');
+  });
+
+  test('past need/want statements stay historical (codex r7)', () => {
+    expect(hasCallReServiceIntent({}, 'schedule my quarterly visit; last time I needed a re-service too')).toBe(false);
+    expect(hasCallReServiceIntent({}, 'previously we wanted a re-service but the quarterly covered it')).toBe(false);
+    // The r6 motivating examples still keep their intent without need/want breaks.
+    expect(hasCallReServiceIntent({}, 'I need a re-service because the last visit did not work')).toBe(true);
+    expect(hasCallReServiceIntent({}, 'last visit missed the lanai, please spray again')).toBe(true);
+  });
+
+  test('a deterministic keyword row outranks a GENERIC model pick (codex r7)', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Waves Pest Control Appointment Service', requested_service: 'rodent inspection re-visit' },
+      transcription: 'the rats are back, we need the rodent inspection re-visit',
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'Rodent Control',
+    });
+    expect(row?.service_key).toBe('rodent_inspection');
+    // A lane-family PLAN pick is specific — it still outranks keyword rules.
+    const plan = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'General Pest Control (Quarterly)' },
+      transcription: 'german roaches in the kitchen',
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: [],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(plan?.service_key).toBe('pest_general_quarterly');
+  });
+
   test('a re-service row never prices — even a transcript-quoted number stays off the visit (codex r2)', () => {
     expect(resolveCallBookingPrice({ quotedPrice: 109, catalogRow: RE_SERVICES[0] }))
       .toEqual({ price: null, source: null });
