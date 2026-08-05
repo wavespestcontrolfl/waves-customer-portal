@@ -226,7 +226,12 @@ function reconcileRainFigure(text, canonicalRain) {
 // (codex P2 r13).
 // …and the praise exclusion covers resistance/resilience wording alongside
 // tolerance ("drought resistant", "drought resilience" — codex P2 r14).
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
+// The leading alternative absorbs the optional "stress" into the -related
+// compound ("drought stress-related", "drought-stress-related"): without it,
+// the (?!-) guard blocked the stress match and the bare "drought" fallback
+// produced "uneven sprinkler coverage stress-related" — or skipped the fully
+// hyphenated form entirely (codex P2 r18).
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:[- ]stress)?[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 
 function replaceDroughtHypothesis(text) {
@@ -275,7 +280,7 @@ function replaceDroughtHypothesis(text) {
       if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(pre)) return m;
       if (/\b(?:unlikely|doubtful)\s+to\s+be\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
       if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
-        && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:be\s+)?rule\b/i.test(pre.slice(-40))) return m;
+        && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
       if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) return m;
       // dry pocket/spell: a hypothesis under a cue OR a terse headline
       // ("Dry pocket near the sidewalk") — but never an OBSERVATION sentence
@@ -293,16 +298,18 @@ function replaceDroughtHypothesis(text) {
       // / "was ruled out" already agrees with the water data and must not be
       // flipped into a coverage claim (codex P2 r14). A NEGATED dismissal
       // ("cannot be ruled out") is an unresolved hypothesis and must still
-      // be reconciled (codex P2 r16).
+      // be reconciled (codex P2 r16) — including with same-clause modifiers
+      // ("cannot be completely ruled out", "can't yet be fully ruled out" —
+      // codex P2 r18), mirrored in the pre-phrase guard above.
       const tail = sentence.slice(offset + m.length);
-      const negatedDismissal = /^[^.;,:]{0,30}\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:be\s+)?ruled\s+out\b/i.test(tail);
+      const negatedDismissal = /^[^.;,:]{0,30}\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b/i.test(tail);
       if (!negatedDismissal
         && /^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never|unlikely|less\s+likely|ruled\s+out|doubtful|improbable)\b/i.test(tail)) return m;
       // Adjectival forms — hyphenated or space-form "drought stressed"
       // (codex P2 r9/r12), or "drought stress" directly modifying
       // symptoms/signs/related (codex P2 r10) — take the adjectival
       // replacement so the sentence stays grammatical.
-      if (/drought[- ]related\b/i.test(m)
+      if (/drought(?:[- ]stress)?[- ]related\b/i.test(m)
         || /drought[- ]stressed\b/i.test(m)
         || /drought-stress\b/i.test(m)
         || (/drought[- ]stress$/i.test(m) && /^\s*(?:symptoms?|signs?|related)\b/i.test(tail))) {

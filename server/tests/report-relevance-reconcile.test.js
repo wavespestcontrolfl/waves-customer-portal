@@ -279,6 +279,22 @@ describe('replaceDroughtHypothesis', () => {
     expect(replaceDroughtHypothesis('We ruled out drought stress for the thin patches.')).toBeNull();
   });
 
+  test('"drought stress-related" rewrites as one adjectival phrase (codex P2 r18)', () => {
+    expect(replaceDroughtHypothesis('The thinning could be drought stress-related damage.'))
+      .toBe('The thinning could be sprinkler-coverage-related damage.');
+    expect(replaceDroughtHypothesis('Drought-stress-related thinning is possible near the edge.'))
+      .toBe('Sprinkler-coverage-related thinning is possible near the edge.');
+  });
+
+  test('a negated dismissal with modifiers still reconciles (codex P2 r18)', () => {
+    expect(replaceDroughtHypothesis('Drought stress cannot be completely ruled out in the thin patches.'))
+      .toBe('Uneven sprinkler coverage cannot be completely ruled out in the thin patches.');
+    expect(replaceDroughtHypothesis('We cannot fully rule out drought stress for the thin patches.'))
+      .toBe('We cannot fully rule out uneven sprinkler coverage for the thin patches.');
+    // A true dismissal with a modifier still survives verbatim.
+    expect(replaceDroughtHypothesis('Drought stress was effectively ruled out for the stressed strip.')).toBeNull();
+  });
+
   test('a direct dry-spot hypothesis passes the prefilter (codex P2 r17)', () => {
     expect(replaceDroughtHypothesis('Could be dry spots near the sidewalk.'))
       .toBe('Could be uneven sprinkler coverage near the sidewalk.');
