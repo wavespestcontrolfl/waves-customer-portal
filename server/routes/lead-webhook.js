@@ -26,6 +26,7 @@ const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
+const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const { verifyTurnstileToken } = require('../utils/turnstile');
@@ -509,6 +510,15 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           fields: buildPrefillAttachFields(),
           webhookStage: { ...webhookStageBase, existing_customer_attach: true },
         });
+        if (!attachedLead) {
+          attachedLead = await attachOpenCallLeadByPhone({
+            phoneFormatted,
+            typedFirstName: firstName,
+            resolvedCustomerFirstName: customer?.first_name,
+            fields: buildPrefillAttachFields(),
+            webhookStage: { ...webhookStageBase, existing_customer_attach: true },
+          });
+        }
         if (attachedLead) {
           await backfillCallLeadAttribution({
             leadId: attachedLead.id,
@@ -823,7 +833,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 
     // Create leads table record for pipeline tracking
     let leadRecord = null;
-    let attachedViaPrefill = false;
+    // True when this submission attached to an existing call-pipeline lead
+    // (via the voicemail text-back prefill token OR the phone-match fallback)
+    // instead of inserting a fresh leads row. attachedVia records which mode
+    // ('prefill' | 'phone') — the attribution block below treats them
+    // differently when the call side can't record a funnel row.
+    let attachedCallLead = false;
+    let attachedVia = null;
     try {
       const webhookStage = {
         ...webhookStageBase,
@@ -841,14 +857,30 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       // (lead_source_id / lead_type / first_contact_*) is preserved;
       // extracted_data is MERGED so the voicemail provenance and the one-shot
       // SMS stamp survive. Terminal or converted leads never re-attach.
-      const attached = await attachVoicemailPrefillLead({
+      let attached = await attachVoicemailPrefillLead({
         body,
         fields: buildPrefillAttachFields(),
         webhookStage,
       });
       if (attached) {
+        attachedVia = 'prefill';
+      } else {
+        // Token-less fallback: a prospect who left a voicemail but never
+        // clicked the text-back link (found the main-site form on their own)
+        // arrives here with no prefill token — match their open call-pipeline
+        // lead by phone instead of minting a duplicate row next to it.
+        attached = await attachOpenCallLeadByPhone({
+          phoneFormatted,
+          typedFirstName: firstName,
+          resolvedCustomerFirstName: customer?.first_name,
+          fields: buildPrefillAttachFields(),
+          webhookStage,
+        });
+        if (attached) attachedVia = 'phone';
+      }
+      if (attached) {
         leadRecord = attached;
-        attachedViaPrefill = true;
+        attachedCallLead = true;
       }
 
       if (!leadRecord) {
@@ -989,8 +1021,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             if (triageResult.extractedData) {
               // On an attached call-pipeline lead, MERGE — a wholesale replace
               // here would clobber the voicemail provenance and the text-back
-              // one-shot stamp the prefill attach just preserved.
-              updates.extracted_data = attachedViaPrefill
+              // one-shot stamp the attach just preserved.
+              updates.extracted_data = attachedCallLead
                 ? db.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(triageResult.extractedData)])
                 : JSON.stringify(triageResult.extractedData);
             }
@@ -1095,8 +1127,8 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // Removed intentionally; do NOT re-add without deduping upstream.
 
     // Ad service attribution — track the full funnel from lead onward.
-    // A lead ATTACHED via the voicemail text-back prefill token is a
-    // call-pipeline lead: its funnel row belongs to the CALL source (the
+    // A lead ATTACHED to an existing call-pipeline row (prefill token or
+    // phone match): its funnel row belongs to the CALL source (the
     // tracking number the prospect dialed) — a web-channel row here would win
     // the unique lead_id slot and permanently misattribute a paid/GBP
     // voicemail to the website. And because the call processor's attribution
@@ -1104,13 +1136,25 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // call time, no call row exists yet either: BACKFILL it now that this
     // handler has linked the customer (lead_id dedupe + first-touch inside).
     try {
-      if (attachedViaPrefill) {
-        await backfillCallLeadAttribution({
+      let needWebRow = !attachedCallLead;
+      if (attachedCallLead) {
+        const backfill = await backfillCallLeadAttribution({
           leadId: leadRecord?.id || null,
           customerId: customer.id,
           serviceInterest: serviceInterest || null,
         });
-      } else {
+        // Phone-match mode only: when the call side can NEVER record a row
+        // (untracked number — no lead_source_id / source gone / no channel
+        // mapping), fall back to the tracked web row this submission carries
+        // so the funnel doesn't lose it entirely. 'bridge_target' stays
+        // suppressed (the unclaimed-bridge sweep owns those) and transient
+        // errors stay conservative. Token attach keeps its long-standing
+        // contract unchanged: call-source-or-nothing.
+        needWebRow = attachedVia === 'phone'
+          && backfill?.recorded !== true
+          && ['no_lead_source', 'source_not_found', 'no_channel'].includes(backfill?.reason);
+      }
+      if (needWebRow) {
         await db('ad_service_attribution').insert({
           customer_id: customer.id,
           // Stamp the lead so the call-attribution path dedupes against this row
@@ -1171,28 +1215,168 @@ async function attachVoicemailPrefillLead({ body, fields, webhookStage }) {
     return null;
   }
   try {
-    const [attached] = await db('leads')
-      .where({ id: prefillLeadId })
-      .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
-      .whereNull('converted_at')
-      .update({
-        ...fields,
-        // Reopen a lead the office parked as 'unresponsive' — they just
-        // responded, and that status buckets as closed in the admin UI.
-        status: db.raw("CASE WHEN status = 'unresponsive' THEN 'new' ELSE status END"),
-        extracted_data: db.raw(
-          "COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb",
-          [JSON.stringify(webhookStage)]
-        ),
-        updated_at: new Date(),
-      })
-      .returning('*');
+    const attached = await applyLeadAttachUpdate(prefillLeadId, fields, webhookStage);
     if (attached) {
       logger.info(`[lead-webhook] attached form submission to existing lead ${prefillLeadId} via prefill token`);
     }
-    return attached || null;
+    return attached;
   } catch (attachErr) {
     logger.warn(`[lead-webhook] prefill attach failed — caller falls back to its default path: ${attachErr.message}`);
+    return null;
+  }
+}
+
+// Shared attach UPDATE for both attach modes (prefill token + phone match).
+// Atomic: the open-lead guards live in the WHERE so a lead the office closed
+// between lookup and update never re-attaches. `extraWhere` lets the phone-
+// match path re-check ITS candidate guards (open-status set, ownership, name)
+// in the same statement — a concurrent claim between its SELECT and this
+// UPDATE must miss, not overwrite. Returns the row or null.
+async function applyLeadAttachUpdate(leadId, fields, webhookStage, extraWhere) {
+  const query = db('leads')
+    .where({ id: leadId })
+    .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
+    .whereNull('converted_at');
+  if (extraWhere) extraWhere(query);
+  const [attached] = await query
+    .update({
+      ...fields,
+      // Reopen a lead the office parked as 'unresponsive' — they just
+      // responded, and that status buckets as closed in the admin UI.
+      status: db.raw("CASE WHEN status = 'unresponsive' THEN 'new' ELSE status END"),
+      extracted_data: db.raw(
+        "COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb",
+        [JSON.stringify(webhookStage)]
+      ),
+      updated_at: new Date(),
+    })
+    .returning('*');
+  return attached || null;
+}
+
+// Phone-match fallback attach. The prefill token only exists when the
+// prospect clicks the voicemail text-back SMS link — one who finds a form on
+// their own (e.g. voicemail to a GBP tracking number, then the main-site
+// quote form) submits token-less, and the webhook minted a duplicate lead row
+// next to their open call-pipeline lead. Mirror the call side
+// (lead-from-extraction reuses the newest lead on the same number): attach
+// the form to the newest OPEN call-channel lead matching the phone.
+//
+// Guards, tightest-first:
+//  - call-channel leads only — form/SMS dups are owned by the customer-dedup
+//    and duplicate-submission logic upstream, never by this attach;
+//  - OPEN statuses only (the shared positive-membership set from
+//    lead-statuses.js) — unlike the token path, a bare phone match carries
+//    no proof the prospect is responding to THAT lead, so a lead the office
+//    closed as 'unresponsive' months ago stays closed and the form gets a
+//    fresh row with fresh attribution. The reopen CASE in the shared UPDATE
+//    is intentionally unreachable from this path;
+//  - unambiguous number only, on BOTH sides: 2+ open call leads on the
+//    number (the call pipeline splits household members into separate rows)
+//    or 2+ customer rows carrying it (multi-property households) → skip —
+//    newest-wins / customers.first() picks are arbitrary and could pin the
+//    voicemail's call attribution on the wrong person or account (mirrors
+//    findCustomerByPhone's never-auto-link-ambiguous rule);
+//  - never cross-link: a candidate already linked to a DIFFERENT customer is
+//    someone else's lead (shared line) — skip;
+//  - first-name conflict guard (mirrors lead-from-extraction.nameConflicts):
+//    a first name that differs from the lead's captured first name means a
+//    different household member — skip. The comparator is the TYPED name
+//    when present, else the RESOLVED customer's name: a nameless form from
+//    an existing customer must not claim a call lead the pipeline left
+//    customer-less precisely because its captured name conflicted with that
+//    customer (Miguel's voicemail on Dana's phone). The webhook's 'Unknown'
+//    placeholder never counts as a name on either side.
+// EVERY candidate predicate (phone, call-channel, open-status, not-deleted,
+// ownership, name) is RE-CHECKED atomically inside the shared UPDATE's
+// WHERE — a concurrent submission or an office edit between the candidate
+// SELECT and the UPDATE makes the UPDATE miss (→ null → the caller inserts
+// a fresh lead) instead of silently overwriting the claim.
+//
+// Unlike the token attach (typed-wins wholesale — the tokenized form was
+// prefilled FROM the lead), this fallback only overwrites with NON-EMPTY
+// typed values: a bare main-site form must not blank out a name/email the
+// call extraction already captured.
+async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, resolvedCustomerFirstName, fields, webhookStage }) {
+  const digits = String(phoneFormatted || '').replace(/\D/g, '').slice(-10);
+  if (digits.length !== 10) return null;
+  try {
+    const candidates = await db('leads')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+      .where({ first_contact_channel: 'call' })
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      .whereNull('deleted_at')
+      .orderBy('created_at', 'desc')
+      .limit(2);
+    const [candidate, rival] = candidates || [];
+    if (!candidate) return null;
+    if (rival) {
+      // Two+ live call leads on one number = the call pipeline already split
+      // household members on a shared line (its name-conflict guard mints
+      // separate rows). Newest-wins could hand this form to the wrong
+      // person's voicemail — ambiguous phone history never auto-attaches.
+      logger.info(`[lead-webhook] phone-match: multiple open call leads share the number; not attaching`);
+      return null;
+    }
+
+    const phoneCustomers = await db('customers')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+      .whereNull('deleted_at')
+      .limit(2);
+    if (phoneCustomers.length > 1) {
+      logger.info(`[lead-webhook] phone-match lead ${candidate.id}: ${phoneCustomers.length}+ customers share the number; not attaching`);
+      return null;
+    }
+
+    if (candidate.customer_id && fields.customer_id && candidate.customer_id !== fields.customer_id) {
+      logger.info(`[lead-webhook] phone-match lead ${candidate.id} belongs to another customer; not attaching`);
+      return null;
+    }
+
+    const normName = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const typed = typedFirstName === 'Unknown' ? '' : normName(typedFirstName);
+    const resolved = resolvedCustomerFirstName === 'Unknown' ? '' : normName(resolvedCustomerFirstName);
+    const nameComparator = typed || resolved;
+    const captured = normName(candidate.first_name);
+    if (nameComparator && captured && nameComparator !== captured) {
+      logger.info(`[lead-webhook] phone-match lead ${candidate.id} first name conflicts with the ${typed ? 'typed' : "resolved customer's"} name; not attaching`);
+      return null;
+    }
+
+    const merged = {};
+    for (const [key, value] of Object.entries(fields)) {
+      if (value === null || value === undefined || value === '') continue;
+      merged[key] = value;
+    }
+    if (typedFirstName === 'Unknown') delete merged.first_name;
+
+    const attached = await applyLeadAttachUpdate(candidate.id, merged, webhookStage, (query) => {
+      query.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits]);
+      query.where({ first_contact_channel: 'call' });
+      query.whereIn('status', OPEN_LEAD_STATUSES);
+      query.whereNull('deleted_at');
+      if (fields.customer_id) {
+        query.where(function ownershipGuard() {
+          this.whereNull('customer_id').orWhere('customer_id', fields.customer_id);
+        });
+      }
+      if (nameComparator) {
+        // SQL twin of normName: attach only while the captured first name is
+        // still absent or still normalizes to the comparator (typed name, or
+        // the resolved customer's name on a nameless form).
+        query.whereRaw(
+          "(COALESCE(first_name, '') = '' OR lower(regexp_replace(first_name, '[^a-zA-Z0-9]', '', 'g')) = ?)",
+          [nameComparator]
+        );
+      }
+    });
+    if (attached) {
+      logger.info(`[lead-webhook] attached form submission to existing lead ${candidate.id} via phone match`);
+    }
+    return attached;
+  } catch (attachErr) {
+    logger.warn(`[lead-webhook] phone-match attach failed — caller falls back to its default path: ${attachErr.message}`);
     return null;
   }
 }
@@ -1630,6 +1814,7 @@ function cleanPhone(value) {
 module.exports = router;
 module.exports._test = {
   attachVoicemailPrefillLead,
+  attachOpenCallLeadByPhone,
   scrubLeadAlertProviderError,
   markLeadAlertCallLogFailed,
   buildLeadWebhookIntake,
