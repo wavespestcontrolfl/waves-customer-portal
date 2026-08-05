@@ -232,9 +232,12 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
       // commit a winner-owned contract whose recipient_email the undo just
       // restored to another account. Lock, re-read, mint from live state.
       await lockCustomerComms(trx, customer.id);
+      // FULL row (r37): signerName/buildAutopayContractSnapshot read
+      // company_name and friends — a column-listed read rendered business
+      // customers as "Customer" in the signed snapshot.
       const freshContractCustomer = await trx('customers')
         .where({ id: customer.id })
-        .first('id', 'email', 'phone', 'first_name', 'last_name', 'deleted_at', 'active');
+        .first();
       if (!freshContractCustomer || freshContractCustomer.deleted_at || freshContractCustomer.active === false) {
         const err = new Error('This customer changed while creating the contract — reload and try again.');
         err.statusCode = 409;

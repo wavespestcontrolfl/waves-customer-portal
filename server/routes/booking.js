@@ -2430,6 +2430,12 @@ async function createSelfBooking(payload = {}) {
     if (shouldSeedQuarterlyPestFollowUps) {
       try {
         const outcome = await db.transaction(async (trx) => {
+          // Rung 6 FIRST (Codex #3109 r37): admin/manual series creators
+          // take customer-comms and THEN the series guard — this fresh
+          // post-commit seeding transaction must acquire in the same
+          // order, or concurrent creation for the same customer/service
+          // deadlocks (the in-seeder acquire is then reentrant).
+          await lockCustomerComms(trx, custId);
           // Composite parents (Pest + add-ons) guard and seed as the PEST
           // family: serviceKeyFor on the joined label would classify the
           // series as mosquito/lawn and (a) miss an existing pest series
