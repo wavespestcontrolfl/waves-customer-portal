@@ -164,7 +164,9 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
   } catch (err) {
     notifyError = err;
   }
-  await emailFailure({ sendEmail, subject: title, textBody: body });
+  // Ops-email convention: subject first word = the action Adam should take.
+  // The bell keeps the bare title — FIX: is an inbox triage cue, not UI copy.
+  await emailFailure({ sendEmail, subject: `FIX: ${title}`, textBody: body });
 
   logger.warn(`[call-replay-eval] failed: checked=${checked} replayErrors=${replayErrors} failedExpectations=${failedExpectations}`);
   if (notifyError) throw notifyError;
@@ -193,7 +195,7 @@ async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
   } catch (err) {
     notifyError = err;
   }
-  await emailFailure({ sendEmail, subject: title, textBody: body });
+  await emailFailure({ sendEmail, subject: `FIX: ${title}`, textBody: body });
 
   logger.warn(`[call-replay-eval] inconclusive: ${attempt.error?.message || 'unknown error'}`);
   if (notifyError) throw notifyError;
