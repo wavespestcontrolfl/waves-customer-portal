@@ -29,6 +29,9 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     // The confidence tag names the actual gap instead of blaming the rain data.
     expect(screen.getByText('Irrigation not on file')).toBeInTheDocument();
     expect(screen.queryByText('Limited data this week')).not.toBeInTheDocument();
+    // And a rain-only figure never renders as a complete weekly "Total"
+    // beside "Not on file" (codex P2 r9).
+    expect(screen.queryByText('Total')).not.toBeInTheDocument();
   });
 
   it('a real schedule keeps the numeric row and the standard confidence tag', () => {

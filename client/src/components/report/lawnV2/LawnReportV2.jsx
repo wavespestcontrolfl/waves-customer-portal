@@ -621,8 +621,11 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
 
   // A weekly Total is only claimable when the server computed one or rain is
   // known — summing the leftovers when rain is missing would tell the
-  // customer rainfall was zero rather than unavailable (codex P2 r7).
-  const hasTotal = known(water.totalInches) || hasRain;
+  // customer rainfall was zero rather than unavailable (codex P2 r7) — AND
+  // the irrigation side is accounted for: with no schedule on file the
+  // server's total is rain-only, and a "Total" beside "Not on file" would
+  // read as complete weekly water (codex P2 r9).
+  const hasTotal = (known(water.totalInches) || hasRain) && irrOnFile;
   const total = known(water.totalInches)
     ? Number(water.totalInches)
     : (hasRain ? rain : 0) + (hasIrr ? irrigation : 0);

@@ -141,9 +141,12 @@ function reconcileRainFigure(text, canonicalRain) {
       // the old below-half-canonical value guard, which also skipped
       // genuinely stale LOW totals (0.2" stale vs 0.8" canonical — codex P2
       // r3): a target is identified by how it's named, not by being small.
-      // Before-guard: the target word must DIRECTLY precede this number (no
-      // other digits between) — "target of 0.75" is a target, but "0.75 inch
-      // target, rain totaled 2.72" must still let 2.72 qualify.
+      // Before-guard: the target word must DIRECTLY precede this number with
+      // no digits AND no clause punctuation between — "target of 0.75" is a
+      // target, but in "above the target, totaling 2.72 inches" the target
+      // word belongs to an earlier clause and the figure IS the weekly total
+      // (codex P2 r9). "0.75 inch target, rain totaled 2.72" also lets 2.72
+      // qualify.
       const before = sentence.slice(Math.max(0, offset - 24), offset);
       const after = sentence.slice(offset + match.length, offset + match.length + 24);
       const TARGET_WORD = '(?:target|goal|aim(?:ing)?|recommend(?:ed|s)?|ideal)';
@@ -152,7 +155,7 @@ function reconcileRainFigure(text, canonicalRain) {
       // (codex P2 r4) — and treats a DELTA figure the same way: "2.2 inches
       // above the weekly target" measures distance from the target, not the
       // rain total (codex P2 r5). Both skip without consuming the attempt.
-      if (new RegExp(`\\b${TARGET_WORD}\\b[^.\\d]{0,12}$`, 'i').test(before)
+      if (new RegExp(`\\b${TARGET_WORD}\\b[^.\\d,;:]{0,12}$`, 'i').test(before)
         || new RegExp(`^\\s*(?:(?:over|above|below|under|past|beyond|short\\s+of)\\s+)?(?:the\\s+)?(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
       // The sentence already quotes the canonical figure → it agrees with the
       // widget; stop scanning so a later, different number (e.g. the target)
@@ -184,7 +187,7 @@ function reconcileRainFigure(text, canonicalRain) {
 // would otherwise exclude it) and rewrites to "sprinkler-coverage-related";
 // dry spot(s)/area(s) join patch(es) under the hypothesis-cue gate
 // (codex P2 r7).
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought(?:\s+stress)?|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought-stress(?:ed)?|drought(?:\s+stress)?|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 
 function replaceDroughtHypothesis(text) {
@@ -205,8 +208,15 @@ function replaceDroughtHypothesis(text) {
     // dry patches were noted" is an OBSERVATION and must survive verbatim.
     // The cue must PRECEDE the match nearby ("could be … or dry spots") — a
     // cue word later in the sentence ("…, and color is improving or stable")
-    // must not convert an observed dry area into a hypothesis (codex P2 r8).
-    const cueBefore = (offset) => HYPOTHESIS_CUE_RE.test(sentence.slice(Math.max(0, offset - 48), offset));
+    // must not convert an observed dry area into a hypothesis (codex P2 r8),
+    // and the backward search stops at clause punctuation so a cue in an
+    // EARLIER clause ("improving or stable; dry spots were noted") doesn't
+    // leak across the boundary (codex P2 r9).
+    const cueBefore = (offset) => {
+      const seg = sentence.slice(Math.max(0, offset - 48), offset);
+      const clause = seg.slice(Math.max(seg.lastIndexOf(';'), seg.lastIndexOf(':'), seg.lastIndexOf('.')) + 1);
+      return HYPOTHESIS_CUE_RE.test(clause);
+    };
     const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m, offset) => {
       // Negation is checked PER MATCH, not per sentence: it must attach to
       // this occurrence (negator + up to three plain same-clause words right
@@ -216,7 +226,10 @@ function replaceDroughtHypothesis(text) {
       // (codex P2 r3/r4/r7).
       if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(sentence.slice(0, offset))) return m;
       if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) return m;
-      if (/drought[- ]related/i.test(m)) {
+      // Hyphenated adjectival forms ("drought-related", "drought-stressed",
+      // "drought-stress symptoms" — codex P2 r9) take the adjectival
+      // replacement so the sentence stays grammatical.
+      if (/drought[- ]related|drought-stress/i.test(m)) {
         return /^[A-Z]/.test(m) ? 'Sprinkler-coverage-related' : 'sprinkler-coverage-related';
       }
       return /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage';

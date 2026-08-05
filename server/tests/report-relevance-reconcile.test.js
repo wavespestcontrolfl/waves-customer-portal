@@ -67,6 +67,13 @@ describe('reconcileRainFigure', () => {
     )).toBeNull();
   });
 
+  test('a stale total AFTER a target clause still rewrites (codex P2 r9)', () => {
+    expect(reconcileRainFigure(
+      'Rain this week was above the target, totaling 2.72 inches.',
+      2.96,
+    )).toBe('Rain this week was above the target, totaling 2.96 inches.');
+  });
+
   test('"target of N" phrasing is skipped without consuming the attempt', () => {
     expect(reconcileRainFigure(
       'Rain this week fell short of the target of 0.75 inches, totaling 0.2 inches.',
@@ -191,6 +198,19 @@ describe('replaceDroughtHypothesis', () => {
 
   test('a cue AFTER an observed dry area never converts it to a hypothesis (codex P2 r8)', () => {
     expect(replaceDroughtHypothesis('Dry spots were noted in thin turf, and color is improving or stable.')).toBeNull();
+  });
+
+  test('a cue in an EARLIER clause never leaks across the boundary (codex P2 r9)', () => {
+    expect(replaceDroughtHypothesis('Color is improving or stable; dry spots were noted in thin turf.')).toBeNull();
+  });
+
+  test('hyphenated drought-stress forms are covered (codex P2 r9)', () => {
+    expect(replaceDroughtHypothesis('The thin strip is possibly drought-stressed.'))
+      .toBe('The thin strip is possibly sprinkler-coverage-related.');
+    expect(replaceDroughtHypothesis('Drought-stress symptoms are showing in the thin areas.'))
+      .toBe('Sprinkler-coverage-related symptoms are showing in the thin areas.');
+    // Tolerance praise still survives in hyphenated proximity.
+    expect(replaceDroughtHypothesis('This stressed cultivar shows drought-stress tolerance.')).toBeNull();
   });
 
   test('a negated dry phrase does not shield a later hypothesis in the same sentence (codex P2 r7)', () => {
