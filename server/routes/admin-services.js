@@ -160,11 +160,17 @@ router.post('/:id/cancel', async (req, res, next) => {
     // defers any inspection credit, same as every other cancel surface.
     // This v1 route previously skipped both, leaving dunning chasing a
     // cancelled job and unearned credit spendable until the hourly sweep.
-    // Best-effort: never fail the committed cancel.
-    try {
-      await require('../services/invoice').voidOpenInvoicesForCancelledService(req.params.id);
-    } catch (seamErr) {
-      require('../services/logger').error(`[admin-services] cancel void/reversal seam failed for ${req.params.id}: ${seamErr.message}`);
+    // GATED on the cancel actually committing (Codex #3178 r29 P2): a
+    // cancel that races a completion reconciles to ok:true with
+    // state:'complete' — no cancellation happened, and running the seam
+    // then would void the COMPLETED visit's open invoice and disturb its
+    // credit. Best-effort: never fail the committed cancel.
+    if (result.state === 'cancelled') {
+      try {
+        await require('../services/invoice').voidOpenInvoicesForCancelledService(req.params.id);
+      } catch (seamErr) {
+        require('../services/logger').error(`[admin-services] cancel void/reversal seam failed for ${req.params.id}: ${seamErr.message}`);
+      }
     }
 
     res.json({

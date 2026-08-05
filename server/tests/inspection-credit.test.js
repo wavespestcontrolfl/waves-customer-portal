@@ -909,6 +909,16 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(redeemAt).toBeGreaterThan(gateAt); // redeem sits inside the gate
   });
 
+  it('the v1 cancel seam runs only when the cancel actually committed (r29 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-services.js'), 'utf8');
+    // A cancel racing a completion reconciles to ok:true state:'complete' —
+    // running the seam then voids the COMPLETED visit's open invoice.
+    const gateAt = source.indexOf("if (result.state === 'cancelled') {");
+    const seamAt = source.indexOf('voidOpenInvoicesForCancelledService(req.params.id)');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(seamAt).toBeGreaterThan(gateAt); // seam sits inside the gate
+  });
+
   it('the tokenized receipt page carries the credit memo (r28 P2)', () => {
     // The SMS receipt leg only sends the page link — without the memo on
     // the page, an email-less customer never sees the written deadline and
@@ -940,7 +950,9 @@ describe('closeout route wiring — source contracts (the completion route is to
     // visit. Only a visit with no deliverable customer invoice at all
     // escalates to a human.
     const helperAt = source.indexOf('function queueCreditReceiptResend');
-    const guardAt = source.indexOf("whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)", helperAt);
+    // 'prepaid' excluded (r29 P2): a credit-covered completion invoice is
+    // flipped to prepaid with NO receipt leg — it is not a channel.
+    const guardAt = source.indexOf("whereNotIn('status', [...CANCELLED_SERVICE_RESOLVED_STATUSES, 'prepaid'])", helperAt);
     const alertAt = source.indexOf("alertOfficeOnce('no_receipt_channel'", helperAt);
     expect(helperAt).toBeGreaterThan(-1);
     expect(guardAt).toBeGreaterThan(helperAt);

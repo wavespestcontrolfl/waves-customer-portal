@@ -1262,10 +1262,17 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId, attempt = 0 }) 
           // (comped / never-invoiced / payer-billed-only) has no written
           // channel and needs a human.
           const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+          // 'prepaid' can never settle into a receipt (Codex #3178 r29
+          // P2): a completion invoice fully covered by account credit is
+          // flipped to prepaid by sendViaSMSAndEmail's covered_by_credit
+          // path with NO email or SMS receipt link, and sendReceiptEmail
+          // refuses non-paid invoices — treating it as a deliverable
+          // channel suppressed the alert while the customer got no written
+          // deadline at all.
           const liveInvoice = await db('invoices')
             .where({ scheduled_service_id: scheduledServiceId })
             .whereNull('payer_id')
-            .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+            .whereNotIn('status', [...CANCELLED_SERVICE_RESOLVED_STATUSES, 'prepaid'])
             .first('id');
           if (liveInvoice) return;
           // This helper is queued via setImmediate from the closeout path,
