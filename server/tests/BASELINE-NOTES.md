@@ -18,7 +18,9 @@ Anchor rows keep exact prices; in-between sizes only ever move DOWN (new
 cells floor the old half-round interpolations). Golden master regenerated
 (8 of 65 cases moved — all intended taper/soften rows); local baselines
 recaptured (`CAPTURE_BASELINE=1 LOCAL=1`, one bundled-lawn case moved).
-DB baselines pending the standard post-deploy recapture.
+DB baselines recaptured 2026-08-04 post-#3190-deploy against the live
+prod pricing config (both suites green in diff mode; only the intended
+lawn cases moved — the v1-adapter DB baseline was already current).
 
 ## 2026-08-03 pest base 112 (all pest priced as light tree density)
 
