@@ -138,7 +138,7 @@ function reconcileRainFigure(text, canonicalRain) {
     // window with no true week/7-day window is skipped whole (codex P2
     // r20/r21).
     if (!/\bweek(?:ly)?\b|\b7[- ]days?\b|\b(?:past|last)\s+seven\b|\bseven\s+days\b/i.test(sentence)
-      && /\b(?:\d+[- ]?hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight|(?:past|last)\s+(?:two|three|four|five|six|couple(?:\s+of)?|few|[2-6])\s+days?)\b/i.test(sentence)) return sentence;
+      && /\b(?:\d+[- ]?hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight|weekend|(?:past|last)\s+(?:two|three|four|five|six|couple(?:\s+of)?|few|[2-6])\s+days?)\b/i.test(sentence)) return sentence;
     // A COMBINED rain+irrigation/total-water figure is not the rain total —
     // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
     // contradict the widget's Total row (codex P2 r5).
@@ -199,23 +199,32 @@ function reconcileRainFigure(text, canonicalRain) {
       // historical amount while the current figure still reconciles. Clause-
       // scoped so the current-week half of the comparison isn't shielded;
       // skips without consuming the attempt (codex P2 r22).
-      if (/\b(?:last|previous|prior)\s+week\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
+      // Clause-scoped guards split on punctuation AND contrast/coordination
+      // words — "Last week … totaled 1.2 inches while this week …" has no
+      // comma, but "while" still starts the current-week clause
+      // (codex P2 r27).
+      const clauseBefore = sentence.slice(0, offset).split(/[,;:]|\b(?:while|but|whereas|although|though|and)\b/i).pop();
+      if (/\b(?:last|previous|prior)\s+week\b/i.test(clauseBefore)) return match;
       // …and prior-week wording right AFTER the figure is history too —
       // "Rainfall totaled 1.2 inches last week, while this week…" keeps
       // scanning for the current-week clause (codex P2 r26).
       if (/^[^.;,:]{0,16}\b(?:last|previous|prior)\s+week\b/i.test(after)) return match;
+      // A COMPARATIVE bound is not an exact total — "stayed under 1 inch"
+      // must not become "under 2.96 inches" (codex P2 r27); skipped without
+      // consuming.
+      if (/\b(?:under|below|less\s+than|at\s+most|no\s+more\s+than|at\s+least|more\s+than|over|above|exceed(?:ed|ing|s)?)\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+)?$/i.test(before)) return match;
       // A per-day AVERAGE is not the weekly total either — "Average daily
       // rainfall this week was 0.4 inches" / "averaged 0.4 inches per day"
       // must keep the average and let a later weekly figure reconcile
       // (codex P2 r24). Clause-scoped before-guard + per-day after-guard;
       // neither consumes the attempt.
-      if (/\b(?:averag(?:e|ed|ing)|daily|mean)\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
+      if (/\b(?:averag(?:e|ed|ing)|daily|mean)\b/i.test(clauseBefore)) return match;
       if (/^\s*(?:of\s+rain(?:fall)?\s+)?(?:per|a|each)\s+day\b|^\s*daily\b/i.test(after)) return match;
       // A NON-RAIN measurement in the figure's own clause (mowing height,
       // blade/cut settings, thatch, root depth) is never the rain total —
       // "mowing height was 3.5 inches, and rain totaled 2.72 inches" must
       // keep the height and reconcile the rain figure (codex P2 r25).
-      if (/\b(?:mow(?:ing|ed|er)?|height|blade|cut(?:ting)?|thatch|root|canopy)\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
+      if (/\b(?:mow(?:ing|ed|er)?|height|blade|cut(?:ting)?|thatch|root|canopy)\b/i.test(clauseBefore)) return match;
       // Likewise a figure attached to IRRIGATION is not the rain total —
       // "Irrigation added 0.75 inches while rain totaled 2.72 inches" must
       // skip the 0.75 (without consuming the attempt) so the actual stale
@@ -296,14 +305,14 @@ function reconcileRainFigure(text, canonicalRain) {
 // the (?!-) guard blocked the stress match and the bare "drought" fallback
 // produced "uneven sprinkler coverage stress-related" — or skipped the fully
 // hyphenated form entirely (codex P2 r18).
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:[- ]stress)?[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:[- ]stress)?[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?|conditions?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
 // "possible"/"potential" adjective forms are cues too — "Possible dry spots
 // near the sidewalk" is a direct hypothesis (codex P2 r25).
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bpossible\b|\bpotential\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 // An UNRESOLVED tail also marks a hypothesis — "cannot be ruled out",
 // "remains possible" assert the dry condition is still on the table
 // (codex P2 r23).
-const UNRESOLVED_TAIL_RE = /\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b|\b(?:remains?|is|are|stays?)\s+(?:still\s+|a\s+)?possib/i;
+const UNRESOLVED_TAIL_RE = /\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b|\b(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}ruled\s+out\b|\b(?:remains?|is|are|stays?)\s+(?:still\s+|a\s+)?possib/i;
 
 function replaceDroughtHypothesis(text) {
   const t = String(text || '');
@@ -321,7 +330,7 @@ function replaceDroughtHypothesis(text) {
     // pass the prefilter ("Could be dry spots near the sidewalk" — codex P2
     // r17); the downstream cue/observation/negation logic decides.
     if (!/chinch|stress|thin|tan\b|patch|scuff|damage/i.test(sentence)
-      && !/\bdry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?)\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
+      && !/\bdry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?|conditions?)\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
     // Headline-position matches keep their capitalization ("Dry pocket near
     // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").
     // dry patch/spot/area forms only rewrite under a hypothesis cue — "a few
@@ -344,7 +353,7 @@ function replaceDroughtHypothesis(text) {
     let prevMatch = null;
     const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m, offset) => {
       if (prevMatch && prevMatch.preserved
-        && /^\s*(?:,\s*)?(?:or|and|nor)\s+(?:an?\s+|the\s+)?$/i.test(sentence.slice(prevMatch.end, offset))) {
+        && /^\s*(?:,\s*(?:(?:or|and|nor)\s+)?|(?:or|and|nor)\s+)(?:an?\s+|the\s+)?$/i.test(sentence.slice(prevMatch.end, offset))) {
         prevMatch = { end: offset + m.length, preserved: true };
         return m;
       }
@@ -400,7 +409,7 @@ function replaceDroughtHypothesis(text) {
       const atClauseStart = atSentenceStart || /^\s*(?:but|and|while|though|however|yet|so)?\s*$/i.test(clauseLead);
       const tailClause = sentence.slice(offset + m.length).split(/[,;:.]/)[0];
       const cueAfter = HYPOTHESIS_CUE_RE.test(tailClause) || UNRESOLVED_TAIL_RE.test(tailClause);
-      if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) {
+      if (/dry\s+(?:patch|spots?|areas?|conditions?)/i.test(m) && !cueBefore(offset)) {
         const wasObserved = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence);
         if (wasObserved || !atClauseStart || !cueAfter) return m;
       }
@@ -448,7 +457,7 @@ function replaceDroughtHypothesis(text) {
       // rewrite so the sentence stays grammatical — "Dry areas remain
       // possible" → "Patches of uneven sprinkler coverage remain possible"
       // (codex P2 r23). "remains" (singular) keeps the mass-noun form.
-      if (/^\s*(?:are|remain|were|persist|continue)\b/i.test(tail)) {
+      if (/^\s*(?:are|remain|were|persist|continue|have)\b/i.test(tail)) {
         return /^[A-Z]/.test(m) ? 'Patches of uneven sprinkler coverage' : 'patches of uneven sprinkler coverage';
       }
       return /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage';

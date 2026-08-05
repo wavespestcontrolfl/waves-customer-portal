@@ -109,6 +109,21 @@ describe('reconcileRainFigure', () => {
     )).toBe('Rainfall totaled 1.2 inches last week, while this week rainfall totaled 2.96 inches.');
   });
 
+  test('a weekend rain window is never rewritten (codex P2 r27)', () => {
+    expect(reconcileRainFigure('Rainfall totaled 0.4 inches over the weekend.', 2.96)).toBeNull();
+  });
+
+  test('comparative rain bounds are preserved (codex P2 r27)', () => {
+    expect(reconcileRainFigure('Rainfall this week stayed under 1 inch.', 2.96)).toBeNull();
+  });
+
+  test('a contrast word bounds the prior-week guard (codex P2 r27)', () => {
+    expect(reconcileRainFigure(
+      'Last week rainfall totaled 1.2 inches while this week rainfall totaled 2.72 inches.',
+      2.96,
+    )).toBe('Last week rainfall totaled 1.2 inches while this week rainfall totaled 2.96 inches.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -387,6 +402,22 @@ describe('replaceDroughtHypothesis', () => {
 
   test('coordinated dry-area dismissals stay preserved (codex P2 r23)', () => {
     expect(replaceDroughtHypothesis('The thinning was not due to drought stress or dry spots.')).toBeNull();
+  });
+
+  test('comma-delimited dismissal lists stay preserved (codex P2 r27)', () => {
+    expect(replaceDroughtHypothesis('The thinning was not due to dry spots, drought stress, or chinch bugs.')).toBeNull();
+  });
+
+  test('have-not-been-ruled-out dry areas reconcile with plural grammar (codex P2 r27)', () => {
+    expect(replaceDroughtHypothesis('Dry pockets have not been ruled out in the thin turf.'))
+      .toBe('Patches of uneven sprinkler coverage have not been ruled out in the thin turf.');
+  });
+
+  test('dry-condition hypotheses reconcile (codex P2 r27)', () => {
+    expect(replaceDroughtHypothesis('Dry conditions may be contributing to the thinning.'))
+      .toBe('Uneven sprinkler coverage may be contributing to the thinning.');
+    expect(replaceDroughtHypothesis('The stress may be due to dry conditions near the sidewalk.'))
+      .toBe('The stress may be due to uneven sprinkler coverage near the sidewalk.');
   });
 
   test('unresolved sentence-initial dry areas still reconcile (codex P2 r23)', () => {
