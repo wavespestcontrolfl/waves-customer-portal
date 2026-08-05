@@ -510,7 +510,6 @@ async function redeemInspectionCreditForBooking({
   customerId,
   scheduledServiceId,
   bookingStatus = null,
-  bookingCreatedAt = null,
   createdBy = 'system:inspection_credit_rebook',
   now = new Date(),
 }) {
@@ -519,11 +518,7 @@ async function redeemInspectionCreditForBooking({
   if (bookingStatus && NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingStatus).toLowerCase())) {
     return { redeemed: 0, reason: 'booking_not_live' };
   }
-  // The booking's OWN created_at and live status, read from the row
-  // (Codex #3178 r6 P0). Defaulting to `now` let an offer created AFTER
-  // the appointment — but before this post-commit path ran — slip past the
-  // ordering guard and mint a credit the booking never earned.
-  let bookedAt = bookingCreatedAt ? new Date(bookingCreatedAt) : null;
+  // The booking's live status, read from the row (Codex #3178 r6 P0).
   try {
     const row = await db('scheduled_services')
       .where({ id: scheduledServiceId })
@@ -532,24 +527,29 @@ async function redeemInspectionCreditForBooking({
     if (NON_LIVE_APPOINTMENT_STATUSES.includes(String(row.status || '').toLowerCase())) {
       return { redeemed: 0, reason: 'booking_not_live' };
     }
-    bookedAt = row.created_at ? new Date(row.created_at) : (bookedAt || now);
   } catch (err) {
     logger.warn(`[inspection-credit] booking lookup failed for ${scheduledServiceId}: ${err.message}`);
     return { redeemed: 0, reason: 'booking_lookup_failed' };
   }
-  // The booking EVENT is the authoritative booking moment (pre-push P0) —
-  // the same evidence standard the sweep judges by. A graduated hold's
-  // scheduled_services.created_at is the RESERVATION instant, which can
-  // predate the promise even though the customer actually BOOKED (accepted)
-  // after it; judging by the row time would find no offer and let the
-  // invoice deliver unreduced.
+  // The booking EVENT is the REQUIRED booking moment (r28 P2 — was the
+  // authoritative one with a row-time fallback, pre-push P0): a graduated
+  // hold's or adopted appointment's scheduled_services.created_at is the
+  // RESERVATION/placeholder instant. Falling back to it when the savepoint
+  // evidence write missed let a hold reserved inside the window but
+  // accepted after expiry mint an unearned credit; requiring the event
+  // instead defers those rare failures to the sweep, which judges by the
+  // recovered event's frozen accept-time stamp. Fail CLOSED on a lookup
+  // fault — never mint on an unknown moment.
+  let bookedAt;
   try {
     const evt = await db('inspection_credit_booking_events')
       .where({ scheduled_service_id: scheduledServiceId })
       .first('created_at');
-    if (evt?.created_at) bookedAt = new Date(evt.created_at);
+    if (!evt?.created_at) return { redeemed: 0, reason: 'no_booking_evidence' };
+    bookedAt = new Date(evt.created_at);
   } catch (evtErr) {
     logger.warn(`[inspection-credit] booking event lookup failed for ${scheduledServiceId}: ${evtErr.message}`);
+    return { redeemed: 0, reason: 'booking_event_lookup_failed' };
   }
 
   try {
@@ -1254,9 +1254,11 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId, attempt = 0 }) 
           // should carry these terms is a copy decision (flagged on the PR).
           // A LIVE unpaid customer invoice will carry the memo on its own
           // receipt when it settles — the memo lookup reads the offer at
-          // render time. Alerting here would page billing for every
-          // ordinary pay-after-service inspection (Codex #3178 r24 P2).
-          // Only a visit with NO deliverable customer invoice at all
+          // render time, on BOTH the email leg and the tokenized receipt
+          // page the SMS leg links to (r28 P2: an email-less customer sees
+          // the deadline on the page). Alerting here would page billing for
+          // every ordinary pay-after-service inspection (Codex #3178 r24
+          // P2). Only a visit with NO deliverable customer invoice at all
           // (comped / never-invoiced / payer-billed-only) has no written
           // channel and needs a human.
           const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');

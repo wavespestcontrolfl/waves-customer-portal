@@ -244,13 +244,28 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
 
   it('no open offer → nothing minted', async () => {
     mockOffers = [];
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ redeemed: 0, reason: 'no_open_offer' });
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
+  it('NO booking event → nothing minted, deferred to the sweep (r28 P2)', async () => {
+    // A reused row (graduated hold, adopted appointment) carries a
+    // reservation/placeholder created_at — falling back to it when the
+    // savepoint evidence write missed let a hold reserved in-window but
+    // accepted after expiry mint an unearned credit. Evidence-REQUIRED:
+    // the sweep mints later from the recovered event's frozen stamp.
+    mockEvents = [];
+    mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ redeemed: 0, reason: 'no_booking_evidence' });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+  });
+
   it('mints once, with the frozen amount and the inspection_credit source, and binds the ledger id', async () => {
     mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ redeemed: 1, amount: 75 });
     expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
@@ -264,6 +279,7 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
 
   it('a lost claim race mints NOTHING (the other booking won)', async () => {
     mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
     mockClaimResult = 0; // status-guarded update matched no row
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ redeemed: 0, amount: 0 });
@@ -272,6 +288,7 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
 
   it('a failed mint leaves nothing double-counted and never throws', async () => {
     mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
     mockPostCreditMovement.mockRejectedValueOnce(new Error('ledger down'));
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ redeemed: 0, amount: 0 });
@@ -890,6 +907,17 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(markedAt).toBeGreaterThan(-1);
     expect(gateAt).toBeGreaterThan(markedAt);
     expect(redeemAt).toBeGreaterThan(gateAt); // redeem sits inside the gate
+  });
+
+  it('the tokenized receipt page carries the credit memo (r28 P2)', () => {
+    // The SMS receipt leg only sends the page link — without the memo on
+    // the page, an email-less customer never sees the written deadline and
+    // the live-invoice alert suppression would be unearned.
+    const route = fs.readFileSync(path.join(__dirname, '../routes/receipt-v2.js'), 'utf8');
+    expect(route).toContain('inspectionCreditMemoForInvoice(data)');
+    expect(route).toContain('creditMemo: creditMemo || null');
+    const page = fs.readFileSync(path.join(__dirname, '../../client/src/pages/ReceiptPage.jsx'), 'utf8');
+    expect(page).toContain('invoice.creditMemo && (');
   });
 
   it('the no-channel alert rechecks after the completion handler settles (r27 P2)', () => {

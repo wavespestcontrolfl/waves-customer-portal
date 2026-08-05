@@ -681,6 +681,19 @@ export default function ReceiptPage() {
             </div>
           )}
 
+          {/* Inspection-credit deadline: the SMS receipt leg only sends this
+              page's link, so the memo must render HERE too or an email-less
+              customer never sees the written deadline the emailed receipt
+              carries (Codex #3178 r28). Server-composed copy, frozen terms. */}
+          {invoice.creditMemo && (
+            <div data-glass-clear="" style={{ marginTop: SP.lg, ...subtlePanel, padding: SP.md }}>
+              <div style={{ ...eyebrow, marginBottom: SP.xs }}>Service credit</div>
+              <p style={{ margin: 0, fontSize: FS.bodyLg, color: DOC.ink, lineHeight: LH.body }}>
+                {invoice.creditMemo}
+              </p>
+            </div>
+          )}
+
           {/* In-card PDF/Print chips superseded by the DocumentActionBar at
               the top of the page (owner 2026-07-09). The processing note
               stays — it explains the missing Download button. */}

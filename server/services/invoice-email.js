@@ -577,6 +577,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 module.exports = {
   sendInvoiceEmail,
   sendReceiptEmail,
+  inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,
     isEmailLike,
