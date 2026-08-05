@@ -758,6 +758,11 @@ class ContentBriefBuilder {
         search_volume: opportunity.signal_metadata?.search_volume ?? null,
         competitor_domain: opportunity.signal_metadata?.competitor_domain || null,
         competitor_position: opportunity.signal_metadata?.competitor_position ?? null,
+        // answer_gap rows: the mined per-query gap list ([{query, impressions,
+        // position, heading_coverage, body_term_coverage}, …]) rides the brief
+        // so the refresh agent writes self-contained answer blocks without
+        // re-deriving the gaps (refresh-agent-config ANSWER-GAP MODE).
+        unanswered_queries: opportunity.signal_metadata?.unanswered_queries || null,
       },
       customer_signal: signals.customer_signal
         ? {
