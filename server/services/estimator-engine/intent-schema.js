@@ -31,6 +31,22 @@ const SERVICE_OPTION_SCHEMAS = {
     additionalProperties: false,
   },
   oneTimePest: { type: 'object', additionalProperties: false, properties: {} },
+  germanRoach: {
+    type: 'object',
+    properties: {
+      // The cleanout pricer's tier keys. 'severe' exists as a pricer alias
+      // (collapses to heavy) but stays out of the enum — one canonical word
+      // per tier keeps the composer's choice auditable against the call.
+      severity: { enum: ['light', 'moderate', 'heavy'] },
+    },
+    // priceGermanRoach silently DEFAULTS a missing/invalid severity to the
+    // light (cheapest) tier — an intent without severity would green-lane a
+    // guessed underquote instead of skipping. Required forces the composer
+    // to establish infestation severity on the call or skip with a reason
+    // (same contract as stinging/bedBug).
+    required: ['severity'],
+    additionalProperties: false,
+  },
   lawn: {
     type: 'object',
     properties: {
@@ -45,7 +61,16 @@ const SERVICE_OPTION_SCHEMAS = {
   },
   oneTimeLawn: {
     type: 'object',
-    properties: { treatmentType: { enum: ['fertilizer', 'weed'] } },
+    properties: {
+      treatmentType: { enum: ['fertilizer', 'weed'] },
+      // Same vocab as lawn. Without these a one-time-only intent (no lawn
+      // key to fall back to) silently priced the St. Augustine table at the
+      // enhanced tier regardless of what grass the caller described.
+      // Optional like lawn's — absent still defaults, but a stated grass
+      // now carries. paspalum coercion note on lawn.track applies here too.
+      track: { enum: ['st_augustine', 'bahia', 'zoysia', 'bermuda', 'paspalum'] },
+      tier: { enum: ['basic', 'standard', 'enhanced', 'premium'] },
+    },
     additionalProperties: false,
   },
   lawnPestControl: { type: 'object', additionalProperties: false, properties: {} },
@@ -64,6 +89,11 @@ const SERVICE_OPTION_SCHEMAS = {
   mosquito: {
     type: 'object',
     properties: { tier: { enum: ['seasonal9', 'monthly12'] } },
+    // An unset tier silently priced the pricer's default program — a
+    // program CHOICE (9-visit seasonal vs 12-visit monthly) the call must
+    // establish or the composer must skip, same contract as germanRoach
+    // severity.
+    required: ['tier'],
     additionalProperties: false,
   },
   oneTimeMosquito: { type: 'object', additionalProperties: false, properties: {} },
@@ -76,7 +106,27 @@ const SERVICE_OPTION_SCHEMAS = {
     },
     additionalProperties: false,
   },
-  flea: { type: 'object', additionalProperties: false, properties: {} },
+  flea: {
+    type: 'object',
+    properties: {
+      // priceFlea's canonical offer keys. Absent → the pricer's standard
+      // two-visit elimination package (the default PRODUCT, not an
+      // underquote), so offerKey stays optional; the composer sets
+      // knockdown only when the caller explicitly wants a single visit.
+      offerKey: { enum: ['flea_knockdown_single', 'flea_elimination_two_visit'] },
+      // fleaComplexity is the key the engine reads off services.flea
+      // (estimate-engine's flea block); normalizeFleaComplexity silently
+      // defaults anything else to 'light' (cheapest) — same
+      // guessed-underquote trap as germanRoach severity, so infestation
+      // complexity is REQUIRED: establish it or skip.
+      fleaComplexity: { enum: ['light', 'moderate', 'heavy'] },
+      // Yard/exterior treatment selection — absent silently priced
+      // interior-only even when the caller described an outdoor source.
+      fleaExterior: { type: 'boolean' },
+    },
+    required: ['fleaComplexity'],
+    additionalProperties: false,
+  },
   bedBug: {
     type: 'object',
     properties: {
@@ -118,6 +168,24 @@ const SERVICE_OPTION_SCHEMAS = {
     // guessed price instead of skipping. Required forces the composer to
     // state what the call established or skip with a reason.
     required: ['species', 'tier', 'removal'],
+    additionalProperties: false,
+  },
+  palm: {
+    type: 'object',
+    properties: {
+      // 'nutrition' ONLY: it is the one palm treatment that prices from a
+      // caller-stated count alone (fixed per-palm rate). insecticide/combo
+      // are DBH/size-tiered and fungal/lethalBronzing/treeAge are
+      // quote-based — facts a phone call can't establish, so those requests
+      // skip with a reason (same pattern as bedBug HEAT).
+      treatmentType: { enum: ['nutrition'] },
+      // Caller-stated only, never guessed (treeShrub.treeCount precedent).
+      // pricePalmInjection THROWS without a count — required here so an
+      // incomplete intent fails validation instead of red-laning at
+      // pricing time.
+      palmCount: { type: 'integer', minimum: 1, maximum: 200 },
+    },
+    required: ['treatmentType', 'palmCount'],
     additionalProperties: false,
   },
 };

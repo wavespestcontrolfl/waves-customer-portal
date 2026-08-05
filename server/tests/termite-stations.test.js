@@ -1058,3 +1058,167 @@ test('moving or retiring an existing station never rewrites its ownership', asyn
   // A renter relocating a station they BOUGHT keeps owning it.
   expect(state.stations.find((row) => row.id === 'st-1').owned_by).toBe('customer');
 });
+
+// ---------------------------------------------------------------------------
+// stationMapSatelliteSignaturePart — the cache key must invalidate when the
+// satellite basemap becomes available, because availability gates whether the
+// placement section prints at all (codex P2 #3176 r17): a PDF cached while
+// the provider was off must re-render once it comes on.
+// ---------------------------------------------------------------------------
+describe('stationMapSatelliteSignaturePart', () => {
+  const { stationMapSatelliteSignaturePart } = require('../services/termite-stations');
+  const SAT_VARS = [
+    'SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED',
+    'SERVICE_REPORT_SATELLITE_TREATMENT_MAP_V1',
+    'service_report_satellite_treatment_map_v1',
+    'SERVICE_REPORT_BASEMAP_PROVIDER',
+    'GOOGLE_STATIC_MAPS_API_KEY',
+    'GOOGLE_MAPS_API_KEY',
+  ];
+  let snap;
+  beforeEach(() => {
+    snap = Object.fromEntries(SAT_VARS.map((v) => [v, process.env[v]]));
+    for (const v of SAT_VARS) delete process.env[v];
+  });
+  afterEach(() => {
+    for (const v of SAT_VARS) {
+      if (snap[v] === undefined) delete process.env[v];
+      else process.env[v] = snap[v];
+    }
+  });
+
+  test('s0 with no provider configured — the render gate would refuse, so the key says so', () => {
+    expect(stationMapSatelliteSignaturePart()).toBe('s0');
+  });
+
+  test('s0 while the satellite gate is off, even with a keyed provider', () => {
+    process.env.SERVICE_REPORT_SATELLITE_TREATMENT_MAP_ENABLED = 'false';
+    process.env.GOOGLE_STATIC_MAPS_API_KEY = 'k';
+    expect(stationMapSatelliteSignaturePart()).toBe('s0');
+  });
+
+  test('adding the Google key flips the component — the map-less cached PDF must re-render', () => {
+    const before = stationMapSatelliteSignaturePart();
+    process.env.GOOGLE_STATIC_MAPS_API_KEY = 'k';
+    const after = stationMapSatelliteSignaturePart();
+    expect(before).toBe('s0');
+    expect(after).toBe('s1google_maps');
+    expect(after).not.toBe(before);
+  });
+
+  test('an explicitly requested google provider WITHOUT its key stays s0 — getLiveMapConfig would return null', () => {
+    process.env.SERVICE_REPORT_BASEMAP_PROVIDER = 'google';
+    expect(stationMapSatelliteSignaturePart()).toBe('s0');
+  });
+
+  test('mock provider stays s0 — its canDisplayLive is false, so the render gate refuses it too', () => {
+    process.env.SERVICE_REPORT_BASEMAP_PROVIDER = 'mock';
+    expect(stationMapSatelliteSignaturePart()).toBe('s0');
+  });
+});
+
+// A declared trap setup and a disputed COUNT are separate facts. Round 6
+// withheld initialSetup entirely on a count mismatch, which did not make the
+// map neutral — without the flag the card falls back to re-check wording, so
+// a declared setup published "inspected" beside "Traps set: 6" (codex P2
+// round 9). The stage now always survives; only the number is suppressed.
+test('a disputed trap count suppresses the map count, not the setup stage', () => {
+  const rows = [
+    stationRow('st-r1', 1, pin(0.2, 0.3), { program: 'trapping' }),
+    stationRow('st-r2', 2, pin(0.4, 0.5), { program: 'trapping' }),
+  ];
+  const context = (typedTrapCount) => buildStationMapReportContext({
+    stationRows: rows,
+    checkRows: [
+      { station_id: 'st-r1', status: 'ok' },
+      { station_id: 'st-r2', status: 'ok' },
+    ],
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_trapping'],
+    serviceDate: '2026-07-13',
+    initialSetup: true,
+    typedTrapCount,
+  });
+
+  const agreeing = context(2);
+  expect(agreeing.initialSetup).toBe(true);
+  expect(agreeing.setupCountVerified).toBe(true);
+
+  // The tech hand-edited traps_checked away from the pin count.
+  const disputed = context(6);
+  expect(disputed.initialSetup).toBe(true);      // stage is declared, not disputed
+  expect(disputed.setupCountVerified).toBe(false); // the number is
+
+  // No typed count to compare against is not a dispute.
+  const unknown = context(null);
+  expect(unknown.initialSetup).toBe(true);
+  expect(unknown.setupCountVerified).toBe(true);
+});
+
+// The post-completion station sync is fail-soft, so a declared setup can
+// persist its typed snapshot while writing no check rows. Selection then
+// falls back to the standing registry and every pin carries a null status —
+// the setup intro would claim "the traps went out on this visit" over pins
+// reading "On file (not checked this visit)" (codex P2 round 10).
+test('a setup with no per-visit checks does not claim the setup stage', () => {
+  const rows = [
+    stationRow('st-r1', 1, pin(0.2, 0.3), { program: 'trapping' }),
+    stationRow('st-r2', 2, pin(0.4, 0.5), { program: 'trapping' }),
+  ];
+  const build = (checkRows) => buildStationMapReportContext({
+    stationRows: rows,
+    checkRows,
+    satelliteMap: SATELLITE,
+    imageContext: IMAGE_CONTEXT,
+    typedTypes: ['rodent_trapping'],
+    serviceDate: '2026-07-13',
+    initialSetup: true,
+    typedTrapCount: 2,
+  });
+
+  // sync wrote nothing — nothing records which pins participated
+  const unsynced = build([]);
+  expect(unsynced.available).toBe(true);          // the map itself still renders
+  expect(unsynced.initialSetup).toBeUndefined();  // but claims no stage
+  expect(unsynced.summary.checked).toBe(0);
+
+  // one check row is enough to prove the visit touched the map
+  const synced = build([
+    { station_id: 'st-r1', status: 'ok' },
+    { station_id: 'st-r2', status: 'ok' },
+  ]);
+  expect(synced.initialSetup).toBe(true);
+});
+
+// Pre-push audit P1 (PR #3159): the map relabels an `ok` pin to "Set this
+// visit" on a declared setup, but `serviced` keeps its own label and its
+// own summary line — so the frozen report could read "Traps set" beside
+// "Serviced this visit" and "N serviced". Servicing presupposes the trap
+// was already out, the same reason the prose guard treats it as a re-check
+// verb, so this is inconsistent DATA rather than a labelling problem.
+describe('serviced pins on a declared initial trap setup', () => {
+  const { validateStationEntriesBody } = require('../services/termite-stations');
+
+  it('rejects a serviced status when the visit declares a setup', () => {
+    const error = validateStationEntriesBody([{ id: 'station-1', status: 'serviced' }], {
+      rejectServiced: true,
+    });
+    expect(error).toMatch(/contradicts an initial setup/i);
+  });
+
+  it('allows every other status on a setup', () => {
+    for (const status of ['ok', 'activity', 'inaccessible']) {
+      expect(validateStationEntriesBody([{ id: 'station-1', status }], { rejectServiced: true }))
+        .toBeNull();
+    }
+  });
+
+  it('leaves follow-up visits untouched', () => {
+    expect(validateStationEntriesBody([{ id: 'station-1', status: 'serviced' }], {
+      rejectServiced: false,
+    })).toBeNull();
+    // default is off, so every existing caller keeps its behavior
+    expect(validateStationEntriesBody([{ id: 'station-1', status: 'serviced' }])).toBeNull();
+  });
+});

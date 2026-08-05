@@ -201,6 +201,39 @@ describe('audit P2: grass track coerced by the pricer', () => {
     expect(lane).toBe(LANES.GREEN);
     expect(reasons).toEqual([]);
   });
+
+  // One-time-only intents have no recurring lawn line — the guard must read
+  // the one_time_lawn line's own priced track (passthrough added with the
+  // oneTimeLawn track schema) or a coerced paspalum one-off green-lanes.
+  const oneTimeLawnIntent = (track) => ({
+    ...lawnIntent(),
+    services: { oneTimeLawn: { treatmentType: 'weed', track } },
+    service_interest_label: 'One-Time Weed Treatment',
+  });
+  const oneTimeLawnLine = (overrides = {}) => ({
+    service: 'one_time_lawn',
+    track: 'st_augustine',
+    grassType: 'St. Augustine',
+    price: 150,
+    treatmentType: 'weed',
+    ...overrides,
+  });
+  const oneTimeArgs = (line, intent) => ({
+    ...lawnArgs(line, intent),
+    engineResult: { summary: {}, lineItems: [line] },
+    totals: { monthly: 0, annual: 0, oneTime: 150 },
+  });
+
+  test('a coerced one-time-only paspalum quote is yellow', () => {
+    const { lane, reasons } = classifyLane(oneTimeArgs(oneTimeLawnLine(), oneTimeLawnIntent('paspalum')));
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.some((r) => r.includes("'paspalum'") && r.includes('St. Augustine'))).toBe(true);
+  });
+
+  test('a one-time track the pricer honors adds no track reason', () => {
+    const { reasons } = classifyLane(oneTimeArgs(oneTimeLawnLine({ track: 'bahia', grassType: 'Bahia' }), oneTimeLawnIntent('bahia')));
+    expect(reasons.some((r) => r.includes('pricing vocabulary'))).toBe(false);
+  });
 });
 
 // ── 3. Reused-lead window excludes foreign-sid leads ──────────

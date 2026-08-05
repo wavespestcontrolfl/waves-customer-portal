@@ -398,6 +398,19 @@ const gates = {
   // shows. Dark until Adam flips it in prod.
   bookingCustomersOnly: isProd ? process.env.GATE_BOOKING_CUSTOMERS_ONLY === 'true' : true,
 
+  // Customer self-serve re-service scheduler — the standing /reservice/:token
+  // link (customers.reservice_token) that lets an active recurring / WaveGuard
+  // customer book their free pest/lawn re-service callback themselves, on the
+  // same route-aware availability engine as /book and /reschedule. Gates the
+  // WHOLE surface: the public route 404s, buildReserviceLink mints nothing,
+  // the portal schedule payload omits its reservice block, and the admin
+  // comms composer helper 404s. Customer-facing scheduling surface, so opt-in
+  // in EVERY environment (fail-closed ==='true', like securePlanChoice).
+  // Kill switch: unset GATE_RESERVICE_SELF_SERVE — the surface goes dark
+  // again with no data cleanup needed (booked callbacks are ordinary
+  // is_callback visits the office already manages).
+  reserviceSelfServe: process.env.GATE_RESERVICE_SELF_SERVE === 'true',
+
   // Portal "Pay now" — authenticated /billing/balance includes the
   // customer's open-invoice pay links (`openInvoices`) so the Billing tab
   // can offer the existing tokenized /pay checkout in-app instead of the
@@ -691,6 +704,14 @@ const gates = {
   // admin notifications.
   // Off → cron ticks are no-ops.
   callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
+  // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
+  // past-dated visits stuck in on_site/en_route (performed but never
+  // completed → no service record, invoice, report, or post-service SMS;
+  // 89 found in prod 2026-08-04) and upcoming recurring series with no price
+  // on any row (a Tree & Shrub series was live wholly unpriced the same
+  // day). Reads scheduled_services; writes only admin notifications.
+  // Off → cron ticks are no-ops.
+  scheduleIntegrityWatchdog: process.env.GATE_SCHEDULE_INTEGRITY_WATCHDOG === 'true',
   // Retroactive call_log→customer linking: an hourly cron that links
   // customer_id-NULL calls to a customer by UNAMBIGUOUS primary-phone match
   // (same single-match rule as webhook intake) — heals calls that arrived
@@ -838,6 +859,15 @@ const gates = {
   // seo_llm_mentions tracker has several days of data and the opportunities
   // have been eyeballed. When off, the aeo_gap bucket miner returns [].
   aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
+
+  // answer_gap opportunity mining — queries a page already ranks 9–30 for
+  // (per gsc_query_page_map) whose body never directly answers them; emits
+  // refresh_existing_page opportunities whose drafts add self-contained
+  // answer blocks. Default OFF in prod: ships dormant so the first mined
+  // batch can be eyeballed before the refresh lane starts consuming it
+  // (GATE_ANSWER_GAP_MINING=true to enable). When off, the bucket miner
+  // returns [].
+  answerGapMining: isProd ? process.env.GATE_ANSWER_GAP_MINING === 'true' : true,
 
   // Listicle brief overlay — when a supporting-blog brief's query is
   // list-shaped ("signs of…", "10 natural…"), the brief-builder layers the
@@ -1110,6 +1140,18 @@ const gates = {
   // booking flows and the nightly job revert to the old members-only
   // re-alignment.
   autoWaveguardTierEnroll: process.env.GATE_AUTO_WAVEGUARD_TIER === 'true',
+
+  // Inspection fee credited toward a service booked within the promised
+  // window (owner-approved 2026-08-02). Two halves, one gate: the tech
+  // closeout checkbox that RECORDS the promise, and the redemption that
+  // MINTS it into account credit when the customer books. Money surface —
+  // fail-closed ==='true' in EVERY environment. Gate off: no offer row is
+  // written, the receipt carries no credit line, and any offer recorded
+  // while the gate was on stays dormant (redemption checks the gate too),
+  // so flipping it off mid-window strands nothing — it only stops new
+  // promises and pauses redemption. Kill switch: unset or any non-'true'
+  // value.
+  inspectionCredit: process.env.GATE_INSPECTION_CREDIT === 'true',
 };
 
 function isEnabled(gate) {

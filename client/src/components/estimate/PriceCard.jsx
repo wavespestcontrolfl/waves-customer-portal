@@ -205,7 +205,7 @@ export function perApplicationNetForFrequency(frequency) {
 // "$X/mo" it showed instead was a plan total the estimate surface must not
 // carry. With the flag the headline names the billing unit and the itemized
 // rows below carry the actual per-application prices.
-export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false }) {
+export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountPct = null, memberPerApplicationSavings = null, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -374,10 +374,22 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
   // "WaveGuard <tier> Discount" would misattribute them. When the residual
   // isn't the tier slice (±$0.06 rounding budget), the anchor keeps its
   // existing unlabeled strike-through rather than inventing a label.
-  const waveGuardRowConfirmed = waveGuardTier
-    && Number(waveGuardDiscountPct) > 0
+  // Current-member estimates (owner 2026-08-04, same ruling as the discounts):
+  // the membership snapshot's per-application saving for this service is the
+  // rate ACTUALLY applied at save — margin-guard caps included — so it can
+  // corroborate a residual the plan-level tier pct can't (a capped rate is
+  // below the tier pct, and the snapshot's whole-% discountPct rounds too
+  // coarsely to reconcile against dollars). Amount-match within the same
+  // rounding budget; a cadence switch away from the saved selection changes
+  // the anchor and simply falls back to the unlabeled strike-through.
+  const memberSavingsConfirmed = Number(memberPerApplicationSavings) > 0
     && perAppSavings > 0
-    && Math.abs(perAppSavings - round2(perAppAnchor * Number(waveGuardDiscountPct))) <= 0.06;
+    && Math.abs(perAppSavings - round2(Number(memberPerApplicationSavings))) <= 0.06;
+  const waveGuardRowConfirmed = waveGuardTier
+    && ((Number(waveGuardDiscountPct) > 0
+      && perAppSavings > 0
+      && Math.abs(perAppSavings - round2(perAppAnchor * Number(waveGuardDiscountPct))) <= 0.06)
+      || memberSavingsConfirmed);
   const savingsStack = perAppNet != null && showSavings
     ? [
       waveGuardRowConfirmed

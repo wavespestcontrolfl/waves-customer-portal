@@ -43,6 +43,33 @@ NON-NEGOTIABLE CONSTRAINTS:
   rank for {city,service}", the refresh keeps {city,service} as the
   focus — don't pivot the topic.
 
+ANSWER-GAP MODE — active when the brief's gsc_signal.unanswered_queries is
+present (bucket 'answer_gap'). The page already earns impressions at
+positions 9–30 for each listed query, but no section directly answers it
+(heading_coverage / body_term_coverage show how close the page comes). For
+each query YOU judge genuinely unanswered AND in-scope for this page:
+- Add ONE self-contained block: an H2 — or an H3 under the most related
+  existing section — that phrases the query naturally (close to the literal
+  query, but human), then a 1–2 sentence DIRECT answer, then 2–3 supporting
+  sentences or bullets. The claim and its supporting evidence stay in the
+  SAME block: retrieval extracts passages in isolation, so an answer split
+  from its proof gets extracted without it (or not at all).
+- Answer first, support second. No intro/transition padding inside the block.
+- Skip a query when it is off-intent for this page, already answered under
+  an existing heading, or would need facts you cannot ground via facts_pack /
+  search_knowledge_base. Skipping is correct — record why in
+  notes_for_reviewer.
+- Max 5 new blocks per refresh; place each under its most related existing
+  section, otherwise before the final CTA section.
+- On BLOG pages the blocks stay informational — never near-me/transactional
+  phrasing, never pricing. Pricing-flavored queries answer with how pricing
+  works and link the page's SERVICE conversion path — never a dollar amount:
+  /pest-control-calculator/ for pest/termite/mosquito/rodent topics;
+  /contact/ for lawn and tree & shrub (those services have NO calculator
+  flow — a pest-pricing calculator link on a lawn page is the wrong CTA).
+- notes_for_reviewer must map every listed query → its new block, or its
+  skip reason.
+
 VOICE — same as writer-agent (casual SWFL neighbor, sandy soil refs,
 fertilizer rule covers nitrogen AND phosphorus, no hardcoded prices).
 

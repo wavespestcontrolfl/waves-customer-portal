@@ -192,7 +192,7 @@ function emailExceptions(day, exceptions) {
     .join('');
   return require('./email').send({
     to: DIGEST_TO,
-    subject: `LLM dispatch exceptions — ${day}`,
+    subject: `FIX: LLM dispatch exceptions — ${day}`,
     heading: 'AI dispatch exceptions',
     body: `${exceptions.length === 1 ? 'One exception' : `${exceptions.length} exceptions`} on ${day}:<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is never reported — this email only sends when something degraded, or when nothing was recorded at all.`,
   });

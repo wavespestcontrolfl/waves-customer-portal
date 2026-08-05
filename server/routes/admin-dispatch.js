@@ -35,6 +35,7 @@ const { detectServiceLine, getServiceLineConfig, SERVICE_LINE_IDS } = require('.
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
+const { reportReconciliationIssues } = require('../services/service-report/report-reconciliation');
 const { isValidHeight } = require('../services/service-report/turf-height');
 const { createTurfHeightReading } = require('../services/turf-height-service');
 const TurfHeightOcr = require('../services/turf-height-ocr');
@@ -427,8 +428,24 @@ async function renderRequiredTemplate(templateKey, vars, context = {}) {
 function ensureSmsContainsReportLink(body, reportLink) {
   const text = String(body || '').trim();
   const link = String(reportLink || '').trim();
-  if (!text || !link || text.includes(link)) return text;
-  const portalRootRe = /\b(?:https?:\/\/)?portal\.wavespestcontrol\.com(?:\/report\/[a-f0-9]{32})?/i;
+  if (!text || !link) return text;
+  // Portal links are delivered scheme-stripped (SMS allowlist rule), so a
+  // rendered body can hold the identical link without https:// — that
+  // counts as containing it. Without this, the domain-replace below fired
+  // on a body that already had the link and, because the regex consumed
+  // only the legacy /report/<32-hex> path, swapping the bare domain left
+  // the short-link path dangling: ".../l/report-x/l/report-x" (sent to a
+  // customer 2026-08-03). Presence is matched case-insensitively with the
+  // scheme optional, and the trailing lookahead stops a LONGER stale slug
+  // from satisfying a prefix of it (…/l/report-old12x must not count as
+  // containing …/l/report-old12 — it needs replacing, not skipping). The
+  // replacement regex consumes /l/<slug> paths too, so a genuine
+  // replacement swallows the whole stale link.
+  const schemeless = link.replace(/^https?:\/\//i, '');
+  const escaped = schemeless.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const presentRe = new RegExp(`(?:https?:\\/\\/)?${escaped}(?![A-Za-z0-9-])`, 'i');
+  if (presentRe.test(text)) return text;
+  const portalRootRe = /\b(?:https?:\/\/)?portal\.wavespestcontrol\.com(?:\/report\/[a-f0-9]{32}|\/l\/[A-Za-z0-9-]+)?/i;
   if (portalRootRe.test(text)) {
     return text.replace(portalRootRe, link);
   }
@@ -1921,7 +1938,22 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
     zoom,
     width: liveConfig.width || 640,
     height: liveConfig.height || 340,
-  }).catch(() => ({ stations: [], nextStationNumber: 1, nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 } }));
+  })
+    // `loaded: false` distinguishes a degraded shape from a property that
+    // genuinely has no stations — both carry `stations: []` (codex P2 on
+    // #3159). Consumers that only draw pins can ignore it; anything INFERRING
+    // from the absence of stations must not treat a failed query as fact.
+    // The loader swallows its own query failure (so a station outage never
+    // takes down zone marking) and reports it via `loaded`, so this must
+    // FORWARD that value rather than stamp true — an earlier version stamped
+    // unconditionally here and the flag was inert (codex P2 round 3).
+    .then((slice) => ({ ...slice, loaded: slice.loaded !== false }))
+    .catch(() => ({
+      stations: [],
+      nextStationNumber: 1,
+      nextStationNumberByProgram: { termite: 1, rodent: 1, trapping: 1 },
+      loaded: false,
+    }));
 
   return {
     available: true,
@@ -1934,6 +1966,9 @@ async function buildPropertyMapPayload(customerId, lat, lng) {
       attributionText: liveConfig.attributionText || '',
     },
     stations: stationSlice.stations,
+    // false = the station query failed and the empty array above is a
+    // fallback, not a fact about the property.
+    stationsLoaded: stationSlice.loaded !== false,
     nextStationNumber: stationSlice.nextStationNumber,
     nextStationNumberByProgram: stationSlice.nextStationNumberByProgram,
     stationCap: TermiteStations.MAX_ACTIVE_STATIONS,
@@ -2245,7 +2280,36 @@ router.get('/:date?', async (req, res, next) => {
         autopay_payment_method_id: s.autopay_payment_method_id,
         ach_status: s.ach_status,
       });
-      const completionProfile = await resolveCompletionProfileForScheduledService(s).catch(() => null);
+      let dispatchProfileLookupFailed = false;
+      const completionProfile = await resolveCompletionProfileForScheduledService(s)
+        .catch(() => { dispatchProfileLookupFailed = true; return null; });
+      // Trace verdict for the dispatch surface (codex P2 r24):
+      // CompletionPanel opened from DispatchPageV2 reads THIS feed, and
+      // the client treats an absent flag as eligible — without the
+      // verdict, gate-on dispatch completions still exposed the tracer
+      // on ineligible lanes (the save route then 403s) and ran outline
+      // lanes through the perimeter workflow into the capture-mode
+      // validator. Same shared helpers as the schedule feeds; fail-soft
+      // (absent flags = eligible; capture stays the fail-open surface).
+      let dispatchTraceVerdict = null;
+      try {
+        const {
+          resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts, traceEligibilityGateOn,
+        } = require('../services/service-report/trace-eligibility');
+        // A profile OUTAGE omits the verdict (fail open, codex P2 r28)
+        // instead of classifying a typed primary from its editable label
+        // — the save route catches the same outage and fails open.
+        if (traceEligibilityGateOn() && !dispatchProfileLookupFailed) {
+          dispatchTraceVerdict = combineLineVerdicts(
+            resolveTraceEligibility({
+              serviceKey: completionProfile?.serviceKey || null,
+              findingsType: completionProfile?.findingsType || null,
+              displayName: s.service_type || '',
+            }),
+            await resolveAddonVerdicts(s.id, db),
+          );
+        }
+      } catch { dispatchTraceVerdict = null; }
       // Only fan out the series-context lookup for visits that are actually
       // prepaid — most rows aren't, and we don't want N extra family-fetches
       // per day on the dispatch list.
@@ -2307,6 +2371,8 @@ router.get('/:date?', async (req, res, next) => {
         isCallback: !!s.is_callback,
         autopayActive,
         autopayEnabled: s.autopay_enabled !== false,
+        traceEligible: !dispatchTraceVerdict || dispatchTraceVerdict.eligible,
+        traceVariant: dispatchTraceVerdict?.eligible ? dispatchTraceVerdict.variant : null,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
         prepaidMethod: s.prepaid_method || null,
@@ -2318,6 +2384,18 @@ router.get('/:date?', async (req, res, next) => {
         checkoutInvoiceStatus: checkoutInvoice?.status || null,
         checkoutInvoiceTotal: checkoutInvoice?.total != null ? Number(checkoutInvoice.total) : null,
         completionProfile,
+        // Whether the inspection-credit lane is actually live. The closeout
+        // panel renders its promise checkbox only on true (Codex #3175 P1):
+        // an offered, pre-checked promise the server silently ignores reads
+        // to the tech — and then to the customer — as a credit that was
+        // recorded. Same rule as the card-on-file checkbox.
+        inspectionCreditAvailable: require('../config/feature-gates').isEnabled('inspectionCredit'),
+        // A resolver OUTAGE is not "no profile" (Codex #3178 r33 P2,
+        // mirroring the schedule feed): the CompletionPanel hides the
+        // credit toggle when the profile is null, and without this marker
+        // the submit payload would fabricate an explicit default-true for
+        // a control the tech never saw.
+        completionProfileLookupFailed: dispatchProfileLookupFailed === true,
         // Typed-findings schema embedded per appointment so mobile completion
         // never blocks on a registry fetch (bad-network field conditions).
         // Null for everything except cut-over specialty types.
@@ -3176,6 +3254,14 @@ router.put('/:serviceId/status', async (req, res, next) => {
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }
+        // The invoice-void + credit-reversal seam can also have been lost
+        // to a crash between the status commit and the post-success block
+        // (Codex #3178 r25 P1) — this replay is its recovery vehicle too.
+        // Idempotent: a seam that already ran finds nothing to void or
+        // reverse. Best-effort — never fail the idempotent success.
+        try {
+          await require('../services/invoice').voidOpenInvoicesForCancelledService(svc.id);
+        } catch (e) { logger.error(`[admin-dispatch] no-show replay money seam failed for ${svc.id}: ${e.message}`); }
         return res.json({ success: true, alreadyNoShow: true });
       }
       return res.status(409).json({
@@ -3387,6 +3473,9 @@ router.put('/:serviceId/status', async (req, res, next) => {
           await InvoiceService.voidOpenInvoicesForCancelledService(target.id);
         }
       } catch (e) { logger.error(`[admin-dispatch] series cancellation invoice void sweep failed: ${e.message}`); }
+      // Inspection credit reversal runs INSIDE voidOpenInvoicesForCancelledService
+      // (after the voids, which restore any applied credit) — one hook every
+      // cancellation path shares, so no cancel surface can forget it.
 
       for (const target of targets) {
         try {
@@ -3620,6 +3709,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // helper (skips applied payments / live PaymentIntents); best-effort.
       try {
         const InvoiceService = require('../services/invoice');
+        // Inspection-credit reversal runs inside the void helper (after the
+        // voids restore any applied credit) — shared hook, can't be forgotten.
         await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
       } catch (e) { logger.error(`[admin-dispatch] cancellation invoice void sweep failed: ${e.message}`); }
 
@@ -3702,6 +3793,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // (skips applied payments / live PaymentIntents); best-effort.
       try {
         const InvoiceService = require('../services/invoice');
+        // Inspection-credit reversal runs inside the void helper (after the
+        // voids restore any applied credit) — shared hook, can't be forgotten.
         await InvoiceService.voidOpenInvoicesForCancelledService(svc.id);
       } catch (e) { logger.error(`[admin-dispatch] no-show invoice void sweep failed: ${e.message}`); }
 
@@ -3918,6 +4011,81 @@ router.get('/:serviceId/complete-preview', async (req, res, next) => {
 });
 
 // POST /api/admin/dispatch/:serviceId/complete
+// Pre-submit report reconciliation block (409) — pure for testability
+// (_test), like the other completion block-payload helpers. Returns
+// { status, payload } or null. Fail-OPEN on checker errors: this prompt
+// must never be the reason a visit cannot complete — the render-time
+// guards remain the backstop for anything it skips.
+function reportReconcileBlockPayload({
+  isIncompleteVisit,
+  reportReconcileConfirmed,
+  technicianNotes,
+  structuredFindings,
+  primaryFindingsType = null,
+  primaryActivityScore = null,
+  companionFindings,
+}) {
+  if (process.env.GATE_REPORT_RECONCILE_PROMPT !== 'true') return null;
+  if (isIncompleteVisit || reportReconcileConfirmed) return null;
+  let issues = [];
+  try {
+    issues = reportReconciliationIssues({
+      technicianNotes, structuredFindings, primaryFindingsType, primaryActivityScore, companionFindings,
+    });
+  } catch {
+    return null;
+  }
+  if (!issues.length) return null;
+  return {
+    status: 409,
+    payload: {
+      // adminFetch surfaces only error + code to the client, so the
+      // human-readable contradictions ride in the error string; the
+      // structured list stays for API consumers and tests.
+      error: issues.map((issue) => issue.message).join('\n'),
+      code: 'report_reconcile',
+      contradictions: issues,
+      confirmable: true,
+    },
+  };
+}
+
+// Lightweight side-effects poll for the completion panel (codex P1 #3187
+// r11): while a committed completion's side effects run, the client polls
+// THIS read-only status instead of replaying the media-bearing completion
+// POST (base64 photos, ~MBs) every five seconds. All derivation lives in
+// CompletionAttempts.completionStatusForService; auth = the router-wide
+// adminAuthenticate + requireTechOrAdmin.
+router.get('/:serviceId/completion-status', async (req, res) => {
+  try {
+    // Same per-visit technician boundary as the completion POST (codex P2
+    // #3187 r12): the status carries attempt state, serviceRecordId, and —
+    // same-key — the stored completion response, so a technician may read
+    // it only for their own assigned visit; admins keep office-wide reach.
+    const svc = await db('scheduled_services')
+      .where({ id: req.params.serviceId })
+      .select('id', 'technician_id')
+      .first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+    const ownershipError = completionOwnershipError({
+      role: req.techRole,
+      actorTechnicianId: req.technicianId,
+      assignedTechnicianId: svc.technician_id,
+    });
+    if (ownershipError) {
+      return res.status(ownershipError.status).json(ownershipError.payload);
+    }
+    const status = await CompletionAttempts.completionStatusForService({
+      serviceId: req.params.serviceId,
+      idempotencyKey: String(req.query.idempotencyKey || ''),
+    });
+    res.json(status);
+  } catch (e) {
+    logger.error(`[dispatch] completion-status read failed for ${req.params.serviceId}: ${e.message}`);
+    res.status(500).json({ error: 'Failed to read completion status' });
+  }
+});
+
 router.post('/:serviceId/complete', async (req, res, next) => {
   let completionAttempt = null;
   let markedSucceeded = false;
@@ -3977,7 +4145,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       typedPhotoSummary = null,
       zoneShapes = null,            // satellite zone marks [{ areaLabel, shape }] — OPTIONAL
       termiteStations = null,       // bait station pins/status [{ id?, shape?, status?, retire? }] — OPTIONAL
+      // Inspection credit — DEFAULT ON (owner ruling): an inspection closes
+      // out carrying the credit promise unless the tech explicitly clears
+      // the box. Absent/undefined therefore means ON, and only an explicit
+      // `false` opts out; the rail itself still checks the gate and that
+      // the visit is actually an inspection.
+      offerInspectionCredit = true,
+      reportReconcileConfirmed = false, // tech confirmed the report/typed-value contradiction prompt
     } = req.body;
+    if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
+      return res.status(400).json({ error: 'offerInspectionCredit must be a boolean' });
+    }
     if (!VALID_VISIT_OUTCOMES.has(visitOutcome)) {
       return res.status(400).json({
         error: `visitOutcome must be one of: ${Array.from(VALID_VISIT_OUTCOMES).join(', ')}`,
@@ -4057,7 +4235,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let completionPhotoUploadResult = { uploaded: 0, failed: 0, errors: [] };
     let completionPhotosUploadedBeforeCommit = false;
     let preCommitCompletionPhotoRows = [];
-    const completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
+    let completionReviewDelayMinutes;
+    try {
+      completionReviewDelayMinutes = parseCompletionReviewDelayMinutes(req.body || {});
+    } catch (timingErr) {
+      // A committed chain replays an immutable body, and by the time a
+      // retry lands its custom reviewScheduledFor can legitimately be in
+      // the past — the freshness gate must not 400 a committed retry
+      // before it can reach the replay/resume claim (codex P2 #3187 r7).
+      // The original submit passed the strict gate, so the only reachable
+      // failure here is must-be-in-the-future; 0 = "due now" preserves the
+      // intent (the chosen time has arrived). Fresh completions keep the
+      // strict gate.
+      const committed = await CompletionAttempts
+        .hasCommittedCompletionAttempt(req.params.serviceId)
+        .catch(() => false);
+      if (!committed) throw timingErr;
+      completionReviewDelayMinutes = 0;
+    }
     const completionAreas = Array.isArray(areasTreated) ? areasTreated : (Array.isArray(areasServiced) ? areasServiced : []);
     const concernText = typeof customerConcernText === 'string' ? customerConcernText.trim() : '';
     const normalizedCustomerInteraction = normalizeCustomerInteractionValue(customerInteraction);
@@ -4237,8 +4432,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // default profile when the table simply doesn't exist; a throw here is a
     // real DB error.
     let completionProfile;
+    // The profile the completion TRANSACTION actually judged (r32 P2):
+    // starts as the pre-lock resolution; the trx re-resolves on a detected
+    // update-details repoint (null = repoint detected but re-resolve
+    // failed — unknown identity, credit legs fail closed). The post-commit
+    // offer leg must use THIS, never the pre-lock snapshot.
+    let effectiveCompletionProfile;
     try {
       completionProfile = await resolveCompletionProfileForScheduledService(svc);
+      effectiveCompletionProfile = completionProfile;
     } catch (err) {
       logger.error(`[dispatch] completion profile lookup failed for ${svc.id}: ${err.message}`);
       return res.status(503).json({
@@ -4263,6 +4465,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         error: `this property is at the ${TermiteStations.MAX_ACTIVE_STATIONS}-station cap — remove extra pins (or retire stations) before completing`,
         code: 'termite_stations_cap',
       });
+    }
+    // A declared trap SETUP cannot carry serviced pins: the map relabels
+    // `ok` to "Set this visit" but leaves `serviced` saying "Serviced this
+    // visit", so the frozen report would contradict its own declared stage.
+    //
+    // Scoped to the TRAPPING program, and therefore placed here rather than
+    // with the shape validation above — a combined profile can resolve to
+    // the termite/rodent bait program while a trapping companion declares a
+    // setup, and rejecting on the declaration alone blocked a legitimate
+    // serviced BAIT-STATION entry (codex P1 — a regression from the first
+    // version of this check). `trap_visit_type` only exists on the
+    // rodent_trapping schema, so its presence in any submitted section
+    // identifies the declaration.
+    if (stationProgram === 'trapping' && Array.isArray(termiteStations) && termiteStations.length) {
+      const declaresTrapSetup = [
+        structuredFindings?.values,
+        ...(Array.isArray(companionFindings) ? companionFindings.map((entry) => entry?.values) : []),
+      ].some((values) => String(values?.trap_visit_type || '').trim() === 'Initial setup');
+      const servicedError = TermiteStations.validateStationEntriesBody(termiteStations, {
+        rejectServiced: declaresTrapSetup,
+      });
+      if (servicedError) {
+        return res.status(400).json({ error: servicedError, code: 'termite_stations_invalid' });
+      }
     }
     // Rodent consumption consistency (codex r2): station checks recording
     // bait consumption must not ship beside an explicit "None" consumption
@@ -4303,6 +4529,36 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       });
       if (conflict) {
         return res.status(400).json({ error: conflict, code: 'trap_capture_conflict' });
+      }
+    }
+    // Pre-submit report reconciliation (GATE_REPORT_RECONCILE_PROMPT,
+    // dark): the AI body is generated from the typed fields, the tech can
+    // keep editing them afterwards, and nothing re-runs — the render-time
+    // guards then silently degrade the copy or a missed pattern publishes
+    // a stale number. Surfacing the contradiction HERE lets the tech
+    // regenerate or confirm before anything freezes; a confirmed resubmit
+    // (same idempotency key — 409s don't reset it client-side) passes
+    // through, and the render-time guards remain the backstop.
+    {
+      const reconcileBlock = reportReconcileBlockPayload({
+        isIncompleteVisit,
+        reportReconcileConfirmed,
+        technicianNotes,
+        structuredFindings,
+        primaryFindingsType: completionProfile?.findingsType || null,
+        primaryActivityScore: activityScore,
+        companionFindings,
+      });
+      // A same-key retry of an ALREADY-COMMITTED completion (lost
+      // response, post-commit side-effect failure) must reach the
+      // replay/resume claim untouched: the frozen snapshot exists and a
+      // confirm cannot change it, so prompting would accept an override
+      // the report can never honor (codex P1). Checked only when a block
+      // exists — the clean path costs nothing — and a lookup error skips
+      // the prompt too (fail open).
+      if (reconcileBlock
+        && !(await CompletionAttempts.hasCommittedCompletionAttempt(svc.id).catch(() => true))) {
+        return res.status(reconcileBlock.status).json(reconcileBlock.payload);
       }
     }
     if (completionProfile?.requiresProject || completionProfile?.projectBacked) {
@@ -4354,6 +4610,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...taggedCompletionNoteLines(technicianNotes, ['found']),
           ...(Array.isArray(completionPhotos)
             ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+          // Per-application targets render verbatim in the report's
+          // product purpose copy (ReportViewPage applicationPurposeCopy) —
+          // free-form chips are customer copy too (codex P1 #3187 r16).
+          ...(Array.isArray(products)
+            ? products
+                .flatMap((prod) => (Array.isArray(prod?.targets) ? prod.targets : []))
+                .filter((t) => typeof t === 'string')
             : []),
         ];
         const untypedViolations = [...new Set(
@@ -4506,6 +4770,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           ...(photoSummaryText ? [photoSummaryText] : []),
           ...(Array.isArray(completionPhotos)
             ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+          // Per-application targets render verbatim in the report's
+          // product purpose copy (ReportViewPage applicationPurposeCopy) —
+          // free-form chips are customer copy too (codex P1 #3187 r16).
+          ...(Array.isArray(products)
+            ? products
+                .flatMap((prod) => (Array.isArray(prod?.targets) ? prod.targets : []))
+                .filter((t) => typeof t === 'string')
             : []),
         ];
         const copyViolations = [...new Set(
@@ -5894,7 +6166,148 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               observations: reportObservations,
               recommendations: reportRecommendations,
             },
+            // Durable CONSENT marker for the inspection credit, written
+            // inside the completion transaction (Codex #3175 r5 P0).
+            // Recovery must never infer a promise from "an inspection was
+            // completed" — that can't tell a transient offer-write failure
+            // from the tech clearing the box, and on first gate enablement
+            // it would sweep up every historical inspection. Only an
+            // explicit opt-in recorded HERE is recoverable evidence.
+            // Gate-checked (Codex #3178 P1): with the lane dark the client
+            // still posts the default-true field, and persisting consent
+            // then would let a later gate flip recover promises for
+            // inspections closed out before the feature existed.
+            // visitOutcome must be a real completion — an 'incomplete'
+            // visit performed no inspection to credit.
+            // Shared predicate, not the bare category (Codex #3178 r24
+            // P0): rodent_inspection's typed profile is category 'rodent',
+            // and the category-only gate silently excluded it.
+            // EXCEPT rodent (Codex #3178 r31 P0): its $125-creditable
+            // promise lives on already-sent tokenized estimates,
+            // independent of this lane's gate — the marker and frozen
+            // terms persist while dark so the flip can't strand a promise
+            // the estimator already made. Money still moves only when the
+            // gate is on.
+            // NEVER on a quiet backfill (Codex #3178 r35 P2): the backdated
+            // closeout contract forces every customer send off, and a
+            // weeks-old inspection's credit promise — never announced,
+            // window anchored on the stale service date — would only feed
+            // the delivery audit false undelivered alerts.
+            ...(offerInspectionCredit
+              && !isBackfillCompletion
+              && visitOutcome === 'completed'
+              && require('../services/inspection-credit').isCreditableInspectionProfile(completionProfile)
+              && (require('../config/feature-gates').isEnabled('inspectionCredit')
+                || require('../services/inspection-credit').carriesStandingCreditPromise(completionProfile?.serviceKey))
+              ? {
+                inspectionCreditOptIn: true,
+                // The TERMS the promise was made under, frozen WITH the
+                // consent marker (Codex #3178 r21 P2): if the offer insert
+                // fails and pricing config changes before the hourly
+                // recovery runs, the customer must still receive the
+                // closeout's amount and window — never the newly
+                // configured ones. Recovery passes these through.
+                inspectionCreditTerms: (() => {
+                  const InspectionCredit = require('../services/inspection-credit');
+                  return {
+                    // Service-aware: rodent credits its quoted $125 fee,
+                    // not the flat default (owner ruling 2026-08-04).
+                    amount: InspectionCredit.configuredCreditAmountForServiceKey(completionProfile?.serviceKey || null),
+                    windowDays: InspectionCredit.creditWindowDaysForServiceKey(completionProfile?.serviceKey || null),
+                    // The RESOLVED key rides the frozen terms (r35 P0) so
+                    // recovery classifies standing-promise offers even for
+                    // rows whose service_id FK is null.
+                    serviceKey: completionProfile?.serviceKey || null,
+                  };
+                })(),
+              }
+              : {}),
           };
+          // Freeze the appointment's add-on line identities with the
+          // completion (codex P2 on #3189): schedule add-on rows are
+          // MUTABLE after completion (the update-details route replaces
+          // them), and the trace-eligibility render verdict must reflect
+          // the lines completed on the visit, not later edits — an add-on
+          // added afterwards must not republish a suppressed trace, and
+          // one removed must not hide a legitimately completed map.
+          // Fail-soft: a lookup error omits the field and render falls
+          // back to the live rows (legacy-record behavior).
+          try {
+            // The EMPTY array freezes too (codex P2 r15): an absent field
+            // means "legacy record, fall back to live rows" — a
+            // zero-add-on completion must not stay mutable. Each line also
+            // freezes its key + findings pointer (codex P2 r21) via the
+            // shared freezer, so profile repoints can't rewrite history.
+            const { frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+            serviceData.completedAddonLines = await frozenAddonLinesForCompletion(svc.id, trx);
+          } catch { /* render falls back to live rows */ }
+          // The PRIMARY identity freezes for the same reason (codex P2
+          // r15): update-details can repoint service_id/service_type after
+          // completion, and a generic report has no typed snapshot to
+          // counter it — the permanent report's trace verdict must reflect
+          // the service that was actually completed. Resolved from the
+          // LOCKED row (codex P2 r21, twin of the recap fix): an
+          // update-details repoint can commit between the handler's
+          // pre-transaction svc load and the row lock, and the freeze must
+          // record the service actually completing. Fail-soft on the
+          // re-resolve — the pre-lock profile (today's behavior) stands.
+          let frozenCompletionProfile = completionProfile;
+          let primaryFreezeTrusted = true;
+          if (lockedSvcRow && (lockedSvcRow.service_id !== svc.service_id
+            || lockedSvcRow.service_type !== svc.service_type)) {
+            try {
+              frozenCompletionProfile = await resolveCompletionProfileForScheduledService(lockedSvcRow, trx);
+            } catch {
+              // Repoint DETECTED but the locked re-resolve failed: the
+              // pre-lock profile is known-stale, so freezing it would pin
+              // the WRONG identity permanently (codex P2 r27). Omit the
+              // freeze — the render's live fallback resolves the current
+              // row, the legacy-record behavior.
+              primaryFreezeTrusted = false;
+            }
+          }
+          // The freeze must be SAFE for the key's classification family
+          // (codex P2 r28/r29, mirroring the add-on freezer): a typed key
+          // (flea_tick, lawn_aeration…) or a pointer-required key frozen
+          // WITHOUT its pointer would pin the permanent report to the
+          // wrong verdict forever — render treats the frozen key as
+          // authoritative and never re-queries the restored profile.
+          const { primaryIdentityFreezable } = require('../services/service-report/trace-eligibility');
+          if (primaryFreezeTrusted && primaryIdentityFreezable(frozenCompletionProfile || {})) {
+            serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
+            serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
+          }
+          // The inspection-credit marker keys to the LOCKED identity too
+          // (Codex #3178 r32 P2): the serviceData literal tested the
+          // pre-lock profile, and an update-details repoint committing in
+          // between can persist a promise on a visit that is no longer an
+          // inspection — or strip one from a visit that now is. Re-judge
+          // with the same re-resolved profile the report freeze trusts; a
+          // detected repoint whose re-resolve failed is UNKNOWN identity,
+          // which fails closed (no marker — money never moves on a guess).
+          {
+            const IC = require('../services/inspection-credit');
+            effectiveCompletionProfile = primaryFreezeTrusted ? frozenCompletionProfile : null;
+            const lockedEligible = offerInspectionCredit
+              && !isBackfillCompletion
+              && visitOutcome === 'completed'
+              && IC.isCreditableInspectionProfile(effectiveCompletionProfile)
+              && (require('../config/feature-gates').isEnabled('inspectionCredit')
+                || IC.carriesStandingCreditPromise(effectiveCompletionProfile?.serviceKey));
+            const hasMarker = serviceData.inspectionCreditOptIn === true;
+            if (hasMarker && !lockedEligible) {
+              delete serviceData.inspectionCreditOptIn;
+              delete serviceData.inspectionCreditTerms;
+            } else if (lockedEligible && (!hasMarker
+              || effectiveCompletionProfile?.serviceKey !== completionProfile?.serviceKey)) {
+              serviceData.inspectionCreditOptIn = true;
+              serviceData.inspectionCreditTerms = {
+                amount: IC.configuredCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null),
+                windowDays: IC.creditWindowDaysForServiceKey(effectiveCompletionProfile?.serviceKey || null),
+                serviceKey: effectiveCompletionProfile?.serviceKey || null,
+              };
+            }
+          }
           // Typed specialty completion: resolve trend vs the customer's prior
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders
@@ -5950,6 +6363,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // Primary section only — the AI report describes this visit's
               // primary work; companion sections keep their own typed copy.
               technicianReportBody,
+              // The tech confirmed the reconciliation prompt: the frozen
+              // snapshot carries the decision so neither the snapshot's own
+              // screens nor the render-time summary screen silently discard
+              // the body a person reviewed and overrode.
+              reconcileConfirmed: reportReconcileConfirmed === true,
             });
           }
           // Companion typed sections: one immutable snapshot per validated
@@ -5994,6 +6412,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 visitSequence: companionVisitSequence,
                 activity: companionActivity,
                 photoSummary: null,
+                // A standard primary with a trapping COMPANION has no typed
+                // primary snapshot to carry the confirmed override — freeze
+                // it on the trapping companion so the render-time summary
+                // screen can honor it (codex P1).
+                reconcileConfirmed: reportReconcileConfirmed === true
+                  && companion.type === 'rodent_trapping',
               });
               if (companionSnapshot) {
                 // The frozen per-section delivery rides the snapshot itself
@@ -6952,6 +7376,114 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         void TurfHeightOcr.processReadingOcr(ocrReadingId)
           .catch((err) => logger.error(`[turf-height] OCR cross-check failed for reading=${ocrReadingId}: ${err.message}`));
       });
+    }
+
+    // Recorded inspection-credit promise (null unless this closeout made
+    // one). Declared HERE, before its only assignment — a `let` referenced
+    // above its declaration is a temporal-dead-zone throw, which would have
+    // turned every eligible closeout into a logged false failure.
+    let inspectionCreditOffer = null;
+
+    // Inspection credit promise (dark behind GATE_INSPECTION_CREDIT).
+    // Keyed ONLY to a successful inspection closeout plus the explicit
+    // opt-out — deliberately NOT inside the invoice-mint branch (Codex
+    // #3175 P0): paid, prepaid, pre-minted, existing-invoice and
+    // no-invoice inspections are all still inspections the customer was
+    // promised a credit for. Records the PROMISE only; no money moves
+    // until they book. Never throws — a credit hiccup must not fail a
+    // completion the tech already performed.
+    // On a RESUME the committed record is the only truth (Codex #3178 r22
+    // P1): the request field defaults to true and the gate is re-read live,
+    // so a completion that committed while the lane was dark — deliberately
+    // carrying no marker — would retroactively mint a promise if the gate
+    // flipped on before the retry. Same posture as the backfill freeze
+    // above: first run derives from the request (which is what wrote the
+    // marker inside the transaction), resumes read the marker.
+    const inspectionCreditConsented = resumingCommittedCompletion
+      ? parseJsonObject(record.service_data)?.inspectionCreditOptIn === true
+      : offerInspectionCredit;
+    if (inspectionCreditConsented
+      // Quiet backfills record no promise and queue no comms (r35 P2) —
+      // the marker was never written, and this guard keeps the first-run
+      // request field from re-opening the leg.
+      && !isBackfillCompletion
+      && visitOutcome === 'completed'
+      // Shared predicate, not the bare category (Codex #3178 r24 P0):
+      // rodent_inspection's typed profile is category 'rodent'.
+      // The EFFECTIVE profile — the identity the completion transaction
+      // actually judged after its row lock (r32 P2): a pre-lock snapshot
+      // can be stale across an update-details repoint; null (repoint
+      // detected, re-resolve failed) fails closed. On a RESUME the
+      // committed marker is the consent authority; this predicate is the
+      // identity gate, re-derived from the same pre-trx resolution.
+      && require('../services/inspection-credit').isCreditableInspectionProfile(effectiveCompletionProfile)) {
+      try {
+        const InspectionCredit = require('../services/inspection-credit');
+        // The window starts when the INSPECTION happened, not when it was
+        // closed out (Codex #3178 P1): a backdated closeout would otherwise
+        // hand a weeks-old inspection a fresh 30 days. ET wall-clock noon
+        // so a date-only value can't slip a day.
+        const inspectionMoment = InspectionCredit.etDateOnlyToDate(record.service_date);
+        // The TERMS the closeout froze with the consent marker (Codex
+        // #3178 r23 P2): a crash-resume can run after a pricing-config
+        // change, and reading the live amount/window here would mint a
+        // different monetary promise than the closeout made. Same source
+        // the recovery sweep uses; on a first run the stored terms ARE the
+        // live config, written moments ago in the same request.
+        const frozenCreditTerms = parseJsonObject(record.service_data)?.inspectionCreditTerms || null;
+        inspectionCreditOffer = await InspectionCredit.recordInspectionCreditOffer({
+          customerId: svc.customer_id,
+          scheduledServiceId: svc.id,
+          serviceRecordId: record.id,
+          // The FROZEN key wins (Codex #3178 r36 P2): on a resume after an
+          // update-details repoint, the live re-resolution can differ from
+          // the identity the closeout promised under — and the offer's
+          // source_service_key drives dark-mode standing redemption, so a
+          // rodent promise re-keyed to another inspection would never
+          // redeem before the flip.
+          serviceKey: frozenCreditTerms?.serviceKey || effectiveCompletionProfile?.serviceKey || null,
+          ...(Number(frozenCreditTerms?.amount) > 0 ? { amount: Number(frozenCreditTerms.amount) } : {}),
+          ...(Number(frozenCreditTerms?.windowDays) > 0 ? { windowDays: Number(frozenCreditTerms.windowDays) } : {}),
+          createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,
+          // The promise moment is when the completion COMMITTED —
+          // record.created_at — not when this code runs (pre-push P0): on a
+          // crash-resume the retry can be much later, and stamping the
+          // retry time would fail the ordering guard for any booking made
+          // in between, permanently denying the promised credit. The sweep
+          // then adopts such a booking from its in-window booking event.
+          // The window stays anchored to the inspection's service date
+          // (backdated closeouts must not get a fresh 30 days, but must
+          // also not back-date the ordering guard).
+          ...(record?.created_at ? { now: new Date(record.created_at) } : {}),
+          ...(inspectionMoment ? { windowAnchor: inspectionMoment } : {}),
+          // A durable marker means the promise was made while the lane was
+          // LIVE — a resume after the gate went dark must still honor it
+          // (Codex #3178 r24 P2). First runs without a marker keep the
+          // live-gate check inside recordInspectionCreditOffer.
+          honorCommittedMarker: parseJsonObject(record.service_data)?.inspectionCreditOptIn === true,
+        });
+      } catch (creditErr) {
+        logger.error(`[dispatch] inspection credit offer failed for ${svc.id}: ${creditErr.message}`);
+      }
+      // Prepaid/pre-minted inspections settle BEFORE the offer exists, so
+      // their receipt went out without the written deadline (Codex #3178
+      // P2). Resend it now that the memo lookup can see the offer — only
+      // on the FIRST record, only for an already-paid, non-payer-billed
+      // invoice (an unpaid one gets the memo on its normal receipt).
+      // Shared helper: the sweep's recovery path (which can be the first
+      // successful creation of the same promise) sends the same resend.
+      // Keyed on offerId, NOT `recorded` (Codex #3178 r23 P2): a crash
+      // after the offer insert but before this queue leaves the retry
+      // returning `already_offered` — same promise, memo still unsent, and
+      // the recovery sweep skips the visit because its offer exists. The
+      // resend is idempotent per offer, so re-queueing a delivered one is
+      // a no-op.
+      if (inspectionCreditOffer?.offerId) {
+        require('../services/inspection-credit').queueCreditReceiptResend({
+          scheduledServiceId: svc.id,
+          offerId: inspectionCreditOffer.offerId,
+        });
+      }
     }
 
     if (!completionPhotosUploadedBeforeCommit && Array.isArray(completionPhotos) && completionPhotos.length) {
@@ -12766,6 +13298,8 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  ensureSmsContainsReportLink,
+  reportReconcileBlockPayload,
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
   completionAllowsTechnicianPestRating,

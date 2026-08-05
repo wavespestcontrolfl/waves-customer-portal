@@ -746,15 +746,15 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.tiers[2].label).toBe('12x applications/yr');
   });
 
-  test('includeHiddenTiers preserves the full lawn tier list', () => {
+  test('includeHiddenTiers is a no-op — basic/4x is fully retired (owner 2026-08-04)', () => {
     const property = calculatePropertyProfile(baseInput({ measuredTurfSf: 4500 }));
     const lawn = priceLawnCare(property, {
       track: 'st_augustine', lawnFreq: 9, includeHiddenTiers: true,
     });
 
-    expect(lawn.tiers).toHaveLength(4);
-    expect(lawn.tiers.map(t => t.tier)).toEqual(['basic', 'standard', 'enhanced', 'premium']);
-    expect(lawn.tiers.map(t => t.label)).toEqual(['4x applications/yr', '6x applications/yr', '9x applications/yr', '12x applications/yr']);
+    expect(lawn.tiers).toHaveLength(3);
+    expect(lawn.tiers.map(t => t.tier)).toEqual(['standard', 'enhanced', 'premium']);
+    expect(lawn.tiers.map(t => t.label)).toEqual(['6x applications/yr', '9x applications/yr', '12x applications/yr']);
   });
 
   test('small lawn prices off the market table — the $50 program minimum is disarmed (owner 2026-07-17)', () => {
@@ -767,16 +767,17 @@ describe('lawn pricing production follow-up', () => {
     const lawn = priceLawnCare(property, { track: 'st_augustine', lawnFreq: 9 });
 
     // Owner 2026-07-17 ("forget all pricing floors"): programMinimumMonthly is
-    // 0, so the $564/yr market cell that used to floor at $600/$603 is now the
-    // sold price as-is: $564/yr ÷ 9 apps = $62.67/app.
-    expect(lawn.selected.perApp).toBe(62.67);
-    expect(lawn.selected.annual).toBe(564);
+    // 0, so the market cell is the sold price as-is. Under the 2026-08-04
+    // 500-sqft re-grid, 2,870 sqft interpolates the sub-3,000 taper
+    // (2,500-row $42 -> 3,000-row $44): $43/mo = $516/yr = $57.33/app.
+    expect(lawn.selected.perApp).toBe(57.33);
+    expect(lawn.selected.annual).toBe(516);
     expect(lawn.selected.pricingSource).toBe('MARKET_TABLE');
     expect(lawn.selected.programMinimumApplied).toBe(false);
     expect(lawn.selected.costFloorApplied).toBe(false);
     // Cost-floor MATH still runs for reporting and sits below market here.
     expect(lawn.selected.costFloorAnnual).toBeLessThan(lawn.selected.marketAnnual);
-    expect(lawn.margin).toBeGreaterThan(0.44); // 0.447 on the $564 market price (reserve-folded budgets, #2812)
+    expect(lawn.margin).toBeGreaterThan(0.39); // 0.395 on the $516 tapered market price (2026-08-04 re-grid)
   });
 
   test('reviewed 2,870 sqft estimate stays at 9 applications and Silver-discounted market price', () => {
@@ -797,14 +798,14 @@ describe('lawn pricing production follow-up', () => {
       qualifyingCount: 2,
     });
     expect(lawn.frequency).toBe(9);
-    // Owner 2026-07-17 ("forget all pricing floors"): the $564 market cell no
-    // longer floors at $600 — it sells at $564/yr ($62.67/app) and Silver 10%
-    // applies IN FULL: $564 × 0.90 = $507.60/yr = $42.30/mo. The post-discount
-    // program-minimum guard is inert (never set), so no discount cap.
-    expect(lawn.perApp).toBe(62.67);
-    expect(lawn.annual).toBe(564);
-    expect(lawn.annualAfterDiscount).toBe(507.6);
-    expect(lawn.monthlyAfterDiscount).toBe(42.3);
+    // Owner 2026-07-17 ("forget all pricing floors") + 2026-08-04 re-grid:
+    // 2,870 sqft prices off the sub-3,000 taper at $516/yr ($57.33/app) and
+    // Silver 10% applies IN FULL: $516 × 0.90 = $464.40/yr = $38.70/mo. The
+    // post-discount program-minimum guard is inert (never set), no cap.
+    expect(lawn.perApp).toBe(57.33);
+    expect(lawn.annual).toBe(516);
+    expect(lawn.annualAfterDiscount).toBe(464.4);
+    expect(lawn.monthlyAfterDiscount).toBe(38.7);
     expect(lawn.programMinimumGuardApplied).toBeUndefined();
     expect(lawn.discountCapped).toBeUndefined();
     expect(lawn.pricingSource).toBe('MARKET_TABLE');
@@ -970,12 +971,12 @@ describe('lawn pricing production follow-up', () => {
 
     // Owner 2026-07-17 ("forget all pricing floors"): lawn takes the full
     // Silver 10% ($576 → $518.40), so the manual-discount base is pest
-    // 421.20 + lawn 518.40 = 939.60.
+    // 403.20 + lawn 518.40 = 921.60 (pest base 112, owner ruling 2026-08-03).
     expect(lawn.annualAfterDiscount).toBe(518.4);
-    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(939.6, 2);
-    // With no floor to protect, the 10% manual discount (93.96) applies in
+    expect(estimate.summary.manualDiscount.discountableBase).toBeCloseTo(921.6, 2);
+    // With no floor to protect, the 10% manual discount (92.16) applies in
     // full, uncapped — no lawn_program_minimum cap exists anymore.
-    expect(estimate.summary.manualDiscount.amount).toBe(93.96);
+    expect(estimate.summary.manualDiscount.amount).toBe(92.16);
     expect(estimate.summary.manualDiscount.capped).toBe(false);
     expect(estimate.summary.manualDiscount.capReason).toBeNull();
     expect(estimate.summary.manualDiscount.eligibleServices).toContain('lawn_care_enhanced');
@@ -1157,12 +1158,13 @@ describe('lawn pricing production follow-up', () => {
     expect(lawn.tier).toBe('enhanced');
     expect(lawn.frequency).toBe(9);
 
-    // Legacy/admin flows can still price the retired tier explicitly.
+    // Full retirement (owner 2026-08-04): includeHiddenTiers no longer
+    // resurrects basic — legacy replays land on the enhanced default too.
     const withHidden = priceLawnCare(property, {
       track: 'st_augustine', tier: 'basic', lawnFreq: 4, includeHiddenTiers: true,
     });
-    expect(withHidden.selected.tier).toBe('basic');
-    expect(withHidden.frequency).toBe(4);
+    expect(withHidden.selected.tier).toBe('enhanced');
+    expect(withHidden.frequency).toBe(9);
   });
 
   test('a deep lawn-only manual discount surfaces the below-margin warning while disarmed (report-only)', () => {
@@ -1343,11 +1345,12 @@ describe('lawn pricing production follow-up', () => {
 
     // The floor math still runs and is emitted for margin reporting…
     expect(lawn.selected.costFloorAnnual).toBeGreaterThan(0);
-    // …and here it sits ABOVE the market cell ($591.25 vs $588) — yet the
-    // quote stays market-priced, proving the default is disarmed.
+    // …and here it sits ABOVE the market cell ($591.25 vs $576; the 4,500
+    // cell floors the old half-round interpolation, 2026-08-04 re-grid) —
+    // yet the quote stays market-priced, proving the default is disarmed.
     expect(lawn.selected.costFloorAnnual).toBeGreaterThan(lawn.selected.marketAnnual);
     expect(lawn.selected.costFloorApplied).toBe(false);
     expect(lawn.selected.pricingSource).toBe('MARKET_TABLE');
-    expect(lawn.selected.annual).toBe(588);
+    expect(lawn.selected.annual).toBe(576);
   });
 });

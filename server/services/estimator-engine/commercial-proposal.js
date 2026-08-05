@@ -227,6 +227,7 @@ async function composeProspectBrief({ intent, propertyFacts, facts, context, rea
 const SERVICE_LABELS = {
   pest: 'Pest control',
   oneTimePest: 'One-time pest treatment',
+  germanRoach: 'German roach cleanout',
   lawn: 'Lawn care',
   oneTimeLawn: 'One-time lawn treatment',
   lawnPestControl: 'Lawn insect knockdown',
@@ -238,6 +239,7 @@ const SERVICE_LABELS = {
   bedBug: 'Bed bug treatment',
   rodentBait: 'Rodent bait stations',
   stinging: 'Stinging insect treatment',
+  palm: 'Palm nutrition injection',
 };
 
 // Intent keys the composer vocabulary defines as SINGLE treatments, not
@@ -246,7 +248,19 @@ const SERVICE_LABELS = {
 // invite the operator to price a one-off as a recurring proposal.
 const ONE_TIME_SERVICE_KEYS = new Set([
   'oneTimePest', 'oneTimeLawn', 'oneTimeMosquito', 'lawnPestControl', 'bedBug', 'stinging',
+  // Flat-priced multi-visit cleanout — a program of visits, but sold and
+  // billed as a single engagement, never a monthly cadence.
+  'germanRoach',
+  // priceFlea returns billingCadence 'one_time' (knockdown visit or
+  // two-visit elimination package) — it was never a monthly program; a
+  // scaffold stamping it monthly invited pricing a package as recurring.
+  'flea',
 ]);
+
+// Recurring program keys whose billing cadence is not monthly. Palm
+// nutrition is one application per year — a monthly-stamped scaffold row
+// would 12× annualize whatever per-occurrence price the operator fills in.
+const SERVICE_CADENCE_OVERRIDES = { palm: 'annual' };
 
 function serviceLabel(key) {
   return SERVICE_LABELS[key] || (key.charAt(0).toUpperCase() + key.slice(1));
@@ -282,7 +296,9 @@ function buildProposalScaffold({ intent, facts }) {
 
   const programs = Object.keys(intent.services || {}).map((key) => ({
     name: ONE_TIME_SERVICE_KEYS.has(key) ? serviceLabel(key) : `${serviceLabel(key)} program`,
-    cadence: ONE_TIME_SERVICE_KEYS.has(key) ? 'one_time' : 'monthly',
+    cadence: ONE_TIME_SERVICE_KEYS.has(key)
+      ? 'one_time'
+      : (SERVICE_CADENCE_OVERRIDES[key] || 'monthly'),
     scope: 'scope and pricing after walkthrough',
   }));
   const lineItems = (programs.length ? programs : [{

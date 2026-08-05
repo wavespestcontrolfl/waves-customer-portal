@@ -287,10 +287,12 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(insertIdx).toBeGreaterThan(-1);
     for (const validation of [
       'const slotDateError = validateBookingSlotDate(slotDateStr, config);', // ET date bounds + calendar round-trip
-      'const duration = resolveBookingDuration(duration_minutes, config, serviceKey);', // server duration (catalog-pinned)
+      // server duration — catalog-pinned for the funnel, caller-resolved
+      // (still clamped) for internal callback visits
+      'const duration = callbackVisit',
       'if (slot_end && timeToMin(slot_end) !== endMin)', // slot_end agreement
       'const geometryError = validateBookingSlotGeometry({', // grid/hours/lunch
-      'if (!serviceKey || !verifySlotOfferField({', // signed-offer proof (rounds 2+3)
+      'if (!callbackVisit && (!serviceKey || !verifySlotOfferField({', // signed-offer proof (rounds 2+3; internal callbacks are availability-revalidated by their caller)
       "await db('technicians').where('id', techIdStr).first('id', 'active')", // real active tech
       'let sourceEstimateId = null;', // accept-retry correlation validation
     ]) {
@@ -517,9 +519,11 @@ describe('signed slot offers on the /book surface (source guards)', () => {
   });
 
   test('/availability and /find-slots derive service + duration BEFORE shaping/signing offers', () => {
-    // both routes + createSelfBooking = 3 call sites of the shared
-    // derivation; the old raw parseInt(duration_minutes) form is gone.
-    expect((src.match(/const duration = resolveBookingDuration\(duration_minutes, config, serviceKey\);/g) || []).length).toBe(3);
+    // both offer routes share the derivation; createSelfBooking's site is
+    // the callbackVisit-aware ternary whose non-callback arm is the same
+    // call. The old raw parseInt(duration_minutes) form is gone.
+    expect((src.match(/const duration = resolveBookingDuration\(duration_minutes, config, serviceKey\);/g) || []).length).toBe(2);
+    expect(src).toMatch(/const duration = callbackVisit\s*\n\s*\? resolveBookingDuration\(callbackVisit\.durationMinutes, config, ''\)\s*\n\s*: resolveBookingDuration\(duration_minutes, config, serviceKey\);/);
     expect(src).not.toMatch(/\? parseInt\(duration_minutes\)/);
     // both public offer routes normalize the service key the same way
     expect((src.match(/const serviceKey = normalizeBookingServiceKey\(service_type\);/g) || []).length).toBe(2);
@@ -528,9 +532,13 @@ describe('signed slot offers on the /book surface (source guards)', () => {
   });
 
   test('createSelfBooking requires the signed offer — service + location bound — and rejects with the plain-string 409', () => {
-    const gateIdx = src.indexOf('if (!serviceKey || !verifySlotOfferField({');
+    // Skippable ONLY by the internal callbackVisit option (whose callers
+    // re-validate against a fresh availability build); /confirm pins that
+    // option null after the body spread, so no public payload reaches the
+    // skip.
+    const gateIdx = src.indexOf('if (!callbackVisit && (!serviceKey || !verifySlotOfferField({');
     expect(gateIdx).toBeGreaterThan(-1);
-    const gate = src.slice(gateIdx, gateIdx + 700);
+    const gate = src.slice(gateIdx, gateIdx + 900);
     expect(gate).toMatch(/surface: 'booking'/);
     expect(gate).toMatch(/serviceKey,/);
     expect(gate).toMatch(/locationKey: offerLocationKey,/);
@@ -539,10 +547,12 @@ describe('signed slot offers on the /book surface (source guards)', () => {
     expect(gate).toMatch(/technicianId: technician_id \|\| null/);
     expect(gate).toMatch(/durationMinutes: duration/);
     expect(gate).toMatch(/status: 409/);
+    // the /confirm adapter's forgery pin — set AFTER the spread
+    expect(src).toMatch(/authedCustomer: authedCustomer \|\| null,[\s\S]{0,300}callbackVisit: null,/);
   });
 
   test("the confirm-side service scope prefers the catalog id and the location scope prefers the submitted coords (customer-record fallback)", () => {
-    expect(src).toMatch(/const serviceKey = normalizeBookingServiceKey\(service_id\)\s*\n\s*\|\| normalizeBookingServiceKey\(service_type\)\s*\n\s*\|\| normalizeBookingServiceKey\(quoted_service_label\);/);
+    expect(src).toMatch(/const serviceKey = callbackVisit\s*\n\s*\? String\(callbackVisit\.serviceKey \|\| ''\)\s*\n\s*: \(normalizeBookingServiceKey\(service_id\)\s*\n\s*\|\| normalizeBookingServiceKey\(service_type\)\s*\n\s*\|\| normalizeBookingServiceKey\(quoted_service_label\)\);/);
     expect(src).toMatch(/let offerLat = Number\(new_customer\?\.lat\);/);
     expect(src).toMatch(/&& custId\) \{\s*\n\s*const coordRow = await db\('customers'\)\.where\('id', custId\)\.first\('latitude', 'longitude'\);/);
   });

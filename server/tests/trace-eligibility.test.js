@@ -1,0 +1,923 @@
+/**
+ * Centralized trace eligibility (GATE_TRACE_ELIGIBILITY, dark — owner-ruled
+ * build 2026-08-04). One registry decides whether a service may carry a
+ * spray trace; the contract blocks the historical failure mode where a new
+ * lane was eligible by accident because nobody wrote an exclusion.
+ */
+const {
+  resolveTraceEligibility,
+  traceCaptureBlockPayload,
+  _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },
+} = require('../services/service-report/trace-eligibility');
+const { PROJECT_TYPES } = require('../services/project-types');
+const registry = require('../config/completion-lane-registry');
+
+describe('registry contract — nothing is eligible by accident', () => {
+  test('EVERY typed findings schema has an explicit trace decision', () => {
+    // A new typed lane added to project-types without a decision here would
+    // silently fall to name-matching — the accident this module ends.
+    for (const findingsType of Object.keys(PROJECT_TYPES)) {
+      expect(FINDINGS_TYPE_RULES[findingsType]).toBeDefined();
+    }
+  });
+
+  test('every rule resolves to a complete verdict', () => {
+    for (const [findingsType, rule] of Object.entries(FINDINGS_TYPE_RULES)) {
+      const v = resolveTraceEligibility({ findingsType });
+      expect(typeof v.eligible).toBe('boolean');
+      expect(v.reason).toBeTruthy();
+      if (rule.eligible) {
+        expect(['spray', 'outline']).toContain(v.variant);
+        expect(v.captionKey).toBeTruthy();
+      } else {
+        expect(v.variant).toBeNull();
+      }
+    }
+    for (const serviceKey of Object.keys(SERVICE_KEY_RULES)) {
+      const v = resolveTraceEligibility({ serviceKey });
+      expect(typeof v.eligible).toBe('boolean');
+      expect(v.reason).not.toBe('unclassified_service');
+    }
+  });
+
+  test('every catalog key the completion-lane registry names classifies explicitly', () => {
+    // The completion-lane registry is the catalog's decided universe for
+    // generic lanes — a key it names must never read as unclassified here.
+    const lists = registry.ALL_LISTS;
+    const listedKeys = [
+      ...lists.owner_excluded,
+      ...lists.billing_rider,
+      ...lists.recurring_generic_by_design,
+      ...lists.one_time_generic_by_design,
+      ...lists.compliance_project,
+    ];
+    expect(listedKeys.length).toBeGreaterThan(15);
+    for (const serviceKey of listedKeys) {
+      expect(resolveTraceEligibility({ serviceKey }).reason)
+        .not.toBe('unclassified_service');
+    }
+  });
+
+  test('an unknown service is INELIGIBLE until classified', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'brand_new_admin_key', displayName: 'Attic Encapsulation' }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+  });
+});
+
+describe('classification behavior', () => {
+  test('spray, lawn, and never lanes resolve as ruled', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'pest_general_quarterly' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({ serviceKey: 'lawn_care_monthly' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({ serviceKey: 'termite_liquid' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // pest-PRIMARY bundle (codex P1 r1): the combined visit sprays; the
+    // bait work is a companion — a pure bait stop routes through the
+    // termite_bait_station typed pointer instead
+    expect(resolveTraceEligibility({ serviceKey: 'pest_termite_bait_quarterly' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({ findingsType: 'termite_bait_station' }))
+      .toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+    expect(resolveTraceEligibility({ findingsType: 'rodent_trapping' }))
+      .toMatchObject({ eligible: false, reason: 'trap_lane' });
+    expect(resolveTraceEligibility({ findingsType: 'termite_inspection' }))
+      .toMatchObject({ eligible: false, reason: 'inspection_lane' });
+    expect(resolveTraceEligibility({ findingsType: 'bed_bug' }))
+      .toMatchObject({ eligible: false, reason: 'interior_only_lane' });
+    // codex P1 r3: German knockdown is an interior bait/IGR program — no
+    // exterior work in its lane — while palmetto explicitly treats the
+    // exterior perimeter.
+    expect(resolveTraceEligibility({ findingsType: 'german_roach_knockdown' }))
+      .toMatchObject({ eligible: false, reason: 'interior_only_lane' });
+    expect(resolveTraceEligibility({ findingsType: 'palmetto_roach_knockdown' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('ineligible verdicts win in BOTH precedence directions', () => {
+    // A frozen trapping snapshot widens suppression over a spray key
+    // (snapshot-is-authority)…
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_general_quarterly',
+      findingsType: 'rodent_trapping',
+    })).toMatchObject({ eligible: false, reason: 'trap_lane' });
+    // …and an explicitly ineligible key overrides a STALE eligible
+    // snapshot (codex P1 r4: lawn_inspection completed during that key's
+    // brief typed era must not keep a treatment trace).
+    expect(resolveTraceEligibility({
+      serviceKey: 'lawn_inspection',
+      findingsType: 'one_time_lawn_treatment',
+    })).toMatchObject({ eligible: false, reason: 'inspection_lane' });
+  });
+
+  test('the membership billing row never traces', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'waveguard_membership' }))
+      .toMatchObject({ eligible: false, reason: 'billing_rider' });
+  });
+
+  test('roach-family eligibility is conditional on recorded exterior work at render', () => {
+    // capture side (no typedValues): the tech in the field may trace
+    expect(resolveTraceEligibility({ findingsType: 'cockroach' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // render side, exterior chip recorded (array and CSV shapes)
+    expect(resolveTraceEligibility({
+      findingsType: 'cockroach',
+      typedValues: { treatment_completed: ['Bait placement', 'Exterior perimeter treatment'] },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'palmetto_roach_knockdown',
+      typedValues: { treatment_completed: 'Interior crack & crevice, Exterior perimeter treatment' },
+    })).toMatchObject({ eligible: true });
+    // render side, interior-only work — the German-species case on the
+    // active cockroach_control lane (codex P1 r4)
+    expect(resolveTraceEligibility({
+      findingsType: 'cockroach',
+      typedValues: { treatment_completed: ['Bait placement', 'IGR application'] },
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+    // render side, no snapshot at all — fails closed
+    expect(resolveTraceEligibility({ findingsType: 'cockroach', typedValues: null }))
+      .toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+    // codex P1 r5: the ACTIVE cockroach schema records in work_completed,
+    // not treatment_completed — both fields are read
+    expect(resolveTraceEligibility({
+      findingsType: 'cockroach',
+      typedValues: { work_completed: ['Bait placement', 'Exterior perimeter treatment'] },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'cockroach',
+      typedValues: { work_completed: ['Bait placement', 'Dust application'] },
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+  });
+
+  test('flea is evidence-conditional too, and its lawn chip counts as exterior (round 5)', () => {
+    expect(resolveTraceEligibility({ findingsType: 'flea' }))
+      .toMatchObject({ eligible: true }); // capture side
+    expect(resolveTraceEligibility({
+      findingsType: 'flea',
+      typedValues: { treatment_completed: ['Exterior flea treatment', 'Growth regulator'] },
+    })).toMatchObject({ eligible: true, variant: 'outline' }); // yard geometry (r9)
+    expect(resolveTraceEligibility({
+      findingsType: 'flea',
+      typedValues: { treatment_completed: 'Lawn treatment, Pet resting area treatment' },
+    })).toMatchObject({ eligible: true });
+    expect(resolveTraceEligibility({
+      findingsType: 'flea',
+      typedValues: { treatment_completed: ['Interior flea treatment', 'Growth regulator'] },
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'flea',
+      typedValues: { treatment_completed: 'Inspection only' },
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_work_recorded' });
+  });
+
+  test('termite spot treatment is localized — never a perimeter trace (round 5)', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'termite_spot_treatment' }))
+      .toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+    // the ineligible KEY beats the eligible termite_treatment pointer it shares
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_spot_treatment',
+      findingsType: 'termite_treatment',
+    })).toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+  });
+
+  test('inspection-capable lanes need applied work at render (round 6)', () => {
+    // capture side stays permissive
+    expect(resolveTraceEligibility({ findingsType: 'tree_shrub' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // T&S derives treatments_completed='Inspection only' with no products;
+    // r11 tightened it to CHIP-MATCHED — fertilizer/soil work is real but
+    // a spray trace cannot depict it
+    expect(resolveTraceEligibility({
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: 'Inspection only' },
+    })).toMatchObject({ eligible: false, reason: 'no_traceable_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: 'Fertilizer, Micronutrients, Soil drench' },
+    })).toMatchObject({ eligible: false, reason: 'no_traceable_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: 'Fertilizer, Foliar treatment' },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: ['Insect treatment', 'Horticultural oil'] },
+    })).toMatchObject({ eligible: true });
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Inspection only'] },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    // codex P1 r7: source reduction is real work but not an application —
+    // tipping containers cannot honestly render as a sprayed perimeter
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Source reduction'] },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Barrier treatment', 'Source reduction'] },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'one_time_lawn_treatment',
+      typedValues: { work_completed: 'Inspection completed' },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'one_time_lawn_treatment',
+      typedValues: { work_completed: ['Fertilizer application', 'Inspection completed'] },
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+  });
+
+  test('fire ant traces the LAWN, nest removals never trace, the retired combo keeps its maps (round 6)', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'fire_ant' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({ serviceKey: 'bee_wasp_removal' }))
+      .toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+    expect(resolveTraceEligibility({ serviceKey: 'mud_dauber_removal' }))
+      .toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+    // 3 completed historical visits deliberately retained at retirement
+    expect(resolveTraceEligibility({ serviceKey: 'pest_rodent_quarterly' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('stale historical snapshots do not defeat key-specific semantics (round 8)', () => {
+    // fire_ant completed pre-untype carries a one_time_pest_treatment
+    // snapshot — the key's LAWN geometry overrides that retired generic
+    // pointer (overridesSnapshot)
+    expect(resolveTraceEligibility({
+      serviceKey: 'fire_ant',
+      findingsType: 'one_time_pest_treatment',
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+    // …but a key WITHOUT the override never steals conditional semantics
+    // from its typed pointer: an inspection-only T&S combo still suppresses
+    expect(resolveTraceEligibility({
+      serviceKey: 'lawn_tree_shrub_combo',
+      findingsType: 'tree_shrub',
+      typedValues: { treatments_completed: 'Inspection only' },
+    })).toMatchObject({ eligible: false, reason: 'no_traceable_treatment_recorded' });
+    // legacy station keys repointed by the bait-station cutover: the
+    // explicit ineligible KEY rule overrides the old termite_treatment
+    // snapshot
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_installation_setup',
+      findingsType: 'termite_treatment',
+    })).toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_cartridge_replacement',
+      findingsType: 'termite_treatment',
+    })).toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+  });
+
+  test('larvicide-only mosquito visits cannot substantiate a perimeter trace (round 9)', () => {
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Larvicide applied'] },
+    })).toMatchObject({ eligible: false, reason: 'no_treatment_recorded' });
+    expect(resolveTraceEligibility({
+      findingsType: 'mosquito_event',
+      typedValues: { treatment_completed: ['Larvicide applied', 'Barrier treatment'] },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('tick control is yard geometry and survives its stale snapshot (round 10)', () => {
+    expect(resolveTraceEligibility({ serviceKey: 'tick_control' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'tick_control',
+      findingsType: 'one_time_pest_treatment',
+    })).toMatchObject({ eligible: true, variant: 'outline' });
+  });
+
+  test('termite traces require a recorded perimeter method at render (round 10)', () => {
+    // capture side stays permissive
+    expect(resolveTraceEligibility({ findingsType: 'termite_treatment' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'termite_treatment',
+      typedValues: { treatment_method: 'Liquid perimeter' },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      findingsType: 'termite_treatment',
+      typedValues: { treatment_method: 'Trenching' },
+    })).toMatchObject({ eligible: true });
+    for (const method of ['Wood treatment', 'Spot treatment', 'Bait station setup', 'Cartridge replacement', 'Other']) {
+      expect(resolveTraceEligibility({
+        findingsType: 'termite_treatment',
+        typedValues: { treatment_method: method },
+      })).toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+    }
+    // no snapshot at all fails closed at render
+    expect(resolveTraceEligibility({ findingsType: 'termite_treatment', typedValues: null }))
+      .toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+  });
+
+  test('an eligible add-on line rescues an ineligible primary (round 11)', () => {
+    const { combineLineVerdicts } = require('../services/service-report/trace-eligibility');
+    const baitPrimary = resolveTraceEligibility({ findingsType: 'termite_bait_station' });
+    const pestAddon = resolveTraceEligibility({ serviceKey: 'pest_general_quarterly' });
+    // termite-bait primary + pest add-on → the appointment traces as spray
+    expect(combineLineVerdicts(baitPrimary, [pestAddon]))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // an eligible PRIMARY always wins (it carries conditional semantics)
+    const lawnPrimary = resolveTraceEligibility({ serviceKey: 'lawn_care_monthly' });
+    expect(combineLineVerdicts(lawnPrimary, [pestAddon]))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    // no eligible line anywhere → the primary's verdict stands
+    const inspectionAddon = resolveTraceEligibility({ findingsType: 'pest_inspection' });
+    expect(combineLineVerdicts(baitPrimary, [inspectionAddon]))
+      .toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+  });
+
+  test('round 13 — evidence at render for callbacks, yard names, conditional add-ons', () => {
+    // pest_re_service: capture permissive, render needs exterior areas
+    expect(resolveTraceEligibility({ serviceKey: 'pest_re_service' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_re_service',
+      renderAreas: 'Kitchen, Bathrooms',
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_area_recorded' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_re_service',
+      renderAreas: 'Kitchen, Exterior perimeter',
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    // EMPTY evidence passes (r17): the recap flow records no areas, and
+    // the captured trace stands as the tech's exterior record — only a
+    // recorded-interior completion contradicts it
+    expect(resolveTraceEligibility({ serviceKey: 'pest_re_service', renderAreas: '' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // identity-less yard families resolve outline by NAME too
+    expect(resolveTraceEligibility({ displayName: 'Fire Ant Treatment' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({ displayName: 'Tick Control — Backyard' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    expect(resolveTraceEligibility({ displayName: 'Flea & Tick Yard Service' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    // conditional typed rules fail closed with null evidence — the
+    // render-side posture resolveAddonVerdicts uses for add-on lines
+    expect(resolveTraceEligibility({ findingsType: 'flea', typedValues: null }))
+      .toMatchObject({ eligible: false });
+    expect(resolveTraceEligibility({ findingsType: 'mosquito_event', typedValues: null }))
+      .toMatchObject({ eligible: false });
+  });
+
+  test('round 14 — protocol scopes count as exterior evidence; frozen add-on lines resolve', async () => {
+    const { renderAreasFromRecord, addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    // an exterior APPLIED protocol action alone is exterior evidence
+    expect(renderAreasFromRecord({
+      areas_serviced: '[]',
+      structured_notes: JSON.stringify({
+        protocolActionScopesCompleted: [{ scope: 'exterior', treatmentApplied: true }],
+      }),
+    })).toMatch(/exterior/i);
+    // a not-applied or interior-only action is not
+    expect(renderAreasFromRecord({
+      areas_serviced: JSON.stringify(['Kitchen']),
+      structured_notes: JSON.stringify({
+        protocolActionScopesCompleted: [
+          { scope: 'exterior', treatmentApplied: false },
+          { scope: 'interior', treatmentApplied: true },
+        ],
+      }),
+    })).not.toMatch(/exterior/i);
+    // frozen completion lines resolve verdicts by name without a knex
+    // catalog hit (null ids)
+    const verdicts = await addonVerdictsFromLines(
+      [{ serviceId: null, serviceName: 'Quarterly Pest Control' }],
+      { /* knex unused for name-only lines */ },
+    );
+    expect(verdicts).toHaveLength(1);
+    expect(verdicts[0]).toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('round 18 — a failed or unresolved catalog lookup never broadens add-on eligibility', async () => {
+    const { addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    const throwingKnex = () => ({
+      whereIn: () => { throw new Error('db down'); },
+    });
+    // supplied id + lookup failure: fails closed, the editable name
+    // ("Bee / Wasp Nest Removal" would match the spray regex) cannot rescue
+    const failed = await addonVerdictsFromLines(
+      [{ serviceId: 'svc-1', serviceName: 'Bee / Wasp Nest Removal' }],
+      throwingKnex,
+    );
+    expect(failed[0]).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // supplied id that resolves to NO row (deleted catalog row): same
+    const emptyKnex = () => ({
+      whereIn: () => ({ select: () => Promise.resolve([]) }),
+    });
+    const unresolved = await addonVerdictsFromLines(
+      [{ serviceId: 'svc-gone', serviceName: 'Quarterly Pest Control' }],
+      emptyKnex,
+    );
+    expect(unresolved[0]).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // genuinely unlinked legacy line (no id): name fallback stands
+    const legacy = await addonVerdictsFromLines(
+      [{ serviceId: null, serviceName: 'Quarterly Pest Control' }],
+      emptyKnex,
+    );
+    expect(legacy[0]).toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('round 21 — completion-frozen add-on identities never touch the db; typed pointer failures propagate', async () => {
+    const { addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    // frozen key + pointer resolve with a knex that would EXPLODE on any
+    // query — and the frozen identity beats a contradicting display name
+    const explodingKnex = () => { throw new Error('never queried'); };
+    const frozen = await addonVerdictsFromLines(
+      [{ serviceId: 'a1', serviceName: 'Termite Bait Quarterly', serviceKey: 'pest_general_quarterly', findingsType: null }],
+      explodingKnex,
+    );
+    expect(frozen[0]).toMatchObject({ eligible: true, variant: 'spray' });
+    // frozen typed pointer keeps both postures: permissive at capture,
+    // fail-closed at render (typedValues null)
+    const typedLine = [{ serviceId: 'a2', serviceName: 'Flea & Tick', serviceKey: 'flea_tick', findingsType: 'flea' }];
+    const captureSide = await addonVerdictsFromLines(typedLine, explodingKnex);
+    expect(captureSide[0]).toMatchObject({ eligible: true });
+    const renderSide = await addonVerdictsFromLines(typedLine, explodingKnex, { renderSide: true });
+    expect(renderSide[0]).toMatchObject({ eligible: false });
+    // UNFROZEN typed line: a service_completion_profiles failure
+    // PROPAGATES instead of silently unclassifying the add-on
+    const profilesDownKnex = (table) => {
+      if (table === 'services') {
+        return { whereIn: () => ({ select: () => Promise.resolve([{ id: 'a3', service_key: 'flea_tick' }]) }) };
+      }
+      return { whereIn: () => ({ where: () => ({ select: () => Promise.reject(new Error('profiles down')) }) }) };
+    };
+    await expect(addonVerdictsFromLines(
+      [{ serviceId: 'a3', serviceName: 'Flea & Tick' }],
+      profilesDownKnex,
+    )).rejects.toThrow('profiles down');
+  });
+
+  test('round 22 — the completion freezer never stamps a typed key whose pointer was not found', async () => {
+    const { frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+    const trxFor = (profiles) => (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        orderBy: () => q,
+        select: () => {
+          if (table === 'scheduled_service_addons') {
+            return Promise.resolve([
+              { service_id: 'a1', service_name: 'Flea & Tick', service_key_snapshot: 'flea_tick' },
+              { service_id: 'a2', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+            ]);
+          }
+          if (table === 'service_completion_profiles') return Promise.resolve(profiles);
+          return Promise.resolve([]);
+        },
+      };
+      return q;
+    };
+    // pointer found: the typed line freezes key + pointer
+    const withPointer = await frozenAddonLinesForCompletion('ss-r22', trxFor([
+      { service_key: 'flea_tick', project_type: 'flea' },
+    ]));
+    expect(withPointer[0]).toMatchObject({ serviceKey: 'flea_tick', findingsType: 'flea' });
+    // no active profile row (cutover/deactivation): the typed line stays
+    // LIVE-RESOLVABLE — a frozen null pointer would be permanently
+    // unclassified even after the profile is restored
+    const withoutPointer = await frozenAddonLinesForCompletion('ss-r22', trxFor([]));
+    expect(withoutPointer[0]).not.toHaveProperty('serviceKey');
+    expect(withoutPointer[0]).toMatchObject({ serviceId: 'a1', serviceName: 'Flea & Tick' });
+    // r26: a rules-covered key does NOT freeze without its profile row
+    // either — a null-pointer freeze would pin a typed lane (termite)
+    // to its unconditional key rule forever
+    expect(withoutPointer[1]).not.toHaveProperty('serviceKey');
+  });
+
+  test('round 23 — sentinel keys and unknown typed pointers fail closed ahead of eligible rules', () => {
+    // the unresolved sentinel beats an eligible STALE snapshot — the row
+    // we could not identify is exactly the row whose key would have
+    // overridden that snapshot
+    expect(resolveTraceEligibility({
+      serviceKey: 'unresolved:linked_service',
+      findingsType: 'one_time_pest_treatment',
+      displayName: 'Pest Re-Service',
+    })).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'unresolved:addon-123',
+      findingsType: 'one_time_pest_treatment',
+    })).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // an UNKNOWN supplied typed pointer fails closed before the eligible
+    // key rule — a typoed/new project_type must not publish through its
+    // generic key until the registry learns it
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_general_quarterly',
+      findingsType: 'brand_new_unregistered_type',
+    })).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // control: the same key with no pointer stays eligible
+    expect(resolveTraceEligibility({ serviceKey: 'pest_general_quarterly' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('round 23 — the freezer decides PER ROW: one failed lookup never stops a resolved sibling', async () => {
+    const { frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+    // catalog lookup fails, but the snapshot-keyed sibling still freezes
+    const catalogDownTrx = (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => {
+          if (table === 'services') throw new Error('catalog down');
+          return q;
+        },
+        orderBy: () => q,
+        select: () => {
+          if (table === 'scheduled_service_addons') {
+            return Promise.resolve([
+              { service_id: 'a1', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+              { service_id: 'a2', service_name: 'Mystery Add-on', service_key_snapshot: null },
+            ]);
+          }
+          if (table === 'service_completion_profiles') return Promise.resolve([]);
+          return Promise.resolve([]);
+        },
+      };
+      return q;
+    };
+    const rows = await frozenAddonLinesForCompletion('ss-r23', catalogDownTrx);
+    // r26: freezing requires the key's profile row — this fixture has
+    // none, so the snapshot-keyed row stays live too
+    expect(rows[0]).not.toHaveProperty('serviceKey');
+    expect(rows[1]).not.toHaveProperty('serviceKey');
+    // pointer lookup fails: typed rows stay live, rules-covered rows freeze
+    const profilesDownTrx = (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => {
+          if (table === 'service_completion_profiles') throw new Error('profiles down');
+          return q;
+        },
+        orderBy: () => q,
+        select: () => {
+          if (table === 'scheduled_service_addons') {
+            return Promise.resolve([
+              { service_id: 'a3', service_name: 'Flea & Tick', service_key_snapshot: 'flea_tick' },
+              { service_id: 'a4', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+      };
+      return q;
+    };
+    const mixed = await frozenAddonLinesForCompletion('ss-r23b', profilesDownTrx);
+    expect(mixed[0]).not.toHaveProperty('serviceKey');
+    // r26: the pointer lookup failed, so nothing freezes — a null-pointer
+    // freeze would pin the wrong verdict permanently
+    expect(mixed[1]).not.toHaveProperty('serviceKey');
+  });
+
+  test('round 24 — add-on order is id-tiebroken; rules-covered keys skip the pointer lookup', async () => {
+    const { resolveAddonVerdicts, addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    // the row query orders by created_at THEN id — same-transaction
+    // lines share created_at, and the first eligible add-on picks the
+    // variant on every surface
+    const orderCalls = [];
+    const recordingKnex = (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        orderBy: (col, dir) => { if (table === 'scheduled_service_addons') orderCalls.push([col, dir]); return q; },
+        select: () => Promise.resolve([]),
+      };
+      return q;
+    };
+    await resolveAddonVerdicts('ss-r24', recordingKnex);
+    expect(orderCalls).toEqual([['created_at', 'asc'], ['id', 'asc']]);
+    // EVERY key loads its pointer (codex P1 r25 reverted the r24
+    // scoping): rules-covered keys can be typed lanes whose pointer
+    // narrows the verdict, so a profiles outage propagates for the
+    // whole batch — capture fail-opens, render fails closed
+    const profilesExplodeKnex = (table) => {
+      if (table === 'service_completion_profiles') throw new Error('profiles down');
+      const q = {
+        whereIn: () => ({ select: () => Promise.resolve([{ id: 'a1', service_key: 'pest_general_quarterly' }]) }),
+      };
+      return q;
+    };
+    await expect(addonVerdictsFromLines(
+      [{ serviceId: 'a1', serviceName: 'Quarterly Pest' }],
+      profilesExplodeKnex,
+    )).rejects.toThrow('profiles down');
+  });
+
+  test('round 25 — a rules-covered typed lane loads its pointer, and the condition narrows the render verdict', async () => {
+    const { addonVerdictsFromLines } = require('../services/service-report/trace-eligibility');
+    // termite_liquid routes to termite_treatment, whose render rule
+    // requires a recorded perimeter method — without the pointer a
+    // spot/bait completion would publish a perimeter trace
+    const termiteKnex = (table) => {
+      if (table === 'services') {
+        return { whereIn: () => ({ select: () => Promise.resolve([{ id: 't1', service_key: 'termite_liquid' }]) }) };
+      }
+      if (table === 'service_completion_profiles') {
+        return {
+          whereIn: () => ({
+            where: () => ({
+              select: () => Promise.resolve([{ service_key: 'termite_liquid', project_type: 'termite_treatment' }]),
+            }),
+          }),
+        };
+      }
+      return { whereIn: () => ({ select: () => Promise.resolve([]) }) };
+    };
+    const line = [{ serviceId: 't1', serviceName: 'Termite Treatment Add-on' }];
+    // render: no recorded evidence → the perimeter-method condition
+    // fails closed and the add-on cannot rescue a report
+    const render = await addonVerdictsFromLines(line, termiteKnex, { renderSide: true });
+    expect(render[0]).toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+    // capture stays permissive (typedValues undefined)
+    const capture = await addonVerdictsFromLines(line, termiteKnex);
+    expect(capture[0]).toMatchObject({ eligible: true, variant: 'spray' });
+  });
+
+  test('round 26 — identity-less stinging-insect names fail closed; absent pointers fail render closed; found rows freeze', async () => {
+    // name fallback: localized nest work, same as the stable keys
+    for (const displayName of ['Wasp Control Service', 'Bee / Wasp Nest Removal', 'Hornet Nest Treatment', 'Mud Dauber Removal']) {
+      expect(resolveTraceEligibility({ displayName }))
+        .toMatchObject({ eligible: false, reason: 'localized_treatment_lane' });
+    }
+    // live path: a SUCCESSFUL pointer query with no row for the key
+    // fails closed at render (cutover ≠ untyped) and stays permissive at
+    // capture
+    const { addonVerdictsFromLines, frozenAddonLinesForCompletion } = require('../services/service-report/trace-eligibility');
+    const noRowKnex = (table) => {
+      if (table === 'services') {
+        return { whereIn: () => ({ select: () => Promise.resolve([{ id: 't1', service_key: 'termite_liquid' }]) }) };
+      }
+      if (table === 'service_completion_profiles') {
+        return { whereIn: () => ({ where: () => ({ select: () => Promise.resolve([]) }) }) };
+      }
+      return { whereIn: () => ({ select: () => Promise.resolve([]) }) };
+    };
+    const line = [{ serviceId: 't1', serviceName: 'Termite Treatment Add-on' }];
+    const render = await addonVerdictsFromLines(line, noRowKnex, { renderSide: true });
+    expect(render[0]).toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    const capture = await addonVerdictsFromLines(line, noRowKnex);
+    expect(capture[0]).toMatchObject({ eligible: true, variant: 'spray' });
+    // freezer: a FOUND row freezes (null project_type = genuinely
+    // untyped), an absent row leaves the line live
+    const foundNullTrx = (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        orderBy: () => q,
+        select: () => {
+          if (table === 'scheduled_service_addons') {
+            return Promise.resolve([
+              { service_id: 'p1', service_name: 'Quarterly Pest', service_key_snapshot: 'pest_general_quarterly' },
+              { service_id: 't2', service_name: 'Termite Add-on', service_key_snapshot: 'termite_liquid' },
+            ]);
+          }
+          if (table === 'service_completion_profiles') {
+            return Promise.resolve([{ service_key: 'pest_general_quarterly', project_type: null }]);
+          }
+          return Promise.resolve([]);
+        },
+      };
+      return q;
+    };
+    const frozen = await frozenAddonLinesForCompletion('ss-r26', foundNullTrx);
+    expect(frozen[0]).toMatchObject({ serviceKey: 'pest_general_quarterly', findingsType: null });
+    expect(frozen[1]).not.toHaveProperty('serviceKey');
+  });
+
+  test('round 27 — pointer-REQUIRED primary keys fail render closed without their pointer', () => {
+    // termite_liquid's spray verdict is only valid WITH its
+    // termite_treatment pointer — at render a missing pointer must not
+    // yield the unconditional key rule
+    expect(resolveTraceEligibility({ serviceKey: 'termite_liquid', typedValues: null }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    // capture stays permissive (typedValues undefined)
+    expect(resolveTraceEligibility({ serviceKey: 'termite_liquid' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    // with the pointer, the perimeter-method evidence decides
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_liquid',
+      findingsType: 'termite_treatment',
+      typedValues: { treatment_method: 'Liquid perimeter' },
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'termite_trenching',
+      findingsType: 'termite_treatment',
+      typedValues: { treatment_method: 'Spot treatment' },
+    })).toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
+  });
+
+  test('round 28 — pointerRequiredForKey names exactly the pointer-dependent keys', () => {
+    const { pointerRequiredForKey } = require('../services/service-report/trace-eligibility');
+    expect(pointerRequiredForKey('termite_liquid')).toBe(true);
+    expect(pointerRequiredForKey('termite_trenching')).toBe(true);
+    // a plain eligible key and an unknown key are NOT pointer-required —
+    // completion freezers stamp them normally
+    expect(pointerRequiredForKey('pest_general_quarterly')).toBe(false);
+    expect(pointerRequiredForKey('not_a_key')).toBe(false);
+    expect(pointerRequiredForKey(null)).toBe(false);
+  });
+
+  test('round 29 — primaryIdentityFreezable: typed and pointer-required keys need their pointer', () => {
+    const { primaryIdentityFreezable } = require('../services/service-report/trace-eligibility');
+    // resolved pointer: always freezable
+    expect(primaryIdentityFreezable({ serviceKey: 'flea_tick', findingsType: 'flea' })).toBe(true);
+    expect(primaryIdentityFreezable({ serviceKey: 'termite_liquid', findingsType: 'termite_treatment' })).toBe(true);
+    // self-classifying rules key without pointerRequired: freezable untyped
+    expect(primaryIdentityFreezable({ serviceKey: 'pest_general_quarterly', findingsType: null })).toBe(true);
+    // TYPED key without its pointer: NOT freezable (would pin
+    // unclassified forever)
+    expect(primaryIdentityFreezable({ serviceKey: 'flea_tick', findingsType: null })).toBe(false);
+    expect(primaryIdentityFreezable({ serviceKey: 'lawn_aeration', findingsType: null })).toBe(false);
+    // pointer-required key without its pointer: NOT freezable
+    expect(primaryIdentityFreezable({ serviceKey: 'termite_liquid', findingsType: null })).toBe(false);
+    // null key freezes name-only semantics — safe
+    expect(primaryIdentityFreezable({ serviceKey: null, findingsType: null })).toBe(true);
+    expect(primaryIdentityFreezable({})).toBe(true);
+  });
+
+  test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
+    // pre-untype callback: the eligible one_time_pest_treatment snapshot
+    // no longer bypasses the exterior-evidence condition
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_re_service',
+      findingsType: 'one_time_pest_treatment',
+      renderAreas: 'Kitchen, Bathrooms',
+    })).toMatchObject({ eligible: false, reason: 'no_exterior_area_recorded' });
+    expect(resolveTraceEligibility({
+      serviceKey: 'pest_re_service',
+      findingsType: 'one_time_pest_treatment',
+      renderAreas: 'Exterior perimeter',
+    })).toMatchObject({ eligible: true, variant: 'spray' });
+    // capture-mode agreement at the write route (gate on)
+    const prev = process.env.GATE_TRACE_ELIGIBILITY;
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    try {
+      jest.doMock('../services/service-completion-profiles', () => ({
+        resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+          serviceKey: 'pest_general_quarterly', findingsType: null,
+        })),
+      }));
+      await jest.isolateModulesAsync(async () => {
+        const mod = require('../services/service-report/trace-eligibility');
+        // spray visit + lawn mode → 400 mismatch
+        const block = await mod.traceCaptureBlockPayload(
+          { service_type: 'Quarterly Pest Control' }, null, { captureMode: 'lawn' },
+        );
+        expect(block).toMatchObject({
+          status: 400,
+          payload: { code: 'trace_capture_mode_mismatch' },
+        });
+        // matching mode and absent mode both pass
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Quarterly Pest Control' }, null, { captureMode: 'perimeter' },
+        )).toBeNull();
+        expect(await mod.traceCaptureBlockPayload(
+          { service_type: 'Quarterly Pest Control' }, null, {},
+        )).toBeNull();
+      });
+      jest.dontMock('../services/service-completion-profiles');
+    } finally {
+      if (prev === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+      else process.env.GATE_TRACE_ELIGIBILITY = prev;
+      jest.resetModules();
+    }
+  });
+
+  test('fallback tokens are word-bounded — embedded substrings never classify (round 5)', () => {
+    for (const displayName of ['Warranty Renewal', 'Plant Consultation', 'Care Approach', 'Street Sweeping']) {
+      expect(resolveTraceEligibility({ displayName }))
+        .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    }
+    // real tokens still classify (yard families → outline since r13)
+    expect(resolveTraceEligibility({ displayName: 'Fire Ant Treatment' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+  });
+
+  test('display names are the last resort, in both directions', () => {
+    expect(resolveTraceEligibility({ displayName: 'Bed Bug Treatment — Master Suite' }))
+      .toMatchObject({ eligible: false, reason: 'interior_only_lane' });
+    expect(resolveTraceEligibility({ displayName: 'Rodent Trapping Follow-Up' }))
+      .toMatchObject({ eligible: false, reason: 'trap_lane' });
+    expect(resolveTraceEligibility({ displayName: 'Quarterly Pest Control' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({ displayName: 'Lawn Fertilization Round 3' }))
+      .toMatchObject({ eligible: true, variant: 'outline' });
+    // combined pest+bait names are pest-primary bundles; pure bait is not
+    expect(resolveTraceEligibility({ displayName: 'Quarterly Pest + Termite Bait Station' }))
+      .toMatchObject({ eligible: true, variant: 'spray' });
+    expect(resolveTraceEligibility({ displayName: 'Termite Bait Quarterly' }))
+      .toMatchObject({ eligible: false, reason: 'bait_station_lane' });
+  });
+
+  test('a SUPPLIED stable key that missed the registry fails closed — labels cannot rescue it', () => {
+    // codex P1 r1: an admin-added key whose editable label says "Pest"
+    // must not become eligible by name — fallback is for rows with no
+    // stable identity at all.
+    expect(resolveTraceEligibility({ serviceKey: 'pest_consultation', displayName: 'Pest Consultation' }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+    expect(resolveTraceEligibility({ findingsType: 'future_new_schema', displayName: 'Lawn Something' }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+  });
+
+  test('round 20 — the unresolved linked-identity sentinel fails closed; the display name cannot rescue it', () => {
+    // A LINKED row whose profile lookup threw sends this sentinel instead
+    // of nothing, so an explicitly ineligible service (bee_wasp_removal)
+    // can't republish its map through the generic spray-name regex.
+    expect(resolveTraceEligibility({ serviceKey: 'unresolved:linked_service', displayName: 'Bee & Wasp Removal' }))
+      .toMatchObject({ eligible: false, reason: 'unclassified_service' });
+  });
+});
+
+describe('capture-side block payload (tech write routes)', () => {
+  const prevGate = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = prevGate;
+    jest.resetModules();
+  });
+
+  test('gate off: never blocks (current behavior preserved)', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    expect(await traceCaptureBlockPayload({ service_type: 'Rodent Trapping' }, null)).toBeNull();
+  });
+
+  test('gate on: an ineligible service 403s with the reason', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    jest.isolateModules(() => {});
+    jest.doMock('../services/service-completion-profiles', () => ({
+      resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+        serviceKey: null, findingsType: 'termite_bait_station',
+      })),
+    }));
+    let block;
+    await jest.isolateModulesAsync(async () => {
+      const mod = require('../services/service-report/trace-eligibility');
+      block = await mod.traceCaptureBlockPayload({ service_type: 'Termite Bait Station Check' }, null);
+    });
+    expect(block).toMatchObject({
+      status: 403,
+      payload: { code: 'trace_ineligible_service', reason: 'bait_station_lane' },
+    });
+    jest.dontMock('../services/service-completion-profiles');
+  });
+
+  test('gate on: an eligible service passes, and a resolver error fails OPEN', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    jest.doMock('../services/service-completion-profiles', () => ({
+      resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+        serviceKey: 'pest_general_quarterly', findingsType: null,
+      })),
+    }));
+    await jest.isolateModulesAsync(async () => {
+      const mod = require('../services/service-report/trace-eligibility');
+      expect(await mod.traceCaptureBlockPayload({ service_type: 'Quarterly Pest Control' }, null)).toBeNull();
+    });
+    jest.dontMock('../services/service-completion-profiles');
+    jest.doMock('../services/service-completion-profiles', () => ({
+      resolveCompletionProfileForScheduledService: jest.fn(async () => { throw new Error('db down'); }),
+    }));
+    await jest.isolateModulesAsync(async () => {
+      const mod = require('../services/service-report/trace-eligibility');
+      expect(await mod.traceCaptureBlockPayload({ service_type: 'Rodent Trapping' }, null)).toBeNull();
+    });
+    jest.dontMock('../services/service-completion-profiles');
+  });
+
+  test('round 20 — the rescue path validates capture mode against the rescuing line; addon row-list errors keep the fail-open posture', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    jest.doMock('../services/service-completion-profiles', () => ({
+      resolveCompletionProfileForScheduledService: jest.fn(async () => ({
+        serviceKey: null, findingsType: 'termite_bait_station',
+      })),
+    }));
+    const addonKnex = (rows, { throwOnAddons = false } = {}) => (table) => {
+      const q = {
+        where: () => q,
+        whereIn: () => q,
+        orderBy: () => q,
+        select: () => {
+          if (table !== 'scheduled_service_addons') return Promise.resolve([]);
+          return throwOnAddons ? Promise.reject(new Error('db down')) : Promise.resolve(rows);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return q;
+    };
+    const addonRows = [{ service_id: null, service_name: 'Quarterly Pest Control' }];
+    await jest.isolateModulesAsync(async () => {
+      const mod = require('../services/service-report/trace-eligibility');
+      const svc = { id: 'ss-r20', service_type: 'Termite Bait Station Check' };
+      // rescued spray add-on + lawn mode → 400 keyed on the RESCUING line
+      expect(await mod.traceCaptureBlockPayload(svc, addonKnex(addonRows), { captureMode: 'lawn' }))
+        .toMatchObject({ status: 400, payload: { code: 'trace_capture_mode_mismatch', reason: 'spray' } });
+      // agreeing mode still passes through the rescue
+      expect(await mod.traceCaptureBlockPayload(svc, addonKnex(addonRows), { captureMode: 'perimeter' }))
+        .toBeNull();
+      // the row-list failure PROPAGATES out of resolveAddonVerdicts...
+      await expect(mod.resolveAddonVerdicts('ss-r20', addonKnex([], { throwOnAddons: true })))
+        .rejects.toThrow('db down');
+      // ...so the capture helper fails OPEN instead of 403ing the visit
+      expect(await mod.traceCaptureBlockPayload(svc, addonKnex([], { throwOnAddons: true })))
+        .toBeNull();
+    });
+    jest.dontMock('../services/service-completion-profiles');
+  });
+});

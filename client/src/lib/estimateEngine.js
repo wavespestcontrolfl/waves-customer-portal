@@ -370,7 +370,7 @@ function hasAnySelectedFlag(input = {}, flags = []) {
 }
 
 const LAWN_TABLE_MAX_SQFT = 20000;
-const LAWN_FREQS = [4, 6, 9, 12];
+const LAWN_FREQS = [6, 9, 12];
 const LAWN_PRICING_V2 = {
   targetCollectedMarginFloor: 0.35,
   // Mirrors server constants.LAWN_PRICING_V2.programMinimumMonthly.
@@ -390,7 +390,11 @@ const LAWN_PRICING_V2 = {
   // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
   // _LADDER_CAP (2026-07-29): Premium 12x column retuned + cap so 12x
   // per-app never exceeds 9x per-app (server mirror).
-  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
+  // _GRID_500 (2026-08-04): 500-sqft re-grid + sub-3,000 taper + basic/4x
+  // retirement — fallback saves must stamp the schedule they priced on
+  // (codex #3190 P2), and applyServerLawnPricingConfig below syncs the live
+  // row's version so a mid-flight admin change stamps correctly too.
+  pricingVersion: 'LAWN_PRICING_V2_GRID_500',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -413,6 +417,12 @@ export function applyServerLawnPricingConfig(config) {
   // Cost-floor enforcement arm switch rides the same row — absent/non-true
   // resolves to the disarmed default, exactly like db-bridge on the server.
   LAWN_PRICING_V2.useLawnCostFloor = config?.useLawnCostFloor === true;
+  // Version stamp rides the same row too (codex #3190 P2): fallback saves
+  // stamp the pricing schedule they were priced under, so the live DB value
+  // wins over the baked default; absent/invalid resets the in-code default —
+  // the kill-value pattern.
+  const version = typeof config?.pricingVersion === 'string' ? config.pricingVersion.trim() : '';
+  LAWN_PRICING_V2.pricingVersion = version || 'LAWN_PRICING_V2_GRID_500';
   return LAWN_PRICING_V2.programMinimumMonthly;
 }
 
@@ -422,12 +432,22 @@ export function applyServerLawnPricingConfig(config) {
 // the WaveGuard give-back — matching the server's applyMarginGuard lift —
 // so a no-enriched-profile pest estimate can't be saved/accepted below the
 // re-armed floor (codex P2 round 8 on #2827).
-const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89 };
+const PEST_BASE = { enforceFloorPostDiscount: false, floorPerVisit: 89, basePerVisit: 112 };
 
 export function applyServerPestPricingConfig(config) {
   PEST_BASE.enforceFloorPostDiscount = (
     config?.enforce_floor_post_discount ?? config?.enforceFloorPostDiscount
   ) === true;
+  // Live-configurable per-visit base (pest_base.base) — the same value the
+  // server prices from (PEST.base, db-bridge synced), so an env whose base
+  // was admin-tuned away from the in-code 112 previews and saves fallback
+  // estimates at the SAME base the server recompute uses (pre-push codex
+  // P0 on this PR). Absent/invalid resets the in-code default — the
+  // kill-value pattern — and rounding mirrors the bridge's whole-dollar r().
+  const base = Number(config?.base);
+  PEST_BASE.basePerVisit = Number.isFinite(base) && base > 0
+    ? Math.round(base)
+    : 112;
   // Live-configurable per-visit floor (pest_base.floor) — the same value the
   // server's pestProgramFloorPerVisit reads (PEST.floor, db-bridge synced),
   // so a re-arm at a floor other than $89 stamps/gives back the SAME floor
@@ -671,11 +691,14 @@ export function collectMarginReviewNotes(E) {
 
 // Material budgets now live in @waves/lawn-cost-floor (lawnMaterialBudget),
 // shared with the server so the table can't drift between preview and bill.
+// Mirrors server LAWN_BRACKETS (2026-08-04 re-grid): [sqft, 6x, 9x, 12x] —
+// basic/4x column fully retired; 500-sqft rows 1,500-8,000, 1,000-sqft
+// rows to 12,000; leading 0-row clamps sub-1,500 to the 1,500 cells.
 const LAWN_PRICES = {
-  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,38,47,55],[3000,30,38,47,55],[3500,30,38,47,58],[4000,30,38,47,62],[5000,30,38,50,66],[6000,30,39,56,74],[7000,32,42,62,82],[8000,35,47,68,90],[10000,40,54,80,106],[12000,46,62,92,122],[15000,53,73,110,146],[20000,68,91,140,186]] },
-  bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,51,68],[6000,34,42,57,76],[7000,34,43,63,84],[8000,36,47,69,92],[10000,41,55,81,108],[12000,47,63,94,125],[15000,55,74,112,149],[20000,69,94,143,190]] },
-  zoysia:       { name: 'Zoysia',        code: 'C2', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,52,69],[6000,34,42,58,77],[7000,34,44,63,84],[8000,36,47,70,93],[10000,41,56,82,109],[12000,47,63,95,126],[15000,56,75,113,150],[20000,70,95,145,193]] },
-  bahia:        { name: 'Bahia',         code: 'D', pts: [[0,25,34,42,51],[3000,25,34,42,51],[3500,25,34,42,53],[4000,25,34,42,56],[5000,25,34,47,62],[6000,27,36,52,69],[7000,30,39,57,76],[8000,31,42,62,82],[10000,36,49,73,97],[12000,41,56,83,110],[15000,48,65,99,132],[20000,60,82,125,166]] },
+  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,34,40],[1500,30,34,40],[2000,32,38,44],[2500,35,42,49],[3000,38,44,55],[3500,38,47,58],[4000,38,47,62],[4500,38,48,64],[5000,38,50,66],[5500,38,53,70],[6000,39,56,74],[6500,40,59,78],[7000,42,62,82],[7500,44,65,86],[8000,47,68,90],[9000,50,74,98],[10000,54,80,106],[11000,58,86,114],[12000,62,92,122],[15000,73,110,146],[20000,91,140,186]] },
+  bermuda: { name: 'Bermuda', code: 'C1', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,65],[5000,42,51,68],[5500,42,54,72],[6000,42,57,76],[6500,42,60,80],[7000,43,63,84],[7500,45,66,88],[8000,47,69,92],[9000,51,75,100],[10000,55,81,108],[11000,59,87,116],[12000,63,94,125],[15000,74,112,149],[20000,94,143,190]] },
+  zoysia: { name: 'Zoysia', code: 'C2', pts: [[0,31,36,42],[1500,31,36,42],[2000,34,40,46],[2500,37,44,52],[3000,39,46,56],[3500,40,49,59],[4000,42,51,63],[4500,42,51,66],[5000,42,52,69],[5500,42,55,73],[6000,42,58,77],[6500,43,60,80],[7000,44,63,84],[7500,45,66,88],[8000,47,70,93],[9000,51,76,101],[10000,56,82,109],[11000,59,88,117],[12000,63,95,126],[15000,75,113,150],[20000,95,145,193]] },
+  bahia: { name: 'Bahia', code: 'D', pts: [[0,27,30,36],[1500,27,30,36],[2000,29,34,39],[2500,31,38,44],[3000,34,42,51],[3500,34,42,53],[4000,34,42,56],[4500,34,44,58],[5000,34,47,62],[5500,35,49,65],[6000,36,52,69],[6500,37,54,72],[7000,39,57,76],[7500,40,59,78],[8000,42,62,82],[9000,45,67,89],[10000,49,73,97],[11000,52,78,103],[12000,56,83,110],[15000,65,99,132],[20000,82,125,166]] },
 };
 
 function toPositiveNumber(value) {
@@ -1333,8 +1356,9 @@ function resolveLawnFreq(freq) {
 // result (matches lookupLawnBracket in server service-pricing).
 function lawnLookup(lp, sf, freqIdx) {
   const result = lawnLookupUncapped(lp, sf, freqIdx);
-  if (freqIdx === 3 && result.monthly > 0) {
-    const enhanced = lawnLookupUncapped(lp, sf, 2);
+  // freqIdx 2 = premium(12x), 1 = enhanced(9x) after the 4x column removal.
+  if (freqIdx === 2 && result.monthly > 0) {
+    const enhanced = lawnLookupUncapped(lp, sf, 1);
     if (enhanced.monthly > 0) {
       result.monthly = Math.min(result.monthly, Math.floor(enhanced.monthly * 12 / 9));
     }
@@ -1670,6 +1694,10 @@ export function calculateEstimate(inputs) {
     // resolution reads one shape everywhere.
     pestProgramFloorArmed: PEST_BASE.enforceFloorPostDiscount === true,
     pestProgramFloorPerVisit: PEST_BASE.floorPerVisit,
+    // The base this quote priced from (pest_base.base, DB-synced). The save
+    // gate fails closed on a mismatch — a stale bundle must not persist
+    // yesterday's base after a pricing change (codex #3182 r2 P1).
+    pestBasePerVisit: PEST_BASE.basePerVisit,
   };
   const uniqueStrings = values => [...new Set((values || []).filter(Boolean))];
   const addRoutingWarning = warning => {
@@ -2058,7 +2086,7 @@ export function calculateEstimate(inputs) {
     // db-bridge-synced from pest_base.floor, so a tuned floor must move the
     // fallback's bottom cell too or preview/persisted totals drift from the
     // server recompute (codex P2 round 10 on #2827). Default 89 unchanged.
-    const pp = Math.max(PEST_BASE.floorPerVisit, 117 + adj);
+    const pp = Math.max(PEST_BASE.floorPerVisit, PEST_BASE.basePerVisit + adj);
     const roachAddOn = 0;
     R.pestTiers = [];
     pestFrequencyTiers.forEach(ft => {
@@ -2134,10 +2162,12 @@ export function calculateEstimate(inputs) {
     // Floors are backstops only (Light $22/mo, Standard $35/mo, Enhanced
     // $48/mo) and Light's floor must stay <= 2/3 of Standard's.
     const TS_ADMIN_ANNUAL = 51;
+    // Tier names are application counts (owner 2026-08-04: no Standard/
+    // Enhanced/Premium naming) — mirrors server TREE_SHRUB.tiers labels.
     const tst = [
       { n: 'Light', v: 4, f: 22, mf: 0.75 },
-      { n: 'Standard', v: 6, f: 35, mf: 1 },
-      { n: 'Enhanced', v: 9, f: 48, mf: 1.25 },
+      { n: '6x applications/yr', v: 6, f: 35, mf: 1 },
+      { n: '9x applications/yr', v: 9, f: 48, mf: 1.25 },
     ];
     R.ts = [];
     R.tsMeta = { eb, et, bedAreaIsEstimated };
@@ -2424,7 +2454,7 @@ export function calculateEstimate(inputs) {
     // The trailing clamp keeps the loyalty perk from dropping one-time to/below a
     // recurring customer's visit-1 cost (quarterly + $99 setup) — strictly above
     // (+1, whole-dollar prices), matching the server engine.
-    const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, 117 + pestBaseAdjustment(fpEff));
+    const quarterlyBase = Math.max(PEST_BASE.floorPerVisit, PEST_BASE.basePerVisit + pestBaseAdjustment(fpEff));
     let fp = Math.max(199, otP(Math.max(199, Math.round(quarterlyBase * 2.2))));
     if (fp <= quarterlyBase + 99) fp = quarterlyBase + 100;
     otItems.push({
@@ -2443,7 +2473,7 @@ export function calculateEstimate(inputs) {
     const lp = LAWN_PRICES[grassType] || LAWN_PRICES.st_augustine;
     const selectedFreq = resolveLawnFreq(lawnFreq);
     const selectedFreqIdx = LAWN_FREQS.indexOf(selectedFreq);
-    const baselinePrice = lawnLookup(lp, turfArea.turfSf, selectedFreqIdx >= 0 ? selectedFreqIdx : 2);
+    const baselinePrice = lawnLookup(lp, turfArea.turfSf, selectedFreqIdx >= 0 ? selectedFreqIdx : 1);
     const baselineMonthly = baselinePrice.monthly;
     if (baselinePrice.pricingBasis === 'EXTRAPOLATED_ABOVE_TABLE_MAX') addLawnCustomQuoteNote();
     const baselinePerApp = Math.round((baselineMonthly * 12) / selectedFreq * 100) / 100;

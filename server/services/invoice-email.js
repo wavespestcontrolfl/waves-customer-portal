@@ -337,8 +337,54 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   }
 }
 
+/**
+ * The inspection-credit promise for a receipt, or '' when there is none.
+ *
+ * Derived from the OFFER row rather than passed in by callers: every
+ * receipt path (webhook auto-send, operator resend, delivery queue) then
+ * states the promise without each one having to thread it, and the copy
+ * always reflects the terms actually FROZEN on the offer — never a
+ * re-derived guess that a later config edit could drift.
+ *
+ * Only an offer still open and unexpired is announced: once it has been
+ * redeemed the credit is already on the account, and a lapsed one is no
+ * longer true. Never throws — a receipt must go out regardless.
+ */
+async function inspectionCreditMemoForInvoice(invoice) {
+  try {
+    // Deliberately NOT gated on the live feature flag (Codex #3178 r25
+    // P2): the persisted OFFER row is the authority. Offers only ever
+    // exist for promises made while the lane was live (or recovered from a
+    // committed opt-in marker), so a dark lane with no offers announces
+    // nothing — while a recovered promise's resend, whose offer-scoped
+    // idempotency key is consumed by THIS send, must carry the memo now or
+    // the customer permanently misses their written deadline.
+    if (!invoice?.customer_id) return '';
+    // A payer-billed invoice goes to a third party's AP inbox — never
+    // announce the homeowner's credit there (Codex #3175 r4 P1).
+    if (invoice.payer_id) return '';
+    // Scoped to THIS invoice's visit, not "the customer's earliest open
+    // offer": an unrelated service receipt, an old resend, or a second
+    // inspection would otherwise announce another inspection's terms.
+    const visitId = invoice.scheduled_service_id || null;
+    if (!visitId) return '';
+    const offer = await db('inspection_credit_offers')
+      .where({ source_scheduled_service_id: visitId, status: 'offered' })
+      .where('expires_at', '>=', new Date())
+      .first('amount', 'expires_at');
+    if (!offer) return '';
+    const { inspectionCreditReceiptMemo } = require('./inspection-credit');
+    // The FROZEN expiry rides through — a resend must state the same
+    // deadline, never a recomputed "N days left".
+    return inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '';
+  } catch (err) {
+    logger.warn(`[invoice-email] inspection credit memo lookup failed: ${err.message}`);
+    return '';
+  }
+}
+
 async function sendReceiptEmail(invoiceId, options = {}) {
-  const memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
+  let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
   // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
   // retried delivery doesn't email the customer twice; manual operator
   // resends from /admin/invoices intentionally omit it so the operator
@@ -349,6 +395,10 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice) return { ok: false, error: 'Invoice not found' };
   if (invoice.status !== 'paid') return { ok: false, error: 'Invoice not paid' };
+
+  // An open inspection-credit promise rides the receipt (dark behind the
+  // gate). An explicit caller memo always wins — never silently replaced.
+  if (!memo) memo = await inspectionCreditMemoForInvoice(invoice);
 
   const customer = await db('customers').where({ id: invoice.customer_id })
     .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
@@ -527,6 +577,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 module.exports = {
   sendInvoiceEmail,
   sendReceiptEmail,
+  inspectionCreditMemoForInvoice,
   _private: {
     invoiceRecipientFor,
     isEmailLike,

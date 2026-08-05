@@ -1927,7 +1927,7 @@ const PERKS = [
   'Re-service between visits at no charge',
   'Locked-in pricing for 12 months',
   'Free annual termite inspection',
-  '15% off any one-time treatment',
+  '15% off eligible one-time treatments',
   'One point of contact — no call-center runaround',
   'Text your tech directly for quick questions',
   'Customer portal for service history, invoices, and payments',
@@ -1938,7 +1938,12 @@ const LAWN_CARE_PERKS = [
   'Locked-in pricing for 12 months',
   'Seasonal product rotations matched to Southwest Florida turf cycles',
   'Lawn health scored every visit — turf density, weeds, and color tracked over time',
-  'Re-service between visits at no charge',
+  // Scoped re-service claim (owner copy ruling 2026-08-04): a lawn
+  // application is calendar agronomy, not a redoable treatment — an
+  // unscoped "re-service at no charge" implies every cadence tier delivers
+  // identical results. The pest PERKS list keeps the unscoped line; a pest
+  // re-service genuinely is a redo.
+  'Between-visit service calls at no charge — we diagnose and spot-treat covered issues',
   'Text your tech directly for quick questions',
   'Billing after completed lawn care visits',
   'Owner-operator accountability on every visit',
@@ -2248,12 +2253,22 @@ function pestRecurringForPricingRows(rows = []) {
   return { count: pestRows.length, visitsPerYear, monthlyBase, pricingVersion: pestPricingVersionOf(...pestRows) };
 }
 
-function sameDayVisitTotalForPricingFrequency(frequency = {}, opts = {}) {
+// Per-row first-visit amounts — the ONE derivation both the same-day visit
+// total and the plan-credit first-visit slice read, so a slice can never be
+// computed on a base the visit doesn't bill. `amount` is the billed figure
+// (WaveGuard-net, preference-adjusted); `baseAmount` is the pre-preference
+// figure — the manual percentage credit is calculated on the pre-preference
+// base (shapeFromV1) and the section stamper slices the unadjusted
+// per-application price, so the accept slice must too (codex #3185 P1): an
+// opt-out reduces the bill by its own preference credit AND the full
+// promised plan-credit slice, never a shrunken one. Returns null when any
+// row lacks an amount (the total then falls back to sameDayTreatmentTotal,
+// whose composition per row is unknown).
+function sameDayVisitRowAmounts(frequency = {}, opts = {}) {
   const rows = Array.isArray(frequency?.perServiceTreatments)
     ? frequency.perServiceTreatments
     : [];
   if (opts.services && !frequencyTreatmentsCoverServices(rows, opts.services)) return null;
-  const fallback = Number(frequency?.sameDayTreatmentTotal);
   const prefMonthlyOff = opts.preferences
     ? computePrefDiscount(opts.preferences, pestRecurringForPricingRows(rows), false, 0).monthlyOff
     : 0;
@@ -2264,23 +2279,34 @@ function sameDayVisitTotalForPricingFrequency(frequency = {}, opts = {}) {
     return amount && visits ? (amount * visits) / 12 : 0;
   });
   const pestWeightTotal = pestRowWeights.reduce((sum, weight) => sum + weight, 0);
-  let missingTreatmentAmount = false;
-  const total = rows.reduce((sum, row, index) => {
-    let amount = displayedTreatmentAmountForPricingRow(row);
-    if (!(amount > 0)) {
-      missingTreatmentAmount = true;
-      return sum;
-    }
-    if (amount && prefMonthlyOff > 0 && pestWeightTotal > 0 && recurringServiceKey(row) === 'pest_control') {
+  const out = [];
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index];
+    const baseAmount = displayedTreatmentAmountForPricingRow(row);
+    if (!(baseAmount > 0)) return null;
+    let amount = baseAmount;
+    if (prefMonthlyOff > 0 && pestWeightTotal > 0 && recurringServiceKey(row) === 'pest_control') {
       const visits = treatmentVisitsForPricingRow(row);
       const rowMonthlyOff = prefMonthlyOff * (pestRowWeights[index] / pestWeightTotal);
       const perTreatmentOff = visits ? (rowMonthlyOff * 12) / visits : 0;
       amount = Math.max(0, amount - perTreatmentOff);
     }
-    return amount ? sum + amount : sum;
-  }, 0);
-  if (!missingTreatmentAmount && total > 0) return Math.round(total * 100) / 100;
+    out.push({ row, amount, baseAmount });
+  }
+  return out.length ? out : null;
+}
 
+function sameDayVisitTotalForPricingFrequency(frequency = {}, opts = {}) {
+  const rowAmounts = sameDayVisitRowAmounts(frequency, opts);
+  if (rowAmounts) {
+    const total = rowAmounts.reduce((sum, entry) => sum + entry.amount, 0);
+    if (total > 0) return Math.round(total * 100) / 100;
+  }
+  const rows = Array.isArray(frequency?.perServiceTreatments)
+    ? frequency.perServiceTreatments
+    : [];
+  if (opts.services && !frequencyTreatmentsCoverServices(rows, opts.services)) return null;
+  const fallback = Number(frequency?.sameDayTreatmentTotal);
   if (Number.isFinite(fallback) && fallback > 0) return Math.round(fallback * 100) / 100;
   return null;
 }
@@ -3640,9 +3666,14 @@ ${shellTopBar()}
 }
 
 
-// Server-rendered "Your WaveGuard membership" block for existing customers.
-// Mirrors the React MembershipCard in EstimateViewPage.jsx. Returns '' when
-// there is no membership context (leads, or any error upstream).
+// Server-rendered "Your WaveGuard membership" block for existing customers —
+// LEGACY v1 page only. The React v2 page renders NO member card at all (owner
+// 2026-08-04: a member's estimate goes price → slot picker → approve, with
+// the member savings itemized inside each section's price block — same
+// ruling as the discounts on 2026-08-03). This v1 block deliberately keeps
+// the old card because the legacy page has no in-price savings stack to hand
+// the member story to. Do not "re-sync" the two. Returns '' when there is no
+// membership context (leads, or any error upstream).
 function renderMembershipBlockHtml(membership) {
   if (!membership || !membership.isExistingCustomer) return '';
 
@@ -4712,7 +4743,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     <table>${oneTimeRows}${manualOneTimeDiscountRowHtml}
       ${oneTimeSingleRowNoDiscount ? '' : `<tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>`}
     </table>
-    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
+    ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off eligible one-time treatments.</p>` : ''}
   </div>` : '';
 
   const perksHtml = (hasOnlyLawnCareServices
@@ -7708,6 +7739,31 @@ router.put('/:token/accept', async (req, res, next) => {
       // conversion, no invoice mint, no sends). Best-effort: a rebuild
       // failure degrades to the legacy bare payload rather than blocking
       // the retry.
+      // Fast-redeem on the already-accepted RETRY too (Codex #3178 r38
+      // P2): the first accept can commit bookings + evidence + invoice and
+      // die before its own redemption block, and this retry still hands
+      // back the persisted pay link — so the credit must be in the balance
+      // before the customer can use it. Idempotent and best-effort; the
+      // payload rebuild stays read-only otherwise.
+      if (estimate.customer_id) {
+        try {
+          const acceptedVisits = await db('scheduled_services')
+            .where({ source_estimate_id: estimate.id })
+            .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
+            .whereRaw('COALESCE(is_callback, false) = false')
+            .limit(5)
+            .select('id');
+          for (const visit of acceptedVisits) {
+            await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+              customerId: estimate.customer_id,
+              scheduledServiceId: visit.id,
+              createdBy: 'system:inspection_credit_estimate_accept_replay',
+            });
+          }
+        } catch (replayErr) {
+          logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
+        }
+      }
       try {
         return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
       } catch (e) {
@@ -8313,6 +8369,15 @@ router.put('/:token/accept', async (req, res, next) => {
         annual: selectedCombo.annual,
         perServiceTreatments: selectedCombo.perServiceTreatments ?? pricingVisitFrequency.perServiceTreatments,
         sameDayTreatmentTotal: selectedCombo.sameDayTreatmentTotal ?? pricingVisitFrequency.sameDayTreatmentTotal,
+        // The combo's OWN credit state replaces the base row's entirely
+        // (codex #3185 r7/r8): the inherited base object is stale for a
+        // combo — reconciling against it could authorize dollars a
+        // floor-capped combo never granted, and an inherited base-cadence
+        // suppression must not veto a credit the selected combo itself
+        // grants. A legacy snapshot combo without the field resolves to
+        // null — the slice then fails closed.
+        manualDiscount: selectedCombo.manualDiscount ?? null,
+        manualDiscountSuppressed: selectedCombo.manualDiscountSuppressed === true,
       };
     }
     const effectiveMonthlyTotal = selectedCombo?.monthly != null
@@ -8508,8 +8573,44 @@ router.put('/:token/accept', async (req, res, next) => {
     const sameDayVisitTotal = !treatAsOneTime && !selectedServiceTierBillsMonthly
       ? sameDayVisitTotalForPricingFrequency(pricingVisitFrequency, { preferences: acceptPrefs, services: recurringSvcList })
       : null;
+    // Multi-service plan-credit slices (owner GO 2026-08-04, codex #3183 P0:
+    // shown == accepted == billed). Only when the visit total came from the
+    // per-row derivation (the slice base) — a fallback-priced total has no
+    // per-row composition to slice, and the helper bails on that shape too.
+    // Deliberately NOT conditioned on the display flag or the gate (codex
+    // #3185 r6 P0): both presentations promise the credit, the slice
+    // reconciles against the SELECTED option's own credit, and presentation
+    // state must never move an accepted amount upward mid-flight.
+    const acceptPlanCreditSlice = !treatAsOneTime && !selectedServiceTierBillsMonthly
+      && billingTerm !== 'prepay_annual'
+      && Array.isArray(recurringSvcList) && recurringSvcList.length > 1
+      && sameDayVisitTotal > 0
+      ? planCreditFirstVisitSlice(pricingVisitFrequency, {
+        preferences: acceptPrefs,
+        services: recurringSvcList,
+      })
+      : null;
+    // The display flag is the accept's authorization to net the invoice — if
+    // the customer was shown sliced section prices (flag true) but the
+    // accept-time slice cannot be computed for their selection FOR ANY REASON
+    // (reconciliation drift, an uncovered service nulling the visit total —
+    // codex #3185 r3/r5 P0s), billing a pre-credit fallback would silently
+    // charge more than the page showed. Fail the accept loudly instead: no
+    // wrong charge, and the retry/call path surfaces the shape.
+    if (!treatAsOneTime && !selectedServiceTierBillsMonthly
+      && billingTerm !== 'prepay_annual'
+      && Array.isArray(recurringSvcList) && recurringSvcList.length > 1
+      && pricingBundle?.renderFlags?.manualDiscountItemizedInSections === true
+      && !acceptPlanCreditSlice) {
+      throw estimateAcceptError(
+        'This estimate\'s discount pricing needs a quick refresh — please reload the page and try again, or call us and we\'ll book it for you.',
+        409,
+      );
+    }
     const firstApplicationInvoiceAmount = !treatAsOneTime && !selectedServiceTierBillsMonthly && billingTerm !== 'prepay_annual'
-      ? (sameDayVisitTotal || recurringFirstVisitAmount || null)
+      ? (acceptPlanCreditSlice && sameDayVisitTotal
+        ? Math.round((sameDayVisitTotal - acceptPlanCreditSlice.firstVisitSlice) * 100) / 100
+        : (sameDayVisitTotal || recurringFirstVisitAmount || null))
       : null;
     // Manual-discount itemization for the accept-generated invoice (owner
     // 2026-07-11: the labeled credit the estimate promised follows onto the
@@ -8523,6 +8624,20 @@ router.put('/:token/accept', async (req, res, next) => {
     // credit away — both itemize nothing rather than invent arithmetic.
     const acceptManualDiscountItemization = (() => {
       if (treatAsOneTime) return null;
+      // Multi-service (owner GO 2026-08-04): the first-visit amount above is
+      // now NET of the plan-credit slices, so the invoice itemizes the same
+      // labeled credit the sections display — gross := net + slice, exactly
+      // the single-service mechanism. recurringAnnual is deliberately 0: the
+      // interval/annual consumers (invoice-mode interval slice, annual-prepay
+      // itemization) describe billing shapes multi-service accepts don't use,
+      // and a whole-cadence figure here would re-open the per-application
+      // ambiguity codex #3128 retired. perApplication carries the FIRST-VISIT
+      // slice — the one number the netted amount actually subtracts.
+      if (Array.isArray(recurringSvcList) && recurringSvcList.length > 1) {
+        return acceptPlanCreditSlice
+          ? { label: acceptPlanCreditSlice.label, recurringAnnual: 0, perApplication: acceptPlanCreditSlice.firstVisitSlice }
+          : null;
+      }
       if (!Array.isArray(recurringSvcList) || recurringSvcList.length !== 1) return null;
       const row = selectedFrequency?.manualDiscount;
       if (!row || selectedFrequency?.manualDiscountSuppressed === true) return null;
@@ -8972,6 +9087,28 @@ router.put('/:token/accept', async (req, res, next) => {
             .update(updates);
           assertExistingAppointmentUpdateApplied(updatedCount);
           reservationCommitted = true;
+          // The adopted appointment is a REAL booking committed by THIS
+          // accept — record the inspection-credit evidence in the same trx
+          // (Codex #3178 r25 P1). The post-commit redeemer and the sweep
+          // both judge by booking EVENTS; without one, the ordering guard
+          // falls back to the row's original created_at (a placeholder
+          // that can predate the inspection closeout) and the promised
+          // credit is silently never redeemed. Savepoint-confined — a
+          // marker hiccup cannot poison the accept.
+          const adoptedCustomerId = existingAppointmentRow.customer_id || customerId;
+          if (adoptedCustomerId) {
+            await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+              customerId: adoptedCustomerId,
+              scheduledServiceId: existingAppointmentRow.id,
+              source: 'estimate_accept_existing_appointment',
+              // RESTAMP (Codex #3178 r37 P2): the row may carry a
+              // pre-offer event from its original scheduling; the ACCEPT
+              // is the purchase this credit rides, so the moment moves
+              // forward to now — an ignore would leave the old timestamp
+              // and the ordering guard would reject the promised credit.
+              restamp: true,
+            });
+          }
           acceptedAppointmentsToRegister.push({
             ...existingAppointmentRow,
             ...updates,
@@ -9043,7 +9180,14 @@ router.put('/:token/accept', async (req, res, next) => {
           treatAsOneTime,
           effectiveOneTimeTotal,
           effectiveMonthlyTotal,
-          recurringFirstVisitAmount,
+          // Multi-service plan-credit slices net the first-visit amount at its
+          // choke point above; the invoice-mode leg must bill the same netted
+          // figure (its gross+discount lines then rebuild it, total unchanged).
+          // Single-service keeps the raw resolver value — its ladder already
+          // nets the credit into the amount.
+          recurringFirstVisitAmount: acceptPlanCreditSlice
+            ? (firstApplicationInvoiceAmount ?? recurringFirstVisitAmount)
+            : recurringFirstVisitAmount,
           effectiveBillingCadence,
           selectedFrequency,
           manualDiscountItemization: acceptManualDiscountItemization,
@@ -10026,6 +10170,32 @@ router.put('/:token/accept', async (req, res, next) => {
         // the onboarding handoff text was retired with the onboarding flow.
         // Customers continue through the invoice/pay-link path below.
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
+    }
+
+    // Inspection credit: redeem NOW — the bookings committed above, and
+    // the invoice has not been delivered yet (pre-push P0). Relying on the
+    // hourly sweep here let the customer receive or even pay the full
+    // invoice before the promised $75 existed; redeeming first puts the
+    // credit in the balance so the send-time auto-apply
+    // (sendViaSMSAndEmail → autoApplyAccountCreditIfEnabled) consumes it.
+    // Best-effort per booking — the sweep remains the durable guarantee.
+    if (customerId) {
+      const creditBookingIds = [...new Set([
+        ...acceptedAppointmentsToRegister.map((appt) => appt?.id),
+        txResult.standardConversion?.firstScheduledServiceId,
+        txResult.annualPrepayConversion?.firstScheduledServiceId,
+      ].filter(Boolean))];
+      for (const bookingId of creditBookingIds) {
+        try {
+          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+            customerId,
+            scheduledServiceId: bookingId,
+            createdBy: 'system:inspection_credit_estimate_accept',
+          });
+        } catch (creditErr) {
+          logger.warn(`[estimate-accept] inspection credit redemption deferred to sweep: ${creditErr.message}`);
+        }
+      }
     }
 
     // Post-commit invoice delivery for every accept-minted invoice —
@@ -12107,10 +12277,13 @@ function storedLawnRowBelowProgramFloor(estData = null) {
 // defaulting to quarterly.
 function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   if (!estDataLike || typeof estDataLike !== 'object') return false;
-  const retiredFreqs = new Set(Object.values(LAWN_TIERS || {})
-    .filter((t) => t && t.hidden === true)
-    .map((t) => Number(t.freq))
-    .filter((n) => Number.isFinite(n) && n > 0));
+  const retiredFreqs = new Set([
+    ...REMOVED_LAWN_TIER_FREQS,
+    ...Object.values(LAWN_TIERS || {})
+      .filter((t) => t && t.hidden === true)
+      .map((t) => Number(t.freq))
+      .filter((n) => Number.isFinite(n) && n > 0),
+  ]);
   if (!retiredFreqs.size) return false;
   const { recurringSvcList } = acceptanceServiceLists(estDataLike);
   const converter = require('../services/estimate-converter');
@@ -13719,14 +13892,19 @@ function mergeAskChips(categories = []) {
 function treeShrubTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
   if (raw.includes('light') || raw === '4' || raw === '4x') return 'light';
-  if (raw.includes('standard') || raw === '6' || raw === '6x') return 'standard';
+  // Application-count label names (owner 2026-08-04: Standard/Enhanced are
+  // no longer display names) — client R.ts rows carry no machine tier key,
+  // so the new '6x applications/yr' / '9x applications/yr' names must parse
+  // here or fallback-payload public links lose their T&S tier (codex #3190
+  // P2). startsWith keeps '12x…' out of the '9x' branch below.
+  if (raw.includes('standard') || raw === '6' || raw === '6x' || raw.startsWith('6x ')) return 'standard';
   // 'enhanced' (9x) and 'premium' (12x) are retired but kept here so
   // previously-saved estimates that still carry those rows render unchanged
   // (legacy estimates aren't re-priced) AND the shared quote gate can see
   // them as retired tiers (codex P1 r5: a Premium-only ladder produced an
   // empty tierKeys set and slipped the requote gate).
-  if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
-  if (raw.includes('premium') || raw === '12' || raw === '12x') return 'premium';
+  if (raw.includes('enhanced') || raw === '9' || raw === '9x' || raw.startsWith('9x ')) return 'enhanced';
+  if (raw.includes('premium') || raw === '12' || raw === '12x' || raw.startsWith('12x ')) return 'premium';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
@@ -13874,8 +14052,15 @@ function threadedProgramMinMonthly(value) {
   return value != null && Number.isFinite(n) && n >= 0 ? n : lawnProgramMinimumMonthly();
 }
 
+// basic/4x was fully REMOVED from LAWN_TIERS (owner 2026-08-04) — it no
+// longer carries a hidden flag, so retirement must recognize the removed
+// key explicitly; hidden:true keeps covering any future soft-retired tier.
+const REMOVED_LAWN_TIER_KEYS = new Set(['basic']);
+const REMOVED_LAWN_TIER_FREQS = new Set([4]);
 function isRetiredLawnTierKey(tierKey) {
-  return LAWN_TIERS?.[String(tierKey || '').trim().toLowerCase()]?.hidden === true;
+  const key = String(tierKey || '').trim().toLowerCase();
+  if (REMOVED_LAWN_TIER_KEYS.has(key)) return true;
+  return LAWN_TIERS?.[key]?.hidden === true;
 }
 
 // Per-estimate cost-floor arm state: an estimate generated with an explicit
@@ -15699,6 +15884,15 @@ function buildServiceCadenceCombos(v1, prefs, resultStats, { pestOnly = false, p
       annual: entry.annual,
       perServiceTreatments: entry.perServiceTreatments,
       sameDayTreatmentTotal: entry.sameDayTreatmentTotal,
+      // The combo's OWN engine-computed credit (codex #3185 r7 P0): each
+      // combo re-prices through shapeFromV1, whose manual-discount output
+      // carries this combo's exact granted amount and cap/suppression state.
+      // Persisting it lets display validation and the accept-time slice
+      // reconcile EXACTLY against the authoritative per-combo credit — no
+      // tolerance that could mask a floor-capped grant. Legacy snapshot
+      // combos without this field fail closed (no slicing, plan-level card).
+      manualDiscount: entry.manualDiscount || null,
+      ...(entry.manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
     };
   });
 }
@@ -16032,6 +16226,29 @@ function defaultFrequencyForSection(section = {}) {
 // Every guard below bails WITHOUT mutating, so a bail leaves today's rendering.
 const SECTION_CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
 
+// A frequency/combo entry whose treatment rows can ALL be priced per row
+// (positive per-treatment amount + visit count) and whose pct slice leaves a
+// strictly positive first visit — the pref-blind build-time version of the
+// accept-side sliceability checks. Shared by the base-cadence and combo
+// validation in the stamper so the display flag never authorizes a selection
+// the accept-side slice must refuse.
+function sliceableTreatmentRowSet(entry, pct) {
+  const treatmentRows = Array.isArray(entry?.perServiceTreatments)
+    ? entry.perServiceTreatments
+    : [];
+  if (!treatmentRows.length) return false;
+  let rowSum = 0;
+  for (const treatment of treatmentRows) {
+    const amount = displayedTreatmentAmountForPricingRow(treatment);
+    if (!(amount > 0) || !(treatmentVisitsForPricingRow(treatment) > 0)) return false;
+    rowSum += amount;
+  }
+  // A slice of pct% can at most take pct% of the row sum — require the
+  // remainder strictly positive (mirrors planCreditFirstVisitSlice's
+  // zero-net refusal; pct ≥ 100 always fails here).
+  return rowSum * (1 - Number(pct) / 100) > 0.005;
+}
+
 // md.eligibleServices/excludedServices entries are resolveDiscountKey outputs —
 // tier-suffixed for tiered services ('lawn_care_enhanced') — while sections key
 // by base service. Prefix-match so every tier of an eligible service matches.
@@ -16045,7 +16262,7 @@ function manualDiscountServiceKeyMatches(entries, sectionKey) {
   });
 }
 
-function stampPerServiceManualDiscountSlices(services = [], payload = {}) {
+function stampPerServiceManualDiscountSlices(services = [], payload = {}, estData = null) {
   // DARK (owner flip pending): the slices net the SECTION display below the
   // WaveGuard-net price, but the multi-service accept path still charges the
   // first application from pre-credit treatment rows (codex #3183 P0) —
@@ -16086,12 +16303,50 @@ function stampPerServiceManualDiscountSlices(services = [], payload = {}) {
     // percentage — a cadence whose credit is empty or partly one-time would
     // let section rows itemize a recurring slice that cadence doesn't grant
     // (codex hardening on #3183).
-    return row && row.type === 'PERCENT' && Number(row.value) === pct
+    if (!(row && row.type === 'PERCENT' && Number(row.value) === pct
       && row.capped !== true && !row.capReason && !row.floorBreach
       && Number(row.recurringAmount ?? row.amount) > 0
-      && !(Number(row.oneTimeAmount) > 0);
+      && !(Number(row.oneTimeAmount) > 0))) return false;
+    // Display and billing must slice the SAME shapes (codex #3185 P1): the
+    // accept-side slice reads the combined cadence's per-row amounts, and a
+    // member row without a per-treatment price or visit count (legacy
+    // flat-monthly termite monitoring) makes that math bail to the
+    // pre-credit first visit — so the sections must not slice (nor hide the
+    // plan-level card) for those plans either. Symmetric bail keeps every
+    // such plan exactly on today's behavior on both surfaces.
+    return sliceableTreatmentRowSet(frequency, pct);
   });
   if (!combinedOk) return false;
+  // Every SELECTABLE option — each base cadence and each per-service combo —
+  // must pass the accept-side slicer itself (codex #3185 r3/r4): this flag
+  // is the accept's authorization to net the invoice, and a flag-true accept
+  // that cannot compute its slice fails 409 — so a capped/suppressed/
+  // unpriceable option anywhere in the selection space must keep the WHOLE
+  // plan on the plan-level card instead of stranding that option behind a
+  // permanent 409. Calling planCreditFirstVisitSlice with the SAME stored
+  // preferences the accept reads makes the authorization exact by
+  // construction: base cadences reconcile against their own credit objects,
+  // combos against their pref-excluded net annuals.
+  const storedPreferences = normalizePrefs(estData?.preferences);
+  // Coverage runs against the SAME recurring-service list the accept resolves
+  // (codex #3185 r5): a combined row missing an accepted service nulls the
+  // accept-side visit total, and the flag must not authorize a plan whose
+  // slice the accept then cannot price.
+  const acceptRecurringList = estData ? acceptanceServiceLists(estData).recurringSvcList : null;
+  const coverageServices = Array.isArray(acceptRecurringList) && acceptRecurringList.length
+    ? acceptRecurringList
+    : null;
+  if (!combinedRows.every((frequency) => planCreditFirstVisitSlice(frequency, {
+    preferences: storedPreferences,
+    services: coverageServices,
+  }))) return false;
+  const combos = Array.isArray(payload.serviceCadenceCombos) ? payload.serviceCadenceCombos : [];
+  // Combos validate on their OWN persisted credit object (r7) — a legacy
+  // snapshot combo without one fails this and keeps the plan card.
+  if (!combos.every((combo) => planCreditFirstVisitSlice(
+    combo,
+    { preferences: storedPreferences, services: coverageServices },
+  ))) return false;
 
   const round2 = (n) => Math.round(Number(n) * 100) / 100;
   // Compute every slice first; commit only if EVERY row of EVERY eligible
@@ -16206,6 +16461,101 @@ function stampPerServiceManualDiscountSlices(services = [], payload = {}) {
     };
   }
   return true;
+}
+
+// Accept-side mirror of the stamper (owner GO 2026-08-04, resolving codex
+// #3183's P0: shown == accepted == billed): for the SELECTED cadence of a
+// multi-service plan carrying a clean PERCENT recurring-only credit, the
+// first-visit invoice applies the same per-row slices the section display
+// nets — pct × each eligible row's WaveGuard-net, preference-adjusted
+// first-visit amount, the exact amounts sameDayVisitTotal bills (shared
+// sameDayVisitRowAmounts derivation, so the base can never diverge). Same
+// gate as the display stamper — the whole behavior flips atomically — and
+// the same fail-closed posture: any shape this cannot slice exactly (FIXED,
+// capped, floor-breach, one-time slice, fallback-priced visit totals,
+// reconciliation drift) returns null and the accept keeps today's
+// pre-credit first-visit amount with the plan-level credit story.
+// GATE-INDEPENDENT on purpose (codex #3185 r6 P0): the gate controls the
+// DISPLAY presentation only (sliced sections vs the plan-level card), while
+// billing always honors a cleanly-reconciling credit — both presentations
+// promise it ("Applied to your plan when you book"), so netting the first
+// invoice delivers the promise under either, and an operational gate flip can
+// never change an in-flight tokenized estimate's accepted amount. The only
+// divergence a flip can produce is billing LESS than a pre-credit display —
+// the safe direction. Every guard below is per-selection math, not
+// presentation state.
+function planCreditFirstVisitSlice(frequency = {}, { preferences = null, services = null } = {}) {
+  const md = frequency?.manualDiscount;
+  if (!md || frequency?.manualDiscountSuppressed === true) return null;
+  if (md.type !== 'PERCENT') return null;
+  const pct = Number(md.value);
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const recurringAnnual = round2(Number(md.recurringAmount ?? md.amount) || 0);
+  if (!(pct > 0) || !(recurringAnnual > 0)) return null;
+  if (md.capped === true || md.capReason || md.floorBreach) return null;
+  if (Number(md.oneTimeAmount) > 0) return null;
+  if (md.scope && md.scope !== 'recurring_annual_after_waveguard') return null;
+  const rowAmounts = sameDayVisitRowAmounts(frequency, { preferences, services });
+  if (!rowAmounts) return null;
+  const eligibleList = Array.isArray(md.eligibleServices) && md.eligibleServices.length
+    ? md.eligibleServices
+    : null;
+  let firstVisitSlice = 0;
+  let annualSliceTotal = 0;
+  let visitTotal = 0;
+  for (const entry of rowAmounts) {
+    const visits = treatmentVisitsForPricingRow(entry.row);
+    if (!(visits > 0)) return null;
+    const key = recurringServiceKey(entry.row);
+    const eligible = (!eligibleList || manualDiscountServiceKeyMatches(eligibleList, key))
+      && !manualDiscountServiceKeyMatches(md.excludedServices, key);
+    if (!eligible) continue;
+    // Slices price on the PRE-preference base (codex #3185 r1): the credit
+    // object is preference-blind and the section stamper slices the same
+    // unadjusted price — an opt-out earns its own preference credit AND the
+    // full promised slice, never a shrunken one.
+    const rowSlice = round2(entry.baseAmount * (pct / 100));
+    firstVisitSlice = round2(firstVisitSlice + rowSlice);
+    annualSliceTotal = round2(annualSliceTotal + round2(rowSlice * visits));
+    visitTotal += visits;
+  }
+  if (!(firstVisitSlice > 0)) return null;
+  // A slice that fully comps (or overshoots) the preference-adjusted first
+  // visit cannot thread the downstream consumers safely: a zero/negative
+  // netted amount would persist into scheduled_services.estimated_price, and
+  // the falsy-fallback chains (visitEstimatedPrice, invoice-mode's amount
+  // resolver) would then substitute a POSITIVE cadence amount — charging
+  // more than the fully credited visit (codex #3185 r2). Strictly positive
+  // net or no slice at all: the extreme discount+opt-out corner keeps
+  // today's pre-credit first visit with the plan-level credit story.
+  const billedVisitTotal = round2(rowAmounts.reduce((sum, entry) => sum + entry.amount, 0));
+  if (!(round2(billedVisitTotal - firstVisitSlice) > 0)) return null;
+  // Reconciliation — same rounding budget as the display stamper. The slices
+  // must rebuild EITHER the base cadence's credit object (base-row selection;
+  // matches the display stamper exactly) OR the credit the frequency itself
+  // nets (pre-credit row-sum annual minus the net annual accept charges —
+  // the authority for combo overlays, which keep the BASE row's credit
+  // object while their rows and net total describe a different combo).
+  // shapeFromV1 nets the annualized preference credit into the frequency's
+  // annual alongside the plan credit, so the diff must add it back (codex
+  // #3185 r2) — computed from the SAME preferences the row amounts used.
+  // Ineligible rows appear identically on both sides of the diff, so they
+  // cancel. Drift past the budget on both means something this math doesn't
+  // see shapes the credit (a hidden row, build-time prefs that differ from
+  // accept-time prefs): bail rather than itemize a slice accept-time math
+  // doesn't grant.
+  // ONE exact authority (codex #3185 r7 P0): every selectable option —
+  // base cadence or combo — reconciles against its OWN engine-computed
+  // credit object. Combos carry theirs since buildServiceCadenceCombos
+  // persists the per-combo shapeFromV1 output (the accept overlay replaces
+  // the inherited base object with it; a legacy snapshot combo without one
+  // resolves to null and never reaches here). The budget covers only the
+  // per-row cent rounding this function itself introduces — a floor-capped
+  // grant differs from the full-percentage slice by real dollars and can
+  // never hide inside it.
+  if (Math.abs(annualSliceTotal - recurringAnnual) > 0.005 * visitTotal + 0.02) return null;
+  const label = String(md.label || 'Discount').trim() || 'Discount';
+  return { label, firstVisitSlice };
 }
 
 function buildCombinedRecurring(payload = {}, estimate = {}, estData = {}, services = []) {
@@ -16492,7 +16842,10 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
   // AFTER combinedRecurring: the stamp nets section rows for display, and the
   // combined build must keep reading the pre-credit rows (its own totals
   // already net the plan credit once — netted inputs would double-count it).
-  const manualDiscountItemizedInSections = stampPerServiceManualDiscountSlices(services, contractPayload);
+  // estData carries the stored preferences the accept-side slicer will read —
+  // the stamper validates every selectable option against the same slicer, so
+  // the flag authorizes exactly what accept will honor.
+  const manualDiscountItemizedInSections = stampPerServiceManualDiscountSlices(services, contractPayload, estData);
   const serviceCategories = services.map((section) => (
     section.key === 'bundle' ? 'bundle' : (categoryForRecurringServiceKey(section.key) || section.key)
   ));
@@ -17199,10 +17552,13 @@ function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
   // A lawn row at a retired visit cadence violates the policy even when its
   // price sits at/above the floor — a snapshotted 4-visit lawn row priced at
   // exactly the floor is still the retired Quarterly plan.
-  const retiredLawnVisits = new Set(Object.values(LAWN_TIERS || {})
-    .filter((t) => t && t.hidden === true)
-    .map((t) => Number(t.freq))
-    .filter((n) => Number.isFinite(n) && n > 0));
+  const retiredLawnVisits = new Set([
+    ...REMOVED_LAWN_TIER_FREQS,
+    ...Object.values(LAWN_TIERS || {})
+      .filter((t) => t && t.hidden === true)
+      .map((t) => Number(t.freq))
+      .filter((n) => Number.isFinite(n) && n > 0),
+  ]);
   const lawnTreatmentRowViolates = (rows) => Array.isArray(rows) && rows.some((r) => {
     if (recurringServiceKey(r) !== 'lawn_care') return false;
     const visits = Number(r?.visitsPerYear ?? r?.visits);
@@ -19076,3 +19432,6 @@ module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;
+// Test hook (owner GO 2026-08-04): accept-side first-visit slice of a
+// multi-service PERCENT plan credit.
+module.exports.planCreditFirstVisitSlice = planCreditFirstVisitSlice;

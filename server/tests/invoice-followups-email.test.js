@@ -71,6 +71,9 @@ function followupRow(overrides = {}) {
     invoice_id: 'inv-1',
     customer_id: 'cust-1',
     step_index: 0,
+    // Mirrors the batch select (s.*): due an hour before the frozen clock —
+    // same-day, inside the stale grace, so runPending routes to fireStep.
+    next_touch_at: '2026-05-26T13:00:00.000Z',
     touches_sent: 0,
     token: 'token-1',
     title: 'Quarterly Pest Control',

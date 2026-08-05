@@ -68,6 +68,16 @@ const THRESHOLDS = {
   decayMinDropPct: 0.25,
   cannibalizationMinUrls: 2,
 
+  // answer_gap bucket: queries a page already ranks 9–30 for but whose body
+  // never directly answers them (no heading covers the query's content
+  // terms). Window deliberately deeper than striking_distance — retrieval
+  // gaps persist well past page 1 — and the per-query floor is lower than
+  // minImpressionsToScore because the PAGE-level sum (what scoring uses)
+  // still has to clear the impressionsBoost floor to score at all.
+  answerGapPositionMin: 9,
+  answerGapPositionMax: 30,
+  answerGapMinQueryImpressions: 25,
+
   // Recency / dedupe.
   recencyBlocklistDays: 60,
 

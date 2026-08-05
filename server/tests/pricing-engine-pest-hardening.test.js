@@ -45,13 +45,13 @@ describe('pest-control pricing hardening', () => {
       footprintAdj: 0,
       additionalAdj: 0,
       propAdj: 0,
-      basePrice: 117,
+      basePrice: 112,
       roachAddOn: 0,
       freqMult: 1,
       visitsPerYear: 4,
-      perApp: 117,
-      annual: 468,
-      monthly: 39,
+      perApp: 112,
+      annual: 448,
+      monthly: 37.33,
       marginFloorOk: true,
       requiresManualReview: false,
     }));
@@ -59,7 +59,7 @@ describe('pest-control pricing hardening', () => {
     expect(line.costs.onSiteLaborCost).toBeCloseTo(14.58, 2);
     expect(line.costs.driveLaborCost).toBeCloseTo(11.67, 2);
     expect(line.costs.annualCost).toBe(183);
-    expect(line.margin).toBeCloseTo(0.61, 2);
+    expect(line.margin).toBeCloseTo(0.59, 2);
   });
 
   test('protocol recurring pest example B auto-attaches German roach knockdown', () => {
@@ -84,13 +84,13 @@ describe('pest-control pricing hardening', () => {
     expect(pest).toEqual(expect.objectContaining({
       footprintAdj: 7,
       additionalAdj: 18,
-      basePrice: 142,
+      basePrice: 137,
       roachAddOn: 0,
       freqMult: 0.70,
       visitsPerYear: 12,
-      perApp: 99.40,
-      annual: 1192.80,
-      monthly: 99.40,
+      perApp: 95.90,
+      annual: 1150.80,
+      monthly: 95.90,
       roachType: 'german',
     }));
     expect(roach).toEqual(expect.objectContaining({
@@ -336,13 +336,13 @@ describe('pest-control pricing hardening', () => {
     const result = priceOneTimePest(p, { urgency: 'SOON', isRecurringCustomer: true });
 
     expect(result).toEqual(expect.objectContaining({
-      basePrice: 117,
+      basePrice: 112,
       baseSource: 'computed_quarterly_baseline',
-      preUrgencyPrice: 257,
+      preUrgencyPrice: 246,
       urgencyMultiplier: 1.25,
-      subtotalBeforeRecurringCustomerDiscount: 321,
-      price: 273,
-      recurringCustomerDiscountAmount: 48,
+      subtotalBeforeRecurringCustomerDiscount: 308,
+      price: 261,
+      recurringCustomerDiscountAmount: 47,
     }));
 
     const guarded = priceOneTimePest(p, { recurringPestPerApp: 'bad' });
@@ -553,7 +553,7 @@ describe('pest-control pricing hardening', () => {
     });
 
     expect(pest.footprintAdj).toBe(-5);
-    expect(pest.basePrice).toBe(112);
-    expect(pest.perApp).toBe(112);
+    expect(pest.basePrice).toBe(107);
+    expect(pest.perApp).toBe(107);
   });
 });

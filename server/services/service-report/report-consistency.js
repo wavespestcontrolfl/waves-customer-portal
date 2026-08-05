@@ -16,6 +16,36 @@
  * Pure + best-effort: returns null when there's nothing to reconcile.
  */
 
+// Customer-facing lead extraction for the today's-result hero. Unlike
+// firstSentence (whose callers want a short excerpt and tolerate a "…"),
+// the hero must be a COMPLETE sentence: the boundary logic skips periods
+// that belong to abbreviations ("The St. Augustine lawn…" shipped the
+// hero "The St." — codex P1 #3187 r4) and decimals ("2.77 in"), and
+// anything over the cap returns '' (caller falls back to the neutral
+// lead) rather than truncating.
+// Initialisms are recognized by their DOTTED sequence — a period, letter,
+// period tail ("U.S." ends ".S.", "e.g." ends ".g.") — never by a blanket
+// single-letter rule: "We applied Heritage G." is a real catalog product
+// ending a real sentence, and suppressing that boundary merged the next
+// sentence into the hero (codex P2 #3187 r5 → r20).
+const LEAD_ABBREVIATIONS = /(?:\b(?:St|Mr|Mrs|Ms|Dr|Sr|Jr|vs|etc|approx|Ave|Blvd|Rd|Ft|Mt|No)|\.[A-Za-z])\.$/i;
+
+function leadSentence(text, max = 220) {
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  // A boundary is a terminator followed by whitespace and a capital/digit
+  // start — a decimal's period has no following whitespace, so it never
+  // matches; an abbreviation's period is skipped by the suffix test.
+  const boundary = /[.!?](?=\s+["'(]?[A-Z0-9])/g;
+  let match;
+  while ((match = boundary.exec(t))) {
+    const candidate = t.slice(0, match.index + 1);
+    if (LEAD_ABBREVIATIONS.test(candidate)) continue;
+    return candidate.length <= max ? candidate : '';
+  }
+  return /[.!?]$/.test(t) && t.length <= max ? t : '';
+}
+
 function firstSentence(text, max = 170) {
   const t = String(text || '').trim();
   if (!t) return '';
@@ -96,7 +126,20 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   // ── Today's result reconciliation ─────────────────────────────────────────
   let todaysResult = null;
   if (hasIssue || followUp) {
-    todaysResult = `Routine service completed. No urgent homeowner action is needed today${followUp ? ', and a follow-up is already planned' : ''}.`;
+    // Lead with THIS visit's story, not one fixed sentence for every
+    // customer (owner feedback 2026-08-03). The summary's first sentence is
+    // already vetted customer copy — it renders verbatim in Visit Summary —
+    // so it can't introduce a new claim. Only a COMPLETE sentence qualifies
+    // (leadSentence returns '' for fragments and over-cap text); anything
+    // else keeps the neutral lead. The greeting strip mirrors the client's
+    // cleanVisitSummary so the hero never opens with a thank-you line.
+    const summaryLead = leadSentence(
+      String(data.summary || '').replace(/^Thanks for having us out today\.\s*/i, '').trim()
+    );
+    const lead = summaryLead || 'Routine service completed.';
+    // No follow-up clause here (owner directive 2026-08-03): the follow-up
+    // card below carries that promise; the hero states only today's outcome.
+    todaysResult = `${lead} No urgent homeowner action is needed today.`;
     warnings.push({
       severity: 'warning',
       code: 'todays_result_overclaims_clear',

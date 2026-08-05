@@ -58,8 +58,37 @@ router.get('/', async (req, res, next) => {
     // says nothing about billing.
     const cancellable = await hasCancellableWork(req.customerId);
 
+    // Self-serve re-service tie-in (GATE_RESERVICE_SELF_SERVE): when the
+    // customer's LIVE plan state grants a lane, the portal offers the same
+    // standing /reservice/:token page the office texts (services/
+    // reservice-scheduler.js owns eligibility). Same-customer token, so
+    // exposing it here adds no reach beyond the customer's own texts — the
+    // exact posture rescheduleUrl below takes. Null while the gate is dark,
+    // the customer has no lane, or the row predates the token backfill —
+    // the portal simply doesn't render the CTA. Best-effort: a lookup
+    // failure must not break the schedule list.
+    let reservice = null;
+    try {
+      const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('../services/reservice-scheduler');
+      if (reserviceSelfServeEnabled()) {
+        const customer = await db('customers')
+          .where({ id: req.customerId })
+          .whereNull('deleted_at')
+          .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
+        const lanes = (customer && customer.active !== false && customer.reservice_token)
+          ? await reserviceLanesForCustomer(customer)
+          : [];
+        if (lanes.length) {
+          reservice = { url: `/reservice/${customer.reservice_token}`, lanes };
+        }
+      }
+    } catch (err) {
+      logger.warn(`[schedule] reservice tie-in lookup failed for ${req.customerId}: ${err.message}`);
+    }
+
     res.json({
       hasCancellableWork: cancellable,
+      reservice,
       upcoming: upcoming.map(s => ({
         id: s.id,
         date: s.scheduled_date,

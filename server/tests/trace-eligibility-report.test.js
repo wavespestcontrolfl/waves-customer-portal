@@ -1,0 +1,409 @@
+/**
+ * Report-side enforcement of trace eligibility (GATE_TRACE_ELIGIBILITY):
+ * the ONE server-side suppression point at payload build. The discriminator
+ * lane is termite BAIT — the legacy checks (bed bug, rodent trapping) never
+ * covered it, so gate-off renders its saved trace (today's defect) and
+ * gate-on suppresses it. Reports recompose at view time, so legacy rows on
+ * ineligible services die at render without any data migration.
+ */
+
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (key) => key === 'treatmentZoneMap',
+}));
+jest.mock('../services/photos', () => ({
+  getViewUrl: jest.fn(async () => 'https://signed.example/snapshot.png'),
+  CUSTOMER_DWELL_TTL_SECONDS: 3600,
+}));
+jest.mock('../services/service-report/rodent-report-narrative', () => ({
+  applyRodentReportNarrative: jest.fn(async () => null),
+  applyTypedReportNarrative: jest.fn(async () => null),
+}));
+jest.mock('../services/termite-stations', () => ({
+  ...jest.requireActual('../services/termite-stations'),
+  buildStationMapReportContext: jest.fn(() => null),
+}));
+
+const { buildReportV1Data } = require('../services/service-report/report-data');
+
+const TRACED_ROW = {
+  snapshot_s3_key: 'zones/snap.png',
+  mask_s3_key: null,
+  capture_mode: 'perimeter',
+  path_points: JSON.stringify([{ px: { x: 10, y: 20 } }]),
+  closed_loop: true,
+  linear_ft: 140,
+  updated_at: '2026-08-01T12:00:00Z',
+};
+
+function stubKnex(fixtures = {}) {
+  const knex = (table) => {
+    const rows = fixtures[table] || [];
+    const query = {
+      where: () => query,
+      whereIn: () => query,
+      whereRaw: () => query,
+      orWhere: () => query,
+      andWhere: () => query,
+      whereNull: () => query,
+      whereNotNull: () => query,
+      orderBy: () => query,
+      modify: () => query,
+      limit: () => query,
+      select: () => Promise.resolve(rows),
+      first: () => Promise.resolve(rows[0] || null),
+      catch: () => Promise.resolve(rows),
+      then: (resolve) => Promise.resolve(rows).then(resolve),
+    };
+    return query;
+  };
+  return knex;
+}
+
+function serviceRow(serviceType) {
+  return {
+    id: 'service-trace-1',
+    scheduled_service_id: 'sched-trace-1',
+    customer_id: 'customer-1',
+    service_line: 'pest',
+    service_type: serviceType,
+    service_date: '2026-08-01',
+    first_name: 'Pat',
+    last_name: 'Customer',
+    areas_serviced: '[]',
+    structured_notes: '{}',
+    service_data: '{}',
+    pressure_index: null,
+  };
+}
+
+async function tracedFor(serviceType, options = {}) {
+  const data = await buildReportV1Data(
+    serviceRow(serviceType),
+    `token-trace-${serviceType.replace(/\W+/g, '-').toLowerCase()}-${process.env.GATE_TRACE_ELIGIBILITY || 'off'}`,
+    stubKnex({ treatment_zone_maps: [TRACED_ROW] }),
+    { mode: 'live', ...options },
+  );
+  return data.treatmentMap?.traced || null;
+}
+
+describe('trace suppression at report payload build', () => {
+  const prevGate = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = prevGate;
+  });
+
+  test('gate OFF: a bait-lane trace still renders (the current defect, preserved dark)', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    const traced = await tracedFor('Termite Bait Quarterly');
+    expect(traced).not.toBeNull();
+  });
+
+  test('gate OFF: the registry variant stays dark too — payloads render as today (round 11)', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    const traced = await tracedFor('Quarterly Pest Control');
+    expect(traced).not.toBeNull();
+    expect(traced.variant).toBeNull();
+    expect(traced.captionKey).toBeNull();
+  });
+
+  test('gate ON: the same bait-lane trace is suppressed, legacy row untouched', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    expect(await tracedFor('Termite Bait Quarterly')).toBeNull();
+    expect(await tracedFor('Termite Inspection')).toBeNull();
+  });
+
+  test('gate ON: an eligible spray lane keeps its trace and gains the server variant', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const traced = await tracedFor('Quarterly Pest Control');
+    expect(traced).not.toBeNull();
+    expect(traced.variant).toBe('spray');
+    expect(traced.captionKey).toBe('sprayPerimeter');
+  });
+
+  test('round 15 — completion-frozen identities beat later schedule edits', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    // Frozen ineligible primary + frozen EMPTY add-ons: a pest add-on
+    // added to the schedule AFTER completion cannot republish the trace
+    const frozenRow = serviceRow('Termite Bait Quarterly');
+    frozenRow.service_data = JSON.stringify({
+      // an explicitly INELIGIBLE frozen key (the legacy station-install
+      // lane) — the pest bundle key would be eligible in its own right
+      completedServiceKey: 'termite_installation_setup',
+      completedServiceName: 'Termite Bait Station Install',
+      completedAddonLines: [],
+    });
+    const suppressed = await buildReportV1Data(
+      frozenRow,
+      'token-trace-frozen-suppressed',
+      stubKnex({
+        treatment_zone_maps: [TRACED_ROW],
+        // live rows now claim a pest add-on — must NOT rescue
+        scheduled_service_addons: [{ service_id: null, service_name: 'Quarterly Pest Control' }],
+      }),
+      { mode: 'live' },
+    );
+    expect(suppressed.treatmentMap?.traced || null).toBeNull();
+    // Frozen ELIGIBLE primary beats a live row repointed to bait
+    const keptRow = serviceRow('Termite Bait Quarterly');
+    keptRow.service_data = JSON.stringify({
+      completedServiceKey: 'pest_general_quarterly',
+      completedServiceName: 'Quarterly Pest Control',
+      completedAddonLines: [],
+    });
+    const kept = await buildReportV1Data(
+      keptRow,
+      'token-trace-frozen-kept',
+      stubKnex({ treatment_zone_maps: [TRACED_ROW] }),
+      { mode: 'live' },
+    );
+    expect(kept.treatmentMap?.traced || null).not.toBeNull();
+  });
+
+  test('round 18 — the presentation follows the captured bitmap', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    // a lawn-family capture renders as outline even when the verdict is
+    // a spray lane — the saved geometry cannot wear spray copy
+    const lawnRow = { ...TRACED_ROW, capture_mode: 'lawn' };
+    const data = await buildReportV1Data(
+      serviceRow('Quarterly Pest Control'),
+      'token-trace-lawn-capture-harmonized',
+      stubKnex({ treatment_zone_maps: [lawnRow] }),
+      { mode: 'live' },
+    );
+    const traced = data.treatmentMap?.traced || null;
+    expect(traced).not.toBeNull();
+    expect(traced.variant).toBe('outline');
+    expect(traced.captionKey).toBe('lawnCoverage');
+  });
+
+  test('round 16 — gate on, the combined verdict outranks the legacy belt lanes', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    // trapping-primary belt no longer overrides an add-on rescue: the
+    // frozen trapping snapshot is ineligible, the pest add-on rescues
+    const trapRow = serviceRow('Rodent Trapping');
+    trapRow.service_data = JSON.stringify({
+      typedReportSnapshot: { type: 'rodent_trapping', values: {} },
+      completedServiceKey: null,
+      completedServiceName: 'Rodent Trapping',
+      completedAddonLines: [{ serviceId: null, serviceName: 'Quarterly Pest Control' }],
+    });
+    const rescued = await buildReportV1Data(
+      trapRow, 'token-trace-belt-rescued',
+      stubKnex({ treatment_zone_maps: [TRACED_ROW] }),
+      { mode: 'live' },
+    );
+    expect(rescued.treatmentMap?.traced || null).not.toBeNull();
+    // frozen-pest primary + live label repointed to bed bug: the frozen
+    // identity keeps the map (the label belt would have hidden it)
+    const repointedRow = serviceRow('Bed Bug Treatment');
+    repointedRow.service_data = JSON.stringify({
+      completedServiceKey: 'pest_general_quarterly',
+      completedServiceName: 'Quarterly Pest Control',
+      completedAddonLines: [],
+    });
+    const kept = await buildReportV1Data(
+      repointedRow, 'token-trace-belt-kept',
+      stubKnex({ treatment_zone_maps: [TRACED_ROW] }),
+      { mode: 'live' },
+    );
+    expect(kept.treatmentMap?.traced || null).not.toBeNull();
+  });
+
+  test('gate ON: an eligible add-on line rescues the report map (round 13 — the export bug path)', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const data = await buildReportV1Data(
+      serviceRow('Termite Bait Quarterly'),
+      'token-trace-addon-rescue',
+      stubKnex({
+        treatment_zone_maps: [TRACED_ROW],
+        scheduled_service_addons: [{ service_id: null, service_name: 'Quarterly Pest Control' }],
+      }),
+      { mode: 'live' },
+    );
+    const traced = data.treatmentMap?.traced || null;
+    expect(traced).not.toBeNull();
+    expect(traced.variant).toBe('spray');
+  });
+
+  test('gate ON: a lawn lane resolves the outline variant', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const traced = await tracedFor('Lawn Fertilization');
+    expect(traced).not.toBeNull();
+    expect(traced.variant).toBe('outline');
+  });
+});
+
+// Owner ruling (b): stale cached PDFs invalidate on next open. The PDF
+// cache key's treatment-zone component must change when the gate flips or
+// the verdict differs — otherwise cached PDFs keep publishing the old
+// spray map forever (codex P1 r1).
+describe('PDF signature varies with the eligibility verdict', () => {
+  const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
+  const prevGate = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = prevGate;
+  });
+
+  const signatureFor = (serviceType) => treatmentZonePdfSignature(
+    { scheduled_service_id: 'sched-trace-1', service_type: serviceType, service_data: '{}' },
+    stubKnex({
+      treatment_zone_maps: [TRACED_ROW],
+      scheduled_services: [{ id: 'sched-trace-1', service_id: null, service_type: serviceType }],
+    }),
+  );
+
+  test('gate off: pre-flip keys are untouched', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    expect(await signatureFor('Termite Bait Quarterly')).toMatch(/^-tz\d+$/);
+  });
+
+  test('gate on: suppressed and eligible verdicts key differently', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const bait = await signatureFor('Termite Bait Quarterly');
+    const pest = await signatureFor('Quarterly Pest Control');
+    // r19: the capture-mode presentation component rides the key too
+    expect(bait).toMatch(/-te0-cmperimeter$/);
+    expect(pest).toMatch(/-te1spray-cmperimeter$/);
+    expect(bait).not.toBe(pest);
+  });
+
+  test('round 20 — a partial caller row resolves the same key as the full row', async () => {
+    // pdf-queue passes a narrow column set; the signature must load the
+    // missing evidence itself or the lookup key diverges from the stored
+    // one and the attachment re-renders on every fetch.
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const fullRow = {
+      id: 'svc-r20',
+      service_type: 'Pest Re-Service',
+      areas_serviced: JSON.stringify(['Exterior perimeter']),
+      structured_notes: '{}',
+      service_data: JSON.stringify({
+        completedServiceKey: 'pest_re_service',
+        completedServiceName: 'Pest Re-Service',
+        completedAddonLines: [],
+      }),
+    };
+    const fixtures = {
+      treatment_zone_maps: [TRACED_ROW],
+      service_records: [fullRow],
+    };
+    const partial = await treatmentZonePdfSignature(
+      { scheduled_service_id: 'sched-trace-1', id: 'svc-r20' },
+      stubKnex(fixtures),
+    );
+    const full = await treatmentZonePdfSignature(
+      { scheduled_service_id: 'sched-trace-1', ...fullRow },
+      stubKnex(fixtures),
+    );
+    expect(partial).toBe(full);
+    expect(partial).toMatch(/-te1spray-cmperimeter$/);
+  });
+});
+
+describe('round 21 — the shared resolver fails closed on a linked lookup failure', () => {
+  const { resolveTraceRenderVerdict } = require('../services/service-report/trace-eligibility');
+
+  const prevGate = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = prevGate;
+  });
+
+  test('linked row + throwing lookup → sentinel suppresses; unlinked keeps name fallback', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const throwingKnex = () => { throw new Error('db down'); };
+    // LINKED: the eligible-by-name label cannot rescue the failed lookup
+    const linked = await resolveTraceRenderVerdict(
+      { scheduled_service_id: 'ss-r21', service_type: 'Quarterly Pest Control', service_data: '{}' },
+      throwingKnex,
+    );
+    expect(linked.suppressed).toBe(true);
+    // UNLINKED legacy record: name fallback still stands
+    const unlinked = await resolveTraceRenderVerdict(
+      { service_type: 'Quarterly Pest Control', service_data: '{}' },
+      throwingKnex,
+    );
+    expect(unlinked.suppressed).toBe(false);
+  });
+
+  test('round 22 — the report builder fails closed when the schedule-row lookup REJECTS', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    // knex where only the scheduled_services lookup rejects — everything
+    // else behaves like the standard stub
+    const base = stubKnex({ treatment_zone_maps: [TRACED_ROW] });
+    const rejectingKnex = (table) => {
+      if (table !== 'scheduled_services') return base(table);
+      const q = {
+        where: () => q,
+        first: () => Promise.reject(new Error('db down')),
+      };
+      return q;
+    };
+    // linked record + eligible-by-name label: the sentinel must suppress
+    const data = await buildReportV1Data(
+      serviceRow('Quarterly Pest Control'),
+      'token-trace-r22-schedule-reject',
+      rejectingKnex,
+      { mode: 'live' },
+    );
+    expect(data.treatmentMap?.traced || null).toBeNull();
+  });
+
+  test('round 24 — a precomputed verdict skips the second resolve pass entirely', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    const { resolveTracedExteriorZone } = require('../services/service-report/report-data');
+    // identity lookups EXPLODE — only the zone row works: with the
+    // payload's combined verdict passed in, the resolver must not
+    // recompute, so the exterior claim survives
+    const zoneOnlyKnex = (table) => {
+      if (table !== 'treatment_zone_maps') throw new Error('identity lookups must not run');
+      const q = { where: () => q, first: () => Promise.resolve(TRACED_ROW) };
+      return q;
+    };
+    const record = { scheduled_service_id: 'sched-trace-1', service_type: 'Quarterly Pest Control' };
+    const kept = await resolveTracedExteriorZone(record, zoneOnlyKnex, {
+      precomputedTraceVerdict: { suppressed: false, eligibility: { eligible: true, variant: 'spray' } },
+    });
+    expect(kept).toBe(true);
+    const suppressed = await resolveTracedExteriorZone(record, zoneOnlyKnex, {
+      precomputedTraceVerdict: { suppressed: true, eligibility: null },
+    });
+    expect(suppressed).toBe(false);
+  });
+});
+
+// Codex P1 r2: reports-public and email-delivery build the re-entry
+// context through resolveTracedExteriorZone independently of the report
+// payload, so the verdict must live INSIDE that shared resolver — an
+// ineligible visit losing its map must lose the exterior ready-time
+// claim on every surface, not just the one call site.
+describe('the shared exterior-zone resolver honors the verdict', () => {
+  const { resolveTracedExteriorZone } = require('../services/service-report/report-data');
+  const prevGate = process.env.GATE_TRACE_ELIGIBILITY;
+  afterEach(() => {
+    if (prevGate === undefined) delete process.env.GATE_TRACE_ELIGIBILITY;
+    else process.env.GATE_TRACE_ELIGIBILITY = prevGate;
+  });
+
+  const zoneFor = (serviceType) => resolveTracedExteriorZone(
+    { scheduled_service_id: 'sched-trace-1', service_type: serviceType, service_data: '{}' },
+    stubKnex({
+      treatment_zone_maps: [TRACED_ROW],
+      scheduled_services: [{ id: 'sched-trace-1', service_id: null, service_type: serviceType }],
+    }),
+  );
+
+  test('gate off: a saved trace still asserts the exterior zone (current behavior)', async () => {
+    delete process.env.GATE_TRACE_ELIGIBILITY;
+    expect(await zoneFor('Termite Bait Quarterly')).toBe(true);
+  });
+
+  test('gate on: ineligible lanes lose the exterior claim, eligible lanes keep it', async () => {
+    process.env.GATE_TRACE_ELIGIBILITY = 'true';
+    expect(await zoneFor('Termite Bait Quarterly')).toBe(false);
+    expect(await zoneFor('Termite Inspection')).toBe(false);
+    expect(await zoneFor('Quarterly Pest Control')).toBe(true);
+  });
+});

@@ -46,6 +46,7 @@ import {
   docTransition,
 } from '../theme-doc';
 import BrandFooter from '../components/BrandFooter';
+import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
@@ -825,7 +826,7 @@ function dynamicHeroSummary(data) {
   return 'Your routine service is complete.';
 }
 
-function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource = null } = {}) {
+function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
   // Lawn reports show the week's rain (the number the water card and 7-day
   // chart are built from) so every rain figure on the page agrees; other
   // lines keep the trailing-24h capture (owner 2026-07-30).
@@ -833,26 +834,15 @@ function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource 
   const rainRow = usingWeeklyRain
     ? ['Rain this week', weeklyRainIn, ' in']
     : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
-  // Credit the weekly figure's ACTUAL provider when it differs from the
-  // point-capture source — the property-week series is Open-Meteo, but the
-  // area-snapshot fallback's rainfall is local area records, not Open-Meteo
-  // (codex P2 #3093 ×2).
-  const sourceValue = usingWeeklyRain && weeklyRainSource
-    ? (conditions.source
-      ? (String(conditions.source).toLowerCase().includes(String(weeklyRainSource).toLowerCase())
-        ? conditions.source
-        : `${conditions.source} + ${weeklyRainSource}`)
-      // No point-capture source on the record — the weekly figure still has
-      // a known provider, and the Source row must credit it (codex P2 r14).
-      : weeklyRainSource)
-    : conditions.source;
+  // No Source row: the provider credit is internal provenance, not customer
+  // information (owner directive 2026-08-03 — supersedes the codex #3093/r14
+  // crediting rules, which now apply to nothing rendered here).
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
     ['Humidity', conditions.humidity_pct ?? conditions.humidity, '%'],
     ['Wind', conditions.wind_mph ?? conditions.wind, ' mph'],
     rainRow,
     ['Sky', conditions.sky ?? conditions.cloudCover, ''],
-    ['Source', sourceValue, ''],
   ];
   return rows
     .filter(([, value]) => value !== null && value !== undefined && value !== '')
@@ -991,6 +981,43 @@ export function applicationPurpose(app = {}, serviceLine = 'pest') {
   return 'Treatment application';
 }
 
+// Recorded per-application targets as customer-readable text. Targets arrive
+// both as display labels ("Large patch") and canonical enum keys
+// ("take_all_root_rot") — convert underscores (enum separators) to spaces so
+// keys never print raw, but KEEP hyphens: display labels like "Take-all root
+// rot" spell them deliberately (unlike matchedPestFamilies, which only
+// matches and can flatten both).
+export function recordedTargetsText(app = {}) {
+  const targets = (Array.isArray(app.targets) ? app.targets : [])
+    .map((t) => String(t || '').replace(/_+/g, ' ').trim())
+    .filter(Boolean);
+  return targets.length ? targets.join(', ').toLowerCase() : '';
+}
+
+// Governed disease vocabulary for the fungicide purpose line: target chips
+// accept unrestricted free text (ProductTargetsPicker), so only names
+// recognized as turf diseases may render — ANY unrecognized target fails
+// the WHOLE line closed to the generic copy, mirroring
+// applicationPestFamily's unrecognized-co-target rule (codex P1 #3187
+// r16; the completion intake gate also rejects banned copy in targets,
+// this is the render-side backstop for records that predate it).
+// Vocabulary mirrors the catalog prefill lists (20260723000001 /
+// 20260801300000) — including the oomycete set (Pythium blight /
+// damping-off, yellow tuft) so Banol/Subdue prefills render (codex P2
+// r17). "Pythium root rot" is deliberately absent: that migration's own
+// pre-push P1 keeps root-rot claims off lawn reports (ornamental-label
+// use only).
+const LAWN_DISEASE_TARGET_RE = /^(?:brown patch(?: ?\/ ?large patch)?|large patch|gray leaf spot|grey leaf spot|take[- ]?all root rot|fairy ring|dollar spot|anthracnose|pythium(?: (?:blight|damping[- ]?off))?|yellow tuft(?: \(downy mildew\))?|rust|leaf spot|melting out|summer patch|powdery mildew|slime mold)$/i;
+
+export function recognizedDiseaseTargetsText(app = {}) {
+  const targets = (Array.isArray(app.targets) ? app.targets : [])
+    .map((t) => String(t || '').replace(/_+/g, ' ').trim())
+    .filter(Boolean);
+  if (!targets.length) return '';
+  if (!targets.every((t) => LAWN_DISEASE_TARGET_RE.test(t))) return '';
+  return targets.join(', ').toLowerCase();
+}
+
 export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   const purpose = applicationPurpose(app, serviceLine);
   if (purpose === 'Targeted weed treatment') return 'Applied where visible weed pressure or service notes called for targeted control.';
@@ -998,13 +1025,23 @@ export function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
     // Name only the RECORDED targets — a hardcoded "chinch bugs and grubs"
     // example could describe an off-target use or imply unsupported history
     // when the application was tagged for something else (codex P2 #3038 r4).
-    const insectTargets = (Array.isArray(app.targets) ? app.targets : []).map((t) => String(t || '').trim()).filter(Boolean);
-    return insectTargets.length
-      ? `Applied to protect the turf from ${insectTargets.join(', ').toLowerCase()}, where activity, history, or seasonal pressure called for it.`
+    const insectTargets = recordedTargetsText(app);
+    return insectTargets
+      ? `Applied to protect the turf from ${insectTargets}, where activity, history, or seasonal pressure called for it.`
       : 'Applied to protect the turf from lawn-damaging insects where activity, history, or seasonal pressure called for it.';
   }
   if (purpose === 'Weed prevention application') return 'Applied to stop new weeds before they sprout, ahead of the season when they spread fastest.';
-  if (purpose === 'Fungus control application') return 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';
+  if (purpose === 'Fungus control application') {
+    // Recognized-disease-vocabulary guard: the names come from the
+    // completion form's target chips — untrimmed catalog prefill (never
+    // claim OBSERVED, codex P1 r3), hand-typed free text (never claim the
+    // label DESIGNED it, r10; never render unvetted claims at all, r16).
+    // Only governed disease names print; recording is the only claim made.
+    const diseaseTargets = recognizedDiseaseTargetsText(app);
+    return diseaseTargets
+      ? `Applied to protect the turf against ${diseaseTargets}, the targets your technician recorded for this application.`
+      : 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';
+  }
   if (purpose === 'Lawn nutrient application') return 'Used to support turf density, color, and recovery within the documented lawn program.';
   if (purpose === 'Lawn treatment application') return 'Recorded as part of today’s lawn care visit and treatment plan.';
   if (purpose === 'Station service') return 'Checked or serviced at the documented station locations.';
@@ -2131,22 +2168,6 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             // r32).
             ? (data.reportV2?.water?.rainInches ?? data.lawnAssessment?.waterContext?.rainfallInches7d ?? null)
             : null}
-          weeklyRainSource={{
-            // MRMS is NOAA's gauge-corrected radar estimate; a mixed week
-            // takes measurements where radar had them and the model on the
-            // gaps, and the Source row has to say so rather than crediting
-            // one provider for both. Unmapped keys fall through to null (no
-            // Source row) instead of printing a raw enum at the customer.
-            open_meteo: 'Open-Meteo',
-            fawn: 'FAWN',
-            area: 'local area rain records',
-            mrms: 'NOAA radar + rain gauges',
-            'mrms+open_meteo': 'NOAA radar + rain gauges, with Open-Meteo on gaps',
-            property_point: 'Open-Meteo',
-            city_collective: 'Open-Meteo (local area)',
-          }[
-            data.reportV2?.water?.rainProvider || data.lawnAssessment?.waterContext?.rainfall7dProvider
-          ] || null}
         />
       </div>
     </section>
@@ -2313,8 +2334,8 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null, weeklyRainSource = null }) {
-  const rows = conditionRows(conditions, { weeklyRainIn, weeklyRainSource });
+function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null }) {
+  const rows = conditionRows(conditions, { weeklyRainIn });
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);
@@ -8371,7 +8392,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
-              tracedVariant={data.serviceLine === 'lawn' ? 'outline' : 'spray'}
+              tracedVariant={data.treatmentMap?.traced?.variant
+                || (data.serviceLine === 'lawn' ? 'outline' : 'spray')}
               live={mode === 'live'}
               applications={data.applications || []}
             />
@@ -8503,7 +8525,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
-              tracedVariant={data.serviceLine === 'lawn' ? 'outline' : 'spray'}
+              tracedVariant={data.treatmentMap?.traced?.variant
+                || (data.serviceLine === 'lawn' ? 'outline' : 'spray')}
               live={mode === 'live'}
               applications={data.applications || []}
             />
@@ -8749,6 +8772,13 @@ export default function ReportViewPage() {
     </div>
   );
   if (!data || data.error) return <NotFoundState glass={glassActive} />;
-  if (data.reportVersion === 'service_report_v1') return <ServiceReportV1 data={data} token={token} mode={mode} />;
+  if (data.reportVersion === 'service_report_v1') {
+    // The PDF artifact is the work-order document (owner 2026-08-03):
+    // the renderer hits ?mode=pdf, so the download, the share sheet, and
+    // the post-service email attachment all serve this capture. The glass
+    // web report (live) and the unused static mode are unchanged.
+    if (mode === 'pdf') return <ServiceReportDocument data={data} token={token} />;
+    return <ServiceReportV1 data={data} token={token} mode={mode} />;
+  }
   return <LegacyReport data={data} token={token} glass={glassActive} />;
 }

@@ -19,6 +19,12 @@
  *   no_content_yet      query has impressions but no own page anywhere
  *   aeo_gap             city×service absent from LLM answers across N+ days
  *                       AND has GSC demand (gated behind GATE_AEO_GAP_MINING)
+ *   answer_gap          queries a page ranks 9–30 for (true query→page rows
+ *                       from gsc_query_page_map) that the page body never
+ *                       directly answers — no heading covers the query's
+ *                       content terms. Emits refresh_existing_page whose
+ *                       draft adds self-contained answer blocks (gated
+ *                       behind GATE_ANSWER_GAP_MINING).
  *   link_boost          derived (not mined): every ctr_rewrite/decay_refresh
  *                       page also gets an add_internal_links companion so
  *                       underperformers receive inbound links, not just a
@@ -163,6 +169,7 @@ function gscOpportunityScore(bucket, position, impressionsBoost) {
   if (bucket === 'seasonal_rising') return Math.round(W * 0.7 * impressionsBoost);
   if (bucket === 'no_content_yet') return Math.round(W * 0.65 * impressionsBoost);
   if (bucket === 'aeo_gap') return Math.round(W * 0.8 * impressionsBoost);
+  if (bucket === 'answer_gap') return Math.round(W * 0.8 * impressionsBoost);
   return 0;
 }
 
@@ -241,6 +248,11 @@ function baseActionForOpportunity({ bucket, query, page_url, city, service }) {
     if (city && service) return 'create_or_refresh_city_service_page';
     return 'new_supporting_blog';
   }
+  // answer_gap is page-anchored by construction (mined from query→page rows);
+  // without a target page there is nothing to add answer blocks to.
+  if (bucket === 'answer_gap') {
+    return page_url ? 'refresh_existing_page' : 'do_not_publish';
+  }
   return 'do_not_publish';
 }
 
@@ -270,10 +282,16 @@ function scoreOpportunity(opportunity, extraSignals = {}) {
     ),
     localRevenue: localRevenueScore(opportunity.service),
     conversionIntent: conversionIntentScore(opportunity.query || opportunity.page_url),
+    // answer_gap earns BOTH: it is literally a content gap (the answer is
+    // missing) on an existing page whose rankings the new blocks lift. The
+    // double credit is what lets a strong gap (impressionsBoost 1.0) clear
+    // the 75 floor at all — weaker signals still fall short by design.
     contentGap: opportunity.bucket === 'local_gap' || opportunity.bucket === 'no_content_yet'
+        || opportunity.bucket === 'answer_gap'
       ? WEIGHTS.contentGap
       : 0,
     refreshLift: opportunity.bucket === 'decay_refresh' || opportunity.bucket === 'ctr_rewrite'
+        || opportunity.bucket === 'answer_gap'
       ? WEIGHTS.refreshLift
       : 0,
     aeoGap: opportunity.bucket === 'aeo_gap'
@@ -355,6 +373,130 @@ function deriveLinkBoost(parents = [], { cap = linkBoostCap(), excludeKeys = new
     .slice(0, cap);
 }
 
+// ── answer-gap analysis (pure, test-friendly) ────────────────────────
+//
+// A query counts as ANSWERED when some H2–H4 heading in the page body
+// covers ≥ ANSWER_GAP_HEADING_COVERAGE of the query's content terms —
+// i.e. the page has a section that directly addresses it. Everything
+// else the page ranks 9–30 for is a retrieval gap: Google already
+// associates the page with the query, but no self-contained passage
+// answers it, so neither classic snippets nor answer-engine chunking can
+// extract one. The heuristic is deliberately coarse (stemmed token
+// overlap, no embeddings): it only ranks candidates — the refresh agent
+// sees the full page + query list and makes the final answered/off-intent
+// call per query.
+
+const ANSWER_GAP_HEADING_COVERAGE = 0.6;
+const ANSWER_GAP_MAX_QUERIES_PER_PAGE = 12;
+
+const ANSWER_GAP_STOPWORDS = new Set([
+  'a', 'an', 'the', 'and', 'or', 'but', 'of', 'in', 'on', 'for', 'to', 'with',
+  'at', 'by', 'from', 'near', 'me', 'nearby', 'is', 'are', 'was', 'were', 'be',
+  'been', 'do', 'does', 'did', 'can', 'could', 'should', 'will', 'would',
+  'how', 'what', 'why', 'when', 'where', 'which', 'who', 'my', 'your', 'our',
+  'their', 'its', 'it', 'i', 'we', 'you', 'get', 'got', 'best', 'top', 'vs',
+  'versus', 'fl', 'florida',
+]);
+
+// City tokens never count as content terms — a city page's headings won't
+// (and shouldn't) repeat the city in every section.
+const ANSWER_GAP_CITY_TOKENS = new Set(
+  CITIES.flatMap((c) => c.toLowerCase().split(/\s+/))
+);
+
+// Light stemming so query and heading tokens compare on their stems
+// ("ants" ↔ "ant", "flies" ↔ "fly"). Naive on purpose — see block comment.
+function answerGapStem(token) {
+  let t = token;
+  if (t.length > 4 && t.endsWith('ies')) return `${t.slice(0, -3)}y`;
+  if (t.length > 3 && t.endsWith('s') && !t.endsWith('ss')) return t.slice(0, -1);
+  return t;
+}
+
+function stemmedTokenSet(text) {
+  const out = new Set();
+  const tokens = String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/[\s-]+/)
+    .filter(Boolean);
+  for (const tok of tokens) out.add(answerGapStem(tok));
+  return out;
+}
+
+function queryContentTerms(query) {
+  const terms = new Set();
+  const tokens = String(query || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/[\s-]+/)
+    .filter(Boolean);
+  for (const tok of tokens) {
+    if (ANSWER_GAP_STOPWORDS.has(tok)) continue;
+    if (ANSWER_GAP_CITY_TOKENS.has(tok)) continue;
+    if (tok === 'waves') continue; // brand residue the is_branded filter can miss
+    terms.add(answerGapStem(tok));
+  }
+  return terms;
+}
+
+function extractHeadings(body) {
+  const out = [];
+  const re = /^#{2,4}\s+(.+)$/gm;
+  let m;
+  while ((m = re.exec(String(body || ''))) !== null) out.push(m[1].trim());
+  return out;
+}
+
+function termCoverage(queryTerms, textTermSet) {
+  if (!queryTerms.size) return 0;
+  let hit = 0;
+  for (const t of queryTerms) if (textTermSet.has(t)) hit += 1;
+  return hit / queryTerms.size;
+}
+
+/**
+ * classifyAnswerGapQueries(queries, body) → { unanswered, answered_count }
+ *
+ * `queries` must be sorted impressions-desc: near-duplicate phrasings
+ * (identical content-term sets, e.g. "bermuda grass removal" vs "how to
+ * remove bermuda grass") collapse to the FIRST one seen, so sorting first
+ * keeps the highest-impression phrasing. Each kept entry carries its
+ * heading/body coverage so the refresh agent can see how close the page
+ * already comes.
+ */
+function classifyAnswerGapQueries(queries = [], body = '') {
+  const headingSets = extractHeadings(body).map((h) => stemmedTokenSet(h));
+  const bodyTerms = stemmedTokenSet(body);
+  const seenTermKeys = new Set();
+  const unanswered = [];
+  let answeredCount = 0;
+
+  for (const q of queries) {
+    const terms = queryContentTerms(q.query);
+    if (!terms.size) continue; // pure stopword/city/brand query — nothing to answer
+    const headingCov = headingSets.reduce(
+      (best, h) => Math.max(best, termCoverage(terms, h)), 0
+    );
+    if (headingCov >= ANSWER_GAP_HEADING_COVERAGE) {
+      answeredCount += 1;
+      continue;
+    }
+    const termKey = Array.from(terms).sort().join('|');
+    if (seenTermKeys.has(termKey)) continue;
+    seenTermKeys.add(termKey);
+    unanswered.push({
+      query: q.query,
+      impressions: q.impressions,
+      clicks: q.clicks,
+      position: q.position,
+      heading_coverage: Number(headingCov.toFixed(2)),
+      body_term_coverage: Number(termCoverage(terms, bodyTerms).toFixed(2)),
+    });
+  }
+  return { unanswered, answered_count: answeredCount };
+}
+
 // ── miner class ──────────────────────────────────────────────────────
 
 class GscOpportunityMiner {
@@ -392,6 +534,7 @@ class GscOpportunityMiner {
       ['seasonal_rising', () => this.mineSeasonalRising(periodDays)],
       ['no_content_yet', () => this.mineNoContentYet(since, ownPagesByServiceCity)],
       ['aeo_gap', () => this.mineAeoGaps(since, ownPagesByServiceCity)],
+      ['answer_gap', () => this.mineAnswerGap(since)],
     ];
 
     for (const [name, fn] of runs) {
@@ -415,7 +558,7 @@ class GscOpportunityMiner {
     // score, and with already-occupied queue rows excluded so the per-run
     // cap rotates to lower-scoring pages (see deriveLinkBoost docs).
     try {
-      const occupied = await this._loadOccupiedLinkBoostKeys().catch((err) => {
+      const occupied = await this._loadOccupiedKeys('link_boost').catch((err) => {
         // Fail-open to pre-rotation behavior: re-emitting occupied rows is
         // harmless (persistAll freezes their status); dropping the lane on a
         // transient query error is not.
@@ -493,12 +636,13 @@ class GscOpportunityMiner {
     }
   }
 
-  // dedupe keys of link_boost rows persistAll's upsert would refuse to
+  // dedupe keys of a bucket's rows persistAll's upsert would refuse to
   // re-open (claimed / done / pending_review) — emitting those again only
-  // burns per-run cap slots on rows whose status can't change.
-  async _loadOccupiedLinkBoostKeys() {
+  // burns per-run cap slots on rows whose status can't change. Shared by
+  // the capped buckets (link_boost, answer_gap).
+  async _loadOccupiedKeys(bucket) {
     const rows = await db('opportunity_queue')
-      .where('bucket', 'link_boost')
+      .where('bucket', bucket)
       // 'skipped' counts as occupied too: the upsert keeps an operator
       // skip sticky, so re-deriving a skipped key just burns one of the
       // LINK_BOOST_MAX_PER_RUN slots on a row persistAll re-freezes as
@@ -971,6 +1115,170 @@ class GscOpportunityMiner {
   }
 
   /**
+   * answer_gap — queries a page already ranks 9–30 for (true query→page rows
+   * from gsc_query_page_map, daily granularity) that the page body never
+   * directly answers. One opportunity per page, action refresh_existing_page;
+   * signal_metadata.unanswered_queries carries the ranked gap list into the
+   * brief's gsc_signal so the refresh agent can write self-contained answer
+   * blocks (see refresh-agent-config ANSWER-GAP MODE).
+   *
+   * Dormant behind GATE_ANSWER_GAP_MINING. Page bodies load through
+   * astro-publisher (GitHub reads), so examination is capped per run
+   * (ANSWER_GAP_MAX_PAGES_PER_RUN, default 10, highest gap demand first) —
+   * pages beyond the cap surface on later runs as stronger gaps get
+   * refreshed. Scoped to one property (ANSWER_GAP_DOMAIN, default the hub):
+   * spoke URLs resolve to SHARED spoke content where a per-page answer block
+   * would leak across brands — keep them out until that lane is designed.
+   * A page that can't resolve to an Astro content file is skipped:
+   * publishRefresh couldn't edit it anyway.
+   */
+  async mineAnswerGap(since) {
+    if (!isEnabled('answerGapMining')) return []; // dormant until explicitly enabled
+    const rawCap = Number.parseInt(process.env.ANSWER_GAP_MAX_PAGES_PER_RUN, 10);
+    const maxPages = Number.isFinite(rawCap) && rawCap > 0 ? rawCap : 10;
+    const domain = (process.env.ANSWER_GAP_DOMAIN || 'wavespestcontrol.com').trim().toLowerCase();
+
+    // Lazy require (mirrors _applyFactsReadinessBoost): the miner must keep
+    // mining its other buckets even if the astro-publisher module can't load.
+    let astroPublisher;
+    try {
+      astroPublisher = require('../content-astro/astro-publisher');
+    } catch (err) {
+      logger.warn(`[gsc-opp-miner] answer_gap: astro-publisher unavailable: ${err.message}`);
+      return [];
+    }
+
+    const rows = await db('gsc_query_page_map')
+      .where('domain', domain)
+      .where('date_from', '>=', since)
+      .whereNotIn('query', db('gsc_queries').distinct('query').where('is_branded', true))
+      .select('query')
+      .select(db.raw(`${CANON_URL_SQL} as page_url`))
+      .sum('clicks as clicks')
+      .sum('impressions as impressions')
+      .select(db.raw('sum(position * impressions) / NULLIF(sum(impressions), 0) as avg_position'))
+      .groupBy('query')
+      .groupByRaw(CANON_URL_SQL)
+      .havingRaw('sum(impressions) >= ?', [THRESHOLDS.answerGapMinQueryImpressions])
+      .havingRaw(
+        'sum(position * impressions) / NULLIF(sum(impressions), 0) BETWEEN ? AND ?',
+        [THRESHOLDS.answerGapPositionMin, THRESHOLDS.answerGapPositionMax]
+      );
+
+    // Group by page. Near-me/nearby queries are navigation demand, not
+    // answerable questions — a "near me" heading is doorway copy, so they
+    // never become answer-block candidates.
+    const pages = new Map();
+    for (const r of rows) {
+      if (isTransactionalQuery(r.query)) continue;
+      let p = pages.get(r.page_url);
+      if (!p) {
+        p = { page_url: r.page_url, queries: [], total_impressions: 0 };
+        pages.set(r.page_url, p);
+      }
+      const q = {
+        query: r.query,
+        clicks: parseInt(r.clicks, 10),
+        impressions: parseInt(r.impressions, 10),
+        position: parseFloat(r.avg_position),
+      };
+      p.queries.push(q);
+      p.total_impressions += q.impressions;
+    }
+
+    // Rotation + starvation guards (mirrors link_boost's excludeKeys):
+    //   - pages whose queue row is frozen (claimed/done/pending_review/
+    //     skipped) are excluded BEFORE the cap — persistAll can't re-open
+    //     them, so they'd only burn cap slots run after run;
+    //   - unloadable pages (not resolvable to an Astro file) don't consume
+    //     the cap either — walk on down the sorted list, bounded at
+    //     maxPages*3 load attempts so a pathological list can't turn into
+    //     an unbounded GitHub read loop.
+    // Service/city (and therefore the dedupe key) are derived from URL +
+    // the page's TOP query — deterministic before the body loads, so the
+    // pre-cap occupied check and the emitted row always agree on the key.
+    const occupied = await this._loadOccupiedKeys('answer_gap').catch((err) => {
+      logger.warn(`[gsc-opp-miner] answer_gap: occupied keys load failed: ${err.message}`);
+      return new Set();
+    });
+
+    const candidates = [];
+    for (const page of Array.from(pages.values())
+      .sort((a, b) => b.total_impressions - a.total_impressions)) {
+      page.queries.sort((a, b) => b.impressions - a.impressions);
+      page.service = inferServiceFromUrl(page.page_url)
+        // Blog URLs often carry no service token even when the demand
+        // clearly maps to one — a null service under-scores the row
+        // (localRevenueScore floor, no factsReady boost) and starves the
+        // lane. City stays URL-only ON PURPOSE: a query-inferred city on a
+        // non-city page would attach wrong-city facts to the refresh.
+        || inferServiceFromQuery(page.queries[0].query);
+      page.city = inferCityFromUrl(page.page_url);
+      page.dedupe_key = dedupeKey({
+        bucket: 'answer_gap', service: page.service, city: page.city, page_url: page.page_url,
+      });
+      if (occupied.has(page.dedupe_key)) continue;
+      candidates.push(page);
+    }
+
+    const maxAttempts = maxPages * 3;
+    let attempts = 0;
+    let examined = 0;
+    const out = [];
+    for (const page of candidates) {
+      if (examined >= maxPages || attempts >= maxAttempts) break;
+      attempts += 1;
+      let loaded = null;
+      try {
+        loaded = await astroPublisher.loadExistingPageBody(page.page_url);
+      } catch (err) {
+        logger.warn(`[gsc-opp-miner] answer_gap: body load failed for ${page.page_url}: ${err.message}`);
+      }
+      if (!loaded || !loaded.body) continue; // not an editable Astro page
+      examined += 1;
+
+      const { unanswered, answered_count } = classifyAnswerGapQueries(page.queries, loaded.body);
+      if (!unanswered.length) continue;
+
+      const kept = unanswered.slice(0, ANSWER_GAP_MAX_QUERIES_PER_PAGE);
+      const gapImpressions = kept.reduce((s, q) => s + q.impressions, 0);
+      const gapPosition = gapImpressions
+        ? kept.reduce((s, q) => s + q.position * q.impressions, 0) / gapImpressions
+        : null;
+
+      const opp = {
+        bucket: 'answer_gap',
+        // Strongest unanswered query anchors the brief's target_keyword.
+        query: kept[0].query,
+        page_url: page.page_url,
+        service: page.service,
+        city: page.city,
+        signal_metadata: {
+          // `impressions` (canonical key content-brief-builder reads) = the
+          // GAP demand only — impressions on the kept unanswered queries,
+          // not the page's whole 9–30 footprint.
+          impressions: gapImpressions,
+          avg_position: gapPosition == null ? null : Number(gapPosition.toFixed(1)),
+          unanswered_queries: kept,
+          answered_query_count: answered_count,
+          page_total_impressions_9_30: page.total_impressions,
+          coverage_method: 'heading-term-coverage-v1',
+        },
+      };
+      const { total, breakdown } = scoreOpportunity(opp, {
+        position: gapPosition || 20,
+        impressions: gapImpressions,
+      });
+      opp.score = total;
+      opp.score_breakdown = breakdown;
+      opp.action_type = actionForOpportunity(opp);
+      opp.dedupe_key = dedupeKey(opp);
+      out.push(opp);
+    }
+    return out;
+  }
+
+  /**
    * Summed non-branded GSC impressions per normalized city×service, keyed by
    * ownPageKey(service, city). Mirrors the local_gap aggregation so aeo_gap
    * shares the same demand definition.
@@ -1279,4 +1587,10 @@ module.exports._internals = {
   scoreOpportunity,
   deriveLinkBoost,
   linkBoostCap,
+  answerGapStem,
+  stemmedTokenSet,
+  queryContentTerms,
+  extractHeadings,
+  termCoverage,
+  classifyAnswerGapQueries,
 };

@@ -47,10 +47,10 @@ describe('buildExtractionPrompt threading', () => {
     expect(prompt).toContain('4471 McIntosh Lake Avenue');
   });
 
-  test('bare render (the version-hash input) is unchanged — no block, stable v3 hash', () => {
+  test('bare render (the version-hash input) is unchanged — no block, stable v4 hash', () => {
     const bare = buildExtractionPrompt('', '', '');
     expect(bare).not.toContain('PRIOR CALL FROM THIS NUMBER');
-    expect(PROMPT_HASH).toMatch(/^v3-[a-f0-9]{12}$/);
+    expect(PROMPT_HASH).toMatch(/^v4-[a-f0-9]{12}$/);
   });
 });
 

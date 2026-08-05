@@ -1659,7 +1659,10 @@ async function loadAddonsByServiceId(serviceIds) {
   try {
     const rows = await db('scheduled_service_addons')
       .whereIn('scheduled_service_id', ids)
-      .orderBy('created_at', 'asc');
+      // id tiebreaker: same-transaction lines share created_at, and the
+      // FIRST eligible add-on picks the trace variant (codex P2 r24)
+      .orderBy('created_at', 'asc')
+      .orderBy('id', 'asc');
     const map = new Map();
     for (const row of rows) {
       const key = row.scheduled_service_id;
@@ -1717,13 +1720,26 @@ async function loadProjectCompletionContextByServiceId(services) {
   const rows = Array.isArray(services) ? services : [];
   const linkedProjectsByServiceId = await loadLinkedProjectsByServiceId(rows.map((s) => s.id));
   const entries = await Promise.all(rows.map(async (service) => {
+    let completionProfileLookupFailed = false;
     const completionProfile = await resolveCompletionProfileForScheduledService(service)
       .catch((e) => {
         logger.warn(`[schedule] completion profile lookup failed for ${service.id}: ${e.message}`);
+        completionProfileLookupFailed = true;
         return null;
       });
     return [service.id, {
       completionProfile,
+      // Whether the inspection-credit lane is live — Dispatch V2 completes
+      // from THIS endpoint's payload, and the closeout panel renders its
+      // promise checkbox only on true (Codex #3178 r21 P1): without the
+      // field here the toggle never rendered, submission fell back to
+      // default-true, and the tech could not clear the $75 promise from
+      // the actual completion UI. Mirrors /admin/dispatch/:date.
+      inspectionCreditAvailable: require('../config/feature-gates').isEnabled('inspectionCredit'),
+      // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
+      // fails open on this flag — the write path catches the same
+      // failure and fails open, so the feed must not hide the mapper.
+      completionProfileLookupFailed,
       // Typed-findings schema embedded alongside the profile so the
       // CompletionPanel (fed by this endpoint on desktop AND mobile) can
       // render the typed form without a registry round-trip. Null for
@@ -1924,6 +1940,57 @@ router.get('/', async (req, res, next) => {
     const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
     const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
 
+    // Trace-eligibility flag for the tech portal's per-row "🛰️ Zone"
+    // button (GATE_TRACE_ELIGIBILITY, dark): resolved from the catalog key
+    // in ONE batch query; gate off keeps every row eligible so the UI is
+    // unchanged. This is a UI affordance only — the tech-track write route
+    // enforces the same registry with a 403, and the report render
+    // suppresses ineligible traces regardless.
+    const {
+      resolveTraceEligibility: rowTraceEligibility,
+      combineLineVerdicts: combineRowVerdicts,
+      traceEligibilityGateOn,
+    } = require('../services/service-report/trace-eligibility');
+    let serviceKeyByServiceId = new Map();
+    let dayPointerByKey = new Map();
+    // Pointer OUTAGE ≠ no pointer rows (codex P2 r27): on failure the
+    // verdict is omitted (fail open, matching the write path's fail-open
+    // catch) instead of unclassifying typed add-ons. A CATALOG failure
+    // still fails closed via the unresolved sentinel — capture's own
+    // catalog rule (r18) rejects those ids the same way.
+    let dayPointerLookupFailed = false;
+    if (traceEligibilityGateOn()) {
+      // Primary AND add-on catalog ids in one batch — a grouped visit with
+      // an ineligible primary but a spray-capable add-on line still traces
+      // (codex P2 r11).
+      const catalogIds = [...new Set([
+        ...services.map((s) => s.service_id),
+        ...[...addonsByServiceId.values()].flat().map((a) => a.serviceId),
+      ].filter(Boolean))];
+      if (catalogIds.length) {
+        const catalogRows = await db('services')
+          .whereIn('id', catalogIds)
+          .select('id', 'service_key')
+          .catch(() => []);
+        serviceKeyByServiceId = new Map(catalogRows.map((r) => [r.id, r.service_key]));
+        // Typed add-on keys are absent from the key rules by design —
+        // resolve their pointers in one batch (codex P2 r12).
+        const addonOnlyKeys = [...new Set(
+          [...addonsByServiceId.values()].flat()
+            .map((a) => serviceKeyByServiceId.get(a.serviceId))
+            .filter(Boolean),
+        )];
+        if (addonOnlyKeys.length) {
+          const profileRows = await db('service_completion_profiles')
+            .whereIn('service_key', addonOnlyKeys)
+            .where({ active: true })
+            .select('service_key', 'project_type')
+            .catch(() => { dayPointerLookupFailed = true; return []; });
+          dayPointerByKey = new Map(profileRows.map((r) => [r.service_key, r.project_type]));
+        }
+      }
+    }
+
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
@@ -2077,9 +2144,45 @@ router.get('/', async (req, res, next) => {
         }),
       };
 
+      const rowTraceVerdict = traceEligibilityGateOn()
+        && !dayPointerLookupFailed
+        && !projectCompletionContext?.completionProfileLookupFailed
+        ? combineRowVerdicts(
+          rowTraceEligibility({
+            serviceKey: serviceKeyByServiceId.get(s.service_id)
+              || projectCompletionContext?.completionProfile?.serviceKey
+              || null,
+            findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
+            displayName: s.service_type || '',
+          }),
+          (addonsByServiceId.get(s.id) || []).map((addon) => {
+            // A LINKED add-on whose batched catalog lookup failed or
+            // omitted it fails closed via the unresolved sentinel — the
+            // save route's shared resolver rejects the same id, so name
+            // fallback here would show a tracer the save then 403s
+            // (codex P2 r24). Unlinked lines keep name fallback.
+            const addonKey = addon.serviceId
+              ? (serviceKeyByServiceId.get(addon.serviceId) || `unresolved:${addon.serviceId}`)
+              : null;
+            return rowTraceEligibility({
+              serviceKey: addonKey,
+              findingsType: (addonKey && dayPointerByKey.get(addonKey)) || null,
+              displayName: addon.serviceName || '',
+            });
+          }),
+        )
+        : null;
       return {
         id: s.id, routeOrder: s.route_order,
         scheduledDate: date,
+        // Verdict computed once per row; traceVariant drives the tracer's
+        // capture mode client-side (codex P2 r3: typed lawn visits must
+        // outline the lawn, not run the building-perimeter workflow).
+        // Unlinked rows (null service_id) fall back to the profile's
+        // resolved key (codex P2 r2), and typed keys classify by their
+        // findings pointer (codex P2 r1).
+        traceEligible: !rowTraceVerdict || rowTraceVerdict.eligible,
+        traceVariant: rowTraceVerdict?.eligible ? rowTraceVerdict.variant : null,
         estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
         primaryLinePrice: s.primary_line_price != null ? Number(s.primary_line_price) : null,
         prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
@@ -2114,6 +2217,14 @@ router.get('/', async (req, res, next) => {
         // even when the visit itself resolves self-pay.
         checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
         completionProfile: projectCompletionContext.completionProfile || null,
+        // Dispatch V2 completes from this payload — the closeout promise
+        // checkbox renders only on true (Codex #3178 r21 P1).
+        inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+        // A resolver OUTAGE must reach the client's omit-the-field guard
+        // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
+        // hidden credit toggle falls through to a fabricated default
+        // opt-in the tech never saw.
+        completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
         linkedProject: projectCompletionContext.linkedProject || null,
@@ -2342,6 +2453,45 @@ router.get('/week', async (req, res, next) => {
       services.forEach(s => { const z = s.zone || 'unknown'; zones[z] = (zones[z] || 0) + 1; });
       const addonsByServiceId = await loadAddonsByServiceId(services.map((s) => s.id));
       const projectCompletionContextByServiceId = await loadProjectCompletionContextByServiceId(services);
+      // Same trace-eligibility flag the day feed carries (codex P2 r2):
+      // the mobile Week view opens the shared CompletionPanel straight off
+      // these rows, so the tracer-gating verdict must ride here too. The
+      // resolved profile supplies both identities — no extra queries.
+      const {
+        resolveTraceEligibility: weekTraceEligibility,
+        combineLineVerdicts: weekCombineVerdicts,
+        traceEligibilityGateOn: weekTraceGateOn,
+      } = require('../services/service-report/trace-eligibility');
+      // Add-on lines resolve by CATALOG KEY + typed pointer, like the day
+      // feed — name-only classification gave fire_ant/flea_tick add-ons
+      // the fallback spray variant when their rules require lawn outline
+      // geometry, and the mapper workflow keys off this payload (codex P2
+      // r12). One batch for keys, one for typed pointers.
+      let weekKeyByCatalogId = new Map();
+      let weekPointerByKey = new Map();
+      // Same fail-open-on-outage rule as the day feed (codex P2 r27)
+      let weekPointerLookupFailed = false;
+      if (weekTraceGateOn()) {
+        const addonCatalogIds = [...new Set(
+          [...addonsByServiceId.values()].flat().map((a) => a.serviceId).filter(Boolean),
+        )];
+        if (addonCatalogIds.length) {
+          const catalogRows = await db('services')
+            .whereIn('id', addonCatalogIds)
+            .select('id', 'service_key')
+            .catch(() => []);
+          weekKeyByCatalogId = new Map(catalogRows.map((r) => [r.id, r.service_key]));
+          const addonKeys = [...new Set([...weekKeyByCatalogId.values()].filter(Boolean))];
+          if (addonKeys.length) {
+            const profileRows = await db('service_completion_profiles')
+              .whereIn('service_key', addonKeys)
+              .where({ active: true })
+              .select('service_key', 'project_type')
+              .catch(() => { weekPointerLookupFailed = true; return []; });
+            weekPointerByKey = new Map(profileRows.map((r) => [r.service_key, r.project_type]));
+          }
+        }
+      }
 
       const servicePayloads = await Promise.all(services.map(async (s) => {
         const svcType = normalizeServiceType(s.service_type);
@@ -2465,6 +2615,34 @@ router.get('/week', async (req, res, next) => {
           // "Tree & Shrub Care", which would drop every lawn target.
           serviceTypeRaw: s.service_type,
           serviceCategory: detectServiceCategory(svcType),
+          ...(() => {
+            const v = weekTraceGateOn()
+              && !weekPointerLookupFailed
+              && !projectCompletionContext?.completionProfileLookupFailed
+              ? weekCombineVerdicts(
+                weekTraceEligibility({
+                  serviceKey: projectCompletionContext?.completionProfile?.serviceKey || null,
+                  findingsType: projectCompletionContext?.completionProfile?.findingsType || null,
+                  displayName: s.service_type || '',
+                }),
+                serviceAddons.map((addon) => {
+                  // Same unresolved-sentinel rule as the day feed (codex P2 r24)
+                  const addonKey = addon.serviceId
+                    ? (weekKeyByCatalogId.get(addon.serviceId) || `unresolved:${addon.serviceId}`)
+                    : null;
+                  return weekTraceEligibility({
+                    serviceKey: addonKey,
+                    findingsType: (addonKey && weekPointerByKey.get(addonKey)) || null,
+                    displayName: addon.serviceName || '',
+                  });
+                }),
+              )
+              : null;
+            return {
+              traceEligible: !v || v.eligible,
+              traceVariant: v?.eligible ? v.variant : null,
+            };
+          })(),
           status: s.status,
           techName: s.tech_name, zone: s.zone,
           tier: s.waveguard_tier,
@@ -2505,6 +2683,10 @@ router.get('/week', async (req, res, next) => {
           // Same invoice-level Bill-To flag as the day payload (see there).
           checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
           completionProfile: projectCompletionContext.completionProfile || null,
+          // Same field as the day view above — both feed the V2 closeout.
+          inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+          // Resolver-outage marker — same contract as the day view (r34 P2).
+          completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
           linkedProject: projectCompletionContext.linkedProject || null,
@@ -3381,6 +3563,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
       createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
+      // Inspection credit: durable in-transaction marker on the series
+      // ANCHOR (Codex #3178 P1) — a recurring series is one booking, so
+      // children must not each claim the promise. Dark behind the gate.
+      await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId,
+        scheduledServiceId: svc.id,
+        source: 'admin_schedule',
+      });
 
       // Track all scheduled_date strings created for this parent series
       // (parent itself, recurring children, AND boosters). Hoisted so the
@@ -3749,6 +3939,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
         }
       }
     } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
+
+    // Inspection credit (dark behind GATE_INSPECTION_CREDIT). The durable
+    // marker is written in-transaction with the appointment inserts; this
+    // is the fast path that mints immediately when it can. Runs on the
+    // FIRST created appointment only — a recurring series is one booking,
+    // not one redemption per visit. Best-effort: a booking must never fail
+    // because crediting failed, and the service never throws.
+    if (createdAppointments.length) {
+      try {
+        const InspectionCredit = require('../services/inspection-credit');
+        const first = createdAppointments[0];
+        await InspectionCredit.redeemInspectionCreditForBooking({
+          customerId,
+          scheduledServiceId: first.id,
+          createdBy: `admin:${req.technician?.name || req.technicianId || 'unknown'}`,
+        });
+      } catch (e) {
+        logger.error(`[schedule] inspection credit redemption failed: ${e.message}`);
+      }
+    }
 
     // The appointment(s), any prepayment, and all reminder rows are committed at
     // this point — respond immediately so the admin UI isn't held on "Saving…"
@@ -4469,6 +4679,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             }
             // Void any still-open invoice pre-minted for this visit so
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
+            // Inspection-credit reversal runs inside the void helper (after
+            // the voids restore any applied credit) — shared hook across
+            // every cancellation path, so none can forget it.
             await voidOpenInvoicesForCancelledService(id);
             // One-time card-on-file hold: charge in-window late-cancel fee or
             // release outside it — same as the single-cancel paths.
@@ -7142,6 +7355,14 @@ router.put('/:id/status', async (req, res, next) => {
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }
+        // The invoice-void + credit-reversal seam is also recoverable here
+        // (Codex #3178 r26 P2) — this is the route's ONLY reachable
+        // no-show leg (fresh no_show targets are rejected below as
+        // no_show_wrong_route), so the idempotent replay must run the
+        // helper or a crash-lost seam stays lost until the hourly sweep.
+        try {
+          await voidOpenInvoicesForCancelledService(svc.id);
+        } catch (e) { logger.error(`[admin-schedule] no-show replay money seam failed for ${svc.id}: ${e.message}`); }
         return res.json({ success: true, alreadyNoShow: true });
       }
       return res.status(409).json({

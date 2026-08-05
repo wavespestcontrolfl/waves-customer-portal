@@ -54,6 +54,22 @@ const FLAGGED_PRODUCT_SAFETY = [
 
 // Fixed drying/re-entry timing co-occurrence.
 const FLAGGED_TIMING = [
+  // The agronomic carve-out must not rescue a re-entry restriction that
+  // merely MENTIONS an agronomic action (codex P1 #3176 r23) — the figure
+  // belongs to the restriction, not to the watering.
+  'keep pets off treated areas for 30 minutes before watering',
+  'keep off the lawn for 2 hours after watering',
+  // A clock time asserts the same fixed re-entry moment a duration does
+  // (codex P1 #3176 r20).
+  'safe to return after 7 PM',
+  'you can re-enter the treated area after 7:30 pm',
+  // Spelled-out numbers carry the same banned figure as digits
+  // (codex P1 #3176 r18): the vocabulary was a/an/one/two only.
+  'avoid the treated area for five hours',
+  'keep pets off the treated area for thirty minutes',
+  'stay off the lawn for twenty-four hours',
+  'safe to re-enter after three hours',
+  'keep children away from treated surfaces for a couple of hours',
   'safe after 30 minutes',
   '30-minute drying time',
   're-enter after 45 minutes',
@@ -84,6 +100,18 @@ const FLAGGED_TIMING = [
 ];
 
 const CLEAN = [
+  // ...but a figure that genuinely belongs to the agronomic action still
+  // survives — the carve-out narrowed, it did not disappear.
+  'avoid watering the treated lawn for 24 hours',
+  'irrigate the treated areas within 14 days',
+  // Clock times without a re-entry claim stay legal — business hours and
+  // scheduling copy are not fixed re-entry figures.
+  'call before 5 PM to reschedule',
+  'we are open until 5 PM on weekdays',
+  // Spelled-number agronomic windows stay legitimate — the exemption is
+  // clause-scoped, not defeated by the widened vocabulary.
+  'avoid watering for twenty-four hours',
+  'do not mow for three days after seeding',
   'EPA-registered products applied by licensed technicians',
   'a failsafe scheduling process',
   'Petsmart is next door',
@@ -114,6 +142,33 @@ const CLEAN = [
   'Enter within 24 hours for a chance to win',
   'Technicians wear protective equipment to stay safe while applying pesticides',
 ];
+
+describe('sanitizeProductTargets — target chips are free text (codex P1 #3176 r24)', () => {
+  const { sanitizeProductTargets } = require('../services/social-media');
+
+  it('drops chips that carry a compliance claim instead of naming a target', () => {
+    const { targets, changed } = sanitizeProductTargets([
+      'German cockroaches', 'pet-safe', 'EPA-approved', 'dries in 1 hour', 'non-toxic',
+    ]);
+    expect(targets).toEqual(['German cockroaches']);
+    expect(changed).toBe(true);
+  });
+
+  it('keeps every real target, including the "green" ones a blunt rule would eat', () => {
+    // Verified against the 92 shipped picker suggestions — "Green kyllinga",
+    // "Nitrogen green-up" and "Deep green color" are real targets, so the
+    // claim vocabulary deliberately omits "green".
+    const real = ['German cockroaches', 'Palmetto bugs', 'Green kyllinga', 'Nitrogen green-up', 'Deep green color', 'subterranean termites'];
+    const { targets, changed } = sanitizeProductTargets(real);
+    expect(targets).toEqual(real);
+    expect(changed).toBe(false);
+  });
+
+  it('is inert on empty/absent target lists', () => {
+    expect(sanitizeProductTargets([]).changed).toBe(false);
+    expect(sanitizeProductTargets(undefined).targets).toEqual([]);
+  });
+});
 
 describe('compliance-language classes in validateContent', () => {
   it.each(FLAGGED_OVERCLAIM)('flags overclaim: %s', (text) => {

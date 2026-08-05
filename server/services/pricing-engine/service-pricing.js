@@ -1786,6 +1786,9 @@ function resolveLawnTier(tier, lawnFreq) {
     const match = Object.entries(LAWN_TIERS).find(([, cfg]) => cfg.freq === freq);
     if (match) return match[0];
   }
+  // basic/4x is fully retired (owner 2026-08-04) — a legacy stored
+  // lawnFreq=4 or tier='basic' replays at the enhanced default, matching
+  // the client mirror's resolveLawnFreq(4) -> 9.
   return LAWN_TIERS[tier] ? tier : 'enhanced';
 }
 
@@ -4916,6 +4919,13 @@ function priceOneTimeLawn(property, options = {}) {
     service: 'one_time_lawn',
     price,
     treatmentType: normalizedTreatment,
+    // The track the underlying lawn pricer ACTUALLY priced (its grass
+    // normalizer silently coerces unknown tracks to the St. Augustine
+    // table). classifyLane compares this against the intent's requested
+    // track so a coerced one-time-only quote parks yellow like the
+    // recurring line does.
+    track: lawnResult.track,
+    grassType: lawnResult.grassType,
     urgency,
     afterHours,
     isRecurringCustomer,

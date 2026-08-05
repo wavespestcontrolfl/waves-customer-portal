@@ -57,6 +57,39 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
     logger.info(`[${routeTag}] Armed reminders for confirmed outbound-review booking ${svc.id}`);
   } catch (e) { logger.error(`[${routeTag}] outbound-review reminder arm failed for ${svc.id}: ${e.message}`); }
 
+  // 1a. Inspection-credit booking evidence — written HERE, not at the AI
+  // booking insert (pre-push P0): a pending outbound-review row is not a
+  // closed deal until this office confirmation, and the hourly sweep would
+  // otherwise treat the event plus the live 'pending' status as proof and
+  // mint $75 for an appointment the customer never confirmed. Idempotent
+  // (unique per booking); never blocks the confirmation.
+  try {
+    const marked = await require('./inspection-credit').markBookingForInspectionCredit(db, {
+      customerId: svc.customer_id,
+      scheduledServiceId: svc.id,
+      source: 'phone_call',
+    });
+    // Fast redemption too, mirroring the admin-schedule/self-book paths
+    // (Codex #3178 r26 P2): confirmation is the booking moment, and a
+    // Charge Now / pay link sent before the hourly sweep would otherwise
+    // collect the full amount while the credit strands afterwards.
+    // GATED on the evidence write landing (Codex #3178 r27 P2): this row
+    // was inserted when the AI opened the pending review, so without an
+    // event the redeemer would fall back to that PLACEHOLDER created_at —
+    // for a row opened inside the window but confirmed after expiry, that
+    // mints a credit this booking did not earn. On a failed evidence write
+    // the post-commit retry recovers the event and the hourly sweep (which
+    // only redeems FROM events) mints with the true confirmation moment.
+    // Best-effort — the sweep remains the durable guarantee.
+    if (marked === 1) {
+      await require('./inspection-credit').redeemInspectionCreditForBooking({
+        customerId: svc.customer_id,
+        scheduledServiceId: svc.id,
+        createdBy: 'system:inspection_credit_outbound_confirm',
+      });
+    }
+  } catch (e) { logger.warn(`[${routeTag}] inspection-credit booking evidence failed for ${svc.id}: ${e.message}`); }
+
   // 2. Close the originating call lead. The insert path deliberately skipped
   // conversion for the pending review row; it stashed the lead's id on the
   // outbound_booking_review triage card, because the booking can REUSE an

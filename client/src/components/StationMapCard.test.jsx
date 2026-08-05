@@ -73,3 +73,117 @@ describe('StationMapCard — trap pins', () => {
     expect(eligibleTrapIndices([])).toEqual([]);
   });
 });
+
+// A declared trap SETUP means the pins went out on THIS visit. The default
+// 'ok' status previously read "Checked — no capture" and the summary counted
+// them as "inspected", both of which contradicted the same report's "Traps
+// set" finding (codex P1 on #3159).
+describe('StationMapCard — declared trap setup', () => {
+  const SETUP_MAP = {
+    ...STATION_MAP,
+    initialSetup: true,
+    summary: { total: 2, checked: 2, activity: 0, serviced: 0, inaccessible: 0 },
+    stations: [
+      { id: 's1', number: 1, label: null, cx: 0.25, cy: 0.5, status: 'ok' },
+      { id: 's2', number: 2, label: 'Garage', cx: 0.75, cy: 0.5, status: 'ok' },
+    ],
+  };
+
+  it('says the traps were set, never checked or inspected', () => {
+    const { container } = render(<StationMapCard stationMap={SETUP_MAP} trapPins />);
+    const text = container.textContent;
+    expect(text).toContain('2 traps set this visit');
+    expect(text).toContain('Set this visit');
+    expect(text).not.toContain('inspected');
+    expect(text).not.toContain('Checked — no capture');
+  });
+
+  it('a visit WITHOUT the flag keeps the ratified re-check wording', () => {
+    const { container } = render(<StationMapCard stationMap={STATION_MAP} trapPins />);
+    const text = container.textContent;
+    expect(text).toContain('2 of 2 stations inspected');
+    expect(text).not.toContain('set this visit');
+  });
+
+  it('the plan embed ignores it — that variant aggregates across visits', () => {
+    const { container } = render(<StationMapCard stationMap={SETUP_MAP} variant="plan" />);
+    const text = container.textContent;
+    expect(text).not.toContain('set this visit');
+    expect(text).toContain('inspected');
+  });
+});
+
+// codex P2 round 6: the closeout autofills traps_checked from the pins but
+// relinquishes the field once the tech hand-edits it, so the map's count and
+// the typed count can legitimately diverge.
+//
+// Round 9 corrected how that divergence is handled. Withholding the setup
+// flag does NOT make the map neutral — it makes it say "inspected", which on
+// a declared setup is worse than saying nothing. The stage and the count are
+// separate facts: the stage is declared by the tech and stands; only the
+// disputed number is suppressed.
+describe('StationMapCard — setup counts stay consistent', () => {
+  it('counts accessible pins, not every pin', () => {
+    const { container } = render(<StationMapCard trapPins stationMap={{
+      ...STATION_MAP,
+      initialSetup: true,
+      summary: { total: 3, checked: 2, activity: 0, serviced: 0, inaccessible: 1 },
+      stations: [
+        { id: 's1', number: 1, label: null, cx: 0.2, cy: 0.5, status: 'ok' },
+        { id: 's2', number: 2, label: null, cx: 0.5, cy: 0.5, status: 'ok' },
+        { id: 's3', number: 3, label: null, cx: 0.8, cy: 0.5, status: 'inaccessible' },
+      ],
+    }} />);
+    // 2 accessible, matching what the closeout's autofill would have written.
+    expect(container.textContent).toContain('2 traps set this visit');
+    expect(container.textContent).toContain('1 not accessible');
+    expect(container.textContent).not.toContain('3 traps set this visit');
+  });
+
+  it('without the flag the map says nothing about setup', () => {
+    const { container } = render(<StationMapCard trapPins stationMap={{
+      ...STATION_MAP,
+      summary: { total: 2, checked: 2, activity: 0, serviced: 0, inaccessible: 0 },
+      stations: [
+        { id: 's1', number: 1, label: null, cx: 0.25, cy: 0.5, status: 'ok' },
+        { id: 's2', number: 2, label: null, cx: 0.75, cy: 0.5, status: 'ok' },
+      ],
+    }} />);
+    expect(container.textContent).toContain('2 of 2 stations inspected');
+    expect(container.textContent).not.toContain('set this visit');
+  });
+
+  it('a disputed count drops the number but KEEPS the setup wording', () => {
+    const { container } = render(<StationMapCard trapPins stationMap={{
+      ...STATION_MAP,
+      initialSetup: true,
+      setupCountVerified: false,
+      summary: { total: 2, checked: 2, activity: 0, serviced: 0, inaccessible: 0 },
+      stations: [
+        { id: 's1', number: 1, label: null, cx: 0.25, cy: 0.5, status: 'ok' },
+        { id: 's2', number: 2, label: null, cx: 0.75, cy: 0.5, status: 'ok' },
+      ],
+    }} />);
+    const text = container.textContent;
+    // the pins still read as placements…
+    expect(text).toContain('Set this visit');
+    expect(text).toContain('where the traps went out on this visit');
+    // …but the map restates no count, and never claims an inspection
+    expect(text).not.toContain('traps set this visit');
+    expect(text).not.toContain('inspected');
+    expect(text).not.toContain('Checked — no capture');
+  });
+
+  it('an older payload with no verification field keeps its count', () => {
+    const { container } = render(<StationMapCard trapPins stationMap={{
+      ...STATION_MAP,
+      initialSetup: true,
+      summary: { total: 2, checked: 2, activity: 0, serviced: 0, inaccessible: 0 },
+      stations: [
+        { id: 's1', number: 1, label: null, cx: 0.25, cy: 0.5, status: 'ok' },
+        { id: 's2', number: 2, label: null, cx: 0.75, cy: 0.5, status: 'ok' },
+      ],
+    }} />);
+    expect(container.textContent).toContain('2 traps set this visit');
+  });
+});

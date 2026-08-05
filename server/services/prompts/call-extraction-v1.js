@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const modelOutputSchema = require('../../schemas/call-extraction.model-output.schema.json');
 
-const PROMPT_VERSION = 'v3';
+const PROMPT_VERSION = 'v4';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -64,6 +64,8 @@ Transcript:
 ${transcription}
 
 ═══ EXTRACTION RULES ═══
+
+GENERALIZATION — callers phrase the same intents in endless unseen ways. Match every rule below by the MEANING of what was said, at the least-specific reading that still fits the rule; the quoted examples are illustrations, never templates to expect verbatim.
 
 SCHEDULING STATUS — This is the most important field for downstream routing:
 - "confirmed": ONLY when BOTH a specific DATE and a specific TIME are explicitly agreed to by the caller. Vague references ("tomorrow", "next week", "noonish", "sometime Tuesday") do NOT qualify — the caller must confirm an actual time slot (e.g. "10 AM", "2:30 PM", "noon"). If the agent says "I'll text you" or "let me check" without the caller confirming, status is NOT confirmed.
@@ -145,6 +147,7 @@ SECONDARY CONTACT (a SECOND person who is a party to the service):
 
 SERVICE REQUEST:
 - primary_service_category: Map caller's request to the best enum value.
+- STATED INTENT OUTRANKS SPECIES MENTIONS: choose primary_service_category and specific_service_name from what the caller ASKS FOR (starting/stopping/changing service, one-time vs recurring, scope), never from which pest species happens to be named. A named pest is evidence, not a request — a caller mentioning roaches or ants while asking to start a recurring/quarterly plan is requesting general pest control, NOT a one-time species treatment. Map to a species-specific service ONLY when the caller asks for that treatment itself (an active infestation cleanout, "I need the roaches treated"). When stated intent and a species mention pull different directions, follow the stated intent and note the species in call_summary.
 - specific_service_name: When the request maps to one specific bookable service from the BOOKABLE SERVICE CATALOG below, set it to that catalog name VERBATIM (e.g. a German/kitchen cockroach infestation cleanout -> "Cockroach Treatment"). If no single catalog entry clearly fits, null. Never invent a name that is not in the catalog list.
 - quoted_price_usd: The total price in US dollars that the agent quoted AND the caller accepted for the service being booked (e.g. agent says "that runs around 350 total" and the caller agrees -> 350). Use the TOTAL package price when quoted as a total across multiple treatments. null when no price was quoted, the caller did not accept, or the amount is uncertain/a range. Never estimate or invent a price.
 - If caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, or treatment before a concrete pour: use "termite" as primary_service_category.

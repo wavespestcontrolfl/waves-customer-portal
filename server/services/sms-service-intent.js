@@ -89,6 +89,11 @@ Classify into ONE of:
 - "one_time" — a single-visit service (not a recurring plan)
 - "unknown" — ambiguous, doesn't match any of the three, a question, or a complaint
 
+Rules:
+- Classify by what the customer is ASKING FOR, not by which pest/lawn words appear — a species or yard word is evidence, not the request.
+- An explicit statement of cadence or scope (single visit vs recurring plan) outranks any species mention.
+- Customers phrase these intents in unseen ways; match the meaning at the least-specific reading that fits, not keywords.
+
 Return ONLY JSON: {"interest":"pest"|"lawn"|"one_time"|"unknown","confidence":0.0-1.0}`;
 
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {

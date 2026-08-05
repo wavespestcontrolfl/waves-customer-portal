@@ -863,3 +863,88 @@ describe('product purpose follows recorded pest identity', () => {
     expect(applicationPurpose({ method: 'bait_placement', product: { name: 'Contrac Blox' } }, 'rodent')).toBe('Bait placement');
   });
 });
+
+// Fungicide purpose copy names the RECORDED disease targets — the same
+// recorded-targets-only guard as lawn insect control (owner relevance pass
+// 2026-08-03: the Artavia card read generic boilerplate while the visit
+// documented large patch / gray leaf spot / take-all root rot).
+describe('lawn fungicide purpose copy', () => {
+  const fungicide = {
+    method: 'broadcast_spray',
+    targets: ['Large patch', 'Gray leaf spot', 'Take-all root rot'],
+    product: { name: 'Artavia 2 SC (Azoxy)', category: 'Fungicide', active_ingredient: 'Azoxystrobin' },
+  };
+
+  it('names the recorded disease targets, lowercased, without claiming observation', () => {
+    expect(applicationPurpose(fungicide, 'lawn')).toBe('Fungus control application');
+    expect(applicationPurposeCopy(fungicide, 'lawn')).toBe(
+      'Applied to protect the turf against large patch, gray leaf spot, take-all root rot, the targets your technician recorded for this application.',
+    );
+    // Chips can be untrimmed catalog prefill (label targets) — the copy must
+    // never present them as observed/documented disease (codex P1 #3187).
+    expect(applicationPurposeCopy(fungicide, 'lawn')).not.toMatch(/documented|observed|found|designed/i);
+  });
+
+  it('normalizes enum-key targets before printing', () => {
+    const enumTargets = { ...fungicide, targets: ['take_all_root_rot'] };
+    expect(applicationPurposeCopy(enumTargets, 'lawn')).toContain('take all root rot');
+    expect(applicationPurposeCopy(enumTargets, 'lawn')).not.toContain('_');
+  });
+
+  it('fails closed to the generic line with no recorded targets', () => {
+    const noTargets = { ...fungicide, targets: [] };
+    expect(applicationPurposeCopy(noTargets, 'lawn')).toBe(
+      'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+    );
+  });
+});
+
+// Free-form target chips are unrestricted text — only governed disease
+// vocabulary may render on the fungicide line; ANY unrecognized target
+// fails the whole line closed (codex P1 #3187 r16).
+describe('fungicide targets are restricted to governed disease vocabulary', () => {
+  const base = {
+    method: 'broadcast_spray',
+    product: { name: 'Artavia 2 SC (Azoxy)', category: 'Fungicide', active_ingredient: 'Azoxystrobin' },
+  };
+
+  it('free-form claims never render, even alongside recognized diseases', () => {
+    for (const targets of [['pet-safe'], ['EPA-approved'], ['dries in 1 hour'], ['Large patch', 'pet-safe']]) {
+      const copy = applicationPurposeCopy({ ...base, targets }, 'lawn');
+      expect(copy).toBe(
+        'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+      );
+    }
+  });
+
+  it('governed names, including enum keys and the combined prefill label, still render', () => {
+    expect(applicationPurposeCopy({ ...base, targets: ['Brown patch / large patch', 'Fairy ring'] }, 'lawn'))
+      .toContain('brown patch / large patch, fairy ring');
+    expect(applicationPurposeCopy({ ...base, targets: ['take_all_root_rot'] }, 'lawn'))
+      .toContain('take all root rot');
+  });
+});
+
+// Allowlist stays synchronized with the catalog prefill vocabulary — the
+// oomycete products' normal prefills must render (codex P2 #3187 r17),
+// while the deliberately-excluded root-rot claim still fails closed.
+describe('fungicide vocabulary covers the oomycete catalog prefills', () => {
+  const base = {
+    method: 'broadcast_spray',
+    product: { name: 'Subdue Maxx Fungicide', category: 'Fungicide', active_ingredient: 'Mefenoxam' },
+  };
+
+  it('Banol/Subdue prefill targets render', () => {
+    const copy = applicationPurposeCopy(
+      { ...base, targets: ['Pythium blight', 'Pythium damping-off', 'Yellow tuft (downy mildew)'] },
+      'lawn',
+    );
+    expect(copy).toContain('pythium blight, pythium damping-off, yellow tuft (downy mildew)');
+  });
+
+  it('the excluded root-rot claim still fails the line closed', () => {
+    expect(applicationPurposeCopy({ ...base, targets: ['Pythium root rot'] }, 'lawn')).toBe(
+      'Applied to support turf health where fungus pressure or seasonal conditions called for protection.',
+    );
+  });
+});

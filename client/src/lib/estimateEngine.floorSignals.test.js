@@ -188,6 +188,31 @@ describe("applyServerPestPricingConfig — live pest floor re-arm in the fallbac
       ?? (lifted.results.oneTime || []).find?.((i) => i.service === "one_time_pest");
     if (ot) expect(Number(ot.price ?? ot.amount)).toBeGreaterThanOrEqual(Math.round(95 * 2.2));
   });
+
+  it("the fallback prices from the configured pest_base.base, never a hardcoded 112 (pre-push codex P0, light-tree fold)", () => {
+    // 2000 sf single-family with all-moderate features: footprint adj 0,
+    // feature adj 0 — the quarterly per-app IS the base. In-code default is
+    // 112 (all pest priced as light tree density, owner ruling 2026-08-03).
+    const input = lawnInput({ svcLawn: false, svcPest: true, svcOnetimePest: true });
+    const dflt = calculateEstimate(input);
+    expect(dflt.results.pestTiers.find((t) => t.apps === 4).pa).toBeCloseTo(112, 2);
+
+    // An admin-tuned DB base must drive the fallback preview — the server
+    // recompute prices from PEST.base (db-bridge synced), so a baked 112
+    // would preview/save drifted totals in any tuned env.
+    applyServerPestPricingConfig({ base: 120 });
+    const tuned = calculateEstimate(input);
+    expect(tuned.results.pestTiers.find((t) => t.apps === 4).pa).toBeCloseTo(120, 2);
+    // One-time pest anchors on the same quarterly base — it moves too.
+    const ot = tuned.oneTime?.items?.find?.((i) => i.service === "one_time_pest")
+      ?? (tuned.results.oneTime || []).find?.((i) => i.service === "one_time_pest");
+    if (ot) expect(Number(ot.price ?? ot.amount)).toBeGreaterThanOrEqual(Math.round(120 * 2.2));
+
+    // Absent/invalid resets the in-code default — the kill-value pattern.
+    applyServerPestPricingConfig({});
+    const reset = calculateEstimate(input);
+    expect(reset.results.pestTiers.find((t) => t.apps === 4).pa).toBeCloseTo(112, 2);
+  });
 });
 
 describe("fallback lawn margin visibility — report-only WaveGuard breach warning", () => {
@@ -236,13 +261,15 @@ describe("fallback lawn margin visibility — report-only WaveGuard breach warni
   });
 
   it("re-armed: a market-priced lawn row still cannot DISCOUNT below its cost floor (codex P2 round 9 #2827)", () => {
-    // 3,000 sqft 9x: market $564 sits ABOVE the $531.09 floor, so selection
-    // is untouched — but Silver 10% would land at $507.60. The armed
+    // 2,500 sqft 9x (2026-08-04 re-grid: 3,000's softened $528 market now
+    // sits UNDER its $531.09 floor and floor-selects when armed, so this
+    // scenario moves to 2,500): market $504 sits ABOVE the $489.88 floor,
+    // selection untouched — but Silver 10% would land at $453.60. The armed
     // post-discount guard gives back the overshoot and holds the lawn slice
     // at its floor, matching the server caps and the public-ladder
     // re-clamp (save == accept). At-floor = no breach warning.
     applyServerLawnPricingConfig({ useLawnCostFloor: true });
-    const est = calculateEstimate(lawnInput({ svcPest: true, measuredTurfSf: 3000 }));
+    const est = calculateEstimate(lawnInput({ svcPest: true, measuredTurfSf: 2500 }));
     expect(est.error).toBeUndefined();
     const nine = est.results.lawn.find((t) => t.v === 9);
     expect(nine.costFloorApplied).toBe(false);

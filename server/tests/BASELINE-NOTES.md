@@ -8,6 +8,37 @@ These baselines are the yardstick for Sessions 3-10. A failing regression test m
 
 ---
 
+## 2026-08-04 lawn 500-sqft re-grid + basic/4x retirement
+
+Owner directives 2026-08-04 (accepted/expired funnel review): lawn brackets
+re-gridded (500-sqft rows 1,500-8,000, 1,000-sqft to 12,000) with new
+sub-3,000 taper rows, st_augustine 3,000 9x softened 47 -> 44, and the
+basic/4x tier fully retired (migration `20260804200000` + changelog).
+Anchor rows keep exact prices; in-between sizes only ever move DOWN (new
+cells floor the old half-round interpolations). Golden master regenerated
+(8 of 65 cases moved — all intended taper/soften rows); local baselines
+recaptured (`CAPTURE_BASELINE=1 LOCAL=1`, one bundled-lawn case moved).
+DB baselines recaptured 2026-08-04 post-#3190-deploy against the live
+prod pricing config (both suites green in diff mode; only the intended
+lawn cases moved — the v1-adapter DB baseline was already current).
+
+## 2026-08-03 pest base 112 (all pest priced as light tree density)
+
+Owner ruling 2026-08-03: tree density is not a pest-pricing input and every
+pest quote prices as light tree density. Migration 20260716140000 had
+retired the trees_light -$5 modifier, which effectively raised light-tree
+(majority) homes +$5/visit; this change folds the -$5 into the base
+(117 -> 112, migration `20260803150000_pest_base_light_tree_density` +
+`pricing_changelog` entry). Local baselines recaptured
+(`CAPTURE_BASELINE=1 LOCAL=1`) for both regression suites; every pest case
+moved -$5/visit (and one-time pest -$11 at baseline via the 2.2x anchor).
+The DB baselines (`*.baseline.json`) were recaptured 2026-08-04 against the
+live prod pricing config (post-#3182-deploy; both suites green in diff
+mode against the same config).
+Side effect pinned in `pricing-engine-pest-margin-guard.test.js`: at the
+112 base a typical-home one-time with the recurring-customer perk now
+lands under recurring visit-1, so the designed clamp engages ($212).
+
 ## 2026-07-17 forget-all-floors ruling (later the same day)
 
 All pricing floors disarmed (owner ruling: margins surfaced, never

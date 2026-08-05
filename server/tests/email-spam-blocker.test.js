@@ -167,6 +167,35 @@ describe('stale auto-block removal (sender became a customer)', () => {
     expect(del).toHaveBeenCalled();
   });
 
+  test('a permanently purged burial (Gmail 404) is nothing-to-recover — the unwind completes', async () => {
+    // Gmail purges Trash after 30 days: sync-recorded burials older than
+    // that 404 forever. The unwind must skip them and finish, not retry
+    // daily for eternity (inbox-hygiene failed 7 straight days on exactly
+    // this — one April block whose June burials were long purged).
+    const del = jest.fn(async () => 1);
+    mockTables({ del, blockRow: { gmail_filter_id: null }, syncTrashed: [{ gmail_id: 'm-purged' }, { gmail_id: 'm-live' }] });
+    const gone = Object.assign(new Error('Requested entity was not found.'), { code: 404 });
+    gmailClient.getMessageLabels.mockImplementation(async (id) => {
+      if (id === 'm-purged') throw gone;
+      return ['TRASH'];
+    });
+
+    await expect(isBlocked('cust@x.example', { gmailId: 'm-live' })).resolves.toBe(false);
+    // The live burial recovers; the purged one is skipped, not fatal…
+    expect(gmailClient.modifyLabels.mock.calls.map((c) => c[0])).toEqual(['m-live']);
+    // …and the unwind COMPLETES: the retry token goes away.
+    expect(del).toHaveBeenCalled();
+  });
+
+  test('a non-404 label-read failure still keeps the block row as the retry token', async () => {
+    const del = jest.fn(async () => 1);
+    mockTables({ del, blockRow: { gmail_filter_id: null }, syncTrashed: [{ gmail_id: 'm-1' }] });
+    gmailClient.getMessageLabels.mockRejectedValue(Object.assign(new Error('backend error'), { code: 500 }));
+
+    await expect(isBlocked('cust@x.example', { gmailId: 'm-1' })).resolves.toBe(false);
+    expect(del).not.toHaveBeenCalled();
+  });
+
   test('recovery failure keeps the block row as the retry token', async () => {
     const del = jest.fn(async () => 1);
     mockTables({ del });

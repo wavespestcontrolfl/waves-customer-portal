@@ -616,3 +616,86 @@ describe('guarantee line fully retired (owner 2026-07-24)', () => {
     expect(screen.queryByText(/money-back/i)).toBeNull();
   });
 });
+
+describe('PriceCard — current-member savings corroborate the anchor gap (owner 2026-08-04)', () => {
+  // Pest quarterly on a current member's estimate: anchor $100.00/application,
+  // the margin guard capped the applied rate at 12.7% → $87.30 net. The plan
+  // tier pct (15% Gold) can't reconcile the $12.70 gap, and the snapshot's
+  // whole-% discountPct (13%) rounds too coarsely — only the snapshot's
+  // applied per-application saving matches the dollars.
+  const cappedMember = (overrides = {}) => ({
+    key: 'quarterly',
+    label: 'Quarterly',
+    visitsPerYear: 4,
+    perVisit: 100,
+    perTreatment: 87.3,
+    monthly: 29.1,
+    annual: 349.2,
+    billedPerApplication: true,
+    ...overrides,
+  });
+
+  it('labels the member discount from the snapshot saving when the tier pct cannot corroborate', () => {
+    render(
+      <PriceCard
+        frequency={cappedMember()}
+        waveGuardTier="Gold"
+        waveGuardDiscountPct={0.15}
+        memberPerApplicationSavings={12.7}
+        showTierBadge={false}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.getByText('WaveGuard Gold Discount')).toBeInTheDocument();
+    expect(screen.getByText(/[−-]\$12\.70/)).toBeInTheDocument();
+    expect(screen.getByText(/\$100\.00 \/ application/)).toBeInTheDocument();
+    expect(screen.getByText('$87.30')).toBeInTheDocument();
+  });
+
+  it('keeps the unlabeled strike-through when neither the tier pct nor the member saving matches', () => {
+    // A wrong member figure must not put a name on dollars it doesn't explain
+    // — same principle as the tier-pct corroboration (codex #3183 P1).
+    render(
+      <PriceCard
+        frequency={cappedMember()}
+        waveGuardTier="Gold"
+        waveGuardDiscountPct={0.15}
+        memberPerApplicationSavings={9.99}
+        showTierBadge={false}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.queryByText('WaveGuard Gold Discount')).toBeNull();
+    expect(screen.getByText(/\$100\.00 \/ application/)).toBeInTheDocument();
+  });
+
+  it('invents no row from a member saving when the price shows no anchor gap', () => {
+    render(
+      <PriceCard
+        frequency={cappedMember({ perTreatment: 100, monthly: 33.33, annual: 400 })}
+        waveGuardTier="Gold"
+        memberPerApplicationSavings={12.7}
+        showTierBadge={false}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.queryByText('WaveGuard Gold Discount')).toBeNull();
+    expect(screen.queryByText(/\$100\.00 \/ application/)).toBeNull();
+  });
+
+  it('needs a tier to name — a member saving alone labels nothing', () => {
+    render(
+      <PriceCard
+        frequency={cappedMember()}
+        memberPerApplicationSavings={12.7}
+        showTierBadge={false}
+        preferPerApplicationPrice
+      />,
+    );
+
+    expect(screen.queryByText(/WaveGuard .* Discount/)).toBeNull();
+  });
+});

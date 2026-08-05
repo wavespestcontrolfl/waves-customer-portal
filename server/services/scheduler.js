@@ -472,6 +472,28 @@ function initScheduledJobs() {
   // → no-op. Missing OPENAI_API_KEY → chunks sync for full-text and stay
   // pending for embedding. runExclusive records job_health.
   // =========================================================================
+  // Inspection-credit redemption recovery. The at-booking call is a fast
+  // path, not the guarantee: scheduled_services is written from many
+  // surfaces and a transient claim/ledger failure there must not lose a
+  // promise permanently (Codex #3175 P0). This re-derives redemption from
+  // persisted state — any open offer whose customer has since made a live
+  // booking — and is idempotent, so a promise already redeemed is a no-op.
+  // Hourly, not nightly: the credit should be on the account before the
+  // invoice for that booking goes out.
+  cron.schedule('12 * * * *', async () => {
+    // NOT gated here (Codex #3178 r5 P0): the sweep's reversal half must
+    // keep running through a kill-switch period so a credit whose booking
+    // was cancelled while dark can't stay spendable. The service gates its
+    // own crediting half internally.
+    try {
+      await runExclusive('inspection-credit-sweep', async () => {
+        await require('./inspection-credit').sweepInspectionCreditRedemptions();
+      });
+    } catch (err) {
+      logger.error(`[inspection-credit] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {
@@ -1962,10 +1984,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10AM (Tue–Fri) — Per-invoice follow-up sequences
+  // DAILY 10:16AM (Tue–Fri) — Per-invoice follow-up sequences
   // Fires the next due touch for each unpaid invoice's automated chain.
+  //
+  // The 10am-ET jobs are STAGGERED (:00 late-payment, :03 review-followups,
+  // :07 billing-retries, :12 renewal-reminders, :16 this, :20 seasonal,
+  // :31 payer-statement dunning) —
+  // until 2026-08-04 six of them fired at exactly 10:00, each runExclusive
+  // holds a pool connection for its advisory lock for the whole run, and the
+  // pileup exhausted the pool (this job failed 4 straight days; touches are
+  // anchored to 10:00 so a staggered tick is still same-day). Keep any new
+  // 10am job off :00.
   // =========================================================================
-  cron.schedule('0 10 * * 2-5', async () => {
+  cron.schedule('16 10 * * 2-5', async () => {
     logger.info('Running: invoice follow-up sequences');
     try {
       await runExclusive('invoice-followups', async () => {
@@ -2005,13 +2036,14 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10:15AM (Tue–Fri) — Payer statement dunning (Phase 2 — P4)
+  // DAILY 10:31AM (Tue–Fri) — Payer statement dunning (Phase 2 — P4)
   // Fires the next due AP reminder for each unpaid NET-terms statement past its
   // due date. Gated behind GATE_PAYER_STATEMENTS (runPending no-ops when off).
-  // Staggered 15m after the per-invoice sequences so they don't contend for the
-  // connection pool. Never contacts the homeowner — AP inbox only.
+  // Staggered 15m after the per-invoice sequences (now at :16 in the 10am
+  // stagger plan) so the two dunning sweeps never contend for the pool.
+  // Never contacts the homeowner — AP inbox only.
   // =========================================================================
-  cron.schedule('15 10 * * 2-5', async () => {
+  cron.schedule('31 10 * * 2-5', async () => {
     logger.info('Running: payer statement dunning');
     try {
       await runExclusive('payer-statement-followups', async () => {
@@ -3963,11 +3995,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10:00AM — Review follow-up reminders (Day 3 after initial request)
+  // DAILY 10:03AM — Review follow-up reminders (Day 3 after initial request)
   // Lands the followup on the 3rd ET-calendar-day after the original review
   // SMS was sent. Eligibility logic is in processFollowups().
   // =========================================================================
-  cron.schedule('0 10 * * *', async () => {
+  cron.schedule('3 10 * * *', async () => {
     logger.info('Running: review follow-up reminders');
     try {
       await runExclusive('review-followups', async () => {
@@ -4135,7 +4167,7 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
-  cron.schedule('0 10 * * *', async () => {
+  cron.schedule('7 10 * * *', async () => {
     try {
       await runExclusive('billing-retries', async () => {
         const BillingCron = require('./billing-cron');
@@ -4317,11 +4349,11 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 10AM — Renewal reminders (termite bond ONLY — owner ruling
+  // DAILY 10:12AM — Renewal reminders (termite bond ONLY — owner ruling
   // 2026-07-13: no-term services never get "renewal" language) + the
   // annual-prepay payment reminders/sweeps that ride the same run.
   // =========================================================================
-  cron.schedule('0 10 * * *', async () => {
+  cron.schedule('12 10 * * *', async () => {
     logger.info('Running: renewal reminders');
     try {
       await runExclusive('renewal-reminders', async () => {
@@ -4342,7 +4374,7 @@ function initScheduledJobs() {
   // NEVER sends. Writes message_drafts status='pending' rows for owner
   // approval when GATE_CAMPAIGN_DRAFTS is on; gate off = shadow-log candidate
   // counts only. Sending happens exclusively through the drafts approve route.
-  cron.schedule('0 10 * * 1', async () => {
+  cron.schedule('20 10 * * 1', async () => {
     logger.info('Running: seasonal reactivation campaign');
     try {
       await runExclusive('seasonal-reactivation', async () => {
@@ -4546,6 +4578,31 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Call booking-miss watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages three silent-loss
+  // classes: past-dated visits stuck in on_site/en_route (performed but
+  // never completed → no service record / invoice / report / SMS), upcoming
+  // recurring series with no price on any row, and recurring-lawn customers
+  // invisible to the Monday irrigation email. 6:40, NOT later (Codex #3209
+  // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
+  // lawn-email gap alert after that is unactionable for the very send it
+  // warns about — this tick must precede it. Still before the day's route
+  // starts, so a price gap rings first. Dark behind
+  // GATE_SCHEDULE_INTEGRITY_WATCHDOG. See
+  // server/services/schedule-integrity-watchdog.js.
+  // =========================================================================
+  cron.schedule('40 6 * * *', async () => {
+    try {
+      const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
+      const result = await runScheduleIntegrityWatchdog();
+      if (!result.skipped && (result.stale > 0 || result.unpricedSeries > 0 || result.lawnEmailGaps > 0 || result.lawnGapCheckFailed)) {
+        logger.warn(`[schedule-integrity] stale=${result.stale} unpricedSeries=${result.unpricedSeries} lawnEmailGaps=${result.lawnEmailGaps}${result.lawnGapCheckFailed ? ' LAWN-GAP-CHECK-FAILED' : ''} alerted=${result.alerted}`);
+      }
+    } catch (err) {
+      logger.error(`Schedule-integrity watchdog tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

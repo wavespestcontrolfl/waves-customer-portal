@@ -1717,7 +1717,9 @@ function LawnBracketsTab() {
   const [loading, setLoading] = useState(true);
   const [activeTrack, setActiveTrack] = useState("st_augustine");
   const [saving, setSaving] = useState(false);
-  const tiers = ["basic", "standard", "enhanced", "premium"];
+  // basic/4x fully retired (owner 2026-08-04); header shows application
+  // counts only — no Standard/Enhanced/Premium naming.
+  const tiers = ["standard", "enhanced", "premium"];
   const trackLabels = {
     st_augustine: "St. Augustine",
     bermuda: "Bermuda",
@@ -1834,7 +1836,7 @@ function LawnBracketsTab() {
                     textTransform: "capitalize",
                   }}
                 >
-                  {`${t} (${t === "basic" ? "4x" : t === "standard" ? "6x" : t === "enhanced" ? "9x" : "12x"})`}
+                  {`${t === "standard" ? "6 Applications" : t === "enhanced" ? "9 Applications" : "12 Applications"} / yr`}
                 </th>
               ))}
             </tr>{" "}

@@ -664,14 +664,20 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
     .orderBy('is_best_photo', 'desc').orderBy('quality_score', 'desc').orderBy('photo_order', 'asc')
     .limit(8)
     .catch(() => []);
-  const photos = (await Promise.all(photoRows.map(async (p) => ({
+  const photos = await Promise.all(photoRows.map(async (p) => ({
     url: await photoUrl(p),
     label: p.zone || null,
     zone: p.zone || null,
     caption: p.caption || null,
     isBest: !!p.is_best_photo,
     qualityScore: p.quality_score ?? null,
-  })))).filter((p) => p.url);
+  })));
+  // Photos that EXIST on the assessment but whose URL would not sign are
+  // dropped here — an omission the report can never observe downstream
+  // (codex P2 #3176 r22). Report the count so the payload's cacheability
+  // gate can refuse to cache a silently incomplete PDF.
+  const droppedPhotoCount = photos.filter((p) => !p.url).length;
+  const visiblePhotos = photos.filter((p) => p.url);
 
   const scores = formatAssessmentScores(assessment);
   const trend = historyRows.map((r) => {
@@ -699,7 +705,8 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
     scores,
     observations: assessment.observations || '',
     aiSummary: assessment.ai_summary || null,
-    photos,
+    photos: visiblePhotos,
+    droppedPhotoCount,
     plantGroups,
     trend,
     techConfirmedPest: !!assessment.tech_confirmed_pest,

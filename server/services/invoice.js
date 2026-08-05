@@ -4033,6 +4033,32 @@ const InvoiceService = {
       logger.error(
         `[invoice] Void sweep failed for cancelled service ${scheduledServiceId}: ${e.message}`,
       );
+    } finally {
+      // Inspection credit: a cancelled booking must not keep its $75.
+      // Reversal lives HERE — in the one helper every cancellation path
+      // already calls — so no cancel surface can forget to wire it, and
+      // the ordering is guaranteed by construction: voiding an invoice
+      // RESTORES any credit applied to it, so reversing before the void
+      // would find the balance short and then hand the credit back
+      // spendable (Codex #3178 r7 P0). `finally` covers the no-invoice
+      // early return too — a cancel with nothing to void still reverses.
+      // Idempotent and never throws; the hourly sweep stays as recovery.
+      try {
+        const rev = await require('./inspection-credit').reverseInspectionCreditForBooking({
+          scheduledServiceId,
+          createdBy: 'system:inspection_credit_cancellation_void_hook',
+        });
+        // Surfaced for callers that COUNT reversals (the hourly sweep,
+        // which now routes through this seam — Codex #3178 r33 P2): a
+        // property on the returned array is additive and invisible to
+        // every array-consuming caller. Assigned in finally, so the
+        // no-invoice early return carries it too.
+        voided.inspectionCreditReversal = rev;
+      } catch (revErr) {
+        logger.error(
+          `[invoice] inspection credit reversal failed for cancelled service ${scheduledServiceId}: ${revErr.message}`,
+        );
+      }
     }
     return voided;
   },

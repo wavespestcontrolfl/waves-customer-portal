@@ -40,7 +40,32 @@ describe('customer-credit postCreditMovement validation', () => {
   test('whitelists the expected sources', () => {
     expect([...CustomerCredit.VALID_SOURCES]).toEqual([
       'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
+      'inspection_credit',
     ]);
+  });
+
+  test('every ISSUANCE source renders in the portal — an unmapped one is an invisible credit', () => {
+    // The failure this pins: a source added to VALID_SOURCES but not to
+    // CREDIT_DISPLAY_TYPE_BY_SOURCE falls through to the 'promo' default in
+    // portalCreditsFromLedger, so a customer told "your fee was credited"
+    // sees a generic label — or, for a source that should read as a service
+    // credit, the wrong one. Consumption sources never render (delta < 0).
+    const CONSUMPTION_SOURCES = ['invoice_application', 'invoice_prepaid'];
+    const issuanceSources = [...CustomerCredit.VALID_SOURCES]
+      .filter((s) => !CONSUMPTION_SOURCES.includes(s));
+    for (const source of issuanceSources) {
+      const [row] = CustomerCredit.portalCreditsFromLedger([
+        { id: source, delta: 25, source, created_at: '2026-08-03' },
+      ]);
+      expect(row).toBeTruthy();
+      expect(typeof row.description).toBe('string');
+      expect(row.description.length).toBeGreaterThan(0);
+    }
+    // The inspection credit specifically reads as a SERVICE credit.
+    const [inspection] = CustomerCredit.portalCreditsFromLedger([
+      { id: 'i', delta: 75, source: 'inspection_credit', created_at: '2026-08-03' },
+    ]);
+    expect(inspection).toMatchObject({ type: 'service', description: 'Service credit', amount: 75 });
   });
 });
 
