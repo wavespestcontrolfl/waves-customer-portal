@@ -40,9 +40,15 @@ const applyArg = process.argv.find((a) => a.startsWith('--apply='));
 (async () => {
   if (applyArg) {
     const rescueId = applyArg.split('=')[1];
-    if (!execute) {
-      console.log(`DRY RUN: would apply suggested rescue ${rescueId}. Re-run with --execute.`);
-      process.exit(0);
+    // Dry run loads and revalidates the ledger row and prints the EXACT
+    // change --execute would make (owner, field, bounced -> candidate,
+    // current validation verdict) — never trust a pasted id blind.
+    const preview = await rescue.previewSuggestedRescue(rescueId);
+    console.log(`${execute ? 'EXECUTE' : 'DRY RUN'} preview: ${JSON.stringify(preview, null, 1)}`);
+    if (preview.error || !execute) {
+      if (!execute && !preview.error) console.log('\nDry run — nothing written. Re-run with --execute to apply the change above.');
+      await db.destroy();
+      process.exit(preview.error ? 1 : 0);
     }
     const result = await rescue.applySuggestedRescue(rescueId, { appliedBy: 'operator-backfill' });
     console.log(JSON.stringify(result));

@@ -35,8 +35,9 @@ function makeChain(overrides = {}) {
   const rows = 'rows' in overrides ? overrides.rows : [];
   const chain = {};
   const passthrough = ['where', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'whereNot',
-    'orWhere', 'orWhereRaw', 'distinct', 'limit', 'orderBy', 'select', 'insert', 'update', 'modify'];
+    'orWhere', 'orWhereRaw', 'distinct', 'limit', 'orderBy', 'select', 'insert', 'update'];
   for (const m of passthrough) chain[m] = jest.fn(() => chain);
+  chain.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(chain); return chain; });
   chain.first = jest.fn(() => Promise.resolve('first' in overrides ? overrides.first : null));
   chain.returning = jest.fn(() => Promise.resolve('returning' in overrides ? overrides.returning : []));
   // Awaiting the bare chain (knex builders are thenables) resolves to `rows`.
@@ -373,6 +374,99 @@ describe('rescueBouncedAddress domain repair (mechanical tier)', () => {
     dns.resolveMx.mockResolvedValue([{ exchange: 'mx', priority: 1 }]);
     const r = await rescue.rescueBouncedAddress('bee.p00@gmail', { dryRun: true });
     expect(r).toMatchObject({ status: 'applied', tier: 'domain_repair', candidate: 'bee.p00@gmail.com' });
+  });
+});
+
+describe('codex r2 contracts', () => {
+  it('excludes the OWNER in SQL when checking customer collisions', async () => {
+    const customers = makeChain();
+    db.mockImplementation((name) => {
+      if (name === 'customers') return customers;
+      return makeChain();
+    });
+    dns.resolveMx.mockResolvedValue([{ exchange: 'mx', priority: 1 }]);
+    await rescue.validateCandidate('x@corp-example.com', { bouncedEmail: 'y@corp-example.com', ownerCustomerId: 'me', ownerLeadId: null });
+    expect(customers.whereNot).toHaveBeenCalledWith('id', 'me');
+  });
+
+  it('falls back to an admin bell when the suggestion email cannot send', async () => {
+    const NotificationService = require('../services/notification-service');
+    email.send.mockResolvedValue({ ok: false, error: 'Email not configured' });
+    const rescues = makeChain({ first: null, returning: [{ id: 'r-fallback' }] });
+    db.mockImplementation((name) => {
+      if (name === 'email_bounce_rescues') return rescues;
+      if (name === 'customers') {
+        const chain = makeChain();
+        let probe = 0;
+        chain.first = jest.fn(() => { probe += 1; return Promise.resolve(probe === 1 ? { id: 'c1', first_name: 'Jane', last_name: 'D', phone: '+15550001111', email: 'janeboedmer@gmail.com' } : null); });
+        return chain;
+      }
+      if (name === 'call_log') {
+        const chain = makeChain();
+        chain.select = jest.fn(() => Promise.resolve([{
+          id: 'call1', created_at: new Date('2026-06-08'),
+          transcription: 'Caller: It is J-A-N-E-B-O-D-M-E-R at gmail.com.',
+          ai_extraction: null,
+        }]));
+        return chain;
+      }
+      return makeChain();
+    });
+    dns.resolveMx.mockResolvedValue([{ exchange: 'mx', priority: 1 }]);
+    const r = await rescue.rescueBouncedAddress('janeboedmer@gmail.com');
+    expect(r).toMatchObject({ status: 'suggested' });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledWith(
+      'system',
+      expect.stringContaining('could not be emailed'),
+      expect.stringContaining('--apply=r-fallback'),
+      expect.anything(),
+    );
+    email.send.mockResolvedValue({ ok: true });
+  });
+
+  it('re-examines a no_candidate row when evidence has since landed', async () => {
+    const existingRow = { id: 'r-old', status: 'no_candidate', updated_at: new Date('2026-08-01') };
+    // First .first() = the entry-guard lookup (returns the stale row);
+    // later .first() calls are validateCandidate's prior-attempt check and
+    // must return null or every candidate reads as already_tried.
+    const rescues = makeChain();
+    let rescueProbe = 0;
+    rescues.first = jest.fn(() => { rescueProbe += 1; return Promise.resolve(rescueProbe === 1 ? existingRow : null); });
+    email.send.mockResolvedValue({ ok: true });
+    db.mockImplementation((name) => {
+      if (name === 'email_bounce_rescues') return rescues;
+      if (name === 'customers') {
+        const chain = makeChain();
+        let probe = 0;
+        chain.first = jest.fn(() => { probe += 1; return Promise.resolve(probe === 1 ? { id: 'c1', first_name: 'Jane', last_name: 'D', phone: '+15550001111', email: 'janeboedmer@gmail.com' } : null); });
+        return chain;
+      }
+      if (name === 'call_log') {
+        const chain = makeChain();
+        chain.select = jest.fn(() => Promise.resolve([{
+          id: 'call1', created_at: new Date('2026-06-08'),
+          transcription: 'Caller: It is J-A-N-E-B-O-D-M-E-R at gmail.com.',
+          ai_extraction: null,
+        }]));
+        return chain;
+      }
+      return makeChain();
+    });
+    dns.resolveMx.mockResolvedValue([{ exchange: 'mx', priority: 1 }]);
+    const r = await rescue.rescueBouncedAddress('janeboedmer@gmail.com');
+    expect(r).toMatchObject({ status: 'suggested', candidate: 'janebodmer@gmail.com', rescueId: 'r-old' });
+    expect(rescues.insert).not.toHaveBeenCalled(); // same ledger row, updated in place
+    expect(rescues.update).toHaveBeenCalled();
+  });
+
+  it('keeps a suggested row terminal (no re-send spam on redelivery)', async () => {
+    db.mockImplementation((name) => {
+      if (name === 'email_bounce_rescues') return makeChain({ first: { id: 'r1', status: 'suggested', updated_at: new Date() } });
+      return makeChain();
+    });
+    const r = await rescue.rescueBouncedAddress('janeboedmer@gmail.com');
+    expect(r).toMatchObject({ skipped: 'already_examined', status: 'suggested' });
+    expect(email.send).not.toHaveBeenCalled();
   });
 });
 

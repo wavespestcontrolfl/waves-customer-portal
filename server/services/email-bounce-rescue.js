@@ -393,16 +393,21 @@ async function mxResolves(domain) {
  * never an apply.
  */
 async function candidateCollision(email, { ownerCustomerId, ownerLeadId }) {
+  // The owner is excluded IN SQL, not post-hoc: with `.first()` and no
+  // exclusion, a candidate present on BOTH the owner and another party
+  // could return the owner row and read as collision-free (codex r2).
   const fieldChecks = CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR ');
   const otherCustomer = await db('customers')
     .whereRaw(`(${fieldChecks})`, CUSTOMER_EMAIL_FIELDS.map(() => email))
     .whereNull('deleted_at')
+    .modify((q) => { if (ownerCustomerId) q.whereNot('id', ownerCustomerId); })
     .first();
   if (otherCustomer && otherCustomer.id !== ownerCustomerId) {
     return { kind: 'customer', id: otherCustomer.id };
   }
   const billingPref = await db('notification_prefs')
     .whereRaw('LOWER(billing_email) = ?', [email])
+    .modify((q) => { if (ownerCustomerId) q.whereNot('customer_id', ownerCustomerId); })
     .first()
     .catch(() => null);
   if (billingPref?.customer_id && billingPref.customer_id !== ownerCustomerId) {
@@ -411,6 +416,12 @@ async function candidateCollision(email, { ownerCustomerId, ownerLeadId }) {
   const otherLead = await db('leads')
     .whereRaw('LOWER(email) = ?', [email])
     .whereNull('deleted_at')
+    .modify((q) => {
+      if (ownerLeadId) q.whereNot('id', ownerLeadId);
+      if (ownerCustomerId) {
+        q.where((q2) => q2.whereNull('customer_id').orWhereNot('customer_id', ownerCustomerId));
+      }
+    })
     .first();
   if (otherLead && otherLead.id !== ownerLeadId
     && !(ownerCustomerId && otherLead.customer_id === ownerCustomerId)) {
@@ -541,12 +552,39 @@ async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier,
       ? `To apply it, run from the portal repo root:\n  railway run --service Postgres node ops/agents/bounce-rescue-backfill.js --apply=${rescueRowId} --execute`
       : 'Ask the customer for a working address at the next touchpoint.',
   ].filter(Boolean).join('\n');
-  await email.send({
+  const result = await email.send({
     to: suggestionRecipient(),
     subject: `ACT: bounced email fix ${candidate ? 'suggested' : 'needs a human'} — ${name || bouncedEmail}`,
     heading: 'Bounced email rescue',
     body,
   });
+  // email.send resolves { ok: false } instead of throwing (missing SMTP,
+  // sendMail failure) — a swallowed failure here would silently strand a
+  // read-back prompt behind an already-recorded ledger row. Throw so the
+  // caller's fallback surface (admin bell) runs.
+  if (!result?.ok) {
+    throw new Error(`suggestion email not sent: ${result?.error || 'unknown'}`);
+  }
+}
+
+// Fallback surface when the ACT: email cannot be sent: an admin bell with
+// the same actionable content, so the suggestion is never invisible. The
+// bell is the BACKUP channel only — email-first per the approvals rule.
+async function suggestionFallbackBell({ rescueRowId, bouncedEmail, candidate, owner, sendError }) {
+  const name = owner.customer
+    ? `${owner.customer.first_name || ''} ${owner.customer.last_name || ''}`.trim()
+    : `${owner.lead?.first_name || ''} ${owner.lead?.last_name || ''}`.trim();
+  await NotificationService.notifyAdmin(
+    'system',
+    'Bounced-email suggestion could not be emailed — action needed',
+    `${name}: ${bouncedEmail} bounced. ${candidate
+      ? `Candidate on file: ${candidate}. Apply with: node ops/agents/bounce-rescue-backfill.js --apply=${rescueRowId} --execute`
+      : 'No confident candidate — ask for a working address at the next touchpoint.'} (Suggestion email failed: ${String(sendError).slice(0, 120)})`,
+    {
+      link: owner.customer ? `/admin/customers?customerId=${owner.customer.id}` : '/admin/leads',
+      metadata: { dedupeKey: `email-rescue-suggestion:${bouncedEmail}` },
+    },
+  ).catch((err) => logger.warn(`[email-bounce-rescue] fallback bell failed: ${err.message}`));
 }
 
 // ── main entry ──────────────────────────────────────────────────────
@@ -561,7 +599,7 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
   const bouncedEmail = normalizeEmail(rawEmail);
   if (!LOOSE_EMAIL_RE.test(bouncedEmail)) return { skipped: 'invalid_input' };
 
-  let staleApplyingRow = null;
+  let reusableRow = null;
   if (!dryRun) {
     const existing = await db('email_bounce_rescues')
       .whereRaw('LOWER(bounced_email) = ?', [bouncedEmail]).first().catch(() => null);
@@ -569,9 +607,14 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
       const staleApplying = existing.status === 'applying'
         && existing.updated_at
         && (Date.now() - new Date(existing.updated_at).getTime()) > APPLYING_STALE_MINUTES * 60_000;
-      if (!staleApplying) return { skipped: 'already_examined', status: existing.status };
-      // A crash mid-apply left this row claimed but unwritten — take it over.
-      staleApplyingRow = existing;
+      // 'no_candidate' is NOT terminal: transcription/extraction/inbound
+      // sync may land AFTER the first webhook look, so a re-bounce or
+      // backfill re-examines with the fresh evidence and updates the same
+      // row. 'applied' and 'suggested' stay terminal ('suggested' would
+      // re-send ACT emails on every redelivery otherwise).
+      const reusable = staleApplying || existing.status === 'no_candidate';
+      if (!reusable) return { skipped: 'already_examined', status: existing.status };
+      reusableRow = existing;
     }
   }
 
@@ -651,15 +694,21 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
   // row that a later pass takes over (see entry check above).
   const persistStatus = outcome.status === 'applied' ? 'applying' : outcome.status;
   let row;
-  if (staleApplyingRow) {
-    await db('email_bounce_rescues').where({ id: staleApplyingRow.id }).update({
+  if (reusableRow) {
+    // Re-examination of a no_candidate / stale-applying row: same ledger
+    // row, fresh outcome. Skip the re-write (and any re-send) when a
+    // re-examined no_candidate stayed no_candidate.
+    if (reusableRow.status === 'no_candidate' && outcome.status === 'no_candidate') {
+      return { skipped: 'already_examined', status: 'no_candidate' };
+    }
+    await db('email_bounce_rescues').where({ id: reusableRow.id }).update({
       tier: outcome.tier || null,
       candidate_email: outcome.candidate || null,
       evidence: JSON.stringify(outcome.evidence ? { quote: outcome.evidence.quote, llm: !!outcome.evidence.llm } : {}),
       status: persistStatus,
       updated_at: new Date(),
     });
-    row = { ...staleApplyingRow, status: persistStatus };
+    row = { ...reusableRow, status: persistStatus };
   } else {
     row = await recordRescue({
       bouncedEmail,
@@ -695,7 +744,13 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
       rescueRowId: row.id, bouncedEmail, candidate: outcome.candidate || null,
       tier: outcome.tier || null, evidence: outcome.evidence || null, owner,
       reason: outcome.reason || null,
-    }).catch((err) => logger.warn(`[email-bounce-rescue] suggestion email failed: ${err.message}`));
+    }).catch(async (err) => {
+      logger.warn(`[email-bounce-rescue] suggestion email failed: ${err.message}`);
+      await suggestionFallbackBell({
+        rescueRowId: row.id, bouncedEmail, candidate: outcome.candidate || null,
+        owner, sendError: err.message,
+      });
+    });
   }
   return { bouncedEmail, ...outcome, rescueId: row.id };
 }
@@ -718,6 +773,41 @@ async function recordRescue({ bouncedEmail, customerId = null, leadId = null, ti
     if (String(err.code) === '23505') return null;
     throw err;
   }
+}
+
+/**
+ * Read-only preview of what applySuggestedRescue would change — the ops
+ * script's --apply dry run prints this so the operator sees the exact
+ * target (owner, field, bounced → candidate) and the CURRENT validation
+ * verdict before running --execute on a possibly stale/mistyped id.
+ */
+async function previewSuggestedRescue(rescueId) {
+  const row = await db('email_bounce_rescues').where({ id: rescueId }).first();
+  if (!row) return { error: 'rescue row not found' };
+  const bouncedEmail = normalizeEmail(row.bounced_email);
+  const owner = await findOwner(bouncedEmail);
+  const ownerName = owner.customer
+    ? `${owner.customer.first_name || ''} ${owner.customer.last_name || ''}`.trim()
+    : owner.lead ? `${owner.lead.first_name || ''} ${owner.lead.last_name || ''}`.trim() : null;
+  const validation = row.candidate_email
+    ? await validateCandidate(row.candidate_email, {
+      bouncedEmail,
+      ownerCustomerId: owner.customer?.id || null,
+      ownerLeadId: owner.lead?.id || null,
+      excludeRescueId: row.id,
+    })
+    : { ok: false, reason: 'row has no candidate' };
+  return {
+    rescueId: row.id,
+    status: row.status,
+    tier: row.tier,
+    bouncedEmail,
+    candidate: row.candidate_email ? normalizeEmail(row.candidate_email) : null,
+    owner: owner.customer
+      ? { kind: 'customer', id: owner.customer.id, name: ownerName, field: owner.field }
+      : owner.lead ? { kind: 'lead', id: owner.lead.id, name: ownerName, field: 'email' } : null,
+    validation,
+  };
 }
 
 /**
@@ -755,6 +845,7 @@ module.exports = {
   rescueEnabled,
   rescueBouncedAddress,
   applySuggestedRescue,
+  previewSuggestedRescue,
   // exported for unit tests — pure/deterministic pieces
   editDistance,
   decodeSpelledCandidates,
