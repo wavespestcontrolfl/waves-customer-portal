@@ -2661,6 +2661,7 @@ function auditCountyCandidates(address, geoContext) {
   if (shouldQueryManateePAO(address, geoContext) && !counties.includes('Manatee')) counties.push('Manatee');
   if (shouldQuerySarasotaPAO(address, geoContext) && !counties.includes('Sarasota')) counties.push('Sarasota');
   if (shouldQueryCharlottePAO(address, geoContext) && !counties.includes('Charlotte')) counties.push('Charlotte');
+  if (shouldQueryHillsboroughPAO(address, geoContext) && !counties.includes('Hillsborough')) counties.push('Hillsborough');
   return counties;
 }
 
@@ -3696,7 +3697,14 @@ function parseHillsboroughPaoRecord({ address, search, parcel }) {
     `${parcel?.landUse?.description || ''} ${primary?.type?.description || ''}`,
   ) || dorUcPropertyType(primary?.type?.code);
   const commercialSized = isCommercialBuildingType(propertyType);
-  const sqftDetailed = coerceBuildingSqftDetailed(primary?.heatedArea, commercialSized);
+  // Commercial cards often carry no heated/AC area — fall back to grossArea
+  // (under-roof) like the Charlotte/Sarasota parsers do, or the record fails
+  // hasCountyPricingCore and a priced building reads as "no sqft source".
+  // Residential stays heated-only: grossArea includes garage/porches and
+  // would overstate the living area every pricer keys on (codex P2 r2).
+  const sqftDetailed = commercialSized
+    ? coerceFirstBuildingSqftDetailed([primary?.heatedArea, primary?.grossArea], commercialSized)
+    : coerceBuildingSqftDetailed(primary?.heatedArea, commercialSized);
   const source = `${HILLSBOROUGH_PAO_BASE}/propertysearch/#/parcel/basic/${encodeURIComponent(search.parcelId)}`;
 
   return {

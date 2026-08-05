@@ -431,6 +431,9 @@ function normalizeCountyName(county) {
   if (s === 'manatee') return 'Manatee';
   if (s === 'sarasota') return 'Sarasota';
   if (s === 'charlotte') return 'Charlotte';
+  // Hillsborough has no COUNTY_LAYERS entry (point-in-polygon degrades to the
+  // FDOR statewide layer) but the key routes its street-situs queries below.
+  if (s === 'hillsborough') return 'Hillsborough';
   return null;
 }
 
@@ -648,6 +651,16 @@ const SITUS_QUERY_FIELDS = {
   Manatee: ['SITUS_ADDRESS'],
   Sarasota: ['fulladdress'],
   Charlotte: ['FullPropertyAddress', 'propertyaddress'],
+  // "STREET, CITY" strings — the audit normalizes each piece through
+  // normalizeCountyStreetLine, which drops the post-comma city.
+  Hillsborough: ['FullAddress'],
+};
+
+// Hillsborough has no COUNTY_LAYERS entry — the HCPA WebParcels layer carries
+// no roll attributes for the point-in-polygon path — but its NonConfidential
+// parcel layer (live-probed 2026-08-05) serves the street-situs queries.
+const SITUS_ONLY_LAYER_URLS = {
+  Hillsborough: 'https://gis.hcpafl.org/arcgis/rest/services/Webmaps/HillsboroughFL_WebParcels/MapServer/0/query',
 };
 
 // Situs ZIP per county, returned alongside each situs string so the audit can
@@ -658,6 +671,7 @@ const SITUS_ZIP_FIELDS = {
   Manatee: 'SITUS_POSTAL_ZIP',
   Sarasota: 'loczip',
   Charlotte: 'zipcode',
+  Hillsborough: 'SiteZip',
 };
 
 // Parcel-ID field per county layer (mirrors each parse function's getter).
@@ -724,10 +738,10 @@ async function lookupCountyParcelAttributesById(county, parcelId, options = {}) 
 // interpolation, so no quoting is reachable.
 async function queryStreetSitusAddresses(county, streetText, options = {}) {
   if (isDisabled()) return null;
-  const layer = COUNTY_LAYERS[county];
+  const layerUrl = COUNTY_LAYERS[county]?.url || SITUS_ONLY_LAYER_URLS[county];
   const fields = SITUS_QUERY_FIELDS[county];
   const text = String(streetText || '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-  if (!layer || !fields || text.length < 3) return null;
+  if (!layerUrl || !fields || text.length < 3) return null;
 
   const zipField = SITUS_ZIP_FIELDS[county];
   const params = new URLSearchParams({
@@ -742,7 +756,7 @@ async function queryStreetSitusAddresses(county, streetText, options = {}) {
   const timer = setTimeout(() => controller.abort(), timeoutMsFor(options));
   const t0 = Date.now();
   try {
-    const resp = await fetch(`${layer.url}?${params.toString()}`, { signal: controller.signal });
+    const resp = await fetch(`${layerUrl}?${params.toString()}`, { signal: controller.signal });
     if (!resp.ok) throw new Error(`${county} street GIS ${resp.status}`);
     const data = await resp.json();
     if (data?.error) throw new Error(`${county} street GIS error: ${data.error.message || data.error.code}`);

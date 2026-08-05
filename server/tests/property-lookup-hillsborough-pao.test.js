@@ -183,6 +183,39 @@ describe('parseHillsboroughPaoRecord', () => {
     expect('hasPool' in parsed).toBe(false);
   });
 
+  it('commercial cards fall back to grossArea when heated/AC area is blank (codex P2 r2)', () => {
+    const parcel = parcelFixture({
+      landUse: { code: '4800', description: 'WAREHOUSE DISTRIBUTION TERMINAL' },
+      buildings: [{
+        heatedArea: 0,
+        grossArea: 45000,
+        stories: 1,
+        yearBuilt: 1998,
+        type: { code: '48  ', description: 'WAREHOUSE' },
+      }],
+      extraFeatures: null,
+    });
+    const parsed = parseHillsboroughPaoRecord({ address: 'x', search: SEARCH_MATCH, parcel });
+    expect(parsed.propertyType).toBe('Warehouse');
+    expect(parsed.squareFootage).toBe(45000);
+  });
+
+  it('residential never inherits grossArea — garage/porch sqft must not price as living area', () => {
+    const parcel = parcelFixture({
+      buildings: [{
+        heatedArea: null,
+        grossArea: 2976,
+        stories: 1,
+        yearBuilt: 2004,
+        type: { code: '01  ', description: 'SINGLE FAMILY' },
+      }],
+      extraFeatures: null,
+    });
+    const parsed = parseHillsboroughPaoRecord({ address: 'x', search: SEARCH_MATCH, parcel });
+    expect(parsed.squareFootage).toBeNull();
+    expect(parsed._buildings[0].underRoofSqft).toBe(2976);
+  });
+
   it('still ships a lot-only record for an unimproved parcel', () => {
     const parsed = parseHillsboroughPaoRecord({
       address: 'x',

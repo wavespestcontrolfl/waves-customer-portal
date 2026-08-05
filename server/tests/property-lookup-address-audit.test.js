@@ -412,6 +412,48 @@ describe('buildFieldVerifyFlags snapped-record flag (P1: snapped to a different 
   });
 });
 
+describe('auditAddressHouseNumber — Hillsborough (codex P2 #3220 r2)', () => {
+  // HCPA situs strings are city-suffixed ("STREET, CITY") — the audit's
+  // per-piece normalizeCountyStreetLine drops the post-comma city, so the
+  // end-pinned patterns see the bare street line.
+  const HILLS_SITUS = [
+    '7605 NOTTINGHILL SKY DR, APOLLO BEACH',
+    '7609 NOTTINGHILL SKY DR, APOLLO BEACH',
+    '7611 NOTTINGHILL SKY DR, APOLLO BEACH',
+  ];
+
+  function mockHillsSitus(situsList) {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        features: situsList.map((s) => ({ attributes: { FullAddress: s, SiteZip: '33572' } })),
+      }),
+    });
+  }
+
+  test('nonexistent house number on an existing Hillsborough street → nearest numbers', async () => {
+    mockHillsSitus(HILLS_SITUS);
+
+    const audit = await auditAddressHouseNumber('7615 Nottinghill Sky Dr, Apollo Beach, FL 33572');
+
+    expect(audit).toMatchObject({
+      county: 'Hillsborough',
+      houseNumber: 7615,
+      streetExists: true,
+      hasExactMatch: false,
+    });
+    expect(audit.nearestNumbers).toContain(7611);
+  });
+
+  test('exact Hillsborough match → positive verdict', async () => {
+    mockHillsSitus(HILLS_SITUS);
+
+    const audit = await auditAddressHouseNumber('7609 Nottinghill Sky Dr, Apollo Beach, FL 33572');
+
+    expect(audit).toMatchObject({ county: 'Hillsborough', hasExactMatch: true });
+  });
+});
+
 describe('queryStreetSitusAddresses', () => {
   test('sanitizes the street text before building the where clause', async () => {
     mockSitusResponse(['4857 TOBERMORY WAY']);
@@ -447,6 +489,30 @@ describe('queryStreetSitusAddresses', () => {
     const out = await queryStreetSitusAddresses('Manatee', 'TOBERMORY');
 
     expect(out).toEqual({ situs: ['100 TOBERMORY WAY'], zips: [null], truncated: true });
+  });
+
+  test('Hillsborough routes to the HCPA situs-only layer with FullAddress + SiteZip', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        features: [
+          { attributes: { FullAddress: '7605 NOTTINGHILL SKY DR, APOLLO BEACH', SiteZip: '33572' } },
+          { attributes: { FullAddress: '7609 NOTTINGHILL SKY DR, APOLLO BEACH', SiteZip: '33572' } },
+        ],
+      }),
+    });
+
+    const out = await queryStreetSitusAddresses('Hillsborough', 'NOTTINGHILL SKY');
+
+    const url = new URL(global.fetch.mock.calls[0][0]);
+    expect(url.origin + url.pathname)
+      .toBe('https://gis.hcpafl.org/arcgis/rest/services/Webmaps/HillsboroughFL_WebParcels/MapServer/0/query');
+    expect(url.searchParams.get('where')).toBe("UPPER(FullAddress) LIKE '%NOTTINGHILL SKY%'");
+    expect(out).toEqual({
+      situs: ['7605 NOTTINGHILL SKY DR, APOLLO BEACH', '7609 NOTTINGHILL SKY DR, APOLLO BEACH'],
+      zips: ['33572', '33572'],
+      truncated: false,
+    });
   });
 
   test('Charlotte queries and extracts BOTH address fields', async () => {
