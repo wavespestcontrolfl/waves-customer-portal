@@ -48,6 +48,7 @@ function lazy(name, path) {
 const getSerpProfiler = lazy('serp-profiler', '../../seo/serp-profiler');
 const getGithubClient = lazy('github-client', '../../content-astro/github-client');
 const getFrontmatter = lazy('frontmatter', '../../content-astro/frontmatter');
+const getContentGuardrails = lazy('content-guardrails', '../content-guardrails');
 
 // ── tool executor ────────────────────────────────────────────────────
 
@@ -349,16 +350,59 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
       if (!sessionId) return { error: 'session context missing — dispatcher must pass sessionId' };
       const { frontmatter, body, schema, claims_ledger, notes_for_reviewer } = input || {};
       if (!frontmatter || !body) return { error: 'frontmatter and body required' };
+      // Deterministic pre-gate repair: strip unambiguous citation artifacts
+      // (<cite> wrappers, citeturn/oaicite tokens, PUA glyphs) from every
+      // publishable string at capture, so the CITATION_TOKEN_RESIDUE gate
+      // spends the run's single autonomous redraft on real editorial
+      // problems, not markup with no legitimate published form. Warn-logged
+      // (not silent) so writer-model degradation stays visible; ambiguous
+      // forms (bare index=N, footnotes) still hit the gate untouched.
+      let cleanBody = body;
+      let cleanFrontmatter = frontmatter;
+      let residueStripped = false;
+      const guardrails = getContentGuardrails();
+      if (guardrails?.stripCitationResidue) {
+        const strippedBody = guardrails.stripCitationResidue(body);
+        cleanBody = strippedBody.text;
+        residueStripped = strippedBody.changed;
+        if (frontmatter && typeof frontmatter === 'object') {
+          const stripString = (value) => {
+            const stripped = guardrails.stripCitationResidue(value);
+            if (stripped.changed) residueStripped = true;
+            return stripped.text;
+          };
+          cleanFrontmatter = { ...frontmatter };
+          for (const [key, value] of Object.entries(cleanFrontmatter)) {
+            if (typeof value === 'string') {
+              cleanFrontmatter[key] = stripString(value);
+            } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+              // One nested level: the guardrail's publishableText includes
+              // nested strings like frontmatter.hero_image.alt on new-page
+              // drafts, so residue there must strip too or the gate still
+              // burns the run's single redraft on it.
+              const nested = { ...value };
+              for (const [nkey, nvalue] of Object.entries(nested)) {
+                if (typeof nvalue === 'string') nested[nkey] = stripString(nvalue);
+              }
+              cleanFrontmatter[key] = nested;
+            }
+          }
+        }
+        if (residueStripped) {
+          logger.warn(`[brief-driven-tools] emit_draft(${sessionId}): stripped citation residue from the draft — the writer model is still emitting citation markup despite the prompt ban`);
+        }
+      }
       sessionDrafts.set(sessionId, {
         type: 'draft',
-        frontmatter,
-        body,
+        frontmatter: cleanFrontmatter,
+        body: cleanBody,
         schema: schema || null,
         claims_ledger: Array.isArray(claims_ledger) ? claims_ledger : [],
         notes_for_reviewer: notes_for_reviewer || null,
+        citation_residue_stripped: residueStripped,
         captured_at: new Date(),
       });
-      return { ok: true, captured: true, body_chars: body.length, claims: Array.isArray(claims_ledger) ? claims_ledger.length : 0 };
+      return { ok: true, captured: true, body_chars: cleanBody.length, claims: Array.isArray(claims_ledger) ? claims_ledger.length : 0 };
     }
 
     case 'emit_metadata_only': {
