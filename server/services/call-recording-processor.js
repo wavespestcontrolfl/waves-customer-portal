@@ -8006,26 +8006,26 @@ const CallRecordingProcessor = {
     // Live re-service lane context for the resolver's revisit override (codex
     // #3222 r1): eligibility is the reservice lane's OWN plan check
     // (reserviceLanesForCustomer — live recurring/WaveGuard coverage), never
-    // completed history, and a lane with an open callback is dropped here so
-    // a second free visit can't resolve (advisory — the booking transaction
-    // re-checks authoritatively). Intent-gated so the lookups only run on
+    // completed history. Lanes with an open callback are deliberately NOT
+    // filtered out here (codex r3): the re-service anchor must still resolve
+    // so the locked booking transaction can refuse the duplicate into
+    // hold-for-review or attach to the existing visit — dropping the lane
+    // would fall back to a generic label that books a second appointment
+    // outside the dedupe entirely. Intent-gated so the lookups only run on
     // revisit-shaped calls; fail-closed — an error grants no lanes (generic
     // anchoring, never a free visit).
     let callReServiceLanes = [];
     if (customerId && callReServiceRows.length > 0 && hasCallReServiceIntent(extracted, transcription)) {
       try {
-        const { reserviceLanesForCustomer, openCallbackExistsForLane } = require('./reservice-scheduler');
+        const { reserviceLanesForCustomer } = require('./reservice-scheduler');
         const reServiceCustomerRow = await db('customers').where({ id: customerId }).first();
         // Same inactive guard the public re-service route applies before its
         // lane lookup (codex #3222 r2): reserviceLanesForCustomer itself does
         // not reject deactivated rows, and a lingering WaveGuard tier/rate
         // plus pest evidence would otherwise still grant the pest lane.
-        const eligibleLanes = (reServiceCustomerRow && reServiceCustomerRow.active !== false)
+        callReServiceLanes = (reServiceCustomerRow && reServiceCustomerRow.active !== false)
           ? await reserviceLanesForCustomer(reServiceCustomerRow)
           : [];
-        for (const lane of eligibleLanes) {
-          if (!(await openCallbackExistsForLane(db, customerId, lane))) callReServiceLanes.push(lane);
-        }
       } catch (reErr) {
         callReServiceLanes = [];
         logger.warn(`[call-proc] re-service lane lookup failed for ${maskSid(callSid)} (falling back to generic anchoring): ${reErr.message}`);

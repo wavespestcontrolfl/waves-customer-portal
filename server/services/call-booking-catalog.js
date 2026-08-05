@@ -26,6 +26,10 @@ const BOOKABLE_SERVICE_COLUMNS = [
   'service_key',
   'name',
   'short_name',
+  // Lane-family classification for the re-service override (the prompt block
+  // and its extractionPromptVersion hash render NAMES only — an extra column
+  // here cannot fragment shadow cohorts).
+  'category',
   'billing_type',
   'pricing_type',
   'base_price',
@@ -132,7 +136,18 @@ function hasAffirmativeRodentMention(text) {
 //     termite resolution is a different service, not a covered re-service.
 // Bare "retreat" is excluded on purpose — too common as a plain English word.
 const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
-const RE_SERVICE_INTENT_RE = /\bre[-\s]?service\b|\bre[-\s]?visit\b|\brevisit\b|\bre[-\s]treat(?:ment)?\b|\bretreatment\b|\bspray\s+again\b|\btreat\s+again\b|\bcome\s+back\s+out\b/i;
+const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit|revisit|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
+const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
+// Negated wording ("I don't need a re-service, just my regular visit") is not
+// intent (codex #3222 r3) — same shape as NEGATED_ROACH_RE: negation word +
+// up to four plain-word fillers; adversative conjunctions break the run so
+// "don't want the quarterly but do want a re-service" keeps its affirmative.
+const NEGATED_RE_SERVICE_RE = new RegExp(`\\b(?:no|not|isn['’]?t|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|wouldn['’]?t|never|without|rather\\s+than|instead\\s+of)\\s+(?:(?!(?:but|however|though|except)\\b)[\\w'’]+\\s+){0,4}?${RE_SERVICE_PHRASE}\\b`, 'gi');
+
+function hasAffirmativeReServiceIntent(text) {
+  const cleaned = String(text || '').replace(NEGATED_RE_SERVICE_RE, ' ');
+  return RE_SERVICE_INTENT_RE.test(cleaned);
+}
 const RE_SERVICE_LAWN_CONTEXT_RE = /\b(?:lawn|turf|grass|weeds?|fertili[sz]\w*|chinch|sod)\b/i;
 const GENERIC_CALL_CATALOG_ROW_RE = /^(?:waves pest control appointment service|waves assessment|waves appointment)$/i;
 // Coarse resolveSchedulableCallService labels a lane's re-service may stand in
@@ -161,6 +176,16 @@ function reServiceLaneForRow(row) {
   return null;
 }
 
+// Lane family of a RECURRING plan catalog row, via the reservice lane's OWN
+// classifier (single source of truth — a second regex here would diverge).
+// Lazy require: reservice-scheduler pulls the db module, which this
+// otherwise-pure module must not load unless the branch actually runs.
+function reServiceLaneForPlanRow(row) {
+  if (!row || row.billing_type !== 'recurring') return null;
+  const { laneForCoverageRow } = require('./reservice-scheduler');
+  return laneForCoverageRow({ category: row.category, serviceType: row.name });
+}
+
 function callBookingResolutionHaystack(extracted = {}, transcription = '') {
   return [
     extracted.requested_service,
@@ -171,10 +196,10 @@ function callBookingResolutionHaystack(extracted = {}, transcription = '') {
 }
 
 // Cheap pre-gate so the processor only runs the re-service eligibility lookups
-// (customer row + live lanes + open-callback dedupe) on revisit-shaped calls.
+// (customer row + live lanes) on revisit-shaped calls.
 function hasCallReServiceIntent(extracted = {}, transcription = '') {
   const haystack = callBookingResolutionHaystack(extracted, transcription);
-  return !!haystack && RE_SERVICE_INTENT_RE.test(haystack);
+  return !!haystack && hasAffirmativeReServiceIntent(haystack);
 }
 
 // The two covered re-service rows, loaded OUTSIDE loadBookableCallServices on
@@ -261,10 +286,15 @@ function resolveCallBookingCatalogService({
   const byModelPick = findServiceByName(services, extracted.specific_service_name)
     || findServiceByName(services, extracted.matched_service)
     || findServiceByName(services, extracted.requested_service);
-  // A SPECIFIC model pick is final. A generic pick (appointment service /
-  // Waves Assessment) keeps its original precedence over the keyword rules,
-  // but the re-service override below may replace it.
-  if (byModelPick && !isGenericCallCatalogRow(byModelPick)) return byModelPick;
+  // A SPECIFIC pick is final — except the two shapes the re-service override
+  // may replace (both keep their original precedence over the keyword rules
+  // when the override misses): the generic anything-rows, and (codex #3222
+  // r3) the customer's own lane-family RECURRING plan row — the extractor
+  // exact-picks it from the prompt catalog on plan-customer revisit calls,
+  // but a revisit is the plan's free between-visits callback, not an extra
+  // plan visit.
+  const pickPlanLane = reServiceLaneForPlanRow(byModelPick);
+  if (byModelPick && !isGenericCallCatalogRow(byModelPick) && !pickPlanLane) return byModelPick;
 
   const haystack = callBookingResolutionHaystack(extracted, transcription);
 
@@ -280,21 +310,25 @@ function resolveCallBookingCatalogService({
     }
   }
 
-  // Re-service override (see RE_SERVICE_INTENT_RE block above): revisit intent
-  // from a LANE-ELIGIBLE customer anchors to the covered re-service row — last
-  // resort before the generic anchors. `reServiceLanes` carries the live plan
-  // eligibility (open-callback lanes already dropped; the booking transaction
-  // re-checks the dedupe authoritatively), and the coarse label must be
-  // lane-compatible so a resolved mosquito/termite/etc. call is never
-  // converted into a free callback.
+  // Re-service override (see RE_SERVICE_INTENT_RE block above): AFFIRMATIVE
+  // revisit intent from a LANE-ELIGIBLE customer anchors to the covered
+  // re-service row. `reServiceLanes` carries the live plan eligibility —
+  // lanes with an open callback are NOT pre-filtered (codex r3): the anchor
+  // must still resolve so the locked booking transaction can reject the
+  // duplicate into hold-for-review or attach to the existing visit, instead
+  // of silently booking a second appointment under a generic label. The
+  // coarse label must be lane-compatible, and a replaceable plan pick pins
+  // the lane to its own family (a pest plan revisit never books the lawn
+  // lane).
   if (
     !keywordRow
     && haystack
-    && RE_SERVICE_INTENT_RE.test(haystack)
+    && hasAffirmativeReServiceIntent(haystack)
     && Array.isArray(reServiceLanes) && reServiceLanes.length > 0
   ) {
     const coarse = coarseServiceLabel ? String(coarseServiceLabel) : null;
     const candidates = reServiceLanes.filter((lane) => {
+      if (pickPlanLane && lane !== pickPlanLane) return false;
       const compat = RE_SERVICE_COARSE_COMPATIBLE[lane];
       return !!compat && (coarse === null || compat.has(coarse));
     });
@@ -557,6 +591,7 @@ module.exports = {
   hasCallReServiceIntent,
   isReServiceCatalogRow,
   reServiceLaneForRow,
+  reServiceLaneForPlanRow,
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,

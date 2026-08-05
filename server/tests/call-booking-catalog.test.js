@@ -13,6 +13,7 @@ const {
   hasCallReServiceIntent,
   isReServiceCatalogRow,
   reServiceLaneForRow,
+  reServiceLaneForPlanRow,
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
@@ -527,6 +528,52 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(reServiceLaneForRow(RE_SERVICES[1])).toBe('lawn');
     expect(reServiceLaneForRow(GENERIC_ROW)).toBeNull();
     expect(reServiceLaneForRow(null)).toBeNull();
+  });
+
+  test('negated re-service wording is NOT intent (codex r3)', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: "I don't need a re-service, just my regular pest control visit" },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row).toBeNull();
+    expect(hasCallReServiceIntent({ requested_service: "no re-service needed, just the quarterly" }, '')).toBe(false);
+    expect(hasCallReServiceIntent({}, "not a revisit — this is a brand new problem")).toBe(false);
+    // Adversative keeps the affirmative mention.
+    expect(hasCallReServiceIntent({}, "we don't want the quarterly moved but we do need a re-service")).toBe(true);
+  });
+
+  test('an exact recurring PLAN pick is replaceable by the re-service anchor on revisit intent (codex r3)', () => {
+    const planPicked = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'General Pest Control (Quarterly)', requested_service: 'revisit between treatments, ants are back' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(planPicked?.service_key).toBe('pest_re_service');
+    // Without revisit intent the plan pick stands untouched.
+    const normalPlan = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'General Pest Control (Quarterly)', requested_service: 'set up my quarterly service' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(normalPlan?.service_key).toBe('pest_general_quarterly');
+    // A plan pick pins the lane: pest plan + lawn-only eligibility → no override.
+    const laneMismatch = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'General Pest Control (Quarterly)', requested_service: 'pest control revisit' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(laneMismatch?.service_key).toBe('pest_general_quarterly');
+    expect(reServiceLaneForPlanRow(CATALOG.find((s) => s.service_key === 'pest_general_quarterly'))).toBe('pest');
+    expect(reServiceLaneForPlanRow(GENERIC_ROW)).toBeNull();
   });
 
   test('a re-service row never prices — even a transcript-quoted number stays off the visit (codex r2)', () => {
