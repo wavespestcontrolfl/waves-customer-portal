@@ -712,12 +712,15 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       : freshStale;
     for (const row of stale) {
       try {
-        const rev = await reverseInspectionCreditForBooking({
-          scheduledServiceId: row.booking_id,
-          createdBy: 'system:inspection_credit_sweep_reversal',
-          now,
-        });
-        reversed += Number(rev?.reversed) || 0;
+        // Through the ONE shared void/reversal seam, not a bare reversal
+        // (Codex #3178 r33 P2): when the post-commit cancellation hook was
+        // lost to a crash, the booking's still-OPEN invoice (sent/viewed/
+        // prepaid) made the bare reversal alert-and-defer forever — the
+        // seam voids what is safely voidable first (paid/processing stay
+        // put and still defer), restores any applied credit, and its
+        // finally runs the reversal this sweep is here to guarantee.
+        const voidResult = await require('./invoice').voidOpenInvoicesForCancelledService(row.booking_id);
+        reversed += Number(voidResult?.inspectionCreditReversal?.reversed) || 0;
       } catch (err) {
         logger.error(`[inspection-credit] sweep reversal failed for offer ${row.id}: ${err.message}`);
       }
@@ -951,6 +954,11 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         .whereRaw('e.created_at <= o.expires_at')
         .whereRaw('e.scheduled_service_id IS DISTINCT FROM o.source_scheduled_service_id')
         .whereNotIn('s.status', NON_LIVE_APPOINTMENT_STATUSES)
+        // Callbacks can never mint (r32), so keep them OUT of the working
+        // set (r33 P2) — redeemSpecificOffer would roll each one back, but
+        // enough free re-service events inside open windows would spend
+        // the limit on unmintable rows every run and starve real recovery.
+        .whereRaw('COALESCE(s.is_callback, false) = false')
         .orderBy('e.created_at', 'asc')
         .limit(limit)
         .select('o.id as offer_id', 'o.customer_id as customer_id', 'o.amount as amount',

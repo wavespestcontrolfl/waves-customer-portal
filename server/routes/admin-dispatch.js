@@ -2373,6 +2373,12 @@ router.get('/:date?', async (req, res, next) => {
         // to the tech — and then to the customer — as a credit that was
         // recorded. Same rule as the card-on-file checkbox.
         inspectionCreditAvailable: require('../config/feature-gates').isEnabled('inspectionCredit'),
+        // A resolver OUTAGE is not "no profile" (Codex #3178 r33 P2,
+        // mirroring the schedule feed): the CompletionPanel hides the
+        // credit toggle when the profile is null, and without this marker
+        // the submit payload would fabricate an explicit default-true for
+        // a control the tech never saw.
+        completionProfileLookupFailed: dispatchProfileLookupFailed === true,
         // Typed-findings schema embedded per appointment so mobile completion
         // never blocks on a registry fetch (bad-network field conditions).
         // Null for everything except cut-over specialty types.

@@ -978,6 +978,38 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(seamAt).toBeGreaterThan(gateAt); // seam sits inside the gate
   });
 
+  it('callbacks stay out of the sweep working set; reversal rides the shared seam (r33 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // Both the evidence selector AND the redemption sweep exclude
+    // callbacks — unmintable rows must not spend the hourly limit.
+    const filters = source.match(/COALESCE\(s\.is_callback, false\) = false/g) || [];
+    expect(filters.length).toBe(2); // provenBookingInWindow + the provable join
+    // The stale-reversal loop routes through the ONE shared seam, so a
+    // crash-lost cancellation's open invoice is voided before reversal
+    // instead of alert-deferring forever.
+    expect(source).toContain("voidOpenInvoicesForCancelledService(row.booking_id)");
+    const invoice = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
+    expect(invoice).toContain('voided.inspectionCreditReversal = rev;');
+  });
+
+  it('outbound-review confirmation commits its evidence IN the transition trx (r33 P2)', () => {
+    const jobStatus = fs.readFileSync(path.join(__dirname, '../services/job-status.js'), 'utf8');
+    // The post-commit hook can be lost to a deploy; redemption is
+    // evidence-required, so the event rides the confirmation commit.
+    const confirmAt = jobStatus.indexOf("if (String(toStatus || '') === 'confirmed') {");
+    const markerAt = jobStatus.indexOf('markBookingForInspectionCredit(t, {', confirmAt);
+    expect(confirmAt).toBeGreaterThan(-1);
+    expect(markerAt).toBeGreaterThan(confirmAt); // marker inside the confirm branch, on the trx
+    expect(jobStatus).toContain('CALL_OUTBOUND_REVIEW_SOURCE_ACTION'); // scoped to outbound-review rows
+  });
+
+  it('the dispatch feed serializes the lookup-failed marker beside credit availability (r33 P2)', () => {
+    const dispatch = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // DispatchPageV2 reuses CompletionPanel — without this marker a
+    // resolver outage on THIS feed would fabricate a default opt-in.
+    expect(dispatch).toContain('completionProfileLookupFailed: dispatchProfileLookupFailed === true');
+  });
+
   it('a hidden credit control never fabricates an explicit opt-in (r32 P2)', () => {
     const client = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/SchedulePage.jsx'), 'utf8');
     // A failed profile lookup hides the toggle; the payload omits the
