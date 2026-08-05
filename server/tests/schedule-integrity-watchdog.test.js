@@ -15,10 +15,15 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 1 })) }));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, fn) => fn()) }));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  annualPrepayCoversVisit: jest.fn(async () => false),
+  ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
+}));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
+const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
 const {
   runScheduleIntegrityWatchdog,
   runInner,
@@ -104,16 +109,20 @@ describe('classifiers', () => {
     }))).toBe(true);
   });
 
-  test('a prepaid visit never pages — stamp on the row OR anywhere in the series', () => {
-    // prepaid-series.js fans one prepayment across siblings as
-    // scheduled_services.prepaid_amount; a NULL per-visit price under a
-    // stamp is the coverage convention, not a gap.
-    expect(isUnpricedSeriesVisit(unpricedChild({ prepaid_amount: '559.20' }))).toBe(false);
-    expect(isUnpricedSeriesVisit(unpricedChild({ parent_prepaid_amount: '559.20' }))).toBe(false);
-    // A booster bills alone, so a series stamp on the parent does NOT cover
-    // it — but its own stamp does.
-    expect(isUnpricedSeriesVisit(unpricedChild({ is_recurring: false, parent_prepaid_amount: '559.20' }))).toBe(true);
-    expect(isUnpricedSeriesVisit(unpricedChild({ is_recurring: false, prepaid_amount: '107.00' }))).toBe(false);
+  test('an out-of-band prepaid stamp (cash/check) suppresses; a parent stamp NEVER covers a child', () => {
+    // Mirrors the completion-billing gate: only the row's own out-of-band
+    // stamp settles its books. Completion does not inherit prepaid_amount,
+    // so a child under a parent-only stamp is a real $0-completion risk.
+    expect(isUnpricedSeriesVisit(unpricedChild({ prepaid_amount: '107.00', prepaid_method: 'check' }))).toBe(false);
+    expect(isUnpricedSeriesVisit(unpricedChild({ parent_prepaid_amount: '559.20' }))).toBe(true);
+    expect(isUnpricedSeriesVisit(unpricedChild({ is_recurring: false, prepaid_amount: '107.00', prepaid_method: 'check' }))).toBe(false);
+  });
+
+  test('an annual-prepay stamp is NOT trusted by the pure check — it must pass term validation', () => {
+    // Stale annual stamps (refund/void cleanup misses) must not suppress on
+    // amount alone; the async annualPrepayCoversVisit gate decides in
+    // runInner.
+    expect(isUnpricedSeriesVisit(unpricedChild({ prepaid_amount: '559.20', prepaid_method: 'annual_prepay_invoice' }))).toBe(true);
   });
 
   test('a booster child (is_recurring=false) bills alone — parent price never suppresses it', () => {
@@ -196,6 +205,21 @@ describe('runInner alerting', () => {
     const result = await runInner({ now: NOW });
     expect(result).toMatchObject({ unpricedSeries: 0, alerted: 0 });
     expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('an annual-prepay stamp suppresses ONLY when the term validator confirms coverage', async () => {
+    const stamped = unpricedChild({ prepaid_amount: '559.20', prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1' });
+    // Validator confirms → no page.
+    annualPrepayCoversVisit.mockResolvedValueOnce(true);
+    makeDbMock({ upcomingRows: [stamped] });
+    let result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ unpricedSeries: 0, alerted: 0 });
+    expect(annualPrepayCoversVisit).toHaveBeenCalledWith(expect.objectContaining({ id: 'ss-child-1' }), expect.anything());
+    // Validator refutes (stale stamp, dead term) → fail-closed, page rings.
+    annualPrepayCoversVisit.mockResolvedValueOnce(false);
+    makeDbMock({ upcomingRows: [stamped] });
+    result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ unpricedSeries: 1, alerted: 1 });
   });
 
   test('per-run cap stops at MAX_ALERTS_PER_RUN and leaves the rest for next tick', async () => {

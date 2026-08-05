@@ -72,20 +72,40 @@ function isStaleInProgress(row, todayET) {
 // price only. The query LEFT JOINs the parent and rides its price fields
 // along as parent_estimated_price / parent_primary_line_price.
 //
-// PREPAID visits never page. A prepayment stamped on the row or anywhere in
-// its series (scheduled_services.prepaid_amount, fanned by
-// prepaid-series.js stampSeriesPrepaid) means the visit's books are already
-// settled — a NULL/zero per-visit price is the coverage convention, not a
-// gap (found live 2026-08-04: an annual-prepay customer's series carried no
-// price by design and false-paged). The annual_prepay_terms coverage window
-// is additionally excluded at the SQL level in runInner.
+// PREPAID visits never page — but only through the SAME coverage rules the
+// completion-billing gate applies (admin-dispatch), so the watchdog can't
+// suppress a page on a visit that completion would still bill (or bill at
+// $0). Two coverage paths, mirroring that gate exactly:
+//  - An OUT-OF-BAND stamp (prepaid_method other than the annual-prepay
+//    method: cash/check/Zelle, fanned by prepaid-series.js) with a positive
+//    amount suppresses here (pure check below).
+//  - An ANNUAL-PREPAY stamp is only trusted after annualPrepayCoversVisit
+//    validates the linked term (fail-closed; stale stamps left by
+//    refund/void cleanup must not suppress) — async, applied in runInner.
+// A parent's stamp NEVER covers a child: completion billing does not
+// inherit prepaid_amount, so a child seeded after a parent-only prepay is a
+// real $0-completion risk and must page. Rows with no stamp at all page
+// even when the customer holds a prepay term — an unstamped visit under a
+// term is exactly the inconsistency (double-bill at completion) worth a
+// bell.
+const ANNUAL_PREPAY_METHOD = 'annual_prepay_invoice';
+
+function hasOutOfBandPrepaidStamp(row) {
+  return toMoney(row?.prepaid_amount) != null
+    && row?.prepaid_method !== ANNUAL_PREPAY_METHOD;
+}
+
+function hasAnnualPrepaidStamp(row) {
+  return toMoney(row?.prepaid_amount) != null
+    && row?.prepaid_method === ANNUAL_PREPAY_METHOD;
+}
+
 function isUnpricedSeriesVisit(row) {
   if (!row) return false;
   if (rowHasPrice(row)) return false;
-  if (toMoney(row.prepaid_amount) != null) return false;
+  if (hasOutOfBandPrepaidStamp(row)) return false;
   const inheritsFromParent = !!row.recurring_parent_id && row.is_recurring !== false;
   if (!inheritsFromParent) return true;
-  if (toMoney(row.parent_prepaid_amount) != null) return false;
   return toMoney(row.parent_estimated_price) == null && toMoney(row.parent_primary_line_price) == null;
 }
 
@@ -138,20 +158,8 @@ async function runInner({ now = new Date() } = {}) {
   // phantom/non-working appointments; skipped and no_show never complete) —
   // only pending/confirmed/en_route/on_site visits are headed for an invoice.
   const horizon = new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 24 * 3600 * 1000);
-  // A visit inside an annual-prepay coverage window bills through the term,
-  // not per-visit pricing — exclude it entirely (active AND payment_pending:
-  // a committed prepay in collection is still not a pricing gap).
-  // term_start/term_end are stamped at ET midnight (UTC-04/05), so ::date in
-  // the server's UTC frame yields the ET calendar date.
   const upcomingRows = await db('scheduled_services as ss')
     .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
-    .leftJoin('annual_prepay_terms as apt', function joinTerm() {
-      this.on('apt.customer_id', 'ss.customer_id')
-        .andOn(db.raw("apt.status IN ('active', 'payment_pending')"))
-        .andOn(db.raw('ss.scheduled_date >= apt.term_start::date'))
-        .andOn(db.raw('ss.scheduled_date <= apt.term_end::date'));
-    })
-    .whereNull('apt.id')
     .whereNotIn('ss.status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
     .where('ss.scheduled_date', '>=', todayET)
     .where('ss.scheduled_date', '<=', etDateString(horizon))
@@ -160,16 +168,22 @@ async function runInner({ now = new Date() } = {}) {
     })
     .select(
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
-      'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount', 'ss.recurring_parent_id',
+      'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount',
+      'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.recurring_parent_id',
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',
-      'parent.prepaid_amount as parent_prepaid_amount',
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date"),
     )
     .orderBy('ss.scheduled_date', 'asc');
   const unpricedByRoot = new Map();
+  // Same validator the completion-billing gate uses (fail-closed): an
+  // annual-prepay stamp suppresses only when its linked term is live,
+  // customer-matched, and coverage-service-matched. Lazy require mirrors the
+  // feature-gates pattern and keeps module load light.
+  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
   for (const row of upcomingRows) {
     if (!isUnpricedSeriesVisit(row)) continue;
+    if (hasAnnualPrepaidStamp(row) && await annualPrepayCoversVisit(row, db)) continue;
     const root = seriesRootId(row);
     if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
   }
@@ -246,6 +260,8 @@ module.exports = {
   rowHasPrice,
   isStaleInProgress,
   isUnpricedSeriesVisit,
+  hasOutOfBandPrepaidStamp,
+  hasAnnualPrepaidStamp,
   seriesRootId,
   UPCOMING_WINDOW_DAYS,
   MAX_ALERTS_PER_RUN,
