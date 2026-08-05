@@ -164,6 +164,24 @@ describe('computeFootprintTurf', () => {
     expect(result.parts.footprintBasis).toBe('gross_under_roof');
   });
 
+  test('a gross row without its OWN story count falls back whole-record (codex #3229 P2)', () => {
+    // A 1-story accessory next to a 2-story primary must not inherit the
+    // record-level count (halves its footprint) nor default to 1 (doubles
+    // a story-less primary's).
+    const result = computeFootprintTurf({
+      lotSize: 20000,
+      squareFootage: 4000,
+      stories: 2,
+      imperviousAreaSf: 0,
+      _buildings: [
+        { livingAreaSqft: 4000, underRoofSqft: 4800, stories: 2 },
+        { underRoofSqft: 500 },
+      ],
+    });
+    expect(result.parts.footprintBasis).toBe('living_area');
+    expect(result.parts.footprintSf).toBe(2000);
+  });
+
   test('one gross-less building row falls back whole-record to living/stories', () => {
     const result = computeFootprintTurf({
       lotSize: 20000,

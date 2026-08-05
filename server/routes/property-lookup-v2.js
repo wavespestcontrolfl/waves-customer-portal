@@ -1210,8 +1210,14 @@ function countyBuildingFootprintSf(rc) {
   for (const row of rows) {
     const gross = firstNonNegativeNumber(row?.underRoofSqft, row?.grossAreaSqft, row?.totalAreaSqft);
     if (!(gross > 0)) return null;
-    const stories = Math.max(1, Number(row?.stories) || Number(rc?.stories) || 1);
-    total += gross / stories;
+    // Each row must carry its OWN story count (codex #3229 P2): inheriting
+    // the record-level count would divide a 1-story accessory by the
+    // 2-story primary's floors and halve its footprint; defaulting to 1
+    // would double a story-less primary's. Either miss fails the whole
+    // record back to living/stories.
+    const rowStories = Number(row?.stories);
+    if (!(rowStories >= 1)) return null;
+    total += gross / rowStories;
   }
   return Math.round(total);
 }
@@ -3022,9 +3028,15 @@ function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
       && Math.abs(Math.max(1, Number(stories) || 1) - Number(parts.stories)) > 0.01) return false;
   if (basis === 'gross_under_roof') {
     // The gross basis always records its stories (computeFootprintTurf) —
-    // a stories edit is caught above; homeSqFt edits can't be validated
-    // against a gross footprint and legitimately don't move it.
-    return parts.stories != null;
+    // a stories edit is caught above. A homeSqFt edit usually doesn't move
+    // a gross footprint (the roll's figure governs), EXCEPT when the edited
+    // living/stories would exceed it: computeFootprintTurf floors the
+    // footprint at living/stories, so that edit would have RAISED the
+    // footprint and lowered the ceiling — forwarding the stale higher
+    // ceiling would price excess turf (codex #3229 P1). Drop it there.
+    if (parts.stories == null) return false;
+    const livingFootprint = Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
+    return livingFootprint <= Number(parts.footprintSf) + 1;
   }
   const expectedFootprint = Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
   if (!(expectedFootprint > 0) || Math.abs(expectedFootprint - Number(parts.footprintSf)) > 1) return false;
