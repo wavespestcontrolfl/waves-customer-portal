@@ -1195,20 +1195,70 @@ Return a JSON object with exactly these fields:
 // loop; NOT read by pricing — computeTurfArea consumes estimatedTurfSf /
 // measuredTurfSf only. Promoting this from shadow to a pricing input is a
 // deliberate later flip once the logged deltas have been judged.
+// Ground-floor footprint from the county's own per-building rows, when EVERY
+// row carries a gross/under-roof area (Manatee UnRoof, Sarasota Gross Area,
+// Charlotte Total Area, Hillsborough grossArea — one gross-less row would
+// silently understate the sum, so any miss falls back whole-record). Gross
+// is summed across floors, so each building divides by its own story count.
+// Living area misses the garage/lanai — the 2026-08-05 audit measured
+// living/stories at 2,085 where the roll's under-roof said 2,771 and the
+// GIS roofprint 3,099.
+function countyBuildingFootprintSf(rc) {
+  const rows = Array.isArray(rc?._buildings) ? rc._buildings : [];
+  if (!rows.length) return null;
+  let total = 0;
+  for (const row of rows) {
+    const gross = firstNonNegativeNumber(row?.underRoofSqft, row?.grossAreaSqft, row?.totalAreaSqft);
+    if (!(gross > 0)) return null;
+    const stories = Math.max(1, Number(row?.stories) || Number(rc?.stories) || 1);
+    total += gross / stories;
+  }
+  return Math.round(total);
+}
+
 function computeFootprintTurf(rc) {
   const lotSqFt = Number(rc?.lotSize);
   const homeSqFt = Number(rc?.squareFootage);
   if (!Number.isFinite(lotSqFt) || lotSqFt <= 0) return null;
   if (!Number.isFinite(homeSqFt) || homeSqFt <= 0) return null;
   const stories = Math.max(1, Number(rc?.stories) || 1);
-  const footprintSf = Math.round(homeSqFt / stories);
+  const livingFootprintSf = Math.round(homeSqFt / stories);
+  // Prefer the roll's gross-under-roof footprint; the ground floor can never
+  // be smaller than living/stories, so a short gross parse must not shrink
+  // the footprint below the living-area floor.
+  const grossFootprintSf = countyBuildingFootprintSf(rc);
+  const footprintSf = Math.max(livingFootprintSf, grossFootprintSf || 0);
   const imperviousRaw = Number(rc?.imperviousAreaSf);
   const imperviousKnown = rc?.imperviousAreaSf != null && Number.isFinite(imperviousRaw);
   const imperviousSf = imperviousKnown ? imperviousRaw : 0;
-  const turfSf = Math.max(0, Math.round(lotSqFt - footprintSf - imperviousSf));
+  // Screen cage: pervious on the roll (mesh doesn't seal the ground) but not
+  // treatable turf either. Subtract only the slice not already counted by
+  // its interior pool-family rows — and only when poolImperviousSf is
+  // present (records shaped before that field must not have the full cage
+  // subtracted; see the shaper note).
+  const cageSf = Number(rc?.poolCageSqft);
+  // Same null-vs-0 discipline as imperviousKnown: Number(null) is 0, so a
+  // bare Number.isFinite check would read a pre-field record as "family 0"
+  // and net the full cage.
+  const poolFamilyKnown = rc?.poolImperviousSf != null && Number.isFinite(Number(rc.poolImperviousSf));
+  const enclosureNetSf = imperviousKnown && cageSf > 0 && poolFamilyKnown
+    ? Math.max(0, Math.round(cageSf - Number(rc.poolImperviousSf)))
+    : 0;
+  const turfSf = Math.max(0, Math.round(lotSqFt - footprintSf - imperviousSf - enclosureNetSf));
   return {
     turfSf,
-    parts: { lotSqFt: Math.round(lotSqFt), footprintSf, imperviousSf, imperviousKnown },
+    parts: {
+      lotSqFt: Math.round(lotSqFt),
+      footprintSf,
+      footprintBasis: grossFootprintSf ? 'gross_under_roof' : 'living_area',
+      // Recorded so the translate adapter's stale-ceiling guard can validate
+      // an operator stories edit even when the footprint basis is gross
+      // (gross/stories doesn't reconstruct from homeSqFt).
+      stories,
+      imperviousSf,
+      imperviousKnown,
+      enclosureNetSf,
+    },
   };
 }
 

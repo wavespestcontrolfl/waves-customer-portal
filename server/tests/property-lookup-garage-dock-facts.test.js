@@ -64,13 +64,13 @@ describe('impervious widening: detached structures count in keyword counties', (
     expect(imperviousFactsFromFeatures([
       { description: 'GARAGE DET 1 STORY', sqft: '440' },
       { description: 'UTILITY SHED', sqft: '80' },
-    ])).toEqual({ imperviousAreaSf: 520 });
+    ])).toEqual({ imperviousAreaSf: 520, poolImperviousSf: 0 });
   });
 
   test('Manatee flag still wins: a NO-flagged garage row does not count', () => {
     expect(imperviousFactsFromFeatures([
       { description: 'GARAGE DET 1 STORY', sqft: '440', impervious: 'NO' },
-    ])).toEqual({ imperviousAreaSf: 0 });
+    ])).toEqual({ imperviousAreaSf: 0, poolImperviousSf: 0 });
   });
 });
 
