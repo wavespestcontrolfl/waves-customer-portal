@@ -61,6 +61,11 @@ describe('reconcileRainFigure', () => {
     )).toBe('Last week rainfall totaled 1.2 inches, while this week rainfall totaled 2.96 inches.');
   });
 
+  test('a prior "in." measurement sentence never absorbs the rain rewrite (codex P2 r23)', () => {
+    expect(reconcileRainFigure('Mowing height was 3.5 in. Rainfall totaled 2.72 inches this week.', 2.96))
+      .toBe('Mowing height was 3.5 in. Rainfall totaled 2.96 inches this week.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -335,6 +340,26 @@ describe('replaceDroughtHypothesis', () => {
 
   test('a descriptive "or" before an observed dry area never converts it (codex P2 r21)', () => {
     expect(replaceDroughtHypothesis('Brown or tan patches and dry spots were noted near the sidewalk.')).toBeNull();
+  });
+
+  test('coordinated dry-area dismissals stay preserved (codex P2 r23)', () => {
+    expect(replaceDroughtHypothesis('The thinning was not due to drought stress or dry spots.')).toBeNull();
+  });
+
+  test('unresolved sentence-initial dry areas still reconcile (codex P2 r23)', () => {
+    expect(replaceDroughtHypothesis('Dry spots cannot be ruled out near the sidewalk.'))
+      .toBe('Uneven sprinkler coverage cannot be ruled out near the sidewalk.');
+    expect(replaceDroughtHypothesis('Dry areas remain possible.'))
+      .toBe('Patches of uneven sprinkler coverage remain possible.');
+  });
+
+  test('negated-belief dismissals are preserved (codex P2 r23)', () => {
+    expect(replaceDroughtHypothesis('The thinning is not currently believed to be drought stress.')).toBeNull();
+  });
+
+  test('a dry-pocket hypothesis after a negated clause still reconciles (codex P2 r23)', () => {
+    expect(replaceDroughtHypothesis('No drought stress, but dry pockets may contribute.'))
+      .toBe('No drought stress, but uneven sprinkler coverage may contribute.');
   });
 
   test('a resolved dry spell is historical, not a hypothesis (codex P2 r20)', () => {

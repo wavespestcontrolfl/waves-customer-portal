@@ -108,8 +108,11 @@ const formatInches = (n) => String(Math.round(n * 100) / 100);
 // keeps a unit abbreviation's period ("2.72 in. this week") from reading as
 // a sentence boundary — splitting there strands the rain figure and the
 // weekly cue in different fragments (codex P2 r17). Word chars before "in."
-// (e.g. "basin.") still split normally.
-const SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\b[iI]n\.)\s+/;
+// (e.g. "basin.") still split normally, and a CAPITALIZED word after "in."
+// is a genuine new sentence — "Mowing height was 3.5 in. Rainfall totaled…"
+// must not merge, or the mowing figure reads as the first rain candidate
+// (codex P2 r23).
+const SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\b[iI]n\.)\s+|(?<=\b[iI]n\.)\s+(?=[A-Z])/;
 
 // The AI visit summary bakes a rainfall total in at completion time, while the
 // Water This Week widget recomputes at request time — the same report was
@@ -265,6 +268,10 @@ function reconcileRainFigure(text, canonicalRain) {
 // hyphenated form entirely (codex P2 r18).
 const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:[- ]stress)?[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
+// An UNRESOLVED tail also marks a hypothesis — "cannot be ruled out",
+// "remains possible" assert the dry condition is still on the table
+// (codex P2 r23).
+const UNRESOLVED_TAIL_RE = /\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b|\b(?:remains?|is|are|stays?)\s+(?:still\s+|a\s+)?possib/i;
 
 function replaceDroughtHypothesis(text) {
   const t = String(text || '');
@@ -298,7 +305,18 @@ function replaceDroughtHypothesis(text) {
       const clause = seg.slice(Math.max(seg.lastIndexOf(';'), seg.lastIndexOf(':'), seg.lastIndexOf('.')) + 1);
       return HYPOTHESIS_CUE_RE.test(clause);
     };
+    // Coordination inherits the previous term's outcome: in "not due to
+    // drought stress or dry spots", the bare "or" is a LIST connector inside
+    // the same dismissal, not a hypothesis cue — a preserved term preserves
+    // its coordinated partner (codex P2 r23).
+    let prevMatch = null;
     const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m, offset) => {
+      if (prevMatch && prevMatch.preserved
+        && /^\s*(?:,\s*)?(?:or|and|nor)\s+(?:an?\s+|the\s+)?$/i.test(sentence.slice(prevMatch.end, offset))) {
+        prevMatch = { end: offset + m.length, preserved: true };
+        return m;
+      }
+      const decide = () => {
       // Negation is checked PER MATCH, not per sentence: it must attach to
       // this occurrence (negator + up to three plain same-clause words right
       // before it; punctuation breaks the chain), so "No current signs of
@@ -317,6 +335,10 @@ function replaceDroughtHypothesis(text) {
       // codex P2 r20) — or absent entirely in the bare copular form
       // ("was unlikely drought stress" — codex P2 r21).
       if (/\b(?:unlikely|less\s+likely|doubtful|improbable)\s+(?:(?:to\s+be|due\s+to|from|because\s+of)\s+)?(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
+      // A negated BELIEF is a dismissal too — "not currently believed to be
+      // drought stress" carries the negation past the three-word window
+      // (codex P2 r23).
+      if (/\b(?:not|no|isn['’]t|never)\s+(?:[a-z'’-]+\s+){0,2}(?:believed|thought|expected|considered|likely)\s+(?:to\s+be\s+)?(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
       if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
         && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
       // An observation verb attached right AFTER any dry-area phrase vetoes
@@ -325,27 +347,35 @@ function replaceDroughtHypothesis(text) {
       // (codex P2 r21).
       if (/dry\s+(?:patch(?:es)?|spots?|areas?|pockets?|spells?)/i.test(m)
         && /^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded)\b/i.test(sentence.slice(offset + m.length))) return m;
-      // …but a SENTENCE-INITIAL dry-area phrase with a same-clause cue right
-      // AFTER it is still a hypothesis ("Dry spots could be contributing to
-      // the thinning" — codex P2 r20); observation verbs keep their veto and
-      // the cue search stops at clause punctuation.
+      // …but a CLAUSE-LEADING dry-area phrase with a same-clause cue right
+      // AFTER it is still a hypothesis — "Dry spots could be contributing to
+      // the thinning" (codex P2 r20), including unresolved tails ("Dry spots
+      // cannot be ruled out", "Dry areas remain possible" — codex P2 r23)
+      // and a phrase leading a NEW clause after a coordinator ("…, but dry
+      // pockets may contribute" — codex P2 r23). Observation verbs keep
+      // their veto and the cue search stops at clause punctuation.
+      const preSeg = sentence.slice(0, offset);
+      const atSentenceStart = /^\W*$/.test(preSeg);
+      const clauseLead = preSeg.slice(Math.max(preSeg.lastIndexOf(','), preSeg.lastIndexOf(';'), preSeg.lastIndexOf(':')) + 1);
+      const atClauseStart = atSentenceStart || /^\s*(?:but|and|while|though|however|yet|so)?\s*$/i.test(clauseLead);
+      const tailClause = sentence.slice(offset + m.length).split(/[,;:.]/)[0];
+      const cueAfter = HYPOTHESIS_CUE_RE.test(tailClause) || UNRESOLVED_TAIL_RE.test(tailClause);
       if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) {
-        const atStart = /^\W*$/.test(sentence.slice(0, offset));
-        const tailClause = sentence.slice(offset + m.length).split(/[,;:.]/)[0];
         const wasObserved = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence);
-        if (!atStart || wasObserved || !HYPOTHESIS_CUE_RE.test(tailClause)) return m;
+        if (wasObserved || !atClauseStart || !cueAfter) return m;
       }
-      // dry pocket/spell: a hypothesis under a cue OR a terse headline
-      // ("Dry pocket near the sidewalk") — but never an OBSERVATION sentence
-      // ("Dry pockets were noted in thin turf", codex P2 r10): observation
-      // verbs veto the headline path.
+      // dry pocket/spell: a hypothesis under a cue, a terse headline
+      // ("Dry pocket near the sidewalk"), or a clause-leading phrase with a
+      // cue after it — but never an OBSERVATION sentence ("Dry pockets were
+      // noted in thin turf", codex P2 r10): observation verbs veto both
+      // paths.
       if (/dry\s+(?:pockets?|spells?)/i.test(m) && !cueBefore(offset)) {
-        const sentenceStart = /^\W*$/.test(sentence.slice(0, offset));
         // Resolved/past wording is historical, not a live hypothesis —
         // "Dry spell ended after this week's heavy rain" must not become
         // coverage copy (codex P2 r20).
         const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing|ended|passed|resolved|subsided|broke|eased)\b/i.test(sentence);
-        if (!sentenceStart || observed) return m;
+        if (observed) return m;
+        if (!atSentenceStart && !(atClauseStart && cueAfter)) return m;
       }
       // A negation can also FOLLOW the phrase ("Drought stress was not
       // observed", "isn't visible") — check the same clause after the match
@@ -371,7 +401,18 @@ function replaceDroughtHypothesis(text) {
         || (/drought[- ]stress$/i.test(m) && /^\s*(?:symptoms?|signs?|related)\b/i.test(tail))) {
         return /^[A-Z]/.test(m) ? 'Sprinkler-coverage-related' : 'sprinkler-coverage-related';
       }
+      // A PLURAL verb right after the phrase gets a plural-compatible
+      // rewrite so the sentence stays grammatical — "Dry areas remain
+      // possible" → "Patches of uneven sprinkler coverage remain possible"
+      // (codex P2 r23). "remains" (singular) keeps the mass-noun form.
+      if (/^\s*(?:are|remain|were|persist|continue)\b/i.test(tail)) {
+        return /^[A-Z]/.test(m) ? 'Patches of uneven sprinkler coverage' : 'patches of uneven sprinkler coverage';
+      }
       return /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage';
+      };
+      const out = decide();
+      prevMatch = { end: offset + m.length, preserved: out === m };
+      return out;
     });
     if (replaced !== sentence) changed = true;
     return replaced;
