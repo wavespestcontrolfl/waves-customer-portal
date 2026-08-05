@@ -125,6 +125,8 @@ describe('reconcileRainFigure', () => {
     expect(reconcileRainFigure('Total water including rain came to 1.95 inches this week.', 1.2)).toBeNull();
     // The precipitation synonym rides the same combined-water guard (r8).
     expect(reconcileRainFigure('Precipitation and irrigation totaled 1.95 inches this week.', 1.2)).toBeNull();
+    // Qualifiers between connector and irrigation (r13).
+    expect(reconcileRainFigure('Rainfall plus your irrigation totaled 1.95 inches this week.', 1.2)).toBeNull();
   });
 
   test('a delta-from-target figure is never rewritten to the total (codex P2 r5)', () => {
@@ -239,6 +241,7 @@ describe('replaceDroughtHypothesis', () => {
       .toBe('Sprinkler-coverage-related symptoms are showing in the thin areas.');
     // Tolerance praise still survives in hyphenated proximity.
     expect(replaceDroughtHypothesis('This stressed cultivar shows drought-stress tolerance.')).toBeNull();
+    expect(replaceDroughtHypothesis('This stressed cultivar is drought stress-tolerant.')).toBeNull();
   });
 
   test('a negated dry phrase does not shield a later hypothesis in the same sentence (codex P2 r7)', () => {

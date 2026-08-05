@@ -121,7 +121,9 @@ function reconcileRainFigure(text, canonicalRain) {
     // A COMBINED rain+irrigation/total-water figure is not the rain total —
     // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
     // contradict the widget's Total row (codex P2 r5).
-    if (/\b(?:rain(?:fall)?|precipitation)\s*(?:,|and|&|\+|plus)\s*irrigation\b|\birrigation\s*(?:,|and|&|\+|plus)\s*(?:rain(?:fall)?|precipitation)\b|\bcombined water\b|\btotal water\b/i.test(sentence)) return sentence;
+    // Qualifiers may sit between the connector and irrigation ("plus your
+    // irrigation", "and the weekly irrigation" — codex P2 r13).
+    if (/\b(?:rain(?:fall)?|precipitation)\s*(?:,|and|&|\+|plus)\s*(?:your\s+|the\s+|weekly\s+|any\s+)*irrigation\b|\birrigation\s*(?:,|and|&|\+|plus)\s*(?:your\s+|the\s+|weekly\s+|any\s+)*(?:rain(?:fall)?|precipitation)\b|\bcombined water\b|\btotal water\b/i.test(sentence)) return sentence;
     // No sentence-level target bailout (codex P2 #3197 r1): "totaling 2.72
     // inches was above the 0.75 inch target" is the exact comparison this
     // pass reconciles. Per-number word guards do the work; only the FIRST
@@ -193,7 +195,10 @@ function reconcileRainFigure(text, canonicalRain) {
 // would otherwise exclude it) and rewrites to "sprinkler-coverage-related";
 // dry spot(s)/area(s) join patch(es) under the hypothesis-cue gate
 // (codex P2 r7).
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
+// The tolerance lookahead accepts a hyphen or space before "toleran…" so
+// "drought stress-tolerant" is excluded like "drought stress tolerance"
+// (codex P2 r13).
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?[\s-]+toleran)/gi;
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 
 function replaceDroughtHypothesis(text) {
