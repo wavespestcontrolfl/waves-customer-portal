@@ -714,6 +714,20 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         });
         if (!smsResult.sent) {
           logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+        } else if (REAL_TWILIO_SID_RE.test(String(smsResult.providerMessageId || ''))) {
+          // Durable claim, committed atomically with the advisory-lock
+          // release — survives a persistAudit failure. Only a REAL SID
+          // counts: gate-blocked / owner-silence "sends" never reached
+          // the customer, and skipping the marker lets a later
+          // submission deliver the menu once SMS is re-enabled.
+          await trx('lead_auto_reply_sends')
+            .insert({
+              phone_digits: String(phoneFormatted).slice(-10),
+              customer_id: customer.id,
+              twilio_sid: smsResult.providerMessageId,
+            })
+            .onConflict('phone_digits')
+            .ignore();
         }
       });
 
@@ -1477,7 +1491,7 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
  * The lead auto-reply (lead_auto_reply_biz) is sent AT MOST ONCE per
  * person, ever (owner ruling 2026-08-05).
  *
- * Primary source of truth: messaging_audit_log rows with
+ * Audit leg: messaging_audit_log rows with
  * entry_point='lead_webhook_auto_reply' — this route is the ONLY sender
  * of the menu template, so the entry point identifies it exactly
  * (sms_log.message_type='auto_reply' is shared with the public-quote
@@ -1498,19 +1512,40 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
  * consulted — that's what keeps quote-wizard sends from
  * false-positively suppressing the menu.
  *
- * FAIL CLOSED: if either dedup query errors, report "already sent" so
+ * Durable marker: lead_auto_reply_sends is written by THIS route inside
+ * the same advisory-lock transaction that guards the send, only when
+ * Twilio returned a real message SID. It exists because persistAudit is
+ * best-effort (can return {id:null} after a logged failure), which would
+ * otherwise leave a delivered menu invisible to this check. Checked
+ * first — it is the only leg this route fully controls.
+ *
+ * The audit leg additionally requires a REAL Twilio SID (SM/MM prefix):
+ * gate-blocked / template-disabled / owner-silence sends record
+ * sent_at with a sentinel provider_message_id even though no text
+ * reached the customer — those must not suppress a later real send.
+ * All 167 historical sent rows for this entry point carry real SIDs
+ * (prod-verified), so the filter changes nothing for genuine sends.
+ *
+ * FAIL CLOSED: if any dedup query errors, report "already sent" so
  * the caller skips the send. A missed greeting is recoverable (the
  * operator lead alert still fires); texting a customer the same
  * automated message twice is the failure this guard exists to prevent.
  */
 const LEAD_AUTO_REPLY_AUDIT_CUTOVER = new Date('2026-05-04T11:16:45Z');
+const REAL_TWILIO_SID_RE = /^(SM|MM)/;
 
 async function hasPriorLeadAutoReply(phoneFormatted, dbc = db) {
   try {
+    const markerHit = await dbc('lead_auto_reply_sends')
+      .where({ phone_digits: String(phoneFormatted).slice(-10) })
+      .first();
+    if (markerHit) return true;
+
     const toHash = crypto.createHash('sha256').update(String(phoneFormatted || ''), 'utf8').digest('hex');
     const auditHit = await dbc('messaging_audit_log')
       .where({ entry_point: 'lead_webhook_auto_reply', to_hash: toHash })
       .whereNotNull('sent_at')
+      .whereRaw("provider_message_id ~ '^(SM|MM)'")
       .first();
     if (auditHit) return true;
 
