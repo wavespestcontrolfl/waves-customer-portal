@@ -8,38 +8,52 @@
  * letters in the transcript ("T R Y A L S 24", "w like whiskey"). 9 of 36
  * were fixed that way by hand; this service productionizes the sweep.
  *
- * Evidence tiers (higher wins; only A/B ever auto-apply):
- *   A 'inbound_ground_truth'  — an address the customer has EMAILED US FROM
- *                               that is a near-miss of the bounced one.
- *   B 'domain_repair'         — mechanical: a TLD-less stored domain gets
- *                               `.com` tried; known domain typos
- *                               (gmial→gmail) via email-typo-correction.
- *   B 'extractor_consensus'   — call_log extraction/transcript sightings:
- *                               seen on ≥2 calls, or a near-miss variant of
- *                               the bounced address, or captured on a LATER
- *                               call (correction callback).
- *   C 'transcript_decode'     — reconstruction from spelled letters
- *                               (deterministic letter-run/phonetic decode,
- *                               plus a FAST-tier LLM pass whose supporting
- *                               quote must appear verbatim in the
- *                               transcript). SUGGEST-ONLY.
- *   D 'name_inference'        — never generated here; reserved status for
- *                               operator-entered suggestions.
+ * Evidence tiers:
+ *   'domain_repair'         — mechanical: a TLD-less stored domain gets
+ *                             `.com` tried; known domain typos via
+ *                             email-typo-correction. AUTO-APPLY eligible.
+ *   'inbound_ground_truth'  — a near-miss address the customer has EMAILED
+ *                             US FROM. AUTO-APPLY only on non-freemail
+ *                             domains (a same-org corporate sender is
+ *                             identifying; on gmail-class domains a
+ *                             near-miss inbound sender can be a stranger,
+ *                             so those are suggest-only).
+ *   'extractor_consensus'   — call_log extraction/transcript sightings
+ *                             (≥2 calls, near-miss variant, or a later
+ *                             correction call). SUGGEST-ONLY: hard-bounced
+ *                             call-captured emails are re-verified and
+ *                             surfaced for owner read-back, never
+ *                             auto-corrected (AGENTS.md call-pipeline
+ *                             rule — the original failure mode IS a
+ *                             mishear).
+ *   'transcript_decode'     — reconstruction from spelled letters
+ *                             (deterministic letter-run/phonetic decode,
+ *                             plus a FAST-tier LLM pass whose supporting
+ *                             quote must appear verbatim in the
+ *                             transcript). SUGGEST-ONLY.
  *
  * Actions (hands-off/exception-based, CLAUDE.md rule 14):
- *   - Tier A/B + all validations green → auto-apply: update customers/leads
- *     email, audit interaction, admin bell (real addresses shown — owner
- *     rule 2026-07-30: masked ops alerts "do nothing for me").
- *   - Everything else with a candidate → 'suggested' + ACT: email to
- *     contact@ carrying the evidence quote and the exact ops command that
- *     applies it (ops/agents/bounce-rescue-backfill.js --apply=<id>).
- *   - A candidate already on ANOTHER customer → duplicate signal, never
- *     auto-apply (the Trent Ryles/Ryals dup surfaced exactly this way).
+ *   - Auto-eligible tier + all validations green → apply. A PRIMARY
+ *     customer email goes through propagateCustomerEmailChange with the
+ *     call-path's narrowed review scope (['customer_email_missing']) so
+ *     lead/estimate snapshots retarget and newsletter tokens rotate but
+ *     read-back cards are never settled by an automated correction. A
+ *     service-contact field updates that field only; a lead-only owner
+ *     updates THAT lead row only. Audit interaction + admin bell (real
+ *     addresses — owner rule 2026-07-30).
+ *   - Everything else with a candidate → 'suggested' ledger row + ACT:
+ *     email to contact@ carrying the evidence and the exact ops apply
+ *     command (ops/agents/bounce-rescue-backfill.js --apply=<id>).
+ *   - A candidate already on ANY other sendable record (another customer's
+ *     primary/service-contact email, another lead, another billing email)
+ *     → duplicate signal, never an apply.
  *
- * Loop guards: UNIQUE(bounced_email) ledger row per address; candidates
- * exclude every actively-suppressed address and every candidate this
- * owner's prior rescues already tried; marketing-stream bounces never
- * enter (suppression ledger owns those).
+ * Ledger/loop guards: UNIQUE(bounced_email) row per examined address; the
+ * auto path inserts as 'applying' FIRST and flips to 'applied' only after
+ * the write commits (a crash leaves a stale 'applying' row that a later
+ * pass may take over); no-owner addresses are NOT recorded, so evidence
+ * arriving later can still be used. Candidates exclude every actively
+ * suppressed address and this owner's previously tried candidates.
  *
  * Kill switch: EMAIL_BOUNCE_TRANSCRIPT_RESCUE=off (default on, matching
  * EMAIL_BOUNCE_RECOVERY).
@@ -55,14 +69,32 @@ const { redactEmail, correctEmailDomain, meetsConfidence } = require('../utils/e
 
 const EMAIL_RE = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 const EMAIL_SCAN_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
+const OWN_DOMAIN_RE = /@wavespestcontrol\.com$/i;
 // The BOUNCED input only needs enough shape to work with — a truncated
 // domain ("…@gmail", no TLD) is exactly the malformed-but-real class the
 // domain-repair tier exists to fix, so it must not be rejected at the door.
 const LOOSE_EMAIL_RE = /^[^@\s]+@[^@\s]+$/;
-const OWN_DOMAIN_RE = /@wavespestcontrol\.com$/i;
 const MX_TIMEOUT_MS = 5000;
 const MAX_DECODE_CONTEXTS = 6;
 const DECODE_CONTEXT_LINES = 3;
+// A crashed auto-apply leaves an 'applying' ledger row; after this long a
+// new pass may take it over and retry.
+const APPLYING_STALE_MINUTES = 15;
+
+// Consumer mailbox providers where a same-domain inbound near-miss can be a
+// STRANGER (millions of local parts one edit apart) — inbound evidence on
+// these domains is suggest-only. Corporate/org domains stay auto-eligible:
+// a near-miss sender on the customer's own company domain is identifying.
+const FREEMAIL_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'icloud.com', 'outlook.com', 'hotmail.com',
+  'aol.com', 'comcast.net', 'att.net', 'msn.com', 'live.com', 'me.com',
+  'mac.com', 'protonmail.com', 'proton.me', 'ymail.com', 'verizon.net',
+]);
+
+// Customer columns that can hold a sendable address — same set the
+// bounce-recovery service overwrites. The matched field is what an apply
+// updates; only the PRIMARY email fans out.
+const CUSTOMER_EMAIL_FIELDS = ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email'];
 
 function rescueEnabled() {
   return String(process.env.EMAIL_BOUNCE_TRANSCRIPT_RESCUE || '').toLowerCase() !== 'off';
@@ -84,6 +116,10 @@ function domainPart(email) {
   return normalizeEmail(email).split('@')[1] || '';
 }
 
+function isFreemailDomain(domain) {
+  return FREEMAIL_DOMAINS.has(String(domain || '').toLowerCase());
+}
+
 // Small-string Levenshtein — inputs are email local parts / addresses.
 function editDistance(a, b) {
   const s = String(a || ''); const t = String(b || '');
@@ -103,14 +139,14 @@ function editDistance(a, b) {
 
 // ── deterministic transcript decode ─────────────────────────────────
 
-// Letter runs the way people spell on calls: "J-U-D-Y-B-O-D-M-E-R",
+// Letter runs the way people spell on calls: "J-A-N-E-B-O-D-M-E-R",
 // "T R Y A L S", "B-Y-R-D". 4+ single letters separated by spaces/hyphens/
 // dots/commas (transcribers vary), tolerant of the separators mixing. The
 // apostrophe lookbehind keeps contractions out of the run — without it,
 // "it's K-A-R-R-E-N…" donates a leading "s" (real prod dry-run artifact).
 const LETTER_RUN_RE = /\b(?<!')(?:[a-z][\s\-.,]+){3,}[a-z]\b/gi;
-// NATO-ish phonetic spelling: "w like whiskey", "c as in charlie",
-// "zero zero as in zebra" is NOT matched — only single-letter anchors.
+// NATO-ish phonetic spelling: "w like whiskey", "c as in charlie" —
+// single-letter anchors only.
 const PHONETIC_RE = /\b([a-z])\s+(?:like|as)\s+(?:in\s+)?[a-z]+/gi;
 
 function lettersFromRun(run) {
@@ -121,12 +157,9 @@ function lettersFromRun(run) {
  * Deterministic candidates from one transcript's spelled segments, anchored
  * to the known-wrong bounced address:
  *  - a letter run R that is a near-miss (edit ≤2) of the bounced local's
- *    alpha core proposes R + the bounced local's digit tail @ same domain
- *    (Judy: run JUDYBODMER vs judyboedmer → judybodmer@gmail.com;
- *     Trent: run TRYALS vs tryles + '24' → tryals24@icloud.com).
- *  - phonetic letters + a digit tail heard adjacent propose exactly that
- *    local (Jimenez: w,c,w + '63' → wcw63@gmail.com) when it is a near-miss
- *    superset of the bounced local.
+ *    alpha core proposes R + the bounced local's digit tail @ same domain.
+ *  - phonetic letters + the bounced digit tail propose exactly that local
+ *    when it is a near-miss of the bounced local.
  */
 function decodeSpelledCandidates(transcription, bouncedEmail) {
   const text = String(transcription || '');
@@ -169,11 +202,11 @@ function extractSpelledContexts(transcription) {
 
 /**
  * FAST-tier LLM decode for the spellings deterministic code can't reach
- * ("o-h-a-t-b, abbreviation for Our House At The Beach"). The model output
- * is UNTRUSTED: its supporting quote must appear verbatim in the transcript
+ * (stated abbreviations, multi-run spellings). The model output is
+ * UNTRUSTED: its supporting quote must appear verbatim in the transcript
  * and the candidate is still revalidated (syntax/MX/suppression/collision)
- * before it can even be SUGGESTED. Decode failures degrade to "no tier-C
- * candidate" — the deterministic tiers still ran.
+ * before it can even be SUGGESTED — decode-tier candidates never
+ * auto-apply. Decode failures degrade to "no tier-C candidate".
  */
 async function llmDecodeCandidate({ contexts, bouncedEmail, transcription }) {
   if (!contexts.length || !process.env.ANTHROPIC_API_KEY) return null;
@@ -207,11 +240,7 @@ async function llmDecodeCandidate({ contexts, bouncedEmail, transcription }) {
 // ── candidate gathering ─────────────────────────────────────────────
 
 /**
- * Mechanical domain repairs, MX-verified downstream like everything else:
- *  - a domain with no dot is a truncation — try `.com` ("brandon.post00@gmail"
- *    was a real prod row; the .com variant was the working address).
- *  - the existing domain-typo corrector (gmial→gmail) applied to the whole
- *    address. Both are deterministic, so the tier is auto-apply eligible.
+ * Mechanical domain repairs, MX-verified downstream like everything else.
  */
 function domainRepairCandidates(bouncedEmail) {
   const out = [];
@@ -229,23 +258,42 @@ function domainRepairCandidates(bouncedEmail) {
   return out;
 }
 
+/**
+ * Owner = whoever the bounced address is on file for. Checks every sendable
+ * customer field (not just the primary email — SendGrid bounces target
+ * service-contact and billing addresses too), then billing prefs, then
+ * leads. Returns which FIELD matched so the apply updates that field.
+ */
 async function findOwner(bouncedEmail) {
-  const customer = await db('customers')
-    .whereRaw('LOWER(email) = ?', [bouncedEmail])
-    .whereNull('deleted_at')
-    .first();
-  if (customer) return { customer, lead: null };
+  for (const field of CUSTOMER_EMAIL_FIELDS) {
+    const customer = await db('customers')
+      .whereRaw(`LOWER(${field}) = ?`, [bouncedEmail])
+      .whereNull('deleted_at')
+      .first()
+      .catch(() => null);
+    if (customer) return { customer, lead: null, field };
+  }
+  const billingPref = await db('notification_prefs')
+    .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
+    .first()
+    .catch(() => null);
+  if (billingPref?.customer_id) {
+    const customer = await db('customers')
+      .where({ id: billingPref.customer_id }).whereNull('deleted_at').first();
+    if (customer) return { customer, lead: null, field: 'billing_email' };
+  }
   const lead = await db('leads')
     .whereRaw('LOWER(email) = ?', [bouncedEmail])
     .whereNull('deleted_at')
     .first();
-  return { customer: null, lead };
+  return { customer: null, lead, field: lead ? 'email' : null };
 }
 
 async function inboundGroundTruth(bouncedEmail) {
-  // Same-domain inbound senders, near-miss of the bounced address (Ronnie:
-  // inbound ronnir@ vs bounced ronnier@). Domain-scoped so we never scan
-  // the whole inbound table.
+  // Same-domain inbound senders, near-miss of the bounced address. Domain-
+  // scoped so we never scan the whole inbound table. On freemail domains a
+  // near-miss sender can be a stranger — those candidates are marked
+  // suggest-only and never auto-apply.
   const domain = domainPart(bouncedEmail);
   if (!domain) return [];
   const rows = await db('emails')
@@ -257,11 +305,15 @@ async function inboundGroundTruth(bouncedEmail) {
     .map((r) => normalizeEmail(r.from_address))
     .filter((e) => EMAIL_RE.test(e) && e !== bouncedEmail && !OWN_DOMAIN_RE.test(e))
     .filter((e) => editDistance(e, bouncedEmail) <= 2)
-    .map((email) => ({ email, quote: `inbound email received from ${email}` }));
+    .map((email) => ({
+      email,
+      quote: `inbound email received from ${email}`,
+      suggestOnly: isFreemailDomain(domain),
+    }));
 }
 
 async function callSightings(phone) {
-  if (!phone) return [];
+  if (!phone) return { sightings: [], calls: [] };
   const calls = await db('call_log')
     .where((q) => q.where('from_phone', phone).orWhere('to_phone', phone))
     .whereNotNull('transcription')
@@ -334,7 +386,40 @@ async function mxResolves(domain) {
   }
 }
 
-async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, ownerLeadId }) {
+/**
+ * A candidate collides when it is already a sendable address for a DIFFERENT
+ * party — another customer's primary or service-contact email, another
+ * customer's billing email, or another lead. Any hit is a duplicate signal,
+ * never an apply.
+ */
+async function candidateCollision(email, { ownerCustomerId, ownerLeadId }) {
+  const fieldChecks = CUSTOMER_EMAIL_FIELDS.map((f) => `LOWER(${f}) = ?`).join(' OR ');
+  const otherCustomer = await db('customers')
+    .whereRaw(`(${fieldChecks})`, CUSTOMER_EMAIL_FIELDS.map(() => email))
+    .whereNull('deleted_at')
+    .first();
+  if (otherCustomer && otherCustomer.id !== ownerCustomerId) {
+    return { kind: 'customer', id: otherCustomer.id };
+  }
+  const billingPref = await db('notification_prefs')
+    .whereRaw('LOWER(billing_email) = ?', [email])
+    .first()
+    .catch(() => null);
+  if (billingPref?.customer_id && billingPref.customer_id !== ownerCustomerId) {
+    return { kind: 'billing_prefs', id: billingPref.customer_id };
+  }
+  const otherLead = await db('leads')
+    .whereRaw('LOWER(email) = ?', [email])
+    .whereNull('deleted_at')
+    .first();
+  if (otherLead && otherLead.id !== ownerLeadId
+    && !(ownerCustomerId && otherLead.customer_id === ownerCustomerId)) {
+    return { kind: 'lead', id: otherLead.id };
+  }
+  return null;
+}
+
+async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, ownerLeadId, excludeRescueId = null }) {
   const email = normalizeEmail(candidate);
   if (!EMAIL_RE.test(email)) return { ok: false, reason: 'syntax' };
   if (email === normalizeEmail(bouncedEmail)) return { ok: false, reason: 'same_as_bounced' };
@@ -348,12 +433,12 @@ async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, own
       if (ownerLeadId) q.orWhere('lead_id', ownerLeadId);
       if (!ownerCustomerId && !ownerLeadId) q.whereRaw('1 = 0');
     })
+    .modify((q) => { if (excludeRescueId) q.whereNot('id', excludeRescueId); })
     .first().catch(() => null);
   if (triedBefore) return { ok: false, reason: 'already_tried' };
-  const otherCustomer = await db('customers')
-    .whereRaw('LOWER(email) = ?', [email]).whereNull('deleted_at').first();
-  if (otherCustomer && otherCustomer.id !== ownerCustomerId) {
-    return { ok: false, reason: 'collision', collisionCustomerId: otherCustomer.id };
+  const collision = await candidateCollision(email, { ownerCustomerId, ownerLeadId });
+  if (collision) {
+    return { ok: false, reason: 'collision', collision };
   }
   const mx = await mxResolves(domainPart(email));
   if (mx === false) return { ok: false, reason: 'no_mx' };
@@ -365,50 +450,79 @@ async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, own
 // ── actions ─────────────────────────────────────────────────────────
 
 async function applyFix({ bouncedEmail, candidate, owner, tier, evidence, appliedBy }) {
-  return db.transaction(async (trx) => {
-    let customersUpdated = 0;
+  const counts = await db.transaction(async (trx) => {
     if (owner.customer) {
-      customersUpdated = await trx('customers')
-        .where({ id: owner.customer.id })
-        .whereRaw('LOWER(email) = ?', [bouncedEmail])
-        .update({ email: candidate, updated_at: new Date() });
-      if (customersUpdated !== 1) {
-        // The address moved under us (operator edit mid-rescue) — abort.
-        throw Object.assign(new Error('owner email changed mid-rescue'), { code: 'STALE_OWNER' });
+      const field = owner.field === 'billing_email' ? null : owner.field;
+      if (field) {
+        const updated = await trx('customers')
+          .where({ id: owner.customer.id })
+          .whereRaw(`LOWER(${field}) = ?`, [bouncedEmail])
+          .update({ [field]: candidate, updated_at: new Date() });
+        if (updated !== 1) {
+          // The address moved under us (operator edit mid-rescue) — abort.
+          throw Object.assign(new Error('owner email changed mid-rescue'), { code: 'STALE_OWNER' });
+        }
+      } else {
+        const updated = await trx('notification_prefs')
+          .where({ customer_id: owner.customer.id })
+          .whereRaw('LOWER(billing_email) = ?', [bouncedEmail])
+          .update({ billing_email: candidate, updated_at: new Date() });
+        if (updated !== 1) {
+          throw Object.assign(new Error('billing email changed mid-rescue'), { code: 'STALE_OWNER' });
+        }
       }
-    }
-    const leadsUpdated = await trx('leads')
-      .whereRaw('LOWER(email) = ?', [bouncedEmail])
-      .whereNull('deleted_at')
-      .update({ email: candidate, updated_at: new Date() });
-    if (owner.customer) {
+      if (field === 'email') {
+        // PRIMARY email changes ride the standard fanout so lead/estimate
+        // snapshots retarget and newsletter tokens rotate. Same narrowed
+        // review scope as the call-captured path: an automated correction
+        // must never settle an owner read-back card.
+        const fanout = require('./customer-email-fanout');
+        await fanout.propagateCustomerEmailChange({
+          before: owner.customer,
+          after: { id: owner.customer.id, email: candidate },
+          source: 'email-bounce-rescue',
+          reviewReasonCodes: ['customer_email_missing'],
+        }, trx);
+      }
       await trx('customer_interactions').insert({
         customer_id: owner.customer.id,
         interaction_type: 'email_outbound',
-        subject: 'Bounced email auto-corrected from call evidence',
-        body: `Replaced the hard-bounced address with ${candidate} (${tier}). Evidence: ${String(evidence.quote || '').slice(0, 300)}`,
+        subject: 'Bounced email auto-corrected from evidence on file',
+        body: `Replaced the hard-bounced ${owner.field} with ${candidate} (${tier}). Evidence: ${String(evidence.quote || '').slice(0, 300)}`,
         metadata: JSON.stringify({
-          bounced_email: bouncedEmail, candidate_email: candidate, tier, source: 'email-bounce-rescue',
+          bounced_email: bouncedEmail, candidate_email: candidate, tier, field: owner.field, source: 'email-bounce-rescue',
         }),
       });
+      return { customersUpdated: 1 };
     }
-    return { customersUpdated, leadsUpdated };
-  }).then(async (counts) => {
-    const name = owner.customer
-      ? `${owner.customer.first_name || ''} ${owner.customer.last_name || ''}`.trim()
-      : `${owner.lead.first_name || ''} ${owner.lead.last_name || ''}`.trim();
-    // Owner rule 2026-07-30: ops bells show REAL addresses.
-    await NotificationService.notifyAdmin(
-      'system',
-      'Bounced email auto-corrected from call evidence',
-      `${name}: ${bouncedEmail} bounced; corrected to ${candidate} (${tier}). If this bounces too, a suppression bell will follow.`,
-      {
-        link: owner.customer ? `/admin/customers?customerId=${owner.customer.id}` : '/admin/leads',
-        metadata: { dedupeKey: `email-rescue:${bouncedEmail}`, appliedBy },
-      },
-    ).catch((err) => logger.warn(`[email-bounce-rescue] bell failed: ${err.message}`));
-    return counts;
+    // Lead-only owner: exactly the resolved lead row — other leads sharing
+    // the same bad address belong to other prospects and must not inherit
+    // this owner's recovered mailbox.
+    const updated = await trx('leads')
+      .where({ id: owner.lead.id })
+      .whereRaw('LOWER(email) = ?', [bouncedEmail])
+      .whereNull('deleted_at')
+      .update({ email: candidate, updated_at: new Date() });
+    if (updated !== 1) {
+      throw Object.assign(new Error('lead email changed mid-rescue'), { code: 'STALE_OWNER' });
+    }
+    return { leadsUpdated: 1 };
   });
+
+  const name = owner.customer
+    ? `${owner.customer.first_name || ''} ${owner.customer.last_name || ''}`.trim()
+    : `${owner.lead.first_name || ''} ${owner.lead.last_name || ''}`.trim();
+  // Owner rule 2026-07-30: ops bells show REAL addresses.
+  await NotificationService.notifyAdmin(
+    'system',
+    'Bounced email auto-corrected from evidence on file',
+    `${name}: ${bouncedEmail} bounced; ${owner.field} corrected to ${candidate} (${tier}). If this bounces too, a suppression bell will follow.`,
+    {
+      link: owner.customer ? `/admin/customers?customerId=${owner.customer.id}` : '/admin/leads',
+      metadata: { dedupeKey: `email-rescue:${bouncedEmail}`, appliedBy },
+    },
+  ).catch((err) => logger.warn(`[email-bounce-rescue] bell failed: ${err.message}`));
+  return counts;
 }
 
 async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier, evidence, owner, reason }) {
@@ -420,7 +534,7 @@ async function sendSuggestionEmail({ rescueRowId, bouncedEmail, candidate, tier,
     `${name}'s email ${bouncedEmail} hard-bounced and could not be auto-corrected`,
     reason ? `(${reason}).` : '.',
     '',
-    candidate ? `Best candidate from call evidence (${tier}): ${candidate}` : 'No confident candidate was found.',
+    candidate ? `Best candidate from evidence on file (${tier}): ${candidate}` : 'No confident candidate was found.',
     evidence?.quote ? `Evidence: "${String(evidence.quote).slice(0, 400)}"` : '',
     '',
     candidate
@@ -447,28 +561,38 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
   const bouncedEmail = normalizeEmail(rawEmail);
   if (!LOOSE_EMAIL_RE.test(bouncedEmail)) return { skipped: 'invalid_input' };
 
+  let staleApplyingRow = null;
   if (!dryRun) {
     const existing = await db('email_bounce_rescues')
       .whereRaw('LOWER(bounced_email) = ?', [bouncedEmail]).first().catch(() => null);
-    if (existing) return { skipped: 'already_examined', status: existing.status };
+    if (existing) {
+      const staleApplying = existing.status === 'applying'
+        && existing.updated_at
+        && (Date.now() - new Date(existing.updated_at).getTime()) > APPLYING_STALE_MINUTES * 60_000;
+      if (!staleApplying) return { skipped: 'already_examined', status: existing.status };
+      // A crash mid-apply left this row claimed but unwritten — take it over.
+      staleApplyingRow = existing;
+    }
   }
 
   const owner = await findOwner(bouncedEmail);
   if (!owner.customer && !owner.lead) {
-    if (!dryRun) await recordRescue({ bouncedEmail, status: 'skipped_no_owner' });
+    // Deliberately NOT recorded in the ledger: an address with no owner
+    // today may gain one (or evidence) later — the unique row would make
+    // that permanent.
     return { skipped: 'no_owner' };
   }
   const phone = owner.customer?.phone || owner.lead?.phone || null;
 
-  // Gather, tier order.
+  // Gather, tier order (auto-eligible tiers first).
   const tiers = [];
-  for (const c of await inboundGroundTruth(bouncedEmail)) {
-    tiers.push({ tier: 'inbound_ground_truth', ...c });
-  }
   for (const c of domainRepairCandidates(bouncedEmail)) {
     tiers.push({ tier: 'domain_repair', ...c });
   }
-  const { sightings = [], calls = [] } = await callSightings(phone) || {};
+  for (const c of await inboundGroundTruth(bouncedEmail)) {
+    tiers.push({ tier: 'inbound_ground_truth', ...c });
+  }
+  const { sightings, calls } = await callSightings(phone);
   for (const c of consensusCandidates(sightings, bouncedEmail)) {
     tiers.push({ tier: 'extractor_consensus', ...c });
   }
@@ -478,7 +602,7 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
       tiers.push({ tier: 'transcript_decode', ...c });
     }
   }
-  if (!tiers.some((t) => t.tier !== 'transcript_decode')) {
+  if (!tiers.length) {
     const contexts = calls.flatMap((c) => extractSpelledContexts(c.transcription));
     const llm = await llmDecodeCandidate({ contexts, bouncedEmail, transcription: transcriptAll });
     if (llm) tiers.push({ tier: 'transcript_decode', ...llm, llm: true });
@@ -496,19 +620,25 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
       if (v.reason === 'collision') {
         outcome = {
           status: 'suggested', tier: cand.tier, candidate: cand.email, evidence: cand,
-          reason: 'candidate belongs to another customer — possible duplicate pair, review before applying',
+          reason: 'candidate is already on file for another customer/lead — possible duplicate pair, review before applying',
         };
         break;
       }
       continue;
     }
-    const autoTier = ['inbound_ground_truth', 'domain_repair', 'extractor_consensus'].includes(cand.tier);
+    // Only mechanical repairs and non-freemail inbound ground truth may
+    // auto-apply; call-derived evidence (consensus/decode) is owner
+    // read-back territory per the call-pipeline rule.
+    const autoTier = (cand.tier === 'domain_repair'
+      || (cand.tier === 'inbound_ground_truth' && !cand.suggestOnly));
     if (autoTier && !v.mxUnknown) {
       outcome = { status: 'applied', tier: cand.tier, candidate: cand.email, evidence: cand };
     } else {
       outcome = {
         status: 'suggested', tier: cand.tier, candidate: cand.email, evidence: cand,
-        reason: v.mxUnknown ? 'MX could not be verified' : 'transcript decode requires a human OK',
+        reason: v.mxUnknown ? 'MX could not be verified'
+          : cand.tier === 'inbound_ground_truth' ? 'freemail-domain inbound match — could be a different sender'
+            : 'call-derived evidence requires owner read-back',
       };
     }
     break;
@@ -516,17 +646,33 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
 
   if (dryRun) return { dryRun: true, bouncedEmail, owner: owner.customer?.id || owner.lead?.id, ...outcome };
 
-  const row = await recordRescue({
-    bouncedEmail,
-    customerId: owner.customer?.id || null,
-    leadId: owner.lead?.id || null,
-    tier: outcome.tier || null,
-    candidate: outcome.candidate || null,
-    evidence: outcome.evidence ? { quote: outcome.evidence.quote, llm: !!outcome.evidence.llm } : {},
-    status: outcome.status,
-    appliedBy: outcome.status === 'applied' ? appliedBy : null,
-  });
-  if (!row) return { skipped: 'already_examined' }; // lost the unique race
+  // Auto-applies persist as 'applying' FIRST and flip to 'applied' only
+  // after the write commits — a crash in between leaves a stale 'applying'
+  // row that a later pass takes over (see entry check above).
+  const persistStatus = outcome.status === 'applied' ? 'applying' : outcome.status;
+  let row;
+  if (staleApplyingRow) {
+    await db('email_bounce_rescues').where({ id: staleApplyingRow.id }).update({
+      tier: outcome.tier || null,
+      candidate_email: outcome.candidate || null,
+      evidence: JSON.stringify(outcome.evidence ? { quote: outcome.evidence.quote, llm: !!outcome.evidence.llm } : {}),
+      status: persistStatus,
+      updated_at: new Date(),
+    });
+    row = { ...staleApplyingRow, status: persistStatus };
+  } else {
+    row = await recordRescue({
+      bouncedEmail,
+      customerId: owner.customer?.id || null,
+      leadId: owner.lead?.id || null,
+      tier: outcome.tier || null,
+      candidate: outcome.candidate || null,
+      evidence: outcome.evidence ? { quote: outcome.evidence.quote, llm: !!outcome.evidence.llm } : {},
+      status: persistStatus,
+      appliedBy: outcome.status === 'applied' ? appliedBy : null,
+    });
+    if (!row) return { skipped: 'already_examined' }; // lost the unique race
+  }
 
   if (outcome.status === 'applied') {
     try {
@@ -535,7 +681,7 @@ async function rescueBouncedAddress(rawEmail, { dryRun = false, appliedBy = 'web
         evidence: outcome.evidence, appliedBy,
       });
       await db('email_bounce_rescues').where({ id: row.id })
-        .update({ applied_at: new Date(), updated_at: new Date() });
+        .update({ status: 'applied', applied_at: new Date(), applied_by: appliedBy, updated_at: new Date() });
     } catch (err) {
       // STALE_OWNER or write failure: demote the ledger row so --apply can retry.
       await db('email_bounce_rescues').where({ id: row.id })
@@ -576,7 +722,9 @@ async function recordRescue({ bouncedEmail, customerId = null, leadId = null, ti
 
 /**
  * Operator apply for a 'suggested' row (the ACT: email command). Revalidates
- * before writing — the world may have moved since the suggestion.
+ * IN FULL before writing — the row's own ledger entry is excluded from the
+ * prior-attempt check so the collision and suppression checks still run
+ * (a row parked FOR a collision must never sail through on 'already_tried').
  */
 async function applySuggestedRescue(rescueId, { appliedBy = 'operator' } = {}) {
   const row = await db('email_bounce_rescues').where({ id: rescueId }).first();
@@ -590,10 +738,9 @@ async function applySuggestedRescue(rescueId, { appliedBy = 'operator' } = {}) {
     bouncedEmail,
     ownerCustomerId: owner.customer?.id || null,
     ownerLeadId: owner.lead?.id || null,
+    excludeRescueId: row.id,
   });
-  // 'already_tried' matches this row's own ledger entry by design — the
-  // operator IS retrying it; every other failure still blocks.
-  if (!v.ok && v.reason !== 'already_tried') return { error: `validation failed: ${v.reason}` };
+  if (!v.ok) return { error: `validation failed: ${v.reason}${v.collision ? ` (${v.collision.kind} ${v.collision.id})` : ''}` };
   const evidence = typeof row.evidence === 'string' ? JSON.parse(row.evidence || '{}') : (row.evidence || {});
   const counts = await applyFix({
     bouncedEmail, candidate: normalizeEmail(row.candidate_email), owner,
