@@ -881,6 +881,42 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(frozenAt).toBeLessThan(tryAt); // frozen BEFORE the first insert attempt
   });
 
+  it('the IB booking commits its evidence in the SAME transaction (r31 P2)', () => {
+    const ib = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    // A crash between a bare insert and a follow-up event write left a
+    // live booking the sweep refuses to infer from (bare rows can be
+    // seeders), permanently stranding any open offer.
+    const trxAt = ib.indexOf("await db.transaction(async (trx) => {\n    const [created] = await trx('scheduled_services').insert({");
+    const markerAt = ib.indexOf('markBookingForInspectionCredit(trx, {', trxAt);
+    const trxEndAt = ib.indexOf('\n  });', trxAt);
+    expect(trxAt).toBeGreaterThan(-1);
+    expect(markerAt).toBeGreaterThan(trxAt);
+    expect(markerAt).toBeLessThan(trxEndAt); // marker rides the same trx
+  });
+
+  it('a failed evidence write leaves a DURABLE outbox the sweep replays (r31 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // The in-memory retry dies with a restart, and redemption is
+    // evidence-required — the outbox commits WITH the booking (same trx)
+    // and the sweep re-inserts the event with the FROZEN booking moment.
+    const catchAt = source.indexOf('const recoverEvidence = async (attempt)');
+    const outboxAt = source.indexOf("reason: 'booking_evidence_outbox'");
+    expect(outboxAt).toBeGreaterThan(-1);
+    expect(outboxAt).toBeLessThan(catchAt); // outbox written before the volatile retry arms
+    expect(source).toContain('connection: trx,'); // committed with the booking
+    // The sweep replay filters to outbox rows still missing their event.
+    expect(source).toContain("NOT EXISTS (SELECT 1 FROM inspection_credit_booking_events e WHERE e.scheduled_service_id = (notifications.metadata->>'scheduledServiceId')::uuid)");
+  });
+
+  it('the durable audit also re-queues PAID-invoice resends that never landed (r31 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // email_messages.idempotency_key is the durable send record — a paid
+    // visit's offer with no message row is exactly an undelivered resend
+    // (crash between offer insert and setImmediate), which both marker
+    // recovery and the no-channel tier skip.
+    expect(source).toContain("NOT EXISTS (SELECT 1 FROM email_messages m WHERE m.idempotency_key = 'inspection-credit-offer-' || o.id::text)");
+  });
+
   it('marker-only booking paths fast-redeem after their event writes (r26/r27 P2)', () => {
     // A Charge Now / pay link sent before the hourly sweep would collect
     // the full amount while the credit strands afterwards.
@@ -1034,6 +1070,22 @@ describe('window + receipt copy', () => {
     expect(isCreditableInspectionProfile({ category: 'rodent', serviceKey: 'rodent_trapping_exclusion' })).toBe(false);
     expect(isCreditableInspectionProfile({ category: 'pest', serviceKey: 'pest_control' })).toBe(false);
     expect(isCreditableInspectionProfile(null)).toBe(false);
+  });
+
+  it('rodent carries a STANDING promise independent of the gate; termite does not (r31 P0)', () => {
+    const { carriesStandingCreditPromise } = require('../services/inspection-credit');
+    // The public estimator prints "$125 creditable for 14 days" on rodent
+    // tokenized estimates — a keep-working surface that predates this
+    // lane, so its marker/offer persist while the gate is dark. Termite
+    // has no estimator-quoted creditable fee and stays fully gated.
+    expect(carriesStandingCreditPromise('rodent_inspection')).toBe(true);
+    expect(carriesStandingCreditPromise('termite_inspection')).toBe(false);
+    expect(carriesStandingCreditPromise(null)).toBe(false);
+    // And the closeout marker gate honors it (source contract).
+    const fs = require('fs');
+    const path = require('path');
+    const dispatch = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    expect(dispatch).toContain("|| require('../services/inspection-credit').carriesStandingCreditPromise(completionProfile?.serviceKey))");
   });
 
   it('a pg DATE object anchors the window on its OWN ET day, never the previous (r30 P1)', () => {

@@ -6106,10 +6106,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // Shared predicate, not the bare category (Codex #3178 r24
             // P0): rodent_inspection's typed profile is category 'rodent',
             // and the category-only gate silently excluded it.
+            // EXCEPT rodent (Codex #3178 r31 P0): its $125-creditable
+            // promise lives on already-sent tokenized estimates,
+            // independent of this lane's gate — the marker and frozen
+            // terms persist while dark so the flip can't strand a promise
+            // the estimator already made. Money still moves only when the
+            // gate is on.
             ...(offerInspectionCredit
               && visitOutcome === 'completed'
               && require('../services/inspection-credit').isCreditableInspectionProfile(completionProfile)
-              && require('../config/feature-gates').isEnabled('inspectionCredit')
+              && (require('../config/feature-gates').isEnabled('inspectionCredit')
+                || require('../services/inspection-credit').carriesStandingCreditPromise(completionProfile?.serviceKey))
               ? {
                 inspectionCreditOptIn: true,
                 // The TERMS the promise was made under, frozen WITH the

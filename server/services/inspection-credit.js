@@ -104,6 +104,20 @@ function isCreditableInspectionProfile(profile) {
 }
 
 /**
+ * Services whose credit promise exists INDEPENDENT of GATE_INSPECTION_CREDIT
+ * (Codex #3178 r31 P0): the public estimator prints "$125 inspection
+ * (creditable for 14 days toward remediation work)" on every rodent
+ * tokenized estimate — a keep-working surface that predates this lane.
+ * While the gate is dark these closeouts still write the durable marker
+ * and freeze the offer, or a customer completing an in-flight estimate
+ * before the flip loses a promise already sent. Redemption stays gated —
+ * no money moves while dark; the offer just records what was promised.
+ */
+function carriesStandingCreditPromise(serviceKey) {
+  return String(serviceKey || '') === 'rodent_inspection';
+}
+
+/**
  * A date-only value (YYYY-MM-DD) as an ET wall-clock instant.
  *
  * `new Date('2026-08-03')` anchors at UTC midnight, which in Eastern time is
@@ -358,11 +372,32 @@ async function markBookingForInspectionCredit(trx, { customerId, scheduledServic
     // and the booking MUST still commit (a booking never fails because
     // crediting failed). But this event is the ONLY proof redemption
     // accepts, so a swallowed failure is silent permanent credit loss
-    // (pre-push P0). Recovery ladder: retry post-commit on the global pool
-    // (covers transient failures — by then the booking is committed and
-    // visible), and if that also fails, raise an office alert so the loss
-    // is an exception someone sees, never a log line nobody reads.
+    // (pre-push P0). Recovery ladder: a DURABLE outbox row committed WITH
+    // the booking (r31 P2 — the in-memory retry below dies with a restart,
+    // and redemption is now evidence-required), then the fast in-memory
+    // retry, then the hourly sweep replays any outbox row still missing
+    // its event. The outbox rides the caller's trx, so it exists exactly
+    // when the booking it proves does.
     logger.error(`[inspection-credit] booking event failed for ${scheduledServiceId} (post-commit retry queued): ${err.message}`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'Inspection-credit booking evidence failed — auto-recovery queued',
+        'A booking could not record its inspection-credit evidence in-transaction. The retry ladder and the hourly sweep will recover it automatically; no action needed unless this alert repeats for the same customer.',
+        {
+          link: `/admin/customers/${customerId}`,
+          connection: trx,
+          metadata: {
+            reason: 'booking_evidence_outbox',
+            customerId, scheduledServiceId,
+            source: eventRow.source,
+            bookedAt: eventRow.created_at.toISOString(),
+          },
+        },
+      );
+    } catch (outboxErr) {
+      logger.error(`[inspection-credit] evidence outbox write failed for ${scheduledServiceId}: ${outboxErr.message}`);
+    }
     const recoverEvidence = async (attempt) => {
       try {
         // setImmediate is NOT tied to the caller's commit (pre-push P1):
@@ -389,20 +424,11 @@ async function markBookingForInspectionCredit(trx, { customerId, scheduledServic
           .ignore();
         logger.info(`[inspection-credit] booking event recovered post-commit for ${scheduledServiceId}`);
       } catch (retryErr) {
-        logger.error(`[inspection-credit] booking event retry failed for ${scheduledServiceId}: ${retryErr.message}`);
-        try {
-          await require('./notification-service').notifyAdmin(
-            'billing',
-            'Inspection-credit booking evidence failed to record',
-            'A real booking could not record its inspection-credit evidence, so any open credit for this customer will not auto-apply. Verify the booking and apply the credit manually if one was promised.',
-            {
-              link: `/admin/customers/${customerId}`,
-              metadata: { scheduledServiceId, customerId, source: eventRow.source, reason: 'booking_event_write_failed' },
-            },
-          );
-        } catch (alertErr) {
-          logger.error(`[inspection-credit] booking event failure alert failed for ${scheduledServiceId}: ${alertErr.message}`);
-        }
+        // The durable outbox row (committed with the booking) already
+        // alerted the office and the hourly sweep replays it — this fast
+        // path is just the low-latency leg, so its failure is a log line,
+        // not a second alert.
+        logger.error(`[inspection-credit] booking event retry failed for ${scheduledServiceId} — sweep will replay the outbox: ${retryErr.message}`);
       }
     };
     setImmediate(() => { void recoverEvidence(0); });
@@ -785,6 +811,48 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
       logger.error(`[inspection-credit] closeout recovery failed: ${err.message}`);
     }
 
+    // Evidence-outbox replay (Codex #3178 r31 P2): a booking whose
+    // savepointed event insert failed committed a durable outbox row in
+    // the SAME transaction. The fast in-memory retry usually recovers it,
+    // but a restart drops that — and redemption is evidence-required, so
+    // a missing event is permanent credit loss. Replay any outbox row
+    // still missing its event, stamping the FROZEN booking moment the
+    // outbox carried. The outbox committed with the booking, so the FK
+    // target always exists; the whereNotExists filter self-terminates the
+    // replay once the event lands.
+    try {
+      const outbox = await db('notifications')
+        .where({ recipient_type: 'admin' })
+        .whereRaw("metadata->>'reason' = 'booking_evidence_outbox'")
+        .whereRaw("NOT EXISTS (SELECT 1 FROM inspection_credit_booking_events e WHERE e.scheduled_service_id = (notifications.metadata->>'scheduledServiceId')::uuid)")
+        .limit(limit)
+        .select(
+          db.raw("metadata->>'customerId' as customer_id"),
+          db.raw("metadata->>'scheduledServiceId' as scheduled_service_id"),
+          db.raw("metadata->>'bookedAt' as booked_at"),
+          db.raw("metadata->>'source' as source"),
+        );
+      for (const row of outbox) {
+        if (!row.customer_id || !row.scheduled_service_id) continue;
+        try {
+          await db('inspection_credit_booking_events')
+            .insert({
+              customer_id: row.customer_id,
+              scheduled_service_id: row.scheduled_service_id,
+              source: row.source || null,
+              created_at: row.booked_at ? new Date(row.booked_at) : now,
+            })
+            .onConflict('scheduled_service_id')
+            .ignore();
+          logger.info(`[inspection-credit] booking evidence replayed from outbox for ${row.scheduled_service_id}`);
+        } catch (replayErr) {
+          logger.error(`[inspection-credit] outbox evidence replay failed for ${row.scheduled_service_id}: ${replayErr.message}`);
+        }
+      }
+    } catch (outboxSweepErr) {
+      logger.error(`[inspection-credit] evidence-outbox sweep failed: ${outboxSweepErr.message}`);
+    }
+
     // Receipt-channel audit (Codex #3178 r30 P2): the closeout-time
     // no-channel recheck is an in-memory timer — a restart during its
     // 2-minute wait dropped it permanently, and marker recovery skips
@@ -811,6 +879,27 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         .limit(limit)
         .select('o.id as id', 'o.source_scheduled_service_id as visit_id');
       for (const row of unchanneled) {
+        queueCreditReceiptResend({ scheduledServiceId: row.visit_id, offerId: row.id, attempt: 1 });
+      }
+      // PAID-invoice offers whose resend never landed (Codex #3178 r31
+      // P2): a crash between the offer insert and the setImmediate resend
+      // left the only deadline-carrying receipt unsent — marker recovery
+      // skips the visit (offer exists) and the no-channel tier above skips
+      // it (paid invoice exists). email_messages.idempotency_key is the
+      // DURABLE send record, so an offer with a paid invoice but no
+      // 'inspection-credit-offer-<id>' message row is exactly an undelivered
+      // resend; re-queue it (idempotent — a concurrent send dedupes).
+      // Pre-filtered in SQL so PDF generation only runs for the rare
+      // genuinely-undelivered offer, never per-offer per-hour.
+      const undelivered = await db('inspection_credit_offers as o')
+        .where('o.status', 'offered')
+        .where('o.expires_at', '>=', now)
+        .where('o.created_at', '<=', auditCutoff)
+        .whereRaw("EXISTS (SELECT 1 FROM invoices i WHERE i.scheduled_service_id = o.source_scheduled_service_id AND i.status = 'paid' AND i.payer_id IS NULL)")
+        .whereRaw("NOT EXISTS (SELECT 1 FROM email_messages m WHERE m.idempotency_key = 'inspection-credit-offer-' || o.id::text)")
+        .limit(limit)
+        .select('o.id as id', 'o.source_scheduled_service_id as visit_id');
+      for (const row of undelivered) {
         queueCreditReceiptResend({ scheduledServiceId: row.visit_id, offerId: row.id, attempt: 1 });
       }
     } catch (auditErr) {
@@ -1399,6 +1488,7 @@ module.exports = {
   configuredCreditAmount,
   configuredCreditAmountForServiceKey,
   isCreditableInspectionProfile,
+  carriesStandingCreditPromise,
   redeemInspectionCreditForBooking,
   inspectionCreditReceiptMemo,
   queueCreditReceiptResend,

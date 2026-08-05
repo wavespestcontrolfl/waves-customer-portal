@@ -1371,40 +1371,47 @@ async function createAppointment(input) {
   // 'scheduled' is not in the scheduled_services status CHECK set and threw
   // on every insert. track_token_expires_at is stamped by the INSERT trigger
   // (set_default_track_token_expiry).
-  const [appointment] = await db('scheduled_services').insert({
-    customer_id,
-    scheduled_date: dateStr,
-    service_type,
-    technician_id,
-    status: 'pending',
-    window_start: win.start,
-    window_end: windowEnd,
-    notes: notes || null,
-    created_at: new Date(),
-    updated_at: new Date(),
-  }).returning('*');
-
   // Inspection credit: an operator booking through the Intelligence Bar is
-  // a REAL customer booking (Codex #3178 r5 P0). Recorded as durable
-  // evidence — this insert isn't transactional, so the event is written
-  // right after and the hourly sweep mints from it. Never blocks a booking.
-  try {
-    await require('../inspection-credit').markBookingForInspectionCredit(db, {
+  // a REAL customer booking (Codex #3178 r5 P0), so the durable evidence
+  // commits IN THE SAME TRANSACTION as the appointment (r31 P2) — a crash
+  // between a bare insert and a follow-up event write left a live booking
+  // the sweep refuses to infer from (bare rows can be seeders), stranding
+  // any open offer. The marker runs in a savepoint, so an evidence hiccup
+  // still never blocks the booking.
+  let appointment;
+  await db.transaction(async (trx) => {
+    const [created] = await trx('scheduled_services').insert({
+      customer_id,
+      scheduled_date: dateStr,
+      service_type,
+      technician_id,
+      status: 'pending',
+      window_start: win.start,
+      window_end: windowEnd,
+      notes: notes || null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }).returning('*');
+    appointment = created;
+    await require('../inspection-credit').markBookingForInspectionCredit(trx, {
       customerId: customer_id,
-      scheduledServiceId: appointment.id,
+      scheduledServiceId: created.id,
       source: 'intelligence_bar',
     });
-    // Fast redemption too, mirroring the admin-schedule/self-book paths
-    // (Codex #3178 r26 P2): the marker alone leaves the credit unminted
-    // until the hourly sweep, and a Charge Now / pay link sent in that
-    // window collects the full amount while the credit strands afterwards.
-    // Best-effort — the sweep remains the durable guarantee.
+  });
+
+  try {
+    // Fast redemption post-commit, mirroring the admin-schedule/self-book
+    // paths (Codex #3178 r26 P2): the marker alone leaves the credit
+    // unminted until the hourly sweep, and a Charge Now / pay link sent in
+    // that window collects the full amount while the credit strands
+    // afterwards. Best-effort — the sweep remains the durable guarantee.
     await require('../inspection-credit').redeemInspectionCreditForBooking({
       customerId: customer_id,
       scheduledServiceId: appointment.id,
       createdBy: 'system:inspection_credit_ib_booking',
     });
-  } catch { /* evidence/redemption are best-effort; the booking stands */ }
+  } catch { /* redemption is best-effort; the booking stands */ }
 
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —
