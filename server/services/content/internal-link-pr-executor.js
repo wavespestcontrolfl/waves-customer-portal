@@ -917,19 +917,9 @@ function paragraphHasLink(paragraph) {
 }
 
 function countInternalLinks(body) {
-  const text = String(body || '');
-  let count = 0;
-  // (?<!!) excludes markdown image embeds — ![alt](/x.webp) is not a link.
-  const mdLink = /(?<!!)\[[^\]\n]+\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
-  let match;
-  while ((match = mdLink.exec(text)) !== null) {
-    if (policy.normalizeInternalUrl(String(match[1] || '').replace(/^<|>$/g, ''))) count++;
-  }
-  const href = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
-  while ((match = href.exec(text)) !== null) {
-    if (policy.normalizeInternalUrl(match[1])) count++;
-  }
-  return count;
+  // Delegates to the planner's implementation — the planner applies the same
+  // density cutoff before its cap so it never plans a saturated source.
+  return planner._internals.countInternalLinks(body);
 }
 
 function envInt(name, fallback) {

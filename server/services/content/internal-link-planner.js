@@ -29,6 +29,9 @@ const { CITIES } = require('./scoring-config');
 
 const DEFAULT_LINK_CAP = 5; // per planning run
 const DEFAULT_PER_PAGE_CAP = 1; // per source file per target URL
+// Mirrors the executor's source_link_density_high default — a source above
+// it is rejected at execution, so planning it would burn a cap slot.
+const DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS = 30;
 const ALLOWED_SITE_HOSTS = new Set(['www.wavespestcontrol.com', 'wavespestcontrol.com']);
 const INLINE_MARKDOWN_LINK_RE = /\[[^\]\n]+\]\(\s*(?:<[^>\n]+>|(?:[^\s()\n]+|\([^()\n]*\))*)(?:\s+[^)]*)?\)/g;
 const SERVICE_ANCHOR_ALIASES = {
@@ -363,6 +366,42 @@ function eligibleLinkSource(page) {
   return !sourceRendersOffHub(data) && !canonicalPointsOffHub(data) && !robotsNoindex(data);
 }
 
+/**
+ * A frontmatter canonical that names a DIFFERENT hub path than the page's
+ * own URL fails source_canonical_mismatch at execution — planning such a
+ * source burns a cap slot. Off-hub canonicals are handled separately by
+ * canonicalPointsOffHub; run this only after that check has passed.
+ */
+function sourceCanonicalMismatch(frontmatterData = {}, pageUrl) {
+  if (!pageUrl) return false;
+  for (const value of [frontmatterData.canonical, frontmatterData.canonical_url]) {
+    const raw = String(value || '').trim();
+    if (!raw) continue;
+    if (!policy.urlsEquivalent(raw, pageUrl)) return true;
+  }
+  return false;
+}
+
+/**
+ * Same internal-link count the executor's density gate uses (it delegates
+ * here): internal markdown links plus internal <a> hrefs, images excluded.
+ */
+function countInternalLinks(body) {
+  const text = String(body || '');
+  let count = 0;
+  // (?<!!) excludes markdown image embeds — ![alt](/x.webp) is not a link.
+  const mdLink = /(?<!!)\[[^\]\n]+\]\(\s*(<[^>]+>|[^\s)]+)(?:\s+[^)]*)?\)/g;
+  let match;
+  while ((match = mdLink.exec(text)) !== null) {
+    if (policy.normalizeInternalUrl(String(match[1] || '').replace(/^<|>$/g, ''))) count++;
+  }
+  const href = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>/gi;
+  while ((match = href.exec(text)) !== null) {
+    if (policy.normalizeInternalUrl(match[1])) count++;
+  }
+  return count;
+}
+
 function unwrapAngleHref(href) {
   const s = String(href || '').trim();
   return s.startsWith('<') && s.endsWith('>') ? s.slice(1, -1) : s;
@@ -398,7 +437,7 @@ class InternalLinkPlanner {
    * Returns [{ source_file, target_url, anchor_text, context_snippet,
    *            source_offset, opportunity_id }]
    */
-  planForTarget(target, { corpus = [], opportunityId = null, cap = DEFAULT_LINK_CAP, perPageCap = DEFAULT_PER_PAGE_CAP } = {}) {
+  planForTarget(target, { corpus = [], opportunityId = null, cap = DEFAULT_LINK_CAP, perPageCap = DEFAULT_PER_PAGE_CAP, maxSourceContextualLinks = DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS } = {}) {
     if (!target?.url) return [];
     const candidates = anchorCandidates(target);
     if (!candidates.length) return [];
@@ -423,8 +462,15 @@ class InternalLinkPlanner {
     for (const page of corpus) {
       const pageUrl = page.url || deriveUrlFromSourceFile(page.file, page.body);
       if (sameUrl(pageUrl, targetPath)) continue; // never link page to itself
-      if (!eligibleLinkSource(page)) continue; // never patch spoke-rendered or spoke-canonical pages
+      const front = fm.parse(String(page.body || '')).data || {};
+      // Every executor precondition knowable from the corpus runs HERE,
+      // before the cap — a source the gate would reject must never occupy
+      // a slot (spoke-rendered, spoke-canonical, noindex, canonical
+      // mismatch, link-saturated).
+      if (sourceRendersOffHub(front) || canonicalPointsOffHub(front) || robotsNoindex(front)) continue;
+      if (sourceCanonicalMismatch(front, pageUrl)) continue;
       if (pageAlreadyLinksTo(page.body, targetPath)) continue;
+      if (countInternalLinks(page.body) > maxSourceContextualLinks) continue;
 
       for (const { phrase, priority } of candidates) {
         if ((perFileCount.get(page.file) || 0) >= perPageCap) break;
@@ -657,6 +703,9 @@ module.exports._internals = {
   canonicalPointsOffHub,
   robotsNoindex,
   eligibleLinkSource,
+  sourceCanonicalMismatch,
+  countInternalLinks,
+  DEFAULT_MAX_SOURCE_CONTEXTUAL_LINKS,
   unwrapAngleHref,
   normalizePath,
   canonicalInternalPath,

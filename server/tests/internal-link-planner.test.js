@@ -693,6 +693,59 @@ describe('planForTarget', () => {
     expect(tasks.length).toBe(1);
     expect(tasks[0].source_file).toBe('src/content/blog/indexable-page.md');
   });
+  test('excludes canonical-mismatch and link-saturated sources before the cap', () => {
+    const mismatch = {
+      file: 'src/content/blog/canonical-elsewhere.md',
+      body: [
+        '---',
+        'title: Bed Bug FAQ',
+        'category: pest-control',
+        'primary_keyword: bed bug bites vs flea bites',
+        'canonical: https://www.wavespestcontrol.com/pest-library/bed-bugs/',
+        '---',
+        '',
+        'People ask about bed bug bites vs flea bites constantly.',
+      ].join('\n'),
+      url: '/blog/canonical-elsewhere/',
+    };
+    const saturated = {
+      file: 'src/content/blog/saturated.md',
+      body: [
+        '---',
+        'title: Mega Pest Index',
+        'category: pest-control',
+        'primary_keyword: pest index',
+        '---',
+        '',
+        Array.from({ length: 31 }, (_, i) => `[entry ${i}](/pest-library/entry-${i}/)`).join(' '),
+        '',
+        'Bed bug bites vs flea bites confusion is common among readers.',
+      ].join('\n'),
+      url: '/blog/saturated/',
+    };
+    const clean = {
+      file: 'src/content/blog/clean-source.md',
+      body: [
+        '---',
+        'title: Overnight Itching Causes',
+        'category: pest-control',
+        'primary_keyword: overnight itching',
+        '---',
+        '',
+        'Bed bug bites that appear overnight are worth a closer look.',
+      ].join('\n'),
+      url: '/blog/clean-source/',
+    };
+    // Both ineligible pages match at higher relevance/priority; the executor
+    // would reject them (source_canonical_mismatch, source_link_density_high)
+    // so neither may take the only slot.
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [mismatch, saturated, clean], cap: 1 }
+    );
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/clean-source.md');
+  });
   test('uses service alias anchors instead of partial service fragments', () => {
     const tasks = planner.planForTarget({
       url: '/pest-control-bradenton-fl/',
