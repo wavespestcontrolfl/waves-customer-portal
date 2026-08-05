@@ -3132,7 +3132,14 @@ function pickHillsboroughAddressResult(data, address) {
         city,
       };
     });
-  return isUniqueCountyAddressMatch(rows, address, shouldRequireHillsboroughResultCityMatch(address));
+  // City match is ALWAYS required (codex P2 #3220 r1): BasicSearch scans the
+  // whole county by street string and its rows carry no ZIP to cross-check,
+  // so the situs city is the only evidence tying a unique street/number match
+  // to the typed address — without it, a mistyped Ruskin address whose street
+  // exists in exactly one OTHER Hillsborough city would price that parcel.
+  // Canonical (geocoded) lookup addresses always carry a city; a city-less
+  // raw string degrades to the AI fallback instead of guessing.
+  return isUniqueCountyAddressMatch(rows, address, true);
 }
 
 function splitHillsboroughSitusAddress(value) {
@@ -3190,13 +3197,6 @@ function shouldRequireCharlotteResultCityMatch(address) {
   const zip = extractAddressZip(address);
   if (zip && CHARLOTTE_SHARED_ZIPS.has(zip)) return true;
   return !(zip && CHARLOTTE_ZIPS.has(zip));
-}
-
-// No shared-ZIP set: none of the south-Hillsborough ZIPs appear in another
-// county's set, so a set-member ZIP alone is a sufficient match key.
-function shouldRequireHillsboroughResultCityMatch(address) {
-  const zip = extractAddressZip(address);
-  return !(zip && HILLSBOROUGH_ZIPS.has(zip));
 }
 
 function extractCountyResultCity(value) {

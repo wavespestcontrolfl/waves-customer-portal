@@ -109,11 +109,17 @@ describe('pickHillsboroughAddressResult', () => {
     });
   });
 
-  it('requires a city match when the typed address has no set ZIP', () => {
-    // Typed city disagrees with the row's situs city → no match.
+  it('always requires the city match — a set ZIP is no shortcut (codex P2 r1)', () => {
+    // BasicSearch scans the whole county and its rows carry no ZIP, so the
+    // situs city is the only cross-check: a typed Wimauma address must never
+    // resolve to the same street/number in another Hillsborough city, even
+    // when the typed ZIP is in the county set.
+    expect(pickHillsboroughAddressResult([BASIC_SEARCH_ROW], '123 Sandpiper Shore Dr, Wimauma, FL 33598')).toBeNull();
     expect(pickHillsboroughAddressResult([BASIC_SEARCH_ROW], '123 Sandpiper Shore Dr, Wimauma, FL')).toBeNull();
-    // Same city → match, even without a ZIP.
+    // Same city → match, with or without a ZIP.
     expect(pickHillsboroughAddressResult([BASIC_SEARCH_ROW], '123 Sandpiper Shore Dr, Ruskin, FL')).toBeTruthy();
+    // City-less raw string → no county match (degrades to the AI fallback).
+    expect(pickHillsboroughAddressResult([BASIC_SEARCH_ROW], '123 Sandpiper Shore Dr, FL 33570')).toBeNull();
   });
 
   it('rejects ambiguous result sets and rows without a pin or address', () => {
