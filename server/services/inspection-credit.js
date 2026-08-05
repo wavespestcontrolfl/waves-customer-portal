@@ -275,6 +275,12 @@ async function recordInspectionCreditOffer({
         customer_id: customerId,
         source_scheduled_service_id: scheduledServiceId,
         source_service_record_id: serviceRecordId,
+        // The key the CLOSEOUT resolved, frozen here (r35 P0): dark-mode
+        // redemption classifies standing-promise offers by THIS column —
+        // never by the source row's service_id FK, which graduated holds
+        // and legacy free-text rows leave null while their closeout still
+        // resolves rodent via the service_type fallback.
+        source_service_key: serviceKey || null,
         amount: frozenAmount,
         status: 'offered',
         // The actual promise moment. A recovered offer passes the original
@@ -627,13 +633,12 @@ async function redeemInspectionCreditForBooking({
       .whereNot({ source_scheduled_service_id: scheduledServiceId })
       .orderBy('expires_at', 'asc');
     if (!creditingOn) {
-      // Dark = STANDING-PROMISE offers only (r34 P0): sourced from a
-      // service whose credit pledge is gate-independent.
-      openQ.whereIn('source_scheduled_service_id', function standingSources() {
-        this.select('ss.id').from('scheduled_services as ss')
-          .join('services as sv', 'sv.id', 'ss.service_id')
-          .where('sv.service_key', 'rodent_inspection');
-      });
+      // Dark = STANDING-PROMISE offers only (r34 P0). Classified by the
+      // key FROZEN on the offer at closeout (r35 P0) — the earlier
+      // service_id join missed graduated holds and legacy free-text rows
+      // whose FK is null while closeout resolves rodent via the
+      // service_type fallback.
+      openQ.where({ source_service_key: 'rodent_inspection' });
     }
     const open = await openQ.select('id', 'amount');
     if (!open.length) return { redeemed: 0, reason: 'no_open_offer' };
@@ -783,6 +788,10 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           frozenTerms = typeof visit.frozen_terms === 'string'
             ? JSON.parse(visit.frozen_terms) : (visit.frozen_terms || null);
         } catch { frozenTerms = null; }
+        // The frozen terms also carry the key the CLOSEOUT resolved (r35
+        // P0) — authoritative over the FK lookup, which is null for
+        // graduated holds and legacy free-text rows.
+        if (frozenTerms?.serviceKey) serviceKey = frozenTerms.serviceKey;
         // Frozen from the SERVICE DATE — the customer's window started when
         // the inspection happened, not when recovery ran.
         const created = await recordInspectionCreditOffer({
@@ -939,11 +948,18 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         .where('o.expires_at', '>=', now)
         .where('o.created_at', '<=', auditCutoff)
         .whereRaw("EXISTS (SELECT 1 FROM invoices i WHERE i.scheduled_service_id = o.source_scheduled_service_id AND i.status = 'paid' AND i.payer_id IS NULL)")
+        // m.created_at >= o.UPDATED_at, not created_at (r35 P2): a
+        // recovery-created offer backdates created_at to the promise
+        // moment, so a receipt sent BEFORE the row materialized — which
+        // could not carry the memo — would read as delivered. updated_at
+        // is the insert instant (timestamps default) for offered rows; a
+        // reversal reopen refreshes it, which at worst re-states a
+        // reopened offer's deadline once.
         .whereRaw(`NOT EXISTS (
           SELECT 1 FROM email_messages m
-          WHERE m.created_at >= o.created_at
-            AND (m.idempotency_key = 'inspection-credit-offer-' || o.id::text
-              OR m.trigger_event_id IN (
+          WHERE (m.idempotency_key = 'inspection-credit-offer-' || o.id::text)
+            OR (m.created_at >= o.updated_at
+              AND m.trigger_event_id IN (
                 SELECT 'invoice_receipt:' || i2.id::text FROM invoices i2
                 WHERE i2.scheduled_service_id = o.source_scheduled_service_id
                   AND i2.status = 'paid' AND i2.payer_id IS NULL))
@@ -991,11 +1007,9 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         // estimator-quoted credit exists independent of the gate, prints
         // its memo, and must redeem before the flip or the remediation
         // invoice collects the full amount over a written promise. The
-        // generic lane stays fully paused.
-        provableQ
-          .join('scheduled_services as src', 'src.id', 'o.source_scheduled_service_id')
-          .join('services as sv', 'sv.id', 'src.service_id')
-          .where('sv.service_key', 'rodent_inspection');
+        // generic lane stays fully paused. Classified by the key FROZEN
+        // on the offer (r35 P0) — no service_id FK dependence.
+        provableQ.where('o.source_service_key', 'rodent_inspection');
       }
       const provable = await provableQ
         .select('o.id as offer_id', 'o.customer_id as customer_id', 'o.amount as amount',

@@ -235,11 +235,12 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
     expect(res).toEqual({ redeemed: 1, amount: 125 });
     expect(mockPostCreditMovement).toHaveBeenCalledTimes(1);
-    // The dark-mode restriction was applied: a subquery on the offer's
-    // SOURCE visit limits the working set to standing-promise services.
-    expect(mockChainCalls.some((c) => c.m === 'whereIn'
-      && c.args[0] === 'source_scheduled_service_id'
-      && typeof c.args[1] === 'function')).toBe(true);
+    // The dark-mode restriction was applied via the key FROZEN on the
+    // offer (r35 P0) — never the source row's service_id FK, which
+    // graduated holds and legacy free-text rows leave null.
+    expect(mockChainCalls.some((c) => c.m === 'where'
+      && c.args[0] && typeof c.args[0] === 'object'
+      && c.args[0].source_service_key === 'rodent_inspection')).toBe(true);
   });
 
   it('does not redeem against a cancelled/no-show booking', async () => {
@@ -954,20 +955,45 @@ describe('closeout route wiring — source contracts (the completion route is to
     // customer a duplicate.
     expect(source).toContain("m.idempotency_key = 'inspection-credit-offer-' || o.id::text");
     expect(source).toContain("'invoice_receipt:' || i2.id::text");
-    expect(source).toContain('m.created_at >= o.created_at');
+    // updated_at (row materialization), never the backdated promise
+    // moment (r35 P2): a receipt sent before a recovery-created offer
+    // existed could not carry the memo and must not read as delivered.
+    expect(source).toContain('m.created_at >= o.updated_at');
+    expect(source).not.toContain('m.created_at >= o.created_at');
   });
 
-  it('while dark the sweep redeems standing-promise offers only; expiry stays paused (r34 P0)', () => {
+  it('while dark the sweep redeems standing-promise offers only; expiry stays paused (r34 P0, r35 P0)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
-    // Both the fast path and the sweep restrict dark redemption to
-    // standing-promise sources via the offer's source visit.
-    const restrictions = source.match(/'sv\.service_key', 'rodent_inspection'/g) || [];
-    expect(restrictions.length).toBe(2); // redeem fast path + sweep provable join
+    // Both dark restrictions classify by the FROZEN offer key — no
+    // service_id FK joins (null on graduated holds / legacy rows).
+    expect(source).toContain("openQ.where({ source_service_key: 'rodent_inspection' });");
+    expect(source).toContain("provableQ.where('o.source_service_key', 'rodent_inspection');");
+    expect(source).not.toContain("'sv.service_key', 'rodent_inspection'");
+    // The insert freezes the closeout-resolved key onto the offer row.
+    expect(source).toContain('source_service_key: serviceKey || null,');
     // And the dark return still precedes the expiry pass.
     const darkReturnAt = source.indexOf("reason: 'feature_disabled' };", source.indexOf('standing-promise redeemed'));
     const expiryAt = source.indexOf('Expiry pass, equally starvation-proof');
     expect(darkReturnAt).toBeGreaterThan(-1);
     expect(darkReturnAt).toBeLessThan(expiryAt);
+  });
+
+  it('quiet backfills record no promise and the replay path fast-redeems (r35 P2)', () => {
+    const dispatch = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+    // All three credit legs carry the backfill guard: the marker literal,
+    // the locked adjustment, and the offer leg.
+    const markerGuard = dispatch.indexOf('...(offerInspectionCredit\n              && !isBackfillCompletion');
+    const lockedGuard = dispatch.indexOf('const lockedEligible = offerInspectionCredit\n              && !isBackfillCompletion');
+    const offerGuard = dispatch.indexOf('if (inspectionCreditConsented\n      // Quiet backfills record no promise');
+    expect(markerGuard).toBeGreaterThan(-1);
+    expect(lockedGuard).toBeGreaterThan(-1);
+    expect(offerGuard).toBeGreaterThan(-1);
+    // The self-book double-submit replay redeems too — the retry IS the
+    // recovery path for a response lost after commit.
+    const booking = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
+    expect(booking).toContain("createdBy: 'system:inspection_credit_self_book_replay'");
+    // And the frozen terms carry the resolved key for FK-less recovery.
+    expect(dispatch).toContain('serviceKey: completionProfile?.serviceKey || null,');
   });
 
   it('both schedule serializers forward the lookup-failed marker (r34 P2)', () => {

@@ -6156,7 +6156,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // terms persist while dark so the flip can't strand a promise
             // the estimator already made. Money still moves only when the
             // gate is on.
+            // NEVER on a quiet backfill (Codex #3178 r35 P2): the backdated
+            // closeout contract forces every customer send off, and a
+            // weeks-old inspection's credit promise — never announced,
+            // window anchored on the stale service date — would only feed
+            // the delivery audit false undelivered alerts.
             ...(offerInspectionCredit
+              && !isBackfillCompletion
               && visitOutcome === 'completed'
               && require('../services/inspection-credit').isCreditableInspectionProfile(completionProfile)
               && (require('../config/feature-gates').isEnabled('inspectionCredit')
@@ -6176,6 +6182,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                     // not the flat default (owner ruling 2026-08-04).
                     amount: InspectionCredit.configuredCreditAmountForServiceKey(completionProfile?.serviceKey || null),
                     windowDays: InspectionCredit.creditWindowDaysForServiceKey(completionProfile?.serviceKey || null),
+                    // The RESOLVED key rides the frozen terms (r35 P0) so
+                    // recovery classifies standing-promise offers even for
+                    // rows whose service_id FK is null.
+                    serviceKey: completionProfile?.serviceKey || null,
                   };
                 })(),
               }
@@ -6247,6 +6257,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const IC = require('../services/inspection-credit');
             effectiveCompletionProfile = primaryFreezeTrusted ? frozenCompletionProfile : null;
             const lockedEligible = offerInspectionCredit
+              && !isBackfillCompletion
               && visitOutcome === 'completed'
               && IC.isCreditableInspectionProfile(effectiveCompletionProfile)
               && (require('../config/feature-gates').isEnabled('inspectionCredit')
@@ -6261,6 +6272,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               serviceData.inspectionCreditTerms = {
                 amount: IC.configuredCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null),
                 windowDays: IC.creditWindowDaysForServiceKey(effectiveCompletionProfile?.serviceKey || null),
+                serviceKey: effectiveCompletionProfile?.serviceKey || null,
               };
             }
           }
@@ -7359,6 +7371,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? parseJsonObject(record.service_data)?.inspectionCreditOptIn === true
       : offerInspectionCredit;
     if (inspectionCreditConsented
+      // Quiet backfills record no promise and queue no comms (r35 P2) —
+      // the marker was never written, and this guard keeps the first-run
+      // request field from re-opening the leg.
+      && !isBackfillCompletion
       && visitOutcome === 'completed'
       // Shared predicate, not the bare category (Codex #3178 r24 P0):
       // rodent_inspection's typed profile is category 'rodent'.

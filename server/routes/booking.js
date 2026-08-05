@@ -2412,6 +2412,25 @@ async function createSelfBooking(payload = {}) {
       } catch (err) {
         logger.warn(`[booking:confirm] replay card-request funnel failed for booking ${txResult.existing.id}: ${err.message}`);
       }
+      // Fast-redeem on the REPLAY too (Codex #3178 r35 P2): the first
+      // request can commit the booking + evidence and die before its own
+      // redemption block — this retry IS the recovery path, and without it
+      // a Charge Now / pay link in the next hour collects the full amount.
+      // Idempotent: an already-redeemed offer has nothing left to claim.
+      try {
+        const replayVisit = await db('scheduled_services')
+          .where({ self_booking_id: txResult.existing.id })
+          .first('id', 'customer_id');
+        if (replayVisit?.id && replayVisit.customer_id) {
+          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+            customerId: replayVisit.customer_id,
+            scheduledServiceId: replayVisit.id,
+            createdBy: 'system:inspection_credit_self_book_replay',
+          });
+        }
+      } catch (err) {
+        logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
+      }
       return { ok: true, body: {
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
