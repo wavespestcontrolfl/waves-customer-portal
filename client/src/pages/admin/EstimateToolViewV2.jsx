@@ -1332,6 +1332,35 @@ function propertyLineForPreview(E, R) {
   return rows.join(" · ");
 }
 
+// Operator-only confirmation that the generated estimate priced the
+// pest_initial_roach line from the typed override rather than the bracket.
+// Lives next to the override input — the customer-preview fee card is a 1:1
+// replica of the customer page and must not grow internal annotations.
+// `variant` matches the line to the input's own branch: an estimate can carry
+// BOTH a recurring auto-fired line and a standalone native line, each with
+// its own override field (codex P2 #3223).
+// NOTE: defined ABOVE the INITIAL_ROACH_PREVIEW_RE marker on purpose — the
+// client-estimate-engine-pricing-drift test slices the source from that
+// marker to firstVisitFeesForCustomerPreview and evals it as plain JS, so
+// JSX must stay out of that window.
+function RoachOverrideAppliedNote({ estimate, variant }) {
+  const item = (estimate?.oneTime?.items || []).find(
+    (it) =>
+      it.service === "pest_initial_roach" &&
+      (variant === "standalone" ? it.standalone : it.autoFiredFromRecurringPest),
+  );
+  if (!item || !item.priceOverridden) return null;
+  return (
+    <div className="text-11 text-ink-secondary mt-1">
+      Override applied: {fmtInt(item.price)} on the generated estimate
+      {Number.isFinite(Number(item.bracketPrice))
+        ? ` (engine bracket price ${fmtInt(item.bracketPrice)})`
+        : ""}
+      .
+    </div>
+  );
+}
+
 const INITIAL_ROACH_PREVIEW_RE = /initial.*(palmetto|german|roach).*knockdown/i;
 
 function previewServiceKey(item, fallbackLabel = "") {
@@ -1349,31 +1378,6 @@ function previewServiceKey(item, fallbackLabel = "") {
 
 function previewLineAmount(price) {
   return price < 0 ? `-${fmtInt(Math.abs(price))}` : fmtInt(price);
-}
-
-// Operator-only confirmation that the generated estimate priced the
-// pest_initial_roach line from the typed override rather than the bracket.
-// Lives next to the override input — the customer-preview fee card is a 1:1
-// replica of the customer page and must not grow internal annotations.
-// `variant` matches the line to the input's own branch: an estimate can carry
-// BOTH a recurring auto-fired line and a standalone native line, each with
-// its own override field (codex P2 #3223).
-function RoachOverrideAppliedNote({ estimate, variant }) {
-  const item = (estimate?.oneTime?.items || []).find(
-    (it) =>
-      it.service === "pest_initial_roach" &&
-      (variant === "standalone" ? it.standalone : it.autoFiredFromRecurringPest),
-  );
-  if (!item || !item.priceOverridden) return null;
-  return (
-    <div className="text-11 text-ink-secondary mt-1">
-      Override applied: {fmtInt(item.price)} on the generated estimate
-      {Number.isFinite(Number(item.bracketPrice))
-        ? ` (engine bracket price ${fmtInt(item.bracketPrice)})`
-        : ""}
-      .
-    </div>
-  );
 }
 
 function termiteInstallPreviewRow(E) {
