@@ -1234,6 +1234,11 @@ function computeFootprintTurf(rc) {
   // the footprint below the living-area floor.
   const grossFootprintSf = countyBuildingFootprintSf(rc);
   const footprintSf = Math.max(livingFootprintSf, grossFootprintSf || 0);
+  // The basis records which component actually DETERMINED footprintSf
+  // (codex #3229 r2 P1): a short gross parse loses the max() to
+  // living/stories, and labeling it gross would make the adapter treat the
+  // footprint as independent of home-size edits it in fact tracks.
+  const grossGoverns = Boolean(grossFootprintSf) && grossFootprintSf >= livingFootprintSf;
   const imperviousRaw = Number(rc?.imperviousAreaSf);
   const imperviousKnown = rc?.imperviousAreaSf != null && Number.isFinite(imperviousRaw);
   const imperviousSf = imperviousKnown ? imperviousRaw : 0;
@@ -1256,7 +1261,7 @@ function computeFootprintTurf(rc) {
     parts: {
       lotSqFt: Math.round(lotSqFt),
       footprintSf,
-      footprintBasis: grossFootprintSf ? 'gross_under_roof' : 'living_area',
+      footprintBasis: grossGoverns ? 'gross_under_roof' : 'living_area',
       // Recorded so the translate adapter's stale-ceiling guard can validate
       // an operator stories edit even when the footprint basis is gross
       // (gross/stories doesn't reconstruct from homeSqFt).

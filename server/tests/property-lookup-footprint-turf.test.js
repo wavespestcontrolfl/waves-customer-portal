@@ -197,7 +197,7 @@ describe('computeFootprintTurf', () => {
     expect(result.parts.footprintBasis).toBe('living_area');
   });
 
-  test('a short gross parse never shrinks the footprint below living/stories', () => {
+  test('a short gross parse never shrinks the footprint below living/stories — and the basis records that living won (codex r2)', () => {
     const result = computeFootprintTurf({
       lotSize: 9000,
       squareFootage: 1500,
@@ -206,6 +206,9 @@ describe('computeFootprintTurf', () => {
       _buildings: [{ livingAreaSqft: 1500, underRoofSqft: 900, stories: 1 }],
     });
     expect(result.parts.footprintSf).toBe(1500);
+    // living/stories determined the footprint, so home edits DO move it —
+    // the adapter must keep validating them.
+    expect(result.parts.footprintBasis).toBe('living_area');
   });
 
   test('cage on a pre-poolImperviousSf record (field null) nets nothing — no over-subtraction', () => {
