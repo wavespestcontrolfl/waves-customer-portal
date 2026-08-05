@@ -29,6 +29,7 @@
 // server persists.
 
 const { sanitizeZoneShape } = require('./property-zones');
+const { stampedDivergesSql } = require('./stamped-address');
 const { resolveZoneRowsImageDrift } = require('./service-report/zone-drift');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -884,7 +885,151 @@ function buildStationMapCurrentContext({
   };
 }
 
+// PDF cache-key component (same pattern as treatmentZonePdfSignature).
+// buildStationMapReportContext deliberately reads CURRENT station geometry
+// even for historical visits, and the report document now prints those pins
+// into the cached artifact — so moving, adding or retiring a station must
+// change the key, or a stale PDF keeps showing pins that have since moved.
+// Returns '' when the visit has no stations, so non-station records keep
+// their existing keys (no mass cache bust). Fail-soft: a lookup error must
+// never block PDF serving.
+// knex is REQUIRED — this module has no module-level db binding.
+
+// The satellite-availability component of the station-map cache key.
+//
+// The placement section renders ONLY when the live basemap resolves
+// (buildStationMapReportContext returns available:false otherwise), so
+// availability is part of what the document prints: turning the provider on
+// later must invalidate the map-less cached PDF (codex P2 r17). Mirrors the
+// render gate's inputs — the satellite feature gate, a provider with live
+// capability, and (for Google) the API key whose absence makes
+// getLiveMapConfig return null (providers/google-maps-provider.js:28).
+// Coordinates and zoom, the other live-config inputs, are hashed by the
+// caller. 's0' = the section cannot render; 's1<provider>' = it can, keyed
+// by provider so a provider swap also invalidates.
+function stationMapSatelliteSignaturePart() {
+  try {
+    const { isSatelliteTreatmentMapEnabled, getBasemapProvider } = require('./maps/basemap-provider');
+    const provider = isSatelliteTreatmentMapEnabled() ? getBasemapProvider() : null;
+    if (provider?.capabilities?.canDisplayLive) {
+      const keyed = provider.key === 'google_maps'
+        ? !!(process.env.GOOGLE_STATIC_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY)
+        : true;
+      if (keyed) return `s1${provider.key}`;
+    }
+    return 's0';
+  } catch {
+    return 's0';
+  }
+}
+
+async function stationMapPdfSignature(service, knex) {
+  try {
+    // Gate state is part of the key: flipping SERVICE_REPORT_STATION_MAP_ENABLED
+    // either way changes whether pins render, so a gate flip must invalidate
+    // (mirrors treatmentZonePdfSignature returning '' while disabled).
+    if (!isStationMapReportEnabled()) return '';
+    const customerId = service?.customer_id;
+    if (!customerId || !knex) return '';
+    const row = await knex('termite_stations')
+      .where({ customer_id: customerId })
+      .max({ updated: 'updated_at' })
+      .count({ n: '*' })
+      .first();
+    const count = Number(row?.n || 0);
+    if (!count) return '';
+    const stamp = new Date(row?.updated || 0).getTime();
+    // Per-visit STATUS is what the document actually prints (pin colours and
+    // the outcome counts) and it lives in termite_station_checks, not in the
+    // station rows — a completion replay can change a check's status via the
+    // (station_id, service_record_id) upsert without touching any station, so
+    // geometry alone would leave the cached PDF showing the old outcome.
+    const checks = await knex('termite_station_checks')
+      .where({ service_record_id: service.id })
+      .max({ updated: 'updated_at' })
+      .count({ n: '*' })
+      .first();
+    const checkCount = Number(checks?.n || 0);
+    // Only visits that can actually RENDER a placement map get a station
+    // signature. A station customer's unrelated lawn or general-pest report
+    // is rejected by buildStationMapReportContext as not_station_visit, so
+    // signing it would let a station move invalidate healthy cached PDFs
+    // that contain no map. Conservative on purpose: recorded checks OR a
+    // station-program service line counts as a station visit — under-gating
+    // costs a needless re-render, over-gating would leave a real placement
+    // map stale, which is the worse failure.
+    // Use the SAME typed-flow gate buildStationMapReportContext uses, read
+    // from the same place report-data reads it (service_data's
+    // typedReportSnapshot + companionReportSnapshots) — a keyword guess on
+    // service_line missed legacy typed companion visits with no check rows
+    // and a generic service label, which render current geometry and so must
+    // invalidate when a station moves. Checks still count on their own.
+    let typedTypes = [];
+    try {
+      const sd = typeof service?.service_data === 'string'
+        ? JSON.parse(service.service_data)
+        : (service?.service_data || {});
+      const primary = sd?.typedReportSnapshot?.type || null;
+      const companions = Array.isArray(sd?.companionReportSnapshots)
+        ? sd.companionReportSnapshots.map((c) => c && c.type).filter(Boolean)
+        : [];
+      typedTypes = [primary, ...companions].filter(Boolean);
+    } catch { typedTypes = []; }
+    const stationVisit = checkCount > 0
+      || STATION_PROGRAMS.some((prog) => typedTypes.includes(PROGRAM_TYPED_FLOW[prog]));
+    if (!stationVisit) return '';
+    const checkStamp = new Date(checks?.updated || 0).getTime();
+    const checkPart = checkCount
+      ? `c${checkCount}x${Number.isFinite(checkStamp) ? checkStamp : 0}`
+      : '';
+    // DRIFT INPUTS: the printed cx/cy are resolved through
+    // resolveZoneRowsImageDrift against the CURRENT map center and zoom
+    // (report-data.js:2761-2765), so a re-geocode or a zoom change can move
+    // or drop pins with no station or check write at all. Hash the inputs the
+    // coordinates are derived from, not just the rows.
+    // Same row report-data resolves the zoom from: property_geometries,
+    // newest version first.
+    const geom = await knex('property_geometries')
+      .where({ customer_id: customerId })
+      .orderBy('version', 'desc')
+      .first('zoom', 'version')
+      .catch(() => null);
+    // Resolve coordinates HERE, with the report's OWN precedence expression.
+    // Two reasons this can't come from the caller's row or from customers
+    // directly: (1) the paths that compose this key load different column
+    // sets, so any input taken from `service` differs between them and the
+    // expected key never matches the stored one — a permanent cache miss
+    // that re-renders every emailed report; (2) the map centers on the
+    // STAMPED visit coordinates when the stamp diverges from the primary
+    // address, so hashing customers.latitude would both miss a corrected
+    // stamp and re-render on unrelated primary-address edits. Reusing
+    // stampedDivergesSql keeps this identical to report-data's center.
+    const coords = await knex('service_records as sr')
+      .leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+      .leftJoin('customers as c', 'sr.customer_id', 'c.id')
+      .where('sr.id', service.id)
+      .first(
+        knex.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.latitude END) as lat`),
+        knex.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'c')} THEN c.longitude END) as lng`),
+      )
+      .catch(() => null);
+    const lat = coords?.lat ?? null;
+    const lng = coords?.lng ?? null;
+    // FULL precision: report-data passes the raw coordinate into
+    // resolveZoneRowsImageDrift, and at zoom 20 a 0.000001 degree change
+    // shifts a pin measurably (and can push an edge pin out of frame), so
+    // rounding here would leave a visibly stale PDF looking current.
+    const centerPart = lat != null && lng != null ? `g${lat},${lng}` : '';
+    const zoomPart = geom ? `z${geom.zoom ?? 20}v${geom.version ?? 0}` : '';
+    return `-sm${count}x${Number.isFinite(stamp) ? stamp : 0}${checkPart}${centerPart}${zoomPart}${stationMapSatelliteSignaturePart()}`;
+  } catch {
+    return '';
+  }
+}
+
 module.exports = {
+  stationMapPdfSignature,
+  stationMapSatelliteSignaturePart,
   STATION_STATUSES,
   STATION_OWNERS,
   STATION_PROGRAMS,

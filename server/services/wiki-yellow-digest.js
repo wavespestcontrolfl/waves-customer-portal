@@ -94,7 +94,7 @@ function composeYellowDigest(queue) {
     blockedCount ? `${blockedCount} previously blocked page(s) remain inactive.` : null,
   ].filter(Boolean).join('\n\n');
 
-  const subject = `[Brain digest] ${pending.length} blocked, ${yellow.length} yellow this week`;
+  const subject = `ACT: brain review — ${pending.length} blocked, ${yellow.length} yellow this week`;
   return { subject, html, text, yellowCount: yellow.length, pendingCount: pending.length };
 }
 

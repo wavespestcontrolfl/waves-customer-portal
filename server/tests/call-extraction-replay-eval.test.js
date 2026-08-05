@@ -262,7 +262,7 @@ describe('call extraction replay scheduled eval', () => {
       sendEmail: async (message) => { emails.push(message); return { ok: true }; },
     });
     expect(emails).toHaveLength(1);
-    expect(emails[0].subject).toBe('Call extraction replay eval could not run');
+    expect(emails[0].subject).toBe('FIX: Call extraction replay eval could not run');
     expect(emails[0].body).toContain('NOT verified');
   });
 

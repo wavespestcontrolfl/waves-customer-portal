@@ -4,7 +4,7 @@ const logger = require('../logger');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { buildReportV1Data, stripLiveOnlyScheduleFields, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('./report-data');
 const { nextEtMidnight } = require('./application-conditions');
-const { renderServiceReportV1Pdf } = require('./pdf');
+const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('./pdf');
 const { applyLawnReportReconciliation } = require('./report-consistency');
 const {
   getHealthyStoredReportPdf,
@@ -18,8 +18,10 @@ const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
+const { stationMapPdfSignature } = require('../termite-stations');
 const { treatmentNarrativePdfSignature } = require('./treatment-narrative');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
+const { publicOriginPdfSignature } = require('../../utils/portal-url');
 const { alertServiceReportPdfFailed } = require('./failure-alerts');
 const {
   emitPdfRenderTerminalFailure,
@@ -132,6 +134,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // PDF, so a gate flip or re-trace must change the key (re-trace also
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
+  const smSignature = await stationMapPdfSignature(service, knex);
   // Assessment identity + copy version in the key, so a stale in-flight render
   // cannot republish over a newer one (#3168).
   // ONE canonical lookup feeds BOTH the pin and the storage-key component
@@ -152,6 +155,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
   const isDeliveryPin = !!pinnedLawnAssessmentId;
   const effectivePin = pinnedLawnAssessmentId || canonical.pin;
   let pdf;
+  // The page's own image-load failure count (null = unknown provider).
+  let renderImageFailures = null;
   // The payload the render was produced from — its flags decide whether this
   // output may be cached.
   let renderedData = null;
@@ -182,13 +187,15 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // direct route would then serve that stale render as current (codex P2
     // #3197 r6).
     applyLawnReportReconciliation(data, data.dynamicContext);
-    pdf = await renderServiceReportV1Pdf(data, {
+    const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
       logger,
       serviceRecordId: recordId,
       pinnedLawnAssessmentId: effectivePin,
     });
+    pdf = rendered.pdf;
+    renderImageFailures = rendered.imageFailures ?? null;
 
     const latestPestPressureConfig = await loadActiveConfig(knex).catch(() => null);
     const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
@@ -267,8 +274,35 @@ async function renderAndStoreServiceReportPdf(recordId, {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
       return { key: null, pdf, rendered: true, token: reportToken, uncached: true };
     }
+    // A photo the browser could not load rendered as its placeholder, and
+    // that state is invisible in the returned bytes. TWO signals gate the
+    // cache (codex P2 #3176 r18+r20): the page's OWN load-outcome count
+    // (authoritative — the browser fetches its own /data, so its URLs can
+    // diverge from any payload built here), and the server-side URL probe
+    // as the floor when the count is unavailable (Cloudflare renderer,
+    // mid-deploy page bundle). Serve it, cache nothing; the next view
+    // re-renders.
+    // A transient basemap miss drops the placement section without changing
+    // the cache key (codex P2 #3176 r23) — treat it exactly like a dropped
+    // image: serve the render, store nothing, re-render once it recovers.
+    if (renderedData?.stationMapTransientlyUnavailable) {
+      logger.warn(`[service-report-pdf] station map basemap transiently unavailable for ${recordId} — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: 'station_map_unavailable',
+      };
+    }
+    const unreachablePhotos = renderImageFailures
+      ?? ((renderedData?.imageResolutionFailures || 0) + await countUnreachableReportPhotos(renderedData));
+    if (unreachablePhotos > 0) {
+      logger.warn(`[service-report-pdf] ${unreachablePhotos} report image(s) failed/unreachable for ${recordId} — serving without storing`);
+      return {
+        key: null, pdf, rendered: true, token: reportToken, uncached: true,
+        uncachedReason: 'photos_unreachable',
+      };
+    }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature,
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -354,13 +388,17 @@ async function getOrRenderServiceReportPdf(recordId, {
   // the expected key must match what renderAndStore writes.
   const service = await knex('service_records')
     .where({ id: recordId })
-    // customer_id + service_id ride along for the lawn-assessment component
-    // (#3168): loadLinkedLawnAssessment filters on customer_id and falls back
-    // through the scheduled service, so omitting them makes this side compute
-    // "no assessment" while renderAndStore — which uses the full record —
-    // computes the real hash. The keys would never match and every lawn PDF
-    // would re-render on every lookup.
-    .first('id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes', 'customer_id', 'service_id');
+    // customer_id is REQUIRED by stationMapPdfSignature — without it the
+    // signature silently returns '' here while renderAndStore (which loads
+    // service_records.*) writes a key containing -sm..., so expected and
+    // stored keys could never match and every email would re-render.
+    // customer_id + service_id also ride along for the lawn-assessment
+    // component (#3168): loadLinkedLawnAssessment filters on customer_id and
+    // falls back through the scheduled service, so omitting them makes this
+    // side compute "no assessment" while renderAndStore — which uses the
+    // full record — computes the real hash. The keys would never match and
+    // every lawn PDF would re-render on every lookup.
+    .first('id', 'customer_id', 'service_id', 'pdf_storage_key', 'technician_notes', 'service_data', 'service_type', 'service_line', 'scheduled_service_id', 'structured_notes');
   // DURABLE correction marker (codex P1 #3093 r30): completion sets
   // structured_notes.lawnPdfCorrectionPending when lawn copy may still
   // change after the first render. Any render path — including the public
@@ -400,7 +438,7 @@ async function getOrRenderServiceReportPdf(recordId, {
   const visibilitySignature = pestPressureVisibilitySignature(pestPressureConfig);
   const expectedPdfStorageKey = service?.id
     ? reportPdfStorageKey(service.id, {
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + await lawnAssessmentPdfSignature(service, knex) + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

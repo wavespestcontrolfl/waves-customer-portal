@@ -778,7 +778,9 @@ export default function TechHomePage() {
           /* Shared category detection (mirrors server service-normalizer) —
              a bare lawn|turf regex missed lawn jobs like Weed Control and
              Dethatching (codex P1 #3038 r3). */
-          lawnMode={detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'lawn'}
+          lawnMode={zoneTarget.traceVariant
+            ? zoneTarget.traceVariant === 'outline'
+            : detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'lawn'}
         />
       )}
 
@@ -1109,13 +1111,20 @@ function ServiceRow({ service, onPhotos, onProject, onZone, onLead }) {
         }}>
           📷 Photos
         </button>
-        <button onClick={onZone} aria-label="Trace treatment zone" style={{
-          padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
-          border: `1px solid ${DARK.border}`, background: 'transparent',
-          color: DARK.teal, cursor: 'pointer',
-        }}>
-          🛰️ Zone
-        </button>
+        {/* Hidden when the schedule feed marks the service trace-ineligible
+            (GATE_TRACE_ELIGIBILITY): nothing is sprayed on bait/trapping/
+            inspection stops, so the tracer has nothing true to capture.
+            Absent flag (older payloads, gate off) keeps the button — the
+            write route enforces the same registry either way. */}
+        {service.traceEligible !== false && (
+          <button onClick={onZone} aria-label="Trace treatment zone" style={{
+            padding: '6px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600,
+            border: `1px solid ${DARK.border}`, background: 'transparent',
+            color: DARK.teal, cursor: 'pointer',
+          }}>
+            🛰️ Zone
+          </button>
+        )}
         <button onClick={onLead} aria-label="Flag opportunity" style={{
           padding: '6px 8px', borderRadius: 6, fontSize: 12, fontWeight: 600,
           border: `1px solid ${DARK.border}`, background: 'transparent',

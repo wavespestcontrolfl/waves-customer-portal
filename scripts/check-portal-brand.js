@@ -35,6 +35,11 @@ const SCAN_DIRS = [
 // Files explicitly excluded — dev-only demos, theme tokens themselves, etc.
 const EXCLUDED_FILES = new Set([
   'ButtonExamples.jsx',        // palette demo page
+  // Print-only work-order document captured to PDF by the headless renderer
+  // (?mode=pdf) — never shown on screen. Print typography runs ~8.5-10pt
+  // like the industry WO formats it mirrors; the 16px screen floor doesn't
+  // apply to paper (owner direction 2026-08-03).
+  'ServiceReportDocument.jsx',
 ]);
 // Filename prefixes that belong to the admin/tech surfaces — separate design
 // system (D palette + DM Sans + density-first, per admin brief), NOT subject

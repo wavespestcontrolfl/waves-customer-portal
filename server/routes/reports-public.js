@@ -133,7 +133,11 @@ const {
 } = require('../services/pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../services/pest-pressure/customer-view');
 const { isOneTimePressureExcludedRecord } = require('../services/pest-pressure/one-time-exclusion');
-const { renderServiceReportV1Pdf } = require('../services/service-report/pdf');
+const { renderServiceReportV1Pdf, countUnreachableReportPhotos } = require('../services/service-report/pdf');
+const { stripFixedReentryTiming, sanitizeProductTargets } = require('../services/social-media');
+const { publicOriginPdfSignature } = require('../utils/portal-url');
+// The approved idiom that replaces a stripped fixed-timing clause.
+const REENTRY_SAFE_COPY = 'Ready once dry — your technician confirms timing.';
 const { dateOnlyStamp } = require('../services/service-report/time-format');
 const {
   getHealthyStoredReportPdf,
@@ -150,6 +154,7 @@ const {
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
+const { stationMapPdfSignature } = require('../services/termite-stations');
 const { treatmentNarrativePdfSignature } = require('../services/service-report/treatment-narrative');
 const { enqueuePdfRenderRetry } = require('../services/service-report/pdf-queue');
 const { safePdfRenderError } = require('../services/service-report/pdf-events');
@@ -299,6 +304,32 @@ async function buildServiceReportV1ResponseData(service, token, {
   // precedent of PDFs keeping the plain recap.
   if (mode !== 'live') data.techVisitCard = false;
 
+  // COMPLIANCE, applied ONCE at the payload boundary for the printed record.
+  // AGENTS.md bans fixed drying/re-entry figures on customer surfaces, and
+  // label-derived catalog copy is unconstrained free text that can carry
+  // them. Reuses stripFixedReentryTiming — the SAME clause-level rule (and
+  // regression matrix) validateContent enforces for social copy — so this
+  // has one definition instead of a second, weaker one per renderer. It is
+  // clause-level on purpose: "keep pets off treated areas for 30 minutes and
+  // avoid watering for 24 hours" loses the re-entry clause and KEEPS the
+  // agronomic one.
+  //
+  // Scoped to non-live modes deliberately: the interactive report's own
+  // re-entry copy is a separate remediation item for the owner to rule on,
+  // and changing shipped customer-facing copy is not this PR's call.
+  if (mode !== 'live') {
+    const strip = (value) => stripFixedReentryTiming(value, REENTRY_SAFE_COPY).text;
+    (data.applications || []).forEach((app) => {
+      if (!app?.product) return;
+      if (app.product.precaution_summary) app.product.precaution_summary = strip(app.product.precaution_summary);
+      if (app.product.reentry_summary) app.product.reentry_summary = strip(app.product.reentry_summary);
+    });
+    if (data.reportV2?.aftercare?.reentry) {
+      data.reportV2.aftercare.reentry = strip(data.reportV2.aftercare.reentry);
+    }
+    if (data.advisory?.pet_advisory) data.advisory.pet_advisory = strip(data.advisory.pet_advisory);
+  }
+
   // buildPestPressureCustomerView returns null only when Pest Pressure
   // is hidden from the customer (feature disabled, showOnCustomerReport
   // off, service_line outside allow list, or requireRecurringFrequency
@@ -437,6 +468,30 @@ async function buildServiceReportV1ResponseData(service, token, {
       });
       if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
     } catch { /* best-effort — never block the report */ }
+  }
+
+  // Product TARGETS are free text from the tech's picker, so a chip can carry
+  // a compliance claim the permanent PDF would print verbatim (codex P1
+  // #3176 r24). Sanitized at the SAME payload boundary as the re-entry copy —
+  // one enforcement point, not a per-render-site guard.
+  if (mode !== 'live' && Array.isArray(data.applications)) {
+    data.applications = data.applications.map((app) => {
+      const result = sanitizeProductTargets(app?.targets);
+      return result.changed ? { ...app, targets: result.targets } : app;
+    });
+  }
+
+  // The re-entry context is assembled after the block above, so its
+  // persisted free text (customerSummary, petAdvisory) gets the same
+  // clause-level compliance pass here — same rule, one definition.
+  if (mode !== 'live' && dynamicContext?.reentry) {
+    const strip = (value) => stripFixedReentryTiming(value, REENTRY_SAFE_COPY).text;
+    if (dynamicContext.reentry.customerSummary) {
+      dynamicContext.reentry.customerSummary = strip(dynamicContext.reentry.customerSummary);
+    }
+    if (dynamicContext.reentry.petAdvisory) {
+      dynamicContext.reentry.petAdvisory = strip(dynamicContext.reentry.petAdvisory);
+    }
   }
 
   if (suppressedTypedReport(service)) {
@@ -1294,6 +1349,7 @@ router.get('/:token', async (req, res, next) => {
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
+      const smSignature = await stationMapPdfSignature(service, db);
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
       const tnSignature = await treatmentNarrativePdfSignature(service.id, db);
       // Assessment identity + copy version, computed ONCE before the render and
@@ -1307,7 +1363,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature,
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1330,6 +1386,8 @@ router.get('/:token', async (req, res, next) => {
       // the cache-lookup value; assigned inside the try so an unreadable
       // lookup fails closed through the retry path.
       let laRenderSignature = null;
+      // The page's own image-load failure count (null = unknown provider).
+      let renderImageFailures = null;
       // The payload the render was produced from — its flags decide whether
       // this output may be cached.
       let renderedData = null;
@@ -1347,7 +1405,7 @@ router.get('/:token', async (req, res, next) => {
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           renderedData = data;
-          pdf = await renderServiceReportV1Pdf(data, {
+          const rendered = await renderServiceReportV1Pdf(data, {
             token: req.params.token,
             req,
             logger,
@@ -1360,6 +1418,8 @@ router.get('/:token', async (req, res, next) => {
             // identity, so this render stays cacheable.
             pinnedLawnAssessmentId: canonicalPin,
           });
+          pdf = rendered.pdf;
+          renderImageFailures = rendered.imageFailures ?? null;
 
           const latestPestPressureConfig = await loadActiveConfig(db).catch(() => null);
           const latestVisibilitySignature = pestPressureVisibilitySignature(latestPestPressureConfig);
@@ -1401,13 +1461,27 @@ router.get('/:token', async (req, res, next) => {
         // Same rule as pdf-queue: a render whose week could not be FROZEN is
         // not reproducible, so serve it but cache nothing — otherwise a later
         // view freezes different data while this object keeps these numbers.
-        if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
+        // A photo the browser could not load rendered as its placeholder,
+        // invisible in the returned bytes. Two signals gate the cache
+        // (codex P2 #3176 r18+r20): the page's OWN load-outcome count
+        // (authoritative — the browser fetches its own /data), and the
+        // server-side URL probe as the floor when the count is unavailable
+        // (Cloudflare renderer, mid-deploy bundle). Serve, cache nothing.
+        const unreachablePhotos = renderImageFailures
+          ?? ((renderedData?.imageResolutionFailures || 0) + await countUnreachableReportPhotos(renderedData));
+        if (renderedData?.stationMapTransientlyUnavailable) {
+          // Same rule as pdf-queue: the key can't see a transient basemap
+          // miss, so caching here would strand a map-less report (r23).
+          logger.warn(`[reports-public] station map basemap transiently unavailable for ${service.id} — not caching this render`);
+        } else if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
+        } else if (unreachablePhotos > 0) {
+          logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature,
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

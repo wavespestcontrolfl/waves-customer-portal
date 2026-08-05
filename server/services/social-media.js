@@ -387,11 +387,88 @@ const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|sa
 // Word-order enumeration of banned claims proved unbounded across review
 // rounds (#3059 r2-r9), so the timing and product-safety classes are caught
 // by CLAUSE-LEVEL CO-OCCURRENCE instead. These constants are the vocabulary.
-const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:an?|one|two)[\s-]+hours?|half[\s-]+(?:an[\s-]+)?hour)\b/i;
+// Spelled-out numbers carry the same banned figure as digits ("avoid the
+// treated area for five hours" — codex P1 #3176 r18): the full spoken grid
+// — tens with optional compound ("thirty", "forty-five"), teens, units, and
+// the vague quantities labels actually use. Longer forms first so
+// "fourteen" can't half-match as "four". Units stay minutes/hours — day
+// counts are the agronomic-cadence class the matrix protects.
+// A CLOCK time ("return after 7 PM", "safe after 7:30 pm") asserts the same
+// fixed re-entry moment a duration does (codex P1 #3176 r20) — the clause
+// still needs the re-entry context AND no agronomic exemption, so business
+// hours and appointment windows in ordinary copy stay legal.
+const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\s-](?:one|two|three|four|five|six|seven|eight|nine))?|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|ten|eleven|twelve|an?|one|two|three|four|five|six|seven|eight|nine|several|a[\s-]+few|(?:a[\s-]+)?couple(?:[\s-]+of)?)[\s-]+(?:minutes?|mins?|hours?|hrs?)|half[\s-]+(?:an[\s-]+)?hour|\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b|\d{1,2}:\d{2}\b)/i;
 const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
 // Agronomic aftercare timing (mowing/watering windows) is legitimate copy,
 // and cadence copy uses days — only minute/hour figures are the banned class.
 const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
+
+// Where a SUBORDINATE action starts inside a clause. Used only to decide
+// who owns the time figure — never to decide whether the clause is flagged.
+const AGRONOMIC_SPAN_SPLIT_RE = /\s+(?:before|after|until|prior\s+to|then|and|but|while|so\s+that)\s+/i;
+
+/**
+ * Does the agronomic carve-out actually govern this clause's timing?
+ *
+ * The carve-out exists for label directions whose figure belongs to an
+ * agronomic ACTION — "water in within 14 days", "avoid watering the treated
+ * lawn for 24 hours". It was applied to the whole clause, so a re-entry
+ * restriction that merely MENTIONS one kept its fixed figure: "keep pets off
+ * treated areas for 30 minutes before watering" exempted itself on the word
+ * "watering" (codex P1 #3176 r23).
+ *
+ * Decide on the sub-span that actually carries the figure: split where a
+ * subordinate action begins, and exempt only when every span holding a
+ * duration also names the agronomic action. The split is confined to this
+ * test — the clause is still flagged and stripped as a whole — so phrasings
+ * whose verb and figure sit on opposite sides of a boundary ("re-enter after
+ * 2 hours") keep the detection they already had. A figure that survives no
+ * span (boundary-straddling) falls back to the previous whole-clause
+ * behaviour rather than silently hardening the rule.
+ */
+// Product TARGETS are unconstrained free text — the tech's picker takes typed
+// input (SchedulePage's ProductTargetsPicker), so a target chip can carry
+// compliance copy ("pet-safe", "EPA-approved", "dries in 1 hour") that the
+// permanent PDF would then print verbatim (codex P1 #3176 r24).
+//
+// FAIL CLOSED on the claim, not on an allowlist: techs legitimately type real
+// pest names that no suggestion list contains, so an allowlist would delete
+// true field data. A target is a NOUN naming a pest/weed/nutrient — none of
+// these words belong in one. Verified against all 92 shipped suggestions
+// (PEST/LAWN/ORNAMENTAL/NUTRITION): zero collide. 'green' is deliberately
+// ABSENT — "Green kyllinga", "Nitrogen green-up" and "Deep green color" are
+// real targets.
+const TARGET_CLAIM_WORD_RE = /\b(?:safe|safety|safer|safest|toxic|toxicity|nontoxic|non-toxic|harmless|natural|organic|approved|registered|guaranteed|effective|proof|free)\b/i;
+
+/**
+ * Drop target chips that carry a compliance claim instead of naming a target.
+ * Uses the SAME shared validator every other surface uses, plus the claim-word
+ * guard for phrasings validateContent does not classify on a bare noun phrase
+ * ("non-toxic"). Returns { targets, changed }; never throws.
+ */
+function sanitizeProductTargets(targets) {
+  const list = Array.isArray(targets) ? targets : [];
+  if (!list.length) return { targets: list, changed: false };
+  const kept = list.filter((raw) => {
+    const text = String(raw == null ? '' : raw).trim();
+    if (!text) return false;
+    if (TARGET_CLAIM_WORD_RE.test(text)) return false;
+    try {
+      return validateContent(text, 'gbp').issues.length === 0;
+    } catch {
+      return false;
+    }
+  });
+  return { targets: kept, changed: kept.length !== list.length };
+}
+
+function agronomicExemptionApplies(clause) {
+  if (!AGRONOMIC_EXEMPT_RE.test(clause)) return false;
+  const spans = String(clause).split(AGRONOMIC_SPAN_SPLIT_RE).filter((s) => s && s.trim());
+  const timed = spans.filter((s) => TIMING_DURATION_RE.test(s));
+  if (!timed.length) return true;
+  return timed.every((s) => AGRONOMIC_EXEMPT_RE.test(s));
+}
 // Product-safety co-occurrence: "safe(ly/ty)" said about products/
 // applications in ANY word order (predicate forms included). Two carve-outs
 // are stripped BEFORE testing: the approved idiom ("safe once/until/when
@@ -439,7 +516,7 @@ function complianceOverclaims(text) {
     // avoid watering …" must not let the aftercare half exempt the first.
     for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
       if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
-        && !AGRONOMIC_EXEMPT_RE.test(clause)) {
+        && !agronomicExemptionApplies(clause)) {
         issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
         break;
       }
@@ -447,6 +524,54 @@ function complianceOverclaims(text) {
   }
   return issues;
 }
+/**
+ * Strips fixed drying/re-entry timing from label-derived copy, reusing the
+ * SAME clause-level rule validateContent enforces (and the same regression
+ * matrix in social-validate-safety-claims.test.js) so compliance copy has one
+ * definition rather than a second, weaker one per surface.
+ *
+ * Clause-level on purpose: "keep pets off treated areas for 30 minutes, and
+ * avoid watering for 24 hours" must lose the first clause and KEEP the
+ * agronomic second. Clauses exempt under AGRONOMIC_EXEMPT_RE (watering,
+ * mowing, fertilizing windows) are always preserved.
+ *
+ * Returns { text, changed }. `text` is '' only when every clause was stripped
+ * and no replacement was supplied.
+ */
+function stripFixedReentryTiming(value, replacement = '') {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return { text: '', changed: false };
+  let changed = false;
+  const keptSentences = [];
+  // Split on line breaks as well as sentence punctuation: label copy often
+  // separates directions with an unpunctuated newline, and treating
+  // "Keep pets off treated areas for 30 minutes\nAvoid watering for 24 hours"
+  // as ONE clause let AGRONOMIC_EXEMPT_RE exempt the re-entry claim.
+  for (const sentence of raw.split(/(?<=[.!?])\s+|\r?\n+/)) {
+    if (!sentence.trim()) continue;
+    const parts = sentence.split(/([,;]+|\s+(?:and|but|while|then)\s+)/i);
+    const keptClauses = [];
+    for (let i = 0; i < parts.length; i += 2) {
+      const clause = parts[i];
+      if (clause == null || !clause.trim()) continue;
+      if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
+        && !agronomicExemptionApplies(clause)) {
+        changed = true;
+        continue;
+      }
+      keptClauses.push(clause.trim());
+    }
+    if (keptClauses.length) {
+      let rebuilt = keptClauses.join('. ').replace(/\s+/g, ' ').trim();
+      if (rebuilt && !/[.!?]$/.test(rebuilt)) rebuilt += '.';
+      keptSentences.push(rebuilt.charAt(0).toUpperCase() + rebuilt.slice(1));
+    }
+  }
+  const kept = keptSentences.join(' ').trim();
+  if (!changed) return { text: raw, changed: false };
+  return { text: [replacement, kept].filter(Boolean).join(' ').trim(), changed: true };
+}
+
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
 const KNOWN_PHONES = new Set();
@@ -2406,6 +2531,11 @@ function isImageHostingConfigured() {
 
 module.exports = SocialMediaService;
 module.exports.SOCIAL_FLAGS = SOCIAL_FLAGS;
+// Shared compliance stripper (defined above). Must be assigned AFTER the
+// `module.exports = SocialMediaService` reassignment on the line above, which
+// discards any property set earlier in the file.
+module.exports.stripFixedReentryTiming = stripFixedReentryTiming;
+module.exports.sanitizeProductTargets = sanitizeProductTargets;
 module.exports.isPausedByAdmin = isPausedByAdmin;
 module.exports.assertSocialPublishingReady = assertSocialPublishingReady;
 module.exports.validateContent = validateContent;

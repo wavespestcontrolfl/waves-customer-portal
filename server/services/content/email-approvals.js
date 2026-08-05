@@ -579,7 +579,9 @@ async function sendApprovalRequest(run, opportunity = null) {
   // presentation (and truncation verdict) than the original send did
   // (Codex r19).
   const rendered = renderApprovalEmail({ run, row, opportunity: preSend.opp || opportunity, preview: { title, body: draftBody, truncated, metadata } });
-  const subject = `[${row.token}] Approve? ${title}`;
+  // ACT: prefix per the ops-email convention. Reply recognition is unaffected:
+  // TOKEN_RE matches the [EA-…] token anywhere in the subject, not anchored.
+  const subject = `ACT: [${row.token}] Approve? ${title}`;
 
   const result = await email.send({
     to: approvalRecipient(),
