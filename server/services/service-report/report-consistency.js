@@ -127,12 +127,13 @@ function reconcileRainFigure(text, canonicalRain) {
     // inches" must qualify too (codex P2 r6).
     if (!/\brain(?:fall)?\b|\bprecipitation\b/i.test(sentence)) return sentence;
     if (!/\bweek\b|\b7[- ]days?\b|\b(?:past|last) seven\b|\bseven days\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
-    // "total…" alone can also describe a DAILY window — "Rainfall totaled
-    // 0.4 inches in the last 24 hours" is not the weekly figure. A sentence
-    // naming a sub-weekly window with no true week/7-day window is skipped
-    // whole (codex P2 r20).
+    // "total…" alone can also describe a SUB-WEEK window — "Rainfall totaled
+    // 0.4 inches in the last 24 hours" / "over the last 48 hours" / "in the
+    // past two days" is not the weekly figure. A sentence naming a sub-weekly
+    // window with no true week/7-day window is skipped whole (codex P2
+    // r20/r21).
     if (!/\bweek\b|\b7[- ]days?\b|\b(?:past|last)\s+seven\b|\bseven\s+days\b/i.test(sentence)
-      && /\b(?:24[- ]hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight)\b/i.test(sentence)) return sentence;
+      && /\b(?:\d+[- ]?hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight|(?:past|last)\s+(?:two|three|four|five|six|couple(?:\s+of)?|few|[2-6])\s+days?)\b/i.test(sentence)) return sentence;
     // A COMBINED rain+irrigation/total-water figure is not the rain total —
     // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
     // contradict the widget's Total row (codex P2 r5).
@@ -187,6 +188,13 @@ function reconcileRainFigure(text, canonicalRain) {
       // figure IS a combined rain+irrigation total are already skipped whole
       // by the sentence-level guard above.
       if (/\b(?:irrigation|sprinklers?|watering)\b[^.\d]{0,16}$/i.test(before)) return match;
+      // An instruction/aftercare amount is not the rain total — "skip adding
+      // 0.25 inches of irrigation" / "water in … with 0.25 inches within 24
+      // hours" (codex P2 r21). Guard on the instruction verb before the
+      // figure, or the irrigation/timing attachment after; neither skip
+      // consumes the attempt.
+      if (/\b(?:add(?:ing)?|apply(?:ing)?|applied|give|giving|supplement(?:ing)?)\b[^.\d,;:]{0,20}$/i.test(before)) return match;
+      if (/^\s*of\s+(?:irrigation|water(?:ing)?)\b|^[^.;,:]{0,12}\bwithin\s+\d+[- ]?\s*hours?\b/i.test(after)) return match;
       // A range endpoint ("0.75 to 1 inch") is target copy, not a total —
       // skip a figure preceded by number + range connector (codex P2 r17).
       // The connector may follow the first endpoint's UNIT ("between 1 inch
@@ -300,10 +308,17 @@ function replaceDroughtHypothesis(text) {
       // ("less likely to be drought stress" — codex P2 r19).
       // …and the dismissal's connector can be "due to"/"from"/"because of"
       // as well as "to be" ("less likely due to drought stress" —
-      // codex P2 r20).
-      if (/\b(?:unlikely|less\s+likely|doubtful|improbable)\s+(?:to\s+be|due\s+to|from|because\s+of)\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
+      // codex P2 r20) — or absent entirely in the bare copular form
+      // ("was unlikely drought stress" — codex P2 r21).
+      if (/\b(?:unlikely|less\s+likely|doubtful|improbable)\s+(?:(?:to\s+be|due\s+to|from|because\s+of)\s+)?(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
       if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
         && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
+      // An observation verb attached right AFTER any dry-area phrase vetoes
+      // the rewrite even when a cue precedes it — "Brown or tan patches and
+      // dry spots were noted" uses a descriptive "or", not a differential
+      // (codex P2 r21).
+      if (/dry\s+(?:patch(?:es)?|spots?|areas?|pockets?|spells?)/i.test(m)
+        && /^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded)\b/i.test(sentence.slice(offset + m.length))) return m;
       // …but a SENTENCE-INITIAL dry-area phrase with a same-clause cue right
       // AFTER it is still a hypothesis ("Dry spots could be contributing to
       // the thinning" — codex P2 r20); observation verbs keep their veto and

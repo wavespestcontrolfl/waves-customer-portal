@@ -44,6 +44,16 @@ describe('reconcileRainFigure', () => {
     expect(reconcileRainFigure('Rainfall totaled 0.4 inches today.', 2.96)).toBeNull();
   });
 
+  test('sub-week rain windows are never rewritten (codex P2 r21)', () => {
+    expect(reconcileRainFigure('Rainfall totaled 0.4 inches over the last 48 hours.', 2.96)).toBeNull();
+    expect(reconcileRainFigure('Rainfall totaled 0.4 inches in the past two days.', 2.96)).toBeNull();
+  });
+
+  test('aftercare/irrigation instruction amounts are never rewritten (codex P2 r21)', () => {
+    expect(reconcileRainFigure('With rain this week, water in today’s application with 0.25 inches within 24 hours.', 2.96)).toBeNull();
+    expect(reconcileRainFigure('Rain this week means you can skip adding 0.25 inches of irrigation.', 2.96)).toBeNull();
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -309,6 +319,15 @@ describe('replaceDroughtHypothesis', () => {
   test('pre-phrase "due to"/"from" dismissals are preserved (codex P2 r20)', () => {
     expect(replaceDroughtHypothesis('The thinning is less likely due to drought stress.')).toBeNull();
     expect(replaceDroughtHypothesis('The damage is unlikely from drought stress.')).toBeNull();
+  });
+
+  test('bare copular pre-phrase dismissals are preserved (codex P2 r21)', () => {
+    expect(replaceDroughtHypothesis('The stress was unlikely drought stress.')).toBeNull();
+    expect(replaceDroughtHypothesis('The thinning was less likely drought stress.')).toBeNull();
+  });
+
+  test('a descriptive "or" before an observed dry area never converts it (codex P2 r21)', () => {
+    expect(replaceDroughtHypothesis('Brown or tan patches and dry spots were noted near the sidewalk.')).toBeNull();
   });
 
   test('a resolved dry spell is historical, not a hypothesis (codex P2 r20)', () => {
