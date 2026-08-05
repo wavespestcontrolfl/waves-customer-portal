@@ -111,6 +111,8 @@ describe('keywordSegments', () => {
   });
   test('handles punctuation separators and empty input', () => {
     expect(keywordSegments('lawn grubs: identification signs')).toEqual(['lawn grubs', 'identification signs']);
+    expect(keywordSegments('bed bug bites? flea bite identification')).toEqual(['bed bug bites', 'flea bite identification']);
+    expect(keywordSegments('stop lawn fungus! treatment timing')).toEqual(['stop lawn fungus', 'treatment timing']);
     expect(keywordSegments('')).toEqual([]);
     expect(keywordSegments(null)).toEqual([]);
   });

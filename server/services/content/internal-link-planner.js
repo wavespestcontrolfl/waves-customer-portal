@@ -93,7 +93,7 @@ function keywordSegments(keyword) {
   const raw = String(keyword || '').trim();
   if (!raw) return [];
   return raw
-    .split(/\s+(?:vs\.?|versus|and|or|in|for|with|without)\s+|\s*[,:;()/—–]\s*/i)
+    .split(/\s+(?:vs\.?|versus|and|or|in|for|with|without)\s+|\s*[,:;()/—–?!]\s*/i)
     .map((segment) => String(segment || '').trim())
     .filter((segment) => segment
       && segment.toLowerCase() !== raw.toLowerCase()
