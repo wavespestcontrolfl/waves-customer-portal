@@ -1639,6 +1639,32 @@ function citationResidueFinding(text) {
   return finding('P0', 'CITATION_TOKEN_RESIDUE', `Draft contains raw citation markup ("${m[0]}") — model citation tokens must never ship. Attribute sources in prose instead.`);
 }
 
+// ── citation-residue strip (deterministic pre-gate repair) ──────────
+// Since 2026-07-27 the managed-agent writer emits <cite> wrappers on most
+// FIRST drafts with no portal change (upstream model behavior), so the
+// gate above was spending the run's single autonomous redraft on markup
+// this comment block already declares has "no legitimate published form"
+// — and the redraft then died on a DIFFERENT finding (3 straight zero-post
+// days, 08-02→08-04). emit_draft strips the UNAMBIGUOUS artifacts at
+// capture instead: <cite>…</cite> wrappers keep their inner text (the
+// prose attribution IS the content) and the pure tokens delete outright.
+// The AMBIGUOUS forms stay with the gate — bare index=N also appears in
+// legitimate component props, and deleting a markdown footnote silently
+// drops content a human should look at. Kept adjacent to
+// CITATION_RESIDUE_RE so detector and stripper can never drift.
+const CITE_WRAPPER_RE = /<cite\b[^>]*>([\s\S]*?)<\/cite>/gi;
+const CITE_STRAY_TAG_RE = /<\/?cite\b[^>]*>/gi;
+const CITE_TOKEN_RE = /\bciteturn\w+|【[^】\n]{0,40}】|:contentReference\[[^\]]{0,60}\](\{[^}]{0,80}\})?|[\uE000-\uF8FF]/g;
+
+function stripCitationResidue(text) {
+  const original = String(text || '');
+  const stripped = original
+    .replace(CITE_WRAPPER_RE, '$1')
+    .replace(CITE_STRAY_TAG_RE, '')
+    .replace(CITE_TOKEN_RE, '');
+  return { text: stripped, changed: stripped !== original };
+}
+
 // ── off-footprint service-claim gate ────────────────────────────────
 // Regional SWFL cities Waves does NOT serve. The canonical footprint is
 // config/locations CITY_TO_LOCATION; this candidate list is filtered against
@@ -3103,6 +3129,10 @@ module.exports = {
   SAFE_MDX_COMPONENTS,
   ALLOWED_INTERNAL_LINKS,
   isKnownGoodInternalRoute,
+  // deterministic pre-gate repair for unambiguous citation artifacts —
+  // consumed by brief-driven-tools emit_draft; kept here beside
+  // CITATION_RESIDUE_RE so stripper and detector can never drift.
+  stripCitationResidue,
   PAGE_CITY_SLUGS,
   OUT_OF_AREA_CITY_CANDIDATES,
   outOfAreaCities,
