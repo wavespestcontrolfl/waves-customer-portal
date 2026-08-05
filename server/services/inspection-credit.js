@@ -446,6 +446,10 @@ async function provenBookingInWindow({ customerId, from, to, excludeIds = [] }) 
     .join('scheduled_services as s', 's.id', 'e.scheduled_service_id')
     .where('e.customer_id', customerId)
     .whereNotIn('s.status', NON_LIVE_APPOINTMENT_STATUSES)
+    // Free callbacks never count as the qualifying booking (r32 P2) —
+    // COALESCE: the column defaults false, but a null must not exclude a
+    // real booking under SQL three-valued logic.
+    .whereRaw('COALESCE(s.is_callback, false) = false')
     .where('e.created_at', '>=', from)
     .where('e.created_at', '<=', to)
     .orderBy('e.created_at', 'asc');
@@ -501,11 +505,23 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
       const bookingRow = await trx('scheduled_services')
         .where({ id: bookingId })
         .forUpdate()
-        .first('status', 'customer_id');
+        .first('status', 'customer_id', 'is_callback');
       if (!bookingRow
         || NON_LIVE_APPOINTMENT_STATUSES.includes(String(bookingRow.status || '').toLowerCase())
         || (bookingRow.customer_id != null && String(bookingRow.customer_id) !== String(customerId))) {
         const e = new Error('booking went non-live (or changed hands) before the mint');
+        e.inspectionCreditSkip = 'booking_not_live';
+        throw e;
+      }
+      // A FREE re-service callback is not a purchase (Codex #3178 r32
+      // P2): the promise is a credit toward service the customer BOOKS,
+      // and a courtesy callback carries no collectible work — minting on
+      // it hands out fungible balance for nothing. `is_callback` is the
+      // explicit stamp (createSelfBooking's internal re-service path);
+      // deliberately NOT create_invoice_on_complete=false, which
+      // member-covered and included-child bookings legitimately carry.
+      if (bookingRow.is_callback === true) {
+        const e = new Error('booking is a free callback — no credit to mint against');
         e.inspectionCreditSkip = 'booking_not_live';
         throw e;
       }

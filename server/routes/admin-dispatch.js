@@ -4409,8 +4409,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // default profile when the table simply doesn't exist; a throw here is a
     // real DB error.
     let completionProfile;
+    // The profile the completion TRANSACTION actually judged (r32 P2):
+    // starts as the pre-lock resolution; the trx re-resolves on a detected
+    // update-details repoint (null = repoint detected but re-resolve
+    // failed — unknown identity, credit legs fail closed). The post-commit
+    // offer leg must use THIS, never the pre-lock snapshot.
+    let effectiveCompletionProfile;
     try {
       completionProfile = await resolveCompletionProfileForScheduledService(svc);
+      effectiveCompletionProfile = completionProfile;
     } catch (err) {
       logger.error(`[dispatch] completion profile lookup failed for ${svc.id}: ${err.message}`);
       return res.status(503).json({
@@ -6222,6 +6229,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
             serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
           }
+          // The inspection-credit marker keys to the LOCKED identity too
+          // (Codex #3178 r32 P2): the serviceData literal tested the
+          // pre-lock profile, and an update-details repoint committing in
+          // between can persist a promise on a visit that is no longer an
+          // inspection — or strip one from a visit that now is. Re-judge
+          // with the same re-resolved profile the report freeze trusts; a
+          // detected repoint whose re-resolve failed is UNKNOWN identity,
+          // which fails closed (no marker — money never moves on a guess).
+          {
+            const IC = require('../services/inspection-credit');
+            effectiveCompletionProfile = primaryFreezeTrusted ? frozenCompletionProfile : null;
+            const lockedEligible = offerInspectionCredit
+              && visitOutcome === 'completed'
+              && IC.isCreditableInspectionProfile(effectiveCompletionProfile)
+              && (require('../config/feature-gates').isEnabled('inspectionCredit')
+                || IC.carriesStandingCreditPromise(effectiveCompletionProfile?.serviceKey));
+            const hasMarker = serviceData.inspectionCreditOptIn === true;
+            if (hasMarker && !lockedEligible) {
+              delete serviceData.inspectionCreditOptIn;
+              delete serviceData.inspectionCreditTerms;
+            } else if (lockedEligible && (!hasMarker
+              || effectiveCompletionProfile?.serviceKey !== completionProfile?.serviceKey)) {
+              serviceData.inspectionCreditOptIn = true;
+              serviceData.inspectionCreditTerms = {
+                amount: IC.configuredCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null),
+                windowDays: IC.creditWindowDaysForServiceKey(effectiveCompletionProfile?.serviceKey || null),
+              };
+            }
+          }
           // Typed specialty completion: resolve trend vs the customer's prior
           // visit for the same indicator, then persist the immutable
           // customer-copy snapshot (typedReportSnapshot). The report renders
@@ -7320,7 +7356,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       && visitOutcome === 'completed'
       // Shared predicate, not the bare category (Codex #3178 r24 P0):
       // rodent_inspection's typed profile is category 'rodent'.
-      && require('../services/inspection-credit').isCreditableInspectionProfile(completionProfile)) {
+      // The EFFECTIVE profile — the identity the completion transaction
+      // actually judged after its row lock (r32 P2): a pre-lock snapshot
+      // can be stale across an update-details repoint; null (repoint
+      // detected, re-resolve failed) fails closed. On a RESUME the
+      // committed marker is the consent authority; this predicate is the
+      // identity gate, re-derived from the same pre-trx resolution.
+      && require('../services/inspection-credit').isCreditableInspectionProfile(effectiveCompletionProfile)) {
       try {
         const InspectionCredit = require('../services/inspection-credit');
         // The window starts when the INSPECTION happened, not when it was
@@ -7339,7 +7381,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           customerId: svc.customer_id,
           scheduledServiceId: svc.id,
           serviceRecordId: record.id,
-          serviceKey: completionProfile?.serviceKey || null,
+          serviceKey: effectiveCompletionProfile?.serviceKey || null,
           ...(Number(frozenCreditTerms?.amount) > 0 ? { amount: Number(frozenCreditTerms.amount) } : {}),
           ...(Number(frozenCreditTerms?.windowDays) > 0 ? { windowDays: Number(frozenCreditTerms.windowDays) } : {}),
           createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,

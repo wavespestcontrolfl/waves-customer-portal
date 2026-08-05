@@ -250,6 +250,24 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     expect(mockPostCreditMovement).not.toHaveBeenCalled();
   });
 
+  it('a FREE callback booking never mints — no purchase, no credit (r32 P2)', async () => {
+    // createSelfBooking's internal re-service path stamps is_callback:
+    // minting on it hands out fungible balance against a visit with no
+    // collectible work. create_invoice_on_complete=false is deliberately
+    // NOT the marker — member-covered children legitimately carry it.
+    mockBookings = [{ id: 'svc-2', created_at: new Date('2026-08-10'), status: 'confirmed', is_callback: true }];
+    mockEvents = [{ created_at: new Date('2026-08-10') }];
+    mockOffers = [{ id: 'offer-1', amount: '75.00', expires_at: new Date('2099-01-01') }];
+    const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
+    expect(res).toEqual({ redeemed: 0, amount: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    // And the evidence selector shares the exclusion.
+    const fs = require('fs');
+    const path = require('path');
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    expect(source).toContain("whereRaw('COALESCE(s.is_callback, false) = false')");
+  });
+
   it('NO booking event → nothing minted, deferred to the sweep (r28 P2)', async () => {
     // A reused row (graduated hold, adopted appointment) carries a
     // reservation/placeholder created_at — falling back to it when the
@@ -787,8 +805,13 @@ describe('closeout route wiring — source contracts (the completion route is to
     // category === 'inspection' gate silently excludes it, so neither the
     // durable marker nor the offer ever fires for the one service whose
     // estimator promise the credit must honor.
-    const matches = source.match(/isCreditableInspectionProfile\(completionProfile\)/g) || [];
-    expect(matches.length).toBe(2); // marker freeze + offer creation
+    // The serviceData literal judges the pre-lock profile; the in-trx
+    // adjustment and the offer leg judge the LOCKED effective profile
+    // (r32 P2) — three predicate sites total, zero bare-category gates.
+    const preLock = source.match(/isCreditableInspectionProfile\(completionProfile\)/g) || [];
+    const locked = source.match(/isCreditableInspectionProfile\(effectiveCompletionProfile\)/g) || [];
+    expect(preLock.length).toBe(1); // marker freeze in the literal
+    expect(locked.length).toBe(2); // locked adjustment + offer creation
     expect(source).not.toMatch(/completionProfile\?\.category \|\| ''\) === 'inspection'/);
     // The client renders the opt-out for rodent inspections too.
     const client = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/SchedulePage.jsx'), 'utf8');
@@ -953,6 +976,14 @@ describe('closeout route wiring — source contracts (the completion route is to
     const seamAt = source.indexOf('voidOpenInvoicesForCancelledService(req.params.id)');
     expect(gateAt).toBeGreaterThan(-1);
     expect(seamAt).toBeGreaterThan(gateAt); // seam sits inside the gate
+  });
+
+  it('a hidden credit control never fabricates an explicit opt-in (r32 P2)', () => {
+    const client = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/SchedulePage.jsx'), 'utf8');
+    // A failed profile lookup hides the toggle; the payload omits the
+    // field (undefined drops from JSON) so the server's default-on ruling
+    // applies against its OWN resolution, not a fabricated choice.
+    expect(client).toContain('offerInspectionCredit: service.completionProfileLookupFailed === true');
   });
 
   it('the tokenized receipt page carries the credit memo (r28 P2)', () => {

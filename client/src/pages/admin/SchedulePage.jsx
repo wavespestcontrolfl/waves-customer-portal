@@ -12515,7 +12515,14 @@ export function CompletionPanel({
         // Only meaningful on an inspection closeout; mirror the toggle's
         // visibility so a stale cleared box can't suppress the credit on a
         // non-inspection visit (where the server ignores it anyway).
-        offerInspectionCredit: isInspectionVisit ? offerInspectionCredit : true,
+        // A FAILED profile lookup hides the credit toggle without meaning
+        // "not an inspection" — omitting the field (undefined drops out of
+        // the JSON body) records no explicit choice, and the server's
+        // default-on ruling applies against ITS OWN resolution instead of
+        // a fabricated opt-in (Codex #3178 r32 P2).
+        offerInspectionCredit: service.completionProfileLookupFailed === true
+          ? undefined
+          : (isInspectionVisit ? offerInspectionCredit : true),
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
         reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
         reviewDelayMinutes: selectedReviewDelayMinutes,
