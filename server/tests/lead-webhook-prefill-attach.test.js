@@ -25,18 +25,26 @@ jest.mock('../utils/lead-prefill-token', () => ({
 const db = require('../models/db');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
 const { _test } = require('../routes/lead-webhook');
-const { attachVoicemailPrefillLead } = _test;
+const { attachVoicemailPrefillLead, attachOpenCallLeadByPhone } = _test;
 
 const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
 
 // Update-chain builder: update() records the payload and stays chainable so
-// .returning('*') can resolve the scripted row list (mirrors knex).
+// .returning('*') can resolve the scripted row list (mirrors knex). first()
+// serves the phone-match candidate select; select builders (no update call)
+// and update builders share the shape.
 let state;
 function makeBuilder(table) {
-  const b = { table, wheres: [], whereNotIns: [], whereNulls: [] };
+  const b = { table, wheres: [], whereRaws: [], whereNotIns: [], whereNulls: [] };
   b.where = jest.fn((arg) => { b.wheres.push(arg); return b; });
+  b.whereRaw = jest.fn((sql, bindings) => { b.whereRaws.push([sql, bindings]); return b; });
   b.whereNotIn = jest.fn((col, vals) => { b.whereNotIns.push([col, vals]); return b; });
   b.whereNull = jest.fn((col) => { b.whereNulls.push(col); return b; });
+  b.orderBy = jest.fn(() => b);
+  b.first = jest.fn(() => {
+    state.selects.push({ table, builder: b });
+    return state.selectError ? Promise.reject(state.selectError) : Promise.resolve(state.candidateRow);
+  });
   b.update = jest.fn((payload) => {
     state.updates.push({ table, payload, builder: b });
     if (state.updateError) return { returning: () => Promise.reject(state.updateError) };
@@ -48,7 +56,7 @@ function makeBuilder(table) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  state = { updates: [], returningRows: [], updateError: null };
+  state = { updates: [], selects: [], returningRows: [], candidateRow: null, updateError: null, selectError: null };
   db.mockImplementation((table) => makeBuilder(table));
   db.raw.mockImplementation((sql, bindings) => ({ __raw: sql, bindings }));
   verifyLeadPrefillToken.mockReturnValue(true);
@@ -147,5 +155,136 @@ describe('attachVoicemailPrefillLead — attach semantics', () => {
   test('attach error → null (caller falls back), never throws', async () => {
     state.updateError = new Error('deadlock');
     await expect(attachVoicemailPrefillLead(callArgs())).resolves.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phone-match fallback (attachOpenCallLeadByPhone) — the token-less path for
+// a prospect who left a voicemail but submitted a form without the text-back
+// prefill link. Pins: the candidate filters (call-channel only, open, not
+// deleted), the cross-customer and first-name conflict guards, the
+// non-empty-fields-only merge, and the shared attach UPDATE semantics.
+// ---------------------------------------------------------------------------
+
+const CALL_LEAD_ID = '9a8b7c6d-2222-4333-9444-fedcbafedcba';
+
+function phoneArgs(overrides = {}) {
+  return {
+    phoneFormatted: '+19415550101',
+    typedFirstName: 'Dana',
+    fields: {
+      first_name: 'Dana', last_name: 'Rivera',
+      phone: '+19415550101', email: 'dana@example.com',
+      address: '123 Palm Ave', city: 'Bradenton',
+      service_interest: 'termite', customer_id: 'cust-1',
+      ...overrides.fields,
+    },
+    webhookStage: overrides.webhookStage || { stage: 'lead_webhook_received' },
+    ...overrides.top,
+  };
+}
+
+describe('attachOpenCallLeadByPhone — candidate gate', () => {
+  test('unusable phone → null, no db read', async () => {
+    const result = await attachOpenCallLeadByPhone(phoneArgs({ top: { phoneFormatted: '555' } }));
+    expect(result).toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('no open call lead on the number → null, no update', async () => {
+    state.candidateRow = null;
+    const result = await attachOpenCallLeadByPhone(phoneArgs());
+    expect(result).toBeNull();
+    expect(state.updates).toHaveLength(0);
+
+    // Candidate select is scoped to open CALL-channel leads only — form/SMS
+    // dups belong to the upstream customer dedup, never to this attach.
+    const { builder } = state.selects[0];
+    expect(builder.wheres).toContainEqual({ first_contact_channel: 'call' });
+    expect(builder.whereRaws[0][1]).toEqual(['9415550101']);
+    expect(builder.whereNotIns).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(builder.whereNulls).toContain('converted_at');
+    expect(builder.whereNulls).toContain('deleted_at');
+  });
+
+  test('candidate linked to a DIFFERENT customer → null, no update (shared line)', async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Dana', customer_id: 'cust-OTHER' };
+    const result = await attachOpenCallLeadByPhone(phoneArgs());
+    expect(result).toBeNull();
+    expect(state.updates).toHaveLength(0);
+  });
+
+  test('typed first name conflicts with captured first name → null, no update', async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null };
+    const result = await attachOpenCallLeadByPhone(phoneArgs());
+    expect(result).toBeNull();
+    expect(state.updates).toHaveLength(0);
+  });
+
+  test("webhook 'Unknown' placeholder is not a typed name — attach proceeds", async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null };
+    state.returningRows = [{ id: CALL_LEAD_ID }];
+    const result = await attachOpenCallLeadByPhone(phoneArgs({
+      top: { typedFirstName: 'Unknown' },
+      fields: { first_name: 'Unknown', last_name: '' },
+    }));
+    expect(result).toMatchObject({ id: CALL_LEAD_ID });
+    // ...but the placeholder never overwrites the captured name.
+    expect(state.updates[0].payload).not.toHaveProperty('first_name');
+    expect(state.updates[0].payload).not.toHaveProperty('last_name');
+  });
+});
+
+describe('attachOpenCallLeadByPhone — attach semantics', () => {
+  test('open nameless voicemail lead attaches; update keyed to candidate id with open guards', async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: null, customer_id: null };
+    state.returningRows = [{ id: CALL_LEAD_ID, status: 'new' }];
+    const result = await attachOpenCallLeadByPhone(phoneArgs());
+    expect(result).toMatchObject({ id: CALL_LEAD_ID });
+
+    const { payload, builder } = state.updates[0];
+    expect(state.updates[0].table).toBe('leads');
+    expect(payload).toMatchObject({
+      first_name: 'Dana', last_name: 'Rivera',
+      phone: '+19415550101', customer_id: 'cust-1',
+    });
+    // Atomic re-check: same open-lead guards inside the UPDATE's WHERE.
+    expect(builder.wheres).toContainEqual({ id: CALL_LEAD_ID });
+    expect(builder.whereNotIns).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(builder.whereNulls).toContain('converted_at');
+    // Shared updater semantics: unresponsive reopen + jsonb MERGE.
+    expect(String(payload.status.__raw)).toContain("WHEN status = 'unresponsive' THEN 'new'");
+    expect(String(payload.extracted_data.__raw)).toContain("COALESCE(extracted_data, '{}'::jsonb) ||");
+  });
+
+  test('empty typed values never blank captured data (token attach stays typed-wins)', async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Dana', customer_id: null };
+    state.returningRows = [{ id: CALL_LEAD_ID }];
+    await attachOpenCallLeadByPhone(phoneArgs({
+      fields: { last_name: '', email: null, address: '', service_interest: null },
+    }));
+    const { payload } = state.updates[0];
+    expect(payload).toMatchObject({ first_name: 'Dana', customer_id: 'cust-1' });
+    expect(payload).not.toHaveProperty('last_name');
+    expect(payload).not.toHaveProperty('email');
+    expect(payload).not.toHaveProperty('address');
+    expect(payload).not.toHaveProperty('service_interest');
+  });
+
+  test('closed-between-lookup-and-update → UPDATE matches nothing → null', async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: null, customer_id: null };
+    state.returningRows = [];
+    await expect(attachOpenCallLeadByPhone(phoneArgs())).resolves.toBeNull();
+  });
+
+  test('select error → null (caller falls back), never throws', async () => {
+    state.selectError = new Error('timeout');
+    await expect(attachOpenCallLeadByPhone(phoneArgs())).resolves.toBeNull();
+  });
+
+  test('update error → null (caller falls back), never throws', async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: null, customer_id: null };
+    state.updateError = new Error('deadlock');
+    await expect(attachOpenCallLeadByPhone(phoneArgs())).resolves.toBeNull();
   });
 });
