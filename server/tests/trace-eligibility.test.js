@@ -704,6 +704,17 @@ describe('classification behavior', () => {
     })).toMatchObject({ eligible: false, reason: 'no_perimeter_method_recorded' });
   });
 
+  test('round 28 — pointerRequiredForKey names exactly the pointer-dependent keys', () => {
+    const { pointerRequiredForKey } = require('../services/service-report/trace-eligibility');
+    expect(pointerRequiredForKey('termite_liquid')).toBe(true);
+    expect(pointerRequiredForKey('termite_trenching')).toBe(true);
+    // a plain eligible key and an unknown key are NOT pointer-required —
+    // completion freezers stamp them normally
+    expect(pointerRequiredForKey('pest_general_quarterly')).toBe(false);
+    expect(pointerRequiredForKey('not_a_key')).toBe(false);
+    expect(pointerRequiredForKey(null)).toBe(false);
+  });
+
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
     // pre-untype callback: the eligible one_time_pest_treatment snapshot
     // no longer bypasses the exterior-evidence condition

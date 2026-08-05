@@ -418,6 +418,13 @@ function resolveTraceEligibility({
   return { eligible: false, variant: null, captionKey: null, reason: 'unclassified_service' };
 }
 
+// A key whose eligible verdict is only valid WITH its typed pointer
+// (codex P2 r27/r28) — completion freezers must not stamp such a key
+// pointer-less, or the permanent record fails the render check forever.
+function pointerRequiredForKey(serviceKey) {
+  return Boolean(serviceKey && SERVICE_KEY_RULES[serviceKey]?.pointerRequired);
+}
+
 function traceEligibilityGateOn() {
   return process.env.GATE_TRACE_ELIGIBILITY === 'true';
 }
@@ -827,6 +834,7 @@ module.exports = {
   addonVerdictsFromLines,
   frozenAddonLinesForCompletion,
   renderAreasFromRecord,
+  pointerRequiredForKey,
   traceEligibilityGateOn,
   traceCaptureBlockPayload,
   _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },

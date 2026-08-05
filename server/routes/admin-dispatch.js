@@ -2263,7 +2263,9 @@ router.get('/:date?', async (req, res, next) => {
         autopay_payment_method_id: s.autopay_payment_method_id,
         ach_status: s.ach_status,
       });
-      const completionProfile = await resolveCompletionProfileForScheduledService(s).catch(() => null);
+      let dispatchProfileLookupFailed = false;
+      const completionProfile = await resolveCompletionProfileForScheduledService(s)
+        .catch(() => { dispatchProfileLookupFailed = true; return null; });
       // Trace verdict for the dispatch surface (codex P2 r24):
       // CompletionPanel opened from DispatchPageV2 reads THIS feed, and
       // the client treats an absent flag as eligible — without the
@@ -2277,7 +2279,10 @@ router.get('/:date?', async (req, res, next) => {
         const {
           resolveTraceEligibility, combineLineVerdicts, resolveAddonVerdicts, traceEligibilityGateOn,
         } = require('../services/service-report/trace-eligibility');
-        if (traceEligibilityGateOn()) {
+        // A profile OUTAGE omits the verdict (fail open, codex P2 r28)
+        // instead of classifying a typed primary from its editable label
+        // — the save route catches the same outage and fails open.
+        if (traceEligibilityGateOn() && !dispatchProfileLookupFailed) {
           dispatchTraceVerdict = combineLineVerdicts(
             resolveTraceEligibility({
               serviceKey: completionProfile?.serviceKey || null,
@@ -6061,7 +6066,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               primaryFreezeTrusted = false;
             }
           }
-          if (primaryFreezeTrusted) {
+          // A pointer-REQUIRED key without its resolved pointer stays
+          // live-resolvable (codex P2 r28, mirroring the add-on freezer):
+          // freezing termite_liquid pointer-less would suppress the
+          // permanent report forever — render treats the frozen key as
+          // authoritative and never re-queries the restored profile.
+          const { pointerRequiredForKey } = require('../services/service-report/trace-eligibility');
+          const pointerlessPointerRequired = frozenCompletionProfile?.serviceKey
+            && !frozenCompletionProfile?.findingsType
+            && pointerRequiredForKey(frozenCompletionProfile.serviceKey);
+          if (primaryFreezeTrusted && !pointerlessPointerRequired) {
             serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
             serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
           }

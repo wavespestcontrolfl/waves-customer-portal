@@ -382,9 +382,19 @@ async function submitRecap({
       // shared freezer, same fail-soft posture as the /complete path.
       const { frozenAddonLinesForCompletion } = require('./service-report/trace-eligibility');
       const recapAddonLines = await frozenAddonLinesForCompletion(serviceId, trx).catch(() => null);
+      // Pointer-REQUIRED key without its pointer: leave the primary
+      // live-resolvable, same as the /complete path (codex P2 r28).
+      const { pointerRequiredForKey } = require('./service-report/trace-eligibility');
+      const recapPointerless = recapProfile?.serviceKey
+        && !recapProfile?.findingsType
+        && pointerRequiredForKey(recapProfile.serviceKey);
       frozenTraceIdentity = {
-        completedServiceKey: recapProfile?.serviceKey || null,
-        completedServiceName: (locked ? locked.service_type : svc.service_type) || null,
+        ...(recapPointerless
+          ? {}
+          : {
+            completedServiceKey: recapProfile?.serviceKey || null,
+            completedServiceName: (locked ? locked.service_type : svc.service_type) || null,
+          }),
         ...(Array.isArray(recapAddonLines)
           ? { completedAddonLines: recapAddonLines }
           : {}),
@@ -397,9 +407,22 @@ async function submitRecap({
         const existingData = typeof existing.service_data === 'string'
           ? JSON.parse(existing.service_data || '{}')
           : (existing.service_data || {});
-        if (Object.keys(frozenTraceIdentity).length
-          && !Object.prototype.hasOwnProperty.call(existingData, 'completedServiceKey')) {
-          mergedServiceData = JSON.stringify({ ...existingData, ...frozenTraceIdentity });
+        // Fields merge INDEPENDENTLY (codex P2 r28): a /complete whose
+        // add-on freezer transiently failed leaves completedServiceKey
+        // present but completedAddonLines absent — the recap fills only
+        // what is missing, never overwriting an existing freeze.
+        const missing = {};
+        if (!Object.prototype.hasOwnProperty.call(existingData, 'completedServiceKey')
+          && Object.prototype.hasOwnProperty.call(frozenTraceIdentity, 'completedServiceKey')) {
+          missing.completedServiceKey = frozenTraceIdentity.completedServiceKey;
+          missing.completedServiceName = frozenTraceIdentity.completedServiceName;
+        }
+        if (!Object.prototype.hasOwnProperty.call(existingData, 'completedAddonLines')
+          && Object.prototype.hasOwnProperty.call(frozenTraceIdentity, 'completedAddonLines')) {
+          missing.completedAddonLines = frozenTraceIdentity.completedAddonLines;
+        }
+        if (Object.keys(missing).length) {
+          mergedServiceData = JSON.stringify({ ...existingData, ...missing });
         }
       } catch { /* leave service_data untouched */ }
       await trx('service_records').where({ id: existing.id }).update({
