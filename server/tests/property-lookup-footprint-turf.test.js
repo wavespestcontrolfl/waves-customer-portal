@@ -203,10 +203,32 @@ describe('county turf prior (vision-missing seed)', () => {
     expect(profile.countyTurfPriorSf).toBeNull();
   });
 
-  test('shared-turf types never seed from their own parcel', () => {
-    const profile = buildEnrichedProfile(countyRecord({ propertyType: 'Townhome' }), null, 27.4, -82.4);
+  test('TRUSTED shared-turf types never seed from their own parcel', () => {
+    const profile = buildEnrichedProfile(countyRecord({
+      propertyType: 'Townhome',
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'county' },
+        propertyType: { sourceType: 'satellite' },
+      },
+    }), null, 27.4, -82.4);
     expect(profile.countyTurfPriorSf).toBeNull();
     expect(profile.estimatedTurfSf).toBe(0);
+  });
+
+  test('an UNTRUSTED shared-turf label keeps the bound — the prior still seeds (codex P1)', () => {
+    // Same evidence bar as applyParcelTurfBound: a listing-sourced
+    // "Townhome" on county-verified dims must not lift the per-parcel bound.
+    const profile = buildEnrichedProfile(countyRecord({
+      propertyType: 'Townhome',
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'county' },
+        propertyType: { sourceType: 'listing', fieldVerify: true },
+      },
+    }), null, 27.4, -82.4);
+    expect(profile.countyTurfPriorSf).toBe(4000);
+    expect(profile.estimatedTurfSf).toBe(4000);
   });
 
   test('a sub-minimum ceiling (tiny/implausible yard) never seeds', () => {
@@ -274,13 +296,41 @@ describe('county turf prior (vision-missing seed)', () => {
     ]));
   });
 
-  test('shared-turf types never expose a per-parcel ceiling (same exemption as the prior)', () => {
+  test('TRUSTED shared-turf types never expose a per-parcel ceiling (same exemption as the prior)', () => {
     const profile = buildEnrichedProfile(
-      countyRecord({ propertyType: 'Townhome' }),
+      countyRecord({
+        propertyType: 'Townhome',
+        _fieldEvidence: {
+          lotSize: { sourceType: 'county' },
+          squareFootage: { sourceType: 'county' },
+          propertyType: { sourceType: 'satellite' },
+        },
+      }),
       { estimatedTurfSf: 9500, confidenceScore: 80 },
       27.4, -82.4,
     );
     expect(profile.countyTurfCeilingSf).toBeNull();
+    // ...and buildFieldVerifyFlags honors the same exemption — no spurious
+    // exceeds-ceiling review reason for a lawn that legitimately spans
+    // beyond the unit's parcel (codex P2).
+    expect(profile.fieldVerifyFlags.some((f) => /county-facts ceiling/.test(f.reason))).toBe(false);
+  });
+
+  test('an UNTRUSTED shared-turf label still exposes the ceiling and its review reason (codex P1)', () => {
+    const profile = buildEnrichedProfile(
+      countyRecord({
+        propertyType: 'Townhome',
+        _fieldEvidence: {
+          lotSize: { sourceType: 'county' },
+          squareFootage: { sourceType: 'county' },
+          propertyType: { sourceType: 'listing', fieldVerify: true },
+        },
+      }),
+      { estimatedTurfSf: 9500, confidenceScore: 80 },
+      27.4, -82.4,
+    );
+    expect(profile.countyTurfCeilingSf).toBe(8000);
+    expect(profile.fieldVerifyFlags.some((f) => /county-facts ceiling of 8,000 sq ft/.test(f.reason))).toBe(true);
   });
 });
 
@@ -337,13 +387,33 @@ describe('vision-only turf with the county cross-check disarmed (verify flag)', 
     expect(profile.fieldVerifyFlags).not.toEqual(expect.arrayContaining([visionOnlyFlag]));
   });
 
-  test('shared-turf types stay quiet — no per-parcel bound would apply anyway', () => {
+  test('TRUSTED shared-turf types stay quiet — no per-parcel bound would apply anyway', () => {
     const profile = buildEnrichedProfile(
-      countyRecord({ propertyType: 'Townhome', _fieldEvidence: {} }),
+      countyRecord({
+        propertyType: 'Townhome',
+        _fieldEvidence: { propertyType: { sourceType: 'satellite' } },
+      }),
       { estimatedTurfSf: 3200, confidenceScore: 80 },
       27.4, -82.4, null, audit,
     );
     expect(profile.fieldVerifyFlags).not.toEqual(expect.arrayContaining([visionOnlyFlag]));
+  });
+
+  test('county-sourced record with an untrusted ceiling flags even WITHOUT an address audit (codex P1)', () => {
+    // Fresh county-backed lookups skip the audit (it only runs when the
+    // record lacks county evidence) — record provenance must arm the flag.
+    const profile = buildEnrichedProfile(
+      countyRecord({
+        _source: 'county',
+        county: 'Sarasota',
+        imperviousAreaSf: undefined, // unparsed roll → untrusted ceiling
+      }),
+      { estimatedTurfSf: 3200, confidenceScore: 80 },
+      27.4, -82.4, null, null,
+    );
+    const flag = profile.fieldVerifyFlags.find((f) => /satellite-vision only/.test(f.reason));
+    expect(flag).toBeTruthy();
+    expect(flag.reason).toContain('Sarasota');
   });
 
   test('explicit vision 0 (no-lawn property) never flags', () => {

@@ -1453,8 +1453,20 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // ceiling the engine caps against, and the vision-only verify flag below):
   // a shared-turf type's treatable lawn legitimately spans beyond its own
   // parcel, so a per-parcel bound neither seeds nor caps nor cross-checks it.
-  const parcelTurfBoundApplies =
-    commercialProfile || !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase());
+  //
+  // The exemption may only key off a TRUSTED type — same evidence bar as
+  // applyParcelTurfBound (codex #3224 P1): an unverified listing "Townhome"
+  // on county-verified dimensions must not lift the bound AND its review
+  // marker; distrusted types keep the bound, the conservative direction. A
+  // record-less profile's shared-turf display type is satellite-derived
+  // (visionPropertyType), which the parcel-cap exemplar trusts by design.
+  const sharedTurfDisplayType = SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase());
+  const sharedTurfTypeTrusted = sharedTurfDisplayType && (
+    !rc
+    || String(rc?._fieldEvidence?.propertyType?.sourceType || '').toLowerCase() === 'satellite'
+    || recordCommercialSignalTrusted(rc)
+  );
+  const parcelTurfBoundApplies = commercialProfile || !sharedTurfTypeTrusted;
   const countyTurfPriorSf = (
     !visionTurfKnown
     // A stale-imagery conflict cleared the vision fields, but seeding the
@@ -1468,7 +1480,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     && parcelTurfBoundApplies
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
-  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies });
   if (staleImageryConflict) {
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
@@ -1483,19 +1495,24 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       priority: 'HIGH',
     });
   }
-  // Vision turf with the county cross-check disarmed: the address audit
-  // reached a county roll (so county facts were EXPECTED), but no trusted
-  // county dimensions arrived — the ceiling cap, the county prior, and the
-  // exceeds-ceiling review reason all sit out, and a satellite overshoot
-  // prices silently at MEDIUM confidence (a transient county-lookup failure
-  // priced a real lawn ~25% high on 2026-08-05). Exception-based: quiet when
-  // no county roll answered (out-of-area address, GIS outage — the audit is
-  // absent there) or when a per-parcel bound wouldn't apply anyway.
+  // Vision turf with the county cross-check disarmed: a county SHOULD have
+  // vouched for this address — either the address audit reached a county
+  // roll, or the record itself carries county/cadastral provenance (fresh
+  // county-backed lookups skip the audit entirely, so the audit alone would
+  // miss a county record whose ceiling failed the trust bar — codex #3224
+  // P1) — but no trusted county dimensions arrived, so the ceiling cap, the
+  // county prior, and the exceeds-ceiling review reason all sit out and a
+  // satellite overshoot prices silently at MEDIUM confidence (a transient
+  // county-lookup failure priced a real lawn ~25% high on 2026-08-05).
+  // Exception-based: quiet when no county signal exists at all (out-of-area
+  // address, GIS outage) or when a per-parcel bound wouldn't apply anyway.
+  const countyShouldHaveVouched = Boolean(addressAudit?.county) || hasCountyEvidence(rc);
   if (visionTurfKnown && visionTurfSf > 0 && !countyCeiling && parcelTurfBoundApplies
-      && addressAudit?.county) {
+      && countyShouldHaveVouched) {
+    const countyName = addressAudit?.county || rc?.county || 'county';
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
-      reason: `Treatable turf ${Math.round(visionTurfSf).toLocaleString()} sq ft is satellite-vision only — no county-verified lot/building dimensions arrived from the ${addressAudit.county} roll to cross-check it. Verify treatable lawn area before pricing lawn services.`,
+      reason: `Treatable turf ${Math.round(visionTurfSf).toLocaleString()} sq ft is satellite-vision only — no county-verified lot/building dimensions arrived from the ${countyName} roll to cross-check it. Verify treatable lawn area before pricing lawn services.`,
       priority: 'HIGH',
     });
   }
@@ -2611,7 +2628,7 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true } = {}) {
   const flags = [];
 
   // Geocoder snapped the typed house number to a different premise — this
@@ -2872,8 +2889,10 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
     aiConfidence: ai?.confidenceScore,
     // TRUSTED county ceiling only (county-complete + county-sourced dims) —
     // ai carries no county figures; the profile path passes its own
-    // countyTurfCeilingSf.
-    countyTurfCeilingSf: trustedCountyTurfCeiling(rc)?.turfSf,
+    // countyTurfCeilingSf. Shared-turf exemption rides in from the caller
+    // (codex #3224 P2): a trusted condo/townhome's lawn legitimately spans
+    // beyond its parcel, so the exceeds-ceiling reason is spurious there.
+    countyTurfCeilingSf: parcelTurfBoundApplies ? trustedCountyTurfCeiling(rc)?.turfSf : null,
   });
   if (estimatedTurfSf > 0 && turfReviewReasons.length > 0) {
     flags.push({
@@ -2924,6 +2943,30 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
 // Sub-steps land incrementally: urgency/afterHours fan-out → 2b-2,
 // roachModifier auto-fire → 2b-3, manualDiscount → 2b-4.
 // ─────────────────────────────────────────────
+// Ceiling-vs-request dimension check for the translate adapter (see the
+// countyTurfCeilingSf mapping below). footprintTurfParts records the exact
+// inputs the county ceiling was computed from. Basis 'living_area' (and
+// pre-basis records, where the key is absent) derived its footprint from
+// squareFootage/stories, so an edited home size invalidates; a
+// gross-under-roof footprint doesn't budge with homeSqFt, so only the lot
+// (and stories, when the parts record them) are checked there.
+function countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories }) {
+  if (p?.countyTurfCeilingSf == null) return false;
+  const parts = p?.footprintTurfParts && typeof p.footprintTurfParts === 'object'
+    ? p.footprintTurfParts
+    : null;
+  if (!parts) return false;
+  if (!(lotSqFt > 0) || Math.abs(lotSqFt - Number(parts.lotSqFt)) > 1) return false;
+  if (parts.stories != null
+      && Math.abs(Math.max(1, Number(stories) || 1) - Number(parts.stories)) > 0.01) return false;
+  const basis = String(parts.footprintBasis || 'living_area');
+  if (basis === 'living_area') {
+    const expectedFootprint = Math.round((Number(homeSqFt) || 0) / Math.max(1, Number(stories) || 1));
+    if (!(expectedFootprint > 0) || Math.abs(expectedFootprint - Number(parts.footprintSf)) > 1) return false;
+  }
+  return true;
+}
+
 function translateV2CallToV1Input(profile, selectedServices, options) {
   const p = profile || {};
   const o = options || {};
@@ -3508,7 +3551,17 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     // instead of treating every estimatedTurfSf as vision-measured.
     turfSource: p.turfSource || null,
     countyTurfPriorSf: p.countyTurfPriorSf ?? null,
-    countyTurfCeilingSf: p.countyTurfCeilingSf ?? null,
+    // The ceiling is only forwarded when the request's dimensions still match
+    // the county dimensions it was computed from (codex #3224 P1): both
+    // estimator pages spread the looked-up profile and overwrite
+    // homeSqFt/lotSqFt/stories on operator edit, and a corrected lot/home
+    // must not leave the engine clamping vision turf against stale geometry.
+    // footprintTurfParts records the ceiling's own inputs; a mismatch — or
+    // parts missing entirely, which leaves nothing to validate against —
+    // drops the ceiling for this request (the heuristic max still applies).
+    countyTurfCeilingSf: countyCeilingStillValid(p, { homeSqFt, lotSqFt, stories })
+      ? p.countyTurfCeilingSf
+      : null,
     turfCappedToParcel: p.turfCappedToParcel === true,
     imperviousSurfacePercent: p.imperviousSurfacePercent,
     imperviosSurfacePercent: p.imperviosSurfacePercent,

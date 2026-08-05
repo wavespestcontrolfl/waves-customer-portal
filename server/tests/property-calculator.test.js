@@ -181,6 +181,69 @@ describe('county-facts ceiling tightens the plausible-max turf cap', () => {
     expect(profile.turfBasis).toBe('measuredTurfSf');
     expect(profile.turfConfidence).toBe('HIGH');
   });
+
+  test('a trusted ZERO ceiling is a real bound, not an absent one (codex P1)', () => {
+    // Fully-impervious parcel per county facts: positive vision turf must
+    // clamp all the way down (over tolerance → legacy fallback min()s to 0)
+    // instead of pricing at MEDIUM off the loose heuristic.
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 3200, countyTurfCeilingSf: 0 });
+    expect(profile.lawnSqFt).toBe(0);
+    expect(profile.turfConfidence).toBe('LOW');
+    expect(profile.turfFlags).toEqual(
+      expect.arrayContaining(['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'])
+    );
+  });
+});
+
+describe('translate adapter drops a stale county ceiling (codex P1)', () => {
+  // The estimator pages spread the looked-up profile and overwrite
+  // homeSqFt/lotSqFt/stories on operator edit; the ceiling must only reach
+  // the engine while the request still matches the county dimensions it was
+  // computed from (footprintTurfParts).
+  const baseProfile = {
+    homeSqFt: 2400,
+    lotSqFt: 10000,
+    stories: 2,
+    estimatedTurfSf: 5200,
+    turfSource: 'vision',
+    countyTurfCeilingSf: 8000,
+    footprintTurfParts: { lotSqFt: 10000, footprintSf: 1200, imperviousSf: 800, imperviousKnown: true },
+  };
+  const translate = (profile) => translateV2CallToV1Input(profile, ['LAWN'], { lawnFreq: 9, grassType: 'st_augustine' });
+
+  test('unedited replay forwards the ceiling', () => {
+    expect(translate(baseProfile).countyTurfCeilingSf).toBe(8000);
+  });
+
+  test('an edited lot drops the ceiling', () => {
+    expect(translate({ ...baseProfile, lotSqFt: 14000 }).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('an edited home size drops the ceiling (living-area basis)', () => {
+    expect(translate({ ...baseProfile, homeSqFt: 3200 }).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('an edited story count drops the ceiling via the footprint check', () => {
+    expect(translate({ ...baseProfile, stories: 1 }).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('missing parts leave nothing to validate against — ceiling dropped', () => {
+    const { footprintTurfParts, ...noParts } = baseProfile;
+    expect(translate(noParts).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('a gross-under-roof footprint ignores home-size edits but still validates lot and stories', () => {
+    const gross = {
+      ...baseProfile,
+      footprintTurfParts: {
+        lotSqFt: 10000, footprintSf: 1600, footprintBasis: 'gross_under_roof',
+        imperviousSf: 800, imperviousKnown: true, stories: 2,
+      },
+    };
+    expect(translate({ ...gross, homeSqFt: 3200 }).countyTurfCeilingSf).toBe(8000);
+    expect(translate({ ...gross, lotSqFt: 14000 }).countyTurfCeilingSf).toBeNull();
+    expect(translate({ ...gross, stories: 1 }).countyTurfCeilingSf).toBeNull();
+  });
 });
 
 describe('turf provenance through the translate boundary (P1)', () => {
@@ -192,6 +255,9 @@ describe('turf provenance through the translate boundary (P1)', () => {
     turfSource: 'county_prior',
     countyTurfPriorSf: 4050,
     countyTurfCeilingSf: 8100,
+    // Ceiling inputs — the adapter only forwards countyTurfCeilingSf while
+    // the request's dims still match these (stale-ceiling guard, codex P1).
+    footprintTurfParts: { lotSqFt: 9000, footprintSf: 1800, imperviousSf: 0, imperviousKnown: true },
     turfCappedToParcel: false,
   };
 

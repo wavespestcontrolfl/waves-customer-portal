@@ -562,10 +562,17 @@ function calculatePropertyProfile(input) {
   // trusted ceiling implies county lot data (so lotSqFt is present in any
   // real payload), and arming the cap lot-less would hand the over-tolerance
   // clamp a zero legacy fallback.
-  const countyTurfCeilingSf = toPositiveNumber(input.countyTurfCeilingSf);
+  //
+  // Null-vs-zero matters (codex #3224 P1): a trusted ceiling of 0 is a REAL
+  // bound — a fully-impervious parcel where the county says no turf remains
+  // — and must clamp a positive vision estimate; only an ABSENT ceiling
+  // (null/undefined) leaves the heuristic alone.
+  const countyCeilingRaw = Number(input.countyTurfCeilingSf);
+  const countyCeilingKnown = input.countyTurfCeilingSf != null
+    && Number.isFinite(countyCeilingRaw) && countyCeilingRaw >= 0;
   const hasPlausibleMaxTurfSf = hasHeuristicMaxTurfSf;
-  const plausibleMaxTurfSf = countyTurfCeilingSf > 0 && hasHeuristicMaxTurfSf
-    ? Math.min(heuristicMaxTurfSf, countyTurfCeilingSf)
+  const plausibleMaxTurfSf = countyCeilingKnown && hasHeuristicMaxTurfSf
+    ? Math.min(heuristicMaxTurfSf, countyCeilingRaw)
     : heuristicMaxTurfSf;
   const turfArea = computeTurfArea(
     { ...turfInput, maxEstimatedTurfSf: plausibleMaxTurfSf, maxEstimatedTurfSfKnown: hasPlausibleMaxTurfSf },
