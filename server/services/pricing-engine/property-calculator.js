@@ -549,8 +549,24 @@ function calculatePropertyProfile(input) {
   const bedRatio = explicitBedArea !== null && input.lotSqFt > 0 ? explicitBedArea / input.lotSqFt : 0;
   const features = { ...normalizedFeatures, bedRatio };
   const legacyLawnEstimate = estimateLawnSqFt(input.lotSqFt, footprint, hardscape, features);
-  const hasPlausibleMaxTurfSf = toPositiveNumber(input.lotSqFt) > 0;
-  const plausibleMaxTurfSf = Math.max(0, Math.round((Number(input.lotSqFt) || 0) - footprint - hardscape));
+  const heuristicMaxTurfSf = Math.max(0, Math.round((Number(input.lotSqFt) || 0) - footprint - hardscape));
+  const hasHeuristicMaxTurfSf = toPositiveNumber(input.lotSqFt) > 0;
+  // TRUSTED county-facts turf ceiling (lot − building − assessed hardscape,
+  // county-sourced dims only — the lookup nulls it when the facts are too
+  // weak or the type's lawn spans beyond its own parcel). The in-lot
+  // heuristic above derives footprint from living area (garage/lanai
+  // missing) and guesses hardscape, so when both bounds exist the county
+  // ceiling is the tighter, better-sourced plausible max for the vision
+  // clamp in computeTurfArea.
+  // The ceiling only TIGHTENS a lot-based max, never arms one on its own: a
+  // trusted ceiling implies county lot data (so lotSqFt is present in any
+  // real payload), and arming the cap lot-less would hand the over-tolerance
+  // clamp a zero legacy fallback.
+  const countyTurfCeilingSf = toPositiveNumber(input.countyTurfCeilingSf);
+  const hasPlausibleMaxTurfSf = hasHeuristicMaxTurfSf;
+  const plausibleMaxTurfSf = countyTurfCeilingSf > 0 && hasHeuristicMaxTurfSf
+    ? Math.min(heuristicMaxTurfSf, countyTurfCeilingSf)
+    : heuristicMaxTurfSf;
   const turfArea = computeTurfArea(
     { ...turfInput, maxEstimatedTurfSf: plausibleMaxTurfSf, maxEstimatedTurfSfKnown: hasPlausibleMaxTurfSf },
     { turfSf: legacyLawnEstimate }

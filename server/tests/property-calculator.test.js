@@ -123,6 +123,66 @@ describe('calculatePropertyProfile missing-lot semantics', () => {
   });
 });
 
+describe('county-facts ceiling tightens the plausible-max turf cap', () => {
+  // Fixture: lot 8,000 / 1-story 2,000 home / no features → in-engine
+  // heuristic max = 8000 − 2000 footprint − 815 hardscape = 5,185. The
+  // heuristic footprint is LIVING AREA (garage/lanai missing) and the
+  // hardscape is a guess, so a trusted county ceiling below it must govern
+  // the vision clamp instead (a vision overshoot priced a real lawn ~25%
+  // high on 2026-08-05 because only the loose heuristic was armed).
+  const base = { homeSqFt: 2000, stories: 1, lotSqFt: 8000, turfSource: 'vision' };
+
+  test('vision within tolerance above the ceiling clamps to the ceiling, keeps vision grade', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 3200, countyTurfCeilingSf: 3000 });
+    expect(profile.lawnSqFt).toBe(3000);
+    expect(profile.turfBasis).toBe('plausibleMaxTurfCap');
+    expect(profile.turfConfidence).toBe('MEDIUM');
+    expect(profile.turfFlags).toEqual(
+      expect.arrayContaining(['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'])
+    );
+  });
+
+  test('vision far above the ceiling drops to the capped legacy fallback at LOW', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 4200, countyTurfCeilingSf: 3000 });
+    // legacy = round(5185 × 0.78) = 4044, capped to the 3,000 ceiling.
+    expect(profile.lawnSqFt).toBe(3000);
+    expect(profile.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(profile.turfConfidence).toBe('LOW');
+    expect(profile.turfFlags).toEqual(
+      expect.arrayContaining(['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'])
+    );
+  });
+
+  test('a ceiling looser than the heuristic changes nothing — min() governs', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 5300, countyTurfCeilingSf: 6000 });
+    // Overage vs the 5,185 heuristic (115) is within tolerance → heuristic cap.
+    expect(profile.lawnSqFt).toBe(5185);
+    expect(profile.turfBasis).toBe('plausibleMaxTurfCap');
+  });
+
+  test('vision at or under the ceiling is untouched', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 2900, countyTurfCeilingSf: 3000 });
+    expect(profile.lawnSqFt).toBe(2900);
+    expect(profile.turfBasis).toBe('estimatedTurfSf');
+    expect(profile.turfConfidence).toBe('MEDIUM');
+    expect(profile.turfFlags).toEqual([]);
+  });
+
+  test('no ceiling → heuristic-only behavior is unchanged', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 3200 });
+    expect(profile.lawnSqFt).toBe(3200);
+    expect(profile.turfBasis).toBe('estimatedTurfSf');
+    expect(profile.turfFlags).toEqual([]);
+  });
+
+  test('a field-measured turf entry is never clamped by the ceiling', () => {
+    const profile = calculatePropertyProfile({ ...base, measuredTurfSf: 3600, countyTurfCeilingSf: 3000 });
+    expect(profile.lawnSqFt).toBe(3600);
+    expect(profile.turfBasis).toBe('measuredTurfSf');
+    expect(profile.turfConfidence).toBe('HIGH');
+  });
+});
+
 describe('turf provenance through the translate boundary (P1)', () => {
   const lookupProfile = {
     homeSqFt: 1800,

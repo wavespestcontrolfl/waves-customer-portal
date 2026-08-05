@@ -273,6 +273,83 @@ describe('county turf prior (vision-missing seed)', () => {
       }),
     ]));
   });
+
+  test('shared-turf types never expose a per-parcel ceiling (same exemption as the prior)', () => {
+    const profile = buildEnrichedProfile(
+      countyRecord({ propertyType: 'Townhome' }),
+      { estimatedTurfSf: 9500, confidenceScore: 80 },
+      27.4, -82.4,
+    );
+    expect(profile.countyTurfCeilingSf).toBeNull();
+  });
+});
+
+describe('vision-only turf with the county cross-check disarmed (verify flag)', () => {
+  const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+
+  function countyRecord(overrides = {}) {
+    return {
+      propertyType: 'Single Family',
+      lotSize: 10000,
+      squareFootage: 2400,
+      stories: 2,
+      imperviousAreaSf: 800,
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'county' },
+      },
+      ...overrides,
+    };
+  }
+  const audit = { county: 'Manatee', streetExists: true, hasExactMatch: true, parcelCount: 45, nearestNumbers: [] };
+  const visionOnlyFlag = expect.objectContaining({
+    field: 'estimatedTurfSf',
+    priority: 'HIGH',
+    reason: expect.stringContaining('satellite-vision only'),
+  });
+
+  test('county roll answered the audit but no record arrived → HIGH verify flag', () => {
+    const profile = buildEnrichedProfile(null, { estimatedTurfSf: 3200, confidenceScore: 80 }, 27.4, -82.4, null, audit);
+    expect(profile.estimatedTurfSf).toBe(3200);
+    expect(profile.turfSource).toBe('vision');
+    expect(profile.fieldVerifyFlags).toEqual(expect.arrayContaining([visionOnlyFlag]));
+    expect(profile.fieldVerifyFlags.find((f) => /satellite-vision only/.test(f.reason)).reason)
+      .toContain('Manatee');
+  });
+
+  test('untrusted county dims (listing-sourced lot) also flag — the cross-check is still disarmed', () => {
+    const profile = buildEnrichedProfile(
+      countyRecord({ _fieldEvidence: { lotSize: { sourceType: 'listing' }, squareFootage: { sourceType: 'county' } } }),
+      { estimatedTurfSf: 3200, confidenceScore: 80 },
+      27.4, -82.4, null, audit,
+    );
+    expect(profile.fieldVerifyFlags).toEqual(expect.arrayContaining([visionOnlyFlag]));
+  });
+
+  test('trusted ceiling present → no flag (the cross-check is armed)', () => {
+    const profile = buildEnrichedProfile(countyRecord(), { estimatedTurfSf: 3200, confidenceScore: 80 }, 27.4, -82.4, null, audit);
+    expect(profile.countyTurfCeilingSf).toBe(8000);
+    expect(profile.fieldVerifyFlags).not.toEqual(expect.arrayContaining([visionOnlyFlag]));
+  });
+
+  test('no address audit (out-of-area / GIS outage) → quiet', () => {
+    const profile = buildEnrichedProfile(null, { estimatedTurfSf: 3200, confidenceScore: 80 }, 27.4, -82.4, null, null);
+    expect(profile.fieldVerifyFlags).not.toEqual(expect.arrayContaining([visionOnlyFlag]));
+  });
+
+  test('shared-turf types stay quiet — no per-parcel bound would apply anyway', () => {
+    const profile = buildEnrichedProfile(
+      countyRecord({ propertyType: 'Townhome', _fieldEvidence: {} }),
+      { estimatedTurfSf: 3200, confidenceScore: 80 },
+      27.4, -82.4, null, audit,
+    );
+    expect(profile.fieldVerifyFlags).not.toEqual(expect.arrayContaining([visionOnlyFlag]));
+  });
+
+  test('explicit vision 0 (no-lawn property) never flags', () => {
+    const profile = buildEnrichedProfile(null, { estimatedTurfSf: 0, confidenceScore: 85 }, 27.4, -82.4, null, audit);
+    expect(profile.fieldVerifyFlags).not.toEqual(expect.arrayContaining([visionOnlyFlag]));
+  });
 });
 
 describe('shadow wiring (no pricing impact)', () => {

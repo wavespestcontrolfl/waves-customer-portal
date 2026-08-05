@@ -1448,6 +1448,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // when satellite imagery missed. The shared-turf type exclusion is a
   // residential concern (a condo UNIT doesn't own the lawn) — a commercial
   // profile IS the association/owner, so it doesn't apply there.
+  //
+  // One predicate for every per-parcel county turf bound (the prior, the
+  // ceiling the engine caps against, and the vision-only verify flag below):
+  // a shared-turf type's treatable lawn legitimately spans beyond its own
+  // parcel, so a per-parcel bound neither seeds nor caps nor cross-checks it.
+  const parcelTurfBoundApplies =
+    commercialProfile || !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase());
   const countyTurfPriorSf = (
     !visionTurfKnown
     // A stale-imagery conflict cleared the vision fields, but seeding the
@@ -1458,7 +1465,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     && !turfCountyPriorDisabled()
     && countyCeiling
     && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
-    && (commercialProfile || !SHARED_TURF_TYPE_RE.test(String(residentialDisplayType).toUpperCase()))
+    && parcelTurfBoundApplies
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
@@ -1473,6 +1480,22 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
       reason: `No AI turf estimate — seeded ${countyTurfPriorSf.toLocaleString()} sq ft from county records (${Math.round(TURF_COUNTY_PRIOR_RATIO * 100)}% of lot − building − assessed hardscape). Verify treatable lawn area.`,
+      priority: 'HIGH',
+    });
+  }
+  // Vision turf with the county cross-check disarmed: the address audit
+  // reached a county roll (so county facts were EXPECTED), but no trusted
+  // county dimensions arrived — the ceiling cap, the county prior, and the
+  // exceeds-ceiling review reason all sit out, and a satellite overshoot
+  // prices silently at MEDIUM confidence (a transient county-lookup failure
+  // priced a real lawn ~25% high on 2026-08-05). Exception-based: quiet when
+  // no county roll answered (out-of-area address, GIS outage — the audit is
+  // absent there) or when a per-parcel bound wouldn't apply anyway.
+  if (visionTurfKnown && visionTurfSf > 0 && !countyCeiling && parcelTurfBoundApplies
+      && addressAudit?.county) {
+    fieldVerifyFlags.push({
+      field: 'estimatedTurfSf',
+      reason: `Treatable turf ${Math.round(visionTurfSf).toLocaleString()} sq ft is satellite-vision only — no county-verified lot/building dimensions arrived from the ${addressAudit.county} roll to cross-check it. Verify treatable lawn area before pricing lawn services.`,
       priority: 'HIGH',
     });
   }
@@ -1650,9 +1673,14 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     turfReason: staleImageryConflict ? 'county_structure_vision_bare_land_conflict' : undefined,
     countyTurfPriorSf,
     // TRUSTED ceiling (county-complete + county-sourced dims) — feeds the
-    // exceeds-ceiling review reason; null when the facts are too weak to
-    // judge against (codex P3).
-    countyTurfCeilingSf: countyCeiling ? countyCeiling.turfSf : null,
+    // exceeds-ceiling review reason AND rides into the pricing engine, where
+    // computeTurfArea uses it as the plausible-max cap on a vision estimate
+    // (the in-engine heuristic derives footprint from living area and
+    // guesses hardscape, so this bound is tighter and better-sourced). Null
+    // when the facts are too weak to judge against (codex P3) or the type's
+    // lawn legitimately spans beyond its own parcel (shared-turf types —
+    // same predicate as the county prior, so the exemptions can't drift).
+    countyTurfCeilingSf: countyCeiling && parcelTurfBoundApplies ? countyCeiling.turfSf : null,
     // Shadow comparison fields — see computeFootprintTurf. Not a pricing
     // input; estimatedTurfSf above remains the engine's turf source.
     footprintTurfSf: footprintTurf ? footprintTurf.turfSf : null,
