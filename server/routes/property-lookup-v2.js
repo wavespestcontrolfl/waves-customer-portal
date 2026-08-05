@@ -3016,6 +3016,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (recurringRoachMeta.roachWarnings.length) {
     pricingMetadata.warnings.push(...recurringRoachMeta.roachWarnings);
   }
+  // Per-estimate operator overrides for the pest_initial_roach fee. Two
+  // SEPARATE client options — recurring auto-fire vs standalone native — so
+  // an estimate carrying both lines (recurring German + standalone native)
+  // never reprices one line from the other's input (codex P2 #3223).
+  // Forwarded raw whenever present so the engine's own validation runs — a
+  // present-but-invalid entry surfaces as an engine warning instead of being
+  // silently dropped here.
+  const overridePresent = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+  const initialRoachOverrideProvided = overridePresent(o.initialRoachPriceOverride);
+  const standaloneRoachOverrideProvided = overridePresent(o.standaloneRoachPriceOverride);
 
   // Recurring
   if (sel.has('PEST')) {
@@ -3024,6 +3034,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       roachType,
       ...(o.recurringRoachSeverity || o.roachSeverity
         ? { roachSeverity: o.recurringRoachSeverity || o.roachSeverity, severitySource: 'admin' }
+        : {}),
+      ...(initialRoachOverrideProvided
+        ? { initialRoachPriceOverride: o.initialRoachPriceOverride }
         : {}),
       ...(commercialProfile && o.commercialPricingMode
         ? { commercialPricingMode: o.commercialPricingMode }
@@ -3269,12 +3282,24 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         skippedService: 'standalone_native_cockroach_treatment',
         skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
       });
+      // The whole standalone branch is skipped, so a standalone override
+      // riding this request prices NOTHING — say so instead of dropping it
+      // silently (codex P2 r2 #3223). The recurring line has its own
+      // initialRoachPriceOverride.
+      if (standaloneRoachOverrideProvided) {
+        pricingMetadata.warnings.push(
+          'Standalone roach fee override ignored — recurring pest already covers the native roach knockdown. Use the recurring roach fee override instead.',
+        );
+      }
     } else {
       services.pestInitialRoach = {
         roachType: 'regular',
         source: 'standalone_native_cockroach_treatment',
         ...(o.standaloneRoachSeverity || o.roachSeverity
           ? { severity: o.standaloneRoachSeverity || o.roachSeverity, severitySource: 'admin' }
+          : {}),
+        ...(standaloneRoachOverrideProvided
+          ? { priceOverride: o.standaloneRoachPriceOverride }
           : {}),
       };
     }

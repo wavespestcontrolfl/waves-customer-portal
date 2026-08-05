@@ -759,6 +759,7 @@ function generateEstimate(input) {
           source: 'recurring_pest_roach_activity',
           severity: pestOptions.roachSeverity || pestOptions.severity,
           severitySource: pestOptions.roachSeverity || pestOptions.severity ? 'admin' : undefined,
+          priceOverride: pestOptions.initialRoachPriceOverride,
         });
         if (initialRoach) lineItems.push(initialRoach);
       }
