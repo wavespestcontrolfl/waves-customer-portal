@@ -790,6 +790,8 @@ describe('revertMerge', () => {
     tree_shrub_assessments: ['created_at', 'updated_at'],
     // created_at ONLY — 20260401000073.
     job_costs: ['created_at'],
+    expenses: ['created_at', 'updated_at'],
+    lawn_assessments: ['created_at', 'updated_at'],
   };
   const assertSelectableColumns = (table, q) => {
     const known = TABLE_TIMESTAMPS[table];

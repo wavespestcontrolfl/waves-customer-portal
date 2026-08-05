@@ -1962,6 +1962,9 @@ const TABLE_TIMESTAMP_COLUMNS = {
   tree_shrub_assessments: ['created_at', 'updated_at'],
   // created_at ONLY — 20260401000073.
   job_costs: ['created_at'],
+  // timestamps(true, true) — 20260401000069; explicit pair — 20260401000072.
+  expenses: ['created_at', 'updated_at'],
+  lawn_assessments: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2677,6 +2680,33 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (strandedProjects) {
         refuse(`${strandedProjects} project/report record(s) for this merge's visits are outside its journal — the public report would stay on the kept customer; reconcile by hand`);
       }
+      // r44: cost/receipt ledgers and lawn assessments key by VISIT too —
+      // calculateJobCost can insert with scheduled_service_id while
+      // service_record_id stays null (legacy/ambiguous record matches),
+      // admin-job-expenses attaches receipts by scheduled_service_id, and
+      // a confirmed lawn assessment links service_id before completion
+      // ever stamps a record id. None of them touch the visit.
+      const visitChildProbes = [
+        { table: 'job_costs', column: 'scheduled_service_id', label: 'job cost ledger row(s)' },
+        { table: 'expenses', column: 'scheduled_service_id', label: 'job expense/receipt row(s)' },
+        { table: 'lawn_assessments', column: 'service_id', label: 'lawn assessment(s)' },
+      ];
+      for (const probe of visitChildProbes) {
+        let rows = [];
+        try {
+          rows = await trx(probe.table)
+            .whereIn(probe.column, journaledVisitIdsAll)
+            .select(['id', ...activityColumnsFor(probe.table)]);
+        } catch (e) {
+          refuse(`Cannot verify ${probe.table} for this merge's visits (${e.message}) — refusing to revert`);
+        }
+        const stranded = countActivityRows(rows, {
+          journaledIds: journaledIdsFor(probe.table), mergeAt, table: probe.table,
+        });
+        if (stranded) {
+          refuse(`${stranded} ${probe.label} for this merge's visits are outside its journal — moving the visits back would leave them attributed to the kept customer; reconcile by hand`);
+        }
+      }
     }
 
     // ALL service-record children (r32/r33/r34): scores, review-request
@@ -2734,6 +2764,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           // without touching the record.
           { table: 'tree_shrub_assessments', label: 'tree & shrub assessment(s)' },
           { table: 'job_costs', label: 'job cost ledger row(s)' },
+          // r44: completion links service_record_id onto a confirmed lawn
+          // assessment without touching the record — report loading
+          // requires its customer_id to match the record's.
+          { table: 'lawn_assessments', label: 'lawn assessment(s)' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];

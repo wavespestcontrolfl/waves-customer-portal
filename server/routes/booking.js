@@ -2969,9 +2969,11 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // once and writing after the wait is exactly the race this closes: the
     // write would land on the pre-undo owner AFTER the undo committed,
     // where its probe could never see it. The re-resolve under the lock
-    // yields the post-undo owner; if it differs we lock that id too (both
-    // are xact-scoped, and one bounded retry is enough — the second holder
-    // cannot be mid-undo while we hold its predecessor's lock). Anonymous
+    // yields the post-undo owner; if it differs we lock that id too, then
+    // LOOP to a fixpoint (r44): each new-owner acquire can itself wait out
+    // ANOTHER undo, so the write only lands once the resolved owner is one
+    // whose key this trx already holds — a held owner cannot be mid-undo.
+    // Anonymous
     // captures (no customer match) skip the lock: the undo's probes only
     // match customer-linked rows. Open-intent resolution moved under the
     // lock with it — it is recipient state too.
@@ -2985,9 +2987,16 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
         result = await db.transaction(async (trx) => {
           const lockKey = async (id) => lockCustomerComms(trx, id);
           await lockKey(candidateId);
+          const heldKeys = new Set([String(candidateId)]);
           let ownerId = await resolveCustomerId();
-          if (ownerId && ownerId !== candidateId) {
+          for (let hop = 0; ownerId && !heldKeys.has(String(ownerId)); hop += 1) {
+            if (hop >= 4) {
+              // Degenerate ping-pong backstop: fail closed like a lookup
+              // error rather than writing under an unheld owner.
+              throw new Error('customer owner still moving under the comms fence (merge-undo churn)');
+            }
             await lockKey(ownerId);
+            heldKeys.add(String(ownerId));
             ownerId = await resolveCustomerId();
           }
           row.customer_id = ownerId;
