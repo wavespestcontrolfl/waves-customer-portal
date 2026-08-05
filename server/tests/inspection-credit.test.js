@@ -923,7 +923,10 @@ describe('closeout route wiring — source contracts (the completion route is to
     // A crash between a bare insert and a follow-up event write left a
     // live booking the sweep refuses to infer from (bare rows can be
     // seeders), permanently stranding any open offer.
-    const trxAt = ib.indexOf("await db.transaction(async (trx) => {\n    const [created] = await trx('scheduled_services').insert({");
+    // #3109 rung-6: withCustomerCommsLock(db, ...) opens the transaction
+    // (utils/customer-comms-lock.js) — the marker still rides the same trx
+    // as the insert, now under the merge-undo comms fence.
+    const trxAt = ib.indexOf("await withCustomerCommsLock(db, customer_id, async (trx) => {\n    const [created] = await trx('scheduled_services').insert({");
     const markerAt = ib.indexOf('markBookingForInspectionCredit(trx, {', trxAt);
     const trxEndAt = ib.indexOf('\n  });', trxAt);
     expect(trxAt).toBeGreaterThan(-1);
