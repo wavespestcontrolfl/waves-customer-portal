@@ -111,7 +111,7 @@ function keywordSegments(keyword) {
  * Plan-time approximation of the executor's relevance gate, used only to
  * RANK matches before the site-wide cap — the executor still runs the real
  * gate on its own pageFacts. Source facts come from the page frontmatter
- * plus the snippet around the matched anchor.
+ * plus the same paragraph context the executor scores.
  */
 function planTimeRelevance(page, target, targetFront = {}, snippet = '') {
   const front = fm.parse(String(page.body || '')).data || {};
@@ -254,6 +254,21 @@ function isInsideLink(text, start, end) {
   const lastClose = upToEnd.lastIndexOf('</a>');
   if (lastOpen > lastClose) return true;
   return false;
+}
+
+/**
+ * The blank-line-delimited paragraph containing `index`. This is the SAME
+ * context the executor's relevance gate scores (it delegates here) — the
+ * plan-time ranking must see identical text or weak matches can outrank a
+ * viable page whose supporting tokens sit outside a short snippet.
+ */
+function paragraphAround(body, index) {
+  const text = String(body || '');
+  let start = text.lastIndexOf('\n\n', Math.max(0, index - 1));
+  start = start === -1 ? 0 : start + 2;
+  let end = text.indexOf('\n\n', index);
+  end = end === -1 ? text.length : end;
+  return text.slice(start, end).trim();
 }
 
 function snippetAround(text, start, length, padding = 50) {
@@ -400,7 +415,7 @@ class InternalLinkPlanner {
         const actualAnchor = page.body.slice(occ.index, occ.index + occ.length);
         matches.push({
           priority,
-          relevance: planTimeRelevance(page, target, targetFront, occ.snippet),
+          relevance: planTimeRelevance(page, target, targetFront, paragraphAround(page.body, occ.index)),
           task: {
             source_file: page.file,
             target_url: targetPath,
@@ -603,6 +618,7 @@ module.exports._internals = {
   isWordChar,
   isInsideLink,
   snippetAround,
+  paragraphAround,
   pageAlreadyLinksTo,
   sourceRendersOffHub,
   canonicalPointsOffHub,

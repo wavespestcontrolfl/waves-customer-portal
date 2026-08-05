@@ -562,6 +562,9 @@ describe('planForTarget', () => {
       ].join('\n'),
       url: `/blog/weak-${i}/`,
     });
+    // "flea" sits >50 chars after the matched anchor: inside the paragraph
+    // the executor scores, but OUTSIDE the old ±50-char snippet window —
+    // ranking must use the same paragraph context as the gate to see it.
     const relevant = {
       file: 'src/content/blog/bed-bug-signs.md',
       body: [
@@ -570,7 +573,7 @@ describe('planForTarget', () => {
         'category: pest-control',
         'primary_keyword: bed bug signs',
         '---',
-        'Waking up with bed bug bites is often the first sign, and flea bites look similar.',
+        'Waking up with bed bug bites is the classic first sign homeowners notice in the morning, though a careful look can still reveal that flea bites look similar.',
       ].join('\n'),
       url: '/blog/bed-bug-signs/',
     };

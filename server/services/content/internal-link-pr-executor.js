@@ -903,12 +903,10 @@ function isHeadingOccurrence(body, index) {
 }
 
 function paragraphAround(body, index) {
-  const text = String(body || '');
-  let start = text.lastIndexOf('\n\n', Math.max(0, index - 1));
-  start = start === -1 ? 0 : start + 2;
-  let end = text.indexOf('\n\n', index);
-  end = end === -1 ? text.length : end;
-  return text.slice(start, end).trim();
+  // Delegates to the planner's implementation so plan-time ranking and this
+  // gate score the SAME context — divergence re-opens the cap-burn bug where
+  // weak matches outrank a viable page (codex r3 on #3226).
+  return planner._internals.paragraphAround(body, index);
 }
 
 function paragraphHasLink(paragraph) {
