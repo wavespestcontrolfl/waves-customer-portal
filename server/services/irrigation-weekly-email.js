@@ -871,9 +871,16 @@ async function findLawnEmailAudienceGaps({ now = new Date() } = {}) {
     }
     // Mirror the sender's own validators: it skips non-email-like addresses
     // (isEmailLike) and can't fetch weather without finite coordinates
-    // (numberOrNull) — a non-null-but-unusable value is still a gap.
+    // (numberOrNull) — a non-null-but-unusable value is still a gap. 0,0 is
+    // a failed geocode (the Gulf of Guinea, never a Waves property):
+    // fetchServiceWeekWeather returns empty weather for it, so the sender
+    // selects and then silently skips the customer as rain_unknown — that
+    // guard must count as a gap here too.
     if (!isEmailLike(r.email)) fixable.push(r.email ? 'unusable_email' : 'no_email');
-    if (numberOrNull(r.latitude) == null || numberOrNull(r.longitude) == null) fixable.push('no_coordinates');
+    const lat = numberOrNull(r.latitude);
+    const lng = numberOrNull(r.longitude);
+    if (lat == null || lng == null) fixable.push('no_coordinates');
+    else if (lat === 0 && lng === 0) fixable.push('placeholder_coordinates');
     if (fixable.length === 0) continue;
     gaps.push({
       customerId: r.id,

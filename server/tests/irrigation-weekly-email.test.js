@@ -700,6 +700,15 @@ describe('findLawnEmailAudienceGaps', () => {
     ]);
   });
 
+  test('0,0 placeholder coordinates are a gap — the sender skips them as rain_unknown', async () => {
+    // fetchServiceWeekWeather returns empty weather for 0,0 (failed
+    // geocode), so the sender selects and silently skips the customer.
+    mockBookRows([member({ latitude: 0, longitude: 0 })]);
+    const gaps = await findLawnEmailAudienceGaps();
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].fixable).toEqual(['placeholder_coordinates']);
+  });
+
   test('opted-out rows are suppressed ENTIRELY, even with other missing fields', async () => {
     mockBookRows([
       member({ tips_pref_ok: false }),
