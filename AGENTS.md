@@ -446,6 +446,16 @@ violations at the severity noted.
   the PR body must name it and why, and it needs Adam's explicit
   approval. A new `package.json` entry not called out in the PR
   description is P1.
+- **Find and extend the existing mechanism; don't build a parallel
+  one.** The in-repo counterpart of the dependency rule above: before
+  implementing behavior the repo likely already has (a status writer, a
+  cron sweep, an approval/email path, a rate limiter, a dedupe stamp, a
+  date util), locate the existing mechanism and extend its coverage —
+  don't add a sibling that serves the same purpose. A diff introducing a
+  second mechanism for a purpose an existing one already serves is P1
+  unless the PR body names the existing mechanism and explains why it
+  can't be extended. (Instances rated P0 elsewhere in this file — e.g. a
+  second Stripe webhook mount — keep their P0 severity.)
 
 ### Out of scope (do not flag)
 
