@@ -38,20 +38,46 @@ const median = (a) => {
 };
 const r2 = (n) => (n == null ? '—' : Math.round(n * 100) / 100);
 const pct = (num, den) => (den > 0 ? `${Math.round((num / den) * 100)}%` : '—');
-const FREQ_KEY_TO_APPS = { quarterly: 4, bimonthly: 6, monthly: 12 };
-const LAWN_FREQ_KEY_TO_V = { '6x': 6, '9x': 9, '12x': 12 };
+// accepted_frequency_key stores the PUBLIC UI keys (estimate-public):
+// pest 'bi_monthly', lawn tier keys 'standard'/'enhanced'/'premium' — not
+// the engine spellings (codex #3199). Both key-spaces map here.
+const FREQ_KEY_TO_APPS = {
+  quarterly: 4, bimonthly: 6, bi_monthly: 6, monthly: 12,
+};
+const LAWN_FREQ_KEY_TO_V = {
+  '6x': 6, '9x': 9, '12x': 12,
+  basic: 4, standard: 6, enhanced: 9, premium: 12, every_6_weeks: 9, bi_monthly: 6, monthly: 12,
+};
 
 function outcomeOf(row) {
-  if (row.status === 'accepted' || row.accepted_at) return 'accepted';
+  if (row.status === 'accepted' || row.accepted_at) {
+    // A one-time accept clears accepted_frequency_key and stamps
+    // accepted_service_mode='one_time' — the RECURRING offer was not
+    // bought; count it as a closed non-win, tallied separately
+    // (codex #3199).
+    return row.accepted_service_mode === 'one_time' ? 'accepted_one_time' : 'accepted';
+  }
   if (row.status === 'expired') return 'expired';
   if (row.status === 'declined') return 'declined';
+  // Sent/viewed rows past their expiry are dead offers the customer can no
+  // longer accept — expired in substance even before the sweep flips the
+  // status (codex #3199).
+  if (row.expires_at && new Date(row.expires_at) < new Date()) return 'expired';
   return 'pending';
 }
 
 function identOf(row) {
+  // customer_id, then normalized CONTACT, then address as a last-resort
+  // property fallback — address-first collapsed two different customers at
+  // one address and double-counted a customer re-quoted at a corrected
+  // address (codex #3199).
+  const phone = (row.customer_phone || '').replace(/[^0-9]/g, '');
+  const email = (row.customer_email || '').trim().toLowerCase();
   return row.customer_id
+    || (phone.length >= 10 ? `p:${phone.slice(-10)}` : '')
+    || (email ? `e:${email}` : '')
     || (row.address || '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 30)
-    || row.customer_phone || row.customer_email || row.id;
+    || row.id;
 }
 
 function extractPest(row) {
@@ -59,13 +85,24 @@ function extractPest(row) {
   const engRoot = d?.engineResult?.lineItems ? d.engineResult : (d?.result?.lineItems ? d.result : null);
   const engLine = engRoot?.lineItems?.find((l) => l?.service === 'pest_control');
   if (engLine) {
-    const sqft = Number(engLine.footprintUsed ?? engRoot.property?.footprint ?? engRoot.property?.homeSqFt);
+    // Quote-wizard mirrors store compact rows without footprint/property —
+    // fall back to the quote inputs so that channel stays in the funnel
+    // (codex #3199).
+    const sqft = Number(engLine.footprintUsed ?? engRoot.property?.footprint
+      ?? engRoot.property?.homeSqFt ?? d.engineInputs?.homeSqFt ?? d.inputs?.homeSqFt);
     const wantApps = FREQ_KEY_TO_APPS[row.accepted_frequency_key] ?? null;
     const tier = Array.isArray(engLine.tiers)
       ? (wantApps ? engLine.tiers.find((t) => Number(t.freq) === wantApps)
         : engLine.tiers.find((t) => t.selected || t.isSelected))
       : null;
-    const perVisit = Number(tier?.perApp ?? engLine.perApp);
+    // Net over gross: WaveGuard/manual discounts bill annualAfterDiscount —
+    // banding the gross ladder price puts discounted customers in the wrong
+    // band and inflates medians (codex #3199).
+    const visits = Number(tier?.freq ?? engLine.visitsPerYear) || 4;
+    const netAnnual = Number(engLine.annualAfterDiscount);
+    const perVisit = Number.isFinite(netAnnual) && netAnnual > 0
+      ? Math.round((netAnnual / visits) * 100) / 100
+      : Number(tier?.perApp ?? engLine.perApp);
     return sqft > 0 && perVisit > 0 ? { sqft, perVisit } : null;
   }
   if (d?.result?.results?.pestTiers || d?.result?.results?.pest) {
@@ -84,12 +121,17 @@ function extractLawn(row) {
   const engRoot = d?.engineResult?.lineItems ? d.engineResult : (d?.result?.lineItems ? d.result : null);
   const engLine = engRoot?.lineItems?.find((l) => l?.service === 'lawn_care');
   if (engLine) {
-    const sqft = Number(engLine.turfSf ?? engLine.lawnSqFt ?? engRoot.property?.turfSf);
+    const sqft = Number(engLine.turfSf ?? engLine.lawnSqFt ?? engRoot.property?.turfSf
+      ?? engRoot.property?.lawnSqFt ?? d.engineInputs?.measuredTurfSf ?? d.inputs?.measuredTurfSf);
     const acceptedV = LAWN_FREQ_KEY_TO_V[row.accepted_frequency_key] ?? Number(row.accepted_frequency_key);
     const tier = Array.isArray(engLine.tiers)
       ? engLine.tiers.find((t) => Number(t.freq ?? t.v) === acceptedV)
       : null;
-    const perApp = Number(tier?.perApp ?? engLine.perApp);
+    const visits = Number(tier?.freq ?? tier?.v ?? engLine.frequency) || 9;
+    const netAnnual = Number(engLine.annualAfterDiscount);
+    const perApp = Number.isFinite(netAnnual) && netAnnual > 0
+      ? Math.round((netAnnual / visits) * 100) / 100
+      : Number(tier?.perApp ?? engLine.perApp);
     return sqft > 0 && perApp > 0 ? { sqft, perApp } : null;
   }
   if (d?.result?.results?.lawn) {
@@ -133,10 +175,11 @@ function bandReport(rows, bands, valueOf, label) {
 
 function laneSummary(rows, priceOf, priceLabel) {
   const acc = rows.filter((r) => r.outcome === 'accepted');
+  const otAcc = rows.filter((r) => r.outcome === 'accepted_one_time');
   const exp = rows.filter((r) => r.outcome === 'expired');
   const pend = rows.filter((r) => r.outcome === 'pending');
   const closed = rows.length - pend.length;
-  console.log(`  customers=${rows.length}  accepted=${acc.length}  pending=${pend.length}  CLOSE RATE (closed)=${pct(acc.length, closed)}`);
+  console.log(`  customers=${rows.length}  accepted=${acc.length}${otAcc.length ? `  one-time-accepts=${otAcc.length} (closed non-wins for the recurring funnel)` : ''}  pending=${pend.length}  CLOSE RATE (closed)=${pct(acc.length, closed)}`);
   console.log(`  ${priceLabel} medians — accepted: ${r2(median(acc.map(priceOf)))} | expired: ${r2(median(exp.map(priceOf)))}  (identical medians = losses are not price losses)`);
 }
 
@@ -150,22 +193,26 @@ function laneSummary(rows, priceOf, priceLabel) {
   await c.connect();
   const q = await c.query(`
     SELECT id, customer_id, address, customer_phone, customer_email, status,
-           created_at, accepted_at, accepted_frequency_key, estimate_data
+           created_at, accepted_at, accepted_frequency_key, accepted_service_mode,
+           expires_at, estimate_data
     FROM estimates
-    WHERE status <> 'draft'
+    WHERE status IN ('sent', 'viewed', 'accepted', 'declined', 'expired')
     ORDER BY created_at DESC`);
   await c.end();
 
   const all = [];
+  let unpriceable = 0;
   for (const row of q.rows) {
     if (SINCE && row.created_at < SINCE) continue;
     const pest = extractPest(row);
     const lawn = extractLawn(row);
-    if (!pest && !lawn) continue;
+    if (!pest && !lawn) { unpriceable++; continue; }
     all.push({ ident: identOf(row), outcome: outcomeOf(row), created: row.created_at, pest, lawn });
   }
   console.log(`Pricing funnel report — ${new Date().toISOString().slice(0, 10)}${SINCE ? ` (quotes since ${args.since})` : ' (all time)'}`);
-  console.log(`quotes analyzed: ${all.length} (non-draft, pest and/or lawn priced)\n`);
+  console.log(`quotes analyzed: ${all.length} (sent/viewed/accepted/declined/expired with a priceable pest or lawn line)`);
+  if (unpriceable) console.log(`dropped as unpriceable (no pest/lawn line extractable — includes non-pest/lawn service quotes): ${unpriceable}`);
+  console.log('');
 
   if (LANE !== 'lawn') {
     const pestSolo = dedupe(all.filter((r) => r.pest && !r.lawn));
