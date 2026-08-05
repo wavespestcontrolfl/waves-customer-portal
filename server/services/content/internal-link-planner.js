@@ -61,6 +61,9 @@ function anchorCandidates(target) {
     out.push({ phrase: `${service} in ${city}`, priority: 9 });
     out.push({ phrase: `${city} ${service}`, priority: 8 });
   }
+  for (const segment of keywordSegments(target.keyword)) {
+    out.push({ phrase: segment, priority: 7 });
+  }
   if (target.title) out.push({ phrase: target.title, priority: 5 });
   // De-dupe by lowercased phrase.
   const seen = new Set();
@@ -75,6 +78,26 @@ function anchorCandidates(target) {
 function serviceAnchorPhrase(service) {
   const normalized = String(service || '').trim().toLowerCase().replace(/\s+/g, '_');
   return SERVICE_ANCHOR_ALIASES[normalized] || String(service || '').trim();
+}
+
+/**
+ * Long-tail primary keywords ("bed bug bites vs flea bites", "tiny ants in
+ * kitchen identification") occur verbatim almost nowhere in the corpus, so
+ * the full-keyword candidate finds nothing and planning silently returns
+ * zero tasks. Split the keyword on comparison/connective separators into
+ * multi-word segments ("bed bug bites", "flea bites") that DO occur in
+ * sibling pages. Single-word segments are dropped — they anchor poorly and
+ * match promiscuously.
+ */
+function keywordSegments(keyword) {
+  const raw = String(keyword || '').trim();
+  if (!raw) return [];
+  return raw
+    .split(/\s+(?:vs\.?|versus|and|or|in|for|with|without)\s+|\s*[,:;()/—–]\s*/i)
+    .map((segment) => String(segment || '').trim())
+    .filter((segment) => segment
+      && segment.toLowerCase() !== raw.toLowerCase()
+      && segment.split(/\s+/).length >= 2);
 }
 
 // ── corpus scanner ──────────────────────────────────────────────────
@@ -526,6 +549,7 @@ module.exports._internals = {
   INLINE_MARKDOWN_LINK_RE,
   anchorCandidates,
   serviceAnchorPhrase,
+  keywordSegments,
   maskExcludedRegions,
   maskNonContentRegions,
   blankRegion,

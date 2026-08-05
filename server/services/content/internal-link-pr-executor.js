@@ -628,7 +628,11 @@ function evaluateDryRunTask(task, { sourcePage, targetPage, options = {} } = {})
   const paragraph = paragraphAround(sourcePage.body, occurrence.index);
   if (paragraphHasLink(paragraph)) return skipped(base, 'paragraph_already_has_link');
 
-  const sourceFacts = pageFacts(sourcePage, { url: sourceUrl });
+  // The paragraph around the matched anchor is the link's actual context —
+  // without it the relevance score sees only frontmatter facts and misses
+  // that the source body demonstrably discusses the target's topic (the
+  // anchor phrase was found IN it).
+  const sourceFacts = pageFacts(sourcePage, { url: sourceUrl, bodyExcerpt: paragraph });
   const targetFacts = pageFacts(targetPage, { url: targetUrl });
   const opportunity = policy.evaluateLinkOpportunity({
     source: sourceFacts,
@@ -778,7 +782,7 @@ function slugToInternalUrl(slug) {
   return raw.startsWith('/') ? raw : `/${raw}/`;
 }
 
-function pageFacts(page, { url }) {
+function pageFacts(page, { url, bodyExcerpt = null } = {}) {
   const front = page.frontmatter || {};
   return {
     url: url || page.url,
@@ -790,6 +794,7 @@ function pageFacts(page, { url }) {
     topic_cluster: page.topic_cluster || front.category || front.service || inferCluster(page.file, front),
     title: page.title || front.title || null,
     keyword: page.keyword || front.primary_keyword || front.target_keyword || null,
+    body_excerpt: page.body_excerpt || bodyExcerpt || null,
     last_linked_at: page.last_linked_at || null,
   };
 }

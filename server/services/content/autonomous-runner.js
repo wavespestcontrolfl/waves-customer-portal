@@ -2084,6 +2084,9 @@ class AutonomousRunner {
       { url: brief.target_url, keyword: brief.target_keyword, city: brief.city, service: brief.service, title: brief.title },
       { corpus, opportunityId: run.opportunity_id }
     );
+    if (!tasks.length) {
+      logger.warn(`[autonomous-runner] internal-link planner found ZERO anchor opportunities for ${brief.target_url} (keyword: ${brief.target_keyword || 'none'}) across ${corpus.length} corpus pages — no link tasks queued for this target`);
+    }
     const taskIds = [];
     for (const task of tasks) {
       const queued = await queueInternalLinkTaskForDryRun(task, run.opportunity_id);
@@ -3187,6 +3190,9 @@ class AutonomousRunner {
           { url: out.published_url, keyword: brief.target_keyword, city: brief.city, service: brief.service },
           { corpus, opportunityId: run.opportunity_id }
         );
+        if (!tasks.length) {
+          logger.warn(`[autonomous-runner] internal-link planner found ZERO anchor opportunities for freshly published ${out.published_url} (keyword: ${brief.target_keyword || 'none'}) across ${corpus.length} corpus pages — the new post will have no inbound links`);
+        }
         for (const task of tasks) {
           await db('content_internal_link_tasks').insert(task).onConflict(['source_file', 'target_url', 'anchor_text']).ignore().catch(() => {});
         }

@@ -202,6 +202,65 @@ describe('internal-link SEO policy opportunity evaluation', () => {
     ]));
   });
 
+  test('scores blog→blog pairs on core topical identity, not descriptive-title coverage', () => {
+    // Regression: the old denominator included the target's title +
+    // page_type, so a descriptive blog title structurally capped the
+    // containment ratio at 0.1–0.4 against the 0.75 floor and 100% of
+    // blog targets skipped as topical_relevance_low.
+    const blogSource = {
+      topic: 'rat or mouse identification florida',
+      topic_cluster: 'pest-control',
+      page_type: 'supporting-blog',
+      title: 'Rat or Mouse? A Florida Identification Guide',
+      body_excerpt: 'Roof rats climb into attics while Norway rats burrow along foundations.',
+    };
+    const blogTarget = {
+      topic: 'roof rat vs norway rat',
+      topic_cluster: 'pest-control',
+      page_type: 'supporting-blog',
+      title: 'Roof Rat vs Norway Rat: A Southwest Florida Homeowner Comparison Guide',
+      keyword: 'roof rat vs norway rat',
+    };
+    expect(policy.scoreTopicalRelevance(blogSource, blogTarget)).toBeGreaterThanOrEqual(0.75);
+  });
+
+  test('still rejects unrelated pairs and keeps city-service targets at full coverage', () => {
+    const lawnSource = {
+      topic: 'lawn brown patches chinch bugs',
+      topic_cluster: 'lawn',
+      page_type: 'supporting-blog',
+      title: 'Brown Patches in St. Augustine Grass',
+    };
+    const rodentTarget = {
+      topic: 'roof rat vs norway rat',
+      topic_cluster: 'rodent',
+      keyword: 'roof rat vs norway rat',
+    };
+    expect(policy.scoreTopicalRelevance(lawnSource, rodentTarget)).toBe(0);
+
+    const cityTarget = {
+      topic: 'pest control bradenton',
+      topic_cluster: 'pest',
+      keyword: 'pest control bradenton',
+      title: 'Pest Control in Bradenton, FL',
+      page_type: 'location',
+    };
+    const citySource = {
+      topic: 'bradenton pest prevention tips',
+      topic_cluster: 'pest',
+      title: 'Pest Control Tips for Bradenton Homes',
+      body_excerpt: 'Bradenton pest control starts with sealing entry points.',
+    };
+    expect(policy.scoreTopicalRelevance(citySource, cityTarget)).toBe(1);
+  });
+
+  test('falls back to title/page_type tokens when a target has no core facts', () => {
+    const source = { topic: 'termite swarmers', title: 'Termite swarmers guide' };
+    const target = { title: 'Termite Swarmers', page_type: null };
+    expect(policy.scoreTopicalRelevance(source, target)).toBe(1);
+    expect(policy.scoreTopicalRelevance(source, {})).toBe(0);
+  });
+
   test('returns stable paragraph hashes for normalized paragraph text', () => {
     expect(policy.paragraphHash('Termite   swarmers\nin bathrooms.')).toBe(policy.paragraphHash('Termite swarmers in bathrooms.'));
     expect(policy.paragraphHash('Different paragraph.')).not.toBe(policy.paragraphHash('Termite swarmers in bathrooms.'));

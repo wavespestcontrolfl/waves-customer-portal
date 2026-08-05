@@ -34,6 +34,7 @@ const {
   deriveUrlFromSourceFile,
   extractFrontmatterSlug,
   serviceAnchorPhrase,
+  keywordSegments,
 } = planner._internals;
 
 // ── anchorCandidates ────────────────────────────────────────────────
@@ -76,6 +77,42 @@ describe('anchorCandidates', () => {
     expect(anchorCandidates({ url: '/x/' })).toEqual([]);
     expect(anchorCandidates({ url: '/x/', service: 'pest' })).toEqual([]); // no city → no phrase
     expect(anchorCandidates({ url: '/x/', city: 'Bradenton' })).toEqual([]);
+  });
+  test('long-tail keywords contribute multi-word segment candidates below city anchors', () => {
+    const out = anchorCandidates({
+      url: '/blog/bed-bug-bites-vs-flea-bites/',
+      keyword: 'bed bug bites vs flea bites',
+      title: 'Bed Bug Bites vs Flea Bites: How to Tell',
+    });
+    expect(out[0]).toEqual({ phrase: 'bed bug bites vs flea bites', priority: 10 });
+    expect(out).toEqual(expect.arrayContaining([
+      { phrase: 'bed bug bites', priority: 7 },
+      { phrase: 'flea bites', priority: 7 },
+    ]));
+    // Full keyword outranks its segments; segments outrank the title.
+    const phrases = out.map((c) => c.phrase);
+    expect(phrases.indexOf('bed bug bites')).toBeGreaterThan(phrases.indexOf('bed bug bites vs flea bites'));
+    expect(phrases.indexOf('bed bug bites')).toBeLessThan(phrases.indexOf('Bed Bug Bites vs Flea Bites: How to Tell'));
+  });
+});
+
+describe('keywordSegments', () => {
+  test('splits on comparison and connective separators', () => {
+    expect(keywordSegments('bed bug bites vs flea bites')).toEqual(['bed bug bites', 'flea bites']);
+    expect(keywordSegments('roof rat vs. norway rat')).toEqual(['roof rat', 'norway rat']);
+    expect(keywordSegments('sugar ants versus carpenter ants')).toEqual(['sugar ants', 'carpenter ants']);
+  });
+  test('drops single-word segments and the full keyword itself', () => {
+    // "in" split leaves "kitchen identification" (kept, 2 words) and the
+    // 2-word head; nothing equals the original keyword.
+    expect(keywordSegments('tiny ants in kitchen identification')).toEqual(['tiny ants', 'kitchen identification']);
+    expect(keywordSegments('ants in kitchen')).toEqual([]); // both segments single-word
+    expect(keywordSegments('sand fleas')).toEqual([]); // no separator → no segments
+  });
+  test('handles punctuation separators and empty input', () => {
+    expect(keywordSegments('lawn grubs: identification signs')).toEqual(['lawn grubs', 'identification signs']);
+    expect(keywordSegments('')).toEqual([]);
+    expect(keywordSegments(null)).toEqual([]);
   });
 });
 
