@@ -619,6 +619,43 @@ describe('planForTarget', () => {
     expect(tasks.length).toBe(1);
     expect(tasks[0].source_file).toBe('src/content/blog/clean-paragraph.md');
   });
+  test('skips occurrences that split a commercial phrase in context (executor would reject)', () => {
+    const splitting = {
+      file: 'src/content/blog/tree-shrub-program.md',
+      body: [
+        '---',
+        'title: Palm and Hedge Program',
+        'category: tree-shrub',
+        'primary_keyword: shrub care program',
+        '---',
+        '',
+        'Our tree and shrub care program covers palms and hedges year round.',
+      ].join('\n'),
+      url: '/blog/tree-shrub-program/',
+    };
+    const clean = {
+      file: 'src/content/blog/hedge-health.md',
+      body: [
+        '---',
+        'title: Hedge Health Basics',
+        'category: tree-shrub',
+        'primary_keyword: hedge health',
+        '---',
+        '',
+        'Regular shrub care keeps hedges dense and healthy through summer.',
+      ].join('\n'),
+      url: '/blog/hedge-health/',
+    };
+    // "shrub care" inside "tree and shrub care" splits a commercial phrase —
+    // the executor rejects it (anchor_splits_service_phrase); the standalone
+    // occurrence on the second page is the only plannable match.
+    const tasks = planner.planForTarget(
+      { url: '/tree-shrub/shrub-care-guide/', keyword: 'shrub care for florida yards' },
+      { corpus: [splitting, clean], cap: 1 }
+    );
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/hedge-health.md');
+  });
   test('uses service alias anchors instead of partial service fragments', () => {
     const tasks = planner.planForTarget({
       url: '/pest-control-bradenton-fl/',

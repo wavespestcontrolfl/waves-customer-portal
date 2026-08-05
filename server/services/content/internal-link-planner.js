@@ -429,6 +429,12 @@ class InternalLinkPlanner {
         // Preserve the original casing from the matched text rather
         // than the candidate phrase.
         const actualAnchor = page.body.slice(occ.index, occ.index + occ.length);
+        // Re-validate WITH the paragraph as surroundingText: the candidate
+        // filter is context-free, but the executor also rejects anchors that
+        // split a commercial phrase ("shrub care" inside "tree and shrub
+        // care") or leave a dangling geo qualifier — both only detectable
+        // in context. The same phrase may still be clean on another page.
+        if (!policy.validateAnchorPolicy(actualAnchor, { surroundingText: paragraph }).ok) continue;
         matches.push({
           priority,
           relevance: planTimeRelevance(page, target, targetFront, paragraph),
