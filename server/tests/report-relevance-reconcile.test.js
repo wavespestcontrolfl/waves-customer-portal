@@ -83,6 +83,25 @@ describe('reconcileRainFigure', () => {
     )).toBe('Rain this week fell short of the target of 0.75 inches, totaling 0.35 inches.');
   });
 
+  test('an "in." abbreviation does not split the sentence away from its cue (codex P2 r17)', () => {
+    expect(reconcileRainFigure('Rainfall was 2.72 in. this week.', 2.96))
+      .toBe('Rainfall was 2.96 in. this week.');
+  });
+
+  test('a daily/storm amount is never rewritten to the weekly total (codex P2 r17)', () => {
+    expect(reconcileRainFigure(
+      'Wednesday brought 1.36 inches of rain, contributing to this week’s wet turf.',
+      2.96,
+    )).toBeNull();
+  });
+
+  test('a target range endpoint is never rewritten (codex P2 r17)', () => {
+    expect(reconcileRainFigure(
+      'Rain this week was below the recommended range of 0.75 to 1 inch.',
+      2.96,
+    )).toBeNull();
+  });
+
   test('a rain sentence without a weekly-total cue is left alone', () => {
     expect(reconcileRainFigure('About 1.36 inches of rain fell Wednesday.', 2.96)).toBeNull();
   });
@@ -253,6 +272,16 @@ describe('replaceDroughtHypothesis', () => {
   test('a negated dismissal is an unresolved hypothesis and still reconciles (codex P2 r16)', () => {
     expect(replaceDroughtHypothesis('Drought stress cannot be ruled out in the thin patches.'))
       .toBe('Uneven sprinkler coverage cannot be ruled out in the thin patches.');
+  });
+
+  test('pre-phrase dismissals are preserved (codex P2 r17)', () => {
+    expect(replaceDroughtHypothesis('The thinning is unlikely to be drought stress.')).toBeNull();
+    expect(replaceDroughtHypothesis('We ruled out drought stress for the thin patches.')).toBeNull();
+  });
+
+  test('a direct dry-spot hypothesis passes the prefilter (codex P2 r17)', () => {
+    expect(replaceDroughtHypothesis('Could be dry spots near the sidewalk.'))
+      .toBe('Could be uneven sprinkler coverage near the sidewalk.');
   });
 
   test('drought-resistance praise stays verbatim (codex P2 r14)', () => {

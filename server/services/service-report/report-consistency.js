@@ -104,6 +104,13 @@ const toNum = (v) => {
 
 const formatInches = (n) => String(Math.round(n * 100) / 100);
 
+// Sentence splitter shared by the reconciliation passes. The lookbehind
+// keeps a unit abbreviation's period ("2.72 in. this week") from reading as
+// a sentence boundary — splitting there strands the rain figure and the
+// weekly cue in different fragments (codex P2 r17). Word chars before "in."
+// (e.g. "basin.") still split normally.
+const SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\b[iI]n\.)\s+/;
+
 // The AI visit summary bakes a rainfall total in at completion time, while the
 // Water This Week widget recomputes at request time — the same report was
 // telling the customer "2.72 inches" and "2.96 in" at once (owner 2026-08-04).
@@ -114,7 +121,7 @@ function reconcileRainFigure(text, canonicalRain) {
   const t = String(text || '');
   if (!t || canonicalRain == null) return null;
   let changed = false;
-  const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
+  const out = t.split(SENTENCE_SPLIT_RE).map((sentence) => {
     // Same rain/window vocabulary the narrative layer produces — a stale
     // total phrased as "Precipitation over the last seven days was 2.72
     // inches" must qualify too (codex P2 r6).
@@ -163,6 +170,13 @@ function reconcileRainFigure(text, canonicalRain) {
       // (codex P2 r4) — and treats a DELTA figure the same way: "2.2 inches
       // above the weekly target" measures distance from the target, not the
       // rain total (codex P2 r5). Both skip without consuming the attempt.
+      // A figure attributed to a DAY or a storm is never the weekly total —
+      // "Wednesday brought 1.36 inches of rain, contributing to this week's
+      // wet turf" must not become a false daily amount (codex P2 r17).
+      if (/\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|yesterday|overnight|storm|downpour|one day|single day)\b[^.\d]{0,16}$/i.test(before)) return match;
+      // A range endpoint ("0.75 to 1 inch") is target copy, not a total —
+      // skip a figure preceded by number + range connector (codex P2 r17).
+      if (/\d[\s"″]*(?:to|–|—|through|and)\s*$/i.test(before)) return match;
       // The after-guard also allows an explicit target FIGURE between the
       // delta preposition and the target word — "1.97 inches above the
       // 0.75-inch target" is a delta, not the weekly total (codex P2 r16).
@@ -219,7 +233,7 @@ function replaceDroughtHypothesis(text) {
   const t = String(text || '');
   if (!t) return null;
   let changed = false;
-  const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
+  const out = t.split(SENTENCE_SPLIT_RE).map((sentence) => {
     // A sentence qualifies via the stress-signal cues OR because it IS the
     // hypothesis in its terse headline form ("Dry pocket near the sidewalk",
     // "Localized drought near the edge" — codex P2 r4). A bare "drought"
@@ -227,9 +241,11 @@ function replaceDroughtHypothesis(text) {
     // in the county" stays untouched).
     // "damage" joins the stress cues — the dashboard's own category is
     // "Stress / Damage Signals" and summaries phrase the hypothesis with it
-    // ("Damage could be drought-related" — codex P2 r15).
+    // ("Damage could be drought-related" — codex P2 r15). ALL dry-area forms
+    // pass the prefilter ("Could be dry spots near the sidewalk" — codex P2
+    // r17); the downstream cue/observation/negation logic decides.
     if (!/chinch|stress|thin|tan\b|patch|scuff|damage/i.test(sentence)
-      && !/\bdry\s+pockets?\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
+      && !/\bdry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?)\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
     // Headline-position matches keep their capitalization ("Dry pocket near
     // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").
     // dry patch/spot/area forms only rewrite under a hypothesis cue — "a few
@@ -252,7 +268,14 @@ function replaceDroughtHypothesis(text) {
       // dry pockets, but drought stress remains possible" preserves the
       // negated phrase AND still reconciles the later hypothesis
       // (codex P2 r3/r4/r7).
-      if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(sentence.slice(0, offset))) return m;
+      // Pre-phrase dismissals count too — "unlikely to be drought stress" /
+      // "We ruled out drought stress" already agree with the water data
+      // (codex P2 r17).
+      const pre = sentence.slice(0, offset);
+      if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(pre)) return m;
+      if (/\b(?:unlikely|doubtful)\s+to\s+be\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
+      if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
+        && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:be\s+)?rule\b/i.test(pre.slice(-40))) return m;
       if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) return m;
       // dry pocket/spell: a hypothesis under a cue OR a terse headline
       // ("Dry pocket near the sidewalk") — but never an OBSERVATION sentence
