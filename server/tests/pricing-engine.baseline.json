@@ -1,9 +1,9 @@
 {
   "baseline_single_family_zone_a_quarterly_pest_enhanced_lawn": {
     "summary": {
-      "recurringAnnualAfterDiscount": 943.2,
-      "recurringMonthlyAfterDiscount": 78.6,
-      "year1Total": 943
+      "recurringAnnualAfterDiscount": 932.4,
+      "recurringMonthlyAfterDiscount": 77.7,
+      "year1Total": 932
     },
     "waveGuard": {
       "tier": "silver",
@@ -16,8 +16,8 @@
         "monthly": 37.33
       },
       "lawn_care": {
-        "annual": 600,
-        "monthly": 50
+        "annual": 588,
+        "monthly": 49
       }
     }
   },
@@ -177,9 +177,9 @@
   },
   "platinum_bundle_4_qualifying_services_zone_a": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1994.4,
-      "recurringMonthlyAfterDiscount": 166.2,
-      "year1Total": 1994
+      "recurringAnnualAfterDiscount": 1984.8,
+      "recurringMonthlyAfterDiscount": 165.4,
+      "year1Total": 1985
     },
     "waveGuard": {
       "tier": "platinum",
@@ -192,8 +192,8 @@
         "monthly": 37.33
       },
       "lawn_care": {
-        "annual": 600,
-        "monthly": 50
+        "annual": 588,
+        "monthly": 49
       },
       "tree_shrub": {
         "annual": 617,
