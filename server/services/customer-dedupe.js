@@ -1941,6 +1941,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   self_booked_appointments: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260401000009.
   document_share_links: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260601000006.
+  review_incentive_payouts: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2616,6 +2618,28 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // the winner's customer_id for a service record this journal moved —
       // the undo would return the record while the score stays in the
       // kept customer's history.
+      // Payouts also link through review_request_id (r39): a journaled
+      // review request matched to a Google review post-merge earns a
+      // payout that never touches the request row.
+      {
+        const journaledReviewRequestIds = [...journaledIdsFor('review_requests')];
+        if (journaledReviewRequestIds.length) {
+          let payoutRows = [];
+          try {
+            payoutRows = await trx('review_incentive_payouts')
+              .whereIn('review_request_id', journaledReviewRequestIds)
+              .select(['id', ...activityColumnsFor('review_incentive_payouts')]);
+          } catch (e) {
+            refuse(`Cannot verify review-incentive payouts for this merge's review requests (${e.message}) — refusing to revert`);
+          }
+          const strandedPayouts = countActivityRows(payoutRows, {
+            journaledIds: journaledIdsFor('review_incentive_payouts'), mergeAt, table: 'review_incentive_payouts',
+          });
+          if (strandedPayouts) {
+            refuse(`${strandedPayouts} review-incentive payout(s) for this merge's review requests are outside its journal — the earned payout would stay attributed to the kept customer; reconcile by hand`);
+          }
+        }
+      }
       // Projects (r31): a WDO/prep/project report created for a journaled
       // visit stores its own customer_id and sends the public report from
       // it, never touching the visit — moving the visit back would leave
@@ -2665,6 +2689,9 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           // service_record_id both still match the record.
           { table: 'projects', label: 'project(s) linked to the record' },
           { table: 'document_share_links', label: 'document share link(s)' },
+          // r39: a post-merge Google-review match mints a tech payout
+          // carrying the kept customer_id + the journaled record id.
+          { table: 'review_incentive_payouts', label: 'review incentive payout(s)' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];
