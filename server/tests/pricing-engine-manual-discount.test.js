@@ -297,12 +297,13 @@ describe('pricing engine manual recurring discount', () => {
 
     // Owner ruling 2026-07-17 ("forget all pricing floors"): the lawn program
     // minimum is 0 and the margin guard is enforcement-gated, so the Silver
-    // 10% WaveGuard discount applies uncapped to the $600/yr market list
-    // price instead of being clamped to a program or margin floor. (Re-armed
-    // — useLawnCostFloor — the guard binds at the 642.76 reserve-folded
-    // floor on the 648 floor-priced line; pinned in
+    // 10% WaveGuard discount applies uncapped to the $588/yr market list
+    // price (GRID_500 re-grid, #3190 — this pin was the one the #3202
+    // baseline recapture missed) instead of being clamped to a program or
+    // margin floor. (Re-armed — useLawnCostFloor — the guard binds at the
+    // 642.76 reserve-folded floor on the 648 floor-priced line; pinned in
     // lawn-pricing-followup.test.js.)
-    expect(lawn.annualAfterDiscount).toBe(540);
+    expect(lawn.annualAfterDiscount).toBe(529.2);
     expect(credit).toEqual(expect.objectContaining({
       amount: 0,
       capReason: 'service_line_price',
