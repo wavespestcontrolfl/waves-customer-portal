@@ -1939,6 +1939,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   service_report_deliveries: ['created_at', 'updated_at'],
   service_report_events: ['created_at', 'updated_at'],
   self_booked_appointments: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260401000009.
+  document_share_links: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2658,6 +2660,11 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           { table: 'review_sequences', label: 'review cadence(s)' },
           { table: 'service_report_deliveries', label: 'service-report delivery record(s)' },
           { table: 'service_report_events', label: 'service-report audit event(s)' },
+          // r38: projects can link a record directly (no visit), and
+          // document share links render only while customer_id +
+          // service_record_id both still match the record.
+          { table: 'projects', label: 'project(s) linked to the record' },
+          { table: 'document_share_links', label: 'document share link(s)' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];

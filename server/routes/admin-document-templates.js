@@ -551,15 +551,18 @@ router.post('/:key/contracts', async (req, res, next) => {
         user_agent: req.get('user-agent') || null,
         metadata: jsonb({ expiresAt: expiresAt.toISOString() }, {}),
       });
-      return row;
+      return { row, liveRendered };
     });
 
-    const hydrated = await contractQuery().where('cc.id', contract.id).first();
+    const hydrated = await contractQuery().where('cc.id', contract.row.id).first();
     const signingUrl = publicContractUrl(token);
     res.status(201).json({
       contract: serializeContract(hydrated, { signingUrl }),
       signingUrl,
-      rendered,
+      // The LOCKED render (r38): the persisted snapshot was rebuilt under
+      // the fence — returning the pre-lock render let staff preview text
+      // that differs from what the signing link actually shows.
+      rendered: contract.liveRendered,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });

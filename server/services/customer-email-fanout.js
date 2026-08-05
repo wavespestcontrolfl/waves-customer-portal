@@ -1603,19 +1603,39 @@ async function applyCustomerUpdatesWithEmailClaimGuard({
         return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
       }
       await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
-      // Same claim probe revertMerge runs: an address owned by ANOTHER live
-      // customer (typically the just-restored loser of an undone merge) is
-      // someone else's registered mailbox — never backfill it here.
-      const claimant = await trx('customers')
-        .whereRaw('lower(email) = ?', [emailKeyNorm])
-        .whereNot({ id: customerId })
-        .where('active', true)
-        .whereNull('deleted_at')
-        .first('id');
-      if (claimant) {
+      // MERGE-SPECIFIC evidence, not global uniqueness (r38 — the same
+      // ruling every other claimant site adopted): customers.email is
+      // deliberately non-unique, so a spouse/tenant/shared-household
+      // holder must not leave the matched customer email-less. Only a
+      // live holder who is the restored LOSER of an UNDONE merge whose
+      // winner is THIS customer proves the address is a stale pre-undo
+      // capture. One joined existence query; if the joined read fails,
+      // fall back to the conservative bare-holder block.
+      let undoneHolder = null;
+      try {
+        undoneHolder = await trx('customers as c')
+          .join('customer_merge_journal as j', function joinUndone() {
+            this.on('j.loser_customer_id', 'c.id');
+          })
+          .where('j.winner_customer_id', customerId)
+          .whereNotNull('j.undone_at')
+          .whereRaw('lower(c.email) = ?', [emailKeyNorm])
+          .whereNot('c.id', customerId)
+          .where('c.active', true)
+          .whereNull('c.deleted_at')
+          .first('c.id');
+      } catch {
+        undoneHolder = await trx('customers')
+          .whereRaw('lower(email) = ?', [emailKeyNorm])
+          .whereNot({ id: customerId })
+          .where('active', true)
+          .whereNull('deleted_at')
+          .first('id');
+      }
+      if (undoneHolder) {
         const { email: _dropped, ...rest } = updates;
         if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
-        return { emailApplied: false, emailDroppedReason: 'address now belongs to another live customer' };
+        return { emailApplied: false, emailDroppedReason: 'address was restored to a merged-away customer by an undo' };
       }
       if (applyWithEmailInTrx) {
         await applyWithEmailInTrx(trx);

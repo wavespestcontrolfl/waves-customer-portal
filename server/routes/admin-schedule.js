@@ -5541,6 +5541,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const spawnCount = shouldSpawnRecurringChildren ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
       if (isRecurring && recurringPattern && spawnCount > 1) {
         const parent = await trx('scheduled_services').where({ id: req.params.id }).first();
+        // Owner-change abort (r38): the comms key this trx holds was keyed
+        // off the pre-lock peek — a merge-undo that repointed the parent
+        // while we waited means the child inserts below would ride the
+        // WRONG customer's fence, invisible to a simultaneous undo of the
+        // restored owner. Retry re-keys correctly.
+        if (parent && commsPeek && String(parent.customer_id) !== String(commsPeek.customer_id)) {
+          const movedErr = new Error("This appointment's customer changed while saving (a merge was undone) — reload and save again.");
+          movedErr.statusCode = 409;
+          movedErr.isOperational = true;
+          movedErr.code = 'CUSTOMER_CHANGED_RETRY';
+          throw movedErr;
+        }
         if (parent) {
           // Spawn hardening: "make recurring" must not manufacture visits
           // from a row that can't anchor a live series.
