@@ -8468,6 +8468,19 @@ const CallRecordingProcessor = {
                     throw new Error(`customer record changed while waiting on the comms fence (merge-undo in flight?) — missing ${freshValidation.missing.join(', ')}; booking held for office review`);
                   }
                   customer = freshCallCustomer;
+                  // Call OWNERSHIP re-reads too (r40): a journaled
+                  // call_log the undo repointed while we waited means
+                  // customerId is the stale kept id — the insert would
+                  // source a kept-customer appointment from the restored
+                  // customer's call, invisible to the undo's probes.
+                  // Abort into the schedErr path (no booking, no SMS, the
+                  // approved-but-unbooked card reaches the office).
+                  const freshCallRow = await trx('call_log')
+                    .where({ id: call.id }).first('customer_id');
+                  if (freshCallRow?.customer_id
+                    && String(freshCallRow.customer_id) !== String(customer.id)) {
+                    throw new Error('call ownership changed while waiting on the comms fence (merge-undo) — booking held for office review');
+                  }
                 }
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;

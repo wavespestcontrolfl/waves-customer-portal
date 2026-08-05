@@ -1943,6 +1943,9 @@ const TABLE_TIMESTAMP_COLUMNS = {
   document_share_links: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260601000006.
   review_incentive_payouts: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260711000010 / 20260623000001.
+  customer_cards: ['created_at', 'updated_at'],
+  lawn_water_intake_snapshots: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2692,6 +2695,11 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           // r39: a post-merge Google-review match mints a tech payout
           // carrying the kept customer_id + the journaled record id.
           { table: 'review_incentive_payouts', label: 'review incentive payout(s)' },
+          // r40: completion can mint the first digital card, and a lawn
+          // report view self-heals a water snapshot — both stamp
+          // customer_id + service_record_id without touching the record.
+          { table: 'customer_cards', label: 'digital card(s)' },
+          { table: 'lawn_water_intake_snapshots', label: 'lawn water snapshot(s)' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];
