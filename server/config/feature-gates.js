@@ -691,6 +691,14 @@ const gates = {
   // admin notifications.
   // Off → cron ticks are no-ops.
   callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
+  // Schedule-integrity watchdog: daily cron paging two silent-loss classes —
+  // past-dated visits stuck in on_site/en_route (performed but never
+  // completed → no service record, invoice, report, or post-service SMS;
+  // 89 found in prod 2026-08-04) and upcoming recurring series with no price
+  // on any row (a Tree & Shrub series was live wholly unpriced the same
+  // day). Reads scheduled_services; writes only admin notifications.
+  // Off → cron ticks are no-ops.
+  scheduleIntegrityWatchdog: process.env.GATE_SCHEDULE_INTEGRITY_WATCHDOG === 'true',
   // Retroactive call_log→customer linking: an hourly cron that links
   // customer_id-NULL calls to a customer by UNAMBIGUOUS primary-phone match
   // (same single-match rule as webhook intake) — heals calls that arrived
