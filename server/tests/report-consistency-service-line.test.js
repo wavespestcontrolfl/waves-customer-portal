@@ -35,7 +35,7 @@ describe('reconcileLawnReport — tree_shrub', () => {
     const fix = reconcileLawnReport({ ...reportInput({ allReady: true }), serviceLine: 'tree_shrub' });
     expect(fix.reentry).toBeTruthy();
     expect(fix.reentry.status).toBe('Ready now');
-    expect(fix.reentry.petAdvisory).toBe('Treated beds and foliage have dried — pets and family are fine around them now.');
+    expect(fix.reentry.petAdvisory).toBe('Once treated beds and foliage have dried per the re-entry timing your technician confirms, pets and family can be around them again.');
     expect(/turf/i.test(fix.reentry.petAdvisory)).toBe(false);
   });
 
@@ -66,12 +66,15 @@ describe('reconcileLawnReport — tree_shrub', () => {
 describe('reconcileLawnReport — lawn (unchanged full pass)', () => {
   test('default serviceLine is lawn: turf wording + follow-up + todaysResult still produced', () => {
     const fix = reconcileLawnReport(reportInput({ allReady: true }));
-    expect(fix.reentry.petAdvisory).toBe('Treated turf has dried — pets and family are fine on it now.');
+    // Dried wording drops the "are fine" safety assurance (owner 2026-08-04)
+    // and carries the technician-confirmed-timing idiom (codex P1 r16).
+    expect(fix.reentry.petAdvisory).toBe('Once treated turf has dried per the re-entry timing your technician confirms, pets and family can use the lawn again.');
     expect(fix.followUp).toBeTruthy();
     // The hero line states only today's outcome — the follow-up promise
-    // lives on the followUp card alone (owner directive 2026-08-03).
-    expect(fix.todaysResult).toMatch(/No urgent homeowner action is needed today\.$/);
-    expect(fix.todaysResult).not.toMatch(/follow-up/i);
+    // lives on the followUp card alone (owner directive 2026-08-03), and the
+    // fixed "No urgent homeowner action" clause is gone (owner 2026-08-04).
+    expect(fix.todaysResult).toBe('Treated the front beds.');
+    expect(fix.todaysResult).not.toMatch(/follow-up|No urgent/i);
   });
 
   test('explicit lawn matches the default', () => {

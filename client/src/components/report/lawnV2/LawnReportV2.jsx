@@ -593,20 +593,57 @@ function InsightLine({ label, value, strong }) {
 export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', aftercare = null }) {
   const mounted = useMounted();
   if (!water) return null;
+  // Missing readings stay missing card-wide: Number(null)/Number('') are a
+  // finite 0, and a rain-unknown payload must not render a false `Rain 0"`
+  // row/bar or divert the confidence tag (codex P2 r6).
+  const known = (v) => v != null && v !== '' && Number.isFinite(Number(v));
   const rain = Number(water.rainInches);
   const irrigation = Number(water.irrigationInches);
   const target = Number(water.targetInches);
-  const hasRain = Number.isFinite(rain);
-  const hasIrr = Number.isFinite(irrigation);
-  // Nothing measurable → don't draw an empty chart.
-  if (!hasRain && !hasIrr) return null;
+  const hasRain = known(water.rainInches);
+  const hasIrr = known(water.irrigationInches);
+  // No usable schedule on file → the server still sends irrigation as a
+  // finite 0, which rendered as `Irrigation 0"` — a claim the customer didn't
+  // water, not the truth that we don't know (owner 2026-08-04). Show "Not on
+  // file" instead and keep the zero-width segment out of the bar/legend.
+  // scheduleOnFile undefined (older cached payloads) keeps the numeric row.
+  // An explicit false is AUTHORITATIVE, even over a stale positive prefs-only
+  // inches value — the customer disabling their irrigation system must not be
+  // reversed by leftover numbers (codex P2 r30). The r3 concern this clause
+  // once served ("Not on file" beside a Total that includes those inches) is
+  // closed by hasTotal requiring irrOnFile (codex P2 r9): with the schedule
+  // off, the Total row is suppressed alongside the numeric irrigation row.
+  const irrOnFile = water.scheduleOnFile !== false;
+  // Nothing measurable → don't draw an empty chart… unless the missing
+  // schedule is the reason: the add-schedule CTA + explanation must survive
+  // an all-missing payload or the customer never learns how to fix it
+  // (codex P2 r8).
+  const hasAnyReading = hasRain || hasIrr;
+  if (!hasAnyReading && water.scheduleOnFile !== false) return null;
+  // The chart draws only VISIBLE readings — a not-on-file irrigation zero
+  // renders as a text row, not a segment, so it must not conjure an empty
+  // bar + target legend for a week with no actual water reading
+  // (codex P2 r12).
+  const hasVisibleReading = hasRain || (hasIrr && irrOnFile);
 
-  const total = Number.isFinite(Number(water.totalInches))
+  // A weekly Total is only claimable when the server computed one or rain is
+  // known — summing the leftovers when rain is missing would tell the
+  // customer rainfall was zero rather than unavailable (codex P2 r7) — AND
+  // the irrigation side is accounted for: with no schedule on file the
+  // server's total is rain-only, and a "Total" beside "Not on file" would
+  // read as complete weekly water (codex P2 r9).
+  const hasTotal = (known(water.totalInches) || hasRain) && irrOnFile;
+  const total = known(water.totalInches)
     ? Number(water.totalInches)
     : (hasRain ? rain : 0) + (hasIrr ? irrigation : 0);
+  const hasTarget = known(water.targetInches);
   const status = water.status || 'unknown';
   const meta = statusMeta(status === 'unknown' ? 'tracking' : status);
-  const axisMax = Math.max(total, Number.isFinite(target) ? target : 0) * 1.25 || 2;
+  // The bar scales to what it DRAWS: the stacked visible segments count even
+  // when the Total row is suppressed, or a lone rain segment clamps to a full
+  // bar and misplaces the target marker (codex P2 r10).
+  const stackedExtent = (hasRain ? rain : 0) + (hasIrr && irrOnFile ? irrigation : 0);
+  const axisMax = Math.max(hasTotal ? total : 0, stackedExtent, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
 
   return (
@@ -614,28 +651,48 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       <CardTitle sub="Rain in your area plus the irrigation schedule we have on file.">Water This Week</CardTitle>
       <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
         {hasRain ? <><span style={{ color: MUTED }}>Rain</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(rain)}</strong></> : null}
-        {hasIrr ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
-        <span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong>
-        {Number.isFinite(target) ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
+        {hasIrr && irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
+        {/* "Not on file" keys off !irrOnFile alone — the no-schedule payload
+            can carry irrigationInches: null, and gating on a finite amount
+            hid the promised row exactly when the schedule was missing
+            (codex P2 r24). */}
+        {!irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span></> : null}
+        {hasTotal ? <><span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong></> : null}
+        {hasTarget ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
       </div>
-      {/* Stacked bar with a target marker — segments grow on mount */}
-      <div style={{ position: 'relative', height: 26, borderRadius: 8, background: '#F1EEE6', overflow: 'hidden' }}>
-        {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: COLORS.glassNavy, transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
-        {hasIrr ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: 'rgba(4, 57, 94, 0.35)', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
-        {Number.isFinite(target) ? (
-          <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
-        ) : null}
-      </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
-        {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
-        {hasIrr ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
-        {Number.isFinite(target) ? <Legend color={TEXT} label="Target" /> : null}
-      </div>
+      {/* Stacked bar with a target marker — segments grow on mount. Skipped
+          entirely when nothing is measurable (all-missing payload kept alive
+          for the CTA). */}
+      {hasVisibleReading ? (
+        <div style={{ position: 'relative', height: 26, borderRadius: 8, background: '#F1EEE6', overflow: 'hidden' }}>
+          {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: COLORS.glassNavy, transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+          {hasIrr && irrOnFile ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: 'rgba(4, 57, 94, 0.35)', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+          {hasTarget ? (
+            <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
+          ) : null}
+        </div>
+      ) : null}
+      {hasVisibleReading ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
+          {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
+          {hasIrr && irrOnFile ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
+          {hasTarget ? <Legend color={TEXT} label="Target" /> : null}
+        </div>
+      ) : null}
       <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <StatusPill status={status === 'unknown' ? 'tracking' : status} small />
-        {water.confidence ? <ConfidenceTag confidence={water.confidence} /> : null}
+        {/* When the rain reading is solid and only the schedule is missing,
+            "Limited data this week" blamed the rain — name the actual gap.
+            hasRain is a strict known() check, so a rain-unknown report keeps
+            the low-confidence label warning about the rain (codex P2 r2/r6). */}
+        {water.confidence ? <ConfidenceTag confidence={water.confidence} overrideLabel={!irrOnFile && hasRain ? 'Irrigation not on file' : null} /> : null}
       </div>
-      {water.explanation ? (
+      {/* The server-built explanation was composed assuming the irrigation
+          figure is real — with no schedule on file it can claim a schedule,
+          a 0" irrigation add, or a rain-only "total", contradicting the
+          "Not on file" row above (codex P2 r22). Irrigation/total-flavored
+          prose is suppressed with the row; a pure rain narrative stays. */}
+      {water.explanation && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
@@ -657,7 +714,10 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           0/absent/disabled schedule as "not on file"), so a finite-zero irrigation
           with a known rain status still shows the CTA; once a real schedule is
           added, scheduleOnFile flips true and this hides. */}
-      {!water.scheduleOnFile && irrigationHref ? (
+      {/* Keyed off the same effective irrOnFile as the row above — a card
+          showing `Irrigation 1.25"` must not also claim "we don't have your
+          watering schedule yet" (codex P2 r4). */}
+      {!irrOnFile && irrigationHref ? (
         <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>Get a water reading built for your lawn</div>
           <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
@@ -689,9 +749,9 @@ function Legend({ color, label }) {
   );
 }
 
-function ConfidenceTag({ confidence }) {
+function ConfidenceTag({ confidence, overrideLabel = null }) {
   const map = { high: 'Verified data', medium: 'Estimated for your area', low: 'Limited data this week' };
-  return <span style={{ fontSize: 12, color: MUTED, fontStyle: 'italic' }}>{map[confidence] || ''}</span>;
+  return <span style={{ fontSize: 12, color: MUTED, fontStyle: 'italic' }}>{overrideLabel || map[confidence] || ''}</span>;
 }
 
 // ── 4. Rain in your area — last 7 days ───────────────────────────────────────────
@@ -1180,7 +1240,7 @@ function bandAccent(v, lo, hi) { return v >= lo && v <= hi ? COLORS.glassNavy : 
 function gapAccent(v) { return Math.abs(Number(v)) <= 0.25 ? COLORS.glassNavy : COLORS.glassNavy; }
 const lastVal = (pts = []) => { const f = [...pts].reverse().find((p) => Number.isFinite(toScore(p.value))); return f ? toScore(f.value) : NaN; };
 
-export function LawnTrends({ trends = {} }) {
+export function LawnTrends({ trends = {}, baselineScore = null, hasNextVisit = false }) {
   const { overall, waterGap, mowing, weed, stress, coverage, color, seasonalNote } = trends;
   // The server emits [null, null] when no ideal band is known for the grass —
   // a destructure default only covers undefined, so [null, null] used to ride
@@ -1212,7 +1272,30 @@ export function LawnTrends({ trends = {} }) {
     stress && { key: 'stress', title: 'Stress / Damage', sub: 'higher is better', points: stress, domain: [0, 100], accent: scoreAccent(lastVal(stress)) },
   ].filter(Boolean).filter((m) => (m.points || []).filter((p) => Number.isFinite(toScore(p.value))).length >= 2);
 
-  if (!hasOverall && !minis.length) return null;
+  // First scored visit: nothing charts yet (every series needs 2+ visits — a
+  // single point is not a trend), but silence read as "the charts went away"
+  // (owner 2026-08-04). Tell the customer the baseline is set and trends
+  // start next visit. Only with a real score — an unscored visit stays silent.
+  if (!hasOverall && !minis.length) {
+    // null-check BEFORE Number(): Number(null) === 0 is finite — the same
+    // trap the mowing band guard above documents.
+    if (baselineScore == null || baselineScore === '' || !Number.isFinite(Number(baselineScore))) return null;
+    // "Starting with your next visit" only when the payload backs a real
+    // next visit (the server omits snapshot.nextVisit when it can't) — a
+    // one-time visit must not promise a visit that isn't scheduled
+    // (codex P2 r3).
+    return (
+      <Card>
+        <CardTitle sub="Visit-to-visit progress for your lawn.">Progress Tracking</CardTitle>
+        <p style={{ margin: 0, fontSize: 14, color: BODY, lineHeight: 1.55 }}>
+          Today’s visit sets your lawn’s baseline at {Math.round(Number(baselineScore))}/100.
+          {hasNextVisit
+            ? ' Starting with your next visit, this section will chart how your overall score, color, coverage, weeds, and stress signals move over time.'
+            : ' When your lawn is next assessed, this section will chart how your overall score, color, coverage, weeds, and stress signals move over time.'}
+        </p>
+      </Card>
+    );
+  }
   return (
     <>
       {hasOverall ? (

@@ -52,10 +52,23 @@ function firstSentence(text, max = 170) {
   const m = t.match(/^[^.!?]*[.!?]/);
   let out = (m ? m[0] : t).trim();
   if (out.length > max) {
-    out = out.slice(0, max);
-    const lastSpace = out.lastIndexOf(' ');
-    if (lastSpace > 40) out = out.slice(0, lastSpace);
-    out = `${out.replace(/[,;:]\s*$/, '').trim()}…`;
+    // Over-cap: prefer ending on a complete CLAUSE (the tech's long
+    // next-visit focus lines are single sentences joined by semicolons), so
+    // the card never trails off mid-thought with "…inspect edge areas for
+    // chinch bug or drought…" (owner 2026-08-04). SEMICOLONS only: cutting
+    // at a list comma fabricates a "complete" sentence that silently drops
+    // trailing items (codex P2 r8) — comma-only over-length text keeps the
+    // honest ellipsis fallback.
+    const head = out.slice(0, max);
+    const clauseEnd = head.lastIndexOf('; ');
+    if (clauseEnd > 40) {
+      out = `${head.slice(0, clauseEnd).trim()}.`;
+    } else {
+      out = head;
+      const lastSpace = out.lastIndexOf(' ');
+      if (lastSpace > 40) out = out.slice(0, lastSpace);
+      out = `${out.replace(/[,;:]\s*$/, '').trim()}…`;
+    }
   }
   return out;
 }
@@ -66,14 +79,494 @@ function firstSentence(text, max = 170) {
 // 2026-07-18 P1). Unknown lines get no rewrite rather than a wrong noun.
 const REENTRY_REWRITES = {
   lawn: {
-    dried: 'Treated turf has dried — pets and family are fine on it now.',
+    // Label-consistent framing (dried → may re-enter) without a safety
+    // adjective ("are fine" read as a safety assurance the label never
+    // makes — owner compliance pass 2026-08-04), carrying the required
+    // once-dry + technician-confirms-timing idiom (AGENTS.md compliance
+    // language; codex P1 #3197 r16). CONDITIONAL, never an assertion: the
+    // readiness gate is a configured-duration timer (reentry.js), and no
+    // technician-confirmation or observed-dryness field is persisted, so
+    // "has dried per the timing your technician confirmed" claimed a
+    // confirmation that never happened (codex P1 r31). "Once … has dried"
+    // keeps the actual gate on observed dryness.
+    dried: 'Once treated turf has dried per the re-entry timing your technician confirms, pets and family can use the lawn again.',
     untilDry: 'Keep pets and family off treated turf until it dries.',
   },
   tree_shrub: {
-    dried: 'Treated beds and foliage have dried — pets and family are fine around them now.',
+    dried: 'Once treated beds and foliage have dried per the re-entry timing your technician confirms, pets and family can be around them again.',
     untilDry: 'Keep pets and family off treated beds and foliage until they dry.',
   },
 };
+
+const toNum = (v) => {
+  // null-check BEFORE Number(): Number(null) and Number('') are a finite 0,
+  // which would invent a 0" rain reading / 0" target on rain-unknown reports
+  // (codex P1 #3197 r1 — the same trap the client baseline guard documents).
+  if (v == null || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+const formatInches = (n) => String(Math.round(n * 100) / 100);
+
+// The rain matcher accepts spelled amounts ("one inch", "one and a half
+// inches", "half an inch") alongside digits (codex P2 r30) and numeric
+// fractions ("2 1/2", "1/2" — codex P2 r32) — this converts any form to its
+// numeric value; NaN for anything unrecognized.
+const SPELLED_INCH_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+function spelledOrNumericInches(raw) {
+  const s = String(raw).toLowerCase().replace(/\s+/g, ' ').trim();
+  const frac = s.match(/^(?:(\d+) )?(\d+)\/(\d+)$/);
+  if (frac) {
+    const denominator = Number(frac[3]);
+    return denominator ? Number(frac[1] || 0) + Number(frac[2]) / denominator : NaN;
+  }
+  if (/^[\d.]/.test(s)) return Number(s);
+  if (s === 'half a' || s === 'half an') return 0.5;
+  const m = s.match(/^([a-z]+)( and a half)?$/);
+  if (!m || SPELLED_INCH_WORDS[m[1]] == null) return NaN;
+  return SPELLED_INCH_WORDS[m[1]] + (m[2] ? 0.5 : 0);
+}
+
+// Sentence splitter shared by the reconciliation passes. The lookbehind
+// keeps a unit abbreviation's period ("2.72 in. this week") from reading as
+// a sentence boundary — splitting there strands the rain figure and the
+// weekly cue in different fragments (codex P2 r17). Word chars before "in."
+// (e.g. "basin.") still split normally, and a CAPITALIZED word after "in."
+// is a genuine new sentence — "Mowing height was 3.5 in. Rainfall totaled…"
+// must not merge, or the mowing figure reads as the first rain candidate
+// (codex P2 r23).
+const SENTENCE_SPLIT_RE = /(?<=[.!?])(?<!\b[iI]n\.)\s+|(?<=\b[iI]n\.)\s+(?=[A-Z])/;
+
+// The AI visit summary bakes a rainfall total in at completion time, while the
+// Water This Week widget recomputes at request time — the same report was
+// telling the customer "2.72 inches" and "2.96 in" at once (owner 2026-08-04).
+// Sentence-scoped: only a weekly-total rain sentence is touched, only its first
+// inch figure, and only when it's in the canonical figure's neighborhood (a
+// target/goal figure is identified by its naming words and never rewritten).
+function reconcileRainFigure(text, canonicalRain) {
+  const t = String(text || '');
+  if (!t || canonicalRain == null) return null;
+  let changed = false;
+  const out = t.split(SENTENCE_SPLIT_RE).map((sentence) => {
+    // Same rain/window vocabulary the narrative layer produces — a stale
+    // total phrased as "Precipitation over the last seven days was 2.72
+    // inches" must qualify too (codex P2 r6).
+    if (!/\brain(?:fall)?\b|\bprecipitation\b/i.test(sentence)) return sentence;
+    // `week(?:ly)?` — the adjective form ("Weekly rainfall was 2.72 inches")
+    // is a true week cue too (codex P2 r25).
+    if (!/\bweek(?:ly)?\b|\b7[- ]days?\b|\b(?:past|last) seven\b|\bseven days\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
+    // "total…" alone can also describe a SUB-WEEK window — "Rainfall totaled
+    // 0.4 inches in the last 24 hours" / "over the last 48 hours" / "in the
+    // past two days" is not the weekly figure. A sentence naming a sub-weekly
+    // window with no true week/7-day window is skipped whole (codex P2
+    // r20/r21).
+    if (!/\bweek(?:ly)?\b|\b7[- ]days?\b|\b(?:past|last)\s+seven\b|\bseven\s+days\b/i.test(sentence)
+      && /\b(?:\d+[- ]?hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight|weekend|\bmonth\b|(?:past|last|previous)\s+\d+\s+days?|since\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|the\s+\d+|\d)|(?:past|last)\s+(?:two|three|four|five|six|couple(?:\s+of)?|few|[2-6])\s+days?)\b/i.test(sentence)) return sentence;
+    // A COMBINED rain+irrigation/total-water figure is not the rain total —
+    // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
+    // contradict the widget's Total row (codex P2 r5).
+    // Qualifiers may sit between the connector and irrigation ("plus your
+    // irrigation", "and the weekly irrigation" — codex P2 r13).
+    if (/\b(?:rain(?:fall)?|precipitation)\s*(?:,|and|&|\+|plus)\s*(?:your\s+|the\s+|weekly\s+|any\s+)*irrigation\b|\birrigation\s*(?:,|and|&|\+|plus)\s*(?:your\s+|the\s+|weekly\s+|any\s+)*(?:rain(?:fall)?|precipitation)\b|\bcombined water\b|\btotal water\b/i.test(sentence)) return sentence;
+    // No sentence-level target bailout (codex P2 #3197 r1): "totaling 2.72
+    // inches was above the 0.75 inch target" is the exact comparison this
+    // pass reconciles. Per-number word guards do the work; only the FIRST
+    // qualifying figure is rewritten, and a skipped figure does not consume
+    // the attempt.
+    let done = false;
+    // `inch(?:es)?` — a singular "1 inch" total must match too (codex P2 r2).
+    // Bare `in` (no period) is a common abbreviation too (codex P2 r4); the
+    // lookahead keeps prose like "2 in the morning" from reading as a unit.
+    // The gap accepts a hyphen so adjectival totals ("The 2.72-inch rainfall
+    // total") reconcile too (codex P2 r14). Typographic inch marks — the
+    // double prime ″ and the smart quote ” generated prose / pasted copy can
+    // carry — are units exactly like the ASCII " (codex P2 r29). SPELLED
+    // amounts qualify too — the narrative prompt doesn't require digit
+    // formatting, so "one inch" / "one and a half inches" / "half an inch"
+    // can carry the stale total (codex P2 r30); they rewrite to the digit
+    // form of the canonical figure. Numeric fractions match as a WHOLE
+    // ("2 1/2 inches", "1/2 inch") and the lookbehind rejects a leading
+    // slash — matching just the denominator produced "2 1/2.96 inches"
+    // (codex P2 r32).
+    return sentence.replace(/(?<![\d./])(\d+\s+\d+\/\d+|\d+\/\d+|\d+(?:\.\d+)?|\.\d+|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)(?:\s+and\s+a\s+half)?\b|\bhalf\s+an?\b)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|["″”])/gi, (match, value, gap, unit, offset) => {
+      if (done) return match;
+      const v = spelledOrNumericInches(value);
+      if (!Number.isFinite(v)) return match;
+      // A figure inside a target/goal phrase ("below the 0.75 inches target",
+      // "target of 0.75 inch", "recommended 1 inch") is never a rain total —
+      // skip it WITHOUT consuming the attempt. This word-level guard replaces
+      // the old below-half-canonical value guard, which also skipped
+      // genuinely stale LOW totals (0.2" stale vs 0.8" canonical — codex P2
+      // r3): a target is identified by how it's named, not by being small.
+      // Before-guard: the target word must DIRECTLY precede this number with
+      // no digits AND no clause punctuation between — "target of 0.75" is a
+      // target, but in "above the target, totaling 2.72 inches" the target
+      // word belongs to an earlier clause and the figure IS the weekly total
+      // (codex P2 r9). "0.75 inch target, rain totaled 2.72" also lets 2.72
+      // qualify.
+      // 48 chars: every before-guard below anchors at $ with its own bounded
+      // gap, so the window only needs to be wide enough that a cue phrase is
+      // never truncated out of it — "The rain target for this week was" is
+      // longer than the old 24-char window held (codex P2 r29).
+      const before = sentence.slice(Math.max(0, offset - 48), offset);
+      // 40 chars: the delta form "above the 0.75-inch target" must fit in
+      // the window or the target word gets truncated out of the guard.
+      const after = sentence.slice(offset + match.length, offset + match.length + 40);
+      // Benchmark words (normal/average/typical/usual/historical) guard their
+      // deltas exactly like target words — "1.97 inches above normal" is a
+      // distance from the benchmark, not the weekly total (codex P2 r25).
+      const TARGET_WORD = '(?:target|goal|aim(?:ing)?|recommend(?:ed|s)?|ideal|normal|average|typical|usual|historic(?:al)?)';
+      // After-guard tolerates a rate qualifier between the figure and the
+      // target word — "0.75 inches per week target" is still the target
+      // (codex P2 r4) — and treats a DELTA figure the same way: "2.2 inches
+      // above the weekly target" measures distance from the target, not the
+      // rain total (codex P2 r5). Both skip without consuming the attempt.
+      // A figure attributed to a DAY or a storm is never the weekly total —
+      // "Wednesday brought 1.36 inches of rain, contributing to this week's
+      // wet turf" must not become a false daily amount (codex P2 r17).
+      // The gap excludes clause punctuation so a storm in an EARLIER clause
+      // ("…storm, totaling 2.72 inches") doesn't shield the weekly total,
+      // and the day/storm cue can also FOLLOW the figure ("1.36 inches from
+      // Wednesday's storm") — both skip without consuming (codex P2 r26).
+      if (/\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|weekend|yesterday|overnight|storm|downpour|one day|single day)\b[^.\d,;:]{0,16}$/i.test(before)) return match;
+      if (/^[^.;]{0,16}\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|weekend|yesterday|overnight|storm|downpour|today)\b/i.test(after)) return match;
+      // A figure attached to a PRIOR week is history, not the current total —
+      // "Last week rainfall totaled 1.2 inches, while this week…" keeps the
+      // historical amount while the current figure still reconciles. Clause-
+      // scoped so the current-week half of the comparison isn't shielded;
+      // skips without consuming the attempt (codex P2 r22).
+      // Clause-scoped guards split on punctuation AND contrast/coordination
+      // words — "Last week … totaled 1.2 inches while this week …" has no
+      // comma, but "while" still starts the current-week clause
+      // (codex P2 r27).
+      const clauseBefore = sentence.slice(0, offset).split(/[,;:]|\b(?:while|but|whereas|although|though|and)\b/i).pop();
+      if (/\b(?:last|previous|prior)\s+week\b/i.test(clauseBefore)) return match;
+      // …and prior-week wording right AFTER the figure is history too —
+      // "Rainfall totaled 1.2 inches last week, while this week…" keeps
+      // scanning for the current-week clause (codex P2 r26).
+      if (/^[^.;,:]{0,16}\b(?:last|previous|prior)\s+week\b/i.test(after)) return match;
+      // A figure attached to a NON-WEEK window (this month, the past 14
+      // days, since July) is not the weekly total even when the sentence
+      // ALSO names the current week — the whole-sentence non-week bail-out
+      // above only fires when NO true week cue exists, so "Rainfall totaled
+      // 4.2 inches this month, while rain totaled 2.72 inches this week"
+      // needs this per-figure skip to keep the monthly amount and still
+      // reconcile the weekly one (codex P2 r29). Clause-scoped on both
+      // sides, mirroring the prior-week guard; never consumes the attempt.
+      const NON_WEEK_WINDOW_RE = /\bmonth(?:ly)?\b|\bfortnight\b|\b(?:past|last|previous)\s+(?:(?:two|three|four|five|six|several|couple(?:\s+of)?|few)\s+(?:days?|weeks?)|(?!(?:7|seven)\b)\d+\s+days?|\d+\s+weeks?)\b|\b(?!7[\s-])\d{1,3}[\s-]day\b|\bsince\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|the\s+\d+|\d)\b/i;
+      const clauseAfter = sentence.slice(offset + match.length).split(/[,;:]|\b(?:while|but|whereas|although|though|and)\b/i)[0];
+      if (NON_WEEK_WINDOW_RE.test(clauseBefore) || NON_WEEK_WINDOW_RE.test(clauseAfter)) return match;
+      // A COMPARATIVE bound is not an exact total — "stayed under 1 inch"
+      // must not become "under 2.96 inches" (codex P2 r27); skipped without
+      // consuming.
+      if (/\b(?:under|below|less\s+than|at\s+most|no\s+more\s+than|at\s+least|more\s+than|over|above|exceed(?:ed|ing|s)?)\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+)?$/i.test(before)) return match;
+      // A week-over-week CHANGE is a delta, not the total — "Rainfall
+      // increased by 1 inch this week to a total of 2.72 inches" must keep
+      // the change amount and let the later total reconcile (codex P2 r30).
+      // The "by" is optional when the change verb directly precedes the
+      // figure ("Rainfall rose 1 inch this week to a total of…"), and a
+      // COMPARATIVE right after the figure ("was 1 inch higher this week")
+      // is the same delta from the other side (codex P2 r31). None of these
+      // skips consumes the attempt. "rose to 2.72 inches" stays eligible —
+      // "to" fits neither the direct-adjacency nor the by-form branch —
+      // and fell/fallen stay by-form-only: "Rainfall fell 2.72 inches this
+      // week" states the total that fell, not a decrease.
+      if (/\b(?:increased?|increasing|rose|risen|rising|climbed|jumped|grew|grown|dropped|fell|fallen|decreased?|(?:was|were|is|are)\s+(?:up|down))\s+(?:[a-z'’-]+\s+){0,2}by\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+|almost\s+)?$/i.test(before)) return match;
+      if (/\b(?:increased?|increasing|rose|risen|rising|climbed|jumped|grew|grown|dropped|decreased?|(?:was|were|is|are)\s+(?:up|down))\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+|almost\s+)?$/i.test(before)) return match;
+      if (/^\s*(?:higher|lower|greater|less|more|fewer)\b/i.test(after)) return match;
+      // A per-day AVERAGE is not the weekly total either — "Average daily
+      // rainfall this week was 0.4 inches" / "averaged 0.4 inches per day"
+      // must keep the average and let a later weekly figure reconcile
+      // (codex P2 r24). Clause-scoped before-guard + per-day after-guard;
+      // neither consumes the attempt.
+      if (/\b(?:averag(?:e|ed|ing)|daily|mean)\b/i.test(clauseBefore)) return match;
+      if (/^\s*(?:of\s+rain(?:fall)?\s+)?(?:per|a|each)\s+day\b|^\s*daily\b/i.test(after)) return match;
+      // A NON-RAIN measurement in the figure's own clause (mowing height,
+      // blade/cut settings, thatch, root depth) is never the rain total —
+      // "mowing height was 3.5 inches, and rain totaled 2.72 inches" must
+      // keep the height and reconcile the rain figure (codex P2 r25).
+      if (/\b(?:mow(?:ing|ed|er)?|height|blade|cut(?:ting)?|thatch|root|canopy)\b/i.test(clauseBefore)) return match;
+      // Likewise a figure attached to IRRIGATION is not the rain total —
+      // "Irrigation added 0.75 inches while rain totaled 2.72 inches" must
+      // skip the 0.75 (without consuming the attempt) so the actual stale
+      // rain figure still reconciles (codex P2 r19). Sentences where the
+      // figure IS a combined rain+irrigation total are already skipped whole
+      // by the sentence-level guard above.
+      if (/\b(?:irrigation|sprinklers?|watering)\b[^.\d]{0,16}$/i.test(before)) return match;
+      // An instruction/aftercare amount is not the rain total — "skip adding
+      // 0.25 inches of irrigation" / "water in … with 0.25 inches within 24
+      // hours" (codex P2 r21). Guard on the instruction verb before the
+      // figure, or the irrigation/timing attachment after; neither skip
+      // consumes the attempt.
+      if (/\b(?:add(?:ing)?|apply(?:ing)?|applied|give|giving|supplement(?:ing)?)\b[^.\d,;:]{0,20}$/i.test(before)) return match;
+      if (/^\s*of\s+(?:irrigation|water(?:ing)?)\b|^[^.;,:]{0,12}\bwithin\s+\d+[- ]?\s*hours?\b/i.test(after)) return match;
+      // A range endpoint ("0.75 to 1 inch") is target copy, not a total —
+      // skip a figure preceded by number + range connector (codex P2 r17).
+      // The connector may follow the first endpoint's UNIT ("between 1 inch
+      // and 2 inches"), and the range's FIRST endpoint is guarded by its
+      // "between"/"from" opener — rewriting either endpoint corrupts the
+      // range (codex P2 r20). Neither skip consumes the attempt.
+      // …including compact ASCII-hyphen ranges ("1-2 inches" — codex P2
+      // r26): a digit + hyphen right before the figure is a range, not a
+      // total.
+      // The first endpoint can be spelled now that spelled amounts match
+      // ("between one and two inches" — codex P2 r30).
+      if (/(?:\d|\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\b)[\s"″”]*(?:(?:inch(?:es)?|in\.?)\s+)?(?:to|–|—|through|and)\s*$/i.test(before)) return match;
+      if (/\d\s*-\s*$/.test(before)) return match;
+      if (/\b(?:between|from)\s+(?:the\s+|about\s+|around\s+|roughly\s+)?$/i.test(before)) return match;
+      // The after-guard also allows an explicit target FIGURE between the
+      // delta preposition and the target word — "1.97 inches above the
+      // 0.75-inch target" is a delta, not the weekly total (codex P2 r16).
+      // The before-guard tolerates ordinary wording between the target word
+      // and its figure — a scope qualifier ("target for this week", "target
+      // for your lawn") and/or a linking verb ("was", "sits at", "was set
+      // at") — so "The rain target for this week was 0.75 inches, but rain
+      // totaled 2.72 inches" skips the target figure and keeps scanning to
+      // the actual stale total (codex P2 r29). Digits and clause punctuation
+      // still break the attachment, so a target in an earlier clause never
+      // shields a real total.
+      if (new RegExp(`\\b${TARGET_WORD}\\b(?!\\s+(?:and|plus|&)\\b)(?:\\s+for\\s+(?:this|the|your)\\s+(?:week|lawn|yard|turf|grass))*(?:\\s+(?:is|was|were|remains?|stands?|sits?)(?:\\s+set)?(?:\\s+at)?)?[^.\\d,;:]{0,12}$`, 'i').test(before)
+        || new RegExp(`^\\s*(?:(?:over|above|below|under|past|beyond|short\\s+of)\\s+)?(?:the\\s+)?(?:\\d+(?:\\.\\d+)?[\\s-]*(?:inch(?:es)?|in\\.?|")\\s*)?(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
+      // The sentence already quotes the canonical figure → it agrees with the
+      // widget; stop scanning so a later, different number (e.g. the target)
+      // is never mistaken for a stale total.
+      if (Math.abs(v - canonicalRain) <= 0.05) { done = true; return match; }
+      done = true;
+      changed = true;
+      // Keep the unit grammatical when the value changes across the
+      // singular/plural boundary ("1 inch" → "1.52 inches" — codex P3 r12).
+      // Hyphenated adjectival compounds stay singular ("2.96-inch total").
+      const newVal = formatInches(canonicalRain);
+      let newUnit = unit;
+      if (!gap.includes('-')) {
+        if (/^inch$/i.test(unit) && Number(newVal) !== 1) newUnit = `${unit}es`;
+        else if (/^inches$/i.test(unit) && Number(newVal) === 1) newUnit = unit.slice(0, -2);
+      }
+      return `${newVal}${gap}${newUnit}`;
+    });
+  }).join(' ');
+  return changed ? out : null;
+}
+
+// A drought / dry-pocket hypothesis sitting on a report whose own widget shows
+// rain far above target contradicts the data on the page (owner 2026-08-04:
+// "we know from rainfall that this would not necessarily be the case"). When
+// weekly rain is at least an inch over target, the hypothesis is reworded to
+// the water-adequate differential the coverage copy already uses. Hypothesis
+// sentences only: the sentence must be about the stress signals, negated
+// mentions are left alone, and "drought-tolerant"/"drought tolerance" praise
+// never matches.
+// The tolerance lookahead covers the bare AND the "stress" form: without
+// `(?:\s+stress)?`, "drought stress tolerance" backtracked to match bare
+// "drought" and produced "uneven sprinkler coverage stress tolerance"
+// (codex P2 r2). "dry patch(es)" is in the set too (codex P2 r5), but only
+// rewrites in a hypothesis-marked sentence — see the cue check below — since
+// "dry patches" can also be a literal field observation.
+// "drought-related" is its own leading alternative (the (?!-) hyphen guard
+// would otherwise exclude it) and rewrites to "sprinkler-coverage-related";
+// dry spot(s)/area(s) join patch(es) under the hypothesis-cue gate
+// (codex P2 r7).
+// The tolerance lookahead accepts a hyphen or space before "toleran…" so
+// "drought stress-tolerant" is excluded like "drought stress tolerance"
+// (codex P2 r13).
+// …and the praise exclusion covers resistance/resilience wording alongside
+// tolerance ("drought resistant", "drought resilience" — codex P2 r14).
+// The leading alternative absorbs the optional "stress" into the -related
+// compound ("drought stress-related", "drought-stress-related"): without it,
+// the (?!-) guard blocked the stress match and the bare "drought" fallback
+// produced "uneven sprinkler coverage stress-related" — or skipped the fully
+// hyphenated form entirely (codex P2 r18).
+// "drought conditions" is its own alternative so the NOUN is consumed with
+// the match — bare "drought" before "conditions" rendered "Uneven sprinkler
+// coverage conditions may be contributing…" (codex P2 r29); it shares the
+// dry-conditions hypothesis gate below, so a form without a cue is left
+// alone rather than always rewritten.
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:[- ]stress)?[- ]related|drought[- ]stress(?:ed)?|drought\s+conditions?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?|conditions?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
+// "possible"/"potential" adjective forms are cues too — "Possible dry spots
+// near the sidewalk" is a direct hypothesis (codex P2 r25).
+const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bpossible\b|\bpotential\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
+// An UNRESOLVED tail also marks a hypothesis — "cannot be ruled out",
+// "remains possible" assert the dry condition is still on the table
+// (codex P2 r23).
+const UNRESOLVED_TAIL_RE = /\b(?:can(?:not|['’]t)|can\s+not|could(?:n['’]t|\s+not)|won['’]t|will\s+not|would(?:n['’]t|\s+not))\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b|\b(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}ruled\s+out\b|\b(?:remains?|is|are|stays?)\s+(?:still\s+|a\s+)?possib/i;
+
+function replaceDroughtHypothesis(text) {
+  const t = String(text || '');
+  if (!t) return null;
+  let changed = false;
+  const out = t.split(SENTENCE_SPLIT_RE).map((sentence) => {
+    // A sentence qualifies via the stress-signal cues OR because it IS the
+    // hypothesis in its terse headline form ("Dry pocket near the sidewalk",
+    // "Localized drought near the edge" — codex P2 r4). A bare "drought"
+    // with no stress context still needs the cue ("A drought was declared
+    // in the county" stays untouched).
+    // "damage" joins the stress cues — the dashboard's own category is
+    // "Stress / Damage Signals" and summaries phrase the hypothesis with it
+    // ("Damage could be drought-related" — codex P2 r15). ALL dry-area forms
+    // pass the prefilter ("Could be dry spots near the sidewalk" — codex P2
+    // r17); the downstream cue/observation/negation logic decides.
+    if (!/chinch|stress|thin|tan\b|patch|scuff|damage/i.test(sentence)
+      && !/\bdry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?|conditions?)\b|\blocalized\s+drought\b|\bdrought\s+conditions?\b/i.test(sentence)) return sentence;
+    // Headline-position matches keep their capitalization ("Dry pocket near
+    // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").
+    // dry patch/spot/area forms only rewrite under a hypothesis cue — "a few
+    // dry patches were noted" is an OBSERVATION and must survive verbatim.
+    // The cue must PRECEDE the match nearby ("could be … or dry spots") — a
+    // cue word later in the sentence ("…, and color is improving or stable")
+    // must not convert an observed dry area into a hypothesis (codex P2 r8),
+    // and the backward search stops at clause punctuation so a cue in an
+    // EARLIER clause ("improving or stable; dry spots were noted") doesn't
+    // leak across the boundary (codex P2 r9).
+    const cueBefore = (offset) => {
+      const seg = sentence.slice(Math.max(0, offset - 48), offset);
+      const clause = seg.slice(Math.max(seg.lastIndexOf(';'), seg.lastIndexOf(':'), seg.lastIndexOf('.')) + 1);
+      return HYPOTHESIS_CUE_RE.test(clause);
+    };
+    // Coordination inherits the previous term's outcome: in "not due to
+    // drought stress or dry spots", the bare "or" is a LIST connector inside
+    // the same dismissal, not a hypothesis cue — a preserved term preserves
+    // its coordinated partner (codex P2 r23).
+    let prevMatch = null;
+    const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m, offset) => {
+      if (prevMatch && prevMatch.preserved
+        && /^\s*(?:,\s*(?:(?:or|and|nor)\s+)?|(?:or|and|nor)\s+)(?:an?\s+|the\s+)?$/i.test(sentence.slice(prevMatch.end, offset))) {
+        prevMatch = { end: offset + m.length, preserved: true };
+        return m;
+      }
+      const decide = () => {
+      // Negation is checked PER MATCH, not per sentence: it must attach to
+      // this occurrence (negator + up to three plain same-clause words right
+      // before it; punctuation breaks the chain), so "No current signs of
+      // dry pockets, but drought stress remains possible" preserves the
+      // negated phrase AND still reconciles the later hypothesis
+      // (codex P2 r3/r4/r7).
+      // Pre-phrase dismissals count too — "unlikely to be drought stress" /
+      // "We ruled out drought stress" already agree with the water data
+      // (codex P2 r17).
+      const pre = sentence.slice(0, offset);
+      // "not (been/yet) ruled out …" is an UNRESOLVED hypothesis, not a
+      // negation — carve it out of the plain-negation guard so it falls
+      // through to the ruled-out handling below (codex P2 r25).
+      if (/\b(?:no|not|isn['’]t|without)\s+(?!(?:[a-z'’-]+\s+){0,2}ruled?\s+out\b)(?:[a-z'’-]+\s+){0,3}$/i.test(pre)) return m;
+      // The pre-phrase dismissal set mirrors the post-phrase guard's
+      // ("less likely to be drought stress" — codex P2 r19).
+      // …and the dismissal's connector can be "due to"/"from"/"because of"
+      // as well as "to be" ("less likely due to drought stress" —
+      // codex P2 r20) — or absent entirely in the bare copular form
+      // ("was unlikely drought stress" — codex P2 r21).
+      if (/\b(?:unlikely|less\s+likely|doubtful|improbable)\s+(?:(?:to\s+be|due\s+to|from|because\s+of)\s+)?(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
+      // A negated BELIEF is a dismissal too — "not currently believed to be
+      // drought stress" carries the negation past the three-word window
+      // (codex P2 r23).
+      if (/\b(?:not|no|isn['’]t|never)\s+(?:[a-z'’-]+\s+){0,2}(?:believed|thought|expected|considered|likely)\s+(?:to\s+be\s+)?(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
+      if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
+        && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t|not)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
+      // "inconsistent with" is a DISMISSAL, not the "consistent with"
+      // hypothesis cue — "The pattern is inconsistent with drought stress"
+      // already agrees with the water data (codex P2 r24).
+      if (/\b(?:inconsistent|not\s+consistent)\s+with\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
+      // An observation verb attached right AFTER the phrase vetoes the
+      // rewrite even when a cue precedes it — "Brown or tan patches and dry
+      // spots were noted" uses a descriptive "or", not a differential
+      // (codex P2 r21) — and the same veto covers drought-stress matches:
+      // "Drought stress symptoms were noted along the edge" is a technician
+      // OBSERVATION, not a hypothesis (codex P2 r26). "visible"/"showing"
+      // are observation verbs here exactly as in the dry-area branches
+      // below — "Drought stress symptoms are visible along the edge" is
+      // observed evidence, never rewritten to coverage copy (codex P2 r29).
+      // "confirmed" joins them, and STATE adjectives (present/evident/
+      // apparent) veto only behind an indicative copula — "is present" is a
+      // confirmed observation, while "may be present" keeps the modal
+      // hypothesis reading and still reconciles (codex P1 r30).
+      if (/^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded|visible|showing|confirmed|(?:is|are|was|were|remains?|stays?)\s+(?:clearly\s+|still\s+|now\s+|very\s+)?(?:present|evident|apparent))\b/i.test(sentence.slice(offset + m.length))) return m;
+      // A PRE-phrase observation verb is the same confirmed-evidence claim
+      // from the other side — "We confirmed drought stress along the edge"
+      // must not become a coverage assertion (codex P1 r30). Punctuation
+      // between the verb and the phrase breaks the attachment, so "No pests
+      // were seen; drought stress remains possible" still reconciles.
+      if (/\b(?:noted|observed|saw|seen|found|documented|recorded|confirmed|verified)\s+(?:[a-z'’-]+\s+){0,2}$/i.test(sentence.slice(0, offset))) return m;
+      // …but a CLAUSE-LEADING dry-area phrase with a same-clause cue right
+      // AFTER it is still a hypothesis — "Dry spots could be contributing to
+      // the thinning" (codex P2 r20), including unresolved tails ("Dry spots
+      // cannot be ruled out", "Dry areas remain possible" — codex P2 r23)
+      // and a phrase leading a NEW clause after a coordinator ("…, but dry
+      // pockets may contribute" — codex P2 r23). Observation verbs keep
+      // their veto and the cue search stops at clause punctuation.
+      const preSeg = sentence.slice(0, offset);
+      const atSentenceStart = /^\W*$/.test(preSeg);
+      const clauseLead = preSeg.slice(Math.max(preSeg.lastIndexOf(','), preSeg.lastIndexOf(';'), preSeg.lastIndexOf(':')) + 1);
+      const atClauseStart = atSentenceStart || /^\s*(?:but|and|while|though|however|yet|so)?\s*$/i.test(clauseLead);
+      const tailClause = sentence.slice(offset + m.length).split(/[,;:.]/)[0];
+      const cueAfter = HYPOTHESIS_CUE_RE.test(tailClause) || UNRESOLVED_TAIL_RE.test(tailClause);
+      // Observation vetoes read the MATCHED CLAUSE, not the whole sentence —
+      // "Dry spots were observed near the curb, but dry conditions may be
+      // contributing to thinning elsewhere" keeps the observed first clause
+      // while the later live hypothesis still reconciles (codex P2 r31).
+      const clauseOfMatch = `${clauseLead}${m}${tailClause}`;
+      if (/dry\s+(?:patch|spots?|areas?|conditions?)|drought\s+conditions?/i.test(m) && !cueBefore(offset)) {
+        const wasObserved = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(clauseOfMatch);
+        if (wasObserved || !atClauseStart || !cueAfter) return m;
+      }
+      // dry pocket/spell: a hypothesis under a cue, a terse headline
+      // ("Dry pocket near the sidewalk"), or a clause-leading phrase with a
+      // cue after it — but never an OBSERVATION clause ("Dry pockets were
+      // noted in thin turf", codex P2 r10): observation verbs veto both
+      // paths, clause-scoped like the gate above (codex P2 r31).
+      if (/dry\s+(?:pockets?|spells?)/i.test(m) && !cueBefore(offset)) {
+        // Resolved/past wording is historical, not a live hypothesis —
+        // "Dry spell ended after this week's heavy rain" / "Dry pockets have
+        // improved after this week's rain" must not become coverage copy
+        // (codex P2 r20/r25).
+        const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing|ended|passed|resolved|subsided|broke|eased|improv(?:ed|ing)|recover(?:ed|ing)?)\b/i.test(clauseOfMatch);
+        if (observed) return m;
+        if (!atSentenceStart && !(atClauseStart && cueAfter)) return m;
+      }
+      // A negation can also FOLLOW the phrase ("Drought stress was not
+      // observed", "isn't visible") — check the same clause after the match
+      // before replacing (codex P2 r12); clause punctuation ends the search.
+      // Dismissal terms count as negation too — "Drought stress is unlikely"
+      // / "was ruled out" already agrees with the water data and must not be
+      // flipped into a coverage claim (codex P2 r14). A NEGATED dismissal
+      // ("cannot be ruled out") is an unresolved hypothesis and must still
+      // be reconciled (codex P2 r16) — including with same-clause modifiers
+      // ("cannot be completely ruled out", "can't yet be fully ruled out" —
+      // codex P2 r18), mirrored in the pre-phrase guard above.
+      // …and plain "is/was/has not (been) ruled out" is unresolved just like
+      // "cannot be ruled out" (codex P2 r25).
+      const tail = sentence.slice(offset + m.length);
+      const negatedDismissal = /^[^.;,:]{0,30}\b(?:(?:can(?:not|['’]t)|can\s+not|could(?:n['’]t|\s+not)|won['’]t|will\s+not|would(?:n['’]t|\s+not))\s+(?:[a-z'’-]+\s+){0,3}|(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}|not\s+(?:yet\s+)?)ruled\s+out\b/i.test(tail);
+      if (!negatedDismissal
+        && /^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never|unlikely|less\s+likely|ruled\s+out|doubtful|improbable)\b/i.test(tail)) return m;
+      // Adjectival forms — hyphenated or space-form "drought stressed"
+      // (codex P2 r9/r12), or "drought stress" directly modifying
+      // symptoms/signs/related (codex P2 r10) — take the adjectival
+      // replacement so the sentence stays grammatical.
+      if (/drought(?:[- ]stress)?[- ]related\b/i.test(m)
+        || /drought[- ]stressed\b/i.test(m)
+        || /drought-stress\b/i.test(m)
+        || (/drought[- ]stress$/i.test(m) && /^\s*(?:symptoms?|signs?|related)\b/i.test(tail))
+        || (/^(?:localized\s+|an?\s+)?drought$/i.test(m) && /^\s*(?:pressure|symptoms?|signs?|issues?|concerns?|risks?|effects?|impact)\b/i.test(tail))) {
+        return /^[A-Z]/.test(m) ? 'Sprinkler-coverage-related' : 'sprinkler-coverage-related';
+      }
+      // A PLURAL verb right after the phrase gets a plural-compatible
+      // rewrite so the sentence stays grammatical — "Dry areas remain
+      // possible" → "Patches of uneven sprinkler coverage remain possible"
+      // (codex P2 r23). "remains" (singular) keeps the mass-noun form.
+      if (/^\s*(?:are|remain|were|persist|continue|have)\b/i.test(tail)) {
+        return /^[A-Z]/.test(m) ? 'Patches of uneven sprinkler coverage' : 'patches of uneven sprinkler coverage';
+      }
+      return /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage';
+      };
+      const out = decide();
+      prevMatch = { end: offset + m.length, preserved: out === m };
+      return out;
+    });
+    if (replaced !== sentence) changed = true;
+    return replaced;
+  }).join(' ');
+  return changed ? out : null;
+}
 
 /**
  * @param {object} input
@@ -94,8 +587,77 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
   if (!reentryWording) return null;
   const lawnPass = serviceLine === 'lawn';
   const warnings = [];
-  const insights = Array.isArray(reportV2.insights) ? reportV2.insights : [];
-  const hasIssue = lawnPass && insights.some((i) => i.status === 'watch' || i.status === 'needs_attention');
+  const rawInsights = Array.isArray(reportV2.insights) ? reportV2.insights : [];
+  const hasIssue = lawnPass && rawInsights.some((i) => i.status === 'watch' || i.status === 'needs_attention');
+
+  // ── Rain-figure reconciliation (lawn only) ────────────────────────────────
+  // Keep the AI summary's weekly rain total in agreement with the live widget.
+  const canonicalRain = lawnPass ? toNum(reportV2.water && reportV2.water.rainInches) : null;
+  let summary = null;
+  if (canonicalRain != null) {
+    summary = reconcileRainFigure(data.summary, canonicalRain);
+    if (summary) {
+      warnings.push({
+        severity: 'warning',
+        code: 'summary_rain_figure_stale',
+        message: `Visit summary's weekly rain total disagrees with the Water This Week widget (${formatInches(canonicalRain)}").`,
+        suggestedFix: summary,
+      });
+    }
+  }
+  const liveSummary = summary || data.summary;
+
+  // ── Drought-hypothesis reconciliation (lawn only) ─────────────────────────
+  // Rain an inch or more OVER target → a drought / dry-pocket differential
+  // contradicts the page's own water data; reword to the coverage differential.
+  const rainTarget = lawnPass ? toNum(reportV2.water && reportV2.water.targetInches) : null;
+  const rainWellAboveTarget = canonicalRain != null && rainTarget != null && canonicalRain >= rainTarget + 1;
+  let insights = rawInsights;
+  let photoSummary = null;
+  let snapshot = null;
+  const droughtWarn = (where) => warnings.push({
+    severity: 'warning',
+    code: 'drought_hypothesis_contradicts_rainfall',
+    message: `${where} attributed stress to drought/dry conditions while measured weekly rain (${formatInches(canonicalRain)}") is well above the ${formatInches(rainTarget)}" target.`,
+  });
+  if (rainWellAboveTarget) {
+    const summaryDrought = replaceDroughtHypothesis(liveSummary);
+    if (summaryDrought) { summary = summaryDrought; droughtWarn('Visit summary'); }
+    const patched = insights.map((i) => {
+      const fields = {};
+      let touched = false;
+      // The full set of insight fields the card renders (LawnReportV2.jsx
+      // InsightLine rows + the headline) — nextVisitPlan is the rendered
+      // "Next visit" row (codex P2 #3197 r1: a bare `nextVisit` left the
+      // visible line saying drought while the rest was reconciled).
+      for (const f of ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan']) {
+        const replaced = replaceDroughtHypothesis(i && i[f]);
+        if (replaced) { fields[f] = replaced; touched = true; }
+      }
+      return touched ? { ...i, ...fields } : i;
+    });
+    if (patched.some((p, idx) => p !== insights[idx])) { insights = patched; droughtWarn('A priority finding'); }
+    photoSummary = replaceDroughtHypothesis(reportV2.photoSummary);
+    if (photoSummary) droughtWarn('The photo narrative');
+    // The hero snapshot COPIES insight strings at build time (watching =
+    // headlines, mainWatch = top whatWeSaw, wavesNext / customerAction from
+    // the top issue) — patching only the insights left the hero telling the
+    // customer to recheck drought stress (codex P2 r3).
+    const snap = reportV2.snapshot;
+    if (snap) {
+      const fields = {};
+      let touched = false;
+      for (const f of ['statusHeadline', 'scoreExplanation', 'rootCause', 'mainWatch', 'wavesNext', 'customerAction']) {
+        const replaced = replaceDroughtHypothesis(snap[f]);
+        if (replaced) { fields[f] = replaced; touched = true; }
+      }
+      if (Array.isArray(snap.watching)) {
+        const watching = snap.watching.map((w) => replaceDroughtHypothesis(w) || w);
+        if (watching.some((w, idx) => w !== snap.watching[idx])) { fields.watching = watching; touched = true; }
+      }
+      if (touched) { snapshot = { ...snap, ...fields }; droughtWarn('The hero snapshot'); }
+    }
+  }
 
   // ── Follow-up detection (lawn only — see serviceLine doc above) ──────────
   // Honest framing: "planned" — we surface it as a reassurance card with the reason
@@ -115,10 +677,14 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     || (!deniesFollowUp && /\bfollow[- ]?up\b|\bre-?check\b|\breturn visit\b|\b(?:will|we['’]ll) (?:return|come back|be back)\b/i.test(summaryText)));
   let followUp = null;
   if (mentionsFollowUp) {
+    // The reason rides through the same drought reconciliation as the cards —
+    // "inspect edge areas for drought stress" must not survive on a
+    // rain-above-target report when every other surface was corrected.
+    const focus = (rainWellAboveTarget && replaceDroughtHypothesis(nextVisitFocus)) || nextVisitFocus;
     followUp = {
       scheduled: true,
       headline: 'Follow-up already planned',
-      reason: firstSentence(nextVisitFocus) || 'We’ll recheck the areas we flagged and compare them against today’s photos.',
+      reason: firstSentence(focus) || 'We’ll recheck the areas we flagged and compare them against today’s photos.',
       customerAction: 'No action is needed from you before then unless the area changes quickly.',
     };
   }
@@ -134,12 +700,15 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     // else keeps the neutral lead. The greeting strip mirrors the client's
     // cleanVisitSummary so the hero never opens with a thank-you line.
     const summaryLead = leadSentence(
-      String(data.summary || '').replace(/^Thanks for having us out today\.\s*/i, '').trim()
+      String(summary || data.summary || '').replace(/^Thanks for having us out today\.\s*/i, '').trim()
     );
-    const lead = summaryLead || 'Routine service completed.';
     // No follow-up clause here (owner directive 2026-08-03): the follow-up
     // card below carries that promise; the hero states only today's outcome.
-    todaysResult = `${lead} No urgent homeowner action is needed today.`;
+    // No appended "No urgent homeowner action is needed today." either (owner
+    // 2026-08-04): it rendered on EVERY reconciled report — redundant next to
+    // the follow-up card's "no action" line and contradictory when the
+    // snapshot carries a real "Your next step".
+    todaysResult = summaryLead || 'Routine service completed.';
     warnings.push({
       severity: 'warning',
       code: 'todays_result_overclaims_clear',
@@ -166,7 +735,124 @@ function reconcileLawnReport({ data = {}, reportV2 = null, serviceLine = 'lawn' 
     }
   }
 
-  return { todaysResult, reentry, followUp, warnings };
+  // ── Ask-Waves lawn-assessment reconciliation (lawn only) ─────────────────
+  // The public ask route answers lawn questions from data.lawnAssessment
+  // (snapshot.summary / customerSummary / card + finding copy / watch items —
+  // report-assistant.js). Patching only the page payload let the assistant
+  // serve the unreconciled drought answer right after the visible cards were
+  // rewritten to the coverage differential (codex P2 r22). Same passes, same
+  // gates, returned as a patch (null = untouched).
+  let lawnAssessment = null;
+  if (lawnPass && data.lawnAssessment) {
+    let droughtTouched = false;
+    const fixText = (text) => {
+      if (text == null || text === '') return null;
+      const t0 = String(text);
+      let out = t0;
+      if (canonicalRain != null) out = reconcileRainFigure(out, canonicalRain) || out;
+      if (rainWellAboveTarget) {
+        const d = replaceDroughtHypothesis(out);
+        if (d) { out = d; droughtTouched = true; }
+      }
+      return out === t0 ? null : out;
+    };
+    const laSrc = data.lawnAssessment;
+    const next = { ...laSrc };
+    let touched = false;
+    for (const f of ['customerSummary', 'aiSummary', 'observations']) {
+      const replaced = fixText(laSrc[f]);
+      if (replaced) { next[f] = replaced; touched = true; }
+    }
+    if (laSrc.snapshot) {
+      const snapFields = {};
+      let snapTouched = false;
+      const summaryFix = fixText(laSrc.snapshot.summary);
+      if (summaryFix) { snapFields.summary = summaryFix; snapTouched = true; }
+      if (Array.isArray(laSrc.snapshot.nextWatchItems)) {
+        const items = laSrc.snapshot.nextWatchItems.map((w) => fixText(w) || w);
+        if (items.some((w, idx) => w !== laSrc.snapshot.nextWatchItems[idx])) { snapFields.nextWatchItems = items; snapTouched = true; }
+      }
+      if (Array.isArray(laSrc.snapshot.findings)) {
+        const findingsFixed = laSrc.snapshot.findings.map((fi) => {
+          const replaced = fi && fixText(fi.customerCopy);
+          return replaced ? { ...fi, customerCopy: replaced } : fi;
+        });
+        if (findingsFixed.some((fi, idx) => fi !== laSrc.snapshot.findings[idx])) { snapFields.findings = findingsFixed; snapTouched = true; }
+      }
+      if (snapTouched) { next.snapshot = { ...laSrc.snapshot, ...snapFields }; touched = true; }
+    }
+    if (Array.isArray(laSrc.recommendationCards)) {
+      const cards = laSrc.recommendationCards.map((card) => {
+        const replaced = card && fixText(card.customerCopy);
+        return replaced ? { ...card, customerCopy: replaced } : card;
+      });
+      if (cards.some((c, idx) => c !== laSrc.recommendationCards[idx])) { next.recommendationCards = cards; touched = true; }
+    }
+    if (touched) {
+      lawnAssessment = next;
+      if (droughtTouched) droughtWarn('The lawn assessment (assistant answers)');
+    }
+  }
+
+  return {
+    todaysResult,
+    reentry,
+    followUp,
+    warnings,
+    // Non-null ONLY when a reconciliation changed the text — the route applies
+    // these over the payload; null means "keep what the payload already has".
+    summary,
+    photoSummary,
+    snapshot,
+    insights: insights === rawInsights ? null : insights,
+    lawnAssessment,
+  };
 }
 
-module.exports = { reconcileLawnReport, firstSentence };
+/**
+ * Apply reconcileLawnReport's fixes onto an assembled report payload in
+ * place. Shared by the public route AND the queued PDF renderer — the queue
+ * builds its payload directly and renders under the deterministic storage
+ * key, so a queue render without this pass would bake the pre-reconciliation
+ * copy into the cache and the direct route would then serve it as current
+ * (codex P2 #3197 r6). Best-effort: any throw leaves the payload untouched.
+ */
+function applyLawnReportReconciliation(data, dynamicContext = null) {
+  if (!data || !data.reportV2) return data;
+  try {
+    const fix = reconcileLawnReport({
+      data: { ...data, dynamicContext },
+      reportV2: data.reportV2,
+      serviceLine: data.serviceLine,
+    });
+    if (!fix) return data;
+    data.reportV2 = {
+      ...data.reportV2,
+      todaysResult: fix.todaysResult || data.reportV2.todaysResult || null,
+      followUp: fix.followUp || data.reportV2.followUp || null,
+      // Rain-contradicted drought hypotheses reworded in place (null = untouched).
+      insights: fix.insights || data.reportV2.insights,
+      photoSummary: fix.photoSummary || data.reportV2.photoSummary,
+      snapshot: fix.snapshot || data.reportV2.snapshot,
+      consistencyWarnings: fix.warnings || [],
+    };
+    // Stale weekly-rain figure in the AI summary rewritten to the widget's
+    // total so the report never quotes two different rain numbers.
+    if (fix.summary) data.summary = fix.summary;
+    // Ask Waves answers from lawnAssessment — keep it in step with the page
+    // (codex P2 r22).
+    if (fix.lawnAssessment) data.lawnAssessment = fix.lawnAssessment;
+    if (fix.reentry && dynamicContext && dynamicContext.reentry) {
+      dynamicContext.reentry = { ...dynamicContext.reentry, petAdvisory: fix.reentry.petAdvisory };
+    }
+  } catch { /* reconciliation is best-effort — never block the report */ }
+  return data;
+}
+
+module.exports = {
+  reconcileLawnReport,
+  applyLawnReportReconciliation,
+  firstSentence,
+  reconcileRainFigure,
+  replaceDroughtHypothesis,
+};

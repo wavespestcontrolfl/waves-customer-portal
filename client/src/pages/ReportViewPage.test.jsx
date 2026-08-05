@@ -899,6 +899,69 @@ describe('lawn fungicide purpose copy', () => {
   });
 });
 
+// Nutrient why-used correlates to today's tech-confirmed photo diagnosis
+// (owner 2026-08-04): the generic program line was identical on every
+// fertilizer card while the same page's assessment carried the reason. The
+// claims stay within the record — category status/label are the server-derived
+// diagnosis the Turf Health section already renders; no "chosen because"
+// causality, no observed-condition wording.
+describe('lawn nutrient purpose copy — diagnosis correlation', () => {
+  const iron = {
+    method: 'broadcast_spray',
+    targets: [],
+    product: { name: 'LESCO Chelated Iron Plus', category: 'Fertilizer', active_ingredient: 'Iron + N (foliar)' },
+  };
+  const potassium = {
+    method: 'broadcast_spray',
+    targets: [],
+    product: { name: 'LESCO K-Flow 0-0-25 17% S', category: 'Fertilizer', active_ingredient: 'Potassium 0-0-25 + sulfur' },
+  };
+  const GENERIC = 'Used to support turf density, color, and recovery within the documented lawn program.';
+  const diagnosis = (colorStatus, stressStatus) => ([
+    { key: 'color_vigor', label: 'Color & Vigor', status: colorStatus },
+    { key: 'damage_disease_signals', label: 'Stress / Damage Signals', status: stressStatus },
+  ]);
+
+  it('iron cites a flagged Color & Vigor category', () => {
+    const why = applicationPurposeCopy(iron, 'lawn', { diagnosis: diagnosis('watch', 'healthy') });
+    expect(why).toContain('Color & Vigor');
+    expect(why).toContain('area to watch');
+    // Recorded-diagnosis claims only — never observed/chosen-because wording.
+    expect(why).not.toMatch(/observed|found|because|chosen/i);
+  });
+
+  it('potassium cites flagged stress signals', () => {
+    const why = applicationPurposeCopy(potassium, 'lawn', { diagnosis: diagnosis('healthy', 'watch') });
+    expect(why).toContain('Stress / Damage Signals');
+    expect(why).toContain('potassium');
+  });
+
+  it('an un-flagged matching category fails closed to the generic line', () => {
+    expect(applicationPurposeCopy(iron, 'lawn', { diagnosis: diagnosis('healthy', 'watch') })).toBe(GENERIC);
+    expect(applicationPurposeCopy(potassium, 'lawn', { diagnosis: diagnosis('watch', 'strong') })).toBe(GENERIC);
+  });
+
+  it('no diagnosis context (older payloads / PDF fallback) keeps the generic line', () => {
+    expect(applicationPurposeCopy(iron, 'lawn')).toBe(GENERIC);
+    expect(applicationPurposeCopy(iron, 'lawn', { diagnosis: [] })).toBe(GENERIC);
+  });
+
+  it('an unrecognized nutrient product never borrows a diagnosis line', () => {
+    const lime = { method: 'broadcast_spray', targets: [], product: { name: 'Pelletized Lime', category: 'Fertilizer', active_ingredient: 'Calcium carbonate 15-0-0' } };
+    expect(applicationPurposeCopy(lime, 'lawn', { diagnosis: diagnosis('watch', 'watch') })).toBe(GENERIC);
+  });
+
+  it('a potassium chelate takes the potassium reason, not the chelate/color one (codex P2 r4)', () => {
+    const kChelate = { method: 'broadcast_spray', targets: [], product: { name: 'K-Boost', category: 'Fertilizer', active_ingredient: 'Potassium chelate' } };
+    const why = applicationPurposeCopy(kChelate, 'lawn', { diagnosis: diagnosis('watch', 'watch') });
+    expect(why).toContain('Stress / Damage Signals');
+    expect(why).not.toContain('Color & Vigor');
+    // Only Color flagged → the potassium rule matches first, its category is
+    // un-flagged, and the copy fails closed rather than borrowing color.
+    expect(applicationPurposeCopy(kChelate, 'lawn', { diagnosis: diagnosis('watch', 'healthy') })).toBe(GENERIC);
+  });
+});
+
 // Free-form target chips are unrestricted text — only governed disease
 // vocabulary may render on the fungicide line; ANY unrecognized target
 // fails the whole line closed (codex P1 #3187 r16).

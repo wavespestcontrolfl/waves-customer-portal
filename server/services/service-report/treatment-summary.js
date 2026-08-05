@@ -37,18 +37,38 @@ function buildTreatmentSummary(treatment) {
   // Active ingredient, not brand name (owner 2026-07-21 — brand names live
   // on the product cards; the narrative speaks in actives). Strip the label
   // percentage ("Dinotefuran 20%" → "dinotefuran"); fall back to the product
-  // name when no active is recorded.
+  // name when no active is recorded. Word-wise lowercase: element symbols and
+  // short acronyms keep their case ("Iron + N" must not become "iron + n";
+  // "Fe/Mg/Mn/S" and "Mn" keep proper-case symbols — codex P3 #3197 r1), and
+  // anything carrying digits ("0-0-25") is left untouched. A token counts as
+  // symbol notation when EVERY alphabetic segment is element-shaped (capital
+  // + optional lowercase letter) — "Iron" (4 letters) still lowercases.
+  const isSymbolToken = (w) => {
+    const segments = String(w).split(/[^A-Za-z]+/).filter(Boolean);
+    return segments.length > 0 && segments.every((seg) => /^[A-Z][a-z]?$/.test(seg));
+  };
+  const smartLower = (s) => String(s).split(/\s+/).map((w) => (
+    /\d/.test(w) || (w.length <= 3 && /^[A-Z]+$/.test(w)) || isSymbolToken(w) ? w : w.toLowerCase()
+  )).join(' ');
   const activeName = (p) => {
     const active = String(p.activeIngredient || '').replace(/\s*\d+(\.\d+)?\s*%.*$/, '').trim();
-    return active ? active.toLowerCase() : p.name;
+    return active ? smartLower(active) : p.name;
   };
+  // Every product applied the same way → say the method ONCE after the list.
+  // Four "(broadcast application)" parentheticals in one sentence read as
+  // machine output (owner 2026-08-04). Mixed methods keep the per-item tag.
+  const methodOf = (p) => METHOD_PHRASES[String(p.method || '').toLowerCase()] || null;
+  const sharedMethod = main.length > 1 && methodOf(main[0])
+    && main.every((p) => methodOf(p) === methodOf(main[0]))
+    ? methodOf(main[0]) : null;
   const names = main.map((p) => {
-    const method = METHOD_PHRASES[String(p.method || '').toLowerCase()] || null;
+    const method = sharedMethod ? null : methodOf(p);
     return `${activeName(p)}${method ? ` (${method})` : ''}`;
   });
-  const list = names.length === 1
+  const list = (names.length === 1
     ? names[0]
-    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+    : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`)
+    + (sharedMethod ? ` (all applied as a ${sharedMethod})` : '');
   const targets = [...new Set(
     main.flatMap((p) => (Array.isArray(p.targets) ? p.targets : []).map((t) => String(t || '').trim().toLowerCase()).filter(Boolean)),
   )].slice(0, 3);
