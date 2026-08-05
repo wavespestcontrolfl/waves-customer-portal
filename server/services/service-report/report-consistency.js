@@ -138,7 +138,7 @@ function reconcileRainFigure(text, canonicalRain) {
     // window with no true week/7-day window is skipped whole (codex P2
     // r20/r21).
     if (!/\bweek(?:ly)?\b|\b7[- ]days?\b|\b(?:past|last)\s+seven\b|\bseven\s+days\b/i.test(sentence)
-      && /\b(?:\d+[- ]?hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight|weekend|(?:past|last)\s+(?:two|three|four|five|six|couple(?:\s+of)?|few|[2-6])\s+days?)\b/i.test(sentence)) return sentence;
+      && /\b(?:\d+[- ]?hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight|weekend|\bmonth\b|(?:past|last|previous)\s+\d+\s+days?|since\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|the\s+\d+|\d)|(?:past|last)\s+(?:two|three|four|five|six|couple(?:\s+of)?|few|[2-6])\s+days?)\b/i.test(sentence)) return sentence;
     // A COMBINED rain+irrigation/total-water figure is not the rain total —
     // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
     // contradict the widget's Total row (codex P2 r5).
@@ -156,7 +156,7 @@ function reconcileRainFigure(text, canonicalRain) {
     // lookahead keeps prose like "2 in the morning" from reading as a unit.
     // The gap accepts a hyphen so adjectival totals ("The 2.72-inch rainfall
     // total") reconcile too (codex P2 r14).
-    return sentence.replace(/\b(\d+(?:\.\d+)?)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|")/gi, (match, value, gap, unit, offset) => {
+    return sentence.replace(/(?<![\d.])(\d+(?:\.\d+)?|\.\d+)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|")/gi, (match, value, gap, unit, offset) => {
       if (done) return match;
       const v = Number(value);
       if (!Number.isFinite(v)) return match;
@@ -192,8 +192,8 @@ function reconcileRainFigure(text, canonicalRain) {
       // ("…storm, totaling 2.72 inches") doesn't shield the weekly total,
       // and the day/storm cue can also FOLLOW the figure ("1.36 inches from
       // Wednesday's storm") — both skip without consuming (codex P2 r26).
-      if (/\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|yesterday|overnight|storm|downpour|one day|single day)\b[^.\d,;:]{0,16}$/i.test(before)) return match;
-      if (/^[^.;]{0,16}\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|yesterday|overnight|storm|downpour|today)\b/i.test(after)) return match;
+      if (/\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|weekend|yesterday|overnight|storm|downpour|one day|single day)\b[^.\d,;:]{0,16}$/i.test(before)) return match;
+      if (/^[^.;]{0,16}\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|weekend|yesterday|overnight|storm|downpour|today)\b/i.test(after)) return match;
       // A figure attached to a PRIOR week is history, not the current total —
       // "Last week rainfall totaled 1.2 inches, while this week…" keeps the
       // historical amount while the current figure still reconciles. Clause-
@@ -254,7 +254,7 @@ function reconcileRainFigure(text, canonicalRain) {
       // The after-guard also allows an explicit target FIGURE between the
       // delta preposition and the target word — "1.97 inches above the
       // 0.75-inch target" is a delta, not the weekly total (codex P2 r16).
-      if (new RegExp(`\\b${TARGET_WORD}\\b[^.\\d,;:]{0,12}$`, 'i').test(before)
+      if (new RegExp(`\\b${TARGET_WORD}\\b(?!\\s+(?:and|plus|&)\\b)[^.\\d,;:]{0,12}$`, 'i').test(before)
         || new RegExp(`^\\s*(?:(?:over|above|below|under|past|beyond|short\\s+of)\\s+)?(?:the\\s+)?(?:\\d+(?:\\.\\d+)?[\\s-]*(?:inch(?:es)?|in\\.?|")\\s*)?(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
       // The sentence already quotes the canonical figure → it agrees with the
       // widget; stop scanning so a later, different number (e.g. the target)
@@ -312,7 +312,7 @@ const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bpos
 // An UNRESOLVED tail also marks a hypothesis — "cannot be ruled out",
 // "remains possible" assert the dry condition is still on the table
 // (codex P2 r23).
-const UNRESOLVED_TAIL_RE = /\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b|\b(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}ruled\s+out\b|\b(?:remains?|is|are|stays?)\s+(?:still\s+|a\s+)?possib/i;
+const UNRESOLVED_TAIL_RE = /\b(?:can(?:not|['’]t)|can\s+not|could(?:n['’]t|\s+not)|won['’]t|will\s+not|would(?:n['’]t|\s+not))\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b|\b(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}ruled\s+out\b|\b(?:remains?|is|are|stays?)\s+(?:still\s+|a\s+)?possib/i;
 
 function replaceDroughtHypothesis(text) {
   const t = String(text || '');
@@ -440,7 +440,7 @@ function replaceDroughtHypothesis(text) {
       // …and plain "is/was/has not (been) ruled out" is unresolved just like
       // "cannot be ruled out" (codex P2 r25).
       const tail = sentence.slice(offset + m.length);
-      const negatedDismissal = /^[^.;,:]{0,30}\b(?:(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}|(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}|not\s+(?:yet\s+)?)ruled\s+out\b/i.test(tail);
+      const negatedDismissal = /^[^.;,:]{0,30}\b(?:(?:can(?:not|['’]t)|can\s+not|could(?:n['’]t|\s+not)|won['’]t|will\s+not|would(?:n['’]t|\s+not))\s+(?:[a-z'’-]+\s+){0,3}|(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}|not\s+(?:yet\s+)?)ruled\s+out\b/i.test(tail);
       if (!negatedDismissal
         && /^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never|unlikely|less\s+likely|ruled\s+out|doubtful|improbable)\b/i.test(tail)) return m;
       // Adjectival forms — hyphenated or space-form "drought stressed"
@@ -450,7 +450,8 @@ function replaceDroughtHypothesis(text) {
       if (/drought(?:[- ]stress)?[- ]related\b/i.test(m)
         || /drought[- ]stressed\b/i.test(m)
         || /drought-stress\b/i.test(m)
-        || (/drought[- ]stress$/i.test(m) && /^\s*(?:symptoms?|signs?|related)\b/i.test(tail))) {
+        || (/drought[- ]stress$/i.test(m) && /^\s*(?:symptoms?|signs?|related)\b/i.test(tail))
+        || (/^(?:localized\s+|an?\s+)?drought$/i.test(m) && /^\s*(?:pressure|symptoms?|signs?|issues?|concerns?|risks?|effects?|impact)\b/i.test(tail))) {
         return /^[A-Z]/.test(m) ? 'Sprinkler-coverage-related' : 'sprinkler-coverage-related';
       }
       // A PLURAL verb right after the phrase gets a plural-compatible

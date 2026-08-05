@@ -124,6 +124,31 @@ describe('reconcileRainFigure', () => {
     )).toBe('Last week rainfall totaled 1.2 inches while this week rainfall totaled 2.96 inches.');
   });
 
+  test('a weekend amount inside a weekly comparison is skipped (codex P2 r28)', () => {
+    expect(reconcileRainFigure(
+      'Rainfall totaled 1.2 inches last weekend, while rain totaled 2.72 inches this week.',
+      2.96,
+    )).toBe('Rainfall totaled 1.2 inches last weekend, while rain totaled 2.96 inches this week.');
+  });
+
+  test('explicit non-week windows are never rewritten (codex P2 r28)', () => {
+    expect(reconcileRainFigure('Rainfall totaled 4.2 inches over the past 14 days.', 2.96)).toBeNull();
+    expect(reconcileRainFigure('Rainfall totaled 6.1 inches this month.', 2.96)).toBeNull();
+    expect(reconcileRainFigure('Rainfall totaled 9.4 inches since July 1.', 2.96)).toBeNull();
+  });
+
+  test('a leading-dot rain amount rewrites as one value (codex P2 r28)', () => {
+    expect(reconcileRainFigure('Rain totaled .72 inches this week.', 2.96))
+      .toBe('Rain totaled 2.96 inches this week.');
+  });
+
+  test('a stale total after a target-and list still reconciles (codex P2 r28)', () => {
+    expect(reconcileRainFigure(
+      'Rain this week brought the 0.75 inches target and 2.72 inches total.',
+      2.96,
+    )).toBe('Rain this week brought the 0.75 inches target and 2.96 inches total.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -438,6 +463,16 @@ describe('replaceDroughtHypothesis', () => {
 
   test('improving dry pockets are historical, not hypotheses (codex P2 r25)', () => {
     expect(replaceDroughtHypothesis('Dry pockets have improved after this week’s rain.')).toBeNull();
+  });
+
+  test('expanded "could not be ruled out" is unresolved and reconciles (codex P2 r28)', () => {
+    expect(replaceDroughtHypothesis('Drought stress could not be ruled out in the thin patches.'))
+      .toBe('Uneven sprinkler coverage could not be ruled out in the thin patches.');
+  });
+
+  test('bare "drought" before a stress noun reads adjectivally (codex P2 r28)', () => {
+    expect(replaceDroughtHypothesis('Drought pressure may be contributing to thinning.'))
+      .toBe('Sprinkler-coverage-related pressure may be contributing to thinning.');
   });
 
   test('"not ruled out" is unresolved and still reconciles (codex P2 r25)', () => {
