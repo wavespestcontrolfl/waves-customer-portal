@@ -93,14 +93,33 @@ describe('composeTurfVarianceDigest', () => {
 describe('runTurfVarianceDigest', () => {
   const hotRows = [row(-20), row(-25), row(-30)];
 
-  test('sends the ACT email to the internal default recipient', async () => {
-    const result = await runTurfVarianceDigest({ loadRows: async () => hotRows });
+  test('sends the ACT email to the internal default recipient and stamps the durable send marker', async () => {
+    const stampSendMarker = jest.fn();
+    const result = await runTurfVarianceDigest({ loadRows: async () => hotRows, stampSendMarker });
     expect(result.sent).toBe(true);
     expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     const args = sendgrid.sendOne.mock.calls[0][0];
     expect(args.to).toBe('contact@wavespestcontrol.com');
     expect(args.subject).toMatch(/^ACT: /);
     expect(args.categories).toEqual(['ops', 'turf-variance']);
+    expect(stampSendMarker).toHaveBeenCalledTimes(1);
+  });
+
+  test('a recent durable send marker skips everything — deploy-overlap double-send guard (codex P1)', async () => {
+    const loadRows = jest.fn();
+    const result = await runTurfVarianceDigest({ loadRows, sentRecently: async () => true });
+    expect(result.skipped).toBe('recent_send');
+    expect(loadRows).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('the marker is NOT stamped when the send fails or is skipped', async () => {
+    const stampSendMarker = jest.fn();
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('nope'), { status: 500 }));
+    await runTurfVarianceDigest({ loadRows: async () => hotRows, stampSendMarker });
+    process.env.TURF_VARIANCE_DIGEST_DISABLED = '1';
+    await runTurfVarianceDigest({ loadRows: async () => hotRows, stampSendMarker });
+    expect(stampSendMarker).not.toHaveBeenCalled();
   });
 
   test('quiet window sends nothing', async () => {

@@ -819,6 +819,12 @@ function initScheduledJobs() {
         const { runTurfVarianceDigest } = require('./turf-variance-digest');
         const result = await runTurfVarianceDigest();
         logger.info(`[turf-variance] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, avg: result.avgDeltaPct ?? null, samples: result.samples ?? null })}`);
+        // A swallowed query/send failure must still read as a FAILED run in
+        // job_health (codex #3230 P2) — rethrow so runExclusive records it
+        // and the outer handler logs the failure.
+        if (result?.skipped === 'query_failed' || result?.error) {
+          throw new Error(`turf variance digest did not complete (${result.skipped || 'send_failed'})`);
+        }
       });
     } catch (err) {
       logger.error(`Weekly turf variance digest failed: ${err.message}`);

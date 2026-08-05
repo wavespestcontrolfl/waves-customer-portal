@@ -80,6 +80,39 @@ function jsonField(value, key) {
   return value[key];
 }
 
+// Durable weekly-send guard (codex #3230 P1): the advisory lock only
+// serializes CONCURRENT ticks — during a deploy overlap the second instance
+// can enter after the first released the lock and double-send. The marker is
+// a synthetic job_health row (generic one-row-per-name ledger, no new
+// table): last_success_at stamps only when an email actually left. Read
+// failure sends anyway (availability over dedupe — a rare double beats a
+// silently skipped week); write failure risks one duplicate next tick and
+// is logged.
+const SEND_MARKER_JOB = 'turf-variance-digest-send';
+const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
+
+async function sentRecently() {
+  try {
+    const row = await db('job_health').where({ job_name: SEND_MARKER_JOB }).first('last_success_at');
+    return Boolean(row?.last_success_at && (Date.now() - new Date(row.last_success_at).getTime()) < SIX_DAYS_MS);
+  } catch (err) {
+    logger.warn(`[turf-variance] send-marker read failed (${err.message}) — proceeding without the guard`);
+    return false;
+  }
+}
+
+async function stampSendMarker() {
+  try {
+    const now = new Date();
+    await db('job_health')
+      .insert({ job_name: SEND_MARKER_JOB, last_started_at: now, last_finished_at: now, last_success_at: now, last_status: 'success', updated_at: now })
+      .onConflict('job_name')
+      .merge({ last_finished_at: now, last_success_at: now, last_status: 'success', updated_at: now });
+  } catch (err) {
+    logger.warn(`[turf-variance] send-marker write failed (${err.message}) — next tick may re-send`);
+  }
+}
+
 // Pure composition: null = nothing worth an email (the common, quiet case).
 function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFloor = minSamples() } = {}) {
   const samples = (rows || []).filter((row) => Number.isFinite(Number(row.turf_delta_pct)));
@@ -123,6 +156,8 @@ function composeTurfVarianceDigest(rows, { thresholdPct = alertPct(), samplesFlo
 }
 
 async function runTurfVarianceDigest(opts = {}) {
+  if (await (opts.sentRecently || sentRecently)()) return { skipped: 'recent_send' };
+
   let rows;
   try {
     rows = await (opts.loadRows || loadTurfWindow)();
@@ -168,6 +203,7 @@ async function runTurfVarianceDigest(opts = {}) {
     logger.error(`[turf-variance] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
     return { sent: false, error: true, ...composed };
   }
+  await (opts.stampSendMarker || stampSendMarker)();
   logger.info(`[turf-variance] sent: avg ${composed.avgDeltaPct}% over ${composed.samples} services`);
   return { sent: true, ...composed };
 }

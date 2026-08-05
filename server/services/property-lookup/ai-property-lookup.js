@@ -2157,7 +2157,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
 // per-county gates.
 const COUNTY_ADDRESS_SEARCHERS = {
   Manatee: (address, timeoutMs) => searchManateeParcel(address, timeoutMs),
-  Sarasota: (address, timeoutMs) => searchSarasotaParcel(address, timeoutMs),
+  Sarasota: (address, timeoutMs) => searchSarasotaParcel(address, timeoutMs, Date.now(), { searchOnly: true }),
   Charlotte: (address, timeoutMs) => searchCharlotteParcel(address, timeoutMs),
   Hillsborough: (address, timeoutMs) => searchHillsboroughParcel(address, timeoutMs),
 };
@@ -2219,7 +2219,13 @@ async function fetchManateePaoJson(url, timeoutMs, init = {}) {
   }
 }
 
-async function searchSarasotaParcel(address, timeoutMs, startedAt = Date.now()) {
+// opts.searchOnly (canary): return the validated search match as soon as it
+// carries a parcelId, WITHOUT the follow-up detail-page request — the canary
+// advertises a search-half-only probe, and the detail fetch would both
+// double county traffic and misclassify a detail timeout as an
+// address-search failure (codex #3230 P2). Production lookups keep the
+// detail leg: fetchSarasotaParcelDetails consumes the html it returns.
+async function searchSarasotaParcel(address, timeoutMs, startedAt = Date.now(), opts = {}) {
   const candidates = countyAddressSearchCandidates(address);
   for (const candidate of candidates) {
     const requestTimeoutMs = remainingCountyLookupMs(startedAt, timeoutMs);
@@ -2241,6 +2247,7 @@ async function searchSarasotaParcel(address, timeoutMs, startedAt = Date.now()) 
     });
     const match = pickSarasotaSearchResult(response.text, address, response.url);
     if (!match?.parcelId) continue;
+    if (opts.searchOnly) return match;
 
     let detailHtml = response.text;
     if (!/Property Record Information/i.test(detailHtml)) {
@@ -5021,6 +5028,7 @@ module.exports = {
     dorUcPropertyType,
     fetchManateeParcelDetails,
     fetchSarasotaParcelDetails,
+    searchSarasotaParcel,
     fetchCharlotteParcelDetails,
     fetchHillsboroughParcelDetails,
     geoOpensCountyGate,
