@@ -197,6 +197,23 @@ describe('reconcileRainFigure', () => {
     expect(reconcileRainFigure('Rainfall was between one and two inches this week.', 2.96)).toBeNull();
   });
 
+  test('temporal deltas without "by" are preserved (codex P2 r31)', () => {
+    expect(reconcileRainFigure(
+      'Rainfall rose 1 inch this week to a total of 2.72 inches.',
+      2.96,
+    )).toBe('Rainfall rose 1 inch this week to a total of 2.96 inches.');
+    expect(reconcileRainFigure(
+      'Rainfall was 1 inch higher this week, totaling 2.72 inches.',
+      2.96,
+    )).toBe('Rainfall was 1 inch higher this week, totaling 2.96 inches.');
+    // "rose to <total>" is the total itself, not a delta.
+    expect(reconcileRainFigure('Rainfall rose to 2.72 inches this week.', 2.96))
+      .toBe('Rainfall rose to 2.96 inches this week.');
+    // "N inches of rain fell" states the total that fell, not a decrease.
+    expect(reconcileRainFigure('This week 2.72 inches of rain fell across the area.', 2.96))
+      .toBe('This week 2.96 inches of rain fell across the area.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -549,6 +566,12 @@ describe('replaceDroughtHypothesis', () => {
     // A modal keeps the hypothesis reading — "may be present" still reconciles.
     expect(replaceDroughtHypothesis('Drought stress may be present in the thin areas.'))
       .toBe('Uneven sprinkler coverage may be present in the thin areas.');
+  });
+
+  test('an observed clause does not shield a later hypothesis clause (codex P2 r31)', () => {
+    expect(replaceDroughtHypothesis(
+      'Dry spots were observed near the curb, but dry conditions may be contributing to thinning elsewhere.',
+    )).toBe('Dry spots were observed near the curb, but uneven sprinkler coverage may be contributing to thinning elsewhere.');
   });
 
   test('"not ruled out" is unresolved and still reconciles (codex P2 r25)', () => {

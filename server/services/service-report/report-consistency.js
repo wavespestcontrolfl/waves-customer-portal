@@ -83,12 +83,17 @@ const REENTRY_REWRITES = {
     // adjective ("are fine" read as a safety assurance the label never
     // makes — owner compliance pass 2026-08-04), carrying the required
     // once-dry + technician-confirms-timing idiom (AGENTS.md compliance
-    // language; codex P1 #3197 r16).
-    dried: 'Treated turf has dried per the re-entry timing your technician confirmed — pets and family can use the lawn again.',
+    // language; codex P1 #3197 r16). CONDITIONAL, never an assertion: the
+    // readiness gate is a configured-duration timer (reentry.js), and no
+    // technician-confirmation or observed-dryness field is persisted, so
+    // "has dried per the timing your technician confirmed" claimed a
+    // confirmation that never happened (codex P1 r31). "Once … has dried"
+    // keeps the actual gate on observed dryness.
+    dried: 'Once treated turf has dried per the re-entry timing your technician confirms, pets and family can use the lawn again.',
     untilDry: 'Keep pets and family off treated turf until it dries.',
   },
   tree_shrub: {
-    dried: 'Treated beds and foliage have dried per the re-entry timing your technician confirmed — pets and family can be around them again.',
+    dried: 'Once treated beds and foliage have dried per the re-entry timing your technician confirms, pets and family can be around them again.',
     untilDry: 'Keep pets and family off treated beds and foliage until they dry.',
   },
 };
@@ -250,8 +255,17 @@ function reconcileRainFigure(text, canonicalRain) {
       // A week-over-week CHANGE is a delta, not the total — "Rainfall
       // increased by 1 inch this week to a total of 2.72 inches" must keep
       // the change amount and let the later total reconcile (codex P2 r30).
-      // Skipped without consuming the attempt.
-      if (/\b(?:increased?|increasing|ros[e]|risen|rising|climbed|jumped|grew|grown|dropped|fell|fallen|decreased?|(?:was|were|is|are)\s+(?:up|down))\s+(?:[a-z'’-]+\s+){0,2}by\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+|almost\s+)?$/i.test(before)) return match;
+      // The "by" is optional when the change verb directly precedes the
+      // figure ("Rainfall rose 1 inch this week to a total of…"), and a
+      // COMPARATIVE right after the figure ("was 1 inch higher this week")
+      // is the same delta from the other side (codex P2 r31). None of these
+      // skips consumes the attempt. "rose to 2.72 inches" stays eligible —
+      // "to" fits neither the direct-adjacency nor the by-form branch —
+      // and fell/fallen stay by-form-only: "Rainfall fell 2.72 inches this
+      // week" states the total that fell, not a decrease.
+      if (/\b(?:increased?|increasing|rose|risen|rising|climbed|jumped|grew|grown|dropped|fell|fallen|decreased?|(?:was|were|is|are)\s+(?:up|down))\s+(?:[a-z'’-]+\s+){0,2}by\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+|almost\s+)?$/i.test(before)) return match;
+      if (/\b(?:increased?|increasing|rose|risen|rising|climbed|jumped|grew|grown|dropped|decreased?|(?:was|were|is|are)\s+(?:up|down))\s+(?:just\s+|about\s+|around\s+|roughly\s+|nearly\s+|almost\s+)?$/i.test(before)) return match;
+      if (/^\s*(?:higher|lower|greater|less|more|fewer)\b/i.test(after)) return match;
       // A per-day AVERAGE is not the weekly total either — "Average daily
       // rainfall this week was 0.4 inches" / "averaged 0.4 inches per day"
       // must keep the average and let a later weekly figure reconcile
@@ -476,21 +490,26 @@ function replaceDroughtHypothesis(text) {
       const atClauseStart = atSentenceStart || /^\s*(?:but|and|while|though|however|yet|so)?\s*$/i.test(clauseLead);
       const tailClause = sentence.slice(offset + m.length).split(/[,;:.]/)[0];
       const cueAfter = HYPOTHESIS_CUE_RE.test(tailClause) || UNRESOLVED_TAIL_RE.test(tailClause);
+      // Observation vetoes read the MATCHED CLAUSE, not the whole sentence —
+      // "Dry spots were observed near the curb, but dry conditions may be
+      // contributing to thinning elsewhere" keeps the observed first clause
+      // while the later live hypothesis still reconciles (codex P2 r31).
+      const clauseOfMatch = `${clauseLead}${m}${tailClause}`;
       if (/dry\s+(?:patch|spots?|areas?|conditions?)|drought\s+conditions?/i.test(m) && !cueBefore(offset)) {
-        const wasObserved = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence);
+        const wasObserved = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(clauseOfMatch);
         if (wasObserved || !atClauseStart || !cueAfter) return m;
       }
       // dry pocket/spell: a hypothesis under a cue, a terse headline
       // ("Dry pocket near the sidewalk"), or a clause-leading phrase with a
-      // cue after it — but never an OBSERVATION sentence ("Dry pockets were
+      // cue after it — but never an OBSERVATION clause ("Dry pockets were
       // noted in thin turf", codex P2 r10): observation verbs veto both
-      // paths.
+      // paths, clause-scoped like the gate above (codex P2 r31).
       if (/dry\s+(?:pockets?|spells?)/i.test(m) && !cueBefore(offset)) {
         // Resolved/past wording is historical, not a live hypothesis —
         // "Dry spell ended after this week's heavy rain" / "Dry pockets have
         // improved after this week's rain" must not become coverage copy
         // (codex P2 r20/r25).
-        const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing|ended|passed|resolved|subsided|broke|eased|improv(?:ed|ing)|recover(?:ed|ing)?)\b/i.test(sentence);
+        const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing|ended|passed|resolved|subsided|broke|eased|improv(?:ed|ing)|recover(?:ed|ing)?)\b/i.test(clauseOfMatch);
         if (observed) return m;
         if (!atSentenceStart && !(atClauseStart && cueAfter)) return m;
       }

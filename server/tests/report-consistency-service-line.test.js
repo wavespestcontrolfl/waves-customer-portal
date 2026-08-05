@@ -35,7 +35,7 @@ describe('reconcileLawnReport — tree_shrub', () => {
     const fix = reconcileLawnReport({ ...reportInput({ allReady: true }), serviceLine: 'tree_shrub' });
     expect(fix.reentry).toBeTruthy();
     expect(fix.reentry.status).toBe('Ready now');
-    expect(fix.reentry.petAdvisory).toBe('Treated beds and foliage have dried per the re-entry timing your technician confirmed — pets and family can be around them again.');
+    expect(fix.reentry.petAdvisory).toBe('Once treated beds and foliage have dried per the re-entry timing your technician confirms, pets and family can be around them again.');
     expect(/turf/i.test(fix.reentry.petAdvisory)).toBe(false);
   });
 
@@ -68,7 +68,7 @@ describe('reconcileLawnReport — lawn (unchanged full pass)', () => {
     const fix = reconcileLawnReport(reportInput({ allReady: true }));
     // Dried wording drops the "are fine" safety assurance (owner 2026-08-04)
     // and carries the technician-confirmed-timing idiom (codex P1 r16).
-    expect(fix.reentry.petAdvisory).toBe('Treated turf has dried per the re-entry timing your technician confirmed — pets and family can use the lawn again.');
+    expect(fix.reentry.petAdvisory).toBe('Once treated turf has dried per the re-entry timing your technician confirms, pets and family can use the lawn again.');
     expect(fix.followUp).toBeTruthy();
     // The hero line states only today's outcome — the follow-up promise
     // lives on the followUp card alone (owner directive 2026-08-03), and the
