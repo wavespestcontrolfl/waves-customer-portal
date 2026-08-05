@@ -910,7 +910,9 @@ function paragraphAround(body, index) {
 }
 
 function paragraphHasLink(paragraph) {
-  return /\[[^\]\n]+\]\(\s*[^)]+\)/.test(paragraph) || /<a\b[^>]*\bhref\s*=/i.test(paragraph);
+  // Delegates to the planner's implementation — the planner applies the same
+  // check before its cap so it never plans a task this gate would skip.
+  return planner._internals.paragraphHasLink(paragraph);
 }
 
 function countInternalLinks(body) {

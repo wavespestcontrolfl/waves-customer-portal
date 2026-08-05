@@ -271,6 +271,16 @@ function paragraphAround(body, index) {
   return text.slice(start, end).trim();
 }
 
+/**
+ * Same check the executor's gate applies before patching (it delegates
+ * here): a paragraph that already carries a link is not a valid placement.
+ * The planner must apply it BEFORE the site-wide cap or such matches burn
+ * cap slots and then all skip as paragraph_already_has_link.
+ */
+function paragraphHasLink(paragraph) {
+  return /\[[^\]\n]+\]\(\s*[^)]+\)/.test(paragraph) || /<a\b[^>]*\bhref\s*=/i.test(paragraph);
+}
+
 function snippetAround(text, start, length, padding = 50) {
   const s = Math.max(0, start - padding);
   const e = Math.min(text.length, start + length + padding);
@@ -410,12 +420,18 @@ class InternalLinkPlanner {
         if ((perFileCount.get(page.file) || 0) >= perPageCap) break;
         const occ = findFirstUnlinkedOccurrence(page.body, phrase);
         if (!occ) continue;
+        // The executor re-locates each phrase's FIRST occurrence and skips
+        // when its paragraph already has a link — a match it would reject
+        // must not be planned (it would burn a cap slot), but another
+        // candidate phrase may land in a clean paragraph, so keep trying.
+        const paragraph = paragraphAround(page.body, occ.index);
+        if (paragraphHasLink(paragraph)) continue;
         // Preserve the original casing from the matched text rather
         // than the candidate phrase.
         const actualAnchor = page.body.slice(occ.index, occ.index + occ.length);
         matches.push({
           priority,
-          relevance: planTimeRelevance(page, target, targetFront, paragraphAround(page.body, occ.index)),
+          relevance: planTimeRelevance(page, target, targetFront, paragraph),
           task: {
             source_file: page.file,
             target_url: targetPath,
@@ -619,6 +635,7 @@ module.exports._internals = {
   isInsideLink,
   snippetAround,
   paragraphAround,
+  paragraphHasLink,
   pageAlreadyLinksTo,
   sourceRendersOffHub,
   canonicalPointsOffHub,

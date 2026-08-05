@@ -585,6 +585,40 @@ describe('planForTarget', () => {
     expect(tasks.map((t) => t.source_file)).toContain('src/content/blog/bed-bug-signs.md');
     expect(tasks[0].source_file).toBe('src/content/blog/bed-bug-signs.md');
   });
+  test('never plans a match whose paragraph already has a link (executor would skip it)', () => {
+    const linked = {
+      file: 'src/content/blog/linked-paragraph.md',
+      body: [
+        '---',
+        'title: Bed Bug Basics',
+        'category: pest-control',
+        'primary_keyword: bed bug basics',
+        '---',
+        'If you notice bed bug bites, see [our prevention guide](/pest-control/bed-bug-prevention/) for next steps.',
+      ].join('\n'),
+      url: '/blog/linked-paragraph/',
+    };
+    const clean = {
+      file: 'src/content/blog/clean-paragraph.md',
+      body: [
+        '---',
+        'title: Overnight Itching Causes',
+        'category: pest-control',
+        'primary_keyword: overnight itching',
+        '---',
+        'Bed bug bites that appear overnight are worth a closer look.',
+      ].join('\n'),
+      url: '/blog/clean-paragraph/',
+    };
+    // cap=1: without the plan-time paragraph check, the linked page's higher
+    // token overlap could take the only slot and then skip at execution.
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [linked, clean], cap: 1 }
+    );
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/clean-paragraph.md');
+  });
   test('uses service alias anchors instead of partial service fragments', () => {
     const tasks = planner.planForTarget({
       url: '/pest-control-bradenton-fl/',
