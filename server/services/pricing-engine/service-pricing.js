@@ -1671,6 +1671,7 @@ function pricePestInitialRoach(property, options = {}) {
     standalone = false,
     autoFiredFromRecurringPest = false,
     source,
+    priceOverride,
   } = options;
   const roachMeta = normalizeRoachType(requestedRoachTypeInput);
   const severityMeta = normalizeRoachSeverity(requestedSeverityInput);
@@ -1685,7 +1686,18 @@ function pricePestInitialRoach(property, options = {}) {
   if (!Array.isArray(scale) || scale.length === 0) return null;
   const footprint = footprintResolution.footprint;
   const bracket = scale.find((b) => footprint < b.sqft) || scale[scale.length - 1];
-  const price = bracket.price;
+  const bracketPrice = bracket.price;
+
+  // Per-estimate operator override. The bracket price stays on the result
+  // (`bracketPrice`) so the audit trail shows what the engine would have
+  // charged. A present-but-invalid override must not silently fall back to
+  // the bracket price — surface it so the operator sees the number they
+  // typed was not applied.
+  const overrideProvided = priceOverride !== undefined && priceOverride !== null
+    && String(priceOverride).trim() !== '';
+  const overrideValue = overrideProvided ? Number(priceOverride) : NaN;
+  const overrideValid = Number.isFinite(overrideValue) && overrideValue > 0;
+  const price = overrideValid ? roundMoney(overrideValue) : bracketPrice;
 
   // Cost detail mirrors pricePestControl's costing block so the margin
   // panel can reason about the fee. Visit-1 burden estimate: heavier
@@ -1710,6 +1722,9 @@ function pricePestInitialRoach(property, options = {}) {
     ...(severityMeta.severity === 'severe' && isGerman
       ? ['Severe German roach activity should use German Roach Cleanout, not only the one-time German Cockroach Treatment.']
       : []),
+    ...(overrideProvided && !overrideValid
+      ? ['Ignoring invalid initial roach fee override — the bracket price applies. Enter a positive dollar amount to override.']
+      : []),
   ]);
   // Customer-facing name + treatment-visit count come from the admin-editable
   // display config (pest_base.initial_roach.display via db-bridge). Owner
@@ -1733,6 +1748,8 @@ function pricePestInitialRoach(property, options = {}) {
     detail: `${baseDetail} ${treatmentsNote}`,
     treatments,
     price,
+    bracketPrice,
+    priceOverridden: overrideValid,
     requestedRoachType: roachMeta.requestedRoachType,
     roachType,
     roachTypeWasDefaulted: roachMeta.roachTypeWasDefaulted,

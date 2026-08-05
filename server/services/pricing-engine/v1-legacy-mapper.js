@@ -214,6 +214,8 @@ function measurementMetadataFields(li = {}) {
     'requestedRoachType',
     'roachType',
     'roachTypeWasDefaulted',
+    'bracketPrice',
+    'priceOverridden',
     'severity',
     'severitySource',
     'pricingModel',

@@ -1351,6 +1351,26 @@ function previewLineAmount(price) {
   return price < 0 ? `-${fmtInt(Math.abs(price))}` : fmtInt(price);
 }
 
+// Operator-only confirmation that the generated estimate priced the
+// pest_initial_roach line from the typed override rather than the bracket.
+// Lives next to the override input — the customer-preview fee card is a 1:1
+// replica of the customer page and must not grow internal annotations.
+function RoachOverrideAppliedNote({ estimate }) {
+  const item = (estimate?.oneTime?.items || []).find(
+    (it) => it.service === "pest_initial_roach",
+  );
+  if (!item || !item.priceOverridden) return null;
+  return (
+    <div className="text-11 text-ink-secondary mt-1">
+      Override applied: {fmtInt(item.price)} on the generated estimate
+      {Number.isFinite(Number(item.bracketPrice))
+        ? ` (engine bracket price ${fmtInt(item.bracketPrice)})`
+        : ""}
+      .
+    </div>
+  );
+}
+
 function termiteInstallPreviewRow(E) {
   const price = Number(E?.oneTime?.tmInstall || 0);
   if (!Number.isFinite(price) || price <= 0) return null;
@@ -2115,6 +2135,7 @@ export default function EstimateToolViewV2({
     palmLicensedApplicator: false,
     treeCount: "",
     roachModifier: "NONE",
+    roachFeeOverride: "",
     lawnFreq: "9",
     measuredTurfSf: "",
     pestFreq: "4",
@@ -3687,6 +3708,23 @@ export default function EstimateToolViewV2({
         }
       }
 
+      // Per-estimate override for the one-time pest_initial_roach fee
+      // (recurring-pest auto-fire or standalone native). A filled-but-invalid
+      // entry fails loudly — silently dropping it would regenerate at the
+      // bracket price with no notice (same class as the manual-discount
+      // silent-drop guard above).
+      const roachFeeOverrideRaw = String(form.roachFeeOverride ?? "").trim();
+      const roachFeeOverride = parsePositiveNumber(form.roachFeeOverride);
+      const roachFeeOverrideRelevant =
+        (form.svcPest && form.roachModifier && form.roachModifier !== "NONE") ||
+        (form.svcRoach && form.roachType === "REGULAR");
+      if (roachFeeOverrideRelevant && roachFeeOverrideRaw && !roachFeeOverride) {
+        alert(
+          "Roach one-time fee override must be a positive dollar amount — leave it blank to use the engine price.",
+        );
+        return null;
+      }
+
       const options = {
         grassType: form.grassType || "st_augustine",
         lawnFreq: parseInt(overrides.lawnFreq ?? form.lawnFreq, 10) || 9,
@@ -3695,6 +3733,9 @@ export default function EstimateToolViewV2({
         serviceSpecificDiscounts,
         roachModifier: form.roachModifier || "NONE",
         recurringRoachType: form.roachModifier || "NONE",
+        ...(roachFeeOverrideRelevant && roachFeeOverride
+          ? { initialRoachPriceOverride: roachFeeOverride }
+          : {}),
         mosquitoProgram: form.mosquitoProgram || "monthly12",
         mosquitoStationCount: parseInt(form.mosquitoStationCount, 10) || 0,
         mosquitoDunkCount: parseInt(form.mosquitoDunkCount, 10) || 0,
@@ -5727,8 +5768,25 @@ export default function EstimateToolViewV2({
                       />
                     </FieldV2>{" "}
                   </div>{" "}
+                  {form.roachModifier && form.roachModifier !== "NONE" && (
+                    <>
+                      <div className="grid grid-cols-2 gap-3 mt-2">
+                        <FieldV2 label="One-Time Fee Override ($)">
+                          <InputV2
+                            k="roachFeeOverride"
+                            type="number"
+                            placeholder="Engine price"
+                          />
+                        </FieldV2>
+                      </div>
+                      <RoachOverrideAppliedNote estimate={estimate} />
+                    </>
+                  )}
                   <div className="text-11 text-ink-secondary mt-2">
                     Adds a one-time Cockroach Treatment line to recurring pest. This is not a recurring per-visit multiplier.
+                    {form.roachModifier && form.roachModifier !== "NONE"
+                      ? " Leave the override blank to use the engine's footprint-bracket price."
+                      : ""}
                   </div>
                 </div>
               )}
@@ -6722,6 +6780,21 @@ export default function EstimateToolViewV2({
                     <div className="text-11 text-ink-secondary mt-2">
                       German Roach Cleanout is a separate specialty program, not the German version of native cockroach treatment.
                     </div>
+                  )}
+                  {form.roachType === "REGULAR" && (
+                    <>
+                      <FieldV2 label="Fee Override ($)" className="mb-0 mt-2">
+                        <InputV2
+                          k="roachFeeOverride"
+                          type="number"
+                          placeholder="Engine price"
+                        />
+                      </FieldV2>
+                      <div className="text-11 text-ink-secondary mt-2">
+                        Leave blank to use the engine's footprint-bracket price.
+                      </div>
+                      <RoachOverrideAppliedNote estimate={estimate} />
+                    </>
                   )}
                 </div>
               )}
@@ -8341,6 +8414,13 @@ export default function EstimateToolViewV2({
                                   price={fmtInt(item.price)}
                                 />{" "}
                               </TierGridV2>{" "}
+                              {item.service === "pest_initial_roach" &&
+                                item.priceOverridden && (
+                                  <div className="text-11 text-ink-secondary mt-1">
+                                    Fee manually overridden — engine bracket
+                                    price is {fmtInt(item.bracketPrice)}.
+                                  </div>
+                                )}
                             </div>
                           );
                         })}

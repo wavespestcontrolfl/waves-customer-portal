@@ -3016,6 +3016,13 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   if (recurringRoachMeta.roachWarnings.length) {
     pricingMetadata.warnings.push(...recurringRoachMeta.roachWarnings);
   }
+  // Per-estimate operator override for the pest_initial_roach fee (auto-fired
+  // or standalone). Forwarded raw whenever present so the engine's own
+  // validation runs — a present-but-invalid entry surfaces as an engine
+  // warning instead of being silently dropped here.
+  const initialRoachOverrideProvided = o.initialRoachPriceOverride !== undefined
+    && o.initialRoachPriceOverride !== null
+    && String(o.initialRoachPriceOverride).trim() !== '';
 
   // Recurring
   if (sel.has('PEST')) {
@@ -3024,6 +3031,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
       roachType,
       ...(o.recurringRoachSeverity || o.roachSeverity
         ? { roachSeverity: o.recurringRoachSeverity || o.roachSeverity, severitySource: 'admin' }
+        : {}),
+      ...(initialRoachOverrideProvided
+        ? { initialRoachPriceOverride: o.initialRoachPriceOverride }
         : {}),
       ...(commercialProfile && o.commercialPricingMode
         ? { commercialPricingMode: o.commercialPricingMode }
@@ -3275,6 +3285,9 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         source: 'standalone_native_cockroach_treatment',
         ...(o.standaloneRoachSeverity || o.roachSeverity
           ? { severity: o.standaloneRoachSeverity || o.roachSeverity, severitySource: 'admin' }
+          : {}),
+        ...(initialRoachOverrideProvided
+          ? { priceOverride: o.initialRoachPriceOverride }
           : {}),
       };
     }
