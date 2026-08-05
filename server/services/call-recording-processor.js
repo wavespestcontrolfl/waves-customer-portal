@@ -8943,16 +8943,26 @@ const CallRecordingProcessor = {
                 // AFTER the replay/attach lookups (codex #3222 r2 — mirrors
                 // createSelfBooking's lock → replay → dedupe order, so a
                 // reprocessed call reuses its own booking instead of seeing
-                // it as "already booked"). A hit aborts into the schedErr
-                // hold-for-review path (no booking, no SMS, the office books
-                // manually or hands over the existing visit's reschedule
-                // link). A failed check aborts too — fail closed, never a
-                // possibly-duplicate free visit.
+                // it as "already booked"). A hit holds for human review via
+                // the __held return — same non-blocking shape as the
+                // same-day hold above, keeping this occupancy-to-insert
+                // region free of booking-blocking exceptions (the source
+                // contract in call-booking-conflict-flag.test.js) — so no
+                // booking, no SMS, and the reason-flagged review card sends
+                // the office to the existing visit. An unverifiable lane
+                // holds too: fail closed, never a possibly-duplicate free
+                // visit.
                 if (isReServiceCatalogRow(callBookingCatalogRow)) {
                   const { openCallbackExistsForLane } = require('./reservice-scheduler');
                   const reServiceLane = reServiceLaneForRow(callBookingCatalogRow);
-                  if (await openCallbackExistsForLane(trx, customerId, reServiceLane)) {
-                    throw new Error(`open ${reServiceLane} re-service callback already booked — refusing a second free visit in the lane; booking held for office review`);
+                  let laneCallbackOpen = true;
+                  try {
+                    laneCallbackOpen = await openCallbackExistsForLane(trx, customerId, reServiceLane);
+                  } catch (dedupeErr) {
+                    logger.warn(`[call-proc] re-service lane dedupe check failed for ${maskSid(callSid)} (holding for review): ${dedupeErr.message}`);
+                  }
+                  if (laneCallbackOpen) {
+                    return { __held: { reason: 'open_reservice_callback_exists' } };
                   }
                 }
                 // Bill-To linkage (callBookingPayerId resolved above, before the
@@ -9873,7 +9883,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists']);
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError
