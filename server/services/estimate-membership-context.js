@@ -544,6 +544,32 @@ function appliedRecurringRate(estData, fallbackRate) {
   return fallbackRate;
 }
 
+// Per-service applied rate. The aggregate rate above is a BLEND: when the
+// margin guard caps one service (tree_shrub) while the others take the full
+// tier rate, dividing the blended savings evenly both understates the
+// full-rate services and ADVERTISES a larger discount than the guarded
+// service actually received (the exact failure the aggregate fallback exists
+// to prevent). The v1-legacy mapper stamps each recurring services[] row with
+// its post-WaveGuard annualAfterDiscount, so prefer the row's own
+// before/after pair; fall back to the blended rate for shapes that predate
+// the per-line net.
+function appliedRateForService(estData, key, blendedRate, tierRate) {
+  for (const c of recurringCandidates(estData)) {
+    if (toQualifyingKey(candidateName(c)) !== key) continue;
+    const after = Number(c?.annualAfterDiscount);
+    if (!Number.isFinite(after) || after < 0) continue;
+    const monthly = Number(c?.monthlyBeforeDiscount ?? c?.monthly ?? c?.mo);
+    const perApp = Number(c?.perTreatment ?? c?.perApp ?? c?.perVisit);
+    const visits = Number(c?.visitsPerYear ?? c?.visits ?? c?.frequency);
+    const before = Number(c?.annualBeforeDiscount ?? c?.annual ?? c?.ann)
+      || (monthly > 0 ? monthly * 12 : 0)
+      || (perApp > 0 && visits > 0 ? perApp * visits : 0);
+    if (!(before > 0) || after > before) continue;
+    return Math.max(0, Math.min(tierRate, 1 - after / before));
+  }
+  return blendedRate;
+}
+
 async function computeMembershipContext(database, { customerId, estData } = {}) {
   try {
     if (!customerId) return null;
@@ -600,14 +626,15 @@ async function computeMembershipContext(database, { customerId, estData } = {}) 
     // discount can't exceed what the charged total includes.
     const appliedRate = Math.min(combinedTier.discount, appliedRecurringRate(estData, combinedTier.discount));
     const newServices = addedKeys.map((key) => {
+      const rate = appliedRateForService(estData, key, appliedRate, combinedTier.discount);
       const monthly = estimateMonthlyFor(estData, key);
       const perApplication = estimatePerApplicationFor(estData, key);
       return {
         key,
         label: SERVICE_LABEL[key] || key,
-        discountPct: Math.round(appliedRate * 100),
-        monthlySavings: monthly ? round2(monthly * appliedRate) : null,
-        perApplicationSavings: perApplication ? round2(perApplication * appliedRate) : null,
+        discountPct: Math.round(rate * 100),
+        monthlySavings: monthly ? round2(monthly * rate) : null,
+        perApplicationSavings: perApplication ? round2(perApplication * rate) : null,
       };
     });
 
