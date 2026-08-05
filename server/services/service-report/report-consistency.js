@@ -188,13 +188,22 @@ function reconcileRainFigure(text, canonicalRain) {
       // A figure attributed to a DAY or a storm is never the weekly total —
       // "Wednesday brought 1.36 inches of rain, contributing to this week's
       // wet turf" must not become a false daily amount (codex P2 r17).
-      if (/\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|yesterday|overnight|storm|downpour|one day|single day)\b[^.\d]{0,16}$/i.test(before)) return match;
+      // The gap excludes clause punctuation so a storm in an EARLIER clause
+      // ("…storm, totaling 2.72 inches") doesn't shield the weekly total,
+      // and the day/storm cue can also FOLLOW the figure ("1.36 inches from
+      // Wednesday's storm") — both skip without consuming (codex P2 r26).
+      if (/\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|yesterday|overnight|storm|downpour|one day|single day)\b[^.\d,;:]{0,16}$/i.test(before)) return match;
+      if (/^[^.;]{0,16}\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|yesterday|overnight|storm|downpour|today)\b/i.test(after)) return match;
       // A figure attached to a PRIOR week is history, not the current total —
       // "Last week rainfall totaled 1.2 inches, while this week…" keeps the
       // historical amount while the current figure still reconciles. Clause-
       // scoped so the current-week half of the comparison isn't shielded;
       // skips without consuming the attempt (codex P2 r22).
       if (/\b(?:last|previous|prior)\s+week\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
+      // …and prior-week wording right AFTER the figure is history too —
+      // "Rainfall totaled 1.2 inches last week, while this week…" keeps
+      // scanning for the current-week clause (codex P2 r26).
+      if (/^[^.;,:]{0,16}\b(?:last|previous|prior)\s+week\b/i.test(after)) return match;
       // A per-day AVERAGE is not the weekly total either — "Average daily
       // rainfall this week was 0.4 inches" / "averaged 0.4 inches per day"
       // must keep the average and let a later weekly figure reconcile
@@ -227,7 +236,11 @@ function reconcileRainFigure(text, canonicalRain) {
       // and 2 inches"), and the range's FIRST endpoint is guarded by its
       // "between"/"from" opener — rewriting either endpoint corrupts the
       // range (codex P2 r20). Neither skip consumes the attempt.
+      // …including compact ASCII-hyphen ranges ("1-2 inches" — codex P2
+      // r26): a digit + hyphen right before the figure is a range, not a
+      // total.
       if (/\d[\s"″]*(?:(?:inch(?:es)?|in\.?)\s+)?(?:to|–|—|through|and)\s*$/i.test(before)) return match;
+      if (/\d\s*-\s*$/.test(before)) return match;
       if (/\b(?:between|from)\s+(?:the\s+|about\s+|around\s+|roughly\s+)?$/i.test(before)) return match;
       // The after-guard also allows an explicit target FIGURE between the
       // delta preposition and the target word — "1.97 inches above the
@@ -367,12 +380,13 @@ function replaceDroughtHypothesis(text) {
       // hypothesis cue — "The pattern is inconsistent with drought stress"
       // already agrees with the water data (codex P2 r24).
       if (/\b(?:inconsistent|not\s+consistent)\s+with\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
-      // An observation verb attached right AFTER any dry-area phrase vetoes
-      // the rewrite even when a cue precedes it — "Brown or tan patches and
-      // dry spots were noted" uses a descriptive "or", not a differential
-      // (codex P2 r21).
-      if (/dry\s+(?:patch(?:es)?|spots?|areas?|pockets?|spells?)/i.test(m)
-        && /^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded)\b/i.test(sentence.slice(offset + m.length))) return m;
+      // An observation verb attached right AFTER the phrase vetoes the
+      // rewrite even when a cue precedes it — "Brown or tan patches and dry
+      // spots were noted" uses a descriptive "or", not a differential
+      // (codex P2 r21) — and the same veto covers drought-stress matches:
+      // "Drought stress symptoms were noted along the edge" is a technician
+      // OBSERVATION, not a hypothesis (codex P2 r26).
+      if (/^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded)\b/i.test(sentence.slice(offset + m.length))) return m;
       // …but a CLAUSE-LEADING dry-area phrase with a same-clause cue right
       // AFTER it is still a hypothesis — "Dry spots could be contributing to
       // the thinning" (codex P2 r20), including unresolved tails ("Dry spots

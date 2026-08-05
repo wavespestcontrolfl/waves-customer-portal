@@ -91,6 +91,24 @@ describe('reconcileRainFigure', () => {
       .toBe('Weekly rainfall was 2.96 inches.');
   });
 
+  test('hyphenated rain ranges are never corrupted (codex P2 r26)', () => {
+    expect(reconcileRainFigure('Rainfall this week was 1-2 inches.', 2.96)).toBeNull();
+  });
+
+  test('a day/storm amount AFTER the figure is skipped (codex P2 r26)', () => {
+    expect(reconcileRainFigure(
+      'Rainfall this week included 1.36 inches from Wednesday’s storm, totaling 2.72 inches for the week.',
+      2.96,
+    )).toBe('Rainfall this week included 1.36 inches from Wednesday’s storm, totaling 2.96 inches for the week.');
+  });
+
+  test('a prior-week amount AFTER the figure is skipped (codex P2 r26)', () => {
+    expect(reconcileRainFigure(
+      'Rainfall totaled 1.2 inches last week, while this week rainfall totaled 2.72 inches.',
+      2.96,
+    )).toBe('Rainfall totaled 1.2 inches last week, while this week rainfall totaled 2.96 inches.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -380,6 +398,11 @@ describe('replaceDroughtHypothesis', () => {
 
   test('negated-belief dismissals are preserved (codex P2 r23)', () => {
     expect(replaceDroughtHypothesis('The thinning is not currently believed to be drought stress.')).toBeNull();
+  });
+
+  test('observed drought-stress descriptions are preserved (codex P2 r26)', () => {
+    expect(replaceDroughtHypothesis('Drought stress symptoms were noted along the edge.')).toBeNull();
+    expect(replaceDroughtHypothesis('Some drought stress damage was observed near the walkway.')).toBeNull();
   });
 
   test('improving dry pockets are historical, not hypotheses (codex P2 r25)', () => {
