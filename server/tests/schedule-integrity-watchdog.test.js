@@ -260,6 +260,10 @@ describe('runInner alerting', () => {
     const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
     expect(title).toContain('missing from the Monday watering email');
     expect(opts.metadata.dedupeKey).toBe('lawn-email-gap:cust-9:no_coordinates');
+    // The fix lives on the customer record — dispatch may not even have a
+    // row for a trailing-evidence gap. Query-param form: the SPA has no
+    // /admin/customers/<id> route; Customer 360 opens from ?customerId.
+    expect(opts.link).toBe('/admin/customers?customerId=cust-9');
   });
 
   test('a failed lawn-gap check is REPORTED, never silently zero — and other classes still page', async () => {
