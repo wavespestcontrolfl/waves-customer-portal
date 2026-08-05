@@ -59,6 +59,10 @@ function outcomeOf(row) {
   }
   if (row.status === 'expired') return 'expired';
   if (row.status === 'declined') return 'declined';
+  // Archived sent/viewed rows are closed courtships — the public gate
+  // rejects archived tokens, so the offer is dead regardless of status
+  // (codex #3199 r3). Count them as expired losses, not pending.
+  if (row.archived_at) return 'expired';
   // Sent/viewed rows past their expiry are dead offers the customer can no
   // longer accept — expired in substance even before the sweep flips the
   // status (codex #3199).
@@ -106,8 +110,22 @@ function extractPest(row) {
     // from the accepted tier's own gross, then apply the line's discount
     // as a RATIO.
     const grossLineAnnual = Number(engLine.annualBeforeDiscount ?? engLine.annual);
-    const netLineAnnual = Number(engLine.annualAfterDiscount);
-    const discountRatio = Number.isFinite(netLineAnnual) && Number.isFinite(grossLineAnnual)
+    // manualFinalAnnual is the post-manual-discount price (stamped after
+    // annualAfterDiscount, which is post-WaveGuard only) — prefer it
+    // (codex #3199 r3).
+    const netLineAnnual = Number(engLine.manualFinalAnnual ?? engLine.annualAfterDiscount);
+    // Floor/cap guard (codex #3199 r3): a floor-capped or discount-capped
+    // line's net/gross ratio is NOT transferable to another tier (the cap
+    // belongs to the stored cadence). Band those rows on gross — an honest
+    // approximation for a band-level decision instrument; exact per-tier
+    // floor clamping is the production accept path's job, and floors are
+    // disarmed since 2026-07-17 so the affected rows are historical.
+    const ratioTransferable = engLine.programFloorApplied !== true
+      && engLine.marginGuardApplied !== true
+      && engLine.discountCapped !== true
+      && engLine.programMinimumApplied !== true;
+    const discountRatio = ratioTransferable
+      && Number.isFinite(netLineAnnual) && Number.isFinite(grossLineAnnual)
       && grossLineAnnual > 0 && netLineAnnual > 0 && netLineAnnual <= grossLineAnnual
       ? netLineAnnual / grossLineAnnual : 1;
     let perVisit;
@@ -145,10 +163,18 @@ function extractLawn(row) {
     const tier = Array.isArray(engLine.tiers)
       ? engLine.tiers.find((t) => Number(t.freq ?? t.v) === acceptedV)
       : null;
-    // Tier-first net pricing — mirror of the pest handling (codex #3199 r2).
+    // Tier-first net pricing — mirror of the pest handling (codex #3199 r2),
+    // with the same manualFinalAnnual preference and floor/cap ratio guard
+    // (r3): a program-minimum- or margin-floor-capped lawn line's ratio is
+    // not transferable to another tier; band those on gross.
     const grossLineAnnual = Number(engLine.annualBeforeDiscount ?? engLine.annual);
-    const netLineAnnual = Number(engLine.annualAfterDiscount);
-    const discountRatio = Number.isFinite(netLineAnnual) && Number.isFinite(grossLineAnnual)
+    const netLineAnnual = Number(engLine.manualFinalAnnual ?? engLine.annualAfterDiscount);
+    const ratioTransferable = engLine.programMinimumApplied !== true
+      && engLine.costFloorApplied !== true
+      && engLine.marginGuardApplied !== true
+      && engLine.discountCapped !== true;
+    const discountRatio = ratioTransferable
+      && Number.isFinite(netLineAnnual) && Number.isFinite(grossLineAnnual)
       && grossLineAnnual > 0 && netLineAnnual > 0 && netLineAnnual <= grossLineAnnual
       ? netLineAnnual / grossLineAnnual : 1;
     let perApp;
@@ -224,7 +250,7 @@ function laneSummary(rows, priceOf, priceLabel) {
   const q = await c.query(`
     SELECT id, customer_id, address, customer_phone, customer_email, status,
            created_at, accepted_at, accepted_frequency_key, accepted_service_mode,
-           expires_at, estimate_data
+           expires_at, archived_at, estimate_data
     FROM estimates
     WHERE status IN ('sent', 'viewed', 'accepted', 'declined', 'expired')
     ORDER BY created_at DESC`);
