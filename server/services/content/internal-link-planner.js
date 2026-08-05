@@ -24,6 +24,7 @@ const fs = require('fs');
 const path = require('path');
 const GitHubClient = require('../content-astro/github-client');
 const fm = require('../content-astro/frontmatter');
+const policy = require('./internal-link-seo-policy');
 const { CITIES } = require('./scoring-config');
 
 const DEFAULT_LINK_CAP = 5; // per planning run
@@ -65,13 +66,17 @@ function anchorCandidates(target) {
     out.push({ phrase: segment, priority: 7 });
   }
   if (target.title) out.push({ phrase: target.title, priority: 5 });
-  // De-dupe by lowercased phrase.
+  // De-dupe by lowercased phrase, and drop candidates the executor's anchor
+  // policy is guaranteed to reject (too long, sentence punctuation, generic).
+  // The planner commits to the FIRST matching phrase per page, so a doomed
+  // high-priority candidate (e.g. a 9-word comparison keyword) would
+  // otherwise shadow a workable lower-priority segment on the same page.
   const seen = new Set();
   return out.filter(({ phrase }) => {
     const k = phrase.toLowerCase();
     if (seen.has(k)) return false;
     seen.add(k);
-    return true;
+    return policy.validateAnchorPolicy(phrase).ok;
   });
 }
 
@@ -86,18 +91,20 @@ function serviceAnchorPhrase(service) {
  * the full-keyword candidate finds nothing and planning silently returns
  * zero tasks. Split the keyword on comparison/connective separators into
  * multi-word segments ("bed bug bites", "flea bites") that DO occur in
- * sibling pages. Single-word segments are dropped — they anchor poorly and
- * match promiscuously.
+ * sibling pages. Single-word and stopword-only segments are dropped — they
+ * anchor poorly and match promiscuously. Comma/slash between digits is
+ * numeric punctuation ("2,500", "1/2"), not a boundary.
  */
 function keywordSegments(keyword) {
   const raw = String(keyword || '').trim();
   if (!raw) return [];
   return raw
-    .split(/\s+(?:vs\.?|versus|and|or|in|for|with|without)\s+|\s*[,:;()/—–?!]\s*/i)
+    .split(/\s+(?:vs\.?|versus|and|or|in|for|with|without)\s+|\s*[:;()—–?!]\s*|\s*(?<!\d)[,/]\s*|\s*[,/](?!\d)\s*/i)
     .map((segment) => String(segment || '').trim())
     .filter((segment) => segment
       && segment.toLowerCase() !== raw.toLowerCase()
-      && segment.split(/\s+/).length >= 2);
+      && segment.split(/\s+/).length >= 2
+      && policy._internals.meaningfulTokens(segment).size > 0);
 }
 
 // ── corpus scanner ──────────────────────────────────────────────────

@@ -82,7 +82,7 @@ describe('anchorCandidates', () => {
     const out = anchorCandidates({
       url: '/blog/bed-bug-bites-vs-flea-bites/',
       keyword: 'bed bug bites vs flea bites',
-      title: 'Bed Bug Bites vs Flea Bites: How to Tell',
+      title: 'Bed Bug and Flea Bite Comparison',
     });
     expect(out[0]).toEqual({ phrase: 'bed bug bites vs flea bites', priority: 10 });
     expect(out).toEqual(expect.arrayContaining([
@@ -92,7 +92,20 @@ describe('anchorCandidates', () => {
     // Full keyword outranks its segments; segments outrank the title.
     const phrases = out.map((c) => c.phrase);
     expect(phrases.indexOf('bed bug bites')).toBeGreaterThan(phrases.indexOf('bed bug bites vs flea bites'));
-    expect(phrases.indexOf('bed bug bites')).toBeLessThan(phrases.indexOf('Bed Bug Bites vs Flea Bites: How to Tell'));
+    expect(phrases.indexOf('bed bug bites')).toBeLessThan(phrases.indexOf('Bed Bug and Flea Bite Comparison'));
+  });
+  test('drops candidates the executor anchor policy would reject, so they cannot shadow segments', () => {
+    const out = anchorCandidates({
+      url: '/blog/roof-rat-vs-norway-rat/',
+      keyword: 'roof rat vs norway rat in florida attics and garages tonight',
+      title: 'Roof Rat vs Norway Rat: Which Rodent Is in Your Florida Attic Right Now?',
+    });
+    const phrases = out.map((c) => c.phrase);
+    // 11-word keyword → anchor_too_long; title → anchor_sentence. Both would
+    // be queued then rejected downstream, wasting the page's one match.
+    expect(phrases).not.toContain('roof rat vs norway rat in florida attics and garages tonight');
+    expect(phrases).not.toContain('Roof Rat vs Norway Rat: Which Rodent Is in Your Florida Attic Right Now?');
+    expect(phrases).toEqual(expect.arrayContaining(['roof rat', 'norway rat']));
   });
 });
 
@@ -115,6 +128,14 @@ describe('keywordSegments', () => {
     expect(keywordSegments('stop lawn fungus! treatment timing')).toEqual(['stop lawn fungus', 'treatment timing']);
     expect(keywordSegments('')).toEqual([]);
     expect(keywordSegments(null)).toEqual([]);
+  });
+  test('preserves numeric punctuation inside quantities', () => {
+    expect(keywordSegments('pest control for 2,500-square-foot homes')).toEqual(['pest control', '2,500-square-foot homes']);
+    expect(keywordSegments('mosquito control for 1/2 acre lots')).toEqual(['mosquito control', '1/2 acre lots']);
+    expect(keywordSegments('lawn grubs, chinch bugs')).toEqual(['lawn grubs', 'chinch bugs']); // word-adjacent comma still splits
+  });
+  test('drops stopword-only segments', () => {
+    expect(keywordSegments('what is in my attic')).toEqual(['my attic']); // "what is" carries no topical token
   });
 });
 
