@@ -90,6 +90,34 @@ function identOf(row) {
     || row.id;
 }
 
+// engineInputs-only payloads (no stored result/engineResult) are
+// customer-renderable — the public path replays generateEstimate live. For
+// SINGLE-service rows, price from the estimate row's own annual_total (the
+// billed number) rather than replaying with today's constants, which would
+// re-price history; multi-service engineInputs-only rows stay counted in
+// the unpriceable tally (codex #3199 r4).
+function extractEngineInputsOnly(row, lane) {
+  const d = row.estimate_data || {};
+  if (d.result || d.engineResult) return null;
+  const services = d.engineInputs?.services;
+  if (!services || typeof services !== 'object') return null;
+  const keys = Object.keys(services).filter((k) => services[k]);
+  if (keys.length !== 1 || keys[0] !== lane) return null;
+  const annual = Number(row.annual_total);
+  if (!(annual > 0)) return null;
+  if (lane === 'pest') {
+    const sqft = Number(d.engineInputs?.homeSqFt);
+    const visits = FREQ_KEY_TO_APPS[String(services.pest?.frequency || '').toLowerCase()] || 4;
+    const perVisit = Math.round((annual / visits) * 100) / 100;
+    return sqft > 0 && perVisit > 0 ? { sqft, perVisit } : null;
+  }
+  const sqft = Number(d.engineInputs?.measuredTurfSf ?? d.engineInputs?.lotSqFt);
+  const visits = LAWN_FREQ_KEY_TO_V[String(services.lawn?.lawnFreq ?? '')]
+    || Number(services.lawn?.lawnFreq) || 9;
+  const perApp = Math.round((annual / visits) * 100) / 100;
+  return sqft > 0 && perApp > 0 ? { sqft, perApp } : null;
+}
+
 function extractPest(row) {
   const d = row.estimate_data || {};
   const engRoot = d?.engineResult?.lineItems ? d.engineResult : (d?.result?.lineItems ? d.result : null);
@@ -99,7 +127,8 @@ function extractPest(row) {
     // fall back to the quote inputs so that channel stays in the funnel
     // (codex #3199).
     const sqft = Number(engLine.footprintUsed ?? engRoot.property?.footprint
-      ?? engRoot.property?.homeSqFt ?? d.engineInputs?.homeSqFt ?? d.inputs?.homeSqFt);
+      ?? engRoot.property?.homeSqFt ?? d.engineInputs?.homeSqFt ?? d.inputs?.homeSqFt
+      ?? d.enriched?.homeSqFt ?? d.enriched?.footprint);
     // Accepted cadence: bundles persist per-service choices in
     // customerSelection.serviceCadences; the row-level key is the
     // top-level/pest selection (codex #3199 r2).
@@ -158,7 +187,7 @@ function extractPest(row) {
     const sqft = Number(d.inputs?.homeSqFt) || Number(d.result?.property?.footprint);
     return sqft > 0 && perVisit > 0 ? { sqft, perVisit } : null;
   }
-  return null;
+  return extractEngineInputsOnly(row, 'pest');
 }
 
 function extractLawn(row) {
@@ -167,7 +196,8 @@ function extractLawn(row) {
   const engLine = engRoot?.lineItems?.find((l) => l?.service === 'lawn_care');
   if (engLine) {
     const sqft = Number(engLine.turfSf ?? engLine.lawnSqFt ?? engRoot.property?.turfSf
-      ?? engRoot.property?.lawnSqFt ?? d.engineInputs?.measuredTurfSf ?? d.inputs?.measuredTurfSf);
+      ?? engRoot.property?.lawnSqFt ?? d.engineInputs?.measuredTurfSf ?? d.inputs?.measuredTurfSf
+      ?? d.enriched?.measuredTurfSf ?? d.enriched?.turfSf ?? d.enriched?.lawnSqFt);
     const lawnCadenceKey = d.customerSelection?.serviceCadences?.lawn_care
       ?? row.accepted_frequency_key;
     const acceptedV = LAWN_FREQ_KEY_TO_V[lawnCadenceKey] ?? Number(lawnCadenceKey);
@@ -215,7 +245,7 @@ function extractLawn(row) {
     if (!(sqft > 0)) sqft = Number(d.result?.property?.lawnSqFt ?? d.result?.property?.turfSf);
     return sqft > 0 && perApp > 0 ? { sqft, perApp } : null;
   }
-  return null;
+  return extractEngineInputsOnly(row, 'lawn');
 }
 
 // Dedup by customer: an accepted row wins the customer; otherwise the most
@@ -263,7 +293,7 @@ function laneSummary(rows, priceOf, priceLabel) {
   const q = await c.query(`
     SELECT id, customer_id, address, customer_name, customer_phone, customer_email, status,
            created_at, accepted_at, accepted_frequency_key, accepted_service_mode,
-           expires_at, archived_at, estimate_data
+           expires_at, archived_at, annual_total, estimate_data
     FROM estimates
     WHERE status IN ('sent', 'viewed', 'accepted', 'declined', 'expired')
     ORDER BY created_at DESC`);
