@@ -44,6 +44,13 @@ const CHARLOTTE_PAO_BASE = 'https://www.ccappraiser.com';
 const CHARLOTTE_GIS_ADDRESS_URL = 'https://agis3.charlottecountyfl.gov/arcgis/rest/services/Essentials/CCGISLayers/MapServer/0/query';
 const CHARLOTTE_GIS_OWNERSHIP_URL = 'https://agis3.charlottecountyfl.gov/arcgis/rest/services/Essentials/CCGISLayers/MapServer/27/query';
 const CHARLOTTE_PAO_RECORD_URL = `${CHARLOTTE_PAO_BASE}/Show_Parcel.asp`;
+// Hillsborough (HCPA) — the property-search SPA's own JSON backend (no auth,
+// live-probed 2026-08-05). BasicSearch resolves an address (or folio) to the
+// pin ParcelData keys on; ParcelData returns the full CAMA record (buildings,
+// land lines, construction info, extra features).
+const HILLSBOROUGH_PAO_BASE = 'https://gis.hcpafl.org';
+const HILLSBOROUGH_PAO_SEARCH_URL = `${HILLSBOROUGH_PAO_BASE}/CommonServices/property/search/BasicSearch`;
+const HILLSBOROUGH_PAO_PARCEL_URL = `${HILLSBOROUGH_PAO_BASE}/CommonServices/property/search/ParcelData`;
 const COUNTY_LOOKUP_MIN_REMAINING_MS = 750;
 const MANATEE_CITY_NAMES = new Set([
   'ANNA MARIA',
@@ -109,10 +116,26 @@ const CHARLOTTE_CITY_NAMES = new Set([
   'ROTONDA WEST',
   'SOUTH GULF COVE',
 ]);
+// South-Hillsborough corridor only (the reachable service area north of the
+// Manatee line). The raw-address gate mirrors HILLSBOROUGH_ZIPS below; a
+// confident geocode (geoOpensCountyGate) opens the county for ANY Hillsborough
+// address, so a Brandon/Tampa lead still resolves through geo.
+const HILLSBOROUGH_CITY_NAMES = new Set([
+  'APOLLO BEACH',
+  'BALM',
+  'GIBSONTON',
+  'LITHIA',
+  'RIVERVIEW',
+  'RUSKIN',
+  'SUN CITY',
+  'SUN CITY CENTER',
+  'WIMAUMA',
+]);
 const COUNTY_ADDRESS_CITY_HINTS = new Set([
   ...MANATEE_CITY_NAMES,
   ...SARASOTA_CITY_NAMES,
   ...CHARLOTTE_CITY_NAMES,
+  ...HILLSBOROUGH_CITY_NAMES,
 ]);
 const MANATEE_ZIPS = new Set([
   '34201', '34202', '34203', '34204', '34205', '34206', '34207', '34208', '34209',
@@ -134,7 +157,13 @@ const CHARLOTTE_ZIPS = new Set([
   '34224',
 ]);
 const CHARLOTTE_SHARED_ZIPS = new Set(['33921', '33946', '33947', '33955', '34223', '34224']);
-const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao', 'sarasota_pao', 'charlotte_pao']);
+// South-Hillsborough ZIPs (Gibsonton, Lithia, Riverview, Ruskin, Apollo
+// Beach, Sun City Center, Wimauma/Balm). None overlap the other county sets.
+const HILLSBOROUGH_ZIPS = new Set([
+  '33534', '33547', '33569', '33570', '33571', '33572', '33573', '33575',
+  '33578', '33579', '33598',
+]);
+const DIRECT_PROPERTY_RECORD_PROVIDERS = new Set(['manatee_pao', 'sarasota_pao', 'charlotte_pao', 'hillsborough_pao']);
 const PROPERTY_EVIDENCE_FIELDS = [
   'propertyType', 'squareFootage', 'lotSize', 'yearBuilt', 'bedrooms', 'bathrooms',
   'stories', 'constructionMaterial', 'foundationType', 'roofType',
@@ -340,7 +369,7 @@ Search aggressively across these source families. Use web_search multiple times 
 
 1. PRIMARY listing sites — start here, in this order: zillow.com, redfin.com, homes.com, realtor.com, trulia.com. Most listings show stories explicitly in the Facts & Features / Home Highlights section.
 2. Secondary aggregators — compass.com, era.com, liveinswflorida.com, villageshomefinder.com, bradentonhomelocator.com. Try these when the primary sites don't surface the address (common for new construction or recently sold).
-3. County property appraisers — manateepao.gov (Manatee), sc-pa.com (Sarasota), ccappraiser.com (Charlotte). Authoritative for tax records; often include "stories" or "number of stories" fields.
+3. County property appraisers — manateepao.gov (Manatee), sc-pa.com (Sarasota), ccappraiser.com (Charlotte), hcpafl.org (Hillsborough). Authoritative for tax records; often include "stories" or "number of stories" fields.
 4. Builder floorplan catalogs (when subdivision identifies a builder) — drhorton.com, pulte.com, lennar.com, mihomes.com, taylormorrison.com, mattamyhomes.com, neal-communities.com, kbhome.com, davidweekleyhomes.com, meritagehomes.com, ryanhomes.com, richmond-american.com, homesbywestbay.com. Match the home's square footage to a floorplan in the catalog.
 5. Permit / contractor data — buildzoom.com sometimes has stories from building permits.
 
@@ -643,6 +672,75 @@ async function fetchCharlotteParcelDetails(search, address, timeoutMs, t0 = Date
   return record;
 }
 
+async function lookupPropertyFromHillsboroughPAO(address, options = {}) {
+  if (!address || typeof address !== 'string' || address.trim().length < 5) return null;
+  if (!shouldQueryHillsboroughPAO(address, options.geoContext)) return null;
+
+  const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
+  const t0 = Date.now();
+
+  try {
+    const search = await searchHillsboroughParcel(address, timeoutMs, t0);
+    if (!search?.parcelId) return null;
+    return await fetchHillsboroughParcelDetails(search, address, timeoutMs, t0);
+  } catch (err) {
+    logger.warn('[county-property] Hillsborough PAO errored', {
+      elapsedMs: Date.now() - t0,
+      error: summarizeProviderError(err),
+    });
+    return null;
+  }
+}
+
+// Detail half of the Hillsborough lookup: takes a search match ({ parcelId
+// (the HCPA pin), situsAddress, city }) from the BasicSearch address resolve
+// or a caller that already holds the pin (canary golden parcel). One JSON
+// fetch covers the whole CAMA record, so there is no nested degradable fetch
+// here — a failure throws to the caller and never reads as parsed-but-empty
+// (the rethrowErrors machinery the other counties need is unnecessary).
+async function fetchHillsboroughParcelDetails(search, address, timeoutMs, t0 = Date.now()) {
+  const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
+  if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+  const parcel = await fetchCountyJson(
+    `${HILLSBOROUGH_PAO_PARCEL_URL}?pin=${encodeURIComponent(search.parcelId)}`,
+    remainingMs,
+    { headers: { Referer: `${HILLSBOROUGH_PAO_BASE}/propertysearch/` } },
+  );
+
+  const parsed = parseHillsboroughPaoRecord({ address, search, parcel });
+  if (!hasAnyPropertyFact(parsed)) {
+    logger.info('[county-property] Hillsborough PAO found parcel but no usable facts', {
+      elapsedMs: Date.now() - t0,
+    });
+    return null;
+  }
+
+  const record = shapeAsPropertyRecord(parsed, address, 'hillsborough_pao');
+  record._source = 'county';
+  record._raw = {
+    ...(record._raw || {}),
+    _source: 'county',
+    _provider: 'hillsborough_pao',
+    parcelId: search.parcelId,
+    folio: search.folio || null,
+    situsAddress: search.situsAddress,
+    postalCity: search.city,
+  };
+  record.addressLine1 = search.situsAddress || '';
+  record.city = search.city || '';
+  record.state = 'FL';
+  record.county = 'Hillsborough';
+  record._provider = 'hillsborough_pao';
+  record._aiProviders = ['hillsborough_pao'];
+
+  logger.info('[county-property] got Hillsborough PAO facts', {
+    elapsedMs: Date.now() - t0,
+    fields: Object.keys(parsed).filter((k) => parsed[k] != null && k !== 'source' && k !== 'confidence'),
+  });
+  return record;
+}
+
 async function lookupPropertyFromCountyRecords(address, options = {}) {
   const timeoutMs = positiveInt(options.timeoutMs || process.env.COUNTY_PROPERTY_TIMEOUT_MS, DEFAULT_COUNTY_TIMEOUT_MS);
   const geoContext = options.geoContext || null;
@@ -651,6 +749,7 @@ async function lookupPropertyFromCountyRecords(address, options = {}) {
     { county: 'MANATEE', lookup: lookupPropertyFromManateePAO, rawEligible: shouldQueryManateePAO(address) },
     { county: 'SARASOTA', lookup: lookupPropertyFromSarasotaPAO, rawEligible: shouldQuerySarasotaPAO(address) },
     { county: 'CHARLOTTE', lookup: lookupPropertyFromCharlottePAO, rawEligible: shouldQueryCharlottePAO(address) },
+    { county: 'HILLSBOROUGH', lookup: lookupPropertyFromHillsboroughPAO, rawEligible: shouldQueryHillsboroughPAO(address) },
   ];
 
   // Try the geocoded county first so the shared time budget is spent on the
@@ -735,6 +834,19 @@ async function lookupPropertyFromCountyByParcel(parcel, address, options = {}) {
         city: parcel.situsCity,
         zipCode: parcel.situsZip,
       }, address, timeoutMs, t0, helperOpts);
+    } else if (parcel.county === 'Hillsborough') {
+      // Keys on the HCPA pin. GIS/FDOR-derived parcels never carry one
+      // (paoParcelIdFrom is digit-only; HCPA pins are alphanumeric), so in
+      // production this branch stays dormant and the typed-address search
+      // below decides — it fires for callers that supply the pin directly
+      // (the canary's golden parcel). Single-fetch detail: helperOpts'
+      // rethrowErrors is unnecessary because its only failure mode already
+      // throws to this function's catch.
+      record = await fetchHillsboroughParcelDetails({
+        parcelId: parcel.paoParcelId,
+        situsAddress: parcel.situsAddress,
+        city: parcel.situsCity,
+      }, address, timeoutMs, t0);
     }
 
     if (record) {
@@ -2195,6 +2307,23 @@ async function fetchCharlotteOwnership(parcelId, timeoutMs) {
   return data?.features?.[0] || null;
 }
 
+async function searchHillsboroughParcel(address, timeoutMs, startedAt = Date.now()) {
+  const candidates = countyAddressSearchCandidates(address);
+  for (const candidate of candidates) {
+    const requestTimeoutMs = remainingCountyLookupMs(startedAt, timeoutMs);
+    if (requestTimeoutMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
+
+    const params = new URLSearchParams();
+    params.set('address', candidate);
+    const data = await fetchCountyJson(`${HILLSBOROUGH_PAO_SEARCH_URL}?${params.toString()}`, requestTimeoutMs, {
+      headers: { Referer: `${HILLSBOROUGH_PAO_BASE}/propertysearch/` },
+    });
+    const match = pickHillsboroughAddressResult(data, address);
+    if (match) return match;
+  }
+  return null;
+}
+
 // County-lookup UA. Self-identifying bot UA by default; COUNTY_LOOKUP_UA is a
 // no-deploy lever for when a county WAF starts tarpitting requests from
 // datacenter IPs (sc-pa.com has hung every nightly canary request for 17
@@ -2287,6 +2416,17 @@ function shouldQueryCharlottePAO(address, geoContext = null) {
   const city = extractCommaCity(address);
   if (!city) return false;
   return CHARLOTTE_CITY_NAMES.has(city);
+}
+
+function shouldQueryHillsboroughPAO(address, geoContext = null) {
+  if (geoOpensCountyGate(geoContext, 'HILLSBOROUGH', HILLSBOROUGH_ZIPS)) return true;
+
+  const zip = extractAddressZip(address);
+  if (zip && HILLSBOROUGH_ZIPS.has(zip)) return true;
+
+  const city = extractCommaCity(address);
+  if (!city) return false;
+  return HILLSBOROUGH_CITY_NAMES.has(city);
 }
 
 function extractAddressZip(address) {
@@ -2978,6 +3118,33 @@ function pickCharlotteAddressResult(data, address) {
   return isUniqueCountyAddressMatch(rows, address, shouldRequireCharlotteResultCityMatch(address));
 }
 
+// BasicSearch rows carry the situs as one "STREET, CITY" string and flag
+// confidential (protected-party) records, which come back address-less.
+function pickHillsboroughAddressResult(data, address) {
+  const rows = (Array.isArray(data) ? data : [])
+    .filter((row) => row?.pin && row?.address)
+    .map((row) => {
+      const { situsAddress, city } = splitHillsboroughSitusAddress(row.address);
+      return {
+        parcelId: cleanHtmlText(row.pin),
+        folio: cleanHtmlText(row.folio),
+        situsAddress,
+        city,
+      };
+    });
+  return isUniqueCountyAddressMatch(rows, address, shouldRequireHillsboroughResultCityMatch(address));
+}
+
+function splitHillsboroughSitusAddress(value) {
+  const text = cleanHtmlText(value);
+  const lastComma = text.lastIndexOf(',');
+  if (lastComma === -1) return { situsAddress: text, city: '' };
+  return {
+    situsAddress: text.slice(0, lastComma).trim(),
+    city: text.slice(lastComma + 1).trim(),
+  };
+}
+
 function isUniqueCountyAddressMatch(rows, address, requiresCityMatch) {
   const target = normalizeCountyStreetLine(address);
   const targetCity = requiresCityMatch ? extractCommaCity(address) : null;
@@ -3023,6 +3190,13 @@ function shouldRequireCharlotteResultCityMatch(address) {
   const zip = extractAddressZip(address);
   if (zip && CHARLOTTE_SHARED_ZIPS.has(zip)) return true;
   return !(zip && CHARLOTTE_ZIPS.has(zip));
+}
+
+// No shared-ZIP set: none of the south-Hillsborough ZIPs appear in another
+// county's set, so a set-member ZIP alone is a sufficient match key.
+function shouldRequireHillsboroughResultCityMatch(address) {
+  const zip = extractAddressZip(address);
+  return !(zip && HILLSBOROUGH_ZIPS.has(zip));
 }
 
 function extractCountyResultCity(value) {
@@ -3207,6 +3381,28 @@ function charlottePoolFeatures(detailHtml) {
     ...imperviousFactsFromFeatures(mapped),
     ...garageDockFactsFromFeatures(mapped),
   };
+}
+
+// Hillsborough ParcelData extraFeatures rows are COUNT-based ("POOL 01
+// SCREENED" / "POOL 01 NO ENCL", units "1", width/length 0) — NOT the
+// description+sqft shape the shared poolFactsFromFeatures expects. Feeding it
+// those rows would (a) read a screened-pool home as hasPool:false, because
+// SCREEN* sits in POOL_FEATURE_EXCLUDE_RE (it labels cage rows in the other
+// counties' vocab, but is part of the pool row itself here), and (b) read the
+// "1" unit count as pool sqft. Presence-only adapter: tri-state true/false,
+// areas stay null (the Hillsborough roll carries no feature sqft).
+function hillsboroughPoolFeatures(extraFeatures) {
+  if (!Array.isArray(extraFeatures)) return {};
+  const facts = { hasPool: false, poolAreaSqft: null, poolCageSqft: null, hasSpa: false };
+  for (const item of extraFeatures) {
+    const description = String(item?.description || '').toUpperCase();
+    if (/^POOL\b/.test(description) && !/HEATER|BATH|EQUIP|HOUSE/.test(description)) {
+      facts.hasPool = true;
+    } else if (SPA_FEATURE_RE.test(description)) {
+      facts.hasSpa = true;
+    }
+  }
+  return facts;
 }
 
 function parseManateePaoRecord({ address, search, land, buildings, features, parcelAttrs }) {
@@ -3486,6 +3682,106 @@ function webMercatorGeometryLatitude(geometry) {
   const avgY = points.reduce((sum, point) => sum + point[1], 0) / points.length;
   const earthRadiusMeters = 6378137;
   return (Math.atan(Math.sinh(avgY / earthRadiusMeters)) * 180) / Math.PI;
+}
+
+function parseHillsboroughPaoRecord({ address, search, parcel }) {
+  const buildings = (Array.isArray(parcel?.buildings) ? parcel.buildings : [])
+    .filter((row) => row && !row.noData);
+  const primary = pickPrimaryHillsboroughBuilding(buildings);
+
+  // Land-use description ("SINGLE FAMILY R", "WAREHOUSE") is the primary type
+  // signal; the building type row backs it up, and the numeric DOR use code on
+  // the building ("01  ") is the conservative last resort.
+  const propertyType = normalizeCountyPropertyType(
+    `${parcel?.landUse?.description || ''} ${primary?.type?.description || ''}`,
+  ) || dorUcPropertyType(primary?.type?.code);
+  const commercialSized = isCommercialBuildingType(propertyType);
+  const sqftDetailed = coerceBuildingSqftDetailed(primary?.heatedArea, commercialSized);
+  const source = `${HILLSBOROUGH_PAO_BASE}/propertysearch/#/parcel/basic/${encodeURIComponent(search.parcelId)}`;
+
+  return {
+    squareFootage: sqftDetailed.pricingValue,
+    lotSize: hillsboroughLotSqft(parcel),
+    yearBuilt: coerceInt(primary?.yearBuilt, 1900, new Date().getFullYear() + 1),
+    bedrooms: coerceInt(primary?.bedrooms, 1, 15),
+    bathrooms: coerceHillsboroughBathrooms(primary?.bathrooms),
+    stories: coerceStoriesValue(primary?.stories, { commercial: commercialSized }),
+    propertyType,
+    constructionMaterial: normalizeCountyConstruction(findHillsboroughConstructionDetail(primary, 'EW')),
+    roofType: normalizeCountyRoof(findHillsboroughConstructionDetail(primary, 'RC')),
+    source,
+    confidence: 'high',
+    county: 'Hillsborough',
+    formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
+    ...hillsboroughPoolFeatures(parcel?.extraFeatures),
+    ...(sqftDetailed.pricingAdjustment
+      ? { _actuals: { buildingAreaSqft: sqftDetailed.actualValue, pricingAdjustment: sqftDetailed.pricingAdjustment } }
+      : {}),
+    // Every building card, raw-labeled — multi-building commercial parcels
+    // must not collapse to their largest building (same rule as the other
+    // county parsers). Sort-key bounds only; preserved facts, not pricing.
+    _buildings: buildings.map((row) => ({
+      description: row?.type?.description || null,
+      livingAreaSqft: coerceInt(row?.heatedArea, 1, 1000000),
+      underRoofSqft: coerceInt(row?.grossArea, 1, 1000000),
+      stories: coerceStoriesValue(row?.stories, { commercial: true }),
+      yearBuilt: coerceInt(row?.yearBuilt, 1900, new Date().getFullYear() + 1),
+    })),
+  };
+}
+
+function pickPrimaryHillsboroughBuilding(buildings) {
+  return [...buildings]
+    .sort((a, b) => hillsboroughBuildingArea(b) - hillsboroughBuildingArea(a))[0] || {};
+}
+
+function hillsboroughBuildingArea(row) {
+  // Sort key only — generous ceiling so a 100k+ sf commercial main building
+  // still outranks accessory cards; the record-level coerceBuildingSqft
+  // applies the real type-aware bound afterwards.
+  return coerceInt(row?.heatedArea, 1, 1000000) || coerceInt(row?.grossArea, 1, 1000000) || 0;
+}
+
+// Land lines: 'SF'-family rows ('SF' square feet, 'SE' sq-ft lots with
+// effective size) carry the lot in `units`; other row types fall back to
+// their `acres` field, and the parcel-level acreage is the last resort. The
+// sqft and acres branches never double-count the same row.
+function hillsboroughLotSqft(parcel) {
+  const rows = Array.isArray(parcel?.landLines) ? parcel.landLines : [];
+  let sqft = 0;
+  let acres = 0;
+  for (const row of rows) {
+    const code = String(row?.landType?.code || '').trim().toUpperCase();
+    const units = Number(row?.units);
+    const rowAcres = Number(row?.acres);
+    if ((code === 'SF' || code === 'SE') && Number.isFinite(units) && units > 0) {
+      sqft += units;
+    } else if (Number.isFinite(rowAcres) && rowAcres > 0) {
+      acres += rowAcres;
+    }
+  }
+  if (sqft > 0) return clampLotSqft(Math.round(sqft));
+  if (acres > 0) return clampLotSqft(Math.round(acres * SQFT_PER_ACRE));
+  const parcelAcreage = Number(parcel?.acreage);
+  if (Number.isFinite(parcelAcreage) && parcelAcreage > 0) {
+    return clampLotSqft(Math.round(parcelAcreage * SQFT_PER_ACRE));
+  }
+  return null;
+}
+
+// HCPA bathrooms come as decimals with halves ("2.5") — keep the half-bath
+// precision the Manatee rooms parser also produces; coerceInt would round it.
+function coerceHillsboroughBathrooms(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 1 && n <= 20 ? n : null;
+}
+
+// constructionInfo rows are element/detail pairs keyed by element code:
+// 'EW' exterior wall, 'RC' roof cover.
+function findHillsboroughConstructionDetail(building, elementCode) {
+  const rows = Array.isArray(building?.constructionInfo) ? building.constructionInfo : [];
+  const match = rows.find((row) => String(row?.element?.code || '').trim().toUpperCase() === elementCode);
+  return match?.constructionDetail?.description || '';
 }
 
 function pickPrimaryManateeBuilding(buildingRows) {
@@ -3778,7 +4074,7 @@ Search aggressively, in this order:
 
 1. PRIMARY listing sites — zillow.com, redfin.com, homes.com, realtor.com, trulia.com. Most listings show every fact in the Facts & Features / Home Highlights section.
 2. Secondary aggregators — compass.com, era.com, liveinswflorida.com, villageshomefinder.com, bradentonhomelocator.com.
-3. County property appraisers — manateepao.gov (Manatee), sc-pa.com (Sarasota), ccappraiser.com (Charlotte). Authoritative for tax records, sqft, year built, lot size, construction.
+3. County property appraisers — manateepao.gov (Manatee), sc-pa.com (Sarasota), ccappraiser.com (Charlotte), hcpafl.org (Hillsborough). Authoritative for tax records, sqft, year built, lot size, construction.
 4. Builder floorplan catalogs (when subdivision identifies a builder) — drhorton.com, pulte.com, lennar.com, mihomes.com, taylormorrison.com, mattamyhomes.com, neal-communities.com, kbhome.com, davidweekleyhomes.com, meritagehomes.com, ryanhomes.com, richmond-american.com, homesbywestbay.com.
 5. Permits — buildzoom.com sometimes has stories + sqft from building permits.
 
@@ -4489,7 +4785,7 @@ function classifyPropertySource(url) {
 
   // County appraiser sites AND each county's own parcel GIS map service
   // (county-parcel-gis.js) — all county-grade authoritative rolls.
-  if (hostMatchesAny(host, ['manateepao.gov', 'sc-pa.com', 'ccappraiser.com', 'scgov.net', 'charlottecountyfl.gov'])) {
+  if (hostMatchesAny(host, ['manateepao.gov', 'sc-pa.com', 'ccappraiser.com', 'scgov.net', 'charlottecountyfl.gov', 'hcpafl.org'])) {
     return { type: 'county', weight: SOURCE_TYPE_WEIGHTS.county };
   }
   if (hostMatchesDomain(host, 'arcgis.com') && path.includes('florida_statewide_cadastral')) {
@@ -4674,6 +4970,7 @@ module.exports = {
   lookupPropertyFromManateePAO,
   lookupPropertyFromSarasotaPAO,
   lookupPropertyFromCharlottePAO,
+  lookupPropertyFromHillsboroughPAO,
   lookupPropertyFromCountyRecords,
   lookupPropertyFromAITrio,
   lookupPropertyFromCountyByParcel,
@@ -4695,6 +4992,7 @@ module.exports = {
     fetchManateeParcelDetails,
     fetchSarasotaParcelDetails,
     fetchCharlotteParcelDetails,
+    fetchHillsboroughParcelDetails,
     geoOpensCountyGate,
     hasCountyPricingCore,
     hasAnyPropertyFact,
@@ -4713,6 +5011,7 @@ module.exports = {
     lookupPropertyFromManateePAO,
     lookupPropertyFromSarasotaPAO,
     lookupPropertyFromCharlottePAO,
+    lookupPropertyFromHillsboroughPAO,
     lookupPropertyFromCountyRecords,
     manateeAddressSearchCandidates,
     mergePropertyRecords,
@@ -4721,16 +5020,20 @@ module.exports = {
     parseManateePaoRecord,
     parseSarasotaPaoRecord,
     parseCharlottePaoRecord,
+    parseHillsboroughPaoRecord,
     parsePropertyJSON,
     garageDockFactsFromFeatures,
     imperviousFactsFromFeatures,
     poolFactsFromFeatures,
     sarasotaPoolFeatures,
     charlottePoolFeatures,
+    hillsboroughPoolFeatures,
+    hillsboroughLotSqft,
     pickManateeSearchResult,
     pickSarasotaPrimaryBuildingLink,
     pickSarasotaSearchResult,
     pickCharlotteAddressResult,
+    pickHillsboroughAddressResult,
     pickPrimaryHtmlBuilding,
     classifyPropertySource,
     coerceBuildingSqft,
@@ -4741,5 +5044,6 @@ module.exports = {
     shouldQueryManateePAO,
     shouldQuerySarasotaPAO,
     shouldQueryCharlottePAO,
+    shouldQueryHillsboroughPAO,
   },
 };

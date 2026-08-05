@@ -51,12 +51,13 @@ const TRANSIENT_FAILURE_ALERT_THRESHOLD = 3;
 // one alert per breakage plus a weekly reminder, never nightly spam.
 const REPING_EVERY_RUNS = 7;
 
-// One known pool home per county, live-verified 2026-06-12. Each exercises
-// that county's full detail surface: Manatee land+buildings+features models;
-// Sarasota detail page + Extra Features grid; Charlotte Show_Parcel tables +
-// ownership GIS (lotSize). Failure labels deliberately carry only the county
-// — no parcel IDs or addresses (AGENTS.md non-card PII rule applies to the
-// notification fan-out and logs alike).
+// One known pool home per county, live-verified 2026-06-12 (Hillsborough
+// 2026-08-05). Each exercises that county's full detail surface: Manatee
+// land+buildings+features models; Sarasota detail page + Extra Features grid;
+// Charlotte Show_Parcel tables + ownership GIS (lotSize); Hillsborough
+// ParcelData JSON (buildings + land lines + extra features). Failure labels
+// deliberately carry only the county — no parcel IDs or addresses (AGENTS.md
+// non-card PII rule applies to the notification fan-out and logs alike).
 const GOLDEN_PARCELS = [
   {
     label: 'Manatee golden parcel',
@@ -69,6 +70,16 @@ const GOLDEN_PARCELS = [
   {
     label: 'Charlotte golden parcel',
     parcel: { county: 'Charlotte', paoParcelId: '402217351013', situsAddress: '2965 ROCK CREEK DR', situsCity: 'PORT CHARLOTTE' },
+  },
+  {
+    label: 'Hillsborough golden parcel',
+    // Pool home, live-verified 2026-08-05. paoParcelId is the HCPA pin —
+    // exercises BasicSearch-free by-parcel detail (ParcelData JSON: buildings,
+    // land lines, construction info, extra features). The Hillsborough roll's
+    // extra-feature rows are count-based (no feature sqft), so the cage-sqft
+    // expectation is waived for this county.
+    parcel: { county: 'Hillsborough', paoParcelId: '1931135WE000021000020U', situsAddress: '7609 NOTTINGHILL SKY DR', situsCity: 'APOLLO BEACH' },
+    expectCageSqft: false,
   },
 ];
 
@@ -108,6 +119,7 @@ const COUNTY_PROBE_URLS = {
   Sarasota: 'https://www.sc-pa.com/propertysearch/',
   Manatee: 'https://www.manateepao.gov/',
   Charlotte: 'https://www.ccappraiser.com/',
+  Hillsborough: 'https://gis.hcpafl.org/propertysearch/',
 };
 const BROWSER_PROBE_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const PROBE_TIMEOUT_MS = 15000;
@@ -138,14 +150,17 @@ async function probeCountyHostWithBrowserUa(county) {
 
 // Presence-level expectations every golden parcel must satisfy. Each maps to
 // a distinct parsing surface, so the failure text names what broke.
-function evaluateGoldenRecord(label, record) {
+// expectCageSqft:false (golden-entry flag) waives the cage-sqft check for
+// counties whose roll never carries feature sqft (Hillsborough's rows are
+// count-based) — everything else stays mandatory.
+function evaluateGoldenRecord(label, record, { expectCageSqft = true } = {}) {
   if (!record) return [`${label}: by-parcel lookup returned no record`];
   const failures = [];
   if (!(record.squareFootage > 0)) failures.push(`${label}: squareFootage not parsed`);
   if (!(record.lotSize > 0)) failures.push(`${label}: lotSize not parsed`);
   if (!record.yearBuilt) failures.push(`${label}: yearBuilt not parsed`);
   if (record.hasPool !== true) failures.push(`${label}: pool not found on extra-features roll`);
-  if (!(record.poolCageSqft > 0)) failures.push(`${label}: screen cage sqft not parsed`);
+  if (expectCageSqft && !(record.poolCageSqft > 0)) failures.push(`${label}: screen cage sqft not parsed`);
   return failures;
 }
 
@@ -281,8 +296,9 @@ async function runPropertyLookupCanaryInner() {
     checks.push({ key: 'fdor_point', status: 'ok', details: [] });
   }
 
-  // Sequential on purpose — three polite hits a night, and a shared-cause
-  // outage reads as three clean failure lines instead of a thundering herd.
+  // Sequential on purpose — one polite hit per county a night, and a
+  // shared-cause outage reads as clean per-county failure lines instead of a
+  // thundering herd.
   for (const golden of GOLDEN_PARCELS) {
     let errCode = null;
     const record = await lookupPropertyFromCountyByParcel(golden.parcel, golden.parcel.situsAddress, {
@@ -304,7 +320,7 @@ async function runPropertyLookupCanaryInner() {
     } else if (!record) {
       checks.push({ key, status: 'transient', details: [`${golden.label}: by-parcel lookup returned no record`] });
     } else {
-      const fieldFailures = evaluateGoldenRecord(golden.label, record);
+      const fieldFailures = evaluateGoldenRecord(golden.label, record, { expectCageSqft: golden.expectCageSqft !== false });
       checks.push(fieldFailures.length
         ? { key, status: 'regression', details: fieldFailures }
         : { key, status: 'ok', details: [] });
