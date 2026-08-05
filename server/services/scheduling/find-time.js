@@ -266,6 +266,15 @@ async function findAvailableSlots(opts) {
           baseline_drive_minutes: baselineDrive,
           total_drive_minutes: detourDrive,
           score,
+          // Last start this gap can hold (its end still clears the drive to
+          // the next anchor). Availability surfaces that only offer clean
+          // grid-aligned times use this to fan out EVERY aligned start the
+          // gap fits — offering only the earliest-feasible minute meant an
+          // hour-snap into the lunch block or an occupied hour hid the gap's
+          // genuinely free later hours, and whole days with real capacity
+          // disappeared from the self-serve booking surfaces (2026-08-05
+          // field report).
+          latest_start_min: latestEnd - durationMinutes,
           insertion: {
             after: prev.id === 'HQ_START' ? 'HQ (start of day)' : `${prev.customer} (${minutesToTime(prev.endMin)})`,
             before: next.id === 'HQ_END' ? 'HQ (end of day)' : `${next.customer} (${minutesToTime(next.startMin)})`,

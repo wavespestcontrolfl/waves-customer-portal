@@ -1013,7 +1013,29 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     } else {
       // Route scoring returns minute-level travel offsets; customers see clean windows.
       const rawStartMin = timeToMin(slot.start_time);
-      addCandidate(slot, cleanBookingStart(rawStartMin, slot, dayStartMin, slotGridMinutes));
+      const firstStartMin = cleanBookingStart(rawStartMin, slot, dayStartMin, slotGridMinutes);
+      // Fan out every grid-aligned start the gap can hold, not just the
+      // earliest: find-time emits ONE earliest-feasible-minute candidate per
+      // route gap, and when its hour-snap landed in the lunch block or on an
+      // occupied hour, addCandidate's rejection silently discarded the gap's
+      // genuinely free later hours — whole near-term days with real capacity
+      // vanished from /book, the reschedule page, and /reservice (2026-08-05
+      // field report). latest_start_min bounds the fan-out to starts whose
+      // end still clears the drive to the next stop (the unbounded snap
+      // could previously overshoot that); addCandidate still owns the
+      // whole-hour / lunch / occupancy / day-end rules for every start.
+      // When the snap overshoots the bound (a gap too tight to hold any
+      // grid-aligned start), the loop body never runs and the gap offers
+      // nothing — the correct outcome; the old single-candidate path could
+      // offer that overshot start and leave the tech a slot the route can't
+      // reach. Fallback to the single snapped start only when the bound is
+      // absent (defensive: a caller-mocked or cached slot without the field).
+      const lastStartMin = Number.isFinite(slot.latest_start_min)
+        ? slot.latest_start_min
+        : firstStartMin;
+      for (let startMin = firstStartMin; startMin <= lastStartMin; startMin += slotGridMinutes) {
+        addCandidate(slot, startMin);
+      }
     }
   }
   const candidates = [...candidateMap.values()].sort(compareRankedSlots);
