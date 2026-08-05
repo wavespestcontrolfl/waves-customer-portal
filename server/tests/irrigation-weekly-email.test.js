@@ -640,3 +640,93 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     }
   });
 });
+
+describe('findLawnEmailAudienceGaps', () => {
+  const { findLawnEmailAudienceGaps } = require('../services/irrigation-weekly-email');
+
+  // Thenable knex-chain stub. The customers query resolves the book rows;
+  // any other table (the correlated upcoming-evidence subquery builder)
+  // returns an inert chain — it is only embedded as SQL, never awaited.
+  function mockBookRows(rows) {
+    db.mockImplementation((table) => {
+      const c = {};
+      for (const m of ['leftJoin', 'whereNull', 'where', 'whereRaw', 'whereNot', 'whereNotIn', 'whereIn', 'orWhereRaw', 'select', 'from']) {
+        c[m] = jest.fn(() => c);
+      }
+      if (table === 'customers as c') c.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+      return c;
+    });
+  }
+
+  const member = (over = {}) => ({
+    id: 'cust-1', first_name: 'Pat', last_name: 'Sample',
+    email: 'pat@example.com', latitude: 27.3, longitude: -82.5,
+    active: true, pipeline_stage: 'active_customer',
+    email_pref_ok: true, tips_pref_ok: true, has_future_evidence: true,
+    ...over,
+  });
+
+  test('a fully-reachable member produces no gap row', async () => {
+    mockBookRows([member()]);
+    expect(await findLawnEmailAudienceGaps()).toEqual([]);
+  });
+
+  test('missing email / coordinates / lead-stage are FIXABLE gaps', async () => {
+    mockBookRows([
+      member({ id: 'a', email: null }),
+      member({ id: 'b', latitude: null }),
+      member({ id: 'c', pipeline_stage: 'lead' }),
+    ]);
+    const gaps = await findLawnEmailAudienceGaps();
+    expect(gaps.map((g) => [g.customerId, g.fixable[0]])).toEqual([
+      ['a', 'no_email'],
+      ['b', 'no_coordinates'],
+      ['c', 'pipeline_stage=lead'],
+    ]);
+  });
+
+  test("uses the sender's validators — unusable email and non-finite coordinates are gaps", async () => {
+    // The send path selects these rows and then skips them (isEmailLike /
+    // numberOrNull), so null-checks alone would report a clean audience
+    // while the customer silently never hears (Codex #3209 r1).
+    mockBookRows([
+      member({ id: 'a', email: 'not-an-email' }),
+      member({ id: 'b', latitude: 'garbage' }),
+    ]);
+    const gaps = await findLawnEmailAudienceGaps();
+    expect(gaps.map((g) => [g.customerId, g.fixable[0]])).toEqual([
+      ['a', 'unusable_email'],
+      ['b', 'no_coordinates'],
+    ]);
+  });
+
+  test('0,0 placeholder coordinates are a gap — the sender skips them as rain_unknown', async () => {
+    // fetchServiceWeekWeather returns empty weather for 0,0 (failed
+    // geocode), so the sender selects and silently skips the customer.
+    mockBookRows([member({ latitude: 0, longitude: 0 })]);
+    const gaps = await findLawnEmailAudienceGaps();
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0].fixable).toEqual(['placeholder_coordinates']);
+  });
+
+  test('opted-out rows are suppressed ENTIRELY, even with other missing fields', async () => {
+    mockBookRows([
+      member({ tips_pref_ok: false }),
+      member({ id: 'z', email_pref_ok: false, email: null, latitude: null }),
+    ]);
+    expect(await findLawnEmailAudienceGaps()).toEqual([]);
+  });
+
+  test('churned customers (trailing-only evidence, non-customer stage) are a legitimate drop', async () => {
+    mockBookRows([
+      member({ id: 'churned', pipeline_stage: 'churned', has_future_evidence: false, email: null }),
+      // …but a non-customer stage WITH live future visits is a real
+      // inconsistency and still pages.
+      member({ id: 'odd', pipeline_stage: 'churned', has_future_evidence: true }),
+    ]);
+    const gaps = await findLawnEmailAudienceGaps();
+    expect(gaps.map((g) => [g.customerId, g.fixable[0]])).toEqual([
+      ['odd', 'pipeline_stage=churned'],
+    ]);
+  });
+});
