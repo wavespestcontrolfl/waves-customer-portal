@@ -950,6 +950,16 @@ describe('lawn nutrient purpose copy — diagnosis correlation', () => {
     const lime = { method: 'broadcast_spray', targets: [], product: { name: 'Pelletized Lime', category: 'Fertilizer', active_ingredient: 'Calcium carbonate 15-0-0' } };
     expect(applicationPurposeCopy(lime, 'lawn', { diagnosis: diagnosis('watch', 'watch') })).toBe(GENERIC);
   });
+
+  it('a potassium chelate takes the potassium reason, not the chelate/color one (codex P2 r4)', () => {
+    const kChelate = { method: 'broadcast_spray', targets: [], product: { name: 'K-Boost', category: 'Fertilizer', active_ingredient: 'Potassium chelate' } };
+    const why = applicationPurposeCopy(kChelate, 'lawn', { diagnosis: diagnosis('watch', 'watch') });
+    expect(why).toContain('Stress / Damage Signals');
+    expect(why).not.toContain('Color & Vigor');
+    // Only Color flagged → the potassium rule matches first, its category is
+    // un-flagged, and the copy fails closed rather than borrowing color.
+    expect(applicationPurposeCopy(kChelate, 'lawn', { diagnosis: diagnosis('watch', 'healthy') })).toBe(GENERIC);
+  });
 });
 
 // Free-form target chips are unrestricted text — only governed disease

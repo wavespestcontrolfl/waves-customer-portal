@@ -120,7 +120,9 @@ function reconcileRainFigure(text, canonicalRain) {
     // the attempt.
     let done = false;
     // `inch(?:es)?` — a singular "1 inch" total must match too (codex P2 r2).
-    return sentence.replace(/\b(\d+(?:\.\d+)?)(\s*)(inch(?:es)?|in\.|")/gi, (match, value, gap, unit, offset) => {
+    // Bare `in` (no period) is a common abbreviation too (codex P2 r4); the
+    // lookahead keeps prose like "2 in the morning" from reading as a unit.
+    return sentence.replace(/\b(\d+(?:\.\d+)?)(\s*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|")/gi, (match, value, gap, unit, offset) => {
       if (done) return match;
       const v = Number(value);
       if (!Number.isFinite(v)) return match;
@@ -136,8 +138,11 @@ function reconcileRainFigure(text, canonicalRain) {
       const before = sentence.slice(Math.max(0, offset - 24), offset);
       const after = sentence.slice(offset + match.length, offset + match.length + 24);
       const TARGET_WORD = '(?:target|goal|aim(?:ing)?|recommend(?:ed|s)?|ideal)';
+      // After-guard tolerates a rate qualifier between the figure and the
+      // target word — "0.75 inches per week target" is still the target
+      // (codex P2 r4).
       if (new RegExp(`\\b${TARGET_WORD}\\b[^.\\d]{0,12}$`, 'i').test(before)
-        || new RegExp(`^\\s*(?:weekly\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
+        || new RegExp(`^\\s*(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
       // The sentence already quotes the canonical figure → it agrees with the
       // widget; stop scanning so a later, different number (e.g. the target)
       // is never mistaken for a stale total.
@@ -169,13 +174,23 @@ function replaceDroughtHypothesis(text) {
   if (!t) return null;
   let changed = false;
   const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
-    if (!/chinch|stress|thin|tan\b|patch|scuff/i.test(sentence)) return sentence;
+    // A sentence qualifies via the stress-signal cues OR because it IS the
+    // hypothesis in its terse headline form ("Dry pocket near the sidewalk",
+    // "Localized drought near the edge" — codex P2 r4). A bare "drought"
+    // with no stress context still needs the cue ("A drought was declared
+    // in the county" stays untouched).
+    if (!/chinch|stress|thin|tan\b|patch|scuff/i.test(sentence)
+      && !/\bdry\s+pockets?\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
     // The negation must attach to the drought/dry wording itself ("no
     // drought stress", "no signs of drought", "not drought-related") — an
     // unrelated "No pests; drought stress remains possible" must still be
     // reconciled (codex P2 r3).
     if (/\b(?:no|not|isn['’]t|without)\s+(?:(?:visible|apparent|obvious|active|significant|clear)\s+|(?:signs?|evidence|indications?)\s+of\s+){0,2}(?:localized\s+)?(?:drought|dry)/i.test(sentence)) return sentence;
-    const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, 'uneven sprinkler coverage');
+    // Headline-position matches keep their capitalization ("Dry pocket near
+    // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").
+    const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m) => (
+      /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage'
+    ));
     if (replaced !== sentence) changed = true;
     return replaced;
   }).join(' ');

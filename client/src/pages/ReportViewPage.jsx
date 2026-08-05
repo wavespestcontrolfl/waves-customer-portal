@@ -1025,16 +1025,19 @@ export function recognizedDiseaseTargetsText(app = {}) {
 // and the product statement is a product property — no "chosen because"
 // causality, no observed-condition claim. Fail-closed: unrecognized product
 // or an un-flagged / absent category → the existing generic line.
+// Potassium FIRST: its matcher is the specific one, and a "Potassium
+// chelate" product must take the stress/potassium reason — the broad
+// `chelat` in the iron matcher would otherwise win (codex P2 #3197 r4).
 const NUTRIENT_DIAGNOSIS_LINKS = [
-  {
-    productRe: /\biron\b|chelat|micro[\s-]?nutrient/i,
-    categoryKey: 'color_vigor',
-    copy: (label) => `Used to support leaf color and recovery — today’s photo assessment marked ${label} as an area to watch, and this application feeds the color response we’re tracking between visits.`,
-  },
   {
     productRe: /\bpotassium\b|\bpotash\b|(?:^|\D)0-0-\d{1,2}\b/i,
     categoryKey: 'damage_disease_signals',
     copy: (label) => `Used to support root strength and stress tolerance — today’s photo assessment marked ${label} as an area to watch, and potassium helps the turf recover from stress between visits.`,
+  },
+  {
+    productRe: /\biron\b|chelat|micro[\s-]?nutrient/i,
+    categoryKey: 'color_vigor',
+    copy: (label) => `Used to support leaf color and recovery — today’s photo assessment marked ${label} as an area to watch, and this application feeds the color response we’re tracking between visits.`,
   },
 ];
 
@@ -1043,9 +1046,12 @@ export function nutrientDiagnosisCopy(app = {}, diagnosis = []) {
   const hay = `${app.product?.active_ingredient || ''} ${app.product?.name || ''}`;
   for (const link of NUTRIENT_DIAGNOSIS_LINKS) {
     if (!link.productRe.test(hay)) continue;
+    // First product match is AUTHORITATIVE: a potassium product whose stress
+    // category is un-flagged fails closed to the generic line — it must not
+    // fall through and borrow the broader chelate/color reason (codex P2 r4).
     const cat = diagnosis.find((c) => c && c.key === link.categoryKey);
-    if (!cat || !cat.label) continue;
-    if (cat.status !== 'watch' && cat.status !== 'needs_attention') continue;
+    if (!cat || !cat.label) return '';
+    if (cat.status !== 'watch' && cat.status !== 'needs_attention') return '';
     return link.copy(cat.label);
   }
   return '';

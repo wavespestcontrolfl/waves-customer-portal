@@ -89,6 +89,21 @@ describe('reconcileRainFigure', () => {
       .toBe('Rainfall totaled 0.8 inches this week.');
   });
 
+  test('a per-week target qualifier still guards, and the stale total still rewrites (codex P2 r4)', () => {
+    expect(reconcileRainFigure(
+      'Against the 0.75 inches per week target, rain totaled 2.72 inches this week.',
+      2.96,
+    )).toBe('Against the 0.75 inches per week target, rain totaled 2.96 inches this week.');
+  });
+
+  test('a bare "in" unit is recognized (codex P2 r4)', () => {
+    expect(reconcileRainFigure('Rain totaled 2.72 in this week.', 2.96))
+      .toBe('Rain totaled 2.96 in this week.');
+    // …but "in" as a preposition never reads as a unit.
+    expect(reconcileRainFigure('Rain arrived at 2 in the morning and totaled little this week.', 2.96))
+      .toBeNull();
+  });
+
   test('goal/recommended phrasing guards like target does', () => {
     expect(reconcileRainFigure(
       'Rain this week totaled 0.2 inches against the recommended 0.75 inches.',
@@ -124,6 +139,13 @@ describe('replaceDroughtHypothesis', () => {
   test('an unrelated negation does not shield the drought phrase (codex P2 r3)', () => {
     expect(replaceDroughtHypothesis('No pests were seen; drought stress remains possible in the thin areas.'))
       .toBe('No pests were seen; uneven sprinkler coverage remains possible in the thin areas.');
+  });
+
+  test('terse dry-pocket headlines qualify and keep their capitalization (codex P2 r4)', () => {
+    expect(replaceDroughtHypothesis('Dry pocket near the sidewalk'))
+      .toBe('Uneven sprinkler coverage near the sidewalk');
+    expect(replaceDroughtHypothesis('Localized drought near the edge'))
+      .toBe('Uneven sprinkler coverage near the edge');
   });
 
   test('a sentence not about the stress signals is left alone', () => {
