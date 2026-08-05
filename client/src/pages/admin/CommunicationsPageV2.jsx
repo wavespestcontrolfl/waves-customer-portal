@@ -626,6 +626,10 @@ function SmsTab() {
   // { url, recipientKey, customerId }. The bearer link must not outlive its
   // recipient — the effect below strips it from the body if To changes.
   const [insertedResched, setInsertedResched] = useState(null);
+  const [insertingReservice, setInsertingReservice] = useState(false);
+  // Same contract for the standing re-service link (free between-visit
+  // callback booking) — a bearer credential tracked per recipient.
+  const [insertedReservice, setInsertedReservice] = useState(null);
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
@@ -1310,6 +1314,117 @@ function SmsTab() {
       });
     }
   }, [insertedResched, msgBody, toNumber, selectedCustomerId]);
+
+  // Insert the recipient's standing self-serve re-service link (their free
+  // between-visit callback booking page) into the message body. The server
+  // resolves eligibility from LIVE plan state (active recurring / WaveGuard
+  // only) and answers 404 with a plain reason when there is no lane.
+  const handleInsertReserviceLink = async () => {
+    const requestRecipient = toNumber.trim();
+    if (!requestRecipient || insertingReservice) return;
+    const requestRecipientKey = smsThreadKey(requestRecipient);
+    const requestCustomerId = selectedCustomerId || null;
+    const requestThreadKey = activeThread?.contactPhone
+      ? smsThreadKey(activeThread.contactPhone)
+      : "";
+    // Stale-response guard (same contract as handleInsertRescheduleLink):
+    // discard the response if the operator moved on mid-flight.
+    const reserviceContextChanged = () => {
+      const latest = rewriteContextRef.current;
+      const latestRecipient = latest.toNumber.trim();
+      const latestRecipientKey = latestRecipient
+        ? smsThreadKey(latestRecipient)
+        : "";
+      return (
+        latestRecipientKey !== requestRecipientKey ||
+        (latest.selectedCustomerId || null) !== requestCustomerId ||
+        latest.activeThreadKey !== requestThreadKey
+      );
+    };
+    setInsertingReservice(true);
+    setSendResult(null);
+    try {
+      // POST body, never a query string — same request-log redaction reason
+      // as the reschedule lookup.
+      const d = await adminFetch("/admin/communications/reservice-link", {
+        method: "POST",
+        body: JSON.stringify({
+          phone: requestRecipient,
+          customerId: requestCustomerId || undefined,
+        }),
+      });
+      if (reserviceContextChanged()) return;
+      const clause = (d.line || "").trim() || `Book your free re-service: ${d.url}`;
+      // Replace-don't-stack, same as the reschedule insert: drop any line
+      // carrying the previously tracked URL before appending the fresh one.
+      const prevUrl = insertedReservice?.url || null;
+      setMsgBody((b) => {
+        const base = prevUrl
+          ? b
+              .split("\n")
+              .filter((l) => !l.includes(prevUrl))
+              .join("\n")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim()
+          : b;
+        return base.trim() ? `${base.replace(/\s+$/, "")}\n\n${clause}` : clause;
+      });
+      setInsertedReservice({
+        url: d.url,
+        recipientKey: requestRecipientKey,
+        customerId: requestCustomerId,
+      });
+      const laneLabel =
+        Array.isArray(d.lanes) && d.lanes.length
+          ? d.lanes
+              .map((l) => (l === "pest" ? "pest" : l === "lawn" ? "lawn" : l))
+              .join(" + ")
+          : null;
+      setSendResult({
+        ok: true,
+        text: `Re-service link added${laneLabel ? ` — covers the ${laneLabel} plan` : ""}.`,
+      });
+    } catch (e) {
+      if (!reserviceContextChanged()) {
+        setSendResult({ ok: false, text: e.message });
+      }
+    } finally {
+      setInsertingReservice(false);
+    }
+  };
+
+  // Same bearer-credential rule as the reschedule link: an inserted
+  // re-service link must not survive a recipient change, and the tracked
+  // link is forgotten once the operator deletes it from the body.
+  useEffect(() => {
+    if (!insertedReservice) return;
+    if (!msgBody.includes(insertedReservice.url)) {
+      setInsertedReservice(null);
+      return;
+    }
+    const currentRecipient = toNumber.trim();
+    const currentRecipientKey = currentRecipient
+      ? smsThreadKey(currentRecipient)
+      : "";
+    if (
+      currentRecipientKey !== insertedReservice.recipientKey ||
+      (selectedCustomerId || null) !== insertedReservice.customerId
+    ) {
+      setMsgBody((b) =>
+        b
+          .split("\n")
+          .filter((l) => !l.includes(insertedReservice.url))
+          .join("\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim(),
+      );
+      setInsertedReservice(null);
+      setSendResult({
+        ok: true,
+        text: "Re-service link removed — the recipient changed.",
+      });
+    }
+  }, [insertedReservice, msgBody, toNumber, selectedCustomerId]);
 
   const handleRewriteSms = async () => {
     const cleanBody = msgBody.trim();
@@ -2088,8 +2203,9 @@ function SmsTab() {
               rewritingSms ||
               // Mid-lookup send would go out WITHOUT the link the operator
               // just asked for (and clearing the recipient on send discards
-              // the response) — wait out the reschedule-link fetch.
+              // the response) — wait out the link fetches.
               insertingResched ||
+              insertingReservice ||
               !toNumber.trim() ||
               (!msgBody.trim() && attachments.length === 0)
             }
@@ -2120,6 +2236,14 @@ function SmsTab() {
             title="Insert this customer's self-serve reschedule link"
           >
             {insertingResched ? "Adding…" : "Reschedule Link"}
+          </Button>{" "}
+          <Button
+            variant="secondary"
+            onClick={handleInsertReserviceLink}
+            disabled={insertingReservice || !toNumber.trim()}
+            title="Insert this customer's free re-service booking link"
+          >
+            {insertingReservice ? "Adding…" : "Re-Service Link"}
           </Button>{" "}
         </div>
         {sendResult && (
