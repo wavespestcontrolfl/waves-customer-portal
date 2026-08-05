@@ -776,6 +776,14 @@ describe('revertMerge', () => {
     review_requests: ['created_at'],
     satisfaction_responses: ['created_at', 'updated_at'],
     pest_pressure_scores: ['created_at', 'updated_at'],
+    // r40/r41 record children + activity-checked alerts — all carry the
+    // full pair (20260711000010 / 20260623000001 / 20260612000001 /
+    // 20260613000031 / 20260401000093).
+    customer_cards: ['created_at', 'updated_at'],
+    lawn_water_intake_snapshots: ['created_at', 'updated_at'],
+    estimate_actuals: ['created_at', 'updated_at'],
+    google_ads_conversion_uploads: ['created_at', 'updated_at'],
+    customer_health_alerts: ['created_at', 'updated_at'],
   };
   const assertSelectableColumns = (table, q) => {
     const known = TABLE_TIMESTAMPS[table];

@@ -62,10 +62,13 @@ const ALERT = {
   auto_action_taken: '[]',
 };
 
-function wire({ insertChain }) {
+function wire({ insertChain, fenceOwner = 'cust-1' }) {
   const queues = {
     customer_health_alerts: [
       chain({ first: jest.fn().mockResolvedValue(ALERT) }),
+      // r41: the comp path re-reads the alert's owner UNDER the comms fence
+      // before inserting — an owner that moved (merge-undo) aborts.
+      chain({ first: jest.fn().mockResolvedValue(fenceOwner === null ? undefined : { customer_id: fenceOwner }) }),
       chain(), // status update
     ],
     customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace' }) })],
@@ -164,4 +167,18 @@ test('an insert failure is logged loudly, not just swallowed into the result blo
   );
   // No visit row → no reminder registration for it either.
   expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+});
+
+test('an alert whose owner moved under the comms fence (merge-undo) aborts — no comp visit on the stale kept owner', async () => {
+  const insertChain = compInsertChain();
+  wire({ insertChain, fenceOwner: 'cust-RESTORED' });
+
+  const result = await HealthAlerts.executeAction('alert-1', 0);
+
+  expect(insertChain.insert).not.toHaveBeenCalled();
+  expect(AppointmentReminders.registerAppointment).not.toHaveBeenCalled();
+  const actionResult = result.result || result;
+  expect(actionResult.success).toBe(false);
+  expect(actionResult.message).toMatch(/ownership changed/i);
+  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('Complimentary service insert failed'));
 });

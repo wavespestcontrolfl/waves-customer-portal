@@ -283,15 +283,27 @@ async function executeAction(alertId, actionIndex) {
       // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): comms-lock the
       // customer around the insert — this path had no transaction, and a
       // bare advisory xact lock outside one fences nothing.
-      const [compVisit] = await withCustomerCommsLock(db, customer.id, (trx) => trx('scheduled_services').insert({
+      const [compVisit] = await withCustomerCommsLock(db, customer.id, async (trx) => {
+        // r41: the alert + customer were loaded before the fence — an undo
+        // that moved the journaled alert back to the restored customer while
+        // we waited would create the comp visit (and stamp the alert) on the
+        // stale kept owner, invisible to the undo's probes. Re-read the
+        // alert's owner under the fence and abort into the action-failure
+        // path when it moved.
+        const freshAlert = await trx('customer_health_alerts').where({ id: alertId }).first('customer_id');
+        if (!freshAlert || String(freshAlert.customer_id) !== String(customer.id)) {
+          throw new Error('alert ownership changed while waiting on the comms fence (merge-undo) — re-open the alert and retry');
+        }
+        return trx('scheduled_services').insert({
         customer_id: customer.id,
         service_type: compServiceType,
         status: 'pending',
         estimated_price: 0,
         notes: `Complimentary service — Health alert retention #${alertId}`,
-        scheduled_date: compDate,
-        created_at: new Date(),
-      }).returning('id'));
+          scheduled_date: compDate,
+          created_at: new Date(),
+        }).returning('id');
+      });
       // Register the reminder row NOW, as a windowless pre-closed
       // placeholder — the same closeReminderWindows registration the IB
       // create_appointment path uses for untimed visits. Left row-less,

@@ -78,7 +78,15 @@ function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
   db.mockImplementation((table) => {
     const queue = tableQueues.get(table);
-    if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
+    if (!queue || !queue.length) {
+      // r41: every seeding insert presence-probes the term owner under the
+      // comms fence via this alias. Default = owner unchanged, so seeding
+      // tests stay focused; the moved-owner defer pin queues its own miss.
+      if (table === 'annual_prepay_terms as apt_owner_probe') {
+        return query({ first: { customer_id: 'owner-unchanged' } });
+      }
+      throw new Error(`Unexpected db table ${table}`);
+    }
     return queue.shift();
   });
   return tableQueues;
@@ -294,6 +302,41 @@ describe('annual prepay renewal helpers', () => {
     expect(updateTwo.update).toHaveBeenCalledWith(expect.objectContaining({
       prepaid_method: 'annual_prepay_invoice',
     }));
+  });
+
+  test('a term whose owner moved under the comms fence (merge-undo) defers every seed — no visits on the stale kept owner', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {}, service_type: {}, annual_prepay_term_id: {},
+        is_recurring: {}, recurring_pattern: {}, recurring_parent_id: {},
+        recurring_ongoing: {}, technician_id: {}, window_start: {},
+        window_end: {}, time_window: {}, customer_notes: {}, zone: {},
+        notes: {}, estimated_duration_minutes: {},
+      },
+    });
+    const rowsQuery = query({ rows: [] });
+    const insertQuery = query({ returning: [{ id: 'svc-never' }] });
+    const missProbe = () => query({ first: undefined });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), insertQuery],
+      // The presence probe misses on every seeded date — one entry per seed
+      // (the default owner-unchanged fallback only serves an EMPTY queue).
+      'annual_prepay_terms as apt_owner_probe': [missProbe(), missProbe(), missProbe(), missProbe()],
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-moved',
+      customer_id: 'customer-kept',
+      term_start: '2026-06-15',
+      term_end: '2027-06-15',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 4,
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
+      createdCount: 0,
+      existingCount: 0,
+    });
+
+    expect(insertQuery.insert).not.toHaveBeenCalled();
   });
 
   test('creates the quarterly coverage series when no matching visits already exist', async () => {

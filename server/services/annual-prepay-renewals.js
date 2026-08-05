@@ -717,6 +717,25 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // lock before the insert and let a concurrent booking slip in between. This
   // path is reached from Stripe activation with the root connection, so open a
   // transaction when `conn` isn't already one.
+  // r41: resolve → lock → re-resolve — `term` was loaded before any comms
+  // fence, so an undo that repointed the journaled term while we waited (or
+  // before a try-lock acquire) would seed visits on the stale kept owner
+  // with an annual_prepay_term_id the coverage checks then reject. Re-read
+  // the owner under the fence; a change defers exactly like a lock miss —
+  // the next idempotent term refresh reseeds post-undo.
+  const termOwnerMovedUnderFence = async (trx) => {
+    // Presence probe (id + owner, distinct alias): a single indexed lookup
+    // whose ABSENCE means the term moved or vanished — fail closed either way.
+    const fresh = await trx('annual_prepay_terms as apt_owner_probe')
+      .where({ id: term.id, customer_id: term.customer_id })
+      .first('customer_id');
+    if (fresh) return false;
+    logger.warn(`[annual-prepay] term ${term.id} owner changed under the comms fence (merge-undo) — deferring visit seeding; the next term refresh retries`);
+    await fileCoverageException(term, 'term_owner_changed',
+      'A customer-merge undo repointed this term while seeding its visits — seeding deferred; the next term refresh retries automatically. If the visits are still missing tomorrow, re-save the term.');
+    return true;
+  };
+
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
     let concurrentAdoptable = null;
@@ -804,6 +823,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         'A customer-merge undo was in flight while seeding this term\'s visits — seeding deferred; the next term refresh retries automatically. If the visits are still missing tomorrow, re-save the term.');
       return null;
     }
+    if (await termOwnerMovedUnderFence(trx)) return null;
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
     return row;
   };
@@ -910,13 +930,18 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         await fileCoverageException(term, 'comms_lock_busy',
           'A customer-merge undo was in flight while seeding this term\'s visits — seeding deferred; the next term refresh retries automatically. If the visits are still missing tomorrow, re-save the term.');
         created = null;
+      } else if (await termOwnerMovedUnderFence(conn)) {
+        created = null;
       } else {
         [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
       }
     } else {
       // Fresh transaction holds nothing yet — a blocking rung-6 acquire is
       // safe here (utils/customer-comms-lock.js).
-      [created] = await withCustomerCommsLock(conn, term.customer_id, (trx) => trx('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*'));
+      [created] = await withCustomerCommsLock(conn, term.customer_id, async (trx) => {
+        if (await termOwnerMovedUnderFence(trx)) return [null];
+        return trx('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
+      });
     }
     if (!created) continue;
     createdRows.push(created);

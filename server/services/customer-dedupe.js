@@ -1692,7 +1692,11 @@ const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin']);
 const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'customer_contracts',
   // r28: lead conversion stamps updated_at and mints a visit — a journaled
   // lead converted since the merge must refuse, not silently repoint back.
-  'leads']);
+  'leads',
+  // r41: executing a health-alert action stamps the alert's updated_at and
+  // mints kept-owner side effects (interactions, retention credits, a comp
+  // visit) — a journaled alert acted on since the merge must refuse.
+  'customer_health_alerts']);
 
 // The undo's email-clear guard probes every surface that delivers to a
 // denormalized copy of the customer email. This table MIRRORS the canonical
@@ -1946,6 +1950,11 @@ const TABLE_TIMESTAMP_COLUMNS = {
   // timestamps(true, true) — 20260711000010 / 20260623000001.
   customer_cards: ['created_at', 'updated_at'],
   lawn_water_intake_snapshots: ['created_at', 'updated_at'],
+  // explicit created_at/updated_at — 20260612000001; timestamps(true, true)
+  // — 20260613000031 / 20260401000093.
+  estimate_actuals: ['created_at', 'updated_at'],
+  google_ads_conversion_uploads: ['created_at', 'updated_at'],
+  customer_health_alerts: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2700,6 +2709,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           // customer_id + service_record_id without touching the record.
           { table: 'customer_cards', label: 'digital card(s)' },
           { table: 'lawn_water_intake_snapshots', label: 'lawn water snapshot(s)' },
+          // r41: the estimate-actuals and Google data-manager sweeps upsert
+          // calibration/upload rows carrying customer_id + service_record_id
+          // without touching the record — the completed-job uploader joins
+          // customer identifiers through ea.customer_id, so a stranded row
+          // attributes the restored customer's job to the kept customer.
+          { table: 'estimate_actuals', label: 'estimate actuals row(s)' },
+          { table: 'google_ads_conversion_uploads', label: 'ads conversion upload(s)' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];
