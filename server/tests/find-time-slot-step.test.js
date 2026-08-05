@@ -55,6 +55,13 @@ test('earliestStartMin past what fits before day close yields no slot (correctly
   expect(slots.length).toBe(0);
 });
 
+test('emits latest_start_min — the last start whose end still clears the drive to the next anchor', async () => {
+  const { slots } = await findAvailableSlots(BASE);
+  // Empty day: HQ→HQ gap with 1-min mocked drives → latestEnd 16:59 (17:00
+  // close minus the drive back), minus the 60-min duration.
+  expect(slots[0].latest_start_min).toBe(16 * 60 + 59 - 60);
+});
+
 test('earliestStartMin default (0) is a no-op — identical legacy behavior', async () => {
   const { slots } = await findAvailableSlots(BASE);
   expect(slots[0].start_time).toBe('08:01');
