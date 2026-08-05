@@ -57,6 +57,13 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.queryByText('Rain')).not.toBeInTheDocument();
   });
 
+  it('no visible reading draws no bar or target legend (codex P2 r12)', () => {
+    // Rain unknown + not-on-file zero irrigation: text rows only, no chart.
+    const { container } = render(<WaterIntakeBar water={{ rainInches: null, irrigationInches: 0, totalInches: null, targetInches: 0.75, status: 'unknown', confidence: 'low', scheduleOnFile: false }} />);
+    expect(container.querySelector('[title="Target"]')).toBeNull();
+    expect(container.querySelector('[title="Rain"]')).toBeNull();
+  });
+
   it('rain-unknown + no schedule keeps the low-confidence label (codex P2 r2)', () => {
     // Number(null) coerces to a finite 0 — the override must verify the rain
     // reading actually exists before claiming irrigation is the only gap.

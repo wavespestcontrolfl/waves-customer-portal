@@ -54,9 +54,11 @@ describe('reconcileRainFigure', () => {
     )).toBe('Against the 0.75 inch target, rain totaled 2.96 inches this week.');
   });
 
-  test('a singular "inch" total is rewritten too (codex P2 r2)', () => {
+  test('a singular "inch" total is rewritten too, pluralizing the unit (codex P2 r2 + P3 r12)', () => {
     expect(reconcileRainFigure('Rain totaled about 1 inch this week.', 1.52))
-      .toBe('Rain totaled about 1.52 inch this week.');
+      .toBe('Rain totaled about 1.52 inches this week.');
+    expect(reconcileRainFigure('Rain totaled 1.4 inches this week.', 1))
+      .toBe('Rain totaled 1 inch this week.');
   });
 
   test('low-rain week: the target is never rewritten to the rain total (codex P2 r2)', () => {
@@ -210,6 +212,16 @@ describe('replaceDroughtHypothesis', () => {
     // The terse headline form (no observation verb) still qualifies.
     expect(replaceDroughtHypothesis('Dry pocket near the sidewalk'))
       .toBe('Uneven sprinkler coverage near the sidewalk');
+  });
+
+  test('unhyphenated "drought stressed" reads adjectivally (codex P2 r12)', () => {
+    expect(replaceDroughtHypothesis('The thin strip is possibly drought stressed.'))
+      .toBe('The thin strip is possibly sprinkler-coverage-related.');
+  });
+
+  test('a negation AFTER the drought phrase preserves the observation (codex P2 r12)', () => {
+    expect(replaceDroughtHypothesis('Drought stress was not observed in the thin patches.')).toBeNull();
+    expect(replaceDroughtHypothesis('Drought stress isn’t visible across the stressed areas.')).toBeNull();
   });
 
   test('non-hyphenated "drought stress symptoms/signs" reads adjectivally (codex P2 r10)', () => {

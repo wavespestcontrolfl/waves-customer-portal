@@ -163,7 +163,13 @@ function reconcileRainFigure(text, canonicalRain) {
       if (Math.abs(v - canonicalRain) <= 0.05) { done = true; return match; }
       done = true;
       changed = true;
-      return `${formatInches(canonicalRain)}${gap}${unit}`;
+      // Keep the unit grammatical when the value changes across the
+      // singular/plural boundary ("1 inch" → "1.52 inches" — codex P3 r12).
+      const newVal = formatInches(canonicalRain);
+      let newUnit = unit;
+      if (/^inch$/i.test(unit) && Number(newVal) !== 1) newUnit = `${unit}es`;
+      else if (/^inches$/i.test(unit) && Number(newVal) === 1) newUnit = unit.slice(0, -2);
+      return `${newVal}${gap}${newUnit}`;
     });
   }).join(' ');
   return changed ? out : null;
@@ -187,7 +193,7 @@ function reconcileRainFigure(text, canonicalRain) {
 // would otherwise exclude it) and rewrites to "sprinkler-coverage-related";
 // dry spot(s)/area(s) join patch(es) under the hypothesis-cue gate
 // (codex P2 r7).
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought-stress(?:ed)?|drought(?:\s+stress)?|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 
 function replaceDroughtHypothesis(text) {
@@ -235,13 +241,19 @@ function replaceDroughtHypothesis(text) {
         const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence);
         if (!sentenceStart || observed) return m;
       }
-      // Adjectival forms — hyphenated ("drought-related", "drought-stressed"
-      // — codex P2 r9) or a space form directly modifying a noun ("drought
-      // stress symptoms/signs" — codex P2 r10) — take the adjectival
-      // replacement so the sentence stays grammatical.
+      // A negation can also FOLLOW the phrase ("Drought stress was not
+      // observed", "isn't visible") — check the same clause after the match
+      // before replacing (codex P2 r12); clause punctuation ends the search.
       const tail = sentence.slice(offset + m.length);
-      if (/drought[- ]related|drought-stress/i.test(m)
-        || (/drought(?:\s+stress)?$/i.test(m) && /^\s*(?:symptoms?|signs?|related)\b/i.test(tail))) {
+      if (/^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never)\b/i.test(tail)) return m;
+      // Adjectival forms — hyphenated or space-form "drought stressed"
+      // (codex P2 r9/r12), or "drought stress" directly modifying
+      // symptoms/signs/related (codex P2 r10) — take the adjectival
+      // replacement so the sentence stays grammatical.
+      if (/drought[- ]related\b/i.test(m)
+        || /drought[- ]stressed\b/i.test(m)
+        || /drought-stress\b/i.test(m)
+        || (/drought[- ]stress$/i.test(m) && /^\s*(?:symptoms?|signs?|related)\b/i.test(tail))) {
         return /^[A-Z]/.test(m) ? 'Sprinkler-coverage-related' : 'sprinkler-coverage-related';
       }
       return /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage';
