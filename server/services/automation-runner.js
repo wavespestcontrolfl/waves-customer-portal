@@ -141,7 +141,7 @@ async function hasLocalContent(templateKey) {
  * appointment tagger holds a per-customer advisory lock and must not need a
  * second pooled connection while doing so).
  */
-async function enrollCustomer({ templateKey, customer, dbh = db }) {
+async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode = 'block' }) {
   const template = await dbh('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error(`Unknown automation template: ${templateKey}`);
   if (!template.enabled) return { enrolled: false, reason: 'template disabled' };
@@ -224,16 +224,21 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
   };
   if (!customer.id) return runEnrollment(dbh);
   if (dbh.isTransaction) {
-    // A caller transaction may ALREADY hold row locks the undo takes after
-    // customer-comms (the first-touch release holds its hold row FOR
-    // UPDATE; the undo holds comms and reverse-repoints that same row) — a
-    // late BLOCKING acquire here is an AB-BA deadlock (r23). TRY-lock: a
-    // miss means an undo of this exact customer is mid-transaction, and
-    // the caller must treat the enrollment as retryable rather than
-    // proceed unfenced (the resume engine re-pends its hold; see
-    // lead-first-touch-resume).
-    if (!(await tryLockCustomerComms(dbh, customer.id))) {
-      return { enrolled: false, reason: 'customer_comms_busy', retryable: true };
+    // TRY-lock ONLY for callers that declare it (r33 — the r23 blanket
+    // try-lock silently dropped enrollments for transactional callers with
+    // no retry path, e.g. the appointment tagger's first-treatment
+    // sequence): a caller holding undo-contended row locks (the
+    // first-touch release holds its hold row FOR UPDATE, which the undo
+    // reverse-repoints) passes commsLockMode:'try' and handles the
+    // retryable customer_comms_busy result. Everyone else gets the safe
+    // BLOCKING acquire — their transactions hold only fresh/uncontended
+    // rows, and waiting out a brief undo is exactly right.
+    if (commsLockMode === 'try') {
+      if (!(await tryLockCustomerComms(dbh, customer.id))) {
+        return { enrolled: false, reason: 'customer_comms_busy', retryable: true };
+      }
+    } else {
+      await lockCustomerComms(dbh, customer.id);
     }
     return runEnrollment(dbh);
   }

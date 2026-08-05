@@ -273,13 +273,20 @@ describe('create_appointment', () => {
     expect(insertChain.insert.mock.calls[0][0]).toMatchObject({ scheduled_date: TODAY_ET, window_start: '09:00' });
   });
 
-  test('a 23:30 start is rejected before any DB call — the flat-60 end would cross midnight', async () => {
+  test('an off-hour start is rejected — appointment windows start on the hour (owner rule, r33)', async () => {
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '9:30 AM',
+    });
+    expect(result.error).toMatch(/on the hour/);
+  });
+
+  test('a 23:00 start is rejected before any DB call — the flat-60 end would cross midnight (23:30-style off-hour starts are rejected earlier by the on-the-hour rule)', async () => {
     // The old modulo-24h derivation accepted 23:30 and inserted a wrapped
     // 23:30–00:30 same-day block: a non-positive span invisible to every
     // overlap predicate and nonsense to the elapsed guard.
     const result = await executeTool('create_appointment', {
       customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control',
-      time_window: '11:30 PM',
+      time_window: '11:00 PM',
     });
 
     expect(result.error).toMatch(/cross midnight/);
@@ -527,7 +534,7 @@ describe('reschedule_appointment', () => {
     expect(logChain.insert.mock.calls[0][0]).toMatchObject({ new_window: '09:00:00-10:00:00' });
   });
 
-  test('a 23:30 start is rejected — the preserved 60-min duration would cross midnight; nothing moves', async () => {
+  test('a 23:00 start is rejected — the preserved 60-min duration would cross midnight; nothing moves', async () => {
     // baseAppt spans 09:00–10:00 (60 min): 23:30 + 60 wraps past midnight.
     // The old modulo-24h derivation would have persisted a 23:30–00:30
     // inverted block. The update chain is queued to prove it is never used.
@@ -541,7 +548,7 @@ describe('reschedule_appointment', () => {
     });
 
     const result = await executeTool('reschedule_appointment', {
-      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '11:30 PM',
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '11:00 PM',
     });
 
     expect(result.error).toMatch(/cross midnight/);

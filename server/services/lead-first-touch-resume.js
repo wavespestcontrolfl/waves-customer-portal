@@ -868,6 +868,11 @@ async function resumeHeldFirstTouch({
                 id: holdCustomerId,
               },
               dbh: trx,
+              // This transaction holds the hold row FOR UPDATE — an
+              // undo-contended lock (r23/r33) — so the comms acquire must
+              // be non-blocking; the customer_comms_busy handling below
+              // re-pends and retries.
+              commsLockMode: 'try',
             });
             if (enroll?.reason === 'customer_comms_busy') {
               // A merge-undo of this customer is mid-transaction (r23):

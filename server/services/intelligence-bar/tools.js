@@ -1254,7 +1254,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
     if (rowPendingConfirmation) {
       // Post-commit DOI re-send, exactly as the single-edit path — the
       // bearer token never rides into the tool result.
-      void require('../customer-email-fanout').resendPendingConfirmation(rowPendingConfirmation);
+      require('../customer-email-fanout').resendPendingConfirmation(rowPendingConfirmation)
+        .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
     }
     if (addressSubmitted) {
       await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
@@ -1379,6 +1380,13 @@ function parseTimeWindowStart(timeWindow) {
   if (m[3] === 'am' && hour === 12) hour = 0;
   if (hour > 23 || minute > 59) {
     return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
+  }
+  // Appointment windows start ON THE HOUR (owner rule — every creator
+  // enforces it; Codex #3109 r33 flagged this tool as the bypass). Reject
+  // rather than silently rounding: the operator asked for a specific time
+  // and the model can re-ask with the corrected value.
+  if (minute !== 0) {
+    return { error: `Appointment windows start on the hour — got "${timeWindow}"; use e.g. "${hour > 12 ? hour - 12 : hour || 12}:00 ${hour >= 12 ? 'PM' : 'AM'}"` };
   }
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
