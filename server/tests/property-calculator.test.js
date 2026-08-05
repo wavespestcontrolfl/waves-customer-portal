@@ -123,6 +123,131 @@ describe('calculatePropertyProfile missing-lot semantics', () => {
   });
 });
 
+describe('county-facts ceiling tightens the plausible-max turf cap', () => {
+  // Fixture: lot 8,000 / 1-story 2,000 home / no features → in-engine
+  // heuristic max = 8000 − 2000 footprint − 815 hardscape = 5,185. The
+  // heuristic footprint is LIVING AREA (garage/lanai missing) and the
+  // hardscape is a guess, so a trusted county ceiling below it must govern
+  // the vision clamp instead (a vision overshoot priced a real lawn ~25%
+  // high on 2026-08-05 because only the loose heuristic was armed).
+  const base = { homeSqFt: 2000, stories: 1, lotSqFt: 8000, turfSource: 'vision' };
+
+  test('vision within tolerance above the ceiling clamps to the ceiling, keeps vision grade', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 3200, countyTurfCeilingSf: 3000 });
+    expect(profile.lawnSqFt).toBe(3000);
+    expect(profile.turfBasis).toBe('plausibleMaxTurfCap');
+    expect(profile.turfConfidence).toBe('MEDIUM');
+    expect(profile.turfFlags).toEqual(
+      expect.arrayContaining(['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'])
+    );
+  });
+
+  test('vision far above the ceiling drops to the capped legacy fallback at LOW', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 4200, countyTurfCeilingSf: 3000 });
+    // legacy = round(5185 × 0.78) = 4044, capped to the 3,000 ceiling.
+    expect(profile.lawnSqFt).toBe(3000);
+    expect(profile.turfBasis).toBe('legacyHardscapeEstimate');
+    expect(profile.turfConfidence).toBe('LOW');
+    expect(profile.turfFlags).toEqual(
+      expect.arrayContaining(['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'])
+    );
+  });
+
+  test('a ceiling looser than the heuristic changes nothing — min() governs', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 5300, countyTurfCeilingSf: 6000 });
+    // Overage vs the 5,185 heuristic (115) is within tolerance → heuristic cap.
+    expect(profile.lawnSqFt).toBe(5185);
+    expect(profile.turfBasis).toBe('plausibleMaxTurfCap');
+  });
+
+  test('vision at or under the ceiling is untouched', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 2900, countyTurfCeilingSf: 3000 });
+    expect(profile.lawnSqFt).toBe(2900);
+    expect(profile.turfBasis).toBe('estimatedTurfSf');
+    expect(profile.turfConfidence).toBe('MEDIUM');
+    expect(profile.turfFlags).toEqual([]);
+  });
+
+  test('no ceiling → heuristic-only behavior is unchanged', () => {
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 3200 });
+    expect(profile.lawnSqFt).toBe(3200);
+    expect(profile.turfBasis).toBe('estimatedTurfSf');
+    expect(profile.turfFlags).toEqual([]);
+  });
+
+  test('a field-measured turf entry is never clamped by the ceiling', () => {
+    const profile = calculatePropertyProfile({ ...base, measuredTurfSf: 3600, countyTurfCeilingSf: 3000 });
+    expect(profile.lawnSqFt).toBe(3600);
+    expect(profile.turfBasis).toBe('measuredTurfSf');
+    expect(profile.turfConfidence).toBe('HIGH');
+  });
+
+  test('a trusted ZERO ceiling is a real bound, not an absent one (codex P1)', () => {
+    // Fully-impervious parcel per county facts: positive vision turf must
+    // clamp all the way down (over tolerance → legacy fallback min()s to 0)
+    // instead of pricing at MEDIUM off the loose heuristic.
+    const profile = calculatePropertyProfile({ ...base, estimatedTurfSf: 3200, countyTurfCeilingSf: 0 });
+    expect(profile.lawnSqFt).toBe(0);
+    expect(profile.turfConfidence).toBe('LOW');
+    expect(profile.turfFlags).toEqual(
+      expect.arrayContaining(['FIELD_VERIFY_TURF_SQFT', 'TURF_ESTIMATE_EXCEEDS_PLAUSIBLE_MAX'])
+    );
+  });
+});
+
+describe('translate adapter drops a stale county ceiling (codex P1)', () => {
+  // The estimator pages spread the looked-up profile and overwrite
+  // homeSqFt/lotSqFt/stories on operator edit; the ceiling must only reach
+  // the engine while the request still matches the county dimensions it was
+  // computed from (footprintTurfParts).
+  const baseProfile = {
+    homeSqFt: 2400,
+    lotSqFt: 10000,
+    stories: 2,
+    estimatedTurfSf: 5200,
+    turfSource: 'vision',
+    countyTurfCeilingSf: 8000,
+    footprintTurfParts: { lotSqFt: 10000, footprintSf: 1200, imperviousSf: 800, imperviousKnown: true },
+  };
+  const translate = (profile) => translateV2CallToV1Input(profile, ['LAWN'], { lawnFreq: 9, grassType: 'st_augustine' });
+
+  test('unedited replay forwards the ceiling', () => {
+    expect(translate(baseProfile).countyTurfCeilingSf).toBe(8000);
+  });
+
+  test('an edited lot drops the ceiling', () => {
+    expect(translate({ ...baseProfile, lotSqFt: 14000 }).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('an edited home size drops the ceiling (living-area basis)', () => {
+    expect(translate({ ...baseProfile, homeSqFt: 3200 }).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('an edited story count drops the ceiling via the footprint check', () => {
+    expect(translate({ ...baseProfile, stories: 1 }).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('missing parts leave nothing to validate against — ceiling dropped', () => {
+    const { footprintTurfParts, ...noParts } = baseProfile;
+    expect(translate(noParts).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('an unrecognized footprint basis fails closed — no producer, no forwarding (codex r2)', () => {
+    const unknownBasis = {
+      ...baseProfile,
+      footprintTurfParts: { ...baseProfile.footprintTurfParts, footprintBasis: 'gross_under_roof' },
+    };
+    expect(translate(unknownBasis).countyTurfCeilingSf).toBeNull();
+  });
+
+  test('an operator type correction to a shared-turf type drops the ceiling (codex r2 P1)', () => {
+    expect(translate({ ...baseProfile, propertyType: 'Townhome' }).countyTurfCeilingSf).toBeNull();
+    expect(translate({ ...baseProfile, propertyType: 'Interior Townhome' }).countyTurfCeilingSf).toBeNull();
+    expect(translate({ ...baseProfile, propertyType: 'Condo' }).countyTurfCeilingSf).toBeNull();
+    expect(translate({ ...baseProfile, propertyType: 'Single Family' }).countyTurfCeilingSf).toBe(8000);
+  });
+});
+
 describe('turf provenance through the translate boundary (P1)', () => {
   const lookupProfile = {
     homeSqFt: 1800,
@@ -132,6 +257,9 @@ describe('turf provenance through the translate boundary (P1)', () => {
     turfSource: 'county_prior',
     countyTurfPriorSf: 4050,
     countyTurfCeilingSf: 8100,
+    // Ceiling inputs — the adapter only forwards countyTurfCeilingSf while
+    // the request's dims still match these (stale-ceiling guard, codex P1).
+    footprintTurfParts: { lotSqFt: 9000, footprintSf: 1800, imperviousSf: 0, imperviousKnown: true },
     turfCappedToParcel: false,
   };
 
