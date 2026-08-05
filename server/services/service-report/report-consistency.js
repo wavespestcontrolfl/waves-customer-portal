@@ -155,8 +155,10 @@ function reconcileRainFigure(text, canonicalRain) {
     // Bare `in` (no period) is a common abbreviation too (codex P2 r4); the
     // lookahead keeps prose like "2 in the morning" from reading as a unit.
     // The gap accepts a hyphen so adjectival totals ("The 2.72-inch rainfall
-    // total") reconcile too (codex P2 r14).
-    return sentence.replace(/(?<![\d.])(\d+(?:\.\d+)?|\.\d+)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|")/gi, (match, value, gap, unit, offset) => {
+    // total") reconcile too (codex P2 r14). Typographic inch marks — the
+    // double prime ″ and the smart quote ” generated prose / pasted copy can
+    // carry — are units exactly like the ASCII " (codex P2 r29).
+    return sentence.replace(/(?<![\d.])(\d+(?:\.\d+)?|\.\d+)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|["″”])/gi, (match, value, gap, unit, offset) => {
       if (done) return match;
       const v = Number(value);
       if (!Number.isFinite(v)) return match;
@@ -172,7 +174,11 @@ function reconcileRainFigure(text, canonicalRain) {
       // word belongs to an earlier clause and the figure IS the weekly total
       // (codex P2 r9). "0.75 inch target, rain totaled 2.72" also lets 2.72
       // qualify.
-      const before = sentence.slice(Math.max(0, offset - 24), offset);
+      // 48 chars: every before-guard below anchors at $ with its own bounded
+      // gap, so the window only needs to be wide enough that a cue phrase is
+      // never truncated out of it — "The rain target for this week was" is
+      // longer than the old 24-char window held (codex P2 r29).
+      const before = sentence.slice(Math.max(0, offset - 48), offset);
       // 40 chars: the delta form "above the 0.75-inch target" must fit in
       // the window or the target word gets truncated out of the guard.
       const after = sentence.slice(offset + match.length, offset + match.length + 40);
@@ -209,6 +215,17 @@ function reconcileRainFigure(text, canonicalRain) {
       // "Rainfall totaled 1.2 inches last week, while this week…" keeps
       // scanning for the current-week clause (codex P2 r26).
       if (/^[^.;,:]{0,16}\b(?:last|previous|prior)\s+week\b/i.test(after)) return match;
+      // A figure attached to a NON-WEEK window (this month, the past 14
+      // days, since July) is not the weekly total even when the sentence
+      // ALSO names the current week — the whole-sentence non-week bail-out
+      // above only fires when NO true week cue exists, so "Rainfall totaled
+      // 4.2 inches this month, while rain totaled 2.72 inches this week"
+      // needs this per-figure skip to keep the monthly amount and still
+      // reconcile the weekly one (codex P2 r29). Clause-scoped on both
+      // sides, mirroring the prior-week guard; never consumes the attempt.
+      const NON_WEEK_WINDOW_RE = /\bmonth(?:ly)?\b|\bfortnight\b|\b(?:past|last|previous)\s+(?:(?:two|three|four|five|six|several|couple(?:\s+of)?|few)\s+(?:days?|weeks?)|(?!(?:7|seven)\b)\d+\s+days?|\d+\s+weeks?)\b|\b(?!7[\s-])\d{1,3}[\s-]day\b|\bsince\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|the\s+\d+|\d)\b/i;
+      const clauseAfter = sentence.slice(offset + match.length).split(/[,;:]|\b(?:while|but|whereas|although|though|and)\b/i)[0];
+      if (NON_WEEK_WINDOW_RE.test(clauseBefore) || NON_WEEK_WINDOW_RE.test(clauseAfter)) return match;
       // A COMPARATIVE bound is not an exact total — "stayed under 1 inch"
       // must not become "under 2.96 inches" (codex P2 r27); skipped without
       // consuming.
@@ -248,13 +265,21 @@ function reconcileRainFigure(text, canonicalRain) {
       // …including compact ASCII-hyphen ranges ("1-2 inches" — codex P2
       // r26): a digit + hyphen right before the figure is a range, not a
       // total.
-      if (/\d[\s"″]*(?:(?:inch(?:es)?|in\.?)\s+)?(?:to|–|—|through|and)\s*$/i.test(before)) return match;
+      if (/\d[\s"″”]*(?:(?:inch(?:es)?|in\.?)\s+)?(?:to|–|—|through|and)\s*$/i.test(before)) return match;
       if (/\d\s*-\s*$/.test(before)) return match;
       if (/\b(?:between|from)\s+(?:the\s+|about\s+|around\s+|roughly\s+)?$/i.test(before)) return match;
       // The after-guard also allows an explicit target FIGURE between the
       // delta preposition and the target word — "1.97 inches above the
       // 0.75-inch target" is a delta, not the weekly total (codex P2 r16).
-      if (new RegExp(`\\b${TARGET_WORD}\\b(?!\\s+(?:and|plus|&)\\b)[^.\\d,;:]{0,12}$`, 'i').test(before)
+      // The before-guard tolerates ordinary wording between the target word
+      // and its figure — a scope qualifier ("target for this week", "target
+      // for your lawn") and/or a linking verb ("was", "sits at", "was set
+      // at") — so "The rain target for this week was 0.75 inches, but rain
+      // totaled 2.72 inches" skips the target figure and keeps scanning to
+      // the actual stale total (codex P2 r29). Digits and clause punctuation
+      // still break the attachment, so a target in an earlier clause never
+      // shields a real total.
+      if (new RegExp(`\\b${TARGET_WORD}\\b(?!\\s+(?:and|plus|&)\\b)(?:\\s+for\\s+(?:this|the|your)\\s+(?:week|lawn|yard|turf|grass))*(?:\\s+(?:is|was|were|remains?|stands?|sits?)(?:\\s+set)?(?:\\s+at)?)?[^.\\d,;:]{0,12}$`, 'i').test(before)
         || new RegExp(`^\\s*(?:(?:over|above|below|under|past|beyond|short\\s+of)\\s+)?(?:the\\s+)?(?:\\d+(?:\\.\\d+)?[\\s-]*(?:inch(?:es)?|in\\.?|")\\s*)?(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
       // The sentence already quotes the canonical figure → it agrees with the
       // widget; stop scanning so a later, different number (e.g. the target)
@@ -305,7 +330,12 @@ function reconcileRainFigure(text, canonicalRain) {
 // the (?!-) guard blocked the stress match and the bare "drought" fallback
 // produced "uneven sprinkler coverage stress-related" — or skipped the fully
 // hyphenated form entirely (codex P2 r18).
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:[- ]stress)?[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?|conditions?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
+// "drought conditions" is its own alternative so the NOUN is consumed with
+// the match — bare "drought" before "conditions" rendered "Uneven sprinkler
+// coverage conditions may be contributing…" (codex P2 r29); it shares the
+// dry-conditions hypothesis gate below, so a form without a cue is left
+// alone rather than always rewritten.
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:[- ]stress)?[- ]related|drought[- ]stress(?:ed)?|drought\s+conditions?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?|conditions?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
 // "possible"/"potential" adjective forms are cues too — "Possible dry spots
 // near the sidewalk" is a direct hypothesis (codex P2 r25).
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bpossible\b|\bpotential\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
@@ -330,7 +360,7 @@ function replaceDroughtHypothesis(text) {
     // pass the prefilter ("Could be dry spots near the sidewalk" — codex P2
     // r17); the downstream cue/observation/negation logic decides.
     if (!/chinch|stress|thin|tan\b|patch|scuff|damage/i.test(sentence)
-      && !/\bdry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?|conditions?)\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
+      && !/\bdry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?|conditions?)\b|\blocalized\s+drought\b|\bdrought\s+conditions?\b/i.test(sentence)) return sentence;
     // Headline-position matches keep their capitalization ("Dry pocket near
     // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").
     // dry patch/spot/area forms only rewrite under a hypothesis cue — "a few
@@ -394,8 +424,11 @@ function replaceDroughtHypothesis(text) {
       // spots were noted" uses a descriptive "or", not a differential
       // (codex P2 r21) — and the same veto covers drought-stress matches:
       // "Drought stress symptoms were noted along the edge" is a technician
-      // OBSERVATION, not a hypothesis (codex P2 r26).
-      if (/^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded)\b/i.test(sentence.slice(offset + m.length))) return m;
+      // OBSERVATION, not a hypothesis (codex P2 r26). "visible"/"showing"
+      // are observation verbs here exactly as in the dry-area branches
+      // below — "Drought stress symptoms are visible along the edge" is
+      // observed evidence, never rewritten to coverage copy (codex P2 r29).
+      if (/^[^;:.]{0,40}\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence.slice(offset + m.length))) return m;
       // …but a CLAUSE-LEADING dry-area phrase with a same-clause cue right
       // AFTER it is still a hypothesis — "Dry spots could be contributing to
       // the thinning" (codex P2 r20), including unresolved tails ("Dry spots
@@ -409,7 +442,7 @@ function replaceDroughtHypothesis(text) {
       const atClauseStart = atSentenceStart || /^\s*(?:but|and|while|though|however|yet|so)?\s*$/i.test(clauseLead);
       const tailClause = sentence.slice(offset + m.length).split(/[,;:.]/)[0];
       const cueAfter = HYPOTHESIS_CUE_RE.test(tailClause) || UNRESOLVED_TAIL_RE.test(tailClause);
-      if (/dry\s+(?:patch|spots?|areas?|conditions?)/i.test(m) && !cueBefore(offset)) {
+      if (/dry\s+(?:patch|spots?|areas?|conditions?)|drought\s+conditions?/i.test(m) && !cueBefore(offset)) {
         const wasObserved = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence);
         if (wasObserved || !atClauseStart || !cueAfter) return m;
       }

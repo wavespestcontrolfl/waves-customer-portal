@@ -149,6 +149,35 @@ describe('reconcileRainFigure', () => {
     )).toBe('Rain this week brought the 0.75 inches target and 2.96 inches total.');
   });
 
+  test('curly inch marks reconcile like ASCII units (codex P2 r29)', () => {
+    expect(reconcileRainFigure('Rainfall totaled 2.72″ this week.', 2.96))
+      .toBe('Rainfall totaled 2.96″ this week.');
+    expect(reconcileRainFigure('Rainfall totaled 2.72” this week.', 2.96))
+      .toBe('Rainfall totaled 2.96” this week.');
+  });
+
+  test('a long target qualifier still guards the target figure (codex P2 r29)', () => {
+    expect(reconcileRainFigure(
+      'The rain target for this week was 0.75 inches, but rain totaled 2.72 inches.',
+      2.96,
+    )).toBe('The rain target for this week was 0.75 inches, but rain totaled 2.96 inches.');
+    expect(reconcileRainFigure(
+      'The weekly target for your lawn was 0.75 inches, and rainfall reached 2.72 inches.',
+      2.96,
+    )).toBe('The weekly target for your lawn was 0.75 inches, and rainfall reached 2.96 inches.');
+  });
+
+  test('a non-week window amount is skipped even beside a weekly figure (codex P2 r29)', () => {
+    expect(reconcileRainFigure(
+      'Rainfall totaled 4.2 inches this month, while rain totaled 2.72 inches this week.',
+      2.96,
+    )).toBe('Rainfall totaled 4.2 inches this month, while rain totaled 2.96 inches this week.');
+    expect(reconcileRainFigure(
+      'Over the past 14 days rainfall totaled 4.2 inches, but this week rain totaled 2.72 inches.',
+      2.96,
+    )).toBe('Over the past 14 days rainfall totaled 4.2 inches, but this week rain totaled 2.96 inches.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -475,6 +504,23 @@ describe('replaceDroughtHypothesis', () => {
       .toBe('Sprinkler-coverage-related pressure may be contributing to thinning.');
   });
 
+  test('visible/showing drought stress is an observation and is preserved (codex P2 r29)', () => {
+    expect(replaceDroughtHypothesis('Drought stress symptoms are visible along the driveway edge.')).toBeNull();
+    expect(replaceDroughtHypothesis('Drought stress was showing in the thin backyard strip.')).toBeNull();
+  });
+
+  test('"drought conditions" rewrites as a full phrase (codex P2 r29)', () => {
+    expect(replaceDroughtHypothesis('Drought conditions may be contributing to the thinning along the fence.'))
+      .toBe('Uneven sprinkler coverage may be contributing to the thinning along the fence.');
+    expect(replaceDroughtHypothesis('Thinning along the edge could reflect drought conditions.'))
+      .toBe('Thinning along the edge could reflect uneven sprinkler coverage.');
+  });
+
+  test('cue-less or observed drought conditions stay preserved (codex P2 r29)', () => {
+    expect(replaceDroughtHypothesis('Drought conditions were noted in the thin strip.')).toBeNull();
+    expect(replaceDroughtHypothesis('Drought conditions have eased after this week’s rain on the stressed strip.')).toBeNull();
+  });
+
   test('"not ruled out" is unresolved and still reconciles (codex P2 r25)', () => {
     expect(replaceDroughtHypothesis('Drought stress is not ruled out in the thin patches.'))
       .toBe('Uneven sprinkler coverage is not ruled out in the thin patches.');
@@ -532,8 +578,10 @@ describe('replaceDroughtHypothesis', () => {
   });
 
   test('non-hyphenated "drought stress symptoms/signs" reads adjectivally (codex P2 r10)', () => {
-    expect(replaceDroughtHypothesis('Drought stress symptoms are showing in the thin areas.'))
-      .toBe('Sprinkler-coverage-related symptoms are showing in the thin areas.');
+    // "may be developing", not "are showing": visible/showing continuations
+    // are technician observations and are preserved outright (codex P2 r29).
+    expect(replaceDroughtHypothesis('Drought stress symptoms may be developing in the thin areas.'))
+      .toBe('Sprinkler-coverage-related symptoms may be developing in the thin areas.');
     // The plain noun form keeps the noun replacement.
     expect(replaceDroughtHypothesis('No pests were seen; drought stress remains possible in the thin areas.'))
       .toMatch(/uneven sprinkler coverage remains possible/);
@@ -542,8 +590,9 @@ describe('replaceDroughtHypothesis', () => {
   test('hyphenated drought-stress forms are covered (codex P2 r9)', () => {
     expect(replaceDroughtHypothesis('The thin strip is possibly drought-stressed.'))
       .toBe('The thin strip is possibly sprinkler-coverage-related.');
-    expect(replaceDroughtHypothesis('Drought-stress symptoms are showing in the thin areas.'))
-      .toBe('Sprinkler-coverage-related symptoms are showing in the thin areas.');
+    // Non-observation continuation — see the r29 note in the test above.
+    expect(replaceDroughtHypothesis('Drought-stress symptoms may be developing in the thin areas.'))
+      .toBe('Sprinkler-coverage-related symptoms may be developing in the thin areas.');
     // Tolerance praise still survives in hyphenated proximity.
     expect(replaceDroughtHypothesis('This stressed cultivar shows drought-stress tolerance.')).toBeNull();
     expect(replaceDroughtHypothesis('This stressed cultivar is drought stress-tolerant.')).toBeNull();
