@@ -650,7 +650,11 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       <div style={{ display: 'grid', gridTemplateColumns: 'auto auto', gap: '4px 18px', fontSize: 14, color: BODY, marginBottom: 14 }}>
         {hasRain ? <><span style={{ color: MUTED }}>Rain</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(rain)}</strong></> : null}
         {hasIrr && irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
-        {hasIrr && !irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span></> : null}
+        {/* "Not on file" keys off !irrOnFile alone — the no-schedule payload
+            can carry irrigationInches: null, and gating on a finite amount
+            hid the promised row exactly when the schedule was missing
+            (codex P2 r24). */}
+        {!irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span></> : null}
         {hasTotal ? <><span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong></> : null}
         {hasTarget ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
       </div>

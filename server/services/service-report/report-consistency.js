@@ -190,6 +190,13 @@ function reconcileRainFigure(text, canonicalRain) {
       // scoped so the current-week half of the comparison isn't shielded;
       // skips without consuming the attempt (codex P2 r22).
       if (/\b(?:last|previous|prior)\s+week\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
+      // A per-day AVERAGE is not the weekly total either — "Average daily
+      // rainfall this week was 0.4 inches" / "averaged 0.4 inches per day"
+      // must keep the average and let a later weekly figure reconcile
+      // (codex P2 r24). Clause-scoped before-guard + per-day after-guard;
+      // neither consumes the attempt.
+      if (/\b(?:averag(?:e|ed|ing)|daily|mean)\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
+      if (/^\s*(?:of\s+rain(?:fall)?\s+)?(?:per|a|each)\s+day\b|^\s*daily\b/i.test(after)) return match;
       // Likewise a figure attached to IRRIGATION is not the rain total —
       // "Irrigation added 0.75 inches while rain totaled 2.72 inches" must
       // skip the 0.75 (without consuming the attempt) so the actual stale
@@ -341,6 +348,10 @@ function replaceDroughtHypothesis(text) {
       if (/\b(?:not|no|isn['’]t|never)\s+(?:[a-z'’-]+\s+){0,2}(?:believed|thought|expected|considered|likely)\s+(?:to\s+be\s+)?(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
       if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
         && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
+      // "inconsistent with" is a DISMISSAL, not the "consistent with"
+      // hypothesis cue — "The pattern is inconsistent with drought stress"
+      // already agrees with the water data (codex P2 r24).
+      if (/\b(?:inconsistent|not\s+consistent)\s+with\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
       // An observation verb attached right AFTER any dry-area phrase vetoes
       // the rewrite even when a cue precedes it — "Brown or tan patches and
       // dry spots were noted" uses a descriptive "or", not a differential

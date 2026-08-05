@@ -39,6 +39,11 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.queryByText(/irrigation schedule added/)).not.toBeInTheDocument();
   });
 
+  it('no schedule on file with a missing irrigation amount still shows "Not on file" (codex P2 r24)', () => {
+    render(<WaterIntakeBar water={{ rainInches: 2.96, irrigationInches: null, targetInches: 0.75, status: 'high', confidence: 'low', scheduleOnFile: false }} />);
+    expect(screen.getByText('Not on file')).toBeInTheDocument();
+  });
+
   it('no schedule on file: a pure rain narrative explanation still renders', () => {
     render(<WaterIntakeBar water={{ rainInches: 2.96, irrigationInches: 0, targetInches: 0.75, status: 'high', confidence: 'low', scheduleOnFile: false, explanation: 'Heavy rain this week kept the lawn well above its weekly needs.' }} />);
     expect(screen.getByText(/Heavy rain this week/)).toBeInTheDocument();

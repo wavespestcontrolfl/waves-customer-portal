@@ -66,6 +66,14 @@ describe('reconcileRainFigure', () => {
       .toBe('Mowing height was 3.5 in. Rainfall totaled 2.96 inches this week.');
   });
 
+  test('a daily-average rain figure is never rewritten (codex P2 r24)', () => {
+    expect(reconcileRainFigure('Average daily rainfall this week was 0.4 inches.', 2.96)).toBeNull();
+    expect(reconcileRainFigure(
+      'Rainfall averaged 0.4 inches per day this week, with the weekly total at 2.72 inches.',
+      2.96,
+    )).toBe('Rainfall averaged 0.4 inches per day this week, with the weekly total at 2.96 inches.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -355,6 +363,13 @@ describe('replaceDroughtHypothesis', () => {
 
   test('negated-belief dismissals are preserved (codex P2 r23)', () => {
     expect(replaceDroughtHypothesis('The thinning is not currently believed to be drought stress.')).toBeNull();
+  });
+
+  test('"inconsistent with" drought dismissals stay verbatim (codex P2 r24)', () => {
+    expect(replaceDroughtHypothesis('The pattern is inconsistent with drought stress.')).toBeNull();
+    // The positive hypothesis form still reconciles.
+    expect(replaceDroughtHypothesis('Stress that could be consistent with localized drought.'))
+      .toMatch(/uneven sprinkler coverage/);
   });
 
   test('a dry-pocket hypothesis after a negated clause still reconciles (codex P2 r23)', () => {
