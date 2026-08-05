@@ -261,13 +261,15 @@ describe("fallback lawn margin visibility — report-only WaveGuard breach warni
   });
 
   it("re-armed: a market-priced lawn row still cannot DISCOUNT below its cost floor (codex P2 round 9 #2827)", () => {
-    // 3,000 sqft 9x: market $564 sits ABOVE the $531.09 floor, so selection
-    // is untouched — but Silver 10% would land at $507.60. The armed
+    // 2,500 sqft 9x (2026-08-04 re-grid: 3,000's softened $528 market now
+    // sits UNDER its $531.09 floor and floor-selects when armed, so this
+    // scenario moves to 2,500): market $504 sits ABOVE the $489.88 floor,
+    // selection untouched — but Silver 10% would land at $453.60. The armed
     // post-discount guard gives back the overshoot and holds the lawn slice
     // at its floor, matching the server caps and the public-ladder
     // re-clamp (save == accept). At-floor = no breach warning.
     applyServerLawnPricingConfig({ useLawnCostFloor: true });
-    const est = calculateEstimate(lawnInput({ svcPest: true, measuredTurfSf: 3000 }));
+    const est = calculateEstimate(lawnInput({ svcPest: true, measuredTurfSf: 2500 }));
     expect(est.error).toBeUndefined();
     const nine = est.results.lawn.find((t) => t.v === 9);
     expect(nine.costFloorApplied).toBe(false);

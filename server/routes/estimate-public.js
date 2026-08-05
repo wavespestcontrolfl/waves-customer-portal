@@ -12167,10 +12167,13 @@ function storedLawnRowBelowProgramFloor(estData = null) {
 // defaulting to quarterly.
 function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   if (!estDataLike || typeof estDataLike !== 'object') return false;
-  const retiredFreqs = new Set(Object.values(LAWN_TIERS || {})
-    .filter((t) => t && t.hidden === true)
-    .map((t) => Number(t.freq))
-    .filter((n) => Number.isFinite(n) && n > 0));
+  const retiredFreqs = new Set([
+    ...REMOVED_LAWN_TIER_FREQS,
+    ...Object.values(LAWN_TIERS || {})
+      .filter((t) => t && t.hidden === true)
+      .map((t) => Number(t.freq))
+      .filter((n) => Number.isFinite(n) && n > 0),
+  ]);
   if (!retiredFreqs.size) return false;
   const { recurringSvcList } = acceptanceServiceLists(estDataLike);
   const converter = require('../services/estimate-converter');
@@ -13779,14 +13782,19 @@ function mergeAskChips(categories = []) {
 function treeShrubTierKey(row = {}) {
   const raw = String(row.key || row.tier || row.name || row.label || '').trim().toLowerCase();
   if (raw.includes('light') || raw === '4' || raw === '4x') return 'light';
-  if (raw.includes('standard') || raw === '6' || raw === '6x') return 'standard';
+  // Application-count label names (owner 2026-08-04: Standard/Enhanced are
+  // no longer display names) — client R.ts rows carry no machine tier key,
+  // so the new '6x applications/yr' / '9x applications/yr' names must parse
+  // here or fallback-payload public links lose their T&S tier (codex #3190
+  // P2). startsWith keeps '12x…' out of the '9x' branch below.
+  if (raw.includes('standard') || raw === '6' || raw === '6x' || raw.startsWith('6x ')) return 'standard';
   // 'enhanced' (9x) and 'premium' (12x) are retired but kept here so
   // previously-saved estimates that still carry those rows render unchanged
   // (legacy estimates aren't re-priced) AND the shared quote gate can see
   // them as retired tiers (codex P1 r5: a Premium-only ladder produced an
   // empty tierKeys set and slipped the requote gate).
-  if (raw.includes('enhanced') || raw === '9' || raw === '9x') return 'enhanced';
-  if (raw.includes('premium') || raw === '12' || raw === '12x') return 'premium';
+  if (raw.includes('enhanced') || raw === '9' || raw === '9x' || raw.startsWith('9x ')) return 'enhanced';
+  if (raw.includes('premium') || raw === '12' || raw === '12x' || raw.startsWith('12x ')) return 'premium';
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
@@ -13934,8 +13942,15 @@ function threadedProgramMinMonthly(value) {
   return value != null && Number.isFinite(n) && n >= 0 ? n : lawnProgramMinimumMonthly();
 }
 
+// basic/4x was fully REMOVED from LAWN_TIERS (owner 2026-08-04) — it no
+// longer carries a hidden flag, so retirement must recognize the removed
+// key explicitly; hidden:true keeps covering any future soft-retired tier.
+const REMOVED_LAWN_TIER_KEYS = new Set(['basic']);
+const REMOVED_LAWN_TIER_FREQS = new Set([4]);
 function isRetiredLawnTierKey(tierKey) {
-  return LAWN_TIERS?.[String(tierKey || '').trim().toLowerCase()]?.hidden === true;
+  const key = String(tierKey || '').trim().toLowerCase();
+  if (REMOVED_LAWN_TIER_KEYS.has(key)) return true;
+  return LAWN_TIERS?.[key]?.hidden === true;
 }
 
 // Per-estimate cost-floor arm state: an estimate generated with an explicit
@@ -17427,10 +17442,13 @@ function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
   // A lawn row at a retired visit cadence violates the policy even when its
   // price sits at/above the floor — a snapshotted 4-visit lawn row priced at
   // exactly the floor is still the retired Quarterly plan.
-  const retiredLawnVisits = new Set(Object.values(LAWN_TIERS || {})
-    .filter((t) => t && t.hidden === true)
-    .map((t) => Number(t.freq))
-    .filter((n) => Number.isFinite(n) && n > 0));
+  const retiredLawnVisits = new Set([
+    ...REMOVED_LAWN_TIER_FREQS,
+    ...Object.values(LAWN_TIERS || {})
+      .filter((t) => t && t.hidden === true)
+      .map((t) => Number(t.freq))
+      .filter((n) => Number.isFinite(n) && n > 0),
+  ]);
   const lawnTreatmentRowViolates = (rows) => Array.isArray(rows) && rows.some((r) => {
     if (recurringServiceKey(r) !== 'lawn_care') return false;
     const visits = Number(r?.visitsPerYear ?? r?.visits);

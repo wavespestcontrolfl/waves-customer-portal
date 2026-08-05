@@ -1786,6 +1786,9 @@ function resolveLawnTier(tier, lawnFreq) {
     const match = Object.entries(LAWN_TIERS).find(([, cfg]) => cfg.freq === freq);
     if (match) return match[0];
   }
+  // basic/4x is fully retired (owner 2026-08-04) — a legacy stored
+  // lawnFreq=4 or tier='basic' replays at the enhanced default, matching
+  // the client mirror's resolveLawnFreq(4) -> 9.
   return LAWN_TIERS[tier] ? tier : 'enhanced';
 }
 
