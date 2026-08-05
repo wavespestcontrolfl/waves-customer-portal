@@ -74,6 +74,23 @@ describe('reconcileRainFigure', () => {
     )).toBe('Rainfall averaged 0.4 inches per day this week, with the weekly total at 2.96 inches.');
   });
 
+  test('a non-rain inch measurement is never rewritten (codex P2 r25)', () => {
+    expect(reconcileRainFigure(
+      'With rain this week, mowing height was 3.5 inches, and rain totaled 2.72 inches.',
+      2.96,
+    )).toBe('With rain this week, mowing height was 3.5 inches, and rain totaled 2.96 inches.');
+  });
+
+  test('benchmark rain deltas are preserved (codex P2 r25)', () => {
+    expect(reconcileRainFigure('Rainfall was 1.97 inches above normal this week.', 2.96)).toBeNull();
+    expect(reconcileRainFigure('Rain ran below normal by 0.4 inches this week.', 2.96)).toBeNull();
+  });
+
+  test('"weekly rainfall" qualifies as a week cue (codex P2 r25)', () => {
+    expect(reconcileRainFigure('Weekly rainfall was 2.72 inches.', 2.96))
+      .toBe('Weekly rainfall was 2.96 inches.');
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -363,6 +380,24 @@ describe('replaceDroughtHypothesis', () => {
 
   test('negated-belief dismissals are preserved (codex P2 r23)', () => {
     expect(replaceDroughtHypothesis('The thinning is not currently believed to be drought stress.')).toBeNull();
+  });
+
+  test('improving dry pockets are historical, not hypotheses (codex P2 r25)', () => {
+    expect(replaceDroughtHypothesis('Dry pockets have improved after this week’s rain.')).toBeNull();
+  });
+
+  test('"not ruled out" is unresolved and still reconciles (codex P2 r25)', () => {
+    expect(replaceDroughtHypothesis('Drought stress is not ruled out in the thin patches.'))
+      .toBe('Uneven sprinkler coverage is not ruled out in the thin patches.');
+    expect(replaceDroughtHypothesis('Drought stress has not been ruled out for the stressed strip.'))
+      .toBe('Uneven sprinkler coverage has not been ruled out for the stressed strip.');
+  });
+
+  test('possible/potential dry spots are hypotheses (codex P2 r25)', () => {
+    expect(replaceDroughtHypothesis('Possible dry spots near the stressed strip.'))
+      .toBe('Possible uneven sprinkler coverage near the stressed strip.');
+    expect(replaceDroughtHypothesis('Potential dry spots near the sidewalk.'))
+      .toBe('Potential uneven sprinkler coverage near the sidewalk.');
   });
 
   test('"inconsistent with" drought dismissals stay verbatim (codex P2 r24)', () => {

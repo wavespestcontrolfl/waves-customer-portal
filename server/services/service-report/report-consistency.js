@@ -129,13 +129,15 @@ function reconcileRainFigure(text, canonicalRain) {
     // total phrased as "Precipitation over the last seven days was 2.72
     // inches" must qualify too (codex P2 r6).
     if (!/\brain(?:fall)?\b|\bprecipitation\b/i.test(sentence)) return sentence;
-    if (!/\bweek\b|\b7[- ]days?\b|\b(?:past|last) seven\b|\bseven days\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
+    // `week(?:ly)?` — the adjective form ("Weekly rainfall was 2.72 inches")
+    // is a true week cue too (codex P2 r25).
+    if (!/\bweek(?:ly)?\b|\b7[- ]days?\b|\b(?:past|last) seven\b|\bseven days\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
     // "total…" alone can also describe a SUB-WEEK window — "Rainfall totaled
     // 0.4 inches in the last 24 hours" / "over the last 48 hours" / "in the
     // past two days" is not the weekly figure. A sentence naming a sub-weekly
     // window with no true week/7-day window is skipped whole (codex P2
     // r20/r21).
-    if (!/\bweek\b|\b7[- ]days?\b|\b(?:past|last)\s+seven\b|\bseven\s+days\b/i.test(sentence)
+    if (!/\bweek(?:ly)?\b|\b7[- ]days?\b|\b(?:past|last)\s+seven\b|\bseven\s+days\b/i.test(sentence)
       && /\b(?:\d+[- ]?hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight|(?:past|last)\s+(?:two|three|four|five|six|couple(?:\s+of)?|few|[2-6])\s+days?)\b/i.test(sentence)) return sentence;
     // A COMBINED rain+irrigation/total-water figure is not the rain total —
     // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
@@ -174,7 +176,10 @@ function reconcileRainFigure(text, canonicalRain) {
       // 40 chars: the delta form "above the 0.75-inch target" must fit in
       // the window or the target word gets truncated out of the guard.
       const after = sentence.slice(offset + match.length, offset + match.length + 40);
-      const TARGET_WORD = '(?:target|goal|aim(?:ing)?|recommend(?:ed|s)?|ideal)';
+      // Benchmark words (normal/average/typical/usual/historical) guard their
+      // deltas exactly like target words — "1.97 inches above normal" is a
+      // distance from the benchmark, not the weekly total (codex P2 r25).
+      const TARGET_WORD = '(?:target|goal|aim(?:ing)?|recommend(?:ed|s)?|ideal|normal|average|typical|usual|historic(?:al)?)';
       // After-guard tolerates a rate qualifier between the figure and the
       // target word — "0.75 inches per week target" is still the target
       // (codex P2 r4) — and treats a DELTA figure the same way: "2.2 inches
@@ -197,6 +202,11 @@ function reconcileRainFigure(text, canonicalRain) {
       // neither consumes the attempt.
       if (/\b(?:averag(?:e|ed|ing)|daily|mean)\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
       if (/^\s*(?:of\s+rain(?:fall)?\s+)?(?:per|a|each)\s+day\b|^\s*daily\b/i.test(after)) return match;
+      // A NON-RAIN measurement in the figure's own clause (mowing height,
+      // blade/cut settings, thatch, root depth) is never the rain total —
+      // "mowing height was 3.5 inches, and rain totaled 2.72 inches" must
+      // keep the height and reconcile the rain figure (codex P2 r25).
+      if (/\b(?:mow(?:ing|ed|er)?|height|blade|cut(?:ting)?|thatch|root|canopy)\b/i.test(sentence.slice(0, offset).split(/[,;:]/).pop())) return match;
       // Likewise a figure attached to IRRIGATION is not the rain total —
       // "Irrigation added 0.75 inches while rain totaled 2.72 inches" must
       // skip the 0.75 (without consuming the attempt) so the actual stale
@@ -274,7 +284,9 @@ function reconcileRainFigure(text, canonicalRain) {
 // produced "uneven sprinkler coverage stress-related" — or skipped the fully
 // hyphenated form entirely (codex P2 r18).
 const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:[- ]stress)?[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
-const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
+// "possible"/"potential" adjective forms are cues too — "Possible dry spots
+// near the sidewalk" is a direct hypothesis (codex P2 r25).
+const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bpossible\b|\bpotential\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 // An UNRESOLVED tail also marks a hypothesis — "cannot be ruled out",
 // "remains possible" assert the dry condition is still on the table
 // (codex P2 r23).
@@ -334,7 +346,10 @@ function replaceDroughtHypothesis(text) {
       // "We ruled out drought stress" already agree with the water data
       // (codex P2 r17).
       const pre = sentence.slice(0, offset);
-      if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(pre)) return m;
+      // "not (been/yet) ruled out …" is an UNRESOLVED hypothesis, not a
+      // negation — carve it out of the plain-negation guard so it falls
+      // through to the ruled-out handling below (codex P2 r25).
+      if (/\b(?:no|not|isn['’]t|without)\s+(?!(?:[a-z'’-]+\s+){0,2}ruled?\s+out\b)(?:[a-z'’-]+\s+){0,3}$/i.test(pre)) return m;
       // The pre-phrase dismissal set mirrors the post-phrase guard's
       // ("less likely to be drought stress" — codex P2 r19).
       // …and the dismissal's connector can be "due to"/"from"/"because of"
@@ -347,7 +362,7 @@ function replaceDroughtHypothesis(text) {
       // (codex P2 r23).
       if (/\b(?:not|no|isn['’]t|never)\s+(?:[a-z'’-]+\s+){0,2}(?:believed|thought|expected|considered|likely)\s+(?:to\s+be\s+)?(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
       if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
-        && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
+        && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t|not)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
       // "inconsistent with" is a DISMISSAL, not the "consistent with"
       // hypothesis cue — "The pattern is inconsistent with drought stress"
       // already agrees with the water data (codex P2 r24).
@@ -382,9 +397,10 @@ function replaceDroughtHypothesis(text) {
       // paths.
       if (/dry\s+(?:pockets?|spells?)/i.test(m) && !cueBefore(offset)) {
         // Resolved/past wording is historical, not a live hypothesis —
-        // "Dry spell ended after this week's heavy rain" must not become
-        // coverage copy (codex P2 r20).
-        const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing|ended|passed|resolved|subsided|broke|eased)\b/i.test(sentence);
+        // "Dry spell ended after this week's heavy rain" / "Dry pockets have
+        // improved after this week's rain" must not become coverage copy
+        // (codex P2 r20/r25).
+        const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing|ended|passed|resolved|subsided|broke|eased|improv(?:ed|ing)|recover(?:ed|ing)?)\b/i.test(sentence);
         if (observed) return m;
         if (!atSentenceStart && !(atClauseStart && cueAfter)) return m;
       }
@@ -398,8 +414,10 @@ function replaceDroughtHypothesis(text) {
       // be reconciled (codex P2 r16) — including with same-clause modifiers
       // ("cannot be completely ruled out", "can't yet be fully ruled out" —
       // codex P2 r18), mirrored in the pre-phrase guard above.
+      // …and plain "is/was/has not (been) ruled out" is unresolved just like
+      // "cannot be ruled out" (codex P2 r25).
       const tail = sentence.slice(offset + m.length);
-      const negatedDismissal = /^[^.;,:]{0,30}\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}ruled\s+out\b/i.test(tail);
+      const negatedDismissal = /^[^.;,:]{0,30}\b(?:(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}|(?:is|was|are|were|has|have)\s+not\s+(?:been\s+)?(?:[a-z'’-]+\s+){0,2}|not\s+(?:yet\s+)?)ruled\s+out\b/i.test(tail);
       if (!negatedDismissal
         && /^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never|unlikely|less\s+likely|ruled\s+out|doubtful|improbable)\b/i.test(tail)) return m;
       // Adjectival forms — hyphenated or space-form "drought stressed"
