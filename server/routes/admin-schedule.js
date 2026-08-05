@@ -3913,6 +3913,23 @@ router.post('/', requireAdmin, async (req, res, next) => {
           }
         }
 
+        // Admin-created recurring series never stamped a WaveGuard tier (the
+        // accept flow does) — the 2026-08-05 full-book audit found 4
+        // NULL-tier members created this way. Recompute from live qualifying
+        // services via the membership snapshot's own predicates; UPGRADES
+        // ONLY (a downgrade is an owner decision), never throws.
+        if (isRecurring) {
+          try {
+            const { syncCustomerTierFromServices } = require('../services/customer-tier-sync');
+            const tierSync = await syncCustomerTierFromServices(db, customerId, { source: 'admin_booking_sync' });
+            if (tierSync.updated) {
+              logger.info(`[schedule] WaveGuard tier synced for customer ${customerId}: ${tierSync.from || '(none)'} → ${tierSync.to}`);
+            }
+          } catch (e) {
+            logger.error(`[schedule] tier sync failed (non-blocking): ${e.message}`);
+          }
+        }
+
         // Booking a service is the deal closing — convert the originating lead
         // to won now rather than waiting for the first visit to complete.
         // Recurring bookings keep their dedicated trigger source; one-time
