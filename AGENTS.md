@@ -299,9 +299,10 @@ finding and warns on P1. Reviewers must return JSON matching
   legitimately land off-hour (`classifySlot` in
   `estimate-slot-availability.js` produces a 10:30 end for a 90-min
   service at 09:00 — regression-asserted); never round or reject it.
-  KNOWN GAP (2026-07-29): the lead-booking path (`LeadsTabs.jsx` time
-  input → `admin-leads.js`) still accepts and stores off-hour starts — a
-  clamp fix is owed; flag diffs that extend that path without clamping.
+  GAP CLOSED (2026-08-03): the lead-booking path (`LeadsTabs.jsx` time
+  input → `admin-leads.js`) now REJECTS off-hour starts at the handler
+  entry (#3056, `Appointment windows start on the hour (HH:00)`), so
+  `windowStart` downstream of that guard is always hour-aligned.
   Customer-facing arrival copy is
   `window_start` → +120 min, DISPLAY-ONLY, via `arrivalWindowRange()`
   (`server/utils/sms-time-format.js`); never change `window_end` itself

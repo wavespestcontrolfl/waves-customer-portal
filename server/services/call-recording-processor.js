@@ -2144,6 +2144,23 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
     logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
   }
 
+  // Inspection credit: fast redemption for a confirmed call booking, same
+  // as every other booking surface (Codex #3178 r27 P2) — the marker alone
+  // leaves the credit unminted until the hourly sweep, and a Charge Now /
+  // pay link sent in that window collects the full amount. This helper's
+  // one caller is the fresh, non-outbound-review booking path (pending
+  // outbound rows redeem at office confirmation instead), and it runs
+  // post-commit. Best-effort — the sweep remains the durable guarantee.
+  try {
+    await require('./inspection-credit').redeemInspectionCreditForBooking({
+      customerId,
+      scheduledServiceId,
+      createdBy: 'system:inspection_credit_call_booking',
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] inspection credit fast redemption deferred to sweep for ${scheduledServiceId}: ${err.message}`);
+  }
+
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 }
 
@@ -8908,6 +8925,21 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
+                  // Inspection credit: a booked phone sale is a REAL
+                  // customer booking — durable evidence, same transaction
+                  // (Codex #3178 r6 P0). The hourly sweep mints from it.
+                  // EXCEPT outbound-review rows (pre-push P0): those are
+                  // not a closed deal until the office confirms — the
+                  // evidence is written by runOutboundReviewConfirmHook at
+                  // confirmation, never for a booking the customer might
+                  // not have agreed to.
+                  if (!outboundReviewBooking) {
+                    await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                      customerId: created.customer_id,
+                      scheduledServiceId: created.id,
+                      source: 'phone_call',
+                    });
+                  }
                   if (outboundReviewBooking) {
                     // A pending outbound-callback booking is NOT a closed deal
                     // yet — the office confirms it first. Do NOT convert the lead
@@ -9061,6 +9093,23 @@ const CallRecordingProcessor = {
                   windowStart: windowStart || '09:00',
                   serviceType: svc.service_type,
                 });
+              } else if (!outboundReviewBooking) {
+                // Idempotency-conflict REPLAY of a call booking (Codex
+                // #3178 r37 P2): the first attempt committed the visit +
+                // evidence but may have died before its side-effects ran —
+                // this retry is the recovery path, and reminders are
+                // already registered, but the fast redemption must re-run
+                // or a Charge Now / pay link in the next hour collects the
+                // full amount. Best-effort; the sweep stays the guarantee.
+                try {
+                  await require('./inspection-credit').redeemInspectionCreditForBooking({
+                    customerId,
+                    scheduledServiceId: svc.id,
+                    createdBy: 'system:inspection_credit_call_booking_replay',
+                  });
+                } catch (replayErr) {
+                  logger.warn(`[call-proc] replay credit redemption deferred to sweep for ${svc.id}: ${replayErr.message}`);
+                }
               }
               if (!svc.technician_id) {
                 // A confirmed, customer-notified booking assigned to NOBODY

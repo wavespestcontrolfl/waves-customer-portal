@@ -472,6 +472,28 @@ function initScheduledJobs() {
   // → no-op. Missing OPENAI_API_KEY → chunks sync for full-text and stay
   // pending for embedding. runExclusive records job_health.
   // =========================================================================
+  // Inspection-credit redemption recovery. The at-booking call is a fast
+  // path, not the guarantee: scheduled_services is written from many
+  // surfaces and a transient claim/ledger failure there must not lose a
+  // promise permanently (Codex #3175 P0). This re-derives redemption from
+  // persisted state — any open offer whose customer has since made a live
+  // booking — and is idempotent, so a promise already redeemed is a no-op.
+  // Hourly, not nightly: the credit should be on the account before the
+  // invoice for that booking goes out.
+  cron.schedule('12 * * * *', async () => {
+    // NOT gated here (Codex #3178 r5 P0): the sweep's reversal half must
+    // keep running through a kill-switch period so a credit whose booking
+    // was cancelled while dark can't stay spendable. The service gates its
+    // own crediting half internally.
+    try {
+      await runExclusive('inspection-credit-sweep', async () => {
+        await require('./inspection-credit').sweepInspectionCreditRedemptions();
+      });
+    } catch (err) {
+      logger.error(`[inspection-credit] hourly sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('40 2 * * *', async () => {
     if (!isEnabled('hybridKnowledge')) return;
     try {

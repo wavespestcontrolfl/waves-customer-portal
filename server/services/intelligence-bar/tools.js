@@ -1371,18 +1371,47 @@ async function createAppointment(input) {
   // 'scheduled' is not in the scheduled_services status CHECK set and threw
   // on every insert. track_token_expires_at is stamped by the INSERT trigger
   // (set_default_track_token_expiry).
-  const [appointment] = await db('scheduled_services').insert({
-    customer_id,
-    scheduled_date: dateStr,
-    service_type,
-    technician_id,
-    status: 'pending',
-    window_start: win.start,
-    window_end: windowEnd,
-    notes: notes || null,
-    created_at: new Date(),
-    updated_at: new Date(),
-  }).returning('*');
+  // Inspection credit: an operator booking through the Intelligence Bar is
+  // a REAL customer booking (Codex #3178 r5 P0), so the durable evidence
+  // commits IN THE SAME TRANSACTION as the appointment (r31 P2) — a crash
+  // between a bare insert and a follow-up event write left a live booking
+  // the sweep refuses to infer from (bare rows can be seeders), stranding
+  // any open offer. The marker runs in a savepoint, so an evidence hiccup
+  // still never blocks the booking.
+  let appointment;
+  await db.transaction(async (trx) => {
+    const [created] = await trx('scheduled_services').insert({
+      customer_id,
+      scheduled_date: dateStr,
+      service_type,
+      technician_id,
+      status: 'pending',
+      window_start: win.start,
+      window_end: windowEnd,
+      notes: notes || null,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }).returning('*');
+    appointment = created;
+    await require('../inspection-credit').markBookingForInspectionCredit(trx, {
+      customerId: customer_id,
+      scheduledServiceId: created.id,
+      source: 'intelligence_bar',
+    });
+  });
+
+  try {
+    // Fast redemption post-commit, mirroring the admin-schedule/self-book
+    // paths (Codex #3178 r26 P2): the marker alone leaves the credit
+    // unminted until the hourly sweep, and a Charge Now / pay link sent in
+    // that window collects the full amount while the credit strands
+    // afterwards. Best-effort — the sweep remains the durable guarantee.
+    await require('../inspection-credit').redeemInspectionCreditForBooking({
+      customerId: customer_id,
+      scheduledServiceId: appointment.id,
+      createdBy: 'system:inspection_credit_ib_booking',
+    });
+  } catch { /* redemption is best-effort; the booking stands */ }
 
   // Register the durable confirmation/reminder row synchronously with the
   // insert, like the canonical admin create path (admin-schedule POST) —
@@ -1602,6 +1631,17 @@ async function cancelAppointment(input) {
       const { handleFollowupChildCancellation } = require('../typed-followup-obligation');
       void handleFollowupChildCancellation({ jobId: appointment_id, toStatus: 'cancelled' }).catch(() => {});
     }
+    // The money seam runs on the REPLAY path too (Codex #3178 r22 P1): a
+    // process exit between the committed cancellation and the post-commit
+    // call below leaves this early return as the only path a retry reaches,
+    // and the credited $75 would stay spendable until the hourly sweep.
+    // Idempotent — the void helper skips resolved invoices and the reversal
+    // finds no redeemed offer once it has already run.
+    try {
+      await require('../invoice').voidOpenInvoicesForCancelledService(appointment_id);
+    } catch (e) {
+      logger.error(`[intelligence-bar] cancel replay void sweep failed for ${appointment_id}: ${e.message}`);
+    }
     return {
       success: true,
       appointment_id,
@@ -1649,6 +1689,18 @@ async function cancelAppointment(input) {
       return { error: 'This outbound-callback booking is pending office review — confirm or reject it there instead.' };
     }
     throw err;
+  }
+
+  // Void any still-open pre-minted invoice and reverse the inspection
+  // credit IMMEDIATELY (Codex #3178 r21 P1) — the shared money seam every
+  // other cancel surface runs (the reversal rides the void helper's
+  // finally); without it a credited booking cancelled from the
+  // Intelligence Bar left the $75 spendable until the hourly sweep.
+  // Best-effort after the committed transition, same as the status routes.
+  try {
+    await require('../invoice').voidOpenInvoicesForCancelledService(appointment_id);
+  } catch (e) {
+    logger.error(`[intelligence-bar] cancel invoice void sweep failed for ${appointment_id}: ${e.message}`);
   }
 
   const customer = await db('customers').where('id', appt.customer_id).first();

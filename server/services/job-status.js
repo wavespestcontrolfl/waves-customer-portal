@@ -353,6 +353,33 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
       notes: auditNotes,
     });
 
+    // Outbound-review CONFIRMATION is the booking moment for the
+    // inspection credit, and redemption is evidence-required — so the
+    // event commits WITH the confirmation, not in the post-commit hook a
+    // deploy can lose (Codex #3178 r33 P2). Savepoint-confined: an
+    // evidence hiccup never blocks the confirm (and the r31 outbox then
+    // covers even that residue). The hook's own marker call remains as an
+    // idempotent belt (onConflict ignore).
+    if (String(toStatus || '') === 'confirmed') {
+      try {
+        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
+        const confirmedRow = await t('scheduled_services')
+          .where({ id: jobId })
+          .first('source_action', 'customer_id');
+        if (confirmedRow
+          && confirmedRow.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+          && confirmedRow.customer_id) {
+          await require('./inspection-credit').markBookingForInspectionCredit(t, {
+            customerId: confirmedRow.customer_id,
+            scheduledServiceId: jobId,
+            source: 'phone_call',
+          });
+        }
+      } catch (evidenceErr) {
+        logger.warn(`[job-status] outbound-confirm credit evidence failed for ${jobId}: ${evidenceErr.message}`);
+      }
+    }
+
     // Auto-resolve any open overdue-family alerts (tech_late +
     // unassigned_overdue) when the transition makes the "running
     // late" signal obsolete. Same trx — if the outer transition
@@ -395,6 +422,17 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     if (['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) {
       void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
         logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
+      });
+      // Invoice void + inspection-credit reversal seam for every non-live
+      // transition (Codex #3178 r25 P1): 'skipped' reached no route branch
+      // that ran it, leaving a skipped visit's redeemed credit spendable
+      // until the hourly sweep. Guarded HERE — the one shared status
+      // writer — so no transition surface can forget it; the helper is
+      // idempotent, so routes that also run it (cancel/no-show branches)
+      // double-run safely. Post-commit by placement, best-effort by
+      // contract.
+      void require('./invoice').voidOpenInvoicesForCancelledService(jobId).catch((e) => {
+        logger.warn(`[job-status] non-live money seam failed for ${jobId}: ${e.message}`);
       });
     } else {
       // Reverse direction: a compensated cancellation (offboarding /

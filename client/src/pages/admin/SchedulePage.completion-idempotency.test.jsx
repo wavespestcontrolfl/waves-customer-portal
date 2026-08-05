@@ -169,6 +169,13 @@ describe("completion draft state", () => {
     expect(completionPreferencesNeedDraft({ requestReview: false })).toBe(true);
     expect(completionPreferencesNeedDraft({ clientPestRating: 0 })).toBe(true);
   });
+
+  it("a cleared inspection-credit opt-out is draft content (Codex #3178 r25 P2)", () => {
+    // Default-ON: losing the cleared box across the billing/draft detour
+    // would record a credit promise the tech explicitly declined.
+    expect(completionPreferencesNeedDraft({ offerInspectionCredit: false })).toBe(true);
+    expect(completionPreferencesNeedDraft({ offerInspectionCredit: true })).toBe(false);
+  });
 });
 
 describe("backfill choices survive the completion draft (Codex P2, PR #2897 fix round 6)", () => {

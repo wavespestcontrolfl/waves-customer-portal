@@ -2321,6 +2321,17 @@ async function createSelfBooking(payload = {}) {
           .update({ converted_at: trx.fn.now(), converted_booking_id: bookingRow.id, updated_at: trx.fn.now() });
       }
 
+      // Inspection credit: mark the qualifying booking INSIDE this
+      // transaction (Codex #3178 P1). A post-commit marker can be lost to a
+      // crash between commit and write, leaving a real booking the sweep
+      // can never recover; committed with the booking, the hourly sweep
+      // turns it into credit. Dark behind GATE_INSPECTION_CREDIT.
+      await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId: custId,
+        scheduledServiceId: scheduledRow.id,
+        source: 'self_book',
+      });
+
       return { booking: bookingRow, serviceRow: scheduledRow };
       });
     } catch (txErr) {
@@ -2400,6 +2411,25 @@ async function createSelfBooking(payload = {}) {
         }
       } catch (err) {
         logger.warn(`[booking:confirm] replay card-request funnel failed for booking ${txResult.existing.id}: ${err.message}`);
+      }
+      // Fast-redeem on the REPLAY too (Codex #3178 r35 P2): the first
+      // request can commit the booking + evidence and die before its own
+      // redemption block — this retry IS the recovery path, and without it
+      // a Charge Now / pay link in the next hour collects the full amount.
+      // Idempotent: an already-redeemed offer has nothing left to claim.
+      try {
+        const replayVisit = await db('scheduled_services')
+          .where({ self_booking_id: txResult.existing.id })
+          .first('id', 'customer_id');
+        if (replayVisit?.id && replayVisit.customer_id) {
+          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+            customerId: replayVisit.customer_id,
+            scheduledServiceId: replayVisit.id,
+            createdBy: 'system:inspection_credit_self_book_replay',
+          });
+        }
+      } catch (err) {
+        logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
       }
       return { ok: true, body: {
         booking: txResult.existing,
@@ -2700,6 +2730,18 @@ async function createSelfBooking(payload = {}) {
       }
     } catch (err) {
       logger.warn(`[booking:confirm] card-request funnel failed for visit ${serviceRow.id}: ${err.message}`);
+    }
+
+    // Fast path only — the durable evidence was written in-transaction
+    // above, so a crash here costs at most an hour (the sweep mints it).
+    try {
+      await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+        customerId: serviceRow.customer_id,
+        scheduledServiceId: serviceRow.id,
+        createdBy: 'system:inspection_credit_self_book',
+      });
+    } catch (err) {
+      logger.warn(`[booking:confirm] inspection credit redemption failed for visit ${serviceRow.id}: ${err.message}`);
     }
 
     return { ok: true, body: { booking, confirmationCode: confCode, ...(secureCard ? { secureCard } : {}) } };

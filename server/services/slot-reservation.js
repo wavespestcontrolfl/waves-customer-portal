@@ -981,6 +981,17 @@ async function commitReservation({
       .update(updates)
       .returning('*');
 
+    // Inspection credit: graduating a held slot IS the customer's booking —
+    // both estimate-accept branches (one-time and recurring) land here, and
+    // the one-time path never reaches the converter's marker. Written on
+    // the SAME client so the evidence commits with the graduation; the
+    // sweep mints from it. Savepoint-isolated and never throws.
+    await require('./inspection-credit').markBookingForInspectionCredit(client, {
+      customerId,
+      scheduledServiceId,
+      source: 'estimate_accept',
+    });
+
     logger.info('[slot-reservation] committed', {
       scheduledServiceId,
       customerId,

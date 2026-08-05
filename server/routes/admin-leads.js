@@ -1347,6 +1347,15 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
       if (cols.urgency) insertData.urgency = 'routine';
       const [appt] = await trx('scheduled_services').insert(insertData).returning('*');
 
+      // Inspection credit: mark the qualifying booking IN-TRANSACTION so
+      // the evidence commits with the booking (Codex #3178 P1). Dark behind
+      // GATE_INSPECTION_CREDIT; the hourly sweep does the minting.
+      await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId,
+        scheduledServiceId: appt.id,
+        source: 'lead',
+      });
+
       // Mark the lead converted (mirrors leadAttribution.markConverted, but on the
       // same transaction so the conversion can't commit without the appointment).
       // Re-gated on deleted_at inside the transaction: the pre-transaction read
@@ -1395,6 +1404,17 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     });
 
     logger.info(`[leads] Lead ${req.params.id} booked appointment ${appt.id} (customer ${customerId})`);
+
+    // Fast path only — durable evidence was written in-transaction above.
+    try {
+      await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+        customerId,
+        scheduledServiceId: appt.id,
+        createdBy: `admin:${req.technician?.name || req.technicianId || 'unknown'}`,
+      });
+    } catch (err) {
+      logger.warn(`[leads] inspection credit redemption failed for appointment ${appt.id}: ${err.message}`);
+    }
 
     // Booking-triggered estimate pre-draft (GATE_ESTIMATOR_BOOKING_PREDRAFTS,
     // default OFF): a Waves Assessment booked from the leads page seeds a

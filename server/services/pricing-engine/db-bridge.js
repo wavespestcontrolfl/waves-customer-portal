@@ -868,6 +868,16 @@ async function syncConstantsFromDB(dbInstance) {
       if (Number.isFinite(oneTime) && oneTime > 0) constants.DEPOSIT.oneTimeAmount = r(oneTime);
     }
 
+    // ── Inspection credit (flat amount + creditable window) ──
+    if (config.inspection_credit) {
+      const amount = Number(config.inspection_credit.amount);
+      const days = Number(config.inspection_credit.creditableWithinDays);
+      // money() not r(): the credit is a customer-facing dollar promise and
+      // must survive cents exactly as saved (same rule as the no-show fee).
+      if (Number.isFinite(amount) && amount > 0) constants.INSPECTION_CREDIT.amount = money(amount);
+      if (Number.isFinite(days) && days > 0) constants.INSPECTION_CREDIT.creditableWithinDays = Math.round(days);
+    }
+
     // ── One-time card-on-file hold (no-show fee + cancel window) ──
     if (config.estimate_card_hold) {
       const fee = Number(config.estimate_card_hold.noShowFeeAmount);

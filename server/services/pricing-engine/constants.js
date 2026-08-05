@@ -2055,6 +2055,23 @@ const CARD_HOLD = {
   cancelWindowHours: 24,
 };
 
+// Inspection fee credited toward any service booked inside the window
+// (owner ruling 2026-08-03). FLAT by ruling: the credit is worth this
+// amount whatever the inspection was actually billed at — a comped or
+// discounted inspection still earns the full credit, because the promise
+// is "the inspection is worth $75 toward service", not "we refund what you
+// paid". Frozen onto the offer at closeout, so a later change here never
+// moves a promise already made. DB-authoritative via pricing_config key
+// `inspection_credit`. Per-service overrides still win where they exist:
+// rodent's creditableWithinDays (14) AND its amount — a rodent inspection
+// credits its quoted RODENT.inspection.fee ($125), because the public
+// estimator promises that fee as creditable on tokenized estimates
+// (owner ruling 2026-08-04).
+const INSPECTION_CREDIT = {
+  amount: 75,
+  creditableWithinDays: 30,
+};
+
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_CAP, TURF_FACTORS,
@@ -2063,7 +2080,7 @@ module.exports = {
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, TERMITE, RODENT,
   ONE_TIME, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
-  DEPOSIT, CARD_HOLD,
+  DEPOSIT, CARD_HOLD, INSPECTION_CREDIT,
   PROCESSING_ADJUSTMENT,
   ANNUAL_PREPAY_DISCOUNT_PCT,
 };

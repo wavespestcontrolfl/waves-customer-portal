@@ -7738,6 +7738,31 @@ router.put('/:token/accept', async (req, res, next) => {
       // conversion, no invoice mint, no sends). Best-effort: a rebuild
       // failure degrades to the legacy bare payload rather than blocking
       // the retry.
+      // Fast-redeem on the already-accepted RETRY too (Codex #3178 r38
+      // P2): the first accept can commit bookings + evidence + invoice and
+      // die before its own redemption block, and this retry still hands
+      // back the persisted pay link — so the credit must be in the balance
+      // before the customer can use it. Idempotent and best-effort; the
+      // payload rebuild stays read-only otherwise.
+      if (estimate.customer_id) {
+        try {
+          const acceptedVisits = await db('scheduled_services')
+            .where({ source_estimate_id: estimate.id })
+            .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
+            .whereRaw('COALESCE(is_callback, false) = false')
+            .limit(5)
+            .select('id');
+          for (const visit of acceptedVisits) {
+            await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+              customerId: estimate.customer_id,
+              scheduledServiceId: visit.id,
+              createdBy: 'system:inspection_credit_estimate_accept_replay',
+            });
+          }
+        } catch (replayErr) {
+          logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
+        }
+      }
       try {
         return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
       } catch (e) {
@@ -9025,6 +9050,28 @@ router.put('/:token/accept', async (req, res, next) => {
             .update(updates);
           assertExistingAppointmentUpdateApplied(updatedCount);
           reservationCommitted = true;
+          // The adopted appointment is a REAL booking committed by THIS
+          // accept — record the inspection-credit evidence in the same trx
+          // (Codex #3178 r25 P1). The post-commit redeemer and the sweep
+          // both judge by booking EVENTS; without one, the ordering guard
+          // falls back to the row's original created_at (a placeholder
+          // that can predate the inspection closeout) and the promised
+          // credit is silently never redeemed. Savepoint-confined — a
+          // marker hiccup cannot poison the accept.
+          const adoptedCustomerId = existingAppointmentRow.customer_id || customerId;
+          if (adoptedCustomerId) {
+            await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+              customerId: adoptedCustomerId,
+              scheduledServiceId: existingAppointmentRow.id,
+              source: 'estimate_accept_existing_appointment',
+              // RESTAMP (Codex #3178 r37 P2): the row may carry a
+              // pre-offer event from its original scheduling; the ACCEPT
+              // is the purchase this credit rides, so the moment moves
+              // forward to now — an ignore would leave the old timestamp
+              // and the ordering guard would reject the promised credit.
+              restamp: true,
+            });
+          }
           acceptedAppointmentsToRegister.push({
             ...existingAppointmentRow,
             ...updates,
@@ -10086,6 +10133,32 @@ router.put('/:token/accept', async (req, res, next) => {
         // the onboarding handoff text was retired with the onboarding flow.
         // Customers continue through the invoice/pay-link path below.
       } catch (e) { logger.error(`[estimate-accept] Acceptance SMS failed: ${e.message}`); }
+    }
+
+    // Inspection credit: redeem NOW — the bookings committed above, and
+    // the invoice has not been delivered yet (pre-push P0). Relying on the
+    // hourly sweep here let the customer receive or even pay the full
+    // invoice before the promised $75 existed; redeeming first puts the
+    // credit in the balance so the send-time auto-apply
+    // (sendViaSMSAndEmail → autoApplyAccountCreditIfEnabled) consumes it.
+    // Best-effort per booking — the sweep remains the durable guarantee.
+    if (customerId) {
+      const creditBookingIds = [...new Set([
+        ...acceptedAppointmentsToRegister.map((appt) => appt?.id),
+        txResult.standardConversion?.firstScheduledServiceId,
+        txResult.annualPrepayConversion?.firstScheduledServiceId,
+      ].filter(Boolean))];
+      for (const bookingId of creditBookingIds) {
+        try {
+          await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+            customerId,
+            scheduledServiceId: bookingId,
+            createdBy: 'system:inspection_credit_estimate_accept',
+          });
+        } catch (creditErr) {
+          logger.warn(`[estimate-accept] inspection credit redemption deferred to sweep: ${creditErr.message}`);
+        }
+      }
     }
 
     // Post-commit invoice delivery for every accept-minted invoice —

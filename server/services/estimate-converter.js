@@ -2293,6 +2293,16 @@ const EstimateConverter = {
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
+              // Held-slot acceptance is a booking too (Codex #3178 r3 P1)
+              // — the auto-schedule path below is not the only way an
+              // accepted estimate becomes an appointment.
+              try {
+                await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                  customerId: standaloneRow.customer_id,
+                  scheduledServiceId: parentRow.id,
+                  source: 'estimate_accept',
+                });
+              } catch { /* never blocks a conversion */ }
               let seedResult = null;
               try {
                 seedResult = await seedRecurringFollowUpsForParent(trx, parentRow, unit.service, {
@@ -2605,6 +2615,17 @@ const EstimateConverter = {
             const insertedId = Array.isArray(inserted)
               ? (typeof inserted[0] === 'object' ? inserted[0]?.id : inserted[0])
               : (typeof inserted === 'object' ? inserted?.id : inserted);
+            // Accepting an estimate IS a real customer booking, so it
+            // qualifies for an open inspection-credit promise. Marked
+            // in-transaction (dark behind the gate): the marker commits
+            // with the booking, and the hourly sweep turns it into credit.
+            try {
+              await require('./inspection-credit').markBookingForInspectionCredit(trx, {
+                customerId: row.customer_id,
+                scheduledServiceId: insertedId,
+                source: 'estimate_accept',
+              });
+            } catch { /* never blocks a conversion */ }
             const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
               ? inserted[0]
               : { ...row, id: insertedId };
@@ -2671,6 +2692,26 @@ const EstimateConverter = {
         estimateId, tier, discount, monthlyRate, serviceCount, scheduledCount, firstScheduledServiceId,
       }),
     });
+
+    // Inspection credit: redeem after the bookings above committed and
+    // BEFORE the setup/prepay invoice mints (pre-push P0), so the credit
+    // sits in the balance and the invoice machinery auto-applies it —
+    // otherwise the customer can receive or pay the full invoice before
+    // the promised $75 exists. Global-pool conversions only: when this
+    // conversion rides a caller's transaction (the public accept), the
+    // booking is not yet visible to the redeemer's own transaction — that
+    // path redeems post-commit in estimate-public, before delivery.
+    if (firstScheduledServiceId && !usingCallerDatabase) {
+      try {
+        await require('./inspection-credit').redeemInspectionCreditForBooking({
+          customerId,
+          scheduledServiceId: firstScheduledServiceId,
+          createdBy: 'system:inspection_credit_estimate_accept',
+        });
+      } catch (creditErr) {
+        logger.warn(`[estimate-converter] inspection credit redemption deferred to sweep: ${creditErr.message}`);
+      }
+    }
 
     // 4. Create the setup/prepay invoice. Public accepts auto-send it and
     //    return the pay URL; admin/manual conversion can disable auto-send.

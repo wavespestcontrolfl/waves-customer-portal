@@ -1728,6 +1728,13 @@ async function loadProjectCompletionContextByServiceId(services) {
       });
     return [service.id, {
       completionProfile,
+      // Whether the inspection-credit lane is live — Dispatch V2 completes
+      // from THIS endpoint's payload, and the closeout panel renders its
+      // promise checkbox only on true (Codex #3178 r21 P1): without the
+      // field here the toggle never rendered, submission fell back to
+      // default-true, and the tech could not clear the $75 promise from
+      // the actual completion UI. Mirrors /admin/dispatch/:date.
+      inspectionCreditAvailable: require('../config/feature-gates').isEnabled('inspectionCredit'),
       // An OUTAGE is not "no profile" (codex P2 r27): the trace verdict
       // fails open on this flag — the write path catches the same
       // failure and fails open, so the feed must not hide the mapper.
@@ -2209,6 +2216,14 @@ router.get('/', async (req, res, next) => {
         // even when the visit itself resolves self-pay.
         checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
         completionProfile: projectCompletionContext.completionProfile || null,
+        // Dispatch V2 completes from this payload — the closeout promise
+        // checkbox renders only on true (Codex #3178 r21 P1).
+        inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+        // A resolver OUTAGE must reach the client's omit-the-field guard
+        // (Codex #3178 r34 P2, mirroring the dispatch feed) — without it a
+        // hidden credit toggle falls through to a fabricated default
+        // opt-in the tech never saw.
+        completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
         findingsSchema: projectCompletionContext.findingsSchema || null,
         companionSchemas: projectCompletionContext.companionSchemas || null,
         linkedProject: projectCompletionContext.linkedProject || null,
@@ -2667,6 +2682,10 @@ router.get('/week', async (req, res, next) => {
           // Same invoice-level Bill-To flag as the day payload (see there).
           checkoutInvoicePayerBilled: !!checkoutInvoice?.payer_id,
           completionProfile: projectCompletionContext.completionProfile || null,
+          // Same field as the day view above — both feed the V2 closeout.
+          inspectionCreditAvailable: projectCompletionContext.inspectionCreditAvailable === true,
+          // Resolver-outage marker — same contract as the day view (r34 P2).
+          completionProfileLookupFailed: projectCompletionContext.completionProfileLookupFailed === true,
           findingsSchema: projectCompletionContext.findingsSchema || null,
           companionSchemas: projectCompletionContext.companionSchemas || null,
           linkedProject: projectCompletionContext.linkedProject || null,
@@ -3477,6 +3496,14 @@ router.post('/', requireAdmin, async (req, res, next) => {
       [svc] = await trx('scheduled_services').insert(insertData).returning('*');
       await insertScheduledServiceAddons(trx, svc.id, pricing.addonLines, addonCols);
       createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
+      // Inspection credit: durable in-transaction marker on the series
+      // ANCHOR (Codex #3178 P1) — a recurring series is one booking, so
+      // children must not each claim the promise. Dark behind the gate.
+      await require('../services/inspection-credit').markBookingForInspectionCredit(trx, {
+        customerId,
+        scheduledServiceId: svc.id,
+        source: 'admin_schedule',
+      });
 
       // Track all scheduled_date strings created for this parent series
       // (parent itself, recurring children, AND boosters). Hoisted so the
@@ -3845,6 +3872,26 @@ router.post('/', requireAdmin, async (req, res, next) => {
         }
       }
     } catch (e) { logger.error(`Appointment reminder registration failed: ${e.message}`); }
+
+    // Inspection credit (dark behind GATE_INSPECTION_CREDIT). The durable
+    // marker is written in-transaction with the appointment inserts; this
+    // is the fast path that mints immediately when it can. Runs on the
+    // FIRST created appointment only — a recurring series is one booking,
+    // not one redemption per visit. Best-effort: a booking must never fail
+    // because crediting failed, and the service never throws.
+    if (createdAppointments.length) {
+      try {
+        const InspectionCredit = require('../services/inspection-credit');
+        const first = createdAppointments[0];
+        await InspectionCredit.redeemInspectionCreditForBooking({
+          customerId,
+          scheduledServiceId: first.id,
+          createdBy: `admin:${req.technician?.name || req.technicianId || 'unknown'}`,
+        });
+      } catch (e) {
+        logger.error(`[schedule] inspection credit redemption failed: ${e.message}`);
+      }
+    }
 
     // The appointment(s), any prepayment, and all reminder rows are committed at
     // this point — respond immediately so the admin UI isn't held on "Saving…"
@@ -4565,6 +4612,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             }
             // Void any still-open invoice pre-minted for this visit so
             // dunning doesn't chase a cancelled job. Paid/processing stay put.
+            // Inspection-credit reversal runs inside the void helper (after
+            // the voids restore any applied credit) — shared hook across
+            // every cancellation path, so none can forget it.
             await voidOpenInvoicesForCancelledService(id);
             // One-time card-on-file hold: charge in-window late-cancel fee or
             // release outside it — same as the single-cancel paths.
@@ -7198,6 +7248,14 @@ router.put('/:id/status', async (req, res, next) => {
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }
+        // The invoice-void + credit-reversal seam is also recoverable here
+        // (Codex #3178 r26 P2) — this is the route's ONLY reachable
+        // no-show leg (fresh no_show targets are rejected below as
+        // no_show_wrong_route), so the idempotent replay must run the
+        // helper or a crash-lost seam stays lost until the hourly sweep.
+        try {
+          await voidOpenInvoicesForCancelledService(svc.id);
+        } catch (e) { logger.error(`[admin-schedule] no-show replay money seam failed for ${svc.id}: ${e.message}`); }
         return res.json({ success: true, alreadyNoShow: true });
       }
       return res.status(409).json({

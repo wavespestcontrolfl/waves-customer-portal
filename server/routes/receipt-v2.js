@@ -55,6 +55,13 @@ router.get('/:token', async (req, res, next) => {
     // payer as "Billed to" (the emailed receipt PDF already does).
     await require('../services/payer').attachToInvoice(data);
 
+    // Inspection-credit deadline memo (Codex #3178 r28 P2): the SMS receipt
+    // leg only sends this link, so a customer with no email would otherwise
+    // never see the written deadline the emailed receipt carries. Same
+    // helper as the email leg — offer-authoritative, payer-suppressed,
+    // silent when there is nothing to say. Never throws.
+    const creditMemo = await require('../services/invoice-email').inspectionCreditMemoForInvoice(data);
+
     const customer = data.customer || {};
     const lineItems = data.line_items || [];
     const payment = await loadPaymentForInvoice(data.id, data.customer_id, {
@@ -91,6 +98,7 @@ router.get('/:token', async (req, res, next) => {
         cardBrand: data.card_brand,
         cardLastFour: data.card_last_four,
         notes: data.notes,
+        creditMemo: creditMemo || null,
       },
       service: {
         type: data.service_type,

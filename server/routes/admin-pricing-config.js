@@ -230,6 +230,21 @@ function validatePricingConfigData(configKey, data, oldConfig) {
         return fail(`waveguard_tiers.${tier}.min_services must be a positive integer`);
       }
     }
+  } else if (configKey === 'inspection_credit') {
+    // Customer-facing money promise: a typo here becomes real account
+    // credit against a future invoice. Bounded like the no-show fee —
+    // positive whole cents ≤ $500, whole-day window in [1, 365].
+    const amount = num(data?.amount);
+    if (!isPositive(data?.amount) || amount > 500) {
+      return fail('inspection_credit.amount must be a positive dollar amount no greater than 500');
+    }
+    if (Math.abs(amount * 100 - Math.round(amount * 100)) > 1e-6) {
+      return fail('inspection_credit.amount must not have sub-cent precision');
+    }
+    const days = num(data?.creditableWithinDays);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      return fail('inspection_credit.creditableWithinDays must be a whole number of days between 1 and 365');
+    }
   } else if (configKey === 'estimate_card_hold') {
     // Charge-authoritative: db-bridge overlays these onto CARD_HOLD, and
     // both card-on-file rails DISCLOSE then AUTO-CHARGE them — a typo here

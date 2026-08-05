@@ -613,11 +613,16 @@ export function completionPreferencesNeedDraft({
   backfillCloseoutDefault = false,
   backfillTimeOnSite = "",
   adjustedTimeOnSite = "",
+  offerInspectionCredit = true,
 } = {}) {
   return sendSms !== true
     || includePayLink !== true
     || requestReview !== true
     || clientPestRating != null
+    // The inspection-credit opt-out is default-ON: a cleared box that does
+    // not survive the billing/draft detour silently records a credit
+    // promise the tech explicitly declined (Codex #3178 r25 P2).
+    || offerInspectionCredit !== true
     // The backdated-closeout choices are quiet/loud state: losing a checked
     // box across a reload turns the SAME submit into a LOUD completion
     // (sends + collection rails), and the ≥7-days default is CHECKED, so it
@@ -9145,6 +9150,11 @@ export function CompletionPanel({
   const [productSearch, setProductSearch] = useState("");
   const [sendSms, setSendSms] = useState(true);
   const [includePayLink, setIncludePayLink] = useState(true);
+  // Inspection credit — DEFAULT ON per the owner ruling: an inspection
+  // carries the credit promise unless the tech clears it. The server
+  // defaults it on too, so an older client that sends nothing behaves
+  // identically.
+  const [offerInspectionCredit, setOfferInspectionCredit] = useState(true);
   const [requestReview, setRequestReview] = useState(true);
   const [reviewTiming, setReviewTiming] = useState("120");
   const [reviewCustomAt, setReviewCustomAt] = useState("");
@@ -9910,6 +9920,19 @@ export function CompletionPanel({
   // untype lane. The STABLE profile key is authoritative (display labels
   // are admin-editable); the name regex is only a fallback for rows whose
   // profile did not resolve (codex P2 r8).
+  // Inspection closeouts carry the credit promise — the toggle only renders
+  // for them AND only when the server says the lane is live, so a dark gate
+  // never shows the tech a promise that will be silently dropped. The
+  // server independently re-checks the category too, so a crafted payload
+  // can't promise a credit on a treatment visit.
+  // Category OR the typed-family inspection keys: rodent_inspection and
+  // termite_inspection's typed profiles carry their family category, not
+  // 'inspection' — mirrors the server's isCreditableInspectionProfile
+  // (Codex #3178 r24 P0, r30 P2); the server still re-checks independently.
+  const isInspectionVisit = (service.completionProfile?.category === "inspection"
+    || service.completionProfile?.serviceKey === "rodent_inspection"
+    || service.completionProfile?.serviceKey === "termite_inspection")
+    && service.inspectionCreditAvailable === true;
   const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
     || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
   // Rodent trapping skips the spray tracer for the same reason bed bug does:
@@ -10678,6 +10701,7 @@ export function CompletionPanel({
         backfillCloseoutDefault,
         backfillTimeOnSite,
         adjustedTimeOnSite,
+        offerInspectionCredit,
       }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) {
@@ -10705,6 +10729,10 @@ export function CompletionPanel({
         reviewTiming,
         reviewCustomAt,
         oneTimeRecapOnly,
+        // The inspection-credit opt-out survives the detour too — a cleared
+        // box restoring to the default-ON state would promise a credit the
+        // tech explicitly declined (Codex #3178 r25 P2).
+        offerInspectionCredit,
         // Backdated-closeout choices: the checked box is what keeps this
         // submit QUIET (no sends, no collection rails) and the typed minutes
         // are operator input — both must survive the billing-409 detour and
@@ -10793,6 +10821,7 @@ export function CompletionPanel({
     reviewTiming,
     reviewCustomAt,
     oneTimeRecapOnly,
+    offerInspectionCredit,
     backfillCloseout,
     backfillTimeOnSite,
     adjustedTimeOnSite,
@@ -10867,6 +10896,9 @@ export function CompletionPanel({
     // where the server's recap_only_not_allowed 409 becomes unclearable
     // (codex P2 r9).
     setOneTimeRecapOnly(isBedBugVisit ? false : !!savedDraft.oneTimeRecapOnly);
+    // Only an explicit saved `false` restores as opted-out — a legacy draft
+    // without the field keeps the default-ON promise (missing ≠ declined).
+    setOfferInspectionCredit(savedDraft.offerInspectionCredit !== false);
     // Quiet/loud choice + typed minutes come back exactly as saved; a legacy
     // draft without the fields falls back to the panel default. Consumers all
     // gate on backfillEligible, so this stays inert if the visit is somehow
@@ -12480,6 +12512,17 @@ export function CompletionPanel({
         // sub-toggle's visibility (invoice + SMS being sent) so a stale false
         // never posts when the completion SMS is off. false = report-only SMS.
         includePayLink: willInvoice && effectiveSendSms ? includePayLink : true,
+        // Only meaningful on an inspection closeout; mirror the toggle's
+        // visibility so a stale cleared box can't suppress the credit on a
+        // non-inspection visit (where the server ignores it anyway).
+        // A FAILED profile lookup hides the credit toggle without meaning
+        // "not an inspection" — omitting the field (undefined drops out of
+        // the JSON body) records no explicit choice, and the server's
+        // default-on ruling applies against ITS OWN resolution instead of
+        // a fabricated opt-in (Codex #3178 r32 P2).
+        offerInspectionCredit: service.completionProfileLookupFailed === true
+          ? undefined
+          : (isInspectionVisit ? offerInspectionCredit : true),
         requestReview: oneTimeRecapOnly ? !reviewSuppressionReason : willReview,
         reviewTiming: oneTimeRecapOnly ? "now" : reviewTiming,
         reviewDelayMinutes: selectedReviewDelayMinutes,
@@ -14793,6 +14836,48 @@ export function CompletionPanel({
                   {payerBanner}
                 </div>
               )}{" "}
+              {/* Inspection credit — DEFAULT ON. The customer is promised
+                  the inspection fee toward anything they book in the
+                  window; the credit only becomes real money when they
+                  actually book. Clearing this is the opt-out for the rare
+                  inspection that shouldn't carry it. */}
+              {isInspectionVisit && (
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 12,
+                    padding: "12px 16px",
+                    margin: "0 0 8px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  {" "}
+                  <input
+                    type="checkbox"
+                    checked={offerInspectionCredit}
+                    onChange={(e) => setOfferInspectionCredit(e.target.checked)}
+                    style={{ width: 18, height: 18, accentColor: M.ink, marginTop: 1 }}
+                  />{" "}
+                  <span style={{ fontFamily: font, fontSize: 14, color: M.ink }}>
+                    Credit this inspection toward booked service
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: 12,
+                        color: M.ink3,
+                        marginTop: 2,
+                      }}
+                    >
+                      Applies as account credit only if they book — nothing is
+                      credited now.
+                    </span>
+                  </span>{" "}
+                </label>
+              )}{" "}
               {/* Bed bug never offers the no-invoice recap: a performed
                   treatment must mint its invoice (typed-era parity; the
                   server 409s this too — codex P1 r7). */}
@@ -16796,6 +16881,44 @@ export function CompletionPanel({
             />{" "}
             <span>One-time recap + review only (no invoice)</span>{" "}
           </label>
+          )}{" "}
+          {/* Inspection credit — DEFAULT ON, mirroring the mobile closeout
+              (Codex #3178 r22 P1: the control existed only in the isMobile
+              branch, so a desktop tech or CSR could not clear the
+              default-on promise and would record an unintended $75). The
+              customer is promised the inspection fee toward anything they
+              book in the window; it becomes real money only on a booking. */}
+          {isInspectionVisit && (
+            <label
+              style={{
+                ...checkboxRow,
+                alignItems: "flex-start",
+                fontSize: 14,
+                borderColor: offerInspectionCredit ? D.teal : checkboxRow.borderColor,
+              }}
+            >
+              {" "}
+              <input
+                type="checkbox"
+                checked={offerInspectionCredit}
+                onChange={(e) => setOfferInspectionCredit(e.target.checked)}
+                style={{ marginTop: 2 }}
+              />{" "}
+              <span>
+                Credit this inspection toward booked service
+                <span
+                  style={{
+                    display: "block",
+                    fontSize: 14,
+                    color: D.muted,
+                    marginTop: 2,
+                  }}
+                >
+                  Applies as account credit only if they book — nothing is
+                  credited now.
+                </span>
+              </span>{" "}
+            </label>
           )}{" "}
           {backfillEligible && (
             <label
