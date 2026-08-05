@@ -509,3 +509,138 @@ describe('persistAll upsert binding integrity (07-31 regression)', () => {
     expect(placeholders).toBe(calls[0].bindings.length);
   });
 });
+
+// ── answer_gap helpers ───────────────────────────────────────────────
+
+describe('answer_gap analysis helpers', () => {
+  const {
+    answerGapStem,
+    stemmedTokenSet,
+    queryContentTerms,
+    extractHeadings,
+    termCoverage,
+    classifyAnswerGapQueries,
+  } = require('../services/seo/gsc-opportunity-miner')._internals;
+
+  describe('answerGapStem', () => {
+    test.each([
+      ['ants', 'ant'],
+      ['flies', 'fly'],
+      ['grass', 'grass'], // -ss never stripped
+      ['is', 'is'],       // too short to strip
+      ['termites', 'termite'],
+    ])('%j → %j', (input, expected) => {
+      expect(answerGapStem(input)).toBe(expected);
+    });
+  });
+
+  describe('queryContentTerms', () => {
+    test('drops stopwords, interrogatives, cities, and fl/florida', () => {
+      const terms = queryContentTerms('how to get rid of sugar ants in sarasota fl');
+      expect(Array.from(terms).sort()).toEqual(['ant', 'rid', 'sugar']);
+    });
+    test('drops multi-word city tokens (lakewood ranch)', () => {
+      const terms = queryContentTerms('lawn care lakewood ranch cost');
+      expect(terms.has('lakewood')).toBe(false);
+      expect(terms.has('ranch')).toBe(false);
+      expect(terms.has('lawn')).toBe(true);
+      expect(terms.has('cost')).toBe(true);
+    });
+    test('pure city/stopword query yields no terms', () => {
+      expect(queryContentTerms('sarasota fl').size).toBe(0);
+    });
+  });
+
+  describe('extractHeadings', () => {
+    test('captures H2–H4, ignores H1 and deeper', () => {
+      const body = [
+        '# Title', '## Sugar Ant Control', 'text', '### When To Treat',
+        '#### Edge Case', '##### Too Deep', '## Final',
+      ].join('\n');
+      expect(extractHeadings(body)).toEqual([
+        'Sugar Ant Control', 'When To Treat', 'Edge Case', 'Final',
+      ]);
+    });
+  });
+
+  describe('termCoverage', () => {
+    test('fraction of query terms present in the text set', () => {
+      const set = stemmedTokenSet('sugar ant control guide');
+      expect(termCoverage(new Set(['sugar', 'ant']), set)).toBe(1);
+      expect(termCoverage(new Set(['sugar', 'bait']), set)).toBe(0.5);
+      expect(termCoverage(new Set(), set)).toBe(0);
+    });
+  });
+
+  describe('classifyAnswerGapQueries', () => {
+    const body = [
+      '## Sugar Ant Control',
+      'Sugar ants (ghost ants) trail along kitchen counters…',
+      '## Our Treatment Process',
+      'We inspect, treat, and follow up.',
+    ].join('\n');
+
+    test('a query covered by a heading counts as answered', () => {
+      const { unanswered, answered_count } = classifyAnswerGapQueries(
+        [{ query: 'sugar ant control sarasota', impressions: 100, clicks: 2, position: 12 }],
+        body
+      );
+      expect(answered_count).toBe(1);
+      expect(unanswered).toHaveLength(0);
+    });
+
+    test('an uncovered query surfaces with coverage detail', () => {
+      const { unanswered } = classifyAnswerGapQueries(
+        [{ query: 'do ant baits work outdoors', impressions: 80, clicks: 1, position: 14 }],
+        body
+      );
+      expect(unanswered).toHaveLength(1);
+      expect(unanswered[0].query).toBe('do ant baits work outdoors');
+      expect(unanswered[0].heading_coverage).toBeLessThan(0.6);
+      expect(unanswered[0].body_term_coverage).toBeGreaterThanOrEqual(0);
+    });
+
+    test('near-duplicate phrasings collapse to the higher-impression one', () => {
+      const { unanswered } = classifyAnswerGapQueries(
+        [
+          { query: 'lawn sod webworms', impressions: 90, clicks: 1, position: 15 },
+          { query: 'sod webworm lawn', impressions: 30, clicks: 0, position: 18 },
+        ],
+        body
+      );
+      expect(unanswered).toHaveLength(1);
+      expect(unanswered[0].query).toBe('lawn sod webworms');
+    });
+
+    test('pure city/stopword queries are neither answered nor unanswered', () => {
+      const { unanswered, answered_count } = classifyAnswerGapQueries(
+        [{ query: 'sarasota fl', impressions: 500, clicks: 0, position: 11 }],
+        body
+      );
+      expect(unanswered).toHaveLength(0);
+      expect(answered_count).toBe(0);
+    });
+  });
+});
+
+describe('answer_gap scoring + action mapping', () => {
+  test('gscOpportunityScore treats answer_gap like other page-anchored gaps (0.8×)', () => {
+    expect(gscOpportunityScore('answer_gap', 15, 1.0)).toBe(Math.round(WEIGHTS.gscOpportunity * 0.8));
+  });
+
+  test('scoreOpportunity grants answer_gap BOTH contentGap and refreshLift', () => {
+    const { breakdown } = scoreOpportunity(
+      { bucket: 'answer_gap', query: 'do ant baits work outdoors', service: 'pest' },
+      { position: 15, impressions: 600 }
+    );
+    expect(breakdown.contentGap).toBe(WEIGHTS.contentGap);
+    expect(breakdown.refreshLift).toBe(WEIGHTS.refreshLift);
+  });
+
+  test('answer_gap maps to refresh_existing_page only with a target page', () => {
+    expect(actionForOpportunity({ bucket: 'answer_gap', page_url: '/x/', query: 'q' }))
+      .toBe('refresh_existing_page');
+    expect(actionForOpportunity({ bucket: 'answer_gap', page_url: null, query: 'q' }))
+      .toBe('do_not_publish');
+  });
+});

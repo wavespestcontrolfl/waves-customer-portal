@@ -860,6 +860,15 @@ const gates = {
   // have been eyeballed. When off, the aeo_gap bucket miner returns [].
   aeoGapMining: isProd ? process.env.GATE_AEO_GAP_MINING === 'true' : true,
 
+  // answer_gap opportunity mining — queries a page already ranks 9–30 for
+  // (per gsc_query_page_map) whose body never directly answers them; emits
+  // refresh_existing_page opportunities whose drafts add self-contained
+  // answer blocks. Default OFF in prod: ships dormant so the first mined
+  // batch can be eyeballed before the refresh lane starts consuming it
+  // (GATE_ANSWER_GAP_MINING=true to enable). When off, the bucket miner
+  // returns [].
+  answerGapMining: isProd ? process.env.GATE_ANSWER_GAP_MINING === 'true' : true,
+
   // Listicle brief overlay — when a supporting-blog brief's query is
   // list-shaped ("signs of…", "10 natural…"), the brief-builder layers the
   // citable-listicle architecture (count-in-title, numbered H2 per item,
