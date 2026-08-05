@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -716,6 +717,25 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   // lock before the insert and let a concurrent booking slip in between. This
   // path is reached from Stripe activation with the root connection, so open a
   // transaction when `conn` isn't already one.
+  // r41: resolve → lock → re-resolve — `term` was loaded before any comms
+  // fence, so an undo that repointed the journaled term while we waited (or
+  // before a try-lock acquire) would seed visits on the stale kept owner
+  // with an annual_prepay_term_id the coverage checks then reject. Re-read
+  // the owner under the fence; a change defers exactly like a lock miss —
+  // the next idempotent term refresh reseeds post-undo.
+  const termOwnerMovedUnderFence = async (trx) => {
+    // Presence probe (id + owner, distinct alias): a single indexed lookup
+    // whose ABSENCE means the term moved or vanished — fail closed either way.
+    const fresh = await trx('annual_prepay_terms as apt_owner_probe')
+      .where({ id: term.id, customer_id: term.customer_id })
+      .first('customer_id');
+    if (fresh) return false;
+    logger.warn(`[annual-prepay] term ${term.id} owner changed under the comms fence (merge-undo) — deferring visit seeding; the next term refresh retries`);
+    await fileCoverageException(term, 'term_owner_changed',
+      'A customer-merge undo repointed this term while seeding its visits — seeding deferred; the next term refresh retries automatically. If the visits are still missing tomorrow, re-save the term.');
+    return true;
+  };
+
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
     let concurrentAdoptable = null;
@@ -787,6 +807,23 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       await fileCoverageException(term, 'window_conflict',
         `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} now overlaps another job. The visit is on the schedule without a time — re-slot it with the customer.`);
     }
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — TRY-lock:
+    // activation already holds invoice/term row locks, and a merge-undo
+    // holds customer-comms while FOR-UPDATE-ing journaled invoices, so a
+    // blocking acquire here can deadlock. A miss NEVER seeds unfenced
+    // (r27): the undo cannot see the uncommitted visit in its absence
+    // probes and buildInsert snapshots neither address nor contacts.
+    // Seeding DEFERS instead — ensureCoverageRowsForTerm is idempotent and
+    // re-runs on every term refresh (activation retries, renewal sweeps),
+    // and the deduped coverage exception keeps it office-visible if no
+    // refresh comes.
+    if (!(await tryLockCustomerComms(trx, term.customer_id))) {
+      logger.warn(`[annual-prepay] term ${term.id} customer-comms lock busy (merge-undo in flight) — deferring visit seeding; the next term refresh retries`);
+      await fileCoverageException(term, 'comms_lock_busy',
+        'A customer-merge undo was in flight while seeding this term\'s visits — seeding deferred; the next term refresh retries automatically. If the visits are still missing tomorrow, re-save the term.');
+      return null;
+    }
+    if (await termOwnerMovedUnderFence(trx)) return null;
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
     return row;
   };
@@ -884,8 +921,27 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       created = conn.isTransaction
         ? await seedTimedFirstVisit(conn, scheduledDate)
         : await conn.transaction((trx) => seedTimedFirstVisit(trx, scheduledDate));
+    } else if (conn.isTransaction) {
+      // Same try-lock DEFER as seedTimedFirstVisit (r27): a miss never
+      // seeds unfenced — the date stays unseeded and the next idempotent
+      // term refresh seeds it post-undo.
+      if (!(await tryLockCustomerComms(conn, term.customer_id))) {
+        logger.warn(`[annual-prepay] term ${term.id} customer-comms lock busy (merge-undo in flight) — deferring visit seeding; the next term refresh retries`);
+        await fileCoverageException(term, 'comms_lock_busy',
+          'A customer-merge undo was in flight while seeding this term\'s visits — seeding deferred; the next term refresh retries automatically. If the visits are still missing tomorrow, re-save the term.');
+        created = null;
+      } else if (await termOwnerMovedUnderFence(conn)) {
+        created = null;
+      } else {
+        [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
+      }
     } else {
-      [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
+      // Fresh transaction holds nothing yet — a blocking rung-6 acquire is
+      // safe here (utils/customer-comms-lock.js).
+      [created] = await withCustomerCommsLock(conn, term.customer_id, async (trx) => {
+        if (await termOwnerMovedUnderFence(trx)) return [null];
+        return trx('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
+      });
     }
     if (!created) continue;
     createdRows.push(created);
@@ -1784,7 +1840,10 @@ async function syncInvoiceTerm(invoiceId, termId, conn = db) {
   const cols = await invoiceColumns();
   if (!cols.annual_prepay_term_id) return;
   try {
-    await conn('invoices').where({ id: invoiceId }).update({ annual_prepay_term_id: termId });
+    // Real mutation → real stamp (Codex #3109 r26): binding a term to the
+    // invoice is billing state the merge-undo's activity gates detect by
+    // updated_at; an unstamped sync was invisible to them.
+    await conn('invoices').where({ id: invoiceId }).update({ annual_prepay_term_id: termId, updated_at: conn.fn.now() });
   } catch (err) {
     logger.warn(`[annual-prepay] invoice term sync skipped: ${err.message}`);
   }

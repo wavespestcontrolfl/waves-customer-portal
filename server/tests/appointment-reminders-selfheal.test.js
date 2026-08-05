@@ -34,10 +34,29 @@ function sweepChain(rows) {
 }
 
 describe('selfHealMissingReminderRows', () => {
+  // The per-visit transaction now FOR-UPDATE re-reads the visit's owner
+  // (Codex #3109 r26) — the trx stub serves that read from the sweep's own
+  // rows so the pin still asserts which conn registerVisitReminderInTx got.
+  let trxVisitRows;
+  const makeTrxConn = () => {
+    const trx = jest.fn((table) => ({
+      where: jest.fn(({ id }) => ({
+        forUpdate: jest.fn(() => ({
+          first: jest.fn(async () => {
+            const row = (trxVisitRows || []).find((v) => v.id === id);
+            return row ? { customer_id: row.customer_id } : null;
+          }),
+        })),
+      })),
+    }));
+    trx.__isTrxConn = true;
+    return trx;
+  };
   beforeEach(() => {
     jest.clearAllMocks();
     jest.restoreAllMocks();
-    db.transaction = jest.fn(async (callback) => callback('trx-conn'));
+    trxVisitRows = [];
+    db.transaction = jest.fn(async (callback) => callback(makeTrxConn()));
   });
 
   test('registers a row for a future visit missing one, via registerVisitReminderInTx with cron_selfheal source', async () => {
@@ -54,6 +73,7 @@ describe('selfHealMissingReminderRows', () => {
       created_at: bookedAt,
     };
     db.mockImplementation(() => sweepChain([visit]));
+    trxVisitRows = [visit];
     const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
       .mockResolvedValue({ id: 'rem-1' });
 
@@ -61,7 +81,7 @@ describe('selfHealMissingReminderRows', () => {
 
     expect(healed).toBe(1);
     expect(db.transaction).toHaveBeenCalledTimes(1);
-    expect(register).toHaveBeenCalledWith('trx-conn', {
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({ __isTrxConn: true }), {
       scheduledServiceId: 'svc-1',
       customerId: 'cust-1',
       appointmentTime: '2026-08-01T15:00',
@@ -80,12 +100,13 @@ describe('selfHealMissingReminderRows', () => {
       service_type: 'Every 6 Weeks Lawn Care Service',
     };
     db.mockImplementation(() => sweepChain([visit]));
+    trxVisitRows = [visit];
     const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
       .mockResolvedValue({ id: 'rem-2' });
 
     await AppointmentReminders.selfHealMissingReminderRows();
 
-    expect(register).toHaveBeenCalledWith('trx-conn', expect.objectContaining({
+    expect(register).toHaveBeenCalledWith(expect.objectContaining({ __isTrxConn: true }), expect.objectContaining({
       appointmentTime: '2026-08-02T08:00',
     }));
   });
@@ -107,6 +128,7 @@ describe('selfHealMissingReminderRows', () => {
       { id: 'svc-4', customer_id: 'cust-4', scheduled_date: new Date('2026-08-04T04:00:00.000Z'), window_start: '10:00:00', service_type: 'B' },
     ];
     db.mockImplementation(() => sweepChain(visits));
+    trxVisitRows = visits;
     jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
       .mockRejectedValueOnce(new Error('boom'))
       .mockResolvedValueOnce({ id: 'rem-4' });

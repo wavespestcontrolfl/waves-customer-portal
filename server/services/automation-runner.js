@@ -14,6 +14,7 @@
  */
 
 const db = require('../models/db');
+const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-comms-lock');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const { wrapServiceEmail, ensureLegalTextFooter, blockPalette } = require('./email-template');
@@ -140,7 +141,7 @@ async function hasLocalContent(templateKey) {
  * appointment tagger holds a per-customer advisory lock and must not need a
  * second pooled connection while doing so).
  */
-async function enrollCustomer({ templateKey, customer, dbh = db }) {
+async function enrollCustomer({ templateKey, customer, dbh = db, commsLockMode = 'block' }) {
   const template = await dbh('automation_templates').where({ key: templateKey }).first();
   if (!template) throw new Error(`Unknown automation template: ${templateKey}`);
   if (!template.enabled) return { enrolled: false, reason: 'template disabled' };
@@ -153,6 +154,101 @@ async function enrollCustomer({ templateKey, customer, dbh = db }) {
     .orderBy('step_order', 'asc');
   if (!steps.length) return { enrolled: false, reason: 'no steps' };
 
+  // Customer-linked enrollment mutations serialize with a concurrent
+  // merge-undo (r21): the undo's active-enrollment absence probe runs
+  // under `customer-comms:<id>`, and an unfenced insert/reactivation
+  // carrying an inherited email/name snapshot could commit AFTER the undo
+  // cleared those fields — the scheduler would then send the winner's
+  // sequence to the restored loser's mailbox. The active-row read and the
+  // insert/reactivation ride one locked transaction; a caller-provided
+  // transaction (the appointment tagger) takes the same key inline.
+  // Lead-email-only enrollments (no customer id) stay unfenced — the
+  // undo's probes are winner-scoped.
+  const runEnrollment = async (conn) => {
+    // Post-lock revalidation (r22 — resolve → lock → re-resolve): the
+    // caller's customer snapshot may predate an undo this acquisition just
+    // waited out. Callers legitimately pass addresses that differ from the
+    // customers row (a public-quote requester's email, a fresh call
+    // capture), so the row's value is NOT blindly adopted — instead, the
+    // resolveRecipientUnderLock rule: an address that NOW belongs to a
+    // live customer OTHER than this one is someone else's registered
+    // mailbox (typically the restored loser holding back the inherited
+    // email) and must not be enrolled. True third-party addresses are not
+    // customer rows and fall through unchanged.
+    let enrollTarget = customer;
+    if (customer.id) {
+      const fresh = await conn('customers')
+        .where({ id: customer.id })
+        .first('id', 'email', 'first_name', 'last_name', 'deleted_at');
+      if (!fresh || fresh.deleted_at) return { enrolled: false, reason: 'customer gone' };
+      const liveEmail = String(fresh.email || '').trim().toLowerCase();
+      if (normalizedEmail !== liveEmail) {
+        // Merge-specific evidence only (r30), checked across EVERY live
+        // holder of the address (r31 — sampling one arbitrary holder could
+        // pick a spouse/tenant and miss the restored loser sharing the
+        // same mailbox): one joined existence query — any live customer at
+        // this address who is the LOSER of an UNDONE merge whose winner is
+        // this customer blocks; shared household addresses and
+        // different-by-design recipients still enroll. Unreadable → block
+        // (conservative posture).
+        let undoneHolder = { id: 'unverifiable' };
+        try {
+          undoneHolder = await conn('customers as c')
+            .join('customer_merge_journal as j', function joinUndone() {
+              this.on('j.loser_customer_id', 'c.id');
+            })
+            .where('j.winner_customer_id', customer.id)
+            .whereNotNull('j.undone_at')
+            .whereRaw('lower(c.email) = ?', [normalizedEmail])
+            .whereNot('c.id', customer.id)
+            .where('c.active', true)
+            .whereNull('c.deleted_at')
+            .first('c.id');
+        } catch { /* keep the conservative block */ }
+        if (undoneHolder) {
+          return { enrolled: false, reason: 'address was restored to the merged-away customer by an undo (stale pre-undo address)' };
+        }
+      }
+      // Names come from the POST-LOCK row when it has them (r23 P2): the
+      // caller's snapshot can carry a merge-loser name an undo just
+      // restored away, and the scheduler renders greetings from the
+      // STORED enrollment fields. The snapshot only fills a blank row
+      // (fresh call captures naming a customer the row never had).
+      enrollTarget = {
+        ...customer,
+        first_name: fresh.first_name || customer.first_name || null,
+        last_name: fresh.last_name || customer.last_name || null,
+      };
+    }
+    return enrollCustomerLocked({ conn, templateKey, customer: enrollTarget, normalizedEmail, steps });
+  };
+  if (!customer.id) return runEnrollment(dbh);
+  if (dbh.isTransaction) {
+    // TRY-lock ONLY for callers that declare it (r33 — the r23 blanket
+    // try-lock silently dropped enrollments for transactional callers with
+    // no retry path, e.g. the appointment tagger's first-treatment
+    // sequence): a caller holding undo-contended row locks (the
+    // first-touch release holds its hold row FOR UPDATE, which the undo
+    // reverse-repoints) passes commsLockMode:'try' and handles the
+    // retryable customer_comms_busy result. Everyone else gets the safe
+    // BLOCKING acquire — their transactions hold only fresh/uncontended
+    // rows, and waiting out a brief undo is exactly right.
+    if (commsLockMode === 'try') {
+      if (!(await tryLockCustomerComms(dbh, customer.id))) {
+        return { enrolled: false, reason: 'customer_comms_busy', retryable: true };
+      }
+    } else {
+      await lockCustomerComms(dbh, customer.id);
+    }
+    return runEnrollment(dbh);
+  }
+  return db.transaction(async (trx) => {
+    await lockCustomerComms(trx, customer.id);
+    return runEnrollment(trx);
+  });
+}
+
+async function enrollCustomerLocked({ conn: dbh, templateKey, customer, normalizedEmail, steps }) {
   const existingQuery = dbh('automation_enrollments').where({ template_key: templateKey });
   if (customer.id) {
     existingQuery.where({ customer_id: customer.id });

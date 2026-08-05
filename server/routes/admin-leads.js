@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
@@ -1237,6 +1238,12 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
 
     // Compute the time window from start + duration.
     const windowStart = /^\d{2}:\d{2}$/.test(time) ? time : null;
+    // Appointment windows start ON THE HOUR (owner rule; Codex #3109 r37 —
+    // this convert path was the remaining bypass; the schedule-appointment
+    // route already rejects). Same rejection shape as that route.
+    if (windowStart && !windowStart.endsWith(':00')) {
+      return res.status(400).json({ error: `Appointment windows start on the hour — got "${time}"; use e.g. "${windowStart.slice(0, 2)}:00"` });
+    }
     let windowEnd = null;
     if (windowStart) {
       const [h, m] = windowStart.split(':').map(Number);
@@ -1273,6 +1280,27 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
     // (customer create, appointment insert, lead conversion) rolls back the whole
     // booking — no orphaned customer that a retry would duplicate.
     const { appt } = await db.transaction(async (trx) => {
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the appointment
+      // insert below resolves comms recipients LIVE from the customer row —
+      // serialize against a concurrent merge-undo BEFORE this trx's
+      // customers-row update and the insert. A customer CREATED inside this
+      // trx cannot be an undo's winner, so only the reuse path locks.
+      if (!needsCustomer) {
+        await lockCustomerComms(trx, customerId);
+        // Re-resolve UNDER the lock (r28): a merge-undo that held this key
+        // first can have reverse-repointed the lead to the restored
+        // customer while we waited — converting with the pre-lock
+        // lead/customer would book the visit on the stale owner and stamp
+        // the lead back to it, silently reversing the undo's restoration.
+        const freshLead = await trx('leads').where({ id: lead.id }).first('customer_id');
+        if (!freshLead || (freshLead.customer_id && String(freshLead.customer_id) !== String(customerId))) {
+          const err = new Error("This lead's customer changed while converting (a merge was undone) — reload the lead and convert again.");
+          err.statusCode = 409;
+          err.isOperational = true;
+          err.code = 'LEAD_OWNER_CHANGED';
+          throw err;
+        }
+      }
       if (needsCustomer) {
         const account = await ensureCustomerAccount(trx, {
           firstName: fallbackName,

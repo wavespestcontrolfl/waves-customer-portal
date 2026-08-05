@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { withCustomerCommsLock } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const { resolveLocation } = require('../config/locations');
 const smsTemplatesRouter = require('./admin-sms-templates');
@@ -5927,6 +5928,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // and its end-instant forcing is suppressed.
           let correctionPreservedMidFlight = false;
           if (lockedSvcRow) {
+            // Ownership re-resolve under the lock (r23 — customer-dedupe):
+            // a merge-undo that committed between the handler's svc load
+            // and this lock reverse-repointed the visit to the restored
+            // customer. Completion mints CHILDREN from svc.customer_id
+            // (invoices, service records, comms), so finishing with the
+            // stale owner splits the visit from its money. Abort with the
+            // retryable shape rather than silently adopting an owner the
+            // operator wasn't looking at.
+            if (lockedSvcRow.customer_id !== svc.customer_id) {
+              const err = new Error('This appointment\'s customer changed while completing (a merge was undone) — reload the job and complete it again.');
+              err.statusCode = 409;
+              err.isOperational = true;
+              err.code = 'VISIT_OWNER_CHANGED';
+              throw err;
+            }
             const normStampVal = (v) => (v == null || v === '' ? null : Number(v));
             const preLockSeq = normStampVal(svc.time_on_site_correction_seq);
             const preLockStamp = normStampVal(svc.time_on_site_adjusted_minutes);
@@ -11180,7 +11196,29 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
 
     let appointment;
     try {
-      [appointment] = await db('scheduled_services').insert(insertData).returning('*');
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): comms-lock the
+      // customer around the insert — this path had no transaction, and a
+      // bare pg_advisory_xact_lock outside one releases at statement end
+      // and fences nothing (utils/customer-comms-lock.js).
+      // Ownership from the LOCKED source visit (r28): a merge-undo can
+      // reverse-repoint the source while this request waits on the key —
+      // inserting the pre-lock svc.customer_id would leave a follow-up on
+      // the kept customer pointing at the restored customer's visit. A
+      // moved owner aborts retryably (a second blocking comms acquire
+      // while holding the source row would deadlock against the undo).
+      [appointment] = await withCustomerCommsLock(db, svc.customer_id, async (trx) => {
+        const lockedSource = await trx('scheduled_services')
+          .where({ id: svc.id }).forUpdate().first('customer_id');
+        if (!lockedSource || !lockedSource.customer_id
+          || String(lockedSource.customer_id) !== String(svc.customer_id)) {
+          const err = new Error("This appointment's customer changed while booking the follow-up (a merge was undone) — reload the job and try again.");
+          err.statusCode = 409;
+          err.isOperational = true;
+          err.code = 'VISIT_OWNER_CHANGED';
+          throw err;
+        }
+        return trx('scheduled_services').insert(insertData).returning('*');
+      });
     } catch (err) {
       // Partial unique index on followup_source_service_id — a concurrent
       // CTA tap lost the race; return the winner's booking idempotently.

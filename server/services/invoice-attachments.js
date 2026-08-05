@@ -188,7 +188,11 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
     }
 
     return await db.transaction(async (trx) => {
-      const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first('id');
+      // customer_id comes from the LOCKED row, never the pre-lock read
+      // (Codex #3109 r25): a merge-undo can repoint the invoice while this
+      // upload waits on the FOR UPDATE — inserting the stale pre-lock
+      // owner would split the attachment from the invoice it belongs to.
+      const lockedInvoice = await trx('invoices').where({ id: invoice.id }).forUpdate().first('id', 'customer_id');
       if (!lockedInvoice) throw attachmentError('Invoice not found', 404);
 
       const lockedExisting = await attachmentUsage(invoice.id, trx);
@@ -196,7 +200,7 @@ async function upload(invoice, files = [], { uploadedByTechId = null } = {}) {
 
       return trx('invoice_attachments').insert(uploadedObjects.map((object) => ({
         invoice_id: invoice.id,
-        customer_id: invoice.customer_id || null,
+        customer_id: lockedInvoice.customer_id || null,
         file_name: object.fileName,
         mime_type: object.contentType,
         file_size_bytes: object.size,

@@ -94,16 +94,26 @@ async function syncTermiteBonds() {
     const [sy, sm, sd] = startedEt.split('-').map(Number);
     const renewsEt = new Date(Date.UTC(sy + years, sm - 1, sd)).toISOString().slice(0, 10);
     try {
-      await db('termite_bonds').insert({
-        customer_id: v.customer_id,
+      // Owner from the LOCKED visit row (Codex #3109 r27): a merge-undo
+      // can reverse-repoint the visit between the sweep's unlocked read
+      // and this insert — the FOR UPDATE serializes with that repoint so
+      // the bond always binds the visit's CURRENT customer.
+      const bondInserted = await db.transaction(async (trx) => {
+        const lockedVisit = await trx('scheduled_services')
+          .where({ id: v.id }).forUpdate().first('customer_id');
+        if (!lockedVisit || !lockedVisit.customer_id) return false;
+        await trx('termite_bonds').insert({
+        customer_id: lockedVisit.customer_id,
         scheduled_service_id: v.id,
         service_type: v.service_type,
         term_years: years,
         started_at: startedEt,
         renews_at: renewsEt,
         status: 'active',
+        });
+        return true;
       });
-      inserted += 1;
+      if (bondInserted) inserted += 1;
     } catch (e) {
       // Unique race with a concurrent run — fine, the row exists.
       logger.warn(`[lifecycle-sweeps] bond insert skipped for visit ${v.id}: ${e.message}`);

@@ -341,6 +341,24 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       };
       return b;
     }
+    if (table === 'customers') {
+      // The rung-6 comms fence re-reads the fingerprint columns under the
+      // lock — serve the same row as the db-level pre-fence read so the
+      // compare passes and the flow reaches the insert.
+      const b = { where: () => b, first: async () => CUST };
+      return b;
+    }
+    if (table === 'estimates') {
+      // The r35 estimate-linkage revalidation re-reads stamped refs under
+      // the fence — serve the fixture rows (customer-less rows pass the
+      // owner check; unlinked bookings never reach this read).
+      const b = {
+        _id: null,
+        where(arg) { b._id = (arg && typeof arg === 'object') ? arg.id : arg; return b; },
+        first: async () => ESTIMATES[String(b._id)] || null,
+      };
+      return b;
+    }
     throw new Error(`unexpected trx table ${table}`);
   }
 

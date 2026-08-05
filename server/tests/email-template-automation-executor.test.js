@@ -17,10 +17,16 @@ function chain({ result = [], first, returning } = {}) {
   [
     'where',
     'whereIn',
+    'whereRaw',
+    'whereNot',
+    'whereNull',
+    'whereNotNull',
     'leftJoin',
     'select',
     'orderBy',
     'limit',
+    'onConflict',
+    'ignore',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
@@ -34,14 +40,26 @@ function chain({ result = [], first, returning } = {}) {
   return q;
 }
 
+// Shared queue source. `db` and a transaction's `trx` both draw from it,
+// but through SEPARATE entry points, so a test can tell which connection a
+// table was touched through (r14: writes inside the locked transaction must
+// use trx, never the global pool — the run_events FK to an uncommitted
+// parent deadlocks otherwise).
+let takeFromQueue = () => { throw new Error('setDbQueues not called'); };
 function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
-  db.mockImplementation((table) => {
+  takeFromQueue = (table) => {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
+  };
+  db.mockImplementation((table) => {
+    globalDbAccesses.push(table);
+    return takeFromQueue(table);
   });
 }
+// Tables accessed through the GLOBAL db connection (not through a trx).
+const globalDbAccesses = [];
 
 function automation(overrides = {}) {
   return {
@@ -94,8 +112,33 @@ function run(overrides = {}) {
 }
 
 describe('email template automation executor', () => {
+  // createRun wraps its insert in a transaction that first takes the
+  // per-customer comms advisory lock (serializing against a customer-merge
+  // undo probing this recipient's queued sends). The trx delegates table
+  // calls back to db so the per-table queues keep working; raw() captures
+  // the lock for the pin below.
+  const advisoryLockCalls = [];
+  // Ordered trace of lock acquisitions vs table reads/writes inside
+  // createRun — the lock MUST come first (r11: resolving recipient state
+  // before locking lets a writer that waited on an in-flight undo write its
+  // pre-undo read afterwards, where the probe can never see it).
+  const opTrace = [];
   beforeEach(() => {
     jest.clearAllMocks();
+    advisoryLockCalls.length = 0;
+    opTrace.length = 0;
+    globalDbAccesses.length = 0;
+    db.transaction = jest.fn(async (fn) => {
+      // Draws from the same queues as db, but WITHOUT going through the
+      // global connection — so globalDbAccesses stays a true record.
+      const trx = (table) => { opTrace.push(`table:${table}`); return takeFromQueue(table); };
+      trx.raw = jest.fn(async (...args) => {
+        opTrace.push('lock');
+        advisoryLockCalls.push(args);
+        return { rows: [] };
+      });
+      return fn(trx);
+    });
   });
 
   test('maps a trigger to an immediate send with a durable idempotency key', async () => {
@@ -111,6 +154,9 @@ describe('email template automation executor', () => {
 
     setDbQueues({
       'email_template_automations as a': [chain({ result: [automation({ suppression_group_key: 'service_operational' })] })],
+      // The under-lock recipient re-read (r12): a live, non-retired row
+      // keeps the payload's attribution.
+      customers: [chain({ first: { id: 'cust-1', deleted_at: null } })],
       email_template_automation_runs: [
         existingRunQuery,
         insertRunQuery,
@@ -154,6 +200,25 @@ describe('email template automation executor', () => {
       recipient_email: 'sam@example.com',
       idempotency_key: 'estimate.extension_notice:est-1:2026-06-01',
     }));
+    // The insert ran inside a transaction that first took the per-customer
+    // comms advisory lock — the same key customer-dedupe.js's revertMerge
+    // takes before probing queued sends, so a run created here can never
+    // race an in-flight undo of this customer.
+    expect(advisoryLockCalls.some(([sql, bindings]) => String(sql).includes('pg_advisory_xact_lock')
+      && Array.isArray(bindings) && bindings[0] === 'customer-comms:cust-1')).toBe(true);
+    // ORDERING (r11): the lock is the FIRST thing the transaction does —
+    // before the idempotency read and before the insert. A writer that
+    // resolved recipient state first would blow past an in-flight undo.
+    expect(opTrace[0]).toBe('lock');
+    expect(opTrace.indexOf('lock'))
+      .toBeLessThan(opTrace.indexOf('table:email_template_automation_runs'));
+    // ORDERING (r12): the recipient's customer row is READ under the lock,
+    // and that read precedes the insert — the attribution the row is
+    // written with therefore comes from inside the lock, not from the
+    // payload snapshot the trigger was built from.
+    expect(opTrace.indexOf('lock')).toBeLessThan(opTrace.indexOf('table:customers'));
+    expect(opTrace.indexOf('table:customers'))
+      .toBeLessThan(opTrace.indexOf('table:email_template_automation_runs'));
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'estimate.extension_notice',
       versionId: 'version-1',
@@ -168,6 +233,355 @@ describe('email template automation executor', () => {
     expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'sent',
       email_message_id: 'message-1',
+    }));
+  });
+
+  test('no GLOBAL db access happens inside the locked transaction (run events ride the trx — FK deadlock)', async () => {
+    // email_template_automation_run_events.run_id references the parent run
+    // (20260518000002). Logging the event through the global pool while the
+    // parent is still uncommitted in OUR transaction deadlocks: the pooled
+    // connection waits on our row, we wait on it. Every write inside the
+    // transaction must therefore go through trx.
+    const queuedRun = run();
+    const existingRunQuery = chain({ first: null });
+    const insertRunQuery = chain({ returning: [queuedRun] });
+    const eventQuery = chain({ returning: [{ id: 'event-1' }] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+      email_template_automation_runs: [existingRunQuery, insertRunQuery],
+      email_template_automation_run_events: [eventQuery],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    // The run row was inserted, and its 'queued' event was logged...
+    expect(insertRunQuery.insert).toHaveBeenCalled();
+    expect(eventQuery.insert).toHaveBeenCalled();
+    // ...but the event table was NEVER touched through the global db —
+    // only through the transaction (opTrace records trx accesses).
+    expect(globalDbAccesses).not.toContain('email_template_automation_run_events');
+    expect(opTrace).toContain('table:email_template_automation_run_events');
+  });
+
+  test('a failing best-effort run-event insert inside the locked transaction is savepoint-scoped — the run row still commits', async () => {
+    // Postgres semantics modeled faithfully (r17 pre-push P1): logRunEvent
+    // swallows its insert error in JS, but WITHOUT a savepoint the failed
+    // statement has already aborted the enclosing transaction — the
+    // eventual COMMIT then fails and the just-inserted run row is silently
+    // rolled back. With the event insert wrapped in a nested transaction
+    // (SAVEPOINT), its failure rolls back only the savepoint and the run
+    // commits. The stub aborts the trx whenever the failing insert runs
+    // OUTSIDE a savepoint, and the transaction wrapper refuses to commit an
+    // aborted trx — so a regression to a bare best-effort insert fails this
+    // test the same way it loses runs in production.
+    const queuedRun = run();
+    let savepointDepth = 0;
+    let trxAborted = false;
+    const existingRunQuery = chain({ first: null });
+    const insertRunQuery = chain({ returning: [queuedRun] });
+    const eventQuery = chain({});
+    eventQuery.returning = jest.fn(async () => {
+      if (savepointDepth === 0) trxAborted = true;
+      throw new Error('null value in column "metadata" violates not-null constraint');
+    });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+      email_template_automation_runs: [existingRunQuery, insertRunQuery],
+      email_template_automation_run_events: [eventQuery],
+    });
+    // Transaction wrapper that models the aborted-trx COMMIT failure and
+    // provides the nested-transaction (savepoint) entry point.
+    db.transaction = jest.fn(async (fn) => {
+      const trx = (table) => { opTrace.push(`table:${table}`); return takeFromQueue(table); };
+      trx.isTransaction = true;
+      trx.raw = jest.fn(async (...args) => {
+        advisoryLockCalls.push(args);
+        return { rows: [] };
+      });
+      trx.transaction = jest.fn(async (spFn) => {
+        savepointDepth += 1;
+        try {
+          return await spFn(trx);
+        } finally {
+          savepointDepth -= 1;
+        }
+      });
+      const result = await fn(trx);
+      if (trxAborted) {
+        const err = new Error('current transaction is aborted, commands ignored until end of transaction block');
+        err.code = '25P02';
+        throw err;
+      }
+      return result;
+    });
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    // The run committed despite the failed audit event.
+    expect(result.results[0].run.id).toBe('run-1');
+    expect(result.results[0].deduped).toBe(false);
+    expect(insertRunQuery.insert).toHaveBeenCalled();
+    // The event insert was attempted — inside a savepoint — and its
+    // failure never aborted the outer transaction.
+    expect(eventQuery.returning).toHaveBeenCalled();
+    expect(trxAborted).toBe(false);
+  });
+
+  test('a trigger replay racing the insert inside the locked transaction recovers the existing run WITHOUT aborting the trx', async () => {
+    // Postgres semantics modeled faithfully (r16): a raised unique
+    // violation ABORTS the enclosing transaction — every later statement on
+    // it fails 25P02 ("current transaction is aborted") until rollback. The
+    // r14 conversion of createRun to a locked transaction therefore broke
+    // the old catch-23505-then-select recovery on this path: the catch's
+    // replay .first() and its 'deduped' audit insert both ran on the
+    // aborted trx and could never succeed. The insert must not RAISE at
+    // all — ON CONFLICT (idempotency_key) DO NOTHING resolves to zero rows
+    // and the replay fetch runs on a healthy transaction. The stub raises
+    // real 23505/25P02 behavior whenever the insert lacks the ON CONFLICT
+    // clause, so a regression to a raising insert fails this test the same
+    // way it fails in production.
+    const existingRun = run();
+    let trxAborted = false;
+    const abortedTrxError = () => {
+      const err = new Error('current transaction is aborted, commands ignored until end of transaction block');
+      err.code = '25P02';
+      return err;
+    };
+    const existingRunQuery = chain({ first: null }); // pre-insert idempotency read: not there yet
+    const insertRunQuery = chain({});
+    insertRunQuery.returning = jest.fn(async () => {
+      // A concurrent replay committed the row between the read and the
+      // insert. With ON CONFLICT DO NOTHING the conflict is swallowed
+      // (zero rows back); without it, Postgres raises and the trx aborts.
+      if (insertRunQuery.onConflict.mock.calls.length && insertRunQuery.ignore.mock.calls.length) return [];
+      trxAborted = true;
+      const err = new Error('duplicate key value violates unique constraint "email_template_automation_runs_idempotency_key_unique"');
+      err.code = '23505';
+      throw err;
+    });
+    const guardAborted = (fn) => jest.fn(async (...args) => {
+      if (trxAborted) throw abortedTrxError();
+      return fn(...args);
+    });
+    const replayQuery = chain({});
+    replayQuery.first = guardAborted(async () => existingRun);
+    const dedupedLogQuery = chain({});
+    dedupedLogQuery.returning = guardAborted(async () => [{ id: 'event-1' }]);
+
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+      email_template_automation_runs: [existingRunQuery, insertRunQuery, replayQuery],
+      email_template_automation_run_events: [dedupedLogQuery],
+    });
+
+    const result = await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    expect(result.results[0].deduped).toBe(true);
+    expect(result.results[0].run.id).toBe('run-1');
+    // The conflict was absorbed by the insert itself, never raised.
+    expect(insertRunQuery.onConflict).toHaveBeenCalledWith('idempotency_key');
+    expect(insertRunQuery.ignore).toHaveBeenCalled();
+    // The race-recovery audit event landed on the (healthy) transaction.
+    expect(dedupedLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      event_type: 'deduped',
+    }));
+  });
+
+  test('a stale pre-undo recipient address (now owned by another live customer) is recorded SKIPPED, never queued', async () => {
+    // Post-undo shape: the payload carries the merged-in address, which the
+    // undo has handed back to the restored customer. Sending it would mail
+    // a winner-owned message to the restored loser's mailbox.
+    const insertRunQuery = chain({ returning: [run({ status: 'skipped' })] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation()] })],
+      customers: [
+        // The recipient's live email is NO LONGER the payload address...
+        chain({ first: { id: 'cust-1', email: 'winner.new@example.com', deleted_at: null } }),
+        // ...and another LIVE customer now owns it.
+        chain({ first: { id: 'cust-restored' } }),
+      ],
+      email_template_automation_runs: [chain({ first: null }), insertRunQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    const inserted = insertRunQuery.insert.mock.calls[0][0];
+    // Recorded for audit, but SKIPPED — a skipped row fails executeRun's
+    // status claim, so no delivery to the stale address can follow.
+    expect(inserted.status).toBe('skipped');
+    expect(inserted.exit_reason).toMatch(/restored to the merged-away customer/);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('an address that differs BY DESIGN (nobody else owns it) still queues normally', async () => {
+    // Tenant-under-landlord: the estimate mails the tenant, whose address is
+    // not a customer record at all. This must keep working.
+    const insertRunQuery = chain({ returning: [run()] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [
+        chain({ first: { id: 'cust-1', email: 'landlord@example.com', deleted_at: null } }),
+        chain({ first: null }), // no other live customer owns the tenant address
+      ],
+      email_template_automation_runs: [chain({ first: null }), insertRunQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'tenant@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    const inserted = insertRunQuery.insert.mock.calls[0][0];
+    expect(inserted.status).toBe('scheduled'); // queued as normal, not skipped
+    expect(inserted.recipient_email).toBe('tenant@example.com');
+    expect(inserted.exit_reason).toBeFalsy();
+  });
+
+  test('a LEAD-backed run keeps its id — customer revalidation never strips non-customer identifiers', async () => {
+    // The payload names only lead_id: the id provably came from a lead key,
+    // so a customer-merge undo cannot affect it. It must take the lock-free
+    // path and be written with its lead id intact — no customers read at
+    // all (a customer lookup for a lead id would "find nothing" and, pre-
+    // r15, strip the id).
+    const insertRunQuery = chain({ returning: [run({ recipient_id: 'lead-9' })] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      email_template_automation_runs: [chain({ first: null }), insertRunQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        lead_id: 'lead-9', // no customer_id anywhere
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    const inserted = insertRunQuery.insert.mock.calls[0][0];
+    expect(inserted.recipient_id).toBe('lead-9');
+    expect(inserted.status).toBe('scheduled'); // never skipped by revalidation
+    // Lock-free path: no advisory lock, no customers read.
+    expect(advisoryLockCalls).toHaveLength(0);
+    expect(opTrace).not.toContain('table:customers');
+  });
+
+  test('a recipient whose customer row was retired since the trigger is written UNLINKED (under-lock re-read)', async () => {
+    // The payload named cust-1, but the under-lock read finds it
+    // soft-deleted (merged away). The run must not be pinned to a retired
+    // row — the value written comes from the read, not the payload.
+    const queuedRun = run({ recipient_id: null });
+    const existingRunQuery = chain({ first: null });
+    const insertRunQuery = chain({ returning: [queuedRun] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [chain({ first: { id: 'cust-1', deleted_at: '2026-07-30T04:40:00Z' } })],
+      email_template_automation_runs: [existingRunQuery, insertRunQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    // Locked on the payload's id (it is the lock KEY)...
+    expect(advisoryLockCalls.some(([, bindings]) => bindings[0] === 'customer-comms:cust-1')).toBe(true);
+    // ...but attributed from the under-lock read: retired → unlinked.
+    expect(insertRunQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      recipient_id: null,
+      recipient_email: 'sam@example.com', // delivery semantics untouched
     }));
   });
 

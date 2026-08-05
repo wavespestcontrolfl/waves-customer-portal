@@ -1500,9 +1500,18 @@ const AppointmentReminders = {
             ? svc.scheduled_date.toISOString().slice(0, 10)
             : String(svc.scheduled_date || '').slice(0, 10);
           const windowStart = String(svc.window_start || '').slice(0, 5) || '08:00';
-          const record = await db.transaction((trx) => AppointmentReminders.registerVisitReminderInTx(trx, {
+          const record = await db.transaction(async (trx) => {
+            // Owner from the LOCKED visit row (Codex #3109 r26): a
+            // merge-undo can reverse-repoint the visit between the sweep's
+            // unlocked read and this insert — the FOR UPDATE serializes
+            // against that repoint, so the reminder always stamps the
+            // visit's CURRENT owner (a vanished/ownerless row skips).
+            const lockedVisit = await trx('scheduled_services')
+              .where({ id: svc.id }).forUpdate().first('customer_id');
+            if (!lockedVisit || !lockedVisit.customer_id) return null;
+            return AppointmentReminders.registerVisitReminderInTx(trx, {
             scheduledServiceId: svc.id,
-            customerId: svc.customer_id,
+            customerId: lockedVisit.customer_id,
             appointmentTime: `${datePart}T${windowStart}`,
             serviceType: svc.service_type,
             source: 'cron_selfheal',
@@ -1510,7 +1519,8 @@ const AppointmentReminders = {
             // "booked < 72h before appointment" off created_at, and a healed
             // row stamped with the cron time would wrongly skip that reminder.
             createdAt: svc.created_at,
-          }));
+            });
+          });
           if (record) healed += 1;
         } catch (err) {
           logger.error(`[appt-remind] Self-heal registration failed for ${svc.id}: ${err.message}`);

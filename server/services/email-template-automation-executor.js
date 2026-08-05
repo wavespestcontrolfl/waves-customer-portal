@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const EmailTemplates = require('./email-template-library');
 const logger = require('./logger');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -350,11 +351,30 @@ function recipientFor(triggerEventKey, input = {}, automation = {}) {
     err.status = 400;
     throw err;
   }
-  return {
-    email,
-    type: cleanString(rawRecipient.type || rawRecipient.recipient_type || mapping.recipientType || automation.audience || 'customer'),
-    id: cleanString(rawRecipient.id || rawRecipient.recipient_id || firstDefined(payload, mapping.recipientIdKeys), ''),
-  };
+  const type = cleanString(rawRecipient.type || rawRecipient.recipient_type || mapping.recipientType || automation.audience || 'customer');
+  // WHICH source produced the id decides whether the under-lock customer
+  // revalidation applies (r15): recipientIdKeys can carry BOTH
+  // 'customer_id' and 'lead_id', and the recipient TYPE ('lead') does not
+  // say which one matched — a lead-type recipient legitimately rides a
+  // customers-row id when the lead is linked. Only an id that provably
+  // names a customers row gets revalidated; lead/other identifiers are
+  // untouched by a customer-merge undo and must never be stripped by it.
+  let id = cleanString(rawRecipient.id || rawRecipient.recipient_id, '');
+  let idIsCustomer = null;
+  if (id) {
+    // Explicit typed recipient (admin trigger): trust its declared type.
+    idIsCustomer = type === 'customer';
+  } else {
+    for (const key of mapping.recipientIdKeys || []) {
+      const value = payload?.[key];
+      if (value !== undefined && value !== null && String(value).trim() !== '') {
+        id = cleanString(value, '');
+        idIsCustomer = key === 'customer_id';
+        break;
+      }
+    }
+  }
+  return { email, type, id, idIsCustomer };
 }
 
 function entityFor(triggerEventKey, input = {}) {
@@ -382,73 +402,327 @@ async function loadAutomations(triggerEventKey, automationKey) {
   return query.orderBy('a.delay_minutes', 'asc').orderBy('a.automation_key', 'asc');
 }
 
-async function logRunEvent(runId, eventType, message, metadata = {}) {
+/**
+ * @param conn knex connection OR the caller's transaction. MUST be the
+ *   transaction whenever the parent run row was written in one:
+ *   email_template_automation_run_events.run_id references
+ *   email_template_automation_runs(id) (20260518000002), so logging an
+ *   event for an UNCOMMITTED parent through the global pool deadlocks —
+ *   the pooled connection waits on our transaction's uncommitted row while
+ *   our transaction waits on that connection's insert. Defaults to `db` so
+ *   callers outside a transaction are unchanged.
+ */
+async function logRunEvent(runId, eventType, message, metadata = {}, conn = db) {
   if (!runId) return null;
   try {
-    const [event] = await db('email_template_automation_run_events').insert({
-      run_id: runId,
-      event_type: eventType,
-      message: message || null,
-      metadata: JSON.stringify(metadata || {}),
-    }).returning('*');
-    return event || null;
+    const insertEvent = async (c) => {
+      const [event] = await c('email_template_automation_run_events').insert({
+        run_id: runId,
+        event_type: eventType,
+        message: message || null,
+        metadata: JSON.stringify(metadata || {}),
+      }).returning('*');
+      return event || null;
+    };
+    // Best-effort logging must never POISON a caller's transaction (r17
+    // pre-push P1): in Postgres a failed statement aborts the enclosing
+    // transaction even though the JS error is caught below — the caller
+    // would then COMMIT an aborted transaction and silently lose the run
+    // row this event annotates. A nested knex transaction (SAVEPOINT)
+    // scopes the failure to the event insert alone: its rollback releases
+    // the savepoint and the outer transaction stays healthy. The pooled
+    // path keeps the plain insert — there is no enclosing transaction to
+    // protect.
+    if (conn.isTransaction) {
+      return await conn.transaction((sp) => insertEvent(sp));
+    }
+    return await insertEvent(conn);
   } catch (err) {
     logger.warn(`[email-template-automation] failed to log ${eventType} for run ${runId}: ${err.message}`);
     return null;
   }
 }
 
+/**
+ * Re-resolve the recipient's ATTRIBUTION under the comms advisory lock.
+ *
+ * recipientFor() is a pure payload-derived function (no DB access), so
+ * re-deriving it under the lock would return the same values — it cannot
+ * detect that the payload's customer id went stale. The authoritative check
+ * is a real READ of the customer row, performed strictly INSIDE the lock:
+ * only then is it guaranteed to reflect a completed customer-merge undo
+ * rather than the pre-undo world the trigger payload was built from.
+ *
+ * Delivery semantics are deliberately untouched — recipient_email stays the
+ * payload's address (automations legitimately mail an address that differs
+ * from customers.email: a tenant's estimate under a landlord's record).
+ * Only the ATTRIBUTION is corrected: a recipient id whose customer row is
+ * gone or merged-away is dropped to unlinked rather than pinning the run to
+ * a retired row. Best-effort: an unreadable customers table keeps the
+ * payload's id (today's behavior) — the LOCK, not this read, is what closes
+ * the race; this read only refines who the row is attributed to.
+ */
+async function resolveRecipientUnderLock(conn, recipient) {
+  if (!recipient.id) return { recipient, blockReason: null };
+  try {
+    const row = await conn('customers')
+      .where({ id: recipient.id })
+      .first('id', 'email', 'deleted_at');
+    if (!row || row.deleted_at) {
+      return { recipient: { ...recipient, id: '' }, blockReason: null };
+    }
+    // The payload's address may legitimately differ from customers.email
+    // (a tenant's estimate under a landlord's record) — that case must keep
+    // sending. What must NOT send is the post-undo shape: the payload
+    // carries an address this customer USED to hold and that a merge undo
+    // has since handed back to the restored customer. The two are told
+    // apart by asking who owns the address NOW: an address belonging to
+    // ANOTHER LIVE CUSTOMER is never a legitimate "different by design"
+    // recipient for this one — it is someone else's registered mailbox.
+    // (True third-party addresses like a tenant's are not customer rows,
+    // so they fall through and still send.)
+    const payloadEmail = String(recipient.email || '').trim().toLowerCase();
+    const liveEmail = String(row.email || '').trim().toLowerCase();
+    if (payloadEmail && payloadEmail !== liveEmail) {
+      // Another holder ALONE is not staleness (r30): shared household
+      // addresses and different-by-design recipients (a tenant with their
+      // own customer record) are supported. The post-undo shape has
+      // MERGE-SPECIFIC evidence — a live holder who is the restored LOSER
+      // of an undone merge whose winner is this run's customer — checked
+      // across EVERY holder in one joined query (r31: sampling a single
+      // holder could pick the spouse and miss the restored loser sharing
+      // the same mailbox). Unreadable → conservative block only when a
+      // bare holder exists.
+      let undoneHolder = null;
+      try {
+        undoneHolder = await conn('customers as c')
+          .join('customer_merge_journal as j', function joinUndone() {
+            this.on('j.loser_customer_id', 'c.id');
+          })
+          .where('j.winner_customer_id', recipient.id)
+          .whereNotNull('j.undone_at')
+          .whereRaw('lower(c.email) = ?', [payloadEmail])
+          .whereNot('c.id', recipient.id)
+          .where('c.active', true)
+          .whereNull('c.deleted_at')
+          .first('c.id');
+      } catch {
+        try {
+          undoneHolder = await conn('customers')
+            .whereRaw('lower(email) = ?', [payloadEmail])
+            .whereNot({ id: recipient.id })
+            .where('active', true)
+            .whereNull('deleted_at')
+            .first('id');
+        } catch { /* both unreadable → keep the payload attribution */ }
+      }
+      if (undoneHolder) {
+        // Recorded (audit trail) but never sent: a 'skipped' row fails
+        // executeRun's status claim, so no delivery can follow.
+        return {
+          recipient,
+          blockReason: 'recipient address was restored to the merged-away customer by an undo (stale pre-undo address)',
+        };
+      }
+    }
+  } catch {
+    // Unreadable → keep the payload attribution (unchanged behavior).
+  }
+  return { recipient, blockReason: null };
+}
+
 async function createRun({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy }) {
-  const existing = await db('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
+  // LOCK ORDER: the advisory lock is the transaction's FIRST statement —
+  // before the idempotency read, before the recipient's customer row is
+  // read, and before the insert. Resolving recipient state first and
+  // locking second is the race this exists to close: with an undo holding
+  // the lock, a writer that had ALREADY read the pre-undo recipient state
+  // would wait, then insert that stale winner-owned row AFTER the undo
+  // committed — a row the undo's probe could never have seen. The
+  // recipient id arriving here is only a LOCK KEY (payload-derived, pure);
+  // the value the insert is attributed to comes from
+  // resolveRecipientUnderLock's read, which happens under the lock.
+  //
+  // Serializes against an in-flight customer-merge UNDO probing this
+  // recipient's queued sends (customer-dedupe.js revertMerge, email guard):
+  // runs are keyed by recipient_id — a STRING customer id with no FK — so
+  // no row lock can fence this insert against that probe. Behavior is
+  // otherwise identical (the lock only blocks while an undo of THIS
+  // customer is mid-transaction). Key derivation + lock-order contract are
+  // centralized in utils/customer-comms-lock.js.
+  // No recipient id = unlinked run — lock-free. A NON-customer id keeps
+  // the lead UUID in recipient_id (a lead-backed run must never have its
+  // id stripped by the customer revalidation) but is NO LONGER assumed
+  // unrelated to a merge-undo (r21): a LINKED lead's run delivers the
+  // customer's sequence, and the undo's queued-run probe now follows
+  // leads.customer_id — so the insert must fence through that owner. An
+  // unlinked lead (no customer_id) or a genuinely non-lead id stays
+  // lock-free; a failed owner lookup queues unfenced with a loud log
+  // (sends are never blocked into failure — r14 posture).
+  if (!recipient.id || recipient.idIsCustomer === false) {
+    let leadOwnerCustomerId = null;
+    if (recipient.id && recipient.idIsCustomer === false
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(recipient.id))) {
+      try {
+        const leadRow = await db('leads').where({ id: recipient.id }).first('customer_id');
+        leadOwnerCustomerId = (leadRow && leadRow.customer_id) || null;
+      } catch (lookupErr) {
+        logger.warn(`[template-executor] lead owner lookup failed for recipient ${recipient.id} — queuing unfenced: ${lookupErr.message}`);
+      }
+    }
+    if (leadOwnerCustomerId) {
+      return db.transaction(async (trx) => {
+        await lockCustomerComms(trx, leadOwnerCustomerId);
+        // Re-resolve UNDER the lock (r22 — the resolve → lock → re-resolve
+        // idiom): the pre-lock owner lookup may predate an undo this
+        // acquisition just waited out. A repointed lead fences its NEW
+        // owner too (this trx holds only advisory keys, and an undo takes
+        // exactly one comms key — a blocking second acquire cannot cycle).
+        let ownerNow = leadOwnerCustomerId;
+        try {
+          // r42: LOOP to a fixpoint — each new-owner acquire can itself
+          // wait out ANOTHER undo that repoints the lead again, so a
+          // single re-read can still insert against a stale owner.
+          // Re-read until the owner is one whose key this trx already
+          // holds (advisory keys are held to commit, so a held owner
+          // cannot have an undo mid-flight). Cap guards degenerate
+          // ping-pong; exhausting it queues with the last-read owner and
+          // a loud log (r14 posture: sends are never blocked into
+          // failure — the mailbox check below still gates delivery).
+          const heldOwners = new Set([String(leadOwnerCustomerId)]);
+          for (let hop = 0; ; hop += 1) {
+            const freshLead = await trx('leads').where({ id: recipient.id }).first('customer_id');
+            ownerNow = (freshLead && freshLead.customer_id) || null;
+            if (!ownerNow || heldOwners.has(String(ownerNow))) break;
+            if (hop >= 3) {
+              logger.warn(`[template-executor] lead ${recipient.id} owner still moving after ${hop} comms-fence hops — queuing under last-read owner ${ownerNow}`);
+              break;
+            }
+            await lockCustomerComms(trx, ownerNow);
+            heldOwners.add(String(ownerNow));
+          }
+        } catch { ownerNow = leadOwnerCustomerId; }
+        // Mailbox revalidation, same rule as resolveRecipientUnderLock: an
+        // address that NOW belongs to a live customer other than the run's
+        // owner is someone else's registered mailbox — typically the
+        // restored loser of the undo we waited out, holding back the
+        // inherited email this terminal lead captured pre-undo (terminal
+        // leads are outside the undo's identity probes by design, so this
+        // post-wait check is the only gate).
+        let leadBlockReason = null;
+        const leadPayloadEmail = String(recipient.email || '').trim().toLowerCase();
+        if (leadPayloadEmail && ownerNow) {
+          try {
+            // Merge-specific evidence across EVERY live holder (r30/r31)
+            // — see resolveRecipientUnderLock for the sampling rationale.
+            const undoneLeadHolder = await trx('customers as c')
+              .join('customer_merge_journal as j', function joinUndone() {
+                this.on('j.loser_customer_id', 'c.id');
+              })
+              .where('j.winner_customer_id', ownerNow)
+              .whereNotNull('j.undone_at')
+              .whereRaw('lower(c.email) = ?', [leadPayloadEmail])
+              .whereNot('c.id', ownerNow)
+              .where('c.active', true)
+              .whereNull('c.deleted_at')
+              .first('c.id');
+            if (undoneLeadHolder) leadBlockReason = 'recipient address was restored to the merged-away customer by an undo (stale pre-undo address)';
+          } catch { /* unreadable → keep the payload attribution (unchanged behavior) */ }
+        }
+        return createRunUnlocked({
+          conn: trx, automation, triggerEventKey, triggerEventId, entityType, entityId,
+          recipient, payload, context, idempotencyKey, runAfter,
+          status: leadBlockReason ? 'skipped' : status,
+          exitReason: leadBlockReason || exitReason,
+          retryPolicy,
+        });
+      });
+    }
+    return createRunUnlocked({
+      conn: db, automation, triggerEventKey, triggerEventId, entityType, entityId,
+      recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,
+    });
+  }
+  return db.transaction(async (trx) => {
+    await lockCustomerComms(trx, recipient.id);
+    const { recipient: lockedRecipient, blockReason } = await resolveRecipientUnderLock(trx, recipient);
+    return createRunUnlocked({
+      conn: trx, automation, triggerEventKey, triggerEventId, entityType, entityId,
+      recipient: lockedRecipient, payload, context, idempotencyKey, runAfter,
+      // A blocked recipient records the run as SKIPPED rather than queued —
+      // the row stays as an audit trail, and a 'skipped' status fails
+      // executeRun's claim so nothing can deliver to the stale address.
+      status: blockReason ? 'skipped' : status,
+      exitReason: blockReason || exitReason,
+      retryPolicy,
+    });
+  });
+}
+
+async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy }) {
+  const existing = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
   if (existing) {
+    // conn, never the global pool — see logRunEvent's contract (the parent
+    // run may be uncommitted in THIS transaction; a pooled insert deadlocks).
     await logRunEvent(existing.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
       trigger_event_key: triggerEventKey,
       trigger_event_id: triggerEventId || null,
-    });
+    }, conn);
     return { run: existing, deduped: true };
   }
 
-  let run;
-  try {
-    [run] = await db('email_template_automation_runs').insert({
-      automation_id: automation.id || null,
-      automation_key: automation.automation_key,
+  // A trigger replay can commit the same idempotency_key between the read
+  // above and this insert. That race must NEVER surface as a raised unique
+  // violation: when conn is the locked transaction (createRun's customer
+  // path, r14), a raised 23505 ABORTS the transaction — every later
+  // statement fails 25P02 until rollback, so a catch-then-select recovery
+  // can never run there. ON CONFLICT (idempotency_key) DO NOTHING absorbs
+  // the race inside the statement instead: zero rows back means a
+  // concurrent replay won, and the recovery fetch + audit event run on a
+  // still-healthy connection. Any OTHER error still throws and rolls the
+  // transaction back as before.
+  const [run] = await conn('email_template_automation_runs').insert({
+    automation_id: automation.id || null,
+    automation_key: automation.automation_key,
+    trigger_event_key: triggerEventKey,
+    trigger_event_id: triggerEventId || null,
+    entity_type: entityType || null,
+    entity_id: entityId || null,
+    template_key: automation.template_key,
+    template_version_id: automation.active_version_id || automation.template_version_id || null,
+    recipient_type: recipient.type || null,
+    recipient_id: recipient.id || null,
+    recipient_email: recipient.email,
+    idempotency_key: idempotencyKey,
+    status,
+    run_after: runAfter,
+    max_attempts: retryPolicy.maxAttempts,
+    exit_reason: exitReason || null,
+    payload: JSON.stringify(payload || {}),
+    context: JSON.stringify(context || {}),
+    completed_at: status === 'skipped' ? new Date() : null,
+  }).onConflict('idempotency_key').ignore().returning('*');
+  if (!run) {
+    const replayed = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
+    if (!replayed) {
+      // Conflicted yet unreadable — a replay claimed the key and vanished
+      // (only a concurrent hard delete can produce this). Surface it; the
+      // caller's transaction rolls back cleanly.
+      throw new Error(`Automation run insert conflicted on idempotency key but the winning row is gone (${idempotencyKey})`);
+    }
+    await logRunEvent(replayed.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
       trigger_event_key: triggerEventKey,
       trigger_event_id: triggerEventId || null,
-      entity_type: entityType || null,
-      entity_id: entityId || null,
-      template_key: automation.template_key,
-      template_version_id: automation.active_version_id || automation.template_version_id || null,
-      recipient_type: recipient.type || null,
-      recipient_id: recipient.id || null,
-      recipient_email: recipient.email,
-      idempotency_key: idempotencyKey,
-      status,
-      run_after: runAfter,
-      max_attempts: retryPolicy.maxAttempts,
-      exit_reason: exitReason || null,
-      payload: JSON.stringify(payload || {}),
-      context: JSON.stringify(context || {}),
-      completed_at: status === 'skipped' ? new Date() : null,
-    }).returning('*');
-  } catch (err) {
-    if (err.code === '23505' || /email_template_automation_runs.*idempotency_key|idempotency_key.*unique/i.test(err.message || '')) {
-      const replayed = await db('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
-      if (replayed) {
-        await logRunEvent(replayed.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
-          trigger_event_key: triggerEventKey,
-          trigger_event_id: triggerEventId || null,
-          race_recovered: true,
-        });
-        return { run: replayed, deduped: true };
-      }
-    }
-    throw err;
+      race_recovered: true,
+    }, conn);
+    return { run: replayed, deduped: true };
   }
+  // The parent run row was just inserted through `conn`; when conn is a
+  // transaction this event MUST ride it (FK to an uncommitted parent).
   await logRunEvent(run.id, status === 'skipped' ? 'skipped' : 'queued', exitReason || `Automation run ${status}`, {
     automation_key: automation.automation_key,
     run_after: runAfter,
-  });
+  }, conn);
   return { run, deduped: false };
 }
 

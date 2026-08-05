@@ -3,6 +3,7 @@ const rateLimit = require('express-rate-limit');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
@@ -2051,6 +2052,22 @@ async function createSelfBooking(payload = {}) {
     const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../services/availability');
     let txResult;
     try {
+      // Pre-fence fingerprint for the rung-6 revalidation inside the
+      // transaction (r31): zone, pricing, unit, and the intent phone were
+      // all derived from pre-lock customer state — if a merge-undo wins
+      // the fence and clears an inherited address/contact, the booking
+      // must retry against live state, not commit on stale assumptions.
+      const COMMS_FINGERPRINT_COLS = [
+        'address_line1', 'address_line2', 'city', 'state', 'zip', 'phone',
+        ...[1, 2, 3].flatMap((n) => {
+          const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
+          return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
+        }),
+      ];
+      const commsFingerprint = (r) => COMMS_FINGERPRINT_COLS.map((c) => r?.[c] || '').join('|');
+      const preFenceCustomer = custId
+        ? await db('customers').where({ id: custId }).first(...COMMS_FINGERPRINT_COLS)
+        : null;
       txResult = await db.transaction(async (trx) => {
       // RUNG 1 — date-wide occupancy lock, FIRST (see the ORDERING CONTRACT
       // in services/scheduling/occupancy.js). This path's own conflict gate
@@ -2095,6 +2112,42 @@ async function createSelfBooking(payload = {}) {
       // (date → customer → tech → zone → day-cap — the global order in
       // scheduling/occupancy.js) so concurrent confirms can't deadlock.
       await acquireSelfBookingDayCapLock(trx, slotDateStr);
+      // Rung 6 (occupancy.js ORDERING CONTRACT): the appointment insert
+      // below resolves its comms recipients LIVE from the customer row, so
+      // it must serialize against a concurrent customer-merge undo's
+      // absence probes — after the scheduling rungs, BEFORE every row lock.
+      await lockCustomerComms(trx, custId);
+      if (custId) {
+        const freshBookingCustomer = await trx('customers')
+          .where({ id: custId }).first(...COMMS_FINGERPRINT_COLS);
+        if (!freshBookingCustomer || commsFingerprint(freshBookingCustomer) !== commsFingerprint(preFenceCustomer)) {
+          throw Object.assign(new Error('Your account details just changed — please refresh and book again.'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'CUSTOMER_CHANGED_RETRY',
+          });
+        }
+        // Estimate linkage revalidates under the fence too (r35): a
+        // journaled estimate a merge-undo just returned no longer belongs
+        // to this customer — stamping estimate_id/source_estimate_id and
+        // pay-at-visit pricing onto the visit would re-split what the
+        // undo restored (pricingEstimate is always one of these two rows).
+        // Only refs the insert actually STAMPS are checked: an unowned
+        // source estimate already books UNLINKED (fail-open ownership
+        // gate above), and revalidating its row here would 409 a booking
+        // that stamps nothing from it.
+        for (const estRef of [estimate?.id, sourceEstimateId]) {
+          if (!estRef) continue;
+          const freshEst = await trx('estimates').where({ id: estRef }).first('id', 'customer_id');
+          if (!freshEst || (freshEst.customer_id && String(freshEst.customer_id) !== String(custId))) {
+            throw Object.assign(new Error('Your quote was just updated — please refresh and book again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'CUSTOMER_CHANGED_RETRY',
+            });
+          }
+        }
+      }
 
       // Free re-service lane dedupe (codex P1 #3194): the reservice route's
       // page-level open-callback check is advisory — two parallel commits
@@ -2504,6 +2557,12 @@ async function createSelfBooking(payload = {}) {
     if (shouldSeedQuarterlyPestFollowUps) {
       try {
         const outcome = await db.transaction(async (trx) => {
+          // Rung 6 FIRST (Codex #3109 r37): admin/manual series creators
+          // take customer-comms and THEN the series guard — this fresh
+          // post-commit seeding transaction must acquire in the same
+          // order, or concurrent creation for the same customer/service
+          // deadlocks (the in-seeder acquire is then reentrant).
+          await lockCustomerComms(trx, custId);
           // Composite parents (Pest + add-ons) guard and seed as the PEST
           // family: serviceKeyFor on the joined label would classify the
           // series as mosquito/lawn and (a) miss an existing pest series
@@ -3018,10 +3077,88 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // instead of falling through to lead transactional consent (which would let an
     // opted-out customer still get the recovery SMS). Best-effort; new prospects
     // simply resolve to null.
-    try {
+    const resolveCustomerId = async () => {
       const { findCustomerByPhone } = require('../services/lead-from-extraction');
       const match = await findCustomerByPhone(phoneDigits);
-      row.customer_id = match && match.id ? match.id : null;
+      return (match && match.id) ? match.id : null;
+    };
+    // Refresh the existing OPEN intent, keyed by session_id when the client sends
+    // one — so a corrected phone (after a mistyped first attempt) updates the SAME
+    // row instead of orphaning the wrong number as its own recovery-eligible
+    // intent. Fall back to the phone match for older clients with no session id.
+    const resolveOpenIntent = async (conn) => {
+      let found = null;
+      if (sessionId) {
+        found = await conn('booking_intents').where({ session_id: sessionId })
+          .whereNull('converted_at').where('suppressed', false)
+          .orderBy('captured_at', 'desc').first('id');
+      }
+      if (!found) {
+        found = await tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', false))
+          .orderBy('captured_at', 'desc').first('id');
+      }
+      return found;
+    };
+    const writeIntent = async (conn, open) => {
+      if (open) {
+        // Guard against a stale capture overwriting corrected contact: only apply if
+        // this request's client timestamp is >= the stored one (or either is absent).
+        const upd = conn('booking_intents').where({ id: open.id });
+        if (clientTs != null) upd.where((q) => q.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs));
+        const affected = await upd.update(row);
+        return { ok: true, intent_id: open.id, updated: affected === 1, stale: affected === 0 };
+      }
+      const [created] = await conn('booking_intents').insert(row).returning('id');
+      return { ok: true, intent_id: created?.id || created, created: true };
+    };
+    // Customer-linked captures serialize against an in-flight customer-merge
+    // UNDO probing this customer's email-bound rows (customer-dedupe.js
+    // revertMerge email guard): this write UPDATES an existing intent in
+    // place (customer_id untouched), so neither the FK nor the undo's row
+    // locks fence it — both sides take the same per-customer advisory lock,
+    // like the template-run executor's insert path. Key derivation + the
+    // lock-order contract are centralized in utils/customer-comms-lock.js.
+    //
+    // LOCK ORDER: the customer id IS the lock key, so it must be resolved
+    // once to pick the key — and then RE-RESOLVED under the lock, because
+    // that first read may predate an undo that holds the lock. Resolving
+    // once and writing after the wait is exactly the race this closes: the
+    // write would land on the pre-undo owner AFTER the undo committed,
+    // where its probe could never see it. The re-resolve under the lock
+    // yields the post-undo owner; if it differs we lock that id too, then
+    // LOOP to a fixpoint (r44): each new-owner acquire can itself wait out
+    // ANOTHER undo, so the write only lands once the resolved owner is one
+    // whose key this trx already holds — a held owner cannot be mid-undo.
+    // Anonymous
+    // captures (no customer match) skip the lock: the undo's probes only
+    // match customer-linked rows. Open-intent resolution moved under the
+    // lock with it — it is recipient state too.
+    let result;
+    try {
+      const candidateId = await resolveCustomerId();
+      if (!candidateId) {
+        row.customer_id = null;
+        result = await writeIntent(db, await resolveOpenIntent(db));
+      } else {
+        result = await db.transaction(async (trx) => {
+          const lockKey = async (id) => lockCustomerComms(trx, id);
+          await lockKey(candidateId);
+          const heldKeys = new Set([String(candidateId)]);
+          let ownerId = await resolveCustomerId();
+          for (let hop = 0; ownerId && !heldKeys.has(String(ownerId)); hop += 1) {
+            if (hop >= 4) {
+              // Degenerate ping-pong backstop: fail closed like a lookup
+              // error rather than writing under an unheld owner.
+              throw new Error('customer owner still moving under the comms fence (merge-undo churn)');
+            }
+            await lockKey(ownerId);
+            heldKeys.add(String(ownerId));
+            ownerId = await resolveCustomerId();
+          }
+          row.customer_id = ownerId;
+          return writeIntent(trx, await resolveOpenIntent(trx));
+        });
+      }
     } catch (e) {
       // FAIL CLOSED on a lookup ERROR (vs a clean no-match): leaving customer_id
       // null would treat an existing OPTED-OUT customer as a lead and bypass their
@@ -3029,31 +3166,7 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       logger.warn(`[booking:capture-intent] customer lookup failed — skipping capture: ${e.message}`);
       return res.json({ ok: false, skipped: 'lookup_failed' });
     }
-
-    // Refresh the existing OPEN intent, keyed by session_id when the client sends
-    // one — so a corrected phone (after a mistyped first attempt) updates the SAME
-    // row instead of orphaning the wrong number as its own recovery-eligible
-    // intent. Fall back to the phone match for older clients with no session id.
-    let open = null;
-    if (sessionId) {
-      open = await db('booking_intents').where({ session_id: sessionId })
-        .whereNull('converted_at').where('suppressed', false)
-        .orderBy('captured_at', 'desc').first('id');
-    }
-    if (!open) {
-      open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))
-        .orderBy('captured_at', 'desc').first('id');
-    }
-    if (open) {
-      // Guard against a stale capture overwriting corrected contact: only apply if
-      // this request's client timestamp is >= the stored one (or either is absent).
-      const upd = db('booking_intents').where({ id: open.id });
-      if (clientTs != null) upd.where((q) => q.whereNull('capture_client_ts').orWhere('capture_client_ts', '<=', clientTs));
-      const affected = await upd.update(row);
-      return res.json({ ok: true, intent_id: open.id, updated: affected === 1, stale: affected === 0 });
-    }
-    const [created] = await db('booking_intents').insert(row).returning('id');
-    return res.json({ ok: true, intent_id: created?.id || created, created: true });
+    return res.json(result);
   } catch (err) {
     logger.error(`[booking:capture-intent] failed: ${err.message}`);
     return res.json({ ok: false }); // fire-and-forget — never block the funnel

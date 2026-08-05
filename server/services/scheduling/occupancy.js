@@ -68,6 +68,19 @@ const DEFAULT_DURATION_MINUTES = 60;
 //   4. zone             'slot-reserve' / `zone:<zoneId|'unknown'>:<date>`
 //   5. global day cap   'self-booking-day-cap' / `<date>`
 //                       (availability.acquireSelfBookingDayCapLock)
+//   6. customer-comms   `customer-comms:<customerId>`
+//                       (utils/customer-comms-lock.js — every writer that
+//                       COMMITS a scheduled_services INSERT takes it here,
+//                       after the scheduling rungs and BEFORE every row
+//                       lock. Unlike rungs 2-5 it is NOT date-scoped and is
+//                       shared with NON-scheduling holders — the merge-undo
+//                       takes it before FOR-UPDATE-ing customers, journaled
+//                       estimates, and visits — so a writer that row-locks
+//                       first and then waits on it deadlocks against an
+//                       undo holding it and wanting that row. Customer id
+//                       unknown until a read? Read UNLOCKED, lock, re-read
+//                       — booking.js capture-intent's resolve → lock →
+//                       re-resolve idiom.)
 //
 // Coarsest first. Rung 1 is a whole calendar day and is therefore ALWAYS
 // taken first; a consistent global order is what makes the set deadlock-free

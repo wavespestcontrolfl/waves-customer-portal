@@ -206,6 +206,27 @@ describe('syncTermiteBonds — backfilled closeouts anchor the bond term to the 
       }
       throw new Error(`unexpected table ${table}`);
     });
+    // The insert now rides a transaction that FOR-UPDATE re-reads the
+    // visit's owner (Codex #3109 r27) — serve that read from the sweep's
+    // own rows so ownership assertions still bite.
+    db.transaction = jest.fn(async (fn) => {
+      const trx = (table) => {
+        if (table === 'scheduled_services') {
+          return {
+            where: jest.fn(({ id }) => ({
+              forUpdate: jest.fn(() => ({
+                first: jest.fn(async () => {
+                  const row = visits.find((v) => v.id === id);
+                  return row ? { customer_id: row.customer_id } : null;
+                }),
+              })),
+            })),
+          };
+        }
+        return db(table);
+      };
+      return fn(trx);
+    });
   }
 
   test('kept backdated end stamp → started_at is the visit day, renewal a year out from IT', async () => {

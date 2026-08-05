@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -3407,6 +3408,72 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE the
+      // customers row lock below: every scheduled_services insert in this
+      // trx (parent, recurring children, boosters) serializes against a
+      // concurrent merge-undo of this customer. estimate-converter takes
+      // the same lock in the same position, so the #3011 customer-row →
+      // series-advisory order below is unchanged relative to it.
+      await lockCustomerComms(trx, customerId);
+      // Post-lock revalidation (r23): the pre-transaction snapshot loaded
+      // the customer BEFORE this acquire — if a merge-undo held the lock
+      // and cleared inherited address/service-contact fields while we
+      // waited, the zone/pricing derived from that snapshot and the
+      // unstamped visit's live-resolved comms would both bind to state the
+      // undo just removed. The lock alone proves nothing; re-read and
+      // abort with a retryable shape when the booking-relevant fields
+      // moved (an admin reloads and re-books against the live record).
+      {
+        const CONTACT_SLOT_COLS = [1, 2, 3].flatMap((n) => {
+          const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
+          return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
+        });
+        // Billing/pricing inputs join the fingerprint (r35): the booking's
+        // series-coverage, invoice-on-complete stamp, and pricing were
+        // computed from the pre-lock customer, and completion resolves
+        // payer/billing LIVE — a cleared inherited payer/mode/fee must
+        // retry the booking, not commit stale price state.
+        const BILLING_FINGERPRINT_COLS = ['payer_id', 'billing_mode', 'per_application_fee', 'waveguard_tier', 'monthly_rate'];
+        const freshCustomer = await trx('customers')
+          .where({ id: customerId })
+          .first('address_line1', 'address_line2', 'city', 'state', 'zip', ...CONTACT_SLOT_COLS, ...BILLING_FINGERPRINT_COLS);
+        // The COMPLETE address tuple (r24): a merge can backfill ONLY
+        // address_line2 (a street-only winner absorbing the loser's
+        // apartment/unit), so a line1/city/zip comparison passes while the
+        // undo clears the unit out from under the visit — dispatch would
+        // go to the wrong unit.
+        // ALL FOUR members of every slot (r30): email-only service contacts
+        // are supported, and name/email/role can move while the phones stay
+        // identical — a phones-only fingerprint let the undo clear an
+        // email-only slot out from under the new visit's report recipients.
+        const commsDep = (row) => [
+          row?.address_line1 || '', row?.address_line2 || '', row?.city || '', row?.state || '', row?.zip || '',
+          ...CONTACT_SLOT_COLS.map((c) => row?.[c] || ''),
+          ...BILLING_FINGERPRINT_COLS.map((c) => String(row?.[c] ?? '')),
+        ].join('|');
+        if (!freshCustomer || commsDep(freshCustomer) !== commsDep(customer)) {
+          const err = new Error('The customer record changed while booking (address or service contacts moved) — reload the customer and book again.');
+          err.statusCode = 409;
+          err.isOperational = true;
+          err.code = 'CUSTOMER_CHANGED_RETRY';
+          throw err;
+        }
+        // Linked-estimate ownership revalidates under the fence too (r36):
+        // a journaled estimate a merge-undo just returned would stamp the
+        // restored loser's source_estimate_id onto a kept-customer visit.
+        if (linkedEstimateId) {
+          const freshLinkedEstimate = await trx('estimates')
+            .where({ id: linkedEstimateId }).first('id', 'customer_id');
+          if (!freshLinkedEstimate
+            || (freshLinkedEstimate.customer_id && String(freshLinkedEstimate.customer_id) !== String(customerId))) {
+            const estErr = new Error('The linked estimate changed while booking (a merge was undone) — reload and book again.');
+            estErr.statusCode = 409;
+            estErr.isOperational = true;
+            estErr.code = 'CUSTOMER_CHANGED_RETRY';
+            throw estErr;
+          }
+        }
+      }
       // Global lock order for recurring creators: CUSTOMER ROW first, series
       // advisory lock second — the same order estimate-converter uses (it
       // updates the customer, then waits on the advisory lock). Taking the
@@ -5263,6 +5330,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     let scheduleMoveForNotice = null;
 
     await db.transaction(async (trx) => {
+      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): this trx can
+      // spawn recurring children (scheduled_services inserts) — lock
+      // customer-comms off an unlocked peek BEFORE any row lock in the trx
+      // (assignment updates below take visit row locks).
+      const commsPeek = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+      if (commsPeek) await lockCustomerComms(trx, commsPeek.customer_id);
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
         ? await trx('scheduled_services').where({ id: req.params.id }).first()
         : null;
@@ -5681,6 +5754,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       const spawnCount = shouldSpawnRecurringChildren ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
       if (isRecurring && recurringPattern && spawnCount > 1) {
         const parent = await trx('scheduled_services').where({ id: req.params.id }).first();
+        // Owner-change abort (r38): the comms key this trx holds was keyed
+        // off the pre-lock peek — a merge-undo that repointed the parent
+        // while we waited means the child inserts below would ride the
+        // WRONG customer's fence, invisible to a simultaneous undo of the
+        // restored owner. Retry re-keys correctly.
+        if (parent && commsPeek && String(parent.customer_id) !== String(commsPeek.customer_id)) {
+          const movedErr = new Error("This appointment's customer changed while saving (a merge was undone) — reload and save again.");
+          movedErr.statusCode = 409;
+          movedErr.isOperational = true;
+          movedErr.code = 'CUSTOMER_CHANGED_RETRY';
+          throw movedErr;
+        }
         if (parent) {
           // Spawn hardening: "make recurring" must not manufacture visits
           // from a row that can't anchor a live series.
@@ -6948,6 +7033,11 @@ async function runRecurringSeriesMaintenance(conn, svc) {
   const parentId = svc.recurring_parent_id || svc.id;
   const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the auto-extend
+    // insert serializes against a concurrent merge-undo of this customer.
+    // Re-locked in runRecurringSeriesMaintenanceLocked if the in-lock
+    // parent re-read shows a repoint.
+    await lockCustomerComms(trx, svc.customer_id);
     return runRecurringSeriesMaintenanceLocked(trx, svc, parentId);
   };
   // Callers normally pass the plain db instance (all three completion routes
@@ -7013,7 +7103,24 @@ async function runRecurringSeriesMaintenance(conn, svc) {
 async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
   let spawnedVisit = null;
   const cols = await conn('scheduled_services').columnInfo();
-  const parent = await conn('scheduled_services').where({ id: parentId }).first();
+  let parent = await conn('scheduled_services').where({ id: parentId }).first();
+  // Rung-6 re-lock (see runRecurringSeriesMaintenance): the caller locked
+  // customer-comms off svc's snapshot — if the in-lock re-read shows the
+  // series was repointed to another customer, lock that one too.
+  if (parent && parent.customer_id !== svc.customer_id) {
+    await lockCustomerComms(conn, parent.customer_id);
+    // r42: that acquire can sit behind the very undo repointing the parent
+    // — re-read after it. A row that moved AGAIN defers to the next
+    // maintenance tick rather than extending from a stale snapshot; an
+    // unchanged owner still adopts the fresh row so the extension copies
+    // post-undo values.
+    const relocked = await conn('scheduled_services').where({ id: parentId }).first();
+    if (!relocked || relocked.customer_id !== parent.customer_id) {
+      logger.warn(`[recurring] parent ${parentId} owner changed under the comms fence (merge-undo) — deferring auto-extend to the next maintenance tick`);
+      return null;
+    }
+    parent = relocked;
+  }
   if (parent && parent.is_recurring && parent.recurring_pattern) {
     // upcomingCount + latest must reflect the BASE recurring series
     // only — see countUpcomingSeriesVisits for the booster and
@@ -9686,6 +9793,12 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
 
   const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the spawn inserts
+    // below serialize against a concurrent merge-undo of this customer.
+    // Keyed off the unlocked peek; re-locked below if the in-lock re-read
+    // shows the parent was repointed (reentrant + bounded, booking.js's
+    // resolve → lock → re-resolve idiom).
+    await lockCustomerComms(trx, parentPeek.customer_id);
 
     // ——— In-lock re-checks (see the block comment above) ———
     if (alert) {
@@ -9705,6 +9818,19 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     if (!parent) {
       outcome = { status: 404, body: { error: 'parent service not found' } };
       return;
+    }
+    if (parent.customer_id !== parentPeek.customer_id) {
+      await lockCustomerComms(trx, parent.customer_id);
+      // r43 (same seam as the maintenance path): that second acquire can
+      // sit behind the very undo repointing the parent — re-read after it.
+      // A row that moved AGAIN aborts retryably; an unchanged owner adopts
+      // the fresh row so the spawn inserts copy post-undo values.
+      const relocked = await trx('scheduled_services').where({ id: parentId }).first();
+      if (!relocked || relocked.customer_id !== parent.customer_id) {
+        outcome = { status: 409, body: { error: 'The series owner changed while processing (a customer merge was undone). Retry the action.', code: 'VISIT_OWNER_CHANGED' } };
+        return;
+      }
+      parent = relocked;
     }
     if (parent.status === 'cancelled') {
       outcome = { status: 409, body: { error: 'series has been cancelled' } };

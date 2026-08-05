@@ -1142,7 +1142,14 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         if (existingCust.lot_sqft == null && lot) updates.lot_sqft = lot;
         if (!existingCust.landing_page_url && landingForCustomer) updates.landing_page_url = landingForCustomer;
         if (!existingCust.utm_data && attr?.utm) updates.utm_data = attr.utm;
-        await db('customers').where({ id: existingCust.id }).update(updates);
+        // Email backfills serialize with a concurrent merge-undo's claim
+        // check via the shared normalized-email advisory lock (r16).
+        // Proceed-with-fresh-read: only the email column is ever dropped
+        // (filled concurrently / owned by another live customer) — the rest
+        // of this update always lands, and the quote/lead artifacts keep
+        // the submitted address for staff either way.
+        await require('../services/customer-email-fanout')
+          .applyCustomerUpdatesWithEmailClaimGuard({ customerId: existingCust.id, updates, source: 'public-quote' });
         customerId = existingCust.id;
       } else {
         const code = 'WAVES-' + Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]).join('');

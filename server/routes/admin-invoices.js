@@ -1188,6 +1188,33 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           'SELECT pg_advisory_xact_lock(?, hashtext(?))',
           [ANNUAL_PREPAY_LOCK_NS, String(invoice.customer_id)],
         );
+        // The term's owner comes from the LOCKED invoice row (Codex #3109
+        // r26): a merge-undo can repoint this invoice while the request is
+        // in flight, and a term minted with the pre-transaction owner
+        // splits from its invoice. The FOR UPDATE also serializes against
+        // the undo's reverse repoint — whichever commits second sees the
+        // other (the undo's new prepay-term child probe refuses on ours).
+        const lockedInvoiceRow = await trx('invoices')
+          .where({ id: invoice.id }).forUpdate().first('id', 'customer_id');
+        if (!lockedInvoiceRow) {
+          const notFound = new Error('Invoice not found');
+          notFound.statusCode = 404;
+          throw notFound;
+        }
+        // The advisory overlap lock above was keyed on the PRE-transaction
+        // owner (r30): if a merge-undo repointed the invoice while this
+        // request waited, adopting the live owner while holding the OLD
+        // owner's key would let a concurrent request holding the proper
+        // key create competing coverage terms. Restart retryably — the
+        // retry keys the lock correctly from the start.
+        if (String(lockedInvoiceRow.customer_id) !== String(invoice.customer_id)) {
+          const moved = new Error("This invoice's customer changed while creating the term (a merge was undone) — reload and try again.");
+          moved.statusCode = 409;
+          moved.isOperational = true;
+          moved.code = 'INVOICE_OWNER_CHANGED';
+          throw moved;
+        }
+        const termCustomerId = lockedInvoiceRow.customer_id;
 
         if (coverageEnabled) {
           const ownTerm = await trx('annual_prepay_terms')
@@ -1200,7 +1227,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
           const startYmd = dateOnly(start) || etDateString();
           const endYmd = dateOnly(end) || addMonthsSameDay(startYmd, 12);
           let overlapQuery = trx('annual_prepay_terms')
-            .where({ customer_id: invoice.customer_id })
+            .where({ customer_id: termCustomerId })
             .where(function overlapStatus() {
               this.whereIn('status', ['payment_pending', 'active', 'renewal_pending', 'renewed', 'switch_plan'])
                 .orWhere(function lapsedRenewalStillInTerm() {
@@ -1222,7 +1249,7 @@ router.post('/:id/annual-prepay', requireAdmin, async (req, res, next) => {
         }
 
         return AnnualPrepayRenewals.createTermForAnnualPrepay({
-          customerId: invoice.customer_id,
+          customerId: termCustomerId,
           prepayInvoiceId: invoice.id,
           planLabel: cleanOptionalText(planLabel) || invoice.title || 'Annual Prepay',
           monthlyRate: resolvedMonthly,

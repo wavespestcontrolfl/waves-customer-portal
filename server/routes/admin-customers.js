@@ -2976,6 +2976,32 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           const lockedAfter = { ...lockedBefore, ...updates };
+          // Assigning an email serializes against a customer-merge UNDO
+          // checking whether that address is claimed (customer-dedupe.js
+          // revertMerge — customers.email has NO unique constraint, so only
+          // this shared lock keeps the check honest between its read and
+          // its commit). KEY DERIVATION (must stay byte-identical to
+          // customer-dedupe.js and intelligence-bar/tools.js — extend ALL
+          // in the same commit): pg_advisory_xact_lock(hashtextextended(
+          //   'customer-email:' || lower(trim(<email>)), 0)).
+          if (updates.email) {
+            const emailLc = String(updates.email).trim().toLowerCase();
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+              [`customer-email:${emailLc}`],
+            );
+            // Serialization ONLY — deliberately NO claimant refusal (r23):
+            // customers.email is intentionally non-unique (migration
+            // 20260417000010 dropped the constraint so spouses and shared
+            // household/business addresses work), so an operator assigning
+            // a shared address is a SUPPORTED act, not a conflict. What
+            // the undo needs is exactly this lock: its own claim probe
+            // runs under the same key, so an assignment either commits
+            // before the undo (and its probe sees it) or waits its turn.
+            // The automated-intake guard keeps its drop-the-email posture
+            // — unauthenticated input never gets to claim a live
+            // customer's mailbox; an operator can.
+          }
           await trx('customers').where({ id: req.params.id }).update(updates);
           if (addressChanged) {
             await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);

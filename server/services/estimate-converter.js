@@ -8,6 +8,7 @@
  */
 
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
@@ -1944,6 +1945,12 @@ const EstimateConverter = {
           churned_at: null,
           churn_reason: null,
         };
+    // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — BEFORE this
+    // customers-row write, preserving the #3011 customer-row →
+    // series-advisory order relative to admin-schedule. Only meaningful
+    // inside a caller transaction (public accept); the standalone path's
+    // seeding steps take it per-step in runSeedingStep below.
+    if (database.isTransaction) await lockCustomerComms(database, customerId);
     await database('customers').where({ id: customerId }).update(customerUpdates);
 
     // 1b. Persist grass type captured during the estimate so lawn reports use
@@ -2000,7 +2007,13 @@ const EstimateConverter = {
     // Inside a caller transaction the pre-existing registerReminders
     // semantics are preserved unchanged (those callers defer registration).
     const seedsInOwnTransaction = !database.isTransaction;
-    const runSeedingStep = (fn) => (seedsInOwnTransaction ? database.transaction(fn) : fn(database));
+    // Rung 6 first in each per-step transaction (a caller trx took it before
+    // the customers-row write above): every step inserts scheduled_services,
+    // and the comms lock precedes the series advisory lock everywhere
+    // (scheduling/occupancy.js ORDERING CONTRACT).
+    const runSeedingStep = (fn) => (seedsInOwnTransaction
+      ? database.transaction(async (trx) => { await lockCustomerComms(trx, customerId); return fn(trx); })
+      : fn(database));
     const registerSeededRowsInline = !seedsInOwnTransaction && !deferFollowUpReminderRegistration;
     const existingFromReservation = await database('scheduled_services')
       .where({ source_estimate_id: estimateId })

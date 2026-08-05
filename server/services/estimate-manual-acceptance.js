@@ -309,8 +309,33 @@ async function markEstimateManuallyAccepted({
   const annualPrepaySelected = normalizedBillingTerm === 'prepay_annual';
 
   const claim = await database.transaction(async (trx) => {
-    const estimate = await trx('estimates').where({ id: estimateId }).first();
+    let estimate = await trx('estimates').where({ id: estimateId }).first();
     if (!estimate) throw httpError('Estimate not found', 404);
+    // Rung 6 BEFORE the estimate row lock below (Codex #3109 r32): the
+    // merge-undo takes customer-comms and THEN locks journaled estimates —
+    // acquiring comms only later (inside convertEstimate, after the
+    // status-flip UPDATE row-locked this estimate) was an AB-BA that
+    // deadlock-aborted the operator's Mark Won or the undo. The unlocked
+    // peek above picks the key; convertEstimate's own acquisition is
+    // reentrant on this transaction.
+    // r44: LOOP the acquire to a fixpoint — the wait can sit behind the
+    // very undo repointing this estimate, and continuing with the stale
+    // row would row-lock the restored estimate while convertEstimate
+    // later takes the NEW owner's comms key after it (the AB-BA again).
+    // Re-read after each acquire until the owner is one whose key this
+    // transaction already holds; every later check/update then uses the
+    // post-undo row.
+    if (estimate.customer_id) {
+      const { lockCustomerComms } = require('../utils/customer-comms-lock');
+      const heldOwners = new Set();
+      while (estimate.customer_id && !heldOwners.has(String(estimate.customer_id))) {
+        await lockCustomerComms(trx, estimate.customer_id);
+        heldOwners.add(String(estimate.customer_id));
+        const fresh = await trx('estimates').where({ id: estimateId }).first();
+        if (!fresh) throw httpError('Estimate not found', 404);
+        estimate = fresh;
+      }
+    }
 
     if (estimate.status === 'accepted') {
       return { acceptedEstimate: estimate, alreadyAccepted: true, shouldRunDownstream: false, previousEstimate: estimate };

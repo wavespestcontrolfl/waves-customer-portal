@@ -3213,19 +3213,28 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   // THIS capture must not settle: the capture is unverified by design, so
   // only customer_email_missing resolves (round-9 + round-10 P2).
   //
-  // The replacement runs the customer write and the fan-out in ONE
-  // transaction (codex round-24 P1): writing the email first and swallowing a
-  // fan-out failure left the customer on the new address with snapshots
-  // half-migrated — and permanently, because the next call sees a VALID
-  // stored email and never retries. Rolling back keeps the malformed value,
-  // which is the retryable state. Best-effort at the call level either way:
-  // a failure leaves the record exactly as it was and the office still has
-  // the review card.
+  // BOTH paths serialize with a concurrent merge-undo's claim check via the
+  // shared normalized-email advisory lock (r16 — every writer that ASSIGNS
+  // an email must, or revertMerge's "is this address claimed?" probe is
+  // dishonest). The guard is proceed-with-fresh-read: only the email column
+  // is ever dropped (filled concurrently / owned by another live customer)
+  // — the rest of the backfill always lands, and the extraction/triage
+  // records keep the heard address for office review either way.
+  //
+  // The replacement additionally runs the customer write and the fan-out in
+  // ONE guarded transaction (codex round-24 P1): writing the email first
+  // and swallowing a fan-out failure left the customer on the new address
+  // with snapshots half-migrated — permanently, because the next call sees
+  // a VALID stored email and never retries. The guard's failure path rolls
+  // both back, keeping the malformed value — the retryable state.
   const replacingGarbledEmail = !!(updates.email && storedEmailInvalid);
   const fanout = require('./customer-email-fanout');
-  if (replacingGarbledEmail) {
-    try {
-      await db.transaction(async (trx) => {
+  const guarded = await fanout.applyCustomerUpdatesWithEmailClaimGuard({
+    customerId, updates,
+    source: 'call-appointment-contact-backfill',
+    ...(replacingGarbledEmail ? {
+      replaceExpectedEmail: customer.email,
+      applyWithEmailInTrx: async (trx) => {
         await trx('customers').where({ id: customerId }).update(updates);
         await fanout.propagateCustomerEmailChange({
           before: customer,
@@ -3233,15 +3242,13 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
           source: 'call-captured email replacing a garbled address (appointment backfill)',
           reviewReasonCodes: ['customer_email_missing'],
         }, trx);
-      });
-    } catch (e) {
-      logger.warn(`[call-proc] email replacement rolled back for customer ${customerId}: ${e.message}`);
-      return customer;
-    }
-    return { ...customer, ...updates };
-  }
-  await db('customers').where({ id: customerId }).update(updates);
-  if (updates.email) {
+      },
+    } : {}),
+  });
+  if (updates.email && !guarded.emailApplied) delete updates.email;
+  if (updates.email && !replacingGarbledEmail) {
+    // Empty→value only: the replacement's card settlement rides the
+    // fan-out inside the guarded transaction above.
     try {
       await fanout.resolveOpenEmailReviewCards({
         customerId, email: updates.email,
@@ -6434,12 +6441,20 @@ const CallRecordingProcessor = {
           // record no longer holds (codex round-24 P1); an empty→value write
           // only settles the missing-email card; neither settles the
           // read-back cards filed for this unverified capture (round-9 +
-          // round-10 P2; fan-out gap from the local pre-push audit P1).
+          // round-10 P2; fan-out gap from the local pre-push audit P1). Both
+          // paths ride the email-claim guard (r16): every writer that
+          // ASSIGNS an email serializes with a concurrent merge-undo's
+          // claim probe via the shared normalized-email advisory lock —
+          // proceed-with-fresh-read, so only the email column is ever
+          // dropped and the address backfill still lands.
           const fanout = require('./customer-email-fanout');
           const replacingGarbled = !!(updates.email && existingEmailInvalid);
-          if (replacingGarbled) {
-            try {
-              await db.transaction(async (trx) => {
+          const guarded = await fanout.applyCustomerUpdatesWithEmailClaimGuard({
+            customerId, updates,
+            source: 'call-extraction-backfill',
+            ...(replacingGarbled ? {
+              replaceExpectedEmail: existing.email,
+              applyWithEmailInTrx: async (trx) => {
                 await trx('customers').where({ id: customerId }).update(updates);
                 await fanout.propagateCustomerEmailChange({
                   before: existing,
@@ -6447,24 +6462,18 @@ const CallRecordingProcessor = {
                   source: 'call-captured email replacing a garbled address (phone-match update)',
                   reviewReasonCodes: ['customer_email_missing'],
                 }, trx);
+              },
+            } : {}),
+          });
+          if (updates.email && guarded.emailApplied && !replacingGarbled) {
+            try {
+              await fanout.resolveOpenEmailReviewCards({
+                customerId, email: updates.email,
+                source: 'call-captured email (phone-match update)',
+                reasonCodes: ['customer_email_missing'],
               });
             } catch (e) {
-              // Rolled back: the malformed value stays, which is the state a
-              // later call can retry from.
-              logger.warn(`[call-proc] email replacement rolled back for customer ${customerId}: ${e.message}`);
-            }
-          } else {
-            await db('customers').where({ id: customerId }).update(updates);
-            if (updates.email) {
-              try {
-                await fanout.resolveOpenEmailReviewCards({
-                  customerId, email: updates.email,
-                  source: 'call-captured email (phone-match update)',
-                  reasonCodes: ['customer_email_missing'],
-                });
-              } catch (e) {
-                logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
-              }
+              logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
             }
           }
         }
@@ -8450,6 +8459,46 @@ const CallRecordingProcessor = {
               );
               const svc = await db.transaction(async (trx) => {
                 await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['call-recording-schedule', callSid]);
+                // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT — r25):
+                // every scheduled_services insert in this transaction (the
+                // booking + linked follow-up visits) serializes against a
+                // concurrent merge-undo of this customer, BEFORE any row
+                // lock. Taken after the call-SID advisory (which the undo
+                // never takes — no cycle); blocking is safe here, this
+                // transaction holds only advisory keys so far.
+                const { lockCustomerComms } = require('../utils/customer-comms-lock');
+                if (customer?.id) {
+                  await lockCustomerComms(trx, customer.id);
+                  // Revalidate UNDER the fence (r26): the pre-transaction
+                  // read/validation may predate an undo this acquire just
+                  // waited out — an inherited address/name could be gone.
+                  // A fresh row that still validates drives the booking
+                  // (property linkage + confirmation render live values); a
+                  // failing one aborts into the schedErr catch, so nothing
+                  // books, no SMS goes out, and the approved-but-unbooked
+                  // review card reaches the office to book manually.
+                  const freshCallCustomer = await trx('customers').where({ id: customer.id }).first();
+                  const freshValidation = freshCallCustomer
+                    ? validatePhoneCallAppointmentCustomer(freshCallCustomer, extracted, contactPhone)
+                    : { ok: false, missing: ['customer_row'] };
+                  if (!freshValidation.ok) {
+                    throw new Error(`customer record changed while waiting on the comms fence (merge-undo in flight?) — missing ${freshValidation.missing.join(', ')}; booking held for office review`);
+                  }
+                  customer = freshCallCustomer;
+                  // Call OWNERSHIP re-reads too (r40): a journaled
+                  // call_log the undo repointed while we waited means
+                  // customerId is the stale kept id — the insert would
+                  // source a kept-customer appointment from the restored
+                  // customer's call, invisible to the undo's probes.
+                  // Abort into the schedErr path (no booking, no SMS, the
+                  // approved-but-unbooked card reaches the office).
+                  const freshCallRow = await trx('call_log')
+                    .where({ id: call.id }).first('customer_id');
+                  if (freshCallRow?.customer_id
+                    && String(freshCallRow.customer_id) !== String(customer.id)) {
+                    throw new Error('call ownership changed while waiting on the comms fence (merge-undo) — booking held for office review');
+                  }
+                }
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;

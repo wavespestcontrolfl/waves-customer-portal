@@ -217,6 +217,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(updateInvoice).toHaveBeenCalledWith({
       processor: 'stripe',
       stripe_payment_intent_id: 'pi_fresh',
+      // r26: attaching a PI stamps updated_at — the merge-undo's
+      // transferred-profile gate detects invoice mutations by it.
+      updated_at: 'NOW',
     });
   });
 
@@ -250,6 +253,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(updateInvoice).toHaveBeenCalledWith({
       processor: 'stripe',
       stripe_payment_intent_id: 'pi_open',
+      // r31: the reuse branch stamps updated_at too — same mutation-gate
+      // rationale as the fresh-PI path.
+      updated_at: 'NOW',
     });
   });
 
@@ -335,6 +341,9 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     expect(updateInvoice).toHaveBeenCalledWith({
       processor: 'stripe',
       stripe_payment_intent_id: 'pi_fresh',
+      // r26: attaching a PI stamps updated_at — the merge-undo's
+      // transferred-profile gate detects invoice mutations by it.
+      updated_at: 'NOW',
     });
   });
 

@@ -3686,6 +3686,11 @@ const StripeService = {
               .update({
                 processor: 'stripe',
                 stripe_payment_intent_id: paymentIntent.id,
+                // Same stamp as the fresh-PI path (Codex #3109 r31): the
+                // reuse branch binds the invoice to the customer's CURRENT
+                // Stripe profile too, and the merge-undo's mutation gate
+                // reads updated_at.
+                updated_at: trx.fn.now(),
               });
             if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
             return;
@@ -3779,6 +3784,12 @@ const StripeService = {
           .update({
           processor: 'stripe',
           stripe_payment_intent_id: paymentIntent.id,
+          // Real mutation → real stamp (Codex #3109 r26): attaching a
+          // PaymentIntent binds this invoice to the customer's CURRENT
+          // Stripe profile, and the merge-undo's transferred-profile gate
+          // detects mutations of pre-merge invoices by updated_at — an
+          // unstamped attach was invisible to it.
+          updated_at: trx.fn.now(),
         });
         if (!invoiceUpdated) throw new Error('Invoice is no longer collectible');
       });

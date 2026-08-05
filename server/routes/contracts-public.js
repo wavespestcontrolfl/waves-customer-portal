@@ -135,13 +135,35 @@ router.post('/:token/sign', async (req, res, next) => {
 
     let response;
     await db.transaction(async (trx) => {
-      const locked = await trx('customer_contracts')
+      // Lock-order alignment with the merge-undo (Codex #3109 r29): the
+      // undo locks customers THEN customer_contracts; locking the contract
+      // first here was an AB-BA that deadlock-aborted whichever
+      // transaction was second. Resolve → lock the customer → lock the
+      // contract (the unlocked peek only picks the lock key; every
+      // decision below reads the LOCKED rows).
+      const contractPeek = await trx('customer_contracts')
         .where({ share_token_hash: tokenHash })
+        .first('id', 'customer_id');
+      if (!contractPeek) {
+        response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (contractPeek.customer_id) {
+        await trx('customers').where({ id: contractPeek.customer_id }).forUpdate().first('id');
+      }
+      const locked = await trx('customer_contracts')
+        .where({ id: contractPeek.id })
         .forUpdate()
         .first();
 
       if (!locked) {
         response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (String(locked.customer_id || '') !== String(contractPeek.customer_id || '')) {
+        // Repointed while we waited (a merge-undo) — retry rather than
+        // proceeding under the wrong customer's lock.
+        response = { status: 409, body: { error: 'This contract was just updated — please reload the page and try again.' } };
         return;
       }
       if (isExpired(locked)) {

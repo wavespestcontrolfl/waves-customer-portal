@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { logAutopay } = require('../services/autopay-log');
 const {
@@ -225,6 +226,48 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
     });
 
     const [contract] = await db.transaction(async (trx) => {
+      // Comms fence + post-lock re-read (Codex #3109 r29): the contract is
+      // an email-bound bearer surface — minting it with the pre-transaction
+      // customer snapshot while a merge-undo holds the row lets the insert
+      // commit a winner-owned contract whose recipient_email the undo just
+      // restored to another account. Lock, re-read, mint from live state.
+      await lockCustomerComms(trx, customer.id);
+      // FULL row (r37): signerName/buildAutopayContractSnapshot read
+      // company_name and friends — a column-listed read rendered business
+      // customers as "Customer" in the signed snapshot.
+      const freshContractCustomer = await trx('customers')
+        .where({ id: customer.id })
+        .first();
+      if (!freshContractCustomer || freshContractCustomer.deleted_at || freshContractCustomer.active === false) {
+        const err = new Error('This customer changed while creating the contract — reload and try again.');
+        err.statusCode = 409;
+        err.isOperational = true;
+        throw err;
+      }
+      // The METHOD re-resolves under the fence too (r31): a merge-undo can
+      // return the selected card to the restored customer while this
+      // request waits — minting against it would issue a signing link the
+      // public page can never satisfy (it joins methods by the contract's
+      // customer). Moved/gone → retryable 409; the snapshot rebuilds from
+      // the LOCKED customer + method so the rendered identity is live.
+      const freshMethod = await trx('payment_methods')
+        .where({ id: paymentMethod.id })
+        .first();
+      if (!freshMethod || String(freshMethod.customer_id) !== String(customer.id)) {
+        const movedErr = new Error('The selected payment method changed while creating the contract (a merge was undone) — reload and pick again.');
+        movedErr.statusCode = 409;
+        movedErr.isOperational = true;
+        movedErr.code = 'METHOD_OWNER_CHANGED';
+        throw movedErr;
+      }
+      const liveRecipientName = signerName(freshContractCustomer);
+      const liveContractText = buildAutopayContractSnapshot({
+        customer: freshContractCustomer,
+        paymentMethod: freshMethod,
+        serviceName,
+        renewalDate,
+        cancellationDeadline,
+      });
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
         payment_method_id: paymentMethod.id,
@@ -232,16 +275,16 @@ router.post('/customer/:customerId/autopay-authorization', async (req, res, next
         contract_type: 'autopay_authorization',
         title: 'AutoPay Authorization',
         status: 'sent',
-        recipient_name: recipientName,
-        recipient_email: customer.email || null,
-        recipient_phone: customer.phone || null,
+        recipient_name: liveRecipientName,
+        recipient_email: freshContractCustomer.email || null,
+        recipient_phone: freshContractCustomer.phone || null,
         service_name: serviceName,
         renewal_date: renewalDate,
         cancellation_deadline: cancellationDeadline,
         auto_renewal_notice_required: !!(renewalDate && cancellationDeadline),
         consent_text_version: CONSENT_VERSION,
-        consent_text_snapshot: getConsentText(paymentMethod?.method_type),
-        contract_text_snapshot: contractText,
+        consent_text_snapshot: getConsentText(freshMethod?.method_type),
+        contract_text_snapshot: liveContractText,
         esign_disclosure_snapshot: ESIGN_DISCLOSURE,
         share_token_hash: tokenHash,
         share_token_expires_at: expiresAt,

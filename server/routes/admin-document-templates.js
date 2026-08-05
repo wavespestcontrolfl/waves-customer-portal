@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const {
   ESIGN_DISCLOSURE,
@@ -410,7 +411,43 @@ router.post('/:key/contracts', async (req, res, next) => {
     const recipientEmail = cleanRecipientName(req.body?.recipientEmail) || customer.email || null;
     const recipientPhone = cleanRecipientName(req.body?.recipientPhone) || customer.phone || null;
 
+    const recipientEmailExplicit = Boolean(cleanRecipientName(req.body?.recipientEmail));
     const contract = await db.transaction(async (trx) => {
+      // Comms fence + post-lock re-read (Codex #3109 r29): the contract is
+      // an email-bound bearer surface — taken BEFORE the row locks below,
+      // so a merge-undo either committed (the fresh read sees post-undo
+      // state) or waits its turn. When the recipient email came from the
+      // customer fallback (no explicit override), mint from the LIVE row.
+      await lockCustomerComms(trx, customer.id);
+      const freshDocCustomer = await trx('customers')
+        .where({ id: customer.id })
+        .whereNull('deleted_at')
+        .first();
+      if (!freshDocCustomer || freshDocCustomer.active === false) {
+        const goneErr = new Error('This customer changed while issuing the document — reload and try again.');
+        goneErr.status = 409;
+        throw goneErr;
+      }
+      // Rebuild the ENTIRE customer-derived rendering from the row read
+      // under the fence (r30): the pre-lock context/body/name/phone can
+      // carry an inherited identity a merge-undo just restored elsewhere —
+      // a bearer document must render the LIVE customer. Explicit request
+      // overrides (name/email/phone/propertyAddress) still win.
+      const liveContext = buildCustomerDocumentContext(freshDocCustomer, values);
+      if (propertyAddress) liveContext.customer = { ...liveContext.customer, address: propertyAddress };
+      const liveRendered = renderDocumentTemplate({
+        template: loaded.template,
+        version: loaded.activeVersion,
+        context: liveContext,
+      });
+      if (liveRendered.unresolvedVariables.length && req.body?.allowUnresolved !== true) {
+        const unresolvedErr = new Error("Document has unresolved merge fields for the customer's current record — reload and try again.");
+        unresolvedErr.status = 409;
+        throw unresolvedErr;
+      }
+      const recipientNameLive = cleanRecipientName(req.body?.recipientName) || signerName(freshDocCustomer);
+      const recipientEmailLive = recipientEmailExplicit ? recipientEmail : (freshDocCustomer.email || null);
+      const recipientPhoneLive = cleanRecipientName(req.body?.recipientPhone) || freshDocCustomer.phone || null;
       // Termite program agreements carry a service-wide invariant (one
       // live request per property) enforced under a per-customer advisory
       // lock by the accept-time service, the reconciliation sweeps, and
@@ -447,7 +484,7 @@ router.post('/:key/contracts', async (req, res, next) => {
           .whereIn('status', ['draft', 'sent', 'viewed'])
           .forUpdate()
           .select('id', 'document_variables_snapshot');
-        const newAddress = normalizeAddress(context.customer?.address);
+        const newAddress = normalizeAddress(liveContext.customer?.address);
         for (const prior of openPrior) {
           // Per-PROPERTY, mirroring classifyExistingAgreement: a provably
           // different property's open request keeps its signing flow;
@@ -481,14 +518,14 @@ router.post('/:key/contracts', async (req, res, next) => {
         customer_id: customer.id,
         created_by: req.technicianId || null,
         contract_type: 'document_template',
-        title: rendered.title || loaded.activeVersion.title || loaded.template.name,
+        title: liveRendered.title || loaded.activeVersion.title || loaded.template.name,
         status: loaded.template.requires_signature === false ? 'sent' : 'sent',
-        recipient_name: recipientName,
-        recipient_email: recipientEmail,
-        recipient_phone: recipientPhone,
-        service_name: context.service?.name || null,
+        recipient_name: recipientNameLive,
+        recipient_email: recipientEmailLive,
+        recipient_phone: recipientPhoneLive,
+        service_name: liveContext.service?.name || null,
         esign_disclosure_snapshot: loaded.activeVersion.signer_disclosure || ESIGN_DISCLOSURE,
-        contract_text_snapshot: rendered.body,
+        contract_text_snapshot: liveRendered.body,
         share_token_hash: hashContractToken(token),
         share_token_expires_at: expiresAt,
         shared_at: new Date(),
@@ -496,13 +533,13 @@ router.post('/:key/contracts', async (req, res, next) => {
         document_template_version_id: loaded.activeVersion.id,
         document_template_key: loaded.template.template_key,
         requires_signature_snapshot: loaded.template.requires_signature !== false,
-        document_variables_snapshot: jsonb(context, {}),
-        document_render_summary: jsonb(rendered.renderSummary, {}),
+        document_variables_snapshot: jsonb(liveContext, {}),
+        document_render_summary: jsonb(liveRendered.renderSummary, {}),
       }).returning('*');
       await insertContractEvent(trx, row.id, customer.id, req, {
         templateKey: loaded.template.template_key,
         templateVersionId: loaded.activeVersion.id,
-        unresolvedVariables: rendered.unresolvedVariables,
+        unresolvedVariables: liveRendered.unresolvedVariables,
       });
       await trx('customer_contract_events').insert({
         contract_id: row.id,
@@ -514,15 +551,18 @@ router.post('/:key/contracts', async (req, res, next) => {
         user_agent: req.get('user-agent') || null,
         metadata: jsonb({ expiresAt: expiresAt.toISOString() }, {}),
       });
-      return row;
+      return { row, liveRendered };
     });
 
-    const hydrated = await contractQuery().where('cc.id', contract.id).first();
+    const hydrated = await contractQuery().where('cc.id', contract.row.id).first();
     const signingUrl = publicContractUrl(token);
     res.status(201).json({
       contract: serializeContract(hydrated, { signingUrl }),
       signingUrl,
-      rendered,
+      // The LOCKED render (r38): the persisted snapshot was rebuilt under
+      // the fence — returning the pre-lock render let staff preview text
+      // that differs from what the signing link actually shows.
+      rendered: contract.liveRendered,
     });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });

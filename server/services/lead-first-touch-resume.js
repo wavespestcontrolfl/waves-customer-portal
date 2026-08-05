@@ -27,6 +27,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { tryLockCustomerComms, withCustomerCommsLock } = require('../utils/customer-comms-lock');
 
 const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
 // Same permissive-but-real syntax class the fanout uses — releases are also
@@ -867,7 +868,22 @@ async function resumeHeldFirstTouch({
                 id: holdCustomerId,
               },
               dbh: trx,
+              // This transaction holds the hold row FOR UPDATE — an
+              // undo-contended lock (r23/r33) — so the comms acquire must
+              // be non-blocking; the customer_comms_busy handling below
+              // re-pends and retries.
+              commsLockMode: 'try',
             });
+            if (enroll?.reason === 'customer_comms_busy') {
+              // A merge-undo of this customer is mid-transaction (r23):
+              // this trx already holds the hold row FOR UPDATE, so the
+              // enroll's comms acquire is a TRY-lock and a miss must not
+              // proceed unfenced. No writes — the plain re-pend below
+              // returns the row to pending and a later sweep retries
+              // against post-undo state.
+              dripSkip = { skipped: 'customer_comms_busy', plainRepen: true };
+              return;
+            }
             if (!enroll?.enrolled && enroll?.enrollmentId) {
               // Already-enrolled leaves the ACTIVE enrollment's
               // denormalized email untouched, and the scheduler sends each
@@ -1655,7 +1671,31 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
       // resolving the new card could reclaim and release A.
       const liveLease = "first_touch_holds.status = 'releasing' AND first_touch_holds.updated_at >= ?";
       const staleThreshold = new Date(Date.now() - STALE_CLAIM_MS);
-      await dbh('first_touch_holds')
+      // Rung-6 fence for hold creation (r23): held_email is a live
+      // delivery target and now an undo-probed surface (customer-dedupe
+      // EMAIL_BOUND_SURFACES) — a hold committing invisibly to the undo's
+      // absence probe re-creates the READ COMMITTED phantom the lock
+      // contract exists to close. A pool call gets a scoped locked
+      // transaction; a caller transaction (which may already hold row
+      // locks the undo takes after comms) TRY-locks and records unfenced
+      // on a miss — recording the hold outranks blocking the pipeline.
+      let commitHold = async (fn) => fn(dbh);
+      if (customerId && !dbh.isTransaction) {
+        commitHold = async (fn) => withCustomerCommsLock(dbh, customerId, fn);
+      } else if (customerId && dbh.isTransaction && !(await tryLockCustomerComms(dbh, customerId))) {
+        // NEVER record unfenced (r24): an undo holding customer-comms
+        // cannot see this transaction's uncommitted hold in its absence
+        // probe — it would clear the inherited email while this hold
+        // commits with the old address, and the release path sends
+        // held_email directly. The lock stays busy for the undo's whole
+        // transaction, so retrying inside this one is useless: return the
+        // ledger-unavailable result (null) and let the OWNING transaction
+        // restart — the processor stamps extraction_failed with its capped
+        // retry budget and the sweep reprocesses against post-undo state.
+        logger.warn(`[first-touch-hold] customer-comms lock busy for customer ${customerId} (merge-undo in flight) — refusing to record the hold unfenced; the owning run retries`);
+        return null;
+      }
+      await commitHold((conn) => conn('first_touch_holds')
         .insert({
           call_log_id: callLogId,
           customer_id: customerId,
@@ -1731,7 +1771,7 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
             `CASE WHEN ${liveLease} THEN first_touch_holds.updated_at ELSE excluded.updated_at END`,
             [staleThreshold],
           ),
-        });
+        }));
       return true;
     } catch (err) {
       if (attempt === attempts) {

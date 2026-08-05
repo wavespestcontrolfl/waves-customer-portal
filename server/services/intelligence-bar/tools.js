@@ -8,6 +8,7 @@
  */
 
 const db = require('../../models/db');
+const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
 const logger = require('../logger');
 const {
   etDateString, addETDays, validScheduleDate, sameDayWindowElapsed,
@@ -1033,6 +1034,26 @@ async function updateCustomer(customerId, updates) {
       // concurrent editor still matches the snapshots the winner moved.
       const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
       const lockedMerged = { ...lockedBefore, ...clean };
+      // Assigning an email serializes against a customer-merge UNDO
+      // checking whether that address is claimed (customer-dedupe.js
+      // revertMerge — customers.email has NO unique constraint, so only
+      // this shared lock keeps the check honest between its read and its
+      // commit). KEY DERIVATION (must stay byte-identical to
+      // customer-dedupe.js and routes/admin-customers.js — extend ALL in
+      // the same commit): pg_advisory_xact_lock(hashtextextended(
+      //   'customer-email:' || lower(trim(<email>)), 0)).
+      if (clean.email) {
+        const emailLc = String(clean.email).trim().toLowerCase();
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+          [`customer-email:${emailLc}`],
+        );
+        // Serialization ONLY — deliberately NO claimant refusal (r23):
+        // customers.email is intentionally non-unique (20260417000010 —
+        // spouses/shared household addresses are supported), so an
+        // operator assigning a shared address is a supported act. The undo
+        // needs only this lock: its claim probe runs under the same key.
+      }
       await trx('customers').where('id', customerId).update(clean);
       if (addressSubmitted) {
         await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
@@ -1156,7 +1177,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
 
   const addressSubmitted = ['address_line1', 'address_line2', 'city', 'state', 'zip']
     .some((f) => clean[f] !== undefined);
-  if (!addressSubmitted) {
+  const emailSubmitted = clean.email !== undefined;
+  if (!addressSubmitted && !emailSubmitted) {
     const count = await db('customers').whereIn('id', customerIds).update({ ...clean, ...stageStamp });
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     return {
@@ -1172,6 +1194,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
   // then coords cleared + re-geocoded. The old single-statement path skipped
   // all of that, leaving property dedup keys, map pins, and snapshot copies
   // pointing at the old address.
+  //
+  // A bulk EMAIL edit takes the per-row path too (r21): assigning an email
+  // MUST serialize with a concurrent merge-undo's claim probe under the
+  // shared customer-email advisory lock, re-check the live claimant under
+  // it, and run the email fan-out — the single-statement path bypassed all
+  // three, so a bulk edit could hand another live customer's address out
+  // and leave subscriber tokens/queued copies on the old mailbox.
   let count = 0;
   const errors = [];
   for (const customerId of customerIds) {
@@ -1180,15 +1209,32 @@ async function bulkUpdateCustomers(customerIds, updates) {
       errors.push({ customer_id: customerId, error: 'Customer not found' });
       continue;
     }
-    const merged = { ...before, ...clean };
+    let emailSync = null;
     try {
       await db.transaction(async (trx) => {
         // Same row-lock serialization as the single-edit path.
         const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
         const lockedMerged = { ...lockedBefore, ...clean };
+        if (emailSubmitted && clean.email) {
+          const emailLc = String(clean.email).trim().toLowerCase();
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+            [`customer-email:${emailLc}`],
+          );
+          // Serialization ONLY — no claimant refusal (r23): shared
+          // household addresses are supported (20260417000010); see
+          // updateCustomer.
+        }
         await trx('customers').where('id', customerId).update({ ...clean, ...stageStamp });
-        await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
-        await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
+        if (addressSubmitted) {
+          await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);
+          await require('../customer-address-fanout').propagateCustomerAddressChange({ before: lockedBefore, after: lockedMerged }, trx);
+        }
+        if (emailSubmitted) {
+          emailSync = await require('../customer-email-fanout').propagateCustomerEmailChange(
+            { before: lockedBefore, after: lockedMerged, source: 'Intelligence Bar bulk_update_customers' }, trx,
+          );
+        }
       });
     } catch (e) {
       if (e && e.code === '23505') {
@@ -1197,10 +1243,26 @@ async function bulkUpdateCustomers(customerIds, updates) {
       }
       throw e;
     }
-    await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
-    void require('../geocoder').ensureCustomerGeocoded(customerId)
-      .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
-      .catch(() => {});
+    const { pendingConfirmation: rowPendingConfirmation, heldNewsletterResume: rowHeldNewsletterResume } = emailSync || {};
+    if (rowHeldNewsletterResume) {
+      // Deferred held-newsletter DOI, post-commit — same contract as the
+      // single-row paths (r32: the bulk branch dropped the resume, leaving
+      // corrected customers' newsletter holds parked until stale reclaim).
+      require('../lead-first-touch-resume').resumeHeldNewsletterPostCommit(rowHeldNewsletterResume)
+        .catch((err) => logger.error(`[ib] deferred held-newsletter resume failed (bulk): ${err.code || err.name || 'resume_failed'}`));
+    }
+    if (rowPendingConfirmation) {
+      // Post-commit DOI re-send, exactly as the single-edit path — the
+      // bearer token never rides into the tool result.
+      require('../customer-email-fanout').resendPendingConfirmation(rowPendingConfirmation)
+        .catch((err) => logger.error(`[ib] bulk DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
+    }
+    if (addressSubmitted) {
+      await db('customers').where('id', customerId).update({ latitude: null, longitude: null });
+      void require('../geocoder').ensureCustomerGeocoded(customerId)
+        .then((coords) => coords && require('../customer-properties').syncPrimaryCoordsFromCustomer(customerId))
+        .catch(() => {});
+    }
     count += 1;
   }
   logger.info(`[intelligence-bar] Bulk updated ${count} customers (address path):`, logUpdates);
@@ -1319,6 +1381,13 @@ function parseTimeWindowStart(timeWindow) {
   if (hour > 23 || minute > 59) {
     return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
   }
+  // Appointment windows start ON THE HOUR (owner rule — every creator
+  // enforces it; Codex #3109 r33 flagged this tool as the bypass). Reject
+  // rather than silently rounding: the operator asked for a specific time
+  // and the model can re-ask with the corrected value.
+  if (minute !== 0) {
+    return { error: `Appointment windows start on the hour — got "${timeWindow}"; use e.g. "${hour > 12 ? hour - 12 : hour || 12}:00 ${hour >= 12 ? 'PM' : 'AM'}"` };
+  }
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
 
@@ -1371,6 +1440,11 @@ async function createAppointment(input) {
   // 'scheduled' is not in the scheduled_services status CHECK set and threw
   // on every insert. track_token_expires_at is stamped by the INSERT trigger
   // (set_default_track_token_expiry).
+  // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): comms-lock the
+  // customer around the insert — this path had no transaction, and a bare
+  // advisory xact lock outside one fences nothing. withCustomerCommsLock
+  // opens the transaction, so the inspection-credit evidence below commits
+  // inside the same fenced trx.
   // Inspection credit: an operator booking through the Intelligence Bar is
   // a REAL customer booking (Codex #3178 r5 P0), so the durable evidence
   // commits IN THE SAME TRANSACTION as the appointment (r31 P2) — a crash
@@ -1379,7 +1453,7 @@ async function createAppointment(input) {
   // any open offer. The marker runs in a savepoint, so an evidence hiccup
   // still never blocks the booking.
   let appointment;
-  await db.transaction(async (trx) => {
+  await withCustomerCommsLock(db, customer_id, async (trx) => {
     const [created] = await trx('scheduled_services').insert({
       customer_id,
       scheduled_date: dateStr,

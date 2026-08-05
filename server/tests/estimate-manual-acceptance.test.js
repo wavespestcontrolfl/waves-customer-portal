@@ -123,6 +123,9 @@ function makeDb(estimate, claimedOverrides = null) {
     return builder;
   });
   database.fn = { now: () => 'NOW' };
+  // The claim transaction takes the customer-comms advisory lock before
+  // the estimate row lock (Codex #3109 r32) — raw serves that acquire.
+  database.raw = jest.fn(async () => ({ rows: [] }));
   database.transaction = jest.fn(async (callback) => callback(database));
   return { database, updates, inserts };
 }

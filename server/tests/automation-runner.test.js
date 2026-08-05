@@ -24,6 +24,9 @@ function chain({ result = [], first, returning, updateResult = 1 } = {}) {
   [
     'where',
     'whereRaw',
+    'whereNot',
+    'join',
+    'whereNotNull',
     'whereNull',
     'whereNotNull',
     'orWhereNotNull',
@@ -49,6 +52,14 @@ function setDbQueues(queues) {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
+  });
+  // Customer-linked enrollments ride a customer-comms-locked transaction
+  // (r21) — pass the queue-backed connection through with a raw stub for
+  // the advisory lock.
+  db.transaction = jest.fn(async (fn) => {
+    const trx = (table) => db(table);
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    return fn(trx);
   });
 }
 
@@ -321,6 +332,9 @@ describe('automation runner enrollment reactivation', () => {
     setDbQueues({
       automation_templates: [chain({ first: { key: 'flea', name: 'Flea Treatment', enabled: true } })],
       automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      // Post-lock revalidation re-read (r22): the row carries the same
+      // address the caller passed, so the enrollment proceeds.
+      customers: [chain({ first: { id: 'cust-1', email: 'new@example.com', deleted_at: null } })],
       automation_enrollments: [
         // Prior COMPLETED enrollment carrying the customer's OLD email.
         chain({ first: { id: 'enr-1', status: 'completed', email: 'old@example.com' } }),
@@ -343,6 +357,59 @@ describe('automation runner enrollment reactivation', () => {
       first_name: 'Megan',
       last_name: 'Example',
     }));
+  });
+
+  test('refuses an enrollment whose address NOW belongs to another live customer (stale pre-undo snapshot, r22)', async () => {
+    // The caller read the winner carrying the merged-in email, then blocked
+    // on the comms lock while an undo cleared it and restored the loser at
+    // that address. The post-lock revalidation must refuse — never enroll
+    // the winner's sequence into the restored loser's mailbox. Deliberately
+    // different-by-design addresses (a requester's, a tenant's) are not
+    // customer rows and still enroll.
+    const { enrollCustomer } = require('../services/automation-runner');
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'flea', name: 'Flea Treatment', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      customers: [
+        // Post-lock re-read: the undo cleared the winner's inherited email.
+        chain({ first: { id: 'cust-1', email: null, deleted_at: null } }),
+      ],
+      // Joined undone-holder existence query (r31): a live holder who IS
+      // the restored loser of an undone merge with this winner.
+      'customers as c': [chain({ first: { id: 'cust-loser' } })],
+    });
+    const result = await enrollCustomer({
+      templateKey: 'flea',
+      customer: { id: 'cust-1', email: 'inherited@example.com', first_name: 'Megan' },
+    });
+    expect(result).toEqual({ enrolled: false, reason: 'address was restored to the merged-away customer by an undo (stale pre-undo address)' });
+  });
+
+  test('a SUPPORTED shared/different-by-design address still enrolls — another holder with NO undone-merge link is not staleness (r30)', async () => {
+    const { enrollCustomer } = require('../services/automation-runner');
+    const reactivateUpdate = chain();
+    reactivateUpdate.update = jest.fn(() => reactivateUpdate);
+    reactivateUpdate.returning = jest.fn(async () => [{ id: 'enr-2' }]);
+    setDbQueues({
+      automation_templates: [chain({ first: { key: 'flea', name: 'Flea Treatment', enabled: true } })],
+      automation_steps: [chain({ result: [{ id: 'step-1', step_order: 0, delay_hours: 0, enabled: true }] })],
+      customers: [
+        // Row's own email differs (tenant-under-landlord shape)...
+        chain({ first: { id: 'cust-1', email: 'landlord@example.com', deleted_at: null } }),
+      ],
+      // The tenant has their own live record but NO undone-merge link to
+      // cust-1 — the joined existence query finds nothing: supported.
+      'customers as c': [chain({ first: undefined })],
+      automation_enrollments: [
+        chain({ first: { id: 'enr-2', status: 'completed', email: 'old@example.com' } }),
+        reactivateUpdate,
+      ],
+    });
+    const result = await enrollCustomer({
+      templateKey: 'flea',
+      customer: { id: 'cust-1', email: 'tenant@example.com', first_name: 'Tessa' },
+    });
+    expect(result).toEqual({ enrolled: true, enrollmentId: 'enr-2' });
   });
 });
 

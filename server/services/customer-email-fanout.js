@@ -1525,4 +1525,144 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
 // new synced surface.
 const EMAIL_FANOUT_DISCLOSURE = 'an email change also updates every open send still targeting the old email address (leads, estimates, newsletter, automations, queued template sends, referral promoter, billing pref, contracts, booking recovery) and resolves open email review cards';
 
-module.exports = { propagateCustomerEmailChange, resolveOpenEmailReviewCards, resendPendingConfirmation, emailKey, EMAIL_FANOUT_DISCLOSURE };
+/**
+ * Apply an AUTOMATED intake writer's updates to an existing customer row,
+ * serializing an email backfill against a concurrent customer-merge UNDO.
+ *
+ * customers.email has NO unique constraint, and revertMerge (customer-
+ * dedupe.js) restores a merged-away customer's email only after an explicit
+ * "is this address claimed by another live customer?" check — a check that
+ * is only honest if everything that ASSIGNS an email onto a customer row
+ * serializes with it. The operator-driven writers (Customer 360 edit, IB
+ * update_customer) already take the shared advisory lock; this helper
+ * extends it to the automated backfill writers (lead webhook, public quote,
+ * call pipeline), which fill an EXISTING customer's empty email from
+ * unauthenticated intake data.
+ *
+ * KEY DERIVATION (must stay byte-identical to customer-dedupe.js,
+ * routes/admin-customers.js and intelligence-bar/tools.js — extend ALL in
+ * the same commit): pg_advisory_xact_lock(hashtextextended(
+ *   'customer-email:' || lower(trim(<email>)), 0)) — transaction-scoped,
+ * released on commit/rollback, so the hold is only ever as long as this
+ * one small write.
+ *
+ * LOCK ORDER matches revertMerge (customer row locks BEFORE the advisory
+ * email lock): the customer row is locked FOR UPDATE first, then the
+ * advisory lock is taken — so an undo holding the row lock never waits on
+ * a writer that holds the advisory lock (no cycle, no deadlock abort).
+ *
+ * PROCEED-WITH-FRESH-READ semantics — this guard must NEVER turn an intake
+ * write into a failure:
+ *   - the row and the claim state are re-read UNDER the locks, and only
+ *     the email COLUMN is dropped when the fresh state disqualifies it
+ *     (someone filled the email while we waited, or another live customer —
+ *     e.g. a just-restored merge loser — now owns the address); every other
+ *     update still lands;
+ *   - if the guarded transaction itself fails for any reason, the updates
+ *     are re-applied WITHOUT the email exactly as the caller would have
+ *     written them before this guard existed.
+ * Returns { emailApplied, emailDroppedReason } for the caller's logging.
+ */
+async function applyCustomerUpdatesWithEmailClaimGuard({
+  customerId, updates, source = 'intake',
+  // REPLACEMENT mode (the garbled-stored-email rule, call-recording-
+  // processor round-12/round-24): the caller read an EMAIL_RE-failing
+  // stored value and intends to replace it. `replaceExpectedEmail` is that
+  // pre-read value — under the row lock the write proceeds only if the
+  // stored email is STILL that exact value (anything else means someone
+  // fixed it while we waited, and the standing value wins). Because a
+  // replacement has an old address with live copies out there,
+  // `applyWithEmailInTrx(trx)` lets the caller run the customer write and
+  // the required fan-out in THIS guarded transaction, so the claim
+  // serialization, the write, and the fan-out commit or roll back as one.
+  replaceExpectedEmail = null,
+  applyWithEmailInTrx = null,
+}) {
+  const emailKeyNorm = emailKey(updates.email);
+  if (!updates.email || !emailKeyNorm) {
+    // No email being assigned (or not an address at all) — nothing to
+    // serialize; write exactly as before.
+    await db('customers').where({ id: customerId }).update(updates);
+    return { emailApplied: false, emailDroppedReason: null };
+  }
+  try {
+    return await db.transaction(async (trx) => {
+      const fresh = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'email');
+      if (!fresh) return { emailApplied: false, emailDroppedReason: 'customer row gone' };
+      const standingValueBlocks = replaceExpectedEmail == null
+        ? !!fresh.email
+        : String(fresh.email || '') !== String(replaceExpectedEmail);
+      if (standingValueBlocks) {
+        // Filled (or fixed) while we waited — operator edit, merge
+        // backfill, a racing intake. The standing value wins; automated
+        // intake never overwrites an email it did not read pre-lock, only
+        // backfills an empty one or replaces the exact garbled value it
+        // saw.
+        const { email: _dropped, ...rest } = updates;
+        if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
+        return { emailApplied: false, emailDroppedReason: 'email filled concurrently' };
+      }
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
+      // MERGE-SPECIFIC evidence, not global uniqueness (r38 — the same
+      // ruling every other claimant site adopted): customers.email is
+      // deliberately non-unique, so a spouse/tenant/shared-household
+      // holder must not leave the matched customer email-less. Only a
+      // live holder who is the restored LOSER of an UNDONE merge whose
+      // winner is THIS customer proves the address is a stale pre-undo
+      // capture. One joined existence query; if the joined read fails,
+      // fall back to the conservative bare-holder block.
+      let undoneHolder = null;
+      try {
+        undoneHolder = await trx('customers as c')
+          .join('customer_merge_journal as j', function joinUndone() {
+            this.on('j.loser_customer_id', 'c.id');
+          })
+          .where('j.winner_customer_id', customerId)
+          .whereNotNull('j.undone_at')
+          .whereRaw('lower(c.email) = ?', [emailKeyNorm])
+          .whereNot('c.id', customerId)
+          .where('c.active', true)
+          .whereNull('c.deleted_at')
+          .first('c.id');
+      } catch {
+        undoneHolder = await trx('customers')
+          .whereRaw('lower(email) = ?', [emailKeyNorm])
+          .whereNot({ id: customerId })
+          .where('active', true)
+          .whereNull('deleted_at')
+          .first('id');
+      }
+      if (undoneHolder) {
+        const { email: _dropped, ...rest } = updates;
+        if (Object.keys(rest).length) await trx('customers').where({ id: customerId }).update(rest);
+        return { emailApplied: false, emailDroppedReason: 'address was restored to a merged-away customer by an undo' };
+      }
+      if (applyWithEmailInTrx) {
+        await applyWithEmailInTrx(trx);
+      } else {
+        await trx('customers').where({ id: customerId }).update(updates);
+      }
+      return { emailApplied: true, emailDroppedReason: null };
+    });
+  } catch (e) {
+    // The guard must never block the intake write into failure: drop the
+    // email fill (the lead/quote/call record still carries the address for
+    // staff) and apply the rest exactly as the pre-guard code did. For a
+    // REPLACEMENT this also rolls the fan-out and the email write back
+    // together — the malformed stored value stays, which is the state a
+    // later call can retry from (round-24 semantics).
+    logger.warn(`[email-fanout] email-claim guard failed for ${source} (customer ${customerId}) — applying updates without the email backfill: ${e.message}`);
+    const { email: _dropped, ...rest } = updates;
+    if (Object.keys(rest).length) await db('customers').where({ id: customerId }).update(rest);
+    return { emailApplied: false, emailDroppedReason: `guard failed: ${e.message}` };
+  }
+}
+
+module.exports = {
+  propagateCustomerEmailChange,
+  resolveOpenEmailReviewCards,
+  resendPendingConfirmation,
+  emailKey,
+  EMAIL_FANOUT_DISCLOSURE,
+  applyCustomerUpdatesWithEmailClaimGuard,
+};
