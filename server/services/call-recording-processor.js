@@ -2552,6 +2552,53 @@ async function resolveCallBookingPropertyLinkage(customerId, extracted, trx = db
   return { propertyId, address, lat, lng };
 }
 
+/**
+ * Property-scope premise for a phone re-service booking (codex #3222 r8):
+ * resolveCallBookingPropertyLinkage's null propertyId is AMBIGUOUS — it can
+ * mean the on-file address (no property row / legacy account) OR a caller-
+ * stated address that matched nothing. And a linked propertyId can be the
+ * backfilled PRIMARY row, whose coverage often predates property linkage
+ * (legacy rows carry null property_id), so requiring property-scoped
+ * coverage for the primary would false-hold valid requests.
+ *
+ *   'account'  — the booking premise IS the customer's primary/on-file
+ *                address (linked primary row, or address equal to the
+ *                on-file address, or no address at all): the account-level
+ *                lane grant suffices, legacy unlinked coverage included.
+ *   'property' — a linked NON-primary property (a rental, a second home):
+ *                needs its own qualifying live coverage.
+ *   'unknown'  — a stated address that matches neither a property row nor
+ *                the on-file address: never a free visit there, hold.
+ * Fail-closed: classification errors return 'unknown'.
+ */
+async function classifyReServiceBookingPremise({ customer, propertyLinkage, trx = db }) {
+  const linkedId = propertyLinkage?.propertyId || null;
+  if (linkedId) {
+    try {
+      const prop = await trx('customer_properties').where({ id: linkedId }).first('is_primary');
+      return prop?.is_primary ? { scope: 'account' } : { scope: 'property', propertyId: linkedId };
+    } catch (e) {
+      logger.warn(`[call-proc] re-service premise lookup failed for property ${linkedId}: ${e.code || e.message}`);
+      return { scope: 'unknown' };
+    }
+  }
+  const booked = propertyLinkage?.address || null;
+  if (!booked) return { scope: 'account' };
+  try {
+    const { addressKey } = require('./customer-properties');
+    const bookedKey = addressKey({
+      address_line1: booked.line1, address_line2: booked.line2, city: booked.city, zip: booked.zip,
+    });
+    const onFileKey = addressKey({
+      address_line1: customer?.address_line1, address_line2: customer?.address_line2, city: customer?.city, zip: customer?.zip,
+    });
+    if (bookedKey === onFileKey) return { scope: 'account' };
+  } catch (e) {
+    logger.warn(`[call-proc] re-service premise address compare failed: ${e.code || e.message}`);
+  }
+  return { scope: 'unknown' };
+}
+
 async function findExistingCallAppointment({ customerId, call, scheduledDate, windowStart, serviceType, trx = db }) {
   if (!customerId) return null;
 
@@ -8956,30 +9003,41 @@ const CallRecordingProcessor = {
                   const { reserviceLanesForCustomer, reserviceLaneCoversProperty, openCallbackExistsForLane } = require('./reservice-scheduler');
                   const reServiceLane = reServiceLaneForRow(callBookingCatalogRow);
                   // Eligibility REVALIDATED under the locks (codex #3222 r6
-                  // — mirrors the reservice route's commit-time re-check):
-                  // the resolution-time lane lookup is pre-transaction, so a
-                  // plan cancelled or a customer deactivated in the gap
-                  // would otherwise still book a free callback. `customer`
-                  // is the fresh row re-read under the comms fence above.
+                  // — mirrors the reservice route's commit-time re-check),
+                  // and the customer row is read FOR UPDATE (r8): the admin
+                  // customer update row-locks before flipping `active`, so
+                  // sharing that row lock serializes a deactivation against
+                  // this booking — after this read it waits out the insert's
+                  // commit instead of landing between check and insert.
                   // Unverifiable → hold, fail closed.
+                  let lockedReServiceCustomer = null;
                   let laneStillEligible = false;
                   try {
-                    laneStillEligible = !!customer && customer.active !== false
-                      && (await reserviceLanesForCustomer(customer)).includes(reServiceLane);
+                    lockedReServiceCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+                    laneStillEligible = !!lockedReServiceCustomer && lockedReServiceCustomer.active !== false
+                      && (await reserviceLanesForCustomer(lockedReServiceCustomer)).includes(reServiceLane);
                   } catch (eligErr) {
                     logger.warn(`[call-proc] re-service eligibility recheck failed for ${maskSid(callSid)} (holding for review): ${eligErr.message}`);
                   }
                   if (!laneStillEligible) {
                     return { __held: { reason: 'reservice_eligibility_lapsed' } };
                   }
-                  // Multi-property guard (codex #3222 r7): the lane grant is
-                  // account-level, but this booking dispatches to the call's
-                  // RESOLVED property — a covered-primary customer must not
-                  // get the free callback at an uncovered rental. A non-null
-                  // linked property needs its own qualifying live coverage;
-                  // null propertyId = the primary/on-file address the
-                  // account-level grant represents. Fail-closed → hold.
-                  if (!(await reserviceLaneCoversProperty(customerId, reServiceLane, propertyLinkage?.propertyId || null))) {
+                  // Multi-property guard (codex #3222 r7+r8): the lane grant
+                  // is account-level, but this booking dispatches to the
+                  // call's RESOLVED premise. Classify it first — a linked
+                  // PRIMARY property (or the on-file address, matched by
+                  // key) rides the account grant (legacy coverage rows carry
+                  // null property_id and must not false-hold the primary); a
+                  // linked NON-primary property needs its own qualifying
+                  // live coverage; an address matching neither holds.
+                  const reServicePremise = await classifyReServiceBookingPremise({
+                    customer: lockedReServiceCustomer,
+                    propertyLinkage,
+                    trx,
+                  });
+                  if (reServicePremise.scope === 'unknown'
+                    || (reServicePremise.scope === 'property'
+                      && !(await reserviceLaneCoversProperty(customerId, reServiceLane, reServicePremise.propertyId)))) {
                     return { __held: { reason: 'reservice_property_uncovered' } };
                   }
                   let laneCallbackOpen = true;

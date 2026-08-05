@@ -147,13 +147,14 @@ async function reserviceLanesForCustomer(customer) {
 
 /**
  * Property-scoped lane coverage (the phone re-service path's multi-property
- * guard — codex #3222 r7): true when the lane's LIVE coverage includes a
- * recurring row FOR THIS PROPERTY. A null propertyId means the customer's
- * primary/on-file address, which the account-level lane grant already
- * represents — only an explicit non-null property (a rental, a second home)
- * needs its own qualifying coverage, or a covered-primary customer could
- * book the free callback at an uncovered address. Fail-closed: a lookup
- * error covers nothing.
+ * guard — codex #3222 r7/r8): true when the lane's LIVE coverage includes a
+ * recurring row FOR THIS PROPERTY. Callers classify the booking premise
+ * FIRST (call-recording-processor's classifyReServiceBookingPremise) and
+ * only pass a NON-primary linked property here — the primary/on-file
+ * premise rides the account-level grant instead, because legacy coverage
+ * rows carry null property_id and a property-scoped requirement would
+ * false-hold it. A null propertyId returns true for that account-level
+ * case. Fail-closed: a lookup error covers nothing.
  */
 async function reserviceLaneCoversProperty(customerId, lane, propertyId) {
   if (!propertyId) return true;
