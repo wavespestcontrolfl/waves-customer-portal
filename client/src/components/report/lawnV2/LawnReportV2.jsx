@@ -615,13 +615,17 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   // Nothing measurable → don't draw an empty chart.
   if (!hasRain && !hasIrr) return null;
 
+  // A weekly Total is only claimable when the server computed one or rain is
+  // known — summing the leftovers when rain is missing would tell the
+  // customer rainfall was zero rather than unavailable (codex P2 r7).
+  const hasTotal = known(water.totalInches) || hasRain;
   const total = known(water.totalInches)
     ? Number(water.totalInches)
     : (hasRain ? rain : 0) + (hasIrr ? irrigation : 0);
   const hasTarget = known(water.targetInches);
   const status = water.status || 'unknown';
   const meta = statusMeta(status === 'unknown' ? 'tracking' : status);
-  const axisMax = Math.max(total, hasTarget ? target : 0) * 1.25 || 2;
+  const axisMax = Math.max(hasTotal ? total : 0, hasTarget ? target : 0) * 1.25 || 2;
   const pctOf = (v) => `${clamp((v / axisMax) * 100)}%`;
 
   return (
@@ -631,7 +635,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
         {hasRain ? <><span style={{ color: MUTED }}>Rain</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(rain)}</strong></> : null}
         {hasIrr && irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(irrigation)}</strong></> : null}
         {hasIrr && !irrOnFile ? <><span style={{ color: MUTED }}>Irrigation</span><span style={{ textAlign: 'right', color: MUTED, fontStyle: 'italic' }}>Not on file</span></> : null}
-        <span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong>
+        {hasTotal ? <><span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong></> : null}
         {hasTarget ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
       </div>
       {/* Stacked bar with a target marker — segments grow on mount */}

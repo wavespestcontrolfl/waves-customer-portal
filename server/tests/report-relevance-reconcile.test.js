@@ -178,6 +178,20 @@ describe('replaceDroughtHypothesis', () => {
     expect(replaceDroughtHypothesis('A few dry patches near the sidewalk were noted.')).toBeNull();
   });
 
+  test('dry spot/area and drought-related forms are covered (codex P2 r7)', () => {
+    expect(replaceDroughtHypothesis('Thin patches could be chinch bugs or dry spots.'))
+      .toBe('Thin patches could be chinch bugs or uneven sprinkler coverage.');
+    expect(replaceDroughtHypothesis('The stress there is possibly drought-related.'))
+      .toBe('The stress there is possibly sprinkler-coverage-related.');
+    // Observation forms without a hypothesis cue survive.
+    expect(replaceDroughtHypothesis('Some dry areas near the stressed strip were noted.')).toBeNull();
+  });
+
+  test('a negated dry phrase does not shield a later hypothesis in the same sentence (codex P2 r7)', () => {
+    expect(replaceDroughtHypothesis('No current signs of dry pockets, but drought stress remains possible in the thin areas.'))
+      .toBe('No current signs of dry pockets, but uneven sprinkler coverage remains possible in the thin areas.');
+  });
+
   test('a sentence not about the stress signals is left alone', () => {
     expect(replaceDroughtHypothesis('A drought was declared in the county.')).toBeNull();
   });

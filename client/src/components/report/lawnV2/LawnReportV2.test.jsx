@@ -38,10 +38,12 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.getByText('Verified data')).toBeInTheDocument();
   });
 
-  it('rain-unknown payload renders no false Rain 0" row (codex P2 r6)', () => {
-    render(<WaterIntakeBar water={{ rainInches: null, irrigationInches: 0.5, totalInches: 0.5, targetInches: 0.75, status: 'unknown', confidence: 'low', scheduleOnFile: true }} />);
+  it('rain-unknown payload renders no false Rain 0" row and no summed Total (codex P2 r6/r7)', () => {
+    render(<WaterIntakeBar water={{ rainInches: null, irrigationInches: 0.5, totalInches: null, targetInches: 0.75, status: 'unknown', confidence: 'low', scheduleOnFile: true }} />);
     expect(screen.queryByText('Rain')).not.toBeInTheDocument();
     expect(screen.getAllByText('Irrigation').length).toBeGreaterThan(0);
+    // Total from summing only the known components would claim rain was zero.
+    expect(screen.queryByText('Total')).not.toBeInTheDocument();
   });
 
   it('rain-unknown + no schedule keeps the low-confidence label (codex P2 r2)', () => {

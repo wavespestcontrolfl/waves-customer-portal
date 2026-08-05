@@ -178,7 +178,11 @@ function reconcileRainFigure(text, canonicalRain) {
 // (codex P2 r2). "dry patch(es)" is in the set too (codex P2 r5), but only
 // rewrites in a hypothesis-marked sentence — see the cue check below — since
 // "dry patches" can also be a literal field observation.
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:\s+stress)?|dry\s+pockets?|dry\s+spells?|dry\s+patch(?:es)?)\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
+// "drought-related" is its own leading alternative (the (?!-) hyphen guard
+// would otherwise exclude it) and rewrites to "sprinkler-coverage-related";
+// dry spot(s)/area(s) join patch(es) under the hypothesis-cue gate
+// (codex P2 r7).
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought(?:\s+stress)?|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 
 function replaceDroughtHypothesis(text) {
@@ -193,19 +197,23 @@ function replaceDroughtHypothesis(text) {
     // in the county" stays untouched).
     if (!/chinch|stress|thin|tan\b|patch|scuff/i.test(sentence)
       && !/\bdry\s+pockets?\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
-    // The negation must attach to the drought/dry wording itself, allowing
-    // up to three plain intervening words in the SAME clause ("no recent dry
-    // spells", "no current signs of dry pockets", "not drought-related") —
-    // punctuation breaks the chain, so an unrelated "No pests; drought
-    // stress remains possible" is still reconciled (codex P2 r3 + r4).
-    if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}(?:localized\s+)?(?:drought|dry)\b/i.test(sentence)) return sentence;
     // Headline-position matches keep their capitalization ("Dry pocket near
     // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").
-    // "dry patch(es)" only rewrites under a hypothesis cue — "a few dry
-    // patches were noted" is an OBSERVATION and must survive verbatim.
+    // dry patch/spot/area forms only rewrite under a hypothesis cue — "a few
+    // dry patches were noted" is an OBSERVATION and must survive verbatim.
     const hasCue = HYPOTHESIS_CUE_RE.test(sentence);
-    const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m) => {
-      if (/dry\s+patch/i.test(m) && !hasCue) return m;
+    const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m, offset) => {
+      // Negation is checked PER MATCH, not per sentence: it must attach to
+      // this occurrence (negator + up to three plain same-clause words right
+      // before it; punctuation breaks the chain), so "No current signs of
+      // dry pockets, but drought stress remains possible" preserves the
+      // negated phrase AND still reconciles the later hypothesis
+      // (codex P2 r3/r4/r7).
+      if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(sentence.slice(0, offset))) return m;
+      if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !hasCue) return m;
+      if (/drought[- ]related/i.test(m)) {
+        return /^[A-Z]/.test(m) ? 'Sprinkler-coverage-related' : 'sprinkler-coverage-related';
+      }
       return /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage';
     });
     if (replaced !== sentence) changed = true;
