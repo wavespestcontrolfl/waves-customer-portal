@@ -207,6 +207,30 @@ describe('translateV2CallToV1Input override forwarding', () => {
     expect('initialRoachPriceOverride' in standaloneOnly.services.pest).toBe(false);
   });
 
+  test('duplicate-skip state warns about an ignored standalone override instead of dropping it silently', () => {
+    // Recurring REGULAR + standalone REGULAR → translator keeps only the
+    // recurring auto-fired line. A standalone override sent in that state
+    // prices nothing — it must surface as a warning (codex P2 r2 #3223).
+    const v1Input = translateV2CallToV1Input(PROFILE, ['PEST', 'ROACH'], {
+      roachModifier: 'REGULAR',
+      roachType: 'REGULAR',
+      initialRoachPriceOverride: 180,
+      standaloneRoachPriceOverride: 300,
+    });
+    expect(v1Input.services.pestInitialRoach).toBeUndefined();
+    expect(v1Input.services.pest.initialRoachPriceOverride).toBe(180);
+    expect(v1Input.pricingMetadata.warnings).toContain(
+      'Standalone roach fee override ignored — recurring pest already covers the native roach knockdown. Use the recurring roach fee override instead.',
+    );
+
+    // Without a standalone override the skip stays warning-free.
+    const clean = translateV2CallToV1Input(PROFILE, ['PEST', 'ROACH'], {
+      roachModifier: 'REGULAR',
+      roachType: 'REGULAR',
+    });
+    expect((clean.pricingMetadata.warnings || []).some((w) => /override ignored/i.test(w))).toBe(false);
+  });
+
   test('absent or blank override adds no keys', () => {
     const noneGiven = translateV2CallToV1Input(PROFILE, ['PEST'], { roachModifier: 'GERMAN' });
     expect('initialRoachPriceOverride' in noneGiven.services.pest).toBe(false);

@@ -3282,6 +3282,15 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
         skippedService: 'standalone_native_cockroach_treatment',
         skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
       });
+      // The whole standalone branch is skipped, so a standalone override
+      // riding this request prices NOTHING — say so instead of dropping it
+      // silently (codex P2 r2 #3223). The recurring line has its own
+      // initialRoachPriceOverride.
+      if (standaloneRoachOverrideProvided) {
+        pricingMetadata.warnings.push(
+          'Standalone roach fee override ignored — recurring pest already covers the native roach knockdown. Use the recurring roach fee override instead.',
+        );
+      }
     } else {
       services.pestInitialRoach = {
         roachType: 'regular',

@@ -3730,8 +3730,14 @@ export default function EstimateToolViewV2({
       const standaloneRoachFeeOverride = parsePositiveNumber(
         form.standaloneRoachFeeOverride,
       );
+      // Duplicate state: recurring pest with REGULAR roach activity makes the
+      // translator skip the standalone native branch entirely — a standalone
+      // override sent then prices NOTHING, so don't send it (the field is
+      // also hidden in this state; codex P2 r2 #3223).
+      const standaloneRoachDuplicate =
+        form.svcPest && form.roachModifier === "REGULAR";
       const standaloneRoachFeeOverrideRelevant =
-        form.svcRoach && form.roachType === "REGULAR";
+        form.svcRoach && form.roachType === "REGULAR" && !standaloneRoachDuplicate;
       if (roachFeeOverrideRelevant && roachFeeOverrideRaw && !roachFeeOverride) {
         alert(
           "Roach one-time fee override must be a positive dollar amount — leave it blank to use the engine price.",
@@ -6815,24 +6821,37 @@ export default function EstimateToolViewV2({
                       German Roach Cleanout is a separate specialty program, not the German version of native cockroach treatment.
                     </div>
                   )}
-                  {form.roachType === "REGULAR" && (
-                    <>
-                      <FieldV2 label="Fee Override ($)" className="mb-0 mt-2">
-                        <InputV2
-                          k="standaloneRoachFeeOverride"
-                          type="number"
-                          placeholder="Engine price"
-                        />
-                      </FieldV2>
+                  {form.roachType === "REGULAR" &&
+                    (form.svcPest && form.roachModifier === "REGULAR" ? (
+                      // Duplicate state: the engine skips this standalone line
+                      // (recurring pest already auto-fires the same knockdown),
+                      // so an override typed here would price nothing. Point at
+                      // the field that does apply instead of showing an inert
+                      // input (codex P2 r2 #3223).
                       <div className="text-11 text-ink-secondary mt-2">
-                        Leave blank to use the engine's footprint-bracket price.
+                        Covered by the recurring pest roach knockdown — this
+                        standalone line is skipped. Use the One-Time Fee
+                        Override under Pest Control's Roach Activity instead.
                       </div>
-                      <RoachOverrideAppliedNote
-                        estimate={estimate}
-                        variant="standalone"
-                      />
-                    </>
-                  )}
+                    ) : (
+                      <>
+                        <FieldV2 label="Fee Override ($)" className="mb-0 mt-2">
+                          <InputV2
+                            k="standaloneRoachFeeOverride"
+                            type="number"
+                            placeholder="Engine price"
+                          />
+                        </FieldV2>
+                        <div className="text-11 text-ink-secondary mt-2">
+                          Leave blank to use the engine's footprint-bracket
+                          price.
+                        </div>
+                        <RoachOverrideAppliedNote
+                          estimate={estimate}
+                          variant="standalone"
+                        />
+                      </>
+                    ))}
                 </div>
               )}
               <CheckboxV2 k="svcWasp" label="Wasp/Bee/Stinging Insect" />{" "}
