@@ -289,3 +289,53 @@ describe('final_score equals sum of breakdown entries', () => {
     expect(r.final_score).toBe(sum);
   });
 });
+
+// ── page-anchored buckets (answer_gap) ───────────────────────────────
+
+describe('page-anchored bucket pinning (answer_gap)', () => {
+  test('answer_gap keeps refresh_existing_page when the profiler recommends a blog', () => {
+    const r = route(
+      opp({
+        bucket: 'answer_gap',
+        action_type: 'refresh_existing_page',
+        page_url: '/blog/do-ant-baits-work-outdoors/',
+        query: 'do ant baits work outdoors',
+      }),
+      {
+        serp_profile: serp({
+          dominant_intent: 'informational',
+          dominant_page_type: 'blog',
+          recommended_asset_type: 'new_supporting_blog',
+        }),
+      }
+    );
+    expect(r.action_type).toBe('refresh_existing_page');
+    expect(r.router_notes).toMatch(/page-anchored bucket answer_gap/);
+  });
+
+  test('answer_gap still honors SERP safety demotions (public-health)', () => {
+    const r = route(
+      opp({
+        bucket: 'answer_gap',
+        action_type: 'refresh_existing_page',
+        page_url: '/blog/mosquito-diseases/',
+        query: 'mosquito borne diseases florida',
+      }),
+      { serp_profile: serp({ dominant_intent: 'public-health' }) }
+    );
+    expect(r.action_type).toBe('do_not_publish');
+    expect(r.human_review_required).toBe(true);
+  });
+
+  test('non-page-anchored buckets still get the profiler upgrade', () => {
+    const r = route(
+      opp({
+        bucket: 'striking_distance',
+        action_type: 'new_supporting_blog',
+        query: 'exterminator bradenton',
+      }),
+      { serp_profile: serp({ recommended_asset_type: 'create_or_refresh_city_service_page' }) }
+    );
+    expect(r.action_type).toBe('create_or_refresh_city_service_page');
+  });
+});

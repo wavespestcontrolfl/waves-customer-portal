@@ -558,7 +558,7 @@ class GscOpportunityMiner {
     // score, and with already-occupied queue rows excluded so the per-run
     // cap rotates to lower-scoring pages (see deriveLinkBoost docs).
     try {
-      const occupied = await this._loadOccupiedLinkBoostKeys().catch((err) => {
+      const occupied = await this._loadOccupiedKeys('link_boost').catch((err) => {
         // Fail-open to pre-rotation behavior: re-emitting occupied rows is
         // harmless (persistAll freezes their status); dropping the lane on a
         // transient query error is not.
@@ -636,12 +636,13 @@ class GscOpportunityMiner {
     }
   }
 
-  // dedupe keys of link_boost rows persistAll's upsert would refuse to
+  // dedupe keys of a bucket's rows persistAll's upsert would refuse to
   // re-open (claimed / done / pending_review) — emitting those again only
-  // burns per-run cap slots on rows whose status can't change.
-  async _loadOccupiedLinkBoostKeys() {
+  // burns per-run cap slots on rows whose status can't change. Shared by
+  // the capped buckets (link_boost, answer_gap).
+  async _loadOccupiedKeys(bucket) {
     const rows = await db('opportunity_queue')
-      .where('bucket', 'link_boost')
+      .where('bucket', bucket)
       // 'skipped' counts as occupied too: the upsert keeps an operator
       // skip sticky, so re-deriving a skipped key just burns one of the
       // LINK_BOOST_MAX_PER_RUN slots on a row persistAll re-freezes as
@@ -1185,12 +1186,48 @@ class GscOpportunityMiner {
       p.total_impressions += q.impressions;
     }
 
-    const candidates = Array.from(pages.values())
-      .sort((a, b) => b.total_impressions - a.total_impressions)
-      .slice(0, maxPages);
+    // Rotation + starvation guards (mirrors link_boost's excludeKeys):
+    //   - pages whose queue row is frozen (claimed/done/pending_review/
+    //     skipped) are excluded BEFORE the cap — persistAll can't re-open
+    //     them, so they'd only burn cap slots run after run;
+    //   - unloadable pages (not resolvable to an Astro file) don't consume
+    //     the cap either — walk on down the sorted list, bounded at
+    //     maxPages*3 load attempts so a pathological list can't turn into
+    //     an unbounded GitHub read loop.
+    // Service/city (and therefore the dedupe key) are derived from URL +
+    // the page's TOP query — deterministic before the body loads, so the
+    // pre-cap occupied check and the emitted row always agree on the key.
+    const occupied = await this._loadOccupiedKeys('answer_gap').catch((err) => {
+      logger.warn(`[gsc-opp-miner] answer_gap: occupied keys load failed: ${err.message}`);
+      return new Set();
+    });
 
+    const candidates = [];
+    for (const page of Array.from(pages.values())
+      .sort((a, b) => b.total_impressions - a.total_impressions)) {
+      page.queries.sort((a, b) => b.impressions - a.impressions);
+      page.service = inferServiceFromUrl(page.page_url)
+        // Blog URLs often carry no service token even when the demand
+        // clearly maps to one — a null service under-scores the row
+        // (localRevenueScore floor, no factsReady boost) and starves the
+        // lane. City stays URL-only ON PURPOSE: a query-inferred city on a
+        // non-city page would attach wrong-city facts to the refresh.
+        || inferServiceFromQuery(page.queries[0].query);
+      page.city = inferCityFromUrl(page.page_url);
+      page.dedupe_key = dedupeKey({
+        bucket: 'answer_gap', service: page.service, city: page.city, page_url: page.page_url,
+      });
+      if (occupied.has(page.dedupe_key)) continue;
+      candidates.push(page);
+    }
+
+    const maxAttempts = maxPages * 3;
+    let attempts = 0;
+    let examined = 0;
     const out = [];
     for (const page of candidates) {
+      if (examined >= maxPages || attempts >= maxAttempts) break;
+      attempts += 1;
       let loaded = null;
       try {
         loaded = await astroPublisher.loadExistingPageBody(page.page_url);
@@ -1198,8 +1235,8 @@ class GscOpportunityMiner {
         logger.warn(`[gsc-opp-miner] answer_gap: body load failed for ${page.page_url}: ${err.message}`);
       }
       if (!loaded || !loaded.body) continue; // not an editable Astro page
+      examined += 1;
 
-      page.queries.sort((a, b) => b.impressions - a.impressions);
       const { unanswered, answered_count } = classifyAnswerGapQueries(page.queries, loaded.body);
       if (!unanswered.length) continue;
 
@@ -1214,8 +1251,8 @@ class GscOpportunityMiner {
         // Strongest unanswered query anchors the brief's target_keyword.
         query: kept[0].query,
         page_url: page.page_url,
-        service: inferServiceFromUrl(page.page_url),
-        city: inferCityFromUrl(page.page_url),
+        service: page.service,
+        city: page.city,
         signal_metadata: {
           // `impressions` (canonical key content-brief-builder reads) = the
           // GAP demand only — impressions on the kept unanswered queries,

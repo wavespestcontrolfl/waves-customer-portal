@@ -61,6 +61,19 @@ const ACTION_EXPECTS_PAGE_TYPE = {
 // bucket.
 const OPERATOR_PINNED_BUCKETS = new Set(['operator_intercept']);
 
+// ── page-anchored buckets ───────────────────────────────────────────
+//
+// answer_gap rows exist to edit THE page they were mined from — the miner
+// proved the page already ranks 9–30 for the unanswered queries, and the
+// refresh agent's ANSWER-GAP MODE only ever runs on refresh_existing_page.
+// Letting the SERP profiler upgrade the action to its recommended asset
+// (typically new_supporting_blog for informational queries) would dispatch
+// the writer agent instead: the ranked page stays unchanged and a duplicate
+// article competes with it. Safety demotions (public-health, navigational,
+// explicit do_not_publish) still apply — only the recommended-asset upgrade
+// is skipped.
+const PAGE_ANCHORED_BUCKETS = new Set(['answer_gap']);
+
 function isOperatorPinned(opportunity = {}) {
   if (OPERATOR_PINNED_BUCKETS.has(opportunity.bucket)) return true;
   const meta = opportunity.signal_metadata;
@@ -141,10 +154,15 @@ function route(opportunity, signals = {}) {
       notes.push('blocked: profiler do_not_publish');
     } else {
       // If profiler's recommended action differs from miner's, defer
-      // to the profiler — it has the live SERP data.
+      // to the profiler — it has the live SERP data. Page-anchored buckets
+      // are exempt: their action IS the point (see PAGE_ANCHORED_BUCKETS).
       if (recommended && recommended !== action && action !== 'rewrite_title_meta') {
-        notes.push(`router upgraded action: ${action} → ${recommended} (per SERP profile)`);
-        action = recommended;
+        if (PAGE_ANCHORED_BUCKETS.has(opportunity.bucket)) {
+          notes.push(`page-anchored bucket ${opportunity.bucket}: kept ${action} (profiler suggested ${recommended})`);
+        } else {
+          notes.push(`router upgraded action: ${action} → ${recommended} (per SERP profile)`);
+          action = recommended;
+        }
       }
 
       // Mismatch penalty: action expects a page type the SERP isn't
