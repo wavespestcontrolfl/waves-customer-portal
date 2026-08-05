@@ -7738,6 +7738,31 @@ router.put('/:token/accept', async (req, res, next) => {
       // conversion, no invoice mint, no sends). Best-effort: a rebuild
       // failure degrades to the legacy bare payload rather than blocking
       // the retry.
+      // Fast-redeem on the already-accepted RETRY too (Codex #3178 r38
+      // P2): the first accept can commit bookings + evidence + invoice and
+      // die before its own redemption block, and this retry still hands
+      // back the persisted pay link — so the credit must be in the balance
+      // before the customer can use it. Idempotent and best-effort; the
+      // payload rebuild stays read-only otherwise.
+      if (estimate.customer_id) {
+        try {
+          const acceptedVisits = await db('scheduled_services')
+            .where({ source_estimate_id: estimate.id })
+            .whereNotIn('status', ['cancelled', 'canceled', 'skipped', 'no_show'])
+            .whereRaw('COALESCE(is_callback, false) = false')
+            .limit(5)
+            .select('id');
+          for (const visit of acceptedVisits) {
+            await require('../services/inspection-credit').redeemInspectionCreditForBooking({
+              customerId: estimate.customer_id,
+              scheduledServiceId: visit.id,
+              createdBy: 'system:inspection_credit_estimate_accept_replay',
+            });
+          }
+        } catch (replayErr) {
+          logger.warn(`[estimate-accept] replay credit redemption deferred to sweep for estimate ${estimate.id}: ${replayErr.message}`);
+        }
+      }
       try {
         return res.json(await buildAlreadyAcceptedSuccessPayload(estimate));
       } catch (e) {

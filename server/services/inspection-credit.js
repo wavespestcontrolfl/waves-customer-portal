@@ -400,21 +400,28 @@ async function markBookingForInspectionCredit(trx, {
     // when the booking it proves does.
     logger.error(`[inspection-credit] booking event failed for ${scheduledServiceId} (post-commit retry queued): ${err.message}`);
     try {
-      await require('./notification-service').notifyAdmin(
-        'billing',
-        'Inspection-credit booking evidence failed — auto-recovery queued',
-        'A booking could not record its inspection-credit evidence in-transaction. The retry ladder and the hourly sweep will recover it automatically; no action needed unless this alert repeats for the same customer.',
-        {
-          link: `/admin/customers/${customerId}`,
-          connection: trx,
-          metadata: {
-            reason: 'booking_evidence_outbox',
-            customerId, scheduledServiceId,
-            source: eventRow.source,
-            bookedAt: eventRow.created_at.toISOString(),
+      // Own SAVEPOINT (Codex #3178 r38 P2): notification-service catches
+      // its own SQL error and returns null, but the failed statement still
+      // leaves the CALLER'S transaction aborted on Postgres — without this
+      // isolation an outbox hiccup would roll back the booking the whole
+      // ladder exists to protect.
+      await trx.transaction(async (sp) => {
+        await require('./notification-service').notifyAdmin(
+          'billing',
+          'Inspection-credit booking evidence failed — auto-recovery queued',
+          'A booking could not record its inspection-credit evidence in-transaction. The retry ladder and the hourly sweep will recover it automatically; no action needed unless this alert repeats for the same customer.',
+          {
+            link: `/admin/customers/${customerId}`,
+            connection: sp,
+            metadata: {
+              reason: 'booking_evidence_outbox',
+              customerId, scheduledServiceId,
+              source: eventRow.source,
+              bookedAt: eventRow.created_at.toISOString(),
+            },
           },
-        },
-      );
+        );
+      });
     } catch (outboxErr) {
       logger.error(`[inspection-credit] evidence outbox write failed for ${scheduledServiceId}: ${outboxErr.message}`);
     }
@@ -969,14 +976,20 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
         // is the insert instant (timestamps default) for offered rows; a
         // reversal reopen refreshes it, which at worst re-states a
         // reopened offer's deadline once.
+        // Only rows the provider actually took count as delivered (r38
+        // P2): a blocked/failed/stale-queued message row must keep this
+        // NOT EXISTS true so the sweep re-queues — the resend's own
+        // ok:false handling then raises the once-per-offer alert; the
+        // email layer's idempotency key prevents double-sends.
         .whereRaw(`NOT EXISTS (
           SELECT 1 FROM email_messages m
-          WHERE (m.idempotency_key = 'inspection-credit-offer-' || o.id::text)
-            OR (m.created_at >= o.updated_at
-              AND m.trigger_event_id IN (
-                SELECT 'invoice_receipt:' || i2.id::text FROM invoices i2
-                WHERE i2.scheduled_service_id = o.source_scheduled_service_id
-                  AND i2.status = 'paid' AND i2.payer_id IS NULL))
+          WHERE m.status IN ('sent', 'delivered', 'opened', 'clicked')
+            AND ((m.idempotency_key = 'inspection-credit-offer-' || o.id::text)
+              OR (m.created_at >= o.updated_at
+                AND m.trigger_event_id IN (
+                  SELECT 'invoice_receipt:' || i2.id::text FROM invoices i2
+                  WHERE i2.scheduled_service_id = o.source_scheduled_service_id
+                    AND i2.status = 'paid' AND i2.payer_id IS NULL)))
         )`)
         .limit(limit)
         .select('o.id as id', 'o.source_scheduled_service_id as visit_id');

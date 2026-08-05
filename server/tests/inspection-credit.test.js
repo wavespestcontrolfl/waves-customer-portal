@@ -1010,6 +1010,24 @@ describe('closeout route wiring — source contracts (the completion route is to
     // self-book replay (r37 P2).
     const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(callProc).toContain("createdBy: 'system:inspection_credit_call_booking_replay'");
+    // The already-accepted estimate retry redeems too (r38 P2) — the
+    // retry hands back the persisted pay link, so the credit must be in
+    // the balance first.
+    expect(estimate).toContain("createdBy: 'system:inspection_credit_estimate_accept_replay'");
+  });
+
+  it('outbox writes are savepoint-isolated; only provider-taken sends count as delivered (r38 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // A failed outbox insert poisons the caller's Postgres trx unless
+    // isolated — the savepoint keeps a notification hiccup from rolling
+    // back the booking the ladder protects.
+    const outboxAt = source.indexOf("reason: 'booking_evidence_outbox'");
+    const spAt = source.lastIndexOf('await trx.transaction(async (sp) => {', outboxAt);
+    expect(outboxAt).toBeGreaterThan(-1);
+    expect(spAt).toBeGreaterThan(-1);
+    expect(source.slice(spAt, outboxAt)).toContain('notifyAdmin'); // the outbox rides the savepoint
+    // Blocked/failed/stale-queued message rows keep the audit re-queueing.
+    expect(source).toContain("m.status IN ('sent', 'delivered', 'opened', 'clicked')");
   });
 
   it('both schedule serializers forward the lookup-failed marker (r34 P2)', () => {
