@@ -333,7 +333,27 @@ async function handleEvent(ev) {
   }
   if (automationSend) {
     const processedNew = await processWebhookEvent(ev, messageId, email, (trx) => handleAutomationEvent(ev, automationSend, trx));
-    if (processedNew) alertUntrackedHardBounce();
+    if (processedNew) {
+      // Automations span both streams: newsletter-group templates
+      // (cold_lead nurture, referral nudges) are MARKETING — their bounces
+      // stay with the suppression/enrollment lane and must never enter the
+      // contact-rewriting rescue. Resolve the step's template asm_group;
+      // fail CLOSED (no rescue) when it can't be resolved.
+      let newsletterAutomation = true;
+      try {
+        const step = automationSend.step_id
+          ? await db('automation_steps').where({ id: automationSend.step_id }).first()
+          : null;
+        const template = step?.template_key
+          ? await db('automation_templates').where({ key: step.template_key }).first()
+          : null;
+        newsletterAutomation = !template
+          || String(template.asm_group || 'service').trim().toLowerCase() === 'newsletter';
+      } catch (err) {
+        logger.warn(`[sendgrid-webhook] automation asm_group lookup failed (rescue withheld): ${err.message}`);
+      }
+      alertUntrackedHardBounce({ rescue: !newsletterAutomation });
+    }
     return;
   }
   if (emailMessage) {
