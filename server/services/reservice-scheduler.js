@@ -68,18 +68,28 @@ function laneForCallbackRow({ serviceKey, serviceType } = {}) {
   return /\blawn\b|\bturf\b/i.test(String(serviceType || '')) ? 'lawn' : 'pest';
 }
 
+// Terminal statuses that are NOT delivered coverage: a cancelled /
+// rescheduled-phantom / no-show / skipped pest row was never live pest
+// service, so it cannot back a membership's pest lane (codex r3 P2).
+// COMPLETED stays in — a delivered visit is the between-extensions evidence
+// the membership grant exists for.
+const NON_COVERAGE_STATUSES = TERMINAL_STATUSES.filter((s) => s !== 'completed');
+
 /**
  * Pest-backed evidence for a WaveGuard membership: any recurring
- * pest-classified row in the account's service history — completed rows
- * count, because "between seeded extensions" (no upcoming rows yet) is
- * exactly the case the membership grant exists for. Callback/re-service rows
- * never count (same exclusion the coverage loop applies).
+ * pest-classified row in the account's service history that was live
+ * coverage — upcoming rows and COMPLETED rows count ("between seeded
+ * extensions", no upcoming rows yet, is exactly the case the membership
+ * grant exists for); cancelled/no-show/skipped/rescheduled rows do not.
+ * Callback/re-service rows never count (same exclusion the coverage loop
+ * applies).
  */
 async function membershipPestEvidence(customerId) {
   const rows = await db('scheduled_services as hist')
     .leftJoin('services as sv', 'hist.service_id', 'sv.id')
     .where('hist.customer_id', customerId)
     .where('hist.is_recurring', true)
+    .whereNotIn('hist.status', NON_COVERAGE_STATUSES)
     .select('hist.service_type', 'hist.is_callback', 'sv.service_key', 'sv.category')
     .orderBy('hist.scheduled_date', 'desc')
     .limit(500);
@@ -212,6 +222,7 @@ async function openCallbackExistsForLane(dbh, customerId, lane) {
 module.exports = {
   RESERVICE_LANES,
   OPEN_CALLBACK_STATUSES,
+  NON_COVERAGE_STATUSES,
   reserviceSelfServeEnabled,
   laneForCoverageRow,
   laneForCallbackRow,

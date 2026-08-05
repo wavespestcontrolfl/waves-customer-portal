@@ -2115,11 +2115,18 @@ async function createSelfBooking(payload = {}) {
       }
 
       // Idempotent replay: same customer, same day, same start time →
-      // return the original booking instead of creating a duplicate.
-      const existing = await trx('self_booked_appointments')
+      // return the original booking instead of creating a duplicate. A
+      // callback commit additionally requires the existing row to be THIS
+      // callback's service (the server-pinned catalog label) — otherwise a
+      // parallel commit for the OTHER lane (or a paid /book booking) at the
+      // exact same start would replay as this lane's success while no such
+      // callback exists; the mismatch falls through to the lane-dedupe and
+      // slot-conflict checks, which answer truthfully (codex r3 P2).
+      const replayQuery = trx('self_booked_appointments')
         .where({ customer_id: custId, date: slotDateStr, start_time: slot_start })
-        .whereNot('status', 'cancelled')
-        .first();
+        .whereNot('status', 'cancelled');
+      if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);
+      const existing = await replayQuery.first();
       if (existing) return { existing };
 
       if (callbackVisit) {

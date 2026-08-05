@@ -55,6 +55,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   RESERVICE_LANES,
   OPEN_CALLBACK_STATUSES,
+  NON_COVERAGE_STATUSES,
   laneForCoverageRow,
   laneForCallbackRow,
   reserviceLanesForCustomer,
@@ -138,6 +139,20 @@ describe('lane classification', () => {
     // Tier with zero service history: conservative no-lane (office-handled).
     listResults['scheduled_services as hist'] = [];
     expect(await reserviceLanesForCustomer({ id: CUST_ID, waveguard_tier: 'Silver' })).toEqual([]);
+  });
+
+  test('membership pest evidence counts only LIVE coverage — cancelled/no-show/skipped/rescheduled rows are excluded, completed stays (codex r3 P2)', () => {
+    // The db mock passes filters through, so the contract is pinned on the
+    // constant + the query source: every terminal status EXCEPT completed is
+    // excluded from evidence.
+    expect([...NON_COVERAGE_STATUSES].sort()).toEqual(['cancelled', 'no_show', 'rescheduled', 'skipped']);
+    const schedulerSrc = fs.readFileSync(path.join(__dirname, '../services/reservice-scheduler.js'), 'utf8');
+    const evidenceIdx = schedulerSrc.indexOf('async function membershipPestEvidence(');
+    const statusFilterIdx = schedulerSrc.indexOf(".whereNotIn('hist.status', NON_COVERAGE_STATUSES)", evidenceIdx);
+    const evidenceEndIdx = schedulerSrc.indexOf('async function reserviceLanesForCustomer(', evidenceIdx);
+    expect(evidenceIdx).toBeGreaterThan(-1);
+    expect(statusFilterIdx).toBeGreaterThan(evidenceIdx);
+    expect(statusFilterIdx).toBeLessThan(evidenceEndIdx);
   });
 
   test('coverage rows add lanes; callback and re-service rows never count as coverage', async () => {
@@ -305,6 +320,19 @@ describe('lane dedupe atomicity (source guards, codex P1 #3194)', () => {
     // from a slot race.
     expect(bookingSrc).toMatch(/code: 'ALREADY_BOOKED',/);
     expect(bookingSrc).toMatch(/txErr\.code === 'SLOT_TAKEN' \|\| txErr\.code === 'DAY_FULL' \|\| txErr\.code === 'ALREADY_BOOKED'/);
+  });
+
+  test('a callback commit only replays ITS OWN service — a parallel other-lane or paid booking at the same start falls through to the real checks (codex r3 P2)', () => {
+    const replayIdx = bookingSrc.indexOf("const replayQuery = trx('self_booked_appointments')");
+    const laneQualifierIdx = bookingSrc.indexOf("if (callbackVisit) replayQuery.where('service_type', resolvedServiceType);");
+    const replayReturnIdx = bookingSrc.indexOf('if (existing) return { existing };');
+    const recheckIdx = bookingSrc.indexOf('await openCallbackExistsForLane(trx, custId, lane)');
+    expect(replayIdx).toBeGreaterThan(-1);
+    // The service qualifier applies to the replay lookup, before its return,
+    // and the lane dedupe still runs after a non-matching replay.
+    expect(laneQualifierIdx).toBeGreaterThan(replayIdx);
+    expect(laneQualifierIdx).toBeLessThan(replayReturnIdx);
+    expect(recheckIdx).toBeGreaterThan(replayReturnIdx);
   });
 
   test('live callbacks (en_route/on_site) still block the lane — dedupe uses the open-status set (codex P2)', () => {
