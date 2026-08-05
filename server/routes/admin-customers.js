@@ -2088,13 +2088,15 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
-        // mosquito_seasonal is is_active=false until the owner activates the
-        // program, but a seasonal QUOTE still needs its catalog identity —
-        // without it the fuzzy match stamps mosquito_monthly's service_id on
-        // a seasonal booking and catalog-first consumers classify the plan
-        // as 12-visit monthly (codex r16 P2). Inactive here only widens the
-        // schedule-modal pre-fill's identity resolution; it does not make
-        // the service bookable anywhere else.
+        // mosquito_seasonal is active as of 20260805000010, making the
+        // orWhere idempotent — it is RETAINED as a safety net so a seasonal
+        // QUOTE keeps its catalog identity even if the row is ever
+        // deactivated again: without it the fuzzy match stamps
+        // mosquito_monthly's service_id on a seasonal booking and
+        // catalog-first consumers classify the plan as 12-visit monthly
+        // (codex r16 P2). Widening here only affects the schedule-modal
+        // pre-fill's identity resolution; it never makes an inactive
+        // service bookable elsewhere.
         .where((q) => q.where({ is_active: true }).orWhere({ service_key: 'mosquito_seasonal' }))
         .select(
           'id', 'service_key', 'name', 'short_name', 'category', 'billing_type',

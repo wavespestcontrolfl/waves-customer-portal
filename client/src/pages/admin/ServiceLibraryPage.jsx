@@ -175,6 +175,7 @@ function frequencyLabel(f) {
     {
       monthly: "Monthly",
       every_6_weeks: "Every 6 wk",
+      seasonal_feb_oct: "Seasonal (Feb–Oct)",
       bimonthly: "Bi-monthly",
       quarterly: "Quarterly",
       semiannual: "Semiannual",
@@ -433,6 +434,7 @@ function ServiceForm({ svc, onSave, onCancel, isNew }) {
             { value: "", label: "N/A" },
             { value: "monthly", label: "Monthly" },
             { value: "every_6_weeks", label: "Every 6 Weeks" },
+            { value: "seasonal_feb_oct", label: "Seasonal (Feb–Oct)" },
             { value: "bimonthly", label: "Bi-Monthly" },
             { value: "quarterly", label: "Quarterly" },
             { value: "semiannual", label: "Semiannual" },
