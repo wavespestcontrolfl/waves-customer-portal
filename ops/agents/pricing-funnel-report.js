@@ -90,19 +90,35 @@ function extractPest(row) {
     // (codex #3199).
     const sqft = Number(engLine.footprintUsed ?? engRoot.property?.footprint
       ?? engRoot.property?.homeSqFt ?? d.engineInputs?.homeSqFt ?? d.inputs?.homeSqFt);
-    const wantApps = FREQ_KEY_TO_APPS[row.accepted_frequency_key] ?? null;
+    // Accepted cadence: bundles persist per-service choices in
+    // customerSelection.serviceCadences; the row-level key is the
+    // top-level/pest selection (codex #3199 r2).
+    const cadenceKey = d.customerSelection?.serviceCadences?.pest_control
+      ?? row.accepted_frequency_key;
+    const wantApps = FREQ_KEY_TO_APPS[cadenceKey] ?? null;
     const tier = Array.isArray(engLine.tiers)
       ? (wantApps ? engLine.tiers.find((t) => Number(t.freq) === wantApps)
         : engLine.tiers.find((t) => t.selected || t.isSelected))
       : null;
-    // Net over gross: WaveGuard/manual discounts bill annualAfterDiscount —
-    // banding the gross ladder price puts discounted customers in the wrong
-    // band and inflates medians (codex #3199).
-    const visits = Number(tier?.freq ?? engLine.visitsPerYear) || 4;
-    const netAnnual = Number(engLine.annualAfterDiscount);
-    const perVisit = Number.isFinite(netAnnual) && netAnnual > 0
-      ? Math.round((netAnnual / visits) * 100) / 100
-      : Number(tier?.perApp ?? engLine.perApp);
+    // Net over gross, TIER-FIRST (codex #3199 r2): the persisted line's
+    // annualAfterDiscount belongs to the line's OWN cadence — dividing it
+    // by a different accepted tier's visit count invents a price. Price
+    // from the accepted tier's own gross, then apply the line's discount
+    // as a RATIO.
+    const grossLineAnnual = Number(engLine.annualBeforeDiscount ?? engLine.annual);
+    const netLineAnnual = Number(engLine.annualAfterDiscount);
+    const discountRatio = Number.isFinite(netLineAnnual) && Number.isFinite(grossLineAnnual)
+      && grossLineAnnual > 0 && netLineAnnual > 0 && netLineAnnual <= grossLineAnnual
+      ? netLineAnnual / grossLineAnnual : 1;
+    let perVisit;
+    if (tier && Number(tier.perApp) > 0) {
+      perVisit = Math.round(Number(tier.perApp) * discountRatio * 100) / 100;
+    } else {
+      const visits = Number(engLine.visitsPerYear) || 4;
+      perVisit = Number.isFinite(netLineAnnual) && netLineAnnual > 0
+        ? Math.round((netLineAnnual / visits) * 100) / 100
+        : Number(engLine.perApp);
+    }
     return sqft > 0 && perVisit > 0 ? { sqft, perVisit } : null;
   }
   if (d?.result?.results?.pestTiers || d?.result?.results?.pest) {
@@ -123,20 +139,34 @@ function extractLawn(row) {
   if (engLine) {
     const sqft = Number(engLine.turfSf ?? engLine.lawnSqFt ?? engRoot.property?.turfSf
       ?? engRoot.property?.lawnSqFt ?? d.engineInputs?.measuredTurfSf ?? d.inputs?.measuredTurfSf);
-    const acceptedV = LAWN_FREQ_KEY_TO_V[row.accepted_frequency_key] ?? Number(row.accepted_frequency_key);
+    const lawnCadenceKey = d.customerSelection?.serviceCadences?.lawn_care
+      ?? row.accepted_frequency_key;
+    const acceptedV = LAWN_FREQ_KEY_TO_V[lawnCadenceKey] ?? Number(lawnCadenceKey);
     const tier = Array.isArray(engLine.tiers)
       ? engLine.tiers.find((t) => Number(t.freq ?? t.v) === acceptedV)
       : null;
-    const visits = Number(tier?.freq ?? tier?.v ?? engLine.frequency) || 9;
-    const netAnnual = Number(engLine.annualAfterDiscount);
-    const perApp = Number.isFinite(netAnnual) && netAnnual > 0
-      ? Math.round((netAnnual / visits) * 100) / 100
-      : Number(tier?.perApp ?? engLine.perApp);
+    // Tier-first net pricing — mirror of the pest handling (codex #3199 r2).
+    const grossLineAnnual = Number(engLine.annualBeforeDiscount ?? engLine.annual);
+    const netLineAnnual = Number(engLine.annualAfterDiscount);
+    const discountRatio = Number.isFinite(netLineAnnual) && Number.isFinite(grossLineAnnual)
+      && grossLineAnnual > 0 && netLineAnnual > 0 && netLineAnnual <= grossLineAnnual
+      ? netLineAnnual / grossLineAnnual : 1;
+    let perApp;
+    if (tier && Number(tier.perApp) > 0) {
+      perApp = Math.round(Number(tier.perApp) * discountRatio * 100) / 100;
+    } else {
+      const visits = Number(engLine.frequency) || 9;
+      perApp = Number.isFinite(netLineAnnual) && netLineAnnual > 0
+        ? Math.round((netLineAnnual / visits) * 100) / 100
+        : Number(engLine.perApp);
+    }
     return sqft > 0 && perApp > 0 ? { sqft, perApp } : null;
   }
   if (d?.result?.results?.lawn) {
     const tiers = d.result.results.lawn;
-    const acceptedV = LAWN_FREQ_KEY_TO_V[row.accepted_frequency_key] ?? Number(row.accepted_frequency_key);
+    const clientLawnKey = d.customerSelection?.serviceCadences?.lawn_care
+      ?? row.accepted_frequency_key;
+    const acceptedV = LAWN_FREQ_KEY_TO_V[clientLawnKey] ?? Number(clientLawnKey);
     const wantV = Number.isFinite(acceptedV) && acceptedV > 0 ? acceptedV : (Number(d.inputs?.lawnFreq) || 9);
     const tier = tiers.find((t) => Number(t.v) === wantV)
       || tiers.find((t) => t.recommended) || tiers.find((t) => Number(t.v) === 9) || tiers[0];
