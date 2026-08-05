@@ -35,6 +35,15 @@ describe('reconcileRainFigure', () => {
     )).toBe('Irrigation added 0.75 inches while rain totaled 2.96 inches this week.');
   });
 
+  test('a unit-bearing rain range is never corrupted (codex P2 r20)', () => {
+    expect(reconcileRainFigure('Rainfall was between 1 inch and 2 inches this week.', 2.96)).toBeNull();
+  });
+
+  test('a daily-window total is never rewritten to the weekly figure (codex P2 r20)', () => {
+    expect(reconcileRainFigure('Rainfall totaled 0.4 inches in the last 24 hours.', 2.96)).toBeNull();
+    expect(reconcileRainFigure('Rainfall totaled 0.4 inches today.', 2.96)).toBeNull();
+  });
+
   test('matching figures are untouched (null = no change)', () => {
     expect(reconcileRainFigure('With 2.96 inches of rain over the past week, moisture stays high.', 2.96)).toBeNull();
   });
@@ -295,6 +304,22 @@ describe('replaceDroughtHypothesis', () => {
 
   test('a pre-phrase "less likely to be" dismissal is preserved (codex P2 r19)', () => {
     expect(replaceDroughtHypothesis('The thinning is less likely to be drought stress.')).toBeNull();
+  });
+
+  test('pre-phrase "due to"/"from" dismissals are preserved (codex P2 r20)', () => {
+    expect(replaceDroughtHypothesis('The thinning is less likely due to drought stress.')).toBeNull();
+    expect(replaceDroughtHypothesis('The damage is unlikely from drought stress.')).toBeNull();
+  });
+
+  test('a resolved dry spell is historical, not a hypothesis (codex P2 r20)', () => {
+    expect(replaceDroughtHypothesis('Dry spell ended after this week’s heavy rain.')).toBeNull();
+  });
+
+  test('sentence-initial dry-spot hypotheses still reconcile (codex P2 r20)', () => {
+    expect(replaceDroughtHypothesis('Dry spots could be contributing to the thinning.'))
+      .toBe('Uneven sprinkler coverage could be contributing to the thinning.');
+    expect(replaceDroughtHypothesis('Dry areas may be stressing the strip.'))
+      .toBe('Uneven sprinkler coverage may be stressing the strip.');
   });
 
   test('a negated dismissal with modifiers still reconciles (codex P2 r18)', () => {

@@ -127,6 +127,12 @@ function reconcileRainFigure(text, canonicalRain) {
     // inches" must qualify too (codex P2 r6).
     if (!/\brain(?:fall)?\b|\bprecipitation\b/i.test(sentence)) return sentence;
     if (!/\bweek\b|\b7[- ]days?\b|\b(?:past|last) seven\b|\bseven days\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
+    // "total…" alone can also describe a DAILY window — "Rainfall totaled
+    // 0.4 inches in the last 24 hours" is not the weekly figure. A sentence
+    // naming a sub-weekly window with no true week/7-day window is skipped
+    // whole (codex P2 r20).
+    if (!/\bweek\b|\b7[- ]days?\b|\b(?:past|last)\s+seven\b|\bseven\s+days\b/i.test(sentence)
+      && /\b(?:24[- ]hours?|today|tonight|this\s+morning|yesterday|overnight|daily|since\s+midnight)\b/i.test(sentence)) return sentence;
     // A COMBINED rain+irrigation/total-water figure is not the rain total —
     // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
     // contradict the widget's Total row (codex P2 r5).
@@ -183,7 +189,12 @@ function reconcileRainFigure(text, canonicalRain) {
       if (/\b(?:irrigation|sprinklers?|watering)\b[^.\d]{0,16}$/i.test(before)) return match;
       // A range endpoint ("0.75 to 1 inch") is target copy, not a total —
       // skip a figure preceded by number + range connector (codex P2 r17).
-      if (/\d[\s"″]*(?:to|–|—|through|and)\s*$/i.test(before)) return match;
+      // The connector may follow the first endpoint's UNIT ("between 1 inch
+      // and 2 inches"), and the range's FIRST endpoint is guarded by its
+      // "between"/"from" opener — rewriting either endpoint corrupts the
+      // range (codex P2 r20). Neither skip consumes the attempt.
+      if (/\d[\s"″]*(?:(?:inch(?:es)?|in\.?)\s+)?(?:to|–|—|through|and)\s*$/i.test(before)) return match;
+      if (/\b(?:between|from)\s+(?:the\s+|about\s+|around\s+|roughly\s+)?$/i.test(before)) return match;
       // The after-guard also allows an explicit target FIGURE between the
       // delta preposition and the target word — "1.97 inches above the
       // 0.75-inch target" is a delta, not the weekly total (codex P2 r16).
@@ -287,17 +298,32 @@ function replaceDroughtHypothesis(text) {
       if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(pre)) return m;
       // The pre-phrase dismissal set mirrors the post-phrase guard's
       // ("less likely to be drought stress" — codex P2 r19).
-      if (/\b(?:unlikely|less\s+likely|doubtful|improbable)\s+to\s+be\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
+      // …and the dismissal's connector can be "due to"/"from"/"because of"
+      // as well as "to be" ("less likely due to drought stress" —
+      // codex P2 r20).
+      if (/\b(?:unlikely|less\s+likely|doubtful|improbable)\s+(?:to\s+be|due\s+to|from|because\s+of)\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)) return m;
       if (/\bruled?\s+out\s+(?:[a-z'’-]+\s+){0,2}$/i.test(pre)
         && !/\b(?:can(?:not|['’]t)|couldn['’]t|won['’]t)\s+(?:[a-z'’-]+\s+){0,3}rule\b/i.test(pre.slice(-40))) return m;
-      if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) return m;
+      // …but a SENTENCE-INITIAL dry-area phrase with a same-clause cue right
+      // AFTER it is still a hypothesis ("Dry spots could be contributing to
+      // the thinning" — codex P2 r20); observation verbs keep their veto and
+      // the cue search stops at clause punctuation.
+      if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) {
+        const atStart = /^\W*$/.test(sentence.slice(0, offset));
+        const tailClause = sentence.slice(offset + m.length).split(/[,;:.]/)[0];
+        const wasObserved = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence);
+        if (!atStart || wasObserved || !HYPOTHESIS_CUE_RE.test(tailClause)) return m;
+      }
       // dry pocket/spell: a hypothesis under a cue OR a terse headline
       // ("Dry pocket near the sidewalk") — but never an OBSERVATION sentence
       // ("Dry pockets were noted in thin turf", codex P2 r10): observation
       // verbs veto the headline path.
       if (/dry\s+(?:pockets?|spells?)/i.test(m) && !cueBefore(offset)) {
         const sentenceStart = /^\W*$/.test(sentence.slice(0, offset));
-        const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing)\b/i.test(sentence);
+        // Resolved/past wording is historical, not a live hypothesis —
+        // "Dry spell ended after this week's heavy rain" must not become
+        // coverage copy (codex P2 r20).
+        const observed = /\b(?:noted|observed|seen|found|documented|recorded|visible|showing|ended|passed|resolved|subsided|broke|eased)\b/i.test(sentence);
         if (!sentenceStart || observed) return m;
       }
       // A negation can also FOLLOW the phrase ("Drought stress was not
