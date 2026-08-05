@@ -95,7 +95,7 @@ const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
-const { loadBookableCallServices, loadCallReServiceRows, summarizeCallReServiceHistory, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
+const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
 const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('./call-booking-source-actions');
 const { validateAddress, buildAddressLines } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
@@ -8003,12 +8003,35 @@ const CallRecordingProcessor = {
     // the booking. Also rescues catalog services whose names don't hit the
     // coarse canonicalWavesService buckets (every bookable service must be
     // bookable by phone). null -> legacy coarse-label behavior.
+    // Live re-service lane context for the resolver's revisit override (codex
+    // #3222 r1): eligibility is the reservice lane's OWN plan check
+    // (reserviceLanesForCustomer — live recurring/WaveGuard coverage), never
+    // completed history, and a lane with an open callback is dropped here so
+    // a second free visit can't resolve (advisory — the booking transaction
+    // re-checks authoritatively). Intent-gated so the lookups only run on
+    // revisit-shaped calls; fail-closed — an error grants no lanes (generic
+    // anchoring, never a free visit).
+    let callReServiceLanes = [];
+    if (customerId && callReServiceRows.length > 0 && hasCallReServiceIntent(extracted, transcription)) {
+      try {
+        const { reserviceLanesForCustomer, openCallbackExistsForLane } = require('./reservice-scheduler');
+        const reServiceCustomerRow = await db('customers').where({ id: customerId }).first();
+        const eligibleLanes = reServiceCustomerRow ? await reserviceLanesForCustomer(reServiceCustomerRow) : [];
+        for (const lane of eligibleLanes) {
+          if (!(await openCallbackExistsForLane(db, customerId, lane))) callReServiceLanes.push(lane);
+        }
+      } catch (reErr) {
+        callReServiceLanes = [];
+        logger.warn(`[call-proc] re-service lane lookup failed for ${maskSid(callSid)} (falling back to generic anchoring): ${reErr.message}`);
+      }
+    }
     let callBookingCatalogRow = resolveCallBookingCatalogService({
       extracted,
       transcription,
       services: bookableCallServices,
       reServices: callReServiceRows,
-      reServiceHistory: summarizeCallReServiceHistory(customerServiceContext),
+      reServiceLanes: callReServiceLanes,
+      coarseServiceLabel: serviceResolution.ok ? serviceResolution.service : null,
     });
     // Never book a made-up service (owner directive 2026-07-10): service_type
     // MUST be a real admin-catalog service. When the service was UNCLEAR
@@ -8506,6 +8529,22 @@ const CallRecordingProcessor = {
                     throw new Error('call ownership changed while waiting on the comms fence (merge-undo) — booking held for office review');
                   }
                 }
+                // Re-service lane dedupe, re-checked UNDER the transaction
+                // (codex #3222 r1 — mirrors the reservice commit path): the
+                // resolution-time lane filter is advisory and racy against a
+                // callback that landed since. A SECOND open free visit in the
+                // lane must never insert; abort into the schedErr path (no
+                // booking, no SMS, approved-but-unbooked card → the office
+                // books manually or hands over the existing visit's
+                // reschedule link). A failed check aborts too — fail closed,
+                // never a possibly-duplicate free visit.
+                if (isReServiceCatalogRow(callBookingCatalogRow)) {
+                  const { openCallbackExistsForLane } = require('./reservice-scheduler');
+                  const reServiceLane = reServiceLaneForRow(callBookingCatalogRow);
+                  if (await openCallbackExistsForLane(trx, customerId, reServiceLane)) {
+                    throw new Error(`open ${reServiceLane} re-service callback already booked — refusing a second free visit in the lane; booking held for office review`);
+                  }
+                }
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
                 const defaultTechnicianName = defaultTechnician?.name || null;
@@ -8916,6 +8955,13 @@ const CallRecordingProcessor = {
                     catalogRow: callBookingCatalogRow,
                   }),
                   estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                  // A phone-booked covered re-service is the same free
+                  // callback the reservice lane books: is_callback is the
+                  // explicit marker every downstream free-callback path keys
+                  // on (inspection-credit exclusion, callback reporting, the
+                  // lane's own open-callback dedupe) — without it this row
+                  // would read as a paid visit (codex #3222 r1).
+                  ...(isReServiceCatalogRow(callBookingCatalogRow) ? { is_callback: true } : {}),
                   // Outbound-callback bookings land PENDING/needs-review (the
                   // office confirms in dispatch, which arms reminders); inbound
                   // confirmed bookings auto-confirm as before.

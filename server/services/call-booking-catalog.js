@@ -121,21 +121,60 @@ function hasAffirmativeRodentMention(text) {
 // rows are booking_enabled=false ON PURPOSE — the reservice self-serve lane
 // owns their public eligibility — so they never render in the extraction
 // prompt's catalog block and the model structurally cannot pick them. This
-// deterministic override is the phone-path equivalent: it fires only when the
-// caller has COMPLETED service history (a never-serviced caller has nothing to
-// re-service) and the model's pick was absent or one of the generic
-// anything-rows; a specific pick (e.g. "Rodent Inspection Service") always
-// outranks a stray revisit mention. Bare "retreat" is excluded on purpose —
-// too common as a plain English word.
+// deterministic override is the phone-path equivalent, and it is the LAST
+// RESORT before the generic anchors (codex #3222 r1):
+//   - eligibility comes in as `reServiceLanes` — the reservice lane's own
+//     LIVE plan check (reserviceLanesForCustomer), never completed history,
+//     so a lapsed or one-time customer can't talk their way into a free visit;
+//   - a specific model pick and the deterministic keyword rules both outrank
+//     revisit wording ("rodent inspection re-visit" books the inspection);
+//   - the coarse resolver's label must be lane-compatible — a mosquito or
+//     termite resolution is a different service, not a covered re-service.
+// Bare "retreat" is excluded on purpose — too common as a plain English word.
 const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
 const RE_SERVICE_INTENT_RE = /\bre[-\s]?service\b|\bre[-\s]?visit\b|\brevisit\b|\bre[-\s]treat(?:ment)?\b|\bretreatment\b|\bspray\s+again\b|\btreat\s+again\b|\bcome\s+back\s+out\b/i;
 const RE_SERVICE_LAWN_CONTEXT_RE = /\b(?:lawn|turf|grass|weeds?|fertili[sz]\w*|chinch|sod)\b/i;
 const GENERIC_CALL_CATALOG_ROW_RE = /^(?:waves pest control appointment service|waves assessment|waves appointment)$/i;
+// Coarse resolveSchedulableCallService labels a lane's re-service may stand in
+// for. Anything else ("Mosquito Control", "Termite Inspection", …) means the
+// call asked for a DIFFERENT real service and the override must not replace it
+// (a null coarse label — noMatch — is compatible with either lane).
+const RE_SERVICE_COARSE_COMPATIBLE = {
+  pest: new Set(['Waves Appointment', 'General Pest Control']),
+  lawn: new Set(['Waves Appointment', 'Lawn Care']),
+};
 
 function isGenericCallCatalogRow(row) {
   if (!row) return false;
   return row.service_key === 'general_appointment'
     || GENERIC_CALL_CATALOG_ROW_RE.test(String(row.name || '').trim());
+}
+
+function isReServiceCatalogRow(row) {
+  return !!row && Object.values(RE_SERVICE_KEYS).includes(row.service_key);
+}
+
+function reServiceLaneForRow(row) {
+  if (!row) return null;
+  if (row.service_key === RE_SERVICE_KEYS.pest) return 'pest';
+  if (row.service_key === RE_SERVICE_KEYS.lawn) return 'lawn';
+  return null;
+}
+
+function callBookingResolutionHaystack(extracted = {}, transcription = '') {
+  return [
+    extracted.requested_service,
+    extracted.pain_points,
+    extracted.call_summary,
+    transcription,
+  ].filter(Boolean).join(' ');
+}
+
+// Cheap pre-gate so the processor only runs the re-service eligibility lookups
+// (customer row + live lanes + open-callback dedupe) on revisit-shaped calls.
+function hasCallReServiceIntent(extracted = {}, transcription = '') {
+  const haystack = callBookingResolutionHaystack(extracted, transcription);
+  return !!haystack && RE_SERVICE_INTENT_RE.test(haystack);
 }
 
 // The two covered re-service rows, loaded OUTSIDE loadBookableCallServices on
@@ -153,23 +192,6 @@ async function loadCallReServiceRows(conn) {
     logger.warn(`[call-booking-catalog] Failed to load re-service rows (revisit calls fall back to generic anchoring): ${err.message}`);
     return [];
   }
-}
-
-// Completed-history summary for the re-service override, from the same
-// loadCustomerServiceContext shape the coarse resolver already receives
-// (serviceRecords + scheduledServices are completed-only there; estimates are
-// deliberately ignored — a quote is not service history).
-function summarizeCallReServiceHistory(customerServiceContext) {
-  const rows = [
-    ...(customerServiceContext?.serviceRecords || []),
-    ...(customerServiceContext?.scheduledServices || []),
-  ];
-  const types = rows.map((r) => String(r.service_type || '').toLowerCase());
-  return {
-    hasCompleted: rows.length > 0,
-    lawn: types.some((t) => RE_SERVICE_LAWN_CONTEXT_RE.test(t)),
-    pest: types.some((t) => /\b(?:pest|quarterly|waveguard|roach|ant|spider|rodent|mosquito|termite|bed\s*bug)/.test(t)),
-  };
 }
 
 const KEYWORD_SERVICE_RULES = [
@@ -230,47 +252,66 @@ function findServiceByName(services, value) {
  * then deterministic keyword rules over the extraction + transcript.
  * Returns a catalog row or null (null -> legacy coarse service label).
  */
-function resolveCallBookingCatalogService({ extracted = {}, transcription = '', services = [], reServices = [], reServiceHistory = null } = {}) {
+function resolveCallBookingCatalogService({
+  extracted = {}, transcription = '', services = [],
+  reServices = [], reServiceLanes = [], coarseServiceLabel = null,
+} = {}) {
   if (!Array.isArray(services) || services.length === 0) return null;
 
   const byModelPick = findServiceByName(services, extracted.specific_service_name)
     || findServiceByName(services, extracted.matched_service)
     || findServiceByName(services, extracted.requested_service);
+  // A SPECIFIC model pick is final. A generic pick (appointment service /
+  // Waves Assessment) keeps its original precedence over the keyword rules,
+  // but the re-service override below may replace it.
+  if (byModelPick && !isGenericCallCatalogRow(byModelPick)) return byModelPick;
 
-  const haystack = [
-    extracted.requested_service,
-    extracted.pain_points,
-    extracted.call_summary,
-    transcription,
-  ].filter(Boolean).join(' ');
+  const haystack = callBookingResolutionHaystack(extracted, transcription);
+
+  // Computed before the re-service override so a concrete service keyword
+  // ("rodent inspection re-visit", "roach re-treatment") anchors the real
+  // specialty row, never a free re-service (codex #3222 r1 P2).
+  let keywordRow = null;
+  if (haystack) {
+    for (const rule of KEYWORD_SERVICE_RULES) {
+      if (!rule.matches(haystack)) continue;
+      const row = services.find((s) => s.service_key === rule.serviceKey);
+      if (row) { keywordRow = row; break; }
+    }
+  }
 
   // Re-service override (see RE_SERVICE_INTENT_RE block above): revisit intent
-  // from a caller with completed service history anchors to the covered
-  // re-service row — but only over an absent or generic pick, and the lane
-  // comes from what was actually serviced (single-lane history wins; mixed or
-  // unknown history falls back to lawn wording in the call, defaulting pest).
+  // from a LANE-ELIGIBLE customer anchors to the covered re-service row — last
+  // resort before the generic anchors. `reServiceLanes` carries the live plan
+  // eligibility (open-callback lanes already dropped; the booking transaction
+  // re-checks the dedupe authoritatively), and the coarse label must be
+  // lane-compatible so a resolved mosquito/termite/etc. call is never
+  // converted into a free callback.
   if (
-    (!byModelPick || isGenericCallCatalogRow(byModelPick))
-    && reServiceHistory?.hasCompleted
+    !keywordRow
     && haystack
     && RE_SERVICE_INTENT_RE.test(haystack)
+    && Array.isArray(reServiceLanes) && reServiceLanes.length > 0
   ) {
-    const laneKey = reServiceHistory.lawn && !reServiceHistory.pest ? RE_SERVICE_KEYS.lawn
-      : reServiceHistory.pest && !reServiceHistory.lawn ? RE_SERVICE_KEYS.pest
-        : (RE_SERVICE_LAWN_CONTEXT_RE.test(haystack) ? RE_SERVICE_KEYS.lawn : RE_SERVICE_KEYS.pest);
-    const reServiceRow = (Array.isArray(reServices) ? reServices : []).find((s) => s.service_key === laneKey);
-    if (reServiceRow) return reServiceRow;
+    const coarse = coarseServiceLabel ? String(coarseServiceLabel) : null;
+    const candidates = reServiceLanes.filter((lane) => {
+      const compat = RE_SERVICE_COARSE_COMPATIBLE[lane];
+      return !!compat && (coarse === null || compat.has(coarse));
+    });
+    if (candidates.length > 0) {
+      const lane = candidates.length === 1
+        ? candidates[0]
+        : (RE_SERVICE_LAWN_CONTEXT_RE.test(haystack) ? 'lawn' : 'pest');
+      if (candidates.includes(lane)) {
+        const reServiceRow = (Array.isArray(reServices) ? reServices : [])
+          .find((s) => s.service_key === RE_SERVICE_KEYS[lane]);
+        if (reServiceRow) return reServiceRow;
+      }
+    }
   }
 
   if (byModelPick) return byModelPick;
-  if (!haystack) return null;
-
-  for (const rule of KEYWORD_SERVICE_RULES) {
-    if (!rule.matches(haystack)) continue;
-    const row = services.find((s) => s.service_key === rule.serviceKey);
-    if (row) return row;
-  }
-  return null;
+  return keywordRow;
 }
 
 function sanitizeQuotedCallPrice(value) {
@@ -505,7 +546,9 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId }) {
 module.exports = {
   loadBookableCallServices,
   loadCallReServiceRows,
-  summarizeCallReServiceHistory,
+  hasCallReServiceIntent,
+  isReServiceCatalogRow,
+  reServiceLaneForRow,
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,

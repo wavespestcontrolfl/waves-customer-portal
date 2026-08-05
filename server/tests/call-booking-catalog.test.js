@@ -10,7 +10,9 @@ const { transitionJobStatus } = require('../services/job-status');
 const {
   loadBookableCallServices,
   loadCallReServiceRows,
-  summarizeCallReServiceHistory,
+  hasCallReServiceIntent,
+  isReServiceCatalogRow,
+  reServiceLaneForRow,
   resolveCallBookingCatalogService,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
@@ -344,18 +346,16 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     { id: 'svc-pest-re', service_key: 'pest_re_service', name: 'Pest Control Re-Service', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
     { id: 'svc-lawn-re', service_key: 'lawn_re_service', name: 'Lawn Care Re-Service', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
   ];
-  const PEST_HISTORY = { hasCompleted: true, pest: true, lawn: false };
-  const LAWN_HISTORY = { hasCompleted: true, pest: false, lawn: true };
-  const MIXED_HISTORY = { hasCompleted: true, pest: true, lawn: true };
   const CATALOG_WITH_GENERIC = [...CATALOG, GENERIC_ROW];
 
-  test('revisit request from a serviced pest customer anchors to Pest Control Re-Service (2026-08-05 miss)', () => {
+  test('revisit request from a pest-lane-eligible customer anchors to Pest Control Re-Service (2026-08-05 miss)', () => {
     const row = resolveCallBookingCatalogService({
       extracted: { requested_service: 'Pest control revisit' },
       transcription: 'I got a text and tried to schedule for a revisit before we go out of town',
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
-      reServiceHistory: PEST_HISTORY,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('pest_re_service');
   });
@@ -365,7 +365,8 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       extracted: { specific_service_name: 'Waves Pest Control Appointment Service', requested_service: 'pest control revisit' },
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
-      reServiceHistory: PEST_HISTORY,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('pest_re_service');
   });
@@ -375,25 +376,79 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       extracted: { specific_service_name: 'Rodent Inspection Service', call_summary: 'revisit for the rodent inspection follow-up' },
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
-      reServiceHistory: PEST_HISTORY,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('rodent_inspection');
   });
 
-  test('no completed service history → no override (never a free re-service for a new caller)', () => {
+  test('a deterministic keyword rule outranks revisit wording — specialty stays a paid booking (codex r1 P2)', () => {
+    const rodent = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'rodent inspection re-visit' },
+      transcription: 'the rats are back, we need the rodent inspection re-visit',
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'Rodent Control',
+    });
+    expect(rodent?.service_key).toBe('rodent_inspection');
+    const roach = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'roach re-treatment' },
+      transcription: 'german roaches came back in the kitchen, we need a re-treatment',
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(roach?.service_key).toBe('cockroach_control');
+  });
+
+  test('no eligible lanes → no override, never a free visit (codex r1 P1: live eligibility, not history)', () => {
     const generic = resolveCallBookingCatalogService({
       extracted: { specific_service_name: 'Waves Pest Control Appointment Service', requested_service: 'revisit' },
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
-      reServiceHistory: { hasCompleted: false, pest: false, lawn: false },
+      reServiceLanes: [],
+      coarseServiceLabel: 'General Pest Control',
     });
     expect(generic?.service_key).toBe('general_appointment');
     const none = resolveCallBookingCatalogService({
       extracted: { requested_service: 'revisit' },
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
+      coarseServiceLabel: null,
     });
     expect(none).toBeNull();
+  });
+
+  test('a lane-incompatible coarse resolution (mosquito/termite) blocks the override (codex r1 P1)', () => {
+    const mosquito = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'mosquito treatment, please come back out' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'Mosquito Control',
+    });
+    expect(mosquito).toBeNull();
+    const lawnOnlyPestCall = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'pest control revisit' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(lawnOnlyPestCall).toBeNull();
+  });
+
+  test('a null coarse label (noMatch) is compatible with the eligible lane', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'need you to come back out and spray again' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: null,
+    });
+    expect(row?.service_key).toBe('pest_re_service');
   });
 
   test('no revisit intent → generic pick stands', () => {
@@ -401,37 +456,37 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       extracted: { specific_service_name: 'Waves Pest Control Appointment Service', requested_service: 'quarterly service' },
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
-      reServiceHistory: PEST_HISTORY,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('general_appointment');
   });
 
-  test('lane follows the serviced history: lawn-only customer → Lawn Care Re-Service', () => {
-    const row = resolveCallBookingCatalogService({
-      extracted: { requested_service: 're-service' },
-      transcription: 'the weeds came right back, can you come back out',
-      services: CATALOG_WITH_GENERIC,
-      reServices: RE_SERVICES,
-      reServiceHistory: LAWN_HISTORY,
-    });
-    expect(row?.service_key).toBe('lawn_re_service');
-  });
-
-  test('mixed history falls back to the call wording (lawn words → lawn lane, else pest)', () => {
+  test('both lanes eligible: lawn wording picks the lawn lane, else pest; coarse Lawn Care narrows to lawn', () => {
     const lawn = resolveCallBookingCatalogService({
-      extracted: { requested_service: 're-service for the lawn, weeds are back' },
+      extracted: { requested_service: 're-service, the weeds came right back in the lawn' },
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
-      reServiceHistory: MIXED_HISTORY,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: null,
     });
     expect(lawn?.service_key).toBe('lawn_re_service');
     const pest = resolveCallBookingCatalogService({
       extracted: { requested_service: 'revisit, the ants are back inside' },
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
-      reServiceHistory: MIXED_HISTORY,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: null,
     });
     expect(pest?.service_key).toBe('pest_re_service');
+    const coarseLawn = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'lawn re-service' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest', 'lawn'],
+      coarseServiceLabel: 'Lawn Care',
+    });
+    expect(coarseLawn?.service_key).toBe('lawn_re_service');
   });
 
   test('re-service rows unavailable → falls through to the pre-override behavior', () => {
@@ -439,7 +494,8 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       extracted: { specific_service_name: 'Waves Pest Control Appointment Service', requested_service: 'revisit' },
       services: CATALOG_WITH_GENERIC,
       reServices: [],
-      reServiceHistory: PEST_HISTORY,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('general_appointment');
   });
@@ -449,24 +505,28 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       extracted: { specific_service_name: 'Waves Pest Control Appointment Service', call_summary: 'caller mentioned being away at a retreat this weekend' },
       services: CATALOG_WITH_GENERIC,
       reServices: RE_SERVICES,
-      reServiceHistory: PEST_HISTORY,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('general_appointment');
+    expect(hasCallReServiceIntent({ call_summary: 'away at a retreat this weekend' }, '')).toBe(false);
   });
 
-  test('summarizeCallReServiceHistory reads completed rows and lanes from loadCustomerServiceContext shape', () => {
-    expect(summarizeCallReServiceHistory({
-      serviceRecords: [{ service_type: 'Quarterly Pest Control' }],
-      scheduledServices: [],
-    })).toEqual({ hasCompleted: true, lawn: false, pest: true });
-    expect(summarizeCallReServiceHistory({
-      serviceRecords: [],
-      scheduledServices: [{ service_type: 'Lawn Care Program Visit' }],
-    })).toEqual({ hasCompleted: true, lawn: true, pest: false });
-    expect(summarizeCallReServiceHistory(null)).toEqual({ hasCompleted: false, lawn: false, pest: false });
-    // Estimates are not service history — the shape simply never includes them.
-    expect(summarizeCallReServiceHistory({ estimates: [{ service_interest: 'Pest' }], serviceRecords: [], scheduledServices: [] }))
-      .toEqual({ hasCompleted: false, lawn: false, pest: false });
+  test('hasCallReServiceIntent gates the eligibility lookups on revisit wording', () => {
+    expect(hasCallReServiceIntent({ requested_service: 'Pest control revisit' }, '')).toBe(true);
+    expect(hasCallReServiceIntent({}, 'can you come back out and spray again')).toBe(true);
+    expect(hasCallReServiceIntent({ requested_service: 'quarterly pest control' }, 'new customer wants a quote')).toBe(false);
+    expect(hasCallReServiceIntent({}, '')).toBe(false);
+  });
+
+  test('isReServiceCatalogRow / reServiceLaneForRow classify the covered rows only', () => {
+    expect(isReServiceCatalogRow(RE_SERVICES[0])).toBe(true);
+    expect(isReServiceCatalogRow(GENERIC_ROW)).toBe(false);
+    expect(isReServiceCatalogRow(null)).toBe(false);
+    expect(reServiceLaneForRow(RE_SERVICES[0])).toBe('pest');
+    expect(reServiceLaneForRow(RE_SERVICES[1])).toBe('lawn');
+    expect(reServiceLaneForRow(GENERIC_ROW)).toBeNull();
+    expect(reServiceLaneForRow(null)).toBeNull();
   });
 
   test('loadCallReServiceRows queries by service_key without a booking_enabled filter and fails open', async () => {
