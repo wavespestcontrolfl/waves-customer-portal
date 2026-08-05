@@ -1920,8 +1920,12 @@ const TABLE_TIMESTAMP_COLUMNS = {
   projects: ['created_at', 'updated_at'],
   // timestamps(true, true) — 20260520000002; report-rating scores.
   pest_pressure_scores: ['created_at', 'updated_at'],
-  // timestamps(true, true) — 20260401000083 / 20260401000004.
-  review_requests: ['created_at', 'updated_at'],
+  // created_at ONLY for review_requests (r34): the ORIGINAL migration
+  // (20260401000068) created the table without updated_at and the later
+  // compatibility branch (20260401000083) adds business columns only — a
+  // prod DB on the legacy shape would 42703 on an updated_at select.
+  review_requests: ['created_at'],
+  // timestamps(true, true) — 20260401000004.
   satisfaction_responses: ['created_at', 'updated_at'],
 };
 
@@ -2583,37 +2587,6 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // the winner's customer_id for a service record this journal moved —
       // the undo would return the record while the score stays in the
       // kept customer's history.
-      {
-        const journaledServiceRecordIds = [...journaledIdsFor('service_records')];
-        if (journaledServiceRecordIds.length) {
-          // ALL service-record children (r32/r33): scores, review-request
-          // tokens, and NPS responses each carry customer_id +
-          // service_record_id and can be minted post-merge without
-          // touching the record — any of them stranding on the winner
-          // splits the restored customer's report/review history.
-          const serviceRecordChildProbes = [
-            { table: 'pest_pressure_scores', label: 'Pest Pressure score(s)' },
-            { table: 'review_requests', label: 'review request(s)' },
-            { table: 'satisfaction_responses', label: 'satisfaction/NPS response(s)' },
-          ];
-          for (const probe of serviceRecordChildProbes) {
-            let childRows = [];
-            try {
-              childRows = await trx(probe.table)
-                .whereIn('service_record_id', journaledServiceRecordIds)
-                .select(['id', ...activityColumnsFor(probe.table)]);
-            } catch (e) {
-              refuse(`Cannot verify ${probe.table} for this merge's service records (${e.message}) — refusing to revert`);
-            }
-            const stranded = countActivityRows(childRows, {
-              journaledIds: journaledIdsFor(probe.table), mergeAt, table: probe.table,
-            });
-            if (stranded) {
-              refuse(`${stranded} ${probe.label} for this merge's service records are outside its journal — the restored customer's report/review history would split; reconcile by hand`);
-            }
-          }
-        }
-      }
       // Projects (r31): a WDO/prep/project report created for a journaled
       // visit stores its own customer_id and sends the public report from
       // it, never touching the visit — moving the visit back would leave
@@ -2631,6 +2604,39 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       });
       if (strandedProjects) {
         refuse(`${strandedProjects} project/report record(s) for this merge's visits are outside its journal — the public report would stay on the kept customer; reconcile by hand`);
+      }
+    }
+
+    // ALL service-record children (r32/r33/r34): scores, review-request
+    // tokens, and NPS responses each carry customer_id + service_record_id
+    // and can be minted post-merge without touching the record. Keyed on
+    // journaled SERVICE RECORDS directly — independent of journaled visits
+    // (r34: legacy/report-only records carry a NULL scheduled_service_id,
+    // and a merge can move records without moving visits).
+    {
+      const journaledServiceRecordIds = [...journaledIdsFor('service_records')];
+      if (journaledServiceRecordIds.length) {
+        const serviceRecordChildProbes = [
+          { table: 'pest_pressure_scores', label: 'Pest Pressure score(s)' },
+          { table: 'review_requests', label: 'review request(s)' },
+          { table: 'satisfaction_responses', label: 'satisfaction/NPS response(s)' },
+        ];
+        for (const probe of serviceRecordChildProbes) {
+          let childRows = [];
+          try {
+            childRows = await trx(probe.table)
+              .whereIn('service_record_id', journaledServiceRecordIds)
+              .select(['id', ...activityColumnsFor(probe.table)]);
+          } catch (e) {
+            refuse(`Cannot verify ${probe.table} for this merge's service records (${e.message}) — refusing to revert`);
+          }
+          const stranded = countActivityRows(childRows, {
+            journaledIds: journaledIdsFor(probe.table), mergeAt, table: probe.table,
+          });
+          if (stranded) {
+            refuse(`${stranded} ${probe.label} for this merge's service records are outside its journal — the restored customer's report/review history would split; reconcile by hand`);
+          }
+        }
       }
     }
 

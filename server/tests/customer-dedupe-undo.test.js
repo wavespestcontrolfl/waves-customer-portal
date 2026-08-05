@@ -771,6 +771,11 @@ describe('revertMerge', () => {
     first_touch_holds: ['created_at', 'updated_at'],
     stripe_orphan_charges: ['created_at', 'updated_at'],
     invoice_attachments: ['created_at', 'updated_at'],
+    // r34: the ORIGINAL review_requests migration has no updated_at — the
+    // harness raises 42703 on a wrong select exactly like prod would.
+    review_requests: ['created_at'],
+    satisfaction_responses: ['created_at', 'updated_at'],
+    pest_pressure_scores: ['created_at', 'updated_at'],
   };
   const assertSelectableColumns = (table, q) => {
     const known = TABLE_TIMESTAMPS[table];
