@@ -71,9 +71,39 @@ function isStaleInProgress(row, todayET) {
 // as its own one-off visit and does NOT inherit — it is judged on its own
 // price only. The query LEFT JOINs the parent and rides its price fields
 // along as parent_estimated_price / parent_primary_line_price.
+//
+// PREPAID visits never page — but only through the SAME coverage rules the
+// completion-billing gate applies (admin-dispatch), so the watchdog can't
+// suppress a page on a visit that completion would still bill (or bill at
+// $0). Two coverage paths, mirroring that gate exactly:
+//  - An OUT-OF-BAND stamp (prepaid_method other than the annual-prepay
+//    method: cash/check/Zelle, fanned by prepaid-series.js) with a positive
+//    amount suppresses here (pure check below).
+//  - An ANNUAL-PREPAY stamp is only trusted after annualPrepayCoversVisit
+//    validates the linked term (fail-closed; stale stamps left by
+//    refund/void cleanup must not suppress) — async, applied in runInner.
+// A parent's stamp NEVER covers a child: completion billing does not
+// inherit prepaid_amount, so a child seeded after a parent-only prepay is a
+// real $0-completion risk and must page. Rows with no stamp at all page
+// even when the customer holds a prepay term — an unstamped visit under a
+// term is exactly the inconsistency (double-bill at completion) worth a
+// bell.
+const ANNUAL_PREPAY_METHOD = 'annual_prepay_invoice';
+
+function hasOutOfBandPrepaidStamp(row) {
+  return toMoney(row?.prepaid_amount) != null
+    && row?.prepaid_method !== ANNUAL_PREPAY_METHOD;
+}
+
+function hasAnnualPrepaidStamp(row) {
+  return toMoney(row?.prepaid_amount) != null
+    && row?.prepaid_method === ANNUAL_PREPAY_METHOD;
+}
+
 function isUnpricedSeriesVisit(row) {
   if (!row) return false;
   if (rowHasPrice(row)) return false;
+  if (hasOutOfBandPrepaidStamp(row)) return false;
   const inheritsFromParent = !!row.recurring_parent_id && row.is_recurring !== false;
   if (!inheritsFromParent) return true;
   return toMoney(row.parent_estimated_price) == null && toMoney(row.parent_primary_line_price) == null;
@@ -138,15 +168,22 @@ async function runInner({ now = new Date() } = {}) {
     })
     .select(
       'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
-      'ss.estimated_price', 'ss.primary_line_price', 'ss.recurring_parent_id',
+      'ss.estimated_price', 'ss.primary_line_price', 'ss.prepaid_amount',
+      'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.recurring_parent_id',
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',
       db.raw("to_char(ss.scheduled_date, 'YYYY-MM-DD') as service_date"),
     )
     .orderBy('ss.scheduled_date', 'asc');
   const unpricedByRoot = new Map();
+  // Same validator the completion-billing gate uses (fail-closed): an
+  // annual-prepay stamp suppresses only when its linked term is live,
+  // customer-matched, and coverage-service-matched. Lazy require mirrors the
+  // feature-gates pattern and keeps module load light.
+  const { annualPrepayCoversVisit } = require('./annual-prepay-renewals');
   for (const row of upcomingRows) {
     if (!isUnpricedSeriesVisit(row)) continue;
+    if (hasAnnualPrepaidStamp(row) && await annualPrepayCoversVisit(row, db)) continue;
     const root = seriesRootId(row);
     if (!unpricedByRoot.has(root)) unpricedByRoot.set(root, row);
   }
@@ -223,6 +260,8 @@ module.exports = {
   rowHasPrice,
   isStaleInProgress,
   isUnpricedSeriesVisit,
+  hasOutOfBandPrepaidStamp,
+  hasAnnualPrepaidStamp,
   seriesRootId,
   UPCOMING_WINDOW_DAYS,
   MAX_ALERTS_PER_RUN,
