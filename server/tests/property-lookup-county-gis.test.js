@@ -91,7 +91,10 @@ describe('normalizeCountyName / paoParcelIdFrom', () => {
     expect(normalizeCountyName('Manatee County')).toBe('Manatee');
     expect(normalizeCountyName('sarasota')).toBe('Sarasota');
     expect(normalizeCountyName('Charlotte County')).toBe('Charlotte');
-    expect(normalizeCountyName('Hillsborough')).toBeNull();
+    // Hillsborough joined for street-situs audits (PR #3220); no
+    // COUNTY_LAYERS entry, so point-in-polygon still degrades to FDOR.
+    expect(normalizeCountyName('Hillsborough County')).toBe('Hillsborough');
+    expect(normalizeCountyName('Lee County')).toBeNull();
   });
 
   test('PAO parcel id must be digit-only (else fail closed to address search)', () => {
