@@ -76,6 +76,18 @@ describe('stripCitationResidue', () => {
     const clean = 'Per UF/IFAS, sod webworm damage peaks in late summer.';
     expect(stripCitationResidue(clean)).toEqual({ text: clean, changed: false });
   });
+
+  it('handles a ">" inside a quoted cite attribute (codex r1)', () => {
+    const { text } = stripCitationResidue('Per <cite title="UF > IFAS">UF/IFAS</cite>, bait works.');
+    expect(text).toBe('Per UF/IFAS, bait works.');
+    expect(citationResidueFinding(text)).toBeNull();
+  });
+
+  it('stays in sync with the detector on case and bare oaicite remnants (codex r1)', () => {
+    const { text } = stripCitationResidue('Bait works.CITETURN0SEARCH0 See oaicite here.');
+    expect(text).toBe('Bait works. See  here.');
+    expect(citationResidueFinding(text)).toBeNull();
+  });
 });
 
 describe('emit_draft strips at capture', () => {
@@ -89,6 +101,7 @@ describe('emit_draft strips at capture', () => {
         title: 'Roach ID guide <cite index="1">IFAS</cite>',
         meta_description: 'Plain description.',
         domains: ['wavespestcontrol.com'],
+        hero_image: { src: '/img/roach.webp', alt: 'German roach <cite>IFAS photo</cite>' },
       },
       body: 'German roaches breed indoors.citeturn0search1 Palmetto bugs do not.',
       claims_ledger: [],
@@ -100,6 +113,9 @@ describe('emit_draft strips at capture', () => {
     expect(draft.frontmatter.title).toBe('Roach ID guide IFAS');
     expect(draft.frontmatter.meta_description).toBe('Plain description.');
     expect(draft.frontmatter.domains).toEqual(['wavespestcontrol.com']);
+    // Nested publishable strings (hero_image.alt joins publishableText on
+    // new-page drafts) strip too — codex r1.
+    expect(draft.frontmatter.hero_image).toEqual({ src: '/img/roach.webp', alt: 'German roach IFAS photo' });
     expect(draft.citation_residue_stripped).toBe(true);
     expect(res.body_chars).toBe(draft.body.length);
   });

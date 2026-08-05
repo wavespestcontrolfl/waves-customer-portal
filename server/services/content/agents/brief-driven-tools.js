@@ -366,13 +366,25 @@ async function executeBriefTool(toolName, input, { sessionId } = {}) {
         cleanBody = strippedBody.text;
         residueStripped = strippedBody.changed;
         if (frontmatter && typeof frontmatter === 'object') {
+          const stripString = (value) => {
+            const stripped = guardrails.stripCitationResidue(value);
+            if (stripped.changed) residueStripped = true;
+            return stripped.text;
+          };
           cleanFrontmatter = { ...frontmatter };
           for (const [key, value] of Object.entries(cleanFrontmatter)) {
-            if (typeof value !== 'string') continue;
-            const strippedField = guardrails.stripCitationResidue(value);
-            if (strippedField.changed) {
-              cleanFrontmatter[key] = strippedField.text;
-              residueStripped = true;
+            if (typeof value === 'string') {
+              cleanFrontmatter[key] = stripString(value);
+            } else if (value && typeof value === 'object' && !Array.isArray(value)) {
+              // One nested level: the guardrail's publishableText includes
+              // nested strings like frontmatter.hero_image.alt on new-page
+              // drafts, so residue there must strip too or the gate still
+              // burns the run's single redraft on it.
+              const nested = { ...value };
+              for (const [nkey, nvalue] of Object.entries(nested)) {
+                if (typeof nvalue === 'string') nested[nkey] = stripString(nvalue);
+              }
+              cleanFrontmatter[key] = nested;
             }
           }
         }

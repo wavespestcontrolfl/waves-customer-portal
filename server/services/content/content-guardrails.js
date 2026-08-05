@@ -1652,9 +1652,17 @@ function citationResidueFinding(text) {
 // legitimate component props, and deleting a markdown footnote silently
 // drops content a human should look at. Kept adjacent to
 // CITATION_RESIDUE_RE so detector and stripper can never drift.
-const CITE_WRAPPER_RE = /<cite\b[^>]*>([\s\S]*?)<\/cite>/gi;
-const CITE_STRAY_TAG_RE = /<\/?cite\b[^>]*>/gi;
-const CITE_TOKEN_RE = /\bciteturn\w+|【[^】\n]{0,40}】|:contentReference\[[^\]]{0,60}\](\{[^}]{0,80}\})?|[\uE000-\uF8FF]/g;
+// Attribute matcher tolerates '>' inside quoted attribute values
+// (<cite title="UF > IFAS">) — same reason the tag scanner below is
+// quote-aware; a naive [^>]* would cut the tag short and leave residue.
+const CITE_ATTRS_SRC = '(?:[^>"\']|"[^"]*"|\'[^\']*\')*';
+const CITE_WRAPPER_RE = new RegExp(`<cite\\b${CITE_ATTRS_SRC}>([\\s\\S]*?)<\\/cite\\s*>`, 'gi');
+const CITE_STRAY_TAG_RE = new RegExp(`<\\/?cite\\b${CITE_ATTRS_SRC}>`, 'gi');
+// Case-insensitive + bare-`oaicite` coverage keeps the stripper in sync
+// with CITATION_RESIDUE_RE above (which is /i and matches \\boaicite\\b) —
+// the full :contentReference[...]{...} alternative sits FIRST so the
+// complete form wins over the bare-word delete.
+const CITE_TOKEN_RE = /:contentReference\[[^\]]{0,60}\](\{[^}]{0,80}\})?|\bciteturn\w+|\boaicite\b|【[^】\n]{0,40}】|[\uE000-\uF8FF]/gi;
 
 function stripCitationResidue(text) {
   const original = String(text || '');
