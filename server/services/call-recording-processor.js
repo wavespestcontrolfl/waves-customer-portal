@@ -8062,7 +8062,7 @@ const CallRecordingProcessor = {
     // revisit-shaped calls; fail-closed — an error grants no lanes (generic
     // anchoring, never a free visit).
     let callReServiceLanes = [];
-    if (customerId && callReServiceRows.length > 0 && hasCallReServiceIntent(extracted, transcription)) {
+    if (customerId && callReServiceRows.length > 0 && hasCallReServiceIntent(extracted)) {
       try {
         const { reserviceLanesForCustomer } = require('./reservice-scheduler');
         const reServiceCustomerRow = await db('customers').where({ id: customerId }).first();
@@ -9014,8 +9014,13 @@ const CallRecordingProcessor = {
                   let laneStillEligible = false;
                   try {
                     lockedReServiceCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+                    // Lanes read ON THE TRANSACTION with the qualifying
+                    // coverage rows locked (codex r9): an admin cancellation
+                    // of the recurring coverage now serializes against this
+                    // booking instead of committing between the lane read
+                    // and the callback insert.
                     laneStillEligible = !!lockedReServiceCustomer && lockedReServiceCustomer.active !== false
-                      && (await reserviceLanesForCustomer(lockedReServiceCustomer)).includes(reServiceLane);
+                      && (await reserviceLanesForCustomer(lockedReServiceCustomer, trx, { lockCoverage: true })).includes(reServiceLane);
                   } catch (eligErr) {
                     logger.warn(`[call-proc] re-service eligibility recheck failed for ${maskSid(callSid)} (holding for review): ${eligErr.message}`);
                   }
@@ -9037,7 +9042,7 @@ const CallRecordingProcessor = {
                   });
                   if (reServicePremise.scope === 'unknown'
                     || (reServicePremise.scope === 'property'
-                      && !(await reserviceLaneCoversProperty(customerId, reServiceLane, reServicePremise.propertyId)))) {
+                      && !(await reserviceLaneCoversProperty(customerId, reServiceLane, reServicePremise.propertyId, trx, { lockCoverage: true })))) {
                     return { __held: { reason: 'reservice_property_uncovered' } };
                   }
                   let laneCallbackOpen = true;

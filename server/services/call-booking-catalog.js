@@ -136,7 +136,7 @@ function hasAffirmativeRodentMention(text) {
 //     termite resolution is a different service, not a covered re-service.
 // Bare "retreat" is excluded on purpose — too common as a plain English word.
 const RE_SERVICE_KEYS = { pest: 'pest_re_service', lawn: 'lawn_re_service' };
-const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit|revisit|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
+const RE_SERVICE_PHRASE = "(?:re[-\\s]?service|re[-\\s]?visit(?!\\s+(?:the|my|our|your|this|that|it|them)\\b)|revisit(?!\\s+(?:the|my|our|your|this|that|it|them)\\b)|re[-\\s]treat(?:ment)?|retreatment|spray\\s+again|treat\\s+again|come\\s+back\\s+out)";
 const RE_SERVICE_INTENT_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b`, 'i');
 // Negated wording ("I don't need a re-service, just my regular visit") is not
 // intent (codex #3222 r3) — same shape as NEGATED_ROACH_RE: negation word +
@@ -223,11 +223,24 @@ function callBookingResolutionHaystack(extracted = {}, transcription = '') {
   ].filter(Boolean).join(' ');
 }
 
+// Intent text = the EXTRACTION's caller-attributed fields ONLY, never the
+// raw mixed-speaker transcript (codex #3222 r9): an agent's "is this a
+// re-service?" answered "No" would otherwise supply the affirmative phrase.
+// The extraction's requested_service/pain_points/call_summary carry the
+// model's synthesis of what the CALLER asked for.
+function callBookingReServiceIntentText(extracted = {}) {
+  return [
+    extracted.requested_service,
+    extracted.pain_points,
+    extracted.call_summary,
+  ].filter(Boolean).join(' ');
+}
+
 // Cheap pre-gate so the processor only runs the re-service eligibility lookups
 // (customer row + live lanes) on revisit-shaped calls.
-function hasCallReServiceIntent(extracted = {}, transcription = '') {
-  const haystack = callBookingResolutionHaystack(extracted, transcription);
-  return !!haystack && hasAffirmativeReServiceIntent(haystack);
+function hasCallReServiceIntent(extracted = {}) {
+  const intentText = callBookingReServiceIntentText(extracted);
+  return !!intentText && hasAffirmativeReServiceIntent(intentText);
 }
 
 // The two covered re-service rows, loaded OUTSIDE loadBookableCallServices on
@@ -348,10 +361,11 @@ function resolveCallBookingCatalogService({
   // coarse label must be lane-compatible, and a replaceable plan pick pins
   // the lane to its own family (a pest plan revisit never books the lawn
   // lane).
+  const reServiceIntentText = callBookingReServiceIntentText(extracted);
   if (
     !keywordRow
-    && haystack
-    && hasAffirmativeReServiceIntent(haystack)
+    && reServiceIntentText
+    && hasAffirmativeReServiceIntent(reServiceIntentText)
     && Array.isArray(reServiceLanes) && reServiceLanes.length > 0
   ) {
     const coarse = coarseServiceLabel ? String(coarseServiceLabel) : null;

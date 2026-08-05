@@ -510,14 +510,14 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       coarseServiceLabel: 'General Pest Control',
     });
     expect(row?.service_key).toBe('general_appointment');
-    expect(hasCallReServiceIntent({ call_summary: 'away at a retreat this weekend' }, '')).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'away at a retreat this weekend' })).toBe(false);
   });
 
   test('hasCallReServiceIntent gates the eligibility lookups on revisit wording', () => {
-    expect(hasCallReServiceIntent({ requested_service: 'Pest control revisit' }, '')).toBe(true);
-    expect(hasCallReServiceIntent({}, 'can you come back out and spray again')).toBe(true);
-    expect(hasCallReServiceIntent({ requested_service: 'quarterly pest control' }, 'new customer wants a quote')).toBe(false);
-    expect(hasCallReServiceIntent({}, '')).toBe(false);
+    expect(hasCallReServiceIntent({ requested_service: 'Pest control revisit' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'customer asked us to come back out and spray again' })).toBe(true);
+    expect(hasCallReServiceIntent({ requested_service: 'quarterly pest control', call_summary: 'new customer wants a quote' })).toBe(false);
+    expect(hasCallReServiceIntent({})).toBe(false);
   });
 
   test('isReServiceCatalogRow / reServiceLaneForRow classify the covered rows only', () => {
@@ -539,10 +539,10 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       coarseServiceLabel: 'General Pest Control',
     });
     expect(row).toBeNull();
-    expect(hasCallReServiceIntent({ requested_service: "no re-service needed, just the quarterly" }, '')).toBe(false);
-    expect(hasCallReServiceIntent({}, "not a revisit — this is a brand new problem")).toBe(false);
+    expect(hasCallReServiceIntent({ requested_service: "no re-service needed, just the quarterly" })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: "not a revisit — this is a brand new problem" })).toBe(false);
     // Adversative keeps the affirmative mention.
-    expect(hasCallReServiceIntent({}, "we don't want the quarterly moved but we do need a re-service")).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: "we don't want the quarterly moved but we do need a re-service" })).toBe(true);
   });
 
   test('an exact recurring PLAN pick is replaceable by the re-service anchor on revisit intent (codex r3)', () => {
@@ -585,16 +585,16 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       coarseServiceLabel: 'General Pest Control',
     });
     expect(plan?.service_key).toBe('pest_general_quarterly');
-    expect(hasCallReServiceIntent({}, "last month's re-service worked great, book my regular visit")).toBe(false);
-    expect(hasCallReServiceIntent({}, 'we had a re-service two weeks ago')).toBe(false);
-    expect(hasCallReServiceIntent({}, 'you did a revisit in the past and it helped')).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: "last month's re-service worked great, book my regular visit" })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'we had a re-service two weeks ago' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'you did a revisit in the past and it helped' })).toBe(false);
     // A current ask alongside a historical mention keeps its intent.
-    expect(hasCallReServiceIntent({}, "last month's re-service worked great — can we get another re-service now")).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: "last month's re-service worked great — can we get another re-service now" })).toBe(true);
   });
 
   test('a prior-visit cue MOTIVATING a current request keeps its intent (codex r6)', () => {
-    expect(hasCallReServiceIntent({}, 'I need a re-service because the last visit did not work')).toBe(true);
-    expect(hasCallReServiceIntent({}, 'last visit missed the lanai, please spray again')).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'I need a re-service because the last visit did not work' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'last visit missed the lanai, please spray again' })).toBe(true);
     const row = resolveCallBookingCatalogService({
       extracted: { requested_service: 'I need a re-service because the last visit did not work' },
       services: CATALOG_WITH_GENERIC,
@@ -626,8 +626,8 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
   });
 
   test('contraction negations (aren\'t/weren\'t/haven\'t/hasn\'t) are not intent (codex r7)', () => {
-    expect(hasCallReServiceIntent({}, "we aren't asking for a re-service; schedule our regular quarterly visit")).toBe(false);
-    expect(hasCallReServiceIntent({}, "we haven't needed a re-service before, book the regular visit")).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: "we aren't asking for a re-service; schedule our regular quarterly visit" })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: "we haven't needed a re-service before, book the regular visit" })).toBe(false);
     const row = resolveCallBookingCatalogService({
       extracted: { specific_service_name: 'General Pest Control (Quarterly)', requested_service: "we aren't asking for a re-service; schedule our regular quarterly visit" },
       services: CATALOG_WITH_GENERIC,
@@ -639,11 +639,11 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
   });
 
   test('past need/want statements stay historical (codex r7)', () => {
-    expect(hasCallReServiceIntent({}, 'schedule my quarterly visit; last time I needed a re-service too')).toBe(false);
-    expect(hasCallReServiceIntent({}, 'previously we wanted a re-service but the quarterly covered it')).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'schedule my quarterly visit; last time I needed a re-service too' })).toBe(false);
+    expect(hasCallReServiceIntent({ call_summary: 'previously we wanted a re-service but the quarterly covered it' })).toBe(false);
     // The r6 motivating examples still keep their intent without need/want breaks.
-    expect(hasCallReServiceIntent({}, 'I need a re-service because the last visit did not work')).toBe(true);
-    expect(hasCallReServiceIntent({}, 'last visit missed the lanai, please spray again')).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'I need a re-service because the last visit did not work' })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'last visit missed the lanai, please spray again' })).toBe(true);
   });
 
   test('a deterministic keyword row outranks a GENERIC model pick (codex r7)', () => {
@@ -666,6 +666,32 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
       coarseServiceLabel: 'General Pest Control',
     });
     expect(plan?.service_key).toBe('pest_general_quarterly');
+  });
+
+  test('"revisit the pricing" (verb + abstract object) is NOT booking intent (codex r9)', () => {
+    expect(hasCallReServiceIntent({ call_summary: 'customer wants to revisit the pricing on his plan and book the regular quarterly visit' })).toBe(false);
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'General Pest Control (Quarterly)', call_summary: 'wants to revisit the pricing and schedule the regular quarterly visit' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row?.service_key).toBe('pest_general_quarterly');
+    // Noun usage keeps its intent.
+    expect(hasCallReServiceIntent({ requested_service: 'schedule a revisit' })).toBe(true);
+  });
+
+  test('agent-offered re-service wording in the transcript is NOT the caller\'s intent (codex r9)', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'General Pest Control (Quarterly)', requested_service: 'regular quarterly visit', call_summary: 'Customer booked the regular quarterly visit.' },
+      transcription: 'Agent: Is this a re-service? Caller: No, schedule my regular quarterly visit.',
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row?.service_key).toBe('pest_general_quarterly');
   });
 
   test('a re-service row never prices — even a transcript-quoted number stays off the visit (codex r2)', () => {
