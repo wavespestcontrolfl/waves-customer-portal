@@ -128,10 +128,12 @@ try {
 // other server services). Wrap the require() in try/catch so a fresh
 // install missing them doesn't crash the whole ingestion service.
 let chromium;
+let playwrightRequest;
 try {
-  ({ chromium } = require('playwright'));
+  ({ chromium, request: playwrightRequest } = require('playwright'));
 } catch {
   chromium = null;
+  playwrightRequest = null;
 }
 
 let Anthropic;
@@ -147,6 +149,52 @@ const { stripThinkingBlocks } = require('./llm/deep');
 const HTTP_TIMEOUT_MS = 15000;
 const MAX_ITEMS_PER_FEED = 200;
 const FORWARD_WINDOW_DAYS = 90;
+
+// Polite self-identifying UA — the default for every pull. Sources whose
+// host UA-filters bots override it per-source via scrape_config.userAgent
+// (never globally, so we stay identifiable everywhere we're allowed to be).
+const DEFAULT_BOT_UA = 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)';
+
+// Residential-egress escape hatch for hosts that block the app's
+// datacenter IP outright: Visit Sarasota / Visit St. Pete 403 every prod
+// pull and The Gabber serves a non-XML challenge page, while the same URLs
+// answer 200 to ANY user agent (even the bot UA) from a residential
+// connection — so a UA override cannot fix these, only the egress IP can.
+// Opt-in per source via scrape_config.proxy='residential' so the direct
+// path stays the default. The proxy itself is vendor-agnostic on purpose:
+// EVENT_PULL_PROXY_URL holds the full gateway URL including credentials
+// (e.g. http://user:pass@gate.vendor.example:8000), so switching vendors
+// is an env edit, not a deploy. Residential bytes are per-GB billed —
+// proxied scrape pulls abort image/media/font requests to keep that small.
+function resolveProxyConfig(source) {
+  const mode = source.scrape_config?.proxy;
+  if (!mode) return null;
+  if (mode !== 'residential') {
+    throw new Error(`Unknown scrape_config.proxy '${mode}' — expected 'residential'`);
+  }
+  const raw = process.env.EVENT_PULL_PROXY_URL;
+  if (!raw) {
+    // Gateway not provisioned yet — fall back to a DIRECT pull rather
+    // than failing. Blocked hosts then fail exactly as they did before
+    // the opt-in (403/challenge, visible in source health), while a host
+    // that unblocks organically recovers without an env change. A typo'd
+    // mode or unparseable gateway still throws: an explicit misconfig
+    // must be loud, but "not configured yet" is a pending state.
+    logger.warn(`event-ingestion: source '${source.name}' opts into residential proxy but EVENT_PULL_PROXY_URL is not set — pulling direct`);
+    return null;
+  }
+  let gateway;
+  try {
+    gateway = new URL(raw);
+  } catch {
+    throw new Error('EVENT_PULL_PROXY_URL is not a parseable URL');
+  }
+  return {
+    server: `${gateway.protocol}//${gateway.host}`,
+    ...(gateway.username ? { username: decodeURIComponent(gateway.username) } : {}),
+    ...(gateway.password ? { password: decodeURIComponent(gateway.password) } : {}),
+  };
+}
 
 // Best-effort city extraction from venue / location strings. Falls back
 // to null when nothing recognizable. The full geocoding pass lives in
@@ -255,26 +303,39 @@ async function pullRssSource(source) {
 
   // Fetch the body ourselves (same UA/timeout parseURL used) so the XML can
   // be entity-sanitized before parsing — parseURL offers no hook for that.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+  const ua = source.scrape_config?.userAgent || DEFAULT_BOT_UA;
+  const proxy = resolveProxyConfig(source);
   let xml;
-  try {
-    const resp = await fetch(source.feed_url, {
-      signal: controller.signal,
-      headers: {
-        // Polite bot UA by default. Some hosts (e.g. The Gabber's WP Engine
-        // host) UA-filter anything that isn't a real browser — those sources
-        // set scrape_config.userAgent to a browser string instead of being
-        // abandoned. Per-source override, not global, so we stay identifiable
-        // everywhere we're allowed to be.
-        'User-Agent': source.scrape_config?.userAgent
-          || 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
-      },
+  if (proxy) {
+    // Node's fetch() can't route through a proxy without a new dependency;
+    // Playwright (already a workspace dep for the scrape handler) ships an
+    // HTTP client with first-class proxy support — use it for the proxied
+    // path only, the direct path below keeps plain fetch.
+    if (!playwrightRequest) throw new Error('playwright not installed');
+    const rq = await playwrightRequest.newContext({
+      proxy,
+      extraHTTPHeaders: { 'User-Agent': ua },
     });
-    if (!resp.ok) throw new Error(`Status code ${resp.status}`);
-    xml = decodeXmlBody(Buffer.from(await resp.arrayBuffer()), resp.headers.get('content-type'));
-  } finally {
-    clearTimeout(timer);
+    try {
+      const resp = await rq.get(source.feed_url, { timeout: HTTP_TIMEOUT_MS });
+      if (!resp.ok()) throw new Error(`Status code ${resp.status()}`);
+      xml = decodeXmlBody(await resp.body(), resp.headers()['content-type']);
+    } finally {
+      await rq.dispose().catch(() => {});
+    }
+  } else {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+    try {
+      const resp = await fetch(source.feed_url, {
+        signal: controller.signal,
+        headers: { 'User-Agent': ua },
+      });
+      if (!resp.ok) throw new Error(`Status code ${resp.status}`);
+      xml = decodeXmlBody(Buffer.from(await resp.arrayBuffer()), resp.headers.get('content-type'));
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   const feed = await parser.parseString(escapeBareXmlEntities(xml));
@@ -750,8 +811,7 @@ async function pullIcalSource(source) {
           // Polite bot UA by default; per-source browser-UA override for
           // hosts that UA-filter bots (e.g. Visit Venice's WAF serves the
           // iCal feed a 403 to non-browser UAs). Same convention as RSS.
-          'User-Agent': source.scrape_config?.userAgent
-            || 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
+          'User-Agent': source.scrape_config?.userAgent || DEFAULT_BOT_UA,
         },
       },
       (err, data) => {
@@ -890,15 +950,29 @@ async function pullScrapeSource(source) {
   // domcontentloaded (30s ceiling, overridable per source), then give
   // hydration a best-effort settle window instead of a hard gate.
   const gotoTimeoutMs = Math.max(5000, Math.min(60000, Number(cfg.gotoTimeoutMs) || 30000));
+  const proxy = resolveProxyConfig(source);
 
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: true, ...(proxy ? { proxy } : {}) });
   let html;
   try {
     const context = await browser.newContext({
-      userAgent: 'Mozilla/5.0 (compatible; WavesNewsletterBot/1.0; +https://portal.wavespestcontrol.com)',
+      // Per-source browser-UA override — same convention as the RSS and
+      // iCal handlers (this path previously hardcoded the bot UA, leaving
+      // scrape sources no lever against UA-filtering hosts).
+      userAgent: cfg.userAgent || DEFAULT_BOT_UA,
       viewport: { width: 1280, height: 1024 },
     });
     const page = await context.newPage();
+    if (proxy) {
+      // Residential-proxy bytes are per-GB billed and images/media/fonts
+      // contribute nothing to text extraction — drop them on proxied
+      // pulls only, so direct pulls render exactly as before.
+      await page.route('**/*', (route) => (
+        ['image', 'media', 'font'].includes(route.request().resourceType())
+          ? route.abort()
+          : route.continue()
+      ));
+    }
     const response = await page.goto(source.feed_url, { timeout: gotoTimeoutMs, waitUntil: 'domcontentloaded' });
     // A bot wall / 404 serves a perfectly parseable error page — without
     // this gate the LLM extracts zero events from "Access Denied" and the
@@ -1044,6 +1118,7 @@ module.exports = {
   ingestAllEnabledSources,
   ingestSource, // exported for ad-hoc admin-triggered pulls
   revivalResetFields, // exported for unit testing the past→future revival SQL
+  resolveProxyConfig, // exported for unit testing the proxy opt-in contract
   // Exported for unit tests — pure pieces of the shared extraction path.
   buildArticleBundle,
   buildExtractionSystemPrompt,
