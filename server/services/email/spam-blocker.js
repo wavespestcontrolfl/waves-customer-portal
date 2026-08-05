@@ -315,7 +315,20 @@ async function removeStaleAutoBlock(normalizedAddress, { untrashGmailId = null }
     }
     let recovered = 0;
     for (const id of ids) {
-      const labels = await gmailClient.getMessageLabels(id);
+      let labels;
+      try {
+        labels = await gmailClient.getMessageLabels(id);
+      } catch (err) {
+        // Gmail purges Trash after 30 days: a 404 here means the buried
+        // message is permanently gone — "nothing left to recover", not a
+        // retryable failure. Without this, one purged burial makes the
+        // unwind fail forever (the daily reconcile looped on exactly this
+        // for a week). Same 404 tolerance as the filter delete above; any
+        // other error still aborts and keeps the row as the retry token.
+        const gone = err.code === 404 || err.response?.status === 404;
+        if (gone) continue;
+        throw err;
+      }
       if (labels.includes('TRASH')) {
         await gmailClient.modifyLabels(id, ['INBOX'], ['TRASH']);
         recovered += 1;
