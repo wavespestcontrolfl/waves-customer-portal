@@ -91,6 +91,11 @@ describe('reconcileRainFigure', () => {
     expect(reconcileRainFigure('Rain totaled 2.72 inches this week.', null)).toBeNull();
   });
 
+  test('hyphenated adjectival totals reconcile and stay singular (codex P2 r14)', () => {
+    expect(reconcileRainFigure('The 2.72-inch rainfall total this week raised disease pressure.', 2.96))
+      .toBe('The 2.96-inch rainfall total this week raised disease pressure.');
+  });
+
   test('precipitation / last-seven-days phrasing qualifies (codex P2 r6)', () => {
     expect(reconcileRainFigure('Precipitation over the last seven days was 2.72 inches.', 2.96))
       .toBe('Precipitation over the last seven days was 2.96 inches.');
@@ -224,6 +229,16 @@ describe('replaceDroughtHypothesis', () => {
   test('a negation AFTER the drought phrase preserves the observation (codex P2 r12)', () => {
     expect(replaceDroughtHypothesis('Drought stress was not observed in the thin patches.')).toBeNull();
     expect(replaceDroughtHypothesis('Drought stress isn’t visible across the stressed areas.')).toBeNull();
+  });
+
+  test('drought dismissals stay verbatim (codex P2 r14)', () => {
+    expect(replaceDroughtHypothesis('Drought stress is unlikely given the thin-patch pattern.')).toBeNull();
+    expect(replaceDroughtHypothesis('Drought stress was ruled out for the stressed strip.')).toBeNull();
+  });
+
+  test('drought-resistance praise stays verbatim (codex P2 r14)', () => {
+    expect(replaceDroughtHypothesis('This stressed cultivar has strong drought resistance.')).toBeNull();
+    expect(replaceDroughtHypothesis('The stressed sod is drought resistant.')).toBeNull();
   });
 
   test('non-hyphenated "drought stress symptoms/signs" reads adjectivally (codex P2 r10)', () => {

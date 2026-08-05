@@ -133,7 +133,9 @@ function reconcileRainFigure(text, canonicalRain) {
     // `inch(?:es)?` — a singular "1 inch" total must match too (codex P2 r2).
     // Bare `in` (no period) is a common abbreviation too (codex P2 r4); the
     // lookahead keeps prose like "2 in the morning" from reading as a unit.
-    return sentence.replace(/\b(\d+(?:\.\d+)?)(\s*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|")/gi, (match, value, gap, unit, offset) => {
+    // The gap accepts a hyphen so adjectival totals ("The 2.72-inch rainfall
+    // total") reconcile too (codex P2 r14).
+    return sentence.replace(/\b(\d+(?:\.\d+)?)([\s-]*)(inch(?:es)?|in\.|in\b(?!\s+(?:the|a|an)\b)|")/gi, (match, value, gap, unit, offset) => {
       if (done) return match;
       const v = Number(value);
       if (!Number.isFinite(v)) return match;
@@ -167,10 +169,13 @@ function reconcileRainFigure(text, canonicalRain) {
       changed = true;
       // Keep the unit grammatical when the value changes across the
       // singular/plural boundary ("1 inch" → "1.52 inches" — codex P3 r12).
+      // Hyphenated adjectival compounds stay singular ("2.96-inch total").
       const newVal = formatInches(canonicalRain);
       let newUnit = unit;
-      if (/^inch$/i.test(unit) && Number(newVal) !== 1) newUnit = `${unit}es`;
-      else if (/^inches$/i.test(unit) && Number(newVal) === 1) newUnit = unit.slice(0, -2);
+      if (!gap.includes('-')) {
+        if (/^inch$/i.test(unit) && Number(newVal) !== 1) newUnit = `${unit}es`;
+        else if (/^inches$/i.test(unit) && Number(newVal) === 1) newUnit = unit.slice(0, -2);
+      }
       return `${newVal}${gap}${newUnit}`;
     });
   }).join(' ');
@@ -198,7 +203,9 @@ function reconcileRainFigure(text, canonicalRain) {
 // The tolerance lookahead accepts a hyphen or space before "toleran…" so
 // "drought stress-tolerant" is excluded like "drought stress tolerance"
 // (codex P2 r13).
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?[\s-]+toleran)/gi;
+// …and the praise exclusion covers resistance/resilience wording alongside
+// tolerance ("drought resistant", "drought resilience" — codex P2 r14).
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought[- ]related|drought[- ]stress(?:ed)?|drought|dry\s+(?:pockets?|spells?|patch(?:es)?|spots?|areas?))\b(?!-)(?!(?:\s+stress)?[\s-]+(?:toleran|resist|resilien))/gi;
 const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 
 function replaceDroughtHypothesis(text) {
@@ -249,8 +256,11 @@ function replaceDroughtHypothesis(text) {
       // A negation can also FOLLOW the phrase ("Drought stress was not
       // observed", "isn't visible") — check the same clause after the match
       // before replacing (codex P2 r12); clause punctuation ends the search.
+      // Dismissal terms count as negation too — "Drought stress is unlikely"
+      // / "was ruled out" already agrees with the water data and must not be
+      // flipped into a coverage claim (codex P2 r14).
       const tail = sentence.slice(offset + m.length);
-      if (/^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never)\b/i.test(tail)) return m;
+      if (/^[^.;,:]{0,30}\b(?:not|no|isn['’]t|wasn['’]t|aren['’]t|weren['’]t|never|unlikely|less\s+likely|ruled\s+out|doubtful|improbable)\b/i.test(tail)) return m;
       // Adjectival forms — hyphenated or space-form "drought stressed"
       // (codex P2 r9/r12), or "drought stress" directly modifying
       // symptoms/signs/related (codex P2 r10) — take the adjectival
