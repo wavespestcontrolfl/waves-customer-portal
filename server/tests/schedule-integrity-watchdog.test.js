@@ -46,7 +46,7 @@ function unpricedChild(over = {}) {
     id: 'ss-child-1', customer_id: 'cust-1', status: 'pending',
     service_type: 'Bi-Monthly Tree & Shrub Care Service', service_date: '2026-08-10',
     estimated_price: null, primary_line_price: null,
-    recurring_parent_id: 'ss-parent-1',
+    is_recurring: true, recurring_parent_id: 'ss-parent-1',
     parent_estimated_price: null, parent_primary_line_price: null,
     ...over,
   };
@@ -104,9 +104,23 @@ describe('classifiers', () => {
     }))).toBe(true);
   });
 
-  test('seriesRootId collapses children onto the parent', () => {
+  test('a booster child (is_recurring=false) bills alone — parent price never suppresses it', () => {
+    // Booster/add-on rows complete as one-off billable visits and do NOT
+    // inherit the parent amount, so an unpriced booster pages even under a
+    // fully priced series.
+    expect(isUnpricedSeriesVisit(unpricedChild({
+      is_recurring: false, parent_primary_line_price: '72.00',
+    }))).toBe(true);
+    // A priced booster is fine.
+    expect(isUnpricedSeriesVisit(unpricedChild({
+      is_recurring: false, estimated_price: '49.00', parent_primary_line_price: '72.00',
+    }))).toBe(false);
+  });
+
+  test('seriesRootId collapses recurring children onto the parent; boosters stand alone', () => {
     expect(seriesRootId(unpricedChild())).toBe('ss-parent-1');
     expect(seriesRootId(unpricedChild({ recurring_parent_id: null }))).toBe('ss-child-1');
+    expect(seriesRootId(unpricedChild({ is_recurring: false }))).toBe('ss-child-1');
   });
 });
 
@@ -138,6 +152,9 @@ describe('runInner alerting', () => {
     expect(title).toContain('stuck on_site since 2026-07-21');
     expect(opts.link).toBe('/admin/dispatch');
     expect(opts.metadata.dedupeKey).toBe('stale-visit:sv-1');
+    // 'alert' is silenced-by-default under GATE_ADMIN_BELL_POLICY — the
+    // explicit site-level bell tag is what makes these pages actually ring.
+    expect(opts.bell).toBe(true);
   });
 
   test('an already-alerted subject never rings twice', async () => {
@@ -175,6 +192,19 @@ describe('runInner alerting', () => {
     const result = await runInner({ now: NOW });
     expect(result.alerted).toBe(MAX_ALERTS_PER_RUN);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(MAX_ALERTS_PER_RUN);
+  });
+
+  test('unpriced series ring BEFORE the stale backlog consumes the cap', async () => {
+    // First-enable shape: a stale backlog bigger than the whole per-run cap
+    // plus one same-day money-loss series. The series must still page today —
+    // it can invoice at $0 while the backlog drains over days.
+    const staleRows = Array.from({ length: MAX_ALERTS_PER_RUN + 5 }, (_, i) => staleVisit({ id: `sv-${i}` }));
+    makeDbMock({ staleRows, upcomingRows: [unpricedChild()] });
+    const result = await runInner({ now: NOW });
+    expect(result.alerted).toBe(MAX_ALERTS_PER_RUN);
+    const keys = NotificationService.notifyAdmin.mock.calls.map(([, , , opts]) => opts.metadata.dedupeKey);
+    expect(keys[0]).toBe('unpriced-series:ss-parent-1');
+    expect(keys.filter((k) => k.startsWith('stale-visit:'))).toHaveLength(MAX_ALERTS_PER_RUN - 1);
   });
 
   test('a swallowed notification insert fails the run loudly', async () => {

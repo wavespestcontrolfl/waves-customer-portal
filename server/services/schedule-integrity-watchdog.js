@@ -64,19 +64,26 @@ function isStaleInProgress(row, todayET) {
   return /^\d{4}-\d{2}-\d{2}$/.test(d) && d < todayET;
 }
 
-// An upcoming recurring visit pages only when neither it NOR its parent has
-// a price. The query LEFT JOINs the parent and rides its price fields along
-// as parent_estimated_price / parent_primary_line_price.
+// An upcoming visit pages when nothing that will actually bill it carries a
+// price. Recurring children (is_recurring=true under a parent) inherit the
+// parent's price at invoice time, so a priced parent suppresses. A
+// booster/add-on child (is_recurring=false with a recurring_parent_id) bills
+// as its own one-off visit and does NOT inherit — it is judged on its own
+// price only. The query LEFT JOINs the parent and rides its price fields
+// along as parent_estimated_price / parent_primary_line_price.
 function isUnpricedSeriesVisit(row) {
   if (!row) return false;
   if (rowHasPrice(row)) return false;
+  const inheritsFromParent = !!row.recurring_parent_id && row.is_recurring !== false;
+  if (!inheritsFromParent) return true;
   return toMoney(row.parent_estimated_price) == null && toMoney(row.parent_primary_line_price) == null;
 }
 
-// One subject per series: the root is the recurring parent when the row has
-// one, else the row itself.
+// One subject per series: recurring children collapse onto their parent; a
+// booster/add-on child bills alone and is its own subject.
 function seriesRootId(row) {
-  return row?.recurring_parent_id || row?.id;
+  if (row?.recurring_parent_id && row?.is_recurring !== false) return row.recurring_parent_id;
+  return row?.id;
 }
 
 // Forever-dedupe on the notifications metadata dedupeKey — same contract as
@@ -117,17 +124,20 @@ async function runInner({ now = new Date() } = {}) {
   const stale = staleRows.filter((r) => isStaleInProgress(r, todayET));
 
   // Class 2 — unpriced recurring series with a visit inside the window.
+  // Exclude every status that will never bill (rescheduled rows are
+  // phantom/non-working appointments; skipped and no_show never complete) —
+  // only pending/confirmed/en_route/on_site visits are headed for an invoice.
   const horizon = new Date(now.getTime() + UPCOMING_WINDOW_DAYS * 24 * 3600 * 1000);
   const upcomingRows = await db('scheduled_services as ss')
     .leftJoin('scheduled_services as parent', 'parent.id', 'ss.recurring_parent_id')
-    .whereNotIn('ss.status', ['cancelled', 'completed'])
+    .whereNotIn('ss.status', ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'])
     .where('ss.scheduled_date', '>=', todayET)
     .where('ss.scheduled_date', '<=', etDateString(horizon))
     .where(function whereRecurring() {
       this.where('ss.is_recurring', true).orWhereNotNull('ss.recurring_parent_id');
     })
     .select(
-      'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type',
+      'ss.id', 'ss.customer_id', 'ss.status', 'ss.service_type', 'ss.is_recurring',
       'ss.estimated_price', 'ss.primary_line_price', 'ss.recurring_parent_id',
       'parent.estimated_price as parent_estimated_price',
       'parent.primary_line_price as parent_primary_line_price',
@@ -149,8 +159,13 @@ async function runInner({ now = new Date() } = {}) {
   };
   const ring = async (dedupeKey, title, body, metadata) => {
     if (await alreadyAlerted(dedupeKey)) return false;
+    // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
+    // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
+    // site-level tag these money-loss pages would return a suppressed
+    // sentinel instead of ringing.
     const created = await NotificationService.notifyAdmin('alert', title, body, {
       link: '/admin/dispatch',
+      bell: true,
       metadata: { dedupeKey, ...metadata },
     });
     // NotificationService.create swallows insert errors into a null result;
@@ -164,6 +179,22 @@ async function runInner({ now = new Date() } = {}) {
     return true;
   };
 
+  // Unpriced series ring FIRST: they are same-day money loss (a visit can
+  // complete and invoice at $0 today), while the stale backlog is historic
+  // and safely drains across ticks. On first enable the 89-row stale backlog
+  // would otherwise consume the whole per-run cap for days and starve these.
+  for (const [root, v] of unpricedByRoot) {
+    if (capped()) break;
+    const d = v.service_date;
+    await ring(
+      `unpriced-series:${root}`,
+      `Recurring ${v.service_type || 'service'} has no price — next visit ${d}`,
+      `The recurring ${v.service_type || 'service'} series has no price on any row (parent or child). ` +
+      `Its next visit is ${d}; it will complete and invoice at $0 unless the series is priced first.`,
+      { scheduled_service_id: v.id, series_root_id: root, customer_id: v.customer_id || null, next_visit_date: d },
+    );
+  }
+
   for (const v of stale) {
     if (capped()) break;
     const d = v.service_date;
@@ -174,18 +205,6 @@ async function runInner({ now = new Date() } = {}) {
       'service record, invoice, and report fire; if it never happened, cancel it from admin dispatch ' +
       '(admin path — not the customer app).',
       { scheduled_service_id: v.id, customer_id: v.customer_id || null, stale_status: v.status, service_date: d },
-    );
-  }
-
-  for (const [root, v] of unpricedByRoot) {
-    if (capped()) break;
-    const d = v.service_date;
-    await ring(
-      `unpriced-series:${root}`,
-      `Recurring ${v.service_type || 'service'} has no price — next visit ${d}`,
-      `The recurring ${v.service_type || 'service'} series has no price on any row (parent or child). ` +
-      `Its next visit is ${d}; it will complete and invoice at $0 unless the series is priced first.`,
-      { scheduled_service_id: v.id, series_root_id: root, customer_id: v.customer_id || null, next_visit_date: d },
     );
   }
 
