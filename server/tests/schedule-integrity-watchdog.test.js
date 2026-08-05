@@ -19,11 +19,15 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   annualPrepayCoversVisit: jest.fn(async () => false),
   ANNUAL_PREPAY_PREPAID_METHOD: 'annual_prepay_invoice',
 }));
+jest.mock('../services/irrigation-weekly-email', () => ({
+  findLawnEmailAudienceGaps: jest.fn(async () => []),
+}));
 
 const db = require('../models/db');
 const NotificationService = require('../services/notification-service');
 const { isEnabled } = require('../config/feature-gates');
 const { annualPrepayCoversVisit } = require('../services/annual-prepay-renewals');
+const { findLawnEmailAudienceGaps } = require('../services/irrigation-weekly-email');
 const {
   runScheduleIntegrityWatchdog,
   runInner,
@@ -241,6 +245,28 @@ describe('runInner alerting', () => {
     const keys = NotificationService.notifyAdmin.mock.calls.map(([, , , opts]) => opts.metadata.dedupeKey);
     expect(keys[0]).toBe('unpriced-series:ss-parent-1');
     expect(keys.filter((k) => k.startsWith('stale-visit:'))).toHaveLength(MAX_ALERTS_PER_RUN - 1);
+  });
+
+  test('a fixable lawn-email audience gap rings; opt-out-only rows never do', async () => {
+    findLawnEmailAudienceGaps.mockResolvedValueOnce([
+      { customerId: 'cust-9', name: 'Pat Sample', fixable: ['no_coordinates'], optOuts: [], optOutOnly: false },
+      { customerId: 'cust-8', name: 'Lee Sample', fixable: [], optOuts: ['seasonal_tips_opt_out'], optOutOnly: true },
+    ]);
+    makeDbMock();
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ lawnEmailGaps: 1, lawnGapCheckFailed: false, alerted: 1 });
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [, title, , opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toContain('missing from the Monday watering email');
+    expect(opts.metadata.dedupeKey).toBe('lawn-email-gap:cust-9:no_coordinates');
+  });
+
+  test('a failed lawn-gap check is REPORTED, never silently zero — and other classes still page', async () => {
+    findLawnEmailAudienceGaps.mockRejectedValueOnce(new Error('db exploded'));
+    makeDbMock({ staleRows: [staleVisit()] });
+    const result = await runInner({ now: NOW });
+    expect(result).toMatchObject({ lawnGapCheckFailed: true, lawnEmailGaps: 0, stale: 1, alerted: 1 });
+    expect(NotificationService.notifyAdmin.mock.calls[0][3].metadata.dedupeKey).toBe('stale-visit:sv-1');
   });
 
   test('a swallowed notification insert fails the run loudly', async () => {

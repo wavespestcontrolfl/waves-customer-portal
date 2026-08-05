@@ -640,3 +640,51 @@ describe('runWeeklyIrrigationEmailSweep', () => {
     }
   });
 });
+
+describe('findLawnEmailAudienceGaps', () => {
+  const { findLawnEmailAudienceGaps } = require('../services/irrigation-weekly-email');
+
+  // Thenable knex-chain stub resolving the evidence-book rows.
+  function mockBookRows(rows) {
+    db.mockImplementation(() => {
+      const c = {};
+      for (const m of ['leftJoin', 'whereNull', 'where', 'select']) c[m] = jest.fn(() => c);
+      c.then = (res, rej) => Promise.resolve(rows).then(res, rej);
+      return c;
+    });
+  }
+
+  const member = (over = {}) => ({
+    id: 'cust-1', first_name: 'Pat', last_name: 'Sample',
+    email: 'pat@example.com', latitude: 27.3, longitude: -82.5,
+    active: true, pipeline_stage: 'active_customer',
+    email_pref_ok: true, tips_pref_ok: true,
+    ...over,
+  });
+
+  test('a fully-reachable member produces no gap row', async () => {
+    mockBookRows([member()]);
+    expect(await findLawnEmailAudienceGaps()).toEqual([]);
+  });
+
+  test('missing email / coordinates / lead-stage are FIXABLE gaps', async () => {
+    mockBookRows([
+      member({ id: 'a', email: null }),
+      member({ id: 'b', latitude: null }),
+      member({ id: 'c', pipeline_stage: 'lead' }),
+    ]);
+    const gaps = await findLawnEmailAudienceGaps();
+    expect(gaps.map((g) => [g.customerId, g.fixable[0], g.optOutOnly])).toEqual([
+      ['a', 'no_email', false],
+      ['b', 'no_coordinates', false],
+      ['c', 'pipeline_stage=lead', false],
+    ]);
+  });
+
+  test('opt-outs are flagged but optOutOnly — never a defect on their own', async () => {
+    mockBookRows([member({ tips_pref_ok: false })]);
+    const gaps = await findLawnEmailAudienceGaps();
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toMatchObject({ optOutOnly: true, fixable: [], optOuts: ['seasonal_tips_opt_out'] });
+  });
+});

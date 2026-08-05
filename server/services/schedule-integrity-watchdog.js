@@ -9,7 +9,7 @@
  * past-dated visits parked in on_site/en_route the same way. Nothing in the
  * portal surfaces either state; both classes silently cost money.
  *
- * Two exception classes, one pager:
+ * Three exception classes, one pager:
  *  1. STALE IN-PROGRESS — a visit whose scheduled_date is before today (ET)
  *     still sitting in on_site/en_route. The tech went out; the completion
  *     never happened in the system.
@@ -19,6 +19,11 @@
  *     legitimately ride with NULL price and inherit from their parent at
  *     invoice time, so only a series with no price ANYWHERE pages. One bell
  *     per series (root id), not per visit.
+ *  3. LAWN-EMAIL AUDIENCE GAP — a customer with live recurring-lawn
+ *     evidence who cannot receive the Monday irrigation email (no email /
+ *     no coordinates / lead-stage / inactive). The email's audience is
+ *     computed at send time via the same predicate this check reuses, so
+ *     adds and drops are automatic — only prerequisite failures page.
  *
  * Alerting mirrors call-booking-miss-watchdog: one bell per subject, deduped
  * forever via the notifications metadata dedupeKey, with a per-run cap so
@@ -232,6 +237,36 @@ async function runInner({ now = new Date() } = {}) {
     );
   }
 
+  // Class 3 — recurring-lawn customers invisible to the Monday irrigation
+  // email (owner directive 2026-08-05: check daily). The email's audience is
+  // computed at send time, so there is no enrollment list to reconcile — the
+  // only drift class is a customer WITH recurring-lawn evidence failing a
+  // prerequisite (no email / no coordinates / lead-stage / inactive). Reuses
+  // the sender's own predicate (findLawnEmailAudienceGaps wraps the same
+  // recurringLawnEvidenceFilter the send uses) so check and send can't
+  // diverge. Opt-outs are the customer's choice and never page. A failed
+  // check is REPORTED in the result, never silently zero.
+  let lawnGaps = [];
+  let lawnGapCheckFailed = false;
+  try {
+    const { findLawnEmailAudienceGaps } = require('./irrigation-weekly-email');
+    lawnGaps = (await findLawnEmailAudienceGaps({ now })).filter((g) => !g.optOutOnly);
+  } catch (e) {
+    lawnGapCheckFailed = true;
+    logger.error(`[schedule-integrity] lawn-email audience-gap check failed: ${e.message}`);
+  }
+  for (const g of lawnGaps) {
+    if (capped()) break;
+    await ring(
+      `lawn-email-gap:${g.customerId}:${[...g.fixable].sort().join('+')}`,
+      `${g.name || 'A recurring-lawn customer'} is missing from the Monday watering email`,
+      `${g.name || 'This customer'} has live recurring lawn service but cannot receive the Monday ` +
+      `irrigation email: ${g.fixable.join(', ')}. Fix the listed field(s) on their customer record ` +
+      'and they are included automatically next Monday — the audience is computed at send time.',
+      { customer_id: g.customerId, fixable: g.fixable, opt_outs: g.optOuts },
+    );
+  }
+
   for (const v of stale) {
     if (capped()) break;
     const d = v.service_date;
@@ -250,6 +285,8 @@ async function runInner({ now = new Date() } = {}) {
     todayET,
     stale: stale.length,
     unpricedSeries: unpricedByRoot.size,
+    lawnEmailGaps: lawnGaps.length,
+    lawnGapCheckFailed,
     alerted,
   };
 }
