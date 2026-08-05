@@ -2099,7 +2099,11 @@ async function createSelfBooking(payload = {}) {
         // to this customer — stamping estimate_id/source_estimate_id and
         // pay-at-visit pricing onto the visit would re-split what the
         // undo restored (pricingEstimate is always one of these two rows).
-        for (const estRef of [estimate?.id, sourceEstimateRow?.id]) {
+        // Only refs the insert actually STAMPS are checked: an unowned
+        // source estimate already books UNLINKED (fail-open ownership
+        // gate above), and revalidating its row here would 409 a booking
+        // that stamps nothing from it.
+        for (const estRef of [estimate?.id, sourceEstimateId]) {
           if (!estRef) continue;
           const freshEst = await trx('estimates').where({ id: estRef }).first('id', 'customer_id');
           if (!freshEst || (freshEst.customer_id && String(freshEst.customer_id) !== String(custId))) {
