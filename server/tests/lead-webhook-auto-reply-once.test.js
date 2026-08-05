@@ -1,8 +1,9 @@
 // The lead auto-reply (lead_auto_reply_biz) fires AT MOST ONCE per person,
 // ever (owner ruling 2026-08-05). hasPriorLeadAutoReply is the dedup gate,
 // checked in order:
-//   0. lead_auto_reply_sends — durable marker this route writes inside the
-//      send's advisory-lock transaction (survives persistAudit failures).
+//   0. lead_auto_reply_sends — durable CLAIM-BEFORE-SEND marker (the
+//      atomic ON CONFLICT insert is also the per-phone mutex; survives
+//      persistAudit failures and crashes mid-send).
 //   1. messaging_audit_log entry_point='lead_webhook_auto_reply' with a
 //      non-null sent_at AND a real Twilio SID (SM/MM) — gate-blocked /
 //      template-disabled / owner-silence rows carry sentinel provider ids
@@ -157,16 +158,29 @@ describe('resolveLeadAutoReplyClaim', () => {
   });
 
   test.each([
-    ['wrapper block / provider failure', { sent: false, code: 'PROVIDER_FAILURE' }],
+    ['wrapper policy block (provider never called)', { sent: false, blocked: true, code: 'OPT_OUT' }],
     ['gate/template sentinel sid', { sent: true, providerMessageId: 'gate-blocked' }],
-    ['render throw (no result)', null],
-  ])('%s → claim released so a later submission can greet', async (_label, smsResult) => {
+    ['owner-silence sentinel sid', { sent: true, providerMessageId: 'owner-silence' }],
+    ['terminal provider rejection', { sent: false, blocked: false, terminal: true, code: 'PROVIDER_FAILURE' }],
+  ])('deterministic no-delivery: %s → claim released', async (_label, smsResult) => {
     const dbc = mkDbc();
     await resolveLeadAutoReplyClaim('9415551234', smsResult, dbc);
     // Only an UNCONFIRMED claim may be deleted — a stamped SID is immutable.
     expect(dbc.__chain.whereNull).toHaveBeenCalledWith('twilio_sid');
     expect(dbc.__chain.del).toHaveBeenCalled();
     expect(dbc.__chain.update).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['retryable transport error (may have been accepted by Twilio)', { sent: false, blocked: false, retryable: true, terminal: false, code: 'PROVIDER_FAILURE' }],
+    ['unknown result shape', undefined],
+    ['null result', null],
+  ])('AMBIGUOUS outcome: %s → claim KEPT (fail closed) and warns', async (_label, smsResult) => {
+    const dbc = mkDbc();
+    await resolveLeadAutoReplyClaim('9415551234', smsResult, dbc);
+    expect(dbc.__chain.del).not.toHaveBeenCalled();
+    expect(dbc.__chain.update).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('fail closed'));
   });
 
   test('settlement error never throws — claim stays, fail closed, warns', async () => {

@@ -670,58 +670,49 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // "new" row (phone stored in a different format, deleted/merged
     // record, double submission racing the 5-min window — 20 phones got
     // the menu text twice in prod). See hasPriorLeadAutoReply for the
-    // dedup predicate; a per-phone advisory xact lock serializes
-    // concurrent webhook POSTs so both can't pass the check before
-    // either send lands (the audit row is committed by the time
-    // sendCustomerMessage resolves, i.e. before the lock releases).
-    // Lock hold spans one template render + one Twilio call at lead
-    // volume (~2/day) — pool impact is negligible. Fails CLOSED: any
-    // error in the check or lock path skips the send — a missed
-    // greeting beats texting a customer twice. Later inbound replies
-    // are still classified by server/services/lead-intake.js. Edit
-    // copy in the admin UI.
+    // dedup predicate. Concurrency: the CLAIM ITSELF is the mutex — the
+    // ON CONFLICT DO NOTHING ... RETURNING insert is an atomic per-phone
+    // test-and-set, so two concurrent POSTs can both pass the history
+    // check but exactly one wins the claim row and sends; the loser
+    // skips. No transaction and no advisory lock, so no handler ever
+    // holds one pool connection while waiting on a second (that shape
+    // deadlocks the pool under a burst). Fails CLOSED: any error in the
+    // check or claim path skips the send — a missed greeting beats
+    // texting a customer twice. Later inbound replies are still
+    // classified by server/services/lead-intake.js. Edit copy in the
+    // admin UI.
     try {
-      await db.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [
-          `lead_auto_reply:${String(phoneFormatted).slice(-10)}`,
-        ]);
+      if (await hasPriorLeadAutoReply(phoneFormatted)) {
+        logger.info(`[lead-webhook] Auto-reply skipped for customer ${customer.id}: already sent once to this phone`);
+      } else {
+        // Render BEFORE claiming: a template failure claims nothing and
+        // the phone stays re-armed.
+        const replyMsg = await renderRequiredSmsTemplate(
+          'lead_auto_reply_biz',
+          { first_name: firstName },
+          { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customer.id }
+        );
 
-        if (await hasPriorLeadAutoReply(phoneFormatted, trx)) {
-          logger.info(`[lead-webhook] Auto-reply skipped for customer ${customer.id}: already sent once to this phone`);
-          return;
-        }
-
-        // CLAIM-BEFORE-SEND. The claim is committed on its own pooled
-        // connection (db, NOT trx) BEFORE the Twilio call, so from this
-        // point on there is no instant where the customer can have
-        // received the menu without durable evidence: a crash between
-        // Twilio's accept and any later write leaves the claim in
-        // place and the guard stays fail-closed. The advisory lock
-        // (still held) is what serializes concurrent requests; the
-        // claim's durability is deliberately independent of trx, which
-        // would otherwise roll the claim back on the very crash it
-        // exists to survive. resolveLeadAutoReplyClaim then confirms
-        // the claim with the real SID, or RELEASES it when nothing was
-        // delivered (wrapper block, provider failure, gate/template
-        // sentinel sid) so a later submission can greet the customer.
-        // An unresolved claim (twilio_sid null, e.g. crash mid-send)
+        // CLAIM-BEFORE-SEND, committed (autocommit) before the Twilio
+        // call: from this point there is no instant where the customer
+        // can have received the menu without durable evidence — a crash
+        // anywhere after Twilio's accept leaves the claim in place and
+        // the guard stays fail-closed. RETURNING distinguishes winning
+        // the claim ([row]) from losing to a concurrent request or an
+        // existing row ([]). An unresolved claim (twilio_sid null)
         // suppresses future sends by design — delete the
         // lead_auto_reply_sends row to re-arm that phone.
         const phoneDigits = String(phoneFormatted).slice(-10);
-        await db('lead_auto_reply_sends')
+        const claim = await db('lead_auto_reply_sends')
           .insert({ phone_digits: phoneDigits, customer_id: customer.id, twilio_sid: null })
           .onConflict('phone_digits')
-          .ignore();
+          .ignore()
+          .returning('phone_digits');
 
-        let smsResult;
-        try {
-          const replyMsg = await renderRequiredSmsTemplate(
-            'lead_auto_reply_biz',
-            { first_name: firstName },
-            { workflow: 'lead_webhook_auto_reply', entity_type: 'customer', entity_id: customer.id }
-          );
-
-          smsResult = await sendCustomerMessage({
+        if (claim.length === 0) {
+          logger.info(`[lead-webhook] Auto-reply skipped for customer ${customer.id}: claim already held for this phone`);
+        } else {
+          const smsResult = await sendCustomerMessage({
             to: phoneFormatted,
             body: replyMsg,
             channel: 'sms',
@@ -736,20 +727,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
               lead_source: leadSource.source,
             },
           });
-        } catch (sendErr) {
-          // Soft failure before/at send (template render, wrapper throw):
-          // nothing reached the customer — release the claim, then
-          // rethrow to the outer catch. A hard crash skips this and the
-          // claim persists (fail closed).
-          await resolveLeadAutoReplyClaim(phoneDigits, null);
-          throw sendErr;
+          if (!smsResult.sent) {
+            logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
+          }
+          await resolveLeadAutoReplyClaim(phoneDigits, smsResult);
         }
-
-        if (!smsResult.sent) {
-          logger.warn(`[lead-webhook] Auto-reply blocked/failed for customer ${customer.id}: ${smsResult.code || smsResult.reason || 'unknown'}`);
-        }
-        await resolveLeadAutoReplyClaim(phoneDigits, smsResult);
-      });
+      }
 
       // Seed the intake state machine so the customer's next inbound SMS
       // gets routed through server/services/lead-intake.js (classify →
@@ -1533,9 +1516,10 @@ function shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission } = {})
  * false-positively suppressing the menu.
  *
  * Durable marker: lead_auto_reply_sends is a CLAIM-BEFORE-SEND record —
- * this route commits it on its own connection before calling Twilio,
- * confirms it with the real SID on success, and releases it when
- * nothing was delivered (see resolveLeadAutoReplyClaim). There is
+ * this route commits it (an atomic ON CONFLICT test-and-set that also
+ * serializes concurrent requests) before calling Twilio, confirms it
+ * with the real SID on success, and releases it only on PROVABLY
+ * undelivered outcomes (see resolveLeadAutoReplyClaim). There is
  * therefore no instant where a delivered menu lacks durable evidence:
  * persistAudit failing (best-effort, {id:null}) or a crash between
  * Twilio's accept and any later write both leave the claim in place.
@@ -1562,10 +1546,17 @@ const REAL_TWILIO_SID_RE = /^(SM|MM)/;
  * Settle a pre-send lead-auto-reply claim after the send attempt.
  *
  *  - Real Twilio SID → confirm the claim (stamp twilio_sid).
- *  - Anything else (wrapper block, provider failure, gate/template
- *    sentinel sid, render throw → smsResult null) → the customer
- *    received nothing, so RELEASE the claim; a later submission may
- *    greet them.
+ *  - DETERMINISTIC no-delivery → release the claim so a later
+ *    submission can greet the customer. Deterministic means the text
+ *    provably never reached the carrier path:
+ *      · wrapper policy block (blocked === true — provider never called)
+ *      · gate/template/owner sentinel sid (sent:true without a real SID)
+ *      · terminal provider failure (Twilio definitively rejected)
+ *  - AMBIGUOUS outcomes KEEP the claim (fail closed): a retryable
+ *    transport error (timeout, socket reset) can occur AFTER Twilio
+ *    accepted the message, so releasing on those could let a later
+ *    form send the menu a second time to a customer who received the
+ *    first one. Same for unknown/absent result shapes.
  *  - If the release itself fails we keep the claim (fail closed) and
  *    log — a suppressed greeting is recoverable, a duplicate is not.
  *
@@ -1576,8 +1567,17 @@ async function resolveLeadAutoReplyClaim(phoneDigits, smsResult, dbc = db) {
     const sid = smsResult && smsResult.sent ? String(smsResult.providerMessageId || '') : '';
     if (REAL_TWILIO_SID_RE.test(sid)) {
       await dbc('lead_auto_reply_sends').where({ phone_digits: phoneDigits }).update({ twilio_sid: sid });
-    } else {
+      return;
+    }
+    const deterministicNoDelivery = !!smsResult && (
+      smsResult.blocked === true
+      || smsResult.sent === true // sentinel sid: gate-blocked / template-disabled / owner-silence
+      || (smsResult.sent === false && smsResult.terminal === true)
+    );
+    if (deterministicNoDelivery) {
       await dbc('lead_auto_reply_sends').where({ phone_digits: phoneDigits }).whereNull('twilio_sid').del();
+    } else {
+      logger.warn(`[lead-webhook] auto-reply outcome ambiguous (retryable/unknown) — keeping claim, fail closed`);
     }
   } catch (settleErr) {
     logger.warn(`[lead-webhook] auto-reply claim settlement failed (claim stays, fail closed): ${settleErr.message}`);
