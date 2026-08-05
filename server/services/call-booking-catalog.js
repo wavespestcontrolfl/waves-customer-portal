@@ -348,6 +348,14 @@ function sanitizeQuotedCallPrice(value) {
  * job-specific price the agent and caller agreed to.
  */
 function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
+  // A covered re-service is free by definition — a number the extractor
+  // caught on the call (the plan rate, a misheard fee) must never become the
+  // visit's invoice amount (codex #3222 r2). Same shape the self-serve
+  // callback insert uses: no price, and the insert stamps
+  // create_invoice_on_complete false.
+  if (isReServiceCatalogRow(catalogRow)) {
+    return { price: null, source: null };
+  }
   if (!catalogRow || catalogRow.billing_type !== 'one_time') {
     return { price: null, source: null };
   }

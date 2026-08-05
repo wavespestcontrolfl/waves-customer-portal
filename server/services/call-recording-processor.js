@@ -8016,7 +8016,13 @@ const CallRecordingProcessor = {
       try {
         const { reserviceLanesForCustomer, openCallbackExistsForLane } = require('./reservice-scheduler');
         const reServiceCustomerRow = await db('customers').where({ id: customerId }).first();
-        const eligibleLanes = reServiceCustomerRow ? await reserviceLanesForCustomer(reServiceCustomerRow) : [];
+        // Same inactive guard the public re-service route applies before its
+        // lane lookup (codex #3222 r2): reserviceLanesForCustomer itself does
+        // not reject deactivated rows, and a lingering WaveGuard tier/rate
+        // plus pest evidence would otherwise still grant the pest lane.
+        const eligibleLanes = (reServiceCustomerRow && reServiceCustomerRow.active !== false)
+          ? await reserviceLanesForCustomer(reServiceCustomerRow)
+          : [];
         for (const lane of eligibleLanes) {
           if (!(await openCallbackExistsForLane(db, customerId, lane))) callReServiceLanes.push(lane);
         }
@@ -8460,13 +8466,19 @@ const CallRecordingProcessor = {
               // Follow-up visit plan — only when the call specifically
               // discussed a second/follow-up treatment (transcript-driven);
               // date from the transcript when agreed, else parent date + the
-              // service's catalog interval (default 14 days).
-              const callFollowUpPlan = resolveCallFollowUpPlan({
-                extracted,
-                catalogRow: callBookingCatalogRow,
-                parentDate: scheduledDate,
-                parentWindowStart: windowStart || '09:00',
-              });
+              // service's catalog interval (default 14 days). Never for a
+              // covered re-service (codex #3222 r2): the re-service IS the
+              // free callback visit — a child row would be a second open
+              // callback from the same call, invisible to the lane dedupe's
+              // semantics and without the is_callback marker.
+              const callFollowUpPlan = isReServiceCatalogRow(callBookingCatalogRow)
+                ? null
+                : resolveCallFollowUpPlan({
+                  extracted,
+                  catalogRow: callBookingCatalogRow,
+                  parentDate: scheduledDate,
+                  parentWindowStart: windowStart || '09:00',
+                });
               let reusedExistingSchedule = false;
               // Set when the call was ATTACHED to a live booking made by a
               // human through another channel (see the attach guard below):
@@ -8529,21 +8541,21 @@ const CallRecordingProcessor = {
                     throw new Error('call ownership changed while waiting on the comms fence (merge-undo) — booking held for office review');
                   }
                 }
-                // Re-service lane dedupe, re-checked UNDER the transaction
-                // (codex #3222 r1 — mirrors the reservice commit path): the
-                // resolution-time lane filter is advisory and racy against a
-                // callback that landed since. A SECOND open free visit in the
-                // lane must never insert; abort into the schedErr path (no
-                // booking, no SMS, approved-but-unbooked card → the office
-                // books manually or hands over the existing visit's
-                // reschedule link). A failed check aborts too — fail closed,
-                // never a possibly-duplicate free visit.
+                // Re-service lane advisory lock (codex #3222 r2 — the SAME
+                // namespace+key createSelfBooking takes, so a phone booking
+                // and a self-serve commit for the customer's lane serialize
+                // against each other, not just against themselves). Lock
+                // order vs the self-serve writer is compatible: both take
+                // customer-comms before this terminal reservice-lane rung.
+                // Taken here, before the same-call replay lookup, for
+                // lock-order clarity — the replay/attach paths below still
+                // win for a reprocessed call, and the open-callback dedupe
+                // itself runs on the fresh-insert path only (after them).
                 if (isReServiceCatalogRow(callBookingCatalogRow)) {
-                  const { openCallbackExistsForLane } = require('./reservice-scheduler');
-                  const reServiceLane = reServiceLaneForRow(callBookingCatalogRow);
-                  if (await openCallbackExistsForLane(trx, customerId, reServiceLane)) {
-                    throw new Error(`open ${reServiceLane} re-service callback already booked — refusing a second free visit in the lane; booking held for office review`);
-                  }
+                  await trx.raw(
+                    'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+                    ['reservice-lane', `${customerId}:${callBookingCatalogRow.service_key}`],
+                  );
                 }
                 const defaultTechnician = await resolveDefaultCallBookingTechnician(trx);
                 const defaultTechnicianId = defaultTechnician?.id || null;
@@ -8926,6 +8938,23 @@ const CallRecordingProcessor = {
                   logger.warn(`[call-proc] booking occupancy check failed for ${maskSid(callSid)} (booking proceeds unflagged): ${occErr.message}`);
                   bookingTimeConflicts = [];
                 }
+                // Re-service lane dedupe on the FRESH-INSERT path only,
+                // under the reservice-lane advisory lock taken above and
+                // AFTER the replay/attach lookups (codex #3222 r2 — mirrors
+                // createSelfBooking's lock → replay → dedupe order, so a
+                // reprocessed call reuses its own booking instead of seeing
+                // it as "already booked"). A hit aborts into the schedErr
+                // hold-for-review path (no booking, no SMS, the office books
+                // manually or hands over the existing visit's reschedule
+                // link). A failed check aborts too — fail closed, never a
+                // possibly-duplicate free visit.
+                if (isReServiceCatalogRow(callBookingCatalogRow)) {
+                  const { openCallbackExistsForLane } = require('./reservice-scheduler');
+                  const reServiceLane = reServiceLaneForRow(callBookingCatalogRow);
+                  if (await openCallbackExistsForLane(trx, customerId, reServiceLane)) {
+                    throw new Error(`open ${reServiceLane} re-service callback already booked — refusing a second free visit in the lane; booking held for office review`);
+                  }
+                }
                 // Bill-To linkage (callBookingPayerId resolved above, before the
                 // transaction): stamp payer_id (per-job) so the completion
                 // invoice routes to the payer. (propertyLinkage resolved above,
@@ -8956,12 +8985,21 @@ const CallRecordingProcessor = {
                   }),
                   estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                   // A phone-booked covered re-service is the same free
-                  // callback the reservice lane books: is_callback is the
-                  // explicit marker every downstream free-callback path keys
-                  // on (inspection-credit exclusion, callback reporting, the
-                  // lane's own open-callback dedupe) — without it this row
-                  // would read as a paid visit (codex #3222 r1).
-                  ...(isReServiceCatalogRow(callBookingCatalogRow) ? { is_callback: true } : {}),
+                  // callback the reservice lane books — mirror the
+                  // createSelfBooking callbackVisit shape exactly (codex
+                  // #3222 r1+r2): is_callback is the explicit marker every
+                  // downstream free-callback path keys on (inspection-credit
+                  // exclusion, callback reporting, the lane's open-callback
+                  // dedupe, completion's monthly-dues suppression), and the
+                  // price/invoice overrides make the row unbillable even if
+                  // the extractor captured a number (the plan rate, a
+                  // misheard fee) — resolveCallBookingPrice also refuses to
+                  // price these rows, so this is belt and braces.
+                  ...(isReServiceCatalogRow(callBookingCatalogRow) ? {
+                    is_callback: true,
+                    estimated_price: null,
+                    create_invoice_on_complete: false,
+                  } : {}),
                   // Outbound-callback bookings land PENDING/needs-review (the
                   // office confirms in dispatch, which arms reminders); inbound
                   // confirmed bookings auto-confirm as before.

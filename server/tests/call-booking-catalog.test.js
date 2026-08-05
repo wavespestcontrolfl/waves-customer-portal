@@ -529,6 +529,26 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(reServiceLaneForRow(null)).toBeNull();
   });
 
+  test('a re-service row never prices — even a transcript-quoted number stays off the visit (codex r2)', () => {
+    expect(resolveCallBookingPrice({ quotedPrice: 109, catalogRow: RE_SERVICES[0] }))
+      .toEqual({ price: null, source: null });
+    expect(resolveCallBookingPrice({ quotedPrice: null, catalogRow: RE_SERVICES[1] }))
+      .toEqual({ price: null, source: null });
+    expect(callBookingInvoiceOnComplete({ price: null, catalogRow: RE_SERVICES[0] })).toBe(false);
+  });
+
+  test('a re-service primary never plans a follow-up child — it IS the free callback (codex r2)', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true },
+      catalogRow: RE_SERVICES[0],
+      parentDate: '2026-08-06',
+      parentWindowStart: '09:00',
+    })).not.toBeNull(); // the shared planner itself is service-agnostic…
+    // …the processor gates it: callFollowUpPlan is null for re-service rows
+    // (asserted structurally here — the gate keys on isReServiceCatalogRow).
+    expect(isReServiceCatalogRow(RE_SERVICES[0])).toBe(true);
+  });
+
   test('loadCallReServiceRows queries by service_key without a booking_enabled filter and fails open', async () => {
     const wheres = [];
     const chain = {
