@@ -26,6 +26,7 @@ const { alertTwilioFailure } = require('../services/twilio-failure-alerts');
 const { normalizeLeadAddress } = require('../utils/address-normalizer');
 const { zipToCity } = require('../utils/zip-to-city');
 const { verifyLeadPrefillToken } = require('../utils/lead-prefill-token');
+const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const { verifyTurnstileToken } = require('../utils/turnstile');
@@ -1207,12 +1208,17 @@ async function attachVoicemailPrefillLead({ body, fields, webhookStage }) {
 
 // Shared attach UPDATE for both attach modes (prefill token + phone match).
 // Atomic: the open-lead guards live in the WHERE so a lead the office closed
-// between lookup and update never re-attaches. Returns the row or null.
-async function applyLeadAttachUpdate(leadId, fields, webhookStage) {
-  const [attached] = await db('leads')
+// between lookup and update never re-attaches. `extraWhere` lets the phone-
+// match path re-check ITS candidate guards (open-status set, ownership, name)
+// in the same statement — a concurrent claim between its SELECT and this
+// UPDATE must miss, not overwrite. Returns the row or null.
+async function applyLeadAttachUpdate(leadId, fields, webhookStage, extraWhere) {
+  const query = db('leads')
     .where({ id: leadId })
     .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
-    .whereNull('converted_at')
+    .whereNull('converted_at');
+  if (extraWhere) extraWhere(query);
+  const [attached] = await query
     .update({
       ...fields,
       // Reopen a lead the office parked as 'unresponsive' — they just
@@ -1239,14 +1245,27 @@ async function applyLeadAttachUpdate(leadId, fields, webhookStage) {
 // Guards, tightest-first:
 //  - call-channel leads only — form/SMS dups are owned by the customer-dedup
 //    and duplicate-submission logic upstream, never by this attach;
-//  - same terminal/converted exclusions as the token attach (re-checked
-//    atomically in the shared UPDATE);
+//  - OPEN statuses only (the shared positive-membership set from
+//    lead-statuses.js) — unlike the token path, a bare phone match carries
+//    no proof the prospect is responding to THAT lead, so a lead the office
+//    closed as 'unresponsive' months ago stays closed and the form gets a
+//    fresh row with fresh attribution. The reopen CASE in the shared UPDATE
+//    is intentionally unreachable from this path;
+//  - unambiguous number only: if MORE THAN ONE customer row carries this
+//    phone (multi-property households share numbers), skip — the webhook's
+//    customers.first() pick is arbitrary and could pin the voicemail's call
+//    attribution on the wrong account (mirrors findCustomerByPhone's
+//    never-auto-link-ambiguous rule in lead-from-extraction);
 //  - never cross-link: a candidate already linked to a DIFFERENT customer is
 //    someone else's lead (shared line) — skip;
 //  - first-name conflict guard (mirrors lead-from-extraction.nameConflicts):
 //    a typed first name that differs from the lead's captured first name
 //    means a different household member — skip. The webhook's 'Unknown'
 //    placeholder never counts as a typed name.
+// The ownership/name/open-status guards are RE-CHECKED atomically inside the
+// shared UPDATE's WHERE — a concurrent submission or an office edit between
+// the candidate SELECT and the UPDATE makes the UPDATE miss (→ null → the
+// caller inserts a fresh lead) instead of silently overwriting the claim.
 //
 // Unlike the token attach (typed-wins wholesale — the tokenized form was
 // prefilled FROM the lead), this fallback only overwrites with NON-EMPTY
@@ -1259,12 +1278,21 @@ async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, field
     const candidate = await db('leads')
       .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
       .where({ first_contact_channel: 'call' })
-      .whereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate'])
+      .whereIn('status', OPEN_LEAD_STATUSES)
       .whereNull('converted_at')
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
       .first();
     if (!candidate) return null;
+
+    const phoneCustomers = await db('customers')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits])
+      .whereNull('deleted_at')
+      .limit(2);
+    if (phoneCustomers.length > 1) {
+      logger.info(`[lead-webhook] phone-match lead ${candidate.id}: ${phoneCustomers.length}+ customers share the number; not attaching`);
+      return null;
+    }
 
     if (candidate.customer_id && fields.customer_id && candidate.customer_id !== fields.customer_id) {
       logger.info(`[lead-webhook] phone-match lead ${candidate.id} belongs to another customer; not attaching`);
@@ -1286,7 +1314,22 @@ async function attachOpenCallLeadByPhone({ phoneFormatted, typedFirstName, field
     }
     if (typedFirstName === 'Unknown') delete merged.first_name;
 
-    const attached = await applyLeadAttachUpdate(candidate.id, merged, webhookStage);
+    const attached = await applyLeadAttachUpdate(candidate.id, merged, webhookStage, (query) => {
+      query.whereIn('status', OPEN_LEAD_STATUSES);
+      if (fields.customer_id) {
+        query.where(function ownershipGuard() {
+          this.whereNull('customer_id').orWhere('customer_id', fields.customer_id);
+        });
+      }
+      if (typed) {
+        // SQL twin of normName: attach only while the captured first name is
+        // still absent or still normalizes to the typed one.
+        query.whereRaw(
+          "(COALESCE(first_name, '') = '' OR lower(regexp_replace(first_name, '[^a-zA-Z0-9]', '', 'g')) = ?)",
+          [typed]
+        );
+      }
+    });
     if (attached) {
       logger.info(`[lead-webhook] attached form submission to existing lead ${candidate.id} via phone match`);
     }

@@ -35,12 +35,17 @@ const LEAD_ID = '3f2f7b9c-1111-4222-8333-abcdefabcdef';
 // and update builders share the shape.
 let state;
 function makeBuilder(table) {
-  const b = { table, wheres: [], whereRaws: [], whereNotIns: [], whereNulls: [] };
+  const b = { table, wheres: [], whereRaws: [], whereIns: [], whereNotIns: [], whereNulls: [] };
   b.where = jest.fn((arg) => { b.wheres.push(arg); return b; });
   b.whereRaw = jest.fn((sql, bindings) => { b.whereRaws.push([sql, bindings]); return b; });
+  b.whereIn = jest.fn((col, vals) => { b.whereIns.push([col, vals]); return b; });
   b.whereNotIn = jest.fn((col, vals) => { b.whereNotIns.push([col, vals]); return b; });
   b.whereNull = jest.fn((col) => { b.whereNulls.push(col); return b; });
   b.orderBy = jest.fn(() => b);
+  b.limit = jest.fn(() => {
+    state.selects.push({ table, builder: b });
+    return Promise.resolve(state.customerRows);
+  });
   b.first = jest.fn(() => {
     state.selects.push({ table, builder: b });
     return state.selectError ? Promise.reject(state.selectError) : Promise.resolve(state.candidateRow);
@@ -56,7 +61,7 @@ function makeBuilder(table) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  state = { updates: [], selects: [], returningRows: [], candidateRow: null, updateError: null, selectError: null };
+  state = { updates: [], selects: [], returningRows: [], candidateRow: null, customerRows: [], updateError: null, selectError: null };
   db.mockImplementation((table) => makeBuilder(table));
   db.raw.mockImplementation((sql, bindings) => ({ __raw: sql, bindings }));
   verifyLeadPrefillToken.mockReturnValue(true);
@@ -199,12 +204,25 @@ describe('attachOpenCallLeadByPhone — candidate gate', () => {
 
     // Candidate select is scoped to open CALL-channel leads only — form/SMS
     // dups belong to the upstream customer dedup, never to this attach.
+    // Positive open-status membership (shared lead-statuses set), NOT a
+    // not-in-terminal filter: an office-closed 'unresponsive' lead must not
+    // resurrect on a bare phone match (codex P1) — only the signed token
+    // proves the prospect is responding to THAT lead.
     const { builder } = state.selects[0];
     expect(builder.wheres).toContainEqual({ first_contact_channel: 'call' });
     expect(builder.whereRaws[0][1]).toEqual(['9415550101']);
-    expect(builder.whereNotIns).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(builder.whereIns).toContainEqual(['status', ['new', 'contacted', 'estimate_sent', 'estimate_viewed']]);
+    expect(builder.whereNotIns).toHaveLength(0);
     expect(builder.whereNulls).toContain('converted_at');
     expect(builder.whereNulls).toContain('deleted_at');
+  });
+
+  test('phone shared by 2+ customer rows → null, no update (ambiguous account pick)', async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: null, customer_id: null };
+    state.customerRows = [{ id: 'cust-1' }, { id: 'cust-2' }];
+    const result = await attachOpenCallLeadByPhone(phoneArgs());
+    expect(result).toBeNull();
+    expect(state.updates).toHaveLength(0);
   });
 
   test('candidate linked to a DIFFERENT customer → null, no update (shared line)', async () => {
@@ -248,13 +266,31 @@ describe('attachOpenCallLeadByPhone — attach semantics', () => {
       first_name: 'Dana', last_name: 'Rivera',
       phone: '+19415550101', customer_id: 'cust-1',
     });
-    // Atomic re-check: same open-lead guards inside the UPDATE's WHERE.
+    // Atomic re-check (codex P2): the candidate guards ride inside the
+    // UPDATE's WHERE so a concurrent claim/edit makes the UPDATE miss.
     expect(builder.wheres).toContainEqual({ id: CALL_LEAD_ID });
-    expect(builder.whereNotIns).toContainEqual(['status', ['won', 'lost', 'disqualified', 'duplicate']]);
+    expect(builder.whereIns).toContainEqual(['status', ['new', 'contacted', 'estimate_sent', 'estimate_viewed']]);
     expect(builder.whereNulls).toContain('converted_at');
-    // Shared updater semantics: unresponsive reopen + jsonb MERGE.
+    // Ownership guard: unlinked-or-same-customer, as a grouped where.
+    expect(builder.wheres.some((w) => typeof w === 'function')).toBe(true);
+    // Name guard: captured first name absent or normalizes to the typed one.
+    expect(builder.whereRaws.some(([sql, bindings]) =>
+      sql.includes("lower(regexp_replace(first_name") && bindings[0] === 'dana')).toBe(true);
+    // Shared updater semantics: jsonb MERGE (reopen CASE is unreachable here
+    // — phone-match candidates are already open — but harmless).
     expect(String(payload.status.__raw)).toContain("WHEN status = 'unresponsive' THEN 'new'");
     expect(String(payload.extracted_data.__raw)).toContain("COALESCE(extracted_data, '{}'::jsonb) ||");
+  });
+
+  test('no typed first name → no name guard in the UPDATE (nothing to conflict)', async () => {
+    state.candidateRow = { id: CALL_LEAD_ID, first_name: 'Miguel', customer_id: null };
+    state.returningRows = [{ id: CALL_LEAD_ID }];
+    await attachOpenCallLeadByPhone(phoneArgs({
+      top: { typedFirstName: 'Unknown' },
+      fields: { first_name: 'Unknown', last_name: '' },
+    }));
+    const { builder } = state.updates[0];
+    expect(builder.whereRaws.some(([sql]) => sql.includes('regexp_replace(first_name'))).toBe(false);
   });
 
   test('empty typed values never blank captured data (token attach stays typed-wins)', async () => {
