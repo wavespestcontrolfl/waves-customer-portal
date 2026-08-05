@@ -199,14 +199,14 @@ async function runInner({ now = new Date() } = {}) {
     logger.warn(`[schedule-integrity] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
     return true;
   };
-  const ring = async (dedupeKey, title, body, metadata) => {
+  const ring = async (dedupeKey, title, body, metadata, { link = '/admin/dispatch' } = {}) => {
     if (await alreadyAlerted(dedupeKey)) return false;
     // bell: true — under GATE_ADMIN_BELL_POLICY the 'alert' category is
     // silenced-by-default (OVERRIDABLE_CATEGORIES), so without the explicit
     // site-level tag these money-loss pages would return a suppressed
     // sentinel instead of ringing.
     const created = await NotificationService.notifyAdmin('alert', title, body, {
-      link: '/admin/dispatch',
+      link,
       bell: true,
       metadata: { dedupeKey, ...metadata },
     });
@@ -265,6 +265,10 @@ async function runInner({ now = new Date() } = {}) {
       `irrigation email: ${g.fixable.join(', ')}. Fix the listed field(s) on their customer record ` +
       'and they are included automatically next Monday — the audience is computed at send time.',
       { customer_id: g.customerId, fixable: g.fixable },
+      // The fields to fix live on the customer record, not dispatch — and an
+      // active trailing-evidence gap may have no dispatch row at all (Codex
+      // #3209 post-merge P3).
+      { link: `/admin/customers/${g.customerId}` },
     );
   }
 

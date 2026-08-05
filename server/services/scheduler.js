@@ -4560,15 +4560,19 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 7:10 AM ET — Schedule-integrity watchdog. Pages two silent-loss
+  // DAILY 6:40 AM ET — Schedule-integrity watchdog. Pages three silent-loss
   // classes: past-dated visits stuck in on_site/en_route (performed but
-  // never completed → no service record / invoice / report / SMS) and
-  // upcoming recurring series with no price on any row. Morning tick so a
-  // price gap rings before that day's route starts. Dark behind
+  // never completed → no service record / invoice / report / SMS), upcoming
+  // recurring series with no price on any row, and recurring-lawn customers
+  // invisible to the Monday irrigation email. 6:40, NOT later (Codex #3209
+  // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
+  // lawn-email gap alert after that is unactionable for the very send it
+  // warns about — this tick must precede it. Still before the day's route
+  // starts, so a price gap rings first. Dark behind
   // GATE_SCHEDULE_INTEGRITY_WATCHDOG. See
   // server/services/schedule-integrity-watchdog.js.
   // =========================================================================
-  cron.schedule('10 7 * * *', async () => {
+  cron.schedule('40 6 * * *', async () => {
     try {
       const { runScheduleIntegrityWatchdog } = require('./schedule-integrity-watchdog');
       const result = await runScheduleIntegrityWatchdog();
