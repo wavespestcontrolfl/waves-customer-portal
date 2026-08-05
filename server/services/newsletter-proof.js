@@ -3,7 +3,7 @@
  *
  * When the weekly autopilot drafts the flagship newsletter and the draft
  * passes the same validation gate the manual Send button enforces, a proof
- * copy is emailed to the owner (contact@) with a [PROOF-<token>] subject.
+ * copy is emailed to the owner (contact@) with an "ACT: [PROOF-<token>]" subject.
  * Replying "approved" to that email — from an allowlisted owner address —
  * queues the issue for its linked Tuesday 6:00 AM ET target. Any other reply
  * (or no reply) leaves the draft untouched: the flow fails closed, and the
@@ -505,7 +505,9 @@ async function sendNewsletterProof(sendId) {
       to,
       fromEmail: send.from_email,
       fromName: send.from_name,
-      subject: `[PROOF-${token}] ${send.subject}`,
+      // ACT: prefix per the ops-email convention; PROOF_SUBJECT_RE matches the
+      // token anywhere in the subject, so reply recognition is unaffected.
+      subject: `ACT: [PROOF-${token}] ${send.subject}`,
       html,
       text,
       // The reply must land in the mailbox the Gmail sync watches or the
