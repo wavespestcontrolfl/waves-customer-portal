@@ -6066,16 +6066,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               primaryFreezeTrusted = false;
             }
           }
-          // A pointer-REQUIRED key without its resolved pointer stays
-          // live-resolvable (codex P2 r28, mirroring the add-on freezer):
-          // freezing termite_liquid pointer-less would suppress the
-          // permanent report forever — render treats the frozen key as
+          // The freeze must be SAFE for the key's classification family
+          // (codex P2 r28/r29, mirroring the add-on freezer): a typed key
+          // (flea_tick, lawn_aeration…) or a pointer-required key frozen
+          // WITHOUT its pointer would pin the permanent report to the
+          // wrong verdict forever — render treats the frozen key as
           // authoritative and never re-queries the restored profile.
-          const { pointerRequiredForKey } = require('../services/service-report/trace-eligibility');
-          const pointerlessPointerRequired = frozenCompletionProfile?.serviceKey
-            && !frozenCompletionProfile?.findingsType
-            && pointerRequiredForKey(frozenCompletionProfile.serviceKey);
-          if (primaryFreezeTrusted && !pointerlessPointerRequired) {
+          const { primaryIdentityFreezable } = require('../services/service-report/trace-eligibility');
+          if (primaryFreezeTrusted && primaryIdentityFreezable(frozenCompletionProfile || {})) {
             serviceData.completedServiceKey = frozenCompletionProfile?.serviceKey || null;
             serviceData.completedServiceName = (lockedSvcRow ? lockedSvcRow.service_type : svc.service_type) || null;
           }

@@ -425,6 +425,20 @@ function pointerRequiredForKey(serviceKey) {
   return Boolean(serviceKey && SERVICE_KEY_RULES[serviceKey]?.pointerRequired);
 }
 
+// A primary identity freeze is only safe when the frozen key resolves
+// the same way regardless of later profile changes (codex P2 r28/r29):
+// a resolved pointer always does; a self-classifying rules key without
+// pointerRequired does; a TYPED key (no rules entry) or pointer-required
+// key frozen WITHOUT its pointer would pin the wrong verdict forever
+// (permanently unclassified / permanently unconditional). A null key
+// freezes name-only semantics and is safe.
+function primaryIdentityFreezable({ serviceKey = null, findingsType = null } = {}) {
+  if (!serviceKey || findingsType) return true;
+  const rule = SERVICE_KEY_RULES[serviceKey];
+  if (!rule) return false;
+  return !rule.pointerRequired;
+}
+
 function traceEligibilityGateOn() {
   return process.env.GATE_TRACE_ELIGIBILITY === 'true';
 }
@@ -835,6 +849,7 @@ module.exports = {
   frozenAddonLinesForCompletion,
   renderAreasFromRecord,
   pointerRequiredForKey,
+  primaryIdentityFreezable,
   traceEligibilityGateOn,
   traceCaptureBlockPayload,
   _test: { FINDINGS_TYPE_RULES, SERVICE_KEY_RULES },

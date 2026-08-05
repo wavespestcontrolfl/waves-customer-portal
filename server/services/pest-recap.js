@@ -382,14 +382,12 @@ async function submitRecap({
       // shared freezer, same fail-soft posture as the /complete path.
       const { frozenAddonLinesForCompletion } = require('./service-report/trace-eligibility');
       const recapAddonLines = await frozenAddonLinesForCompletion(serviceId, trx).catch(() => null);
-      // Pointer-REQUIRED key without its pointer: leave the primary
-      // live-resolvable, same as the /complete path (codex P2 r28).
-      const { pointerRequiredForKey } = require('./service-report/trace-eligibility');
-      const recapPointerless = recapProfile?.serviceKey
-        && !recapProfile?.findingsType
-        && pointerRequiredForKey(recapProfile.serviceKey);
+      // The freeze must be SAFE for the key's classification family —
+      // typed and pointer-required keys stay live-resolvable without
+      // their pointer, same as the /complete path (codex P2 r28/r29).
+      const { primaryIdentityFreezable } = require('./service-report/trace-eligibility');
       frozenTraceIdentity = {
-        ...(recapPointerless
+        ...(!primaryIdentityFreezable(recapProfile || {})
           ? {}
           : {
             completedServiceKey: recapProfile?.serviceKey || null,

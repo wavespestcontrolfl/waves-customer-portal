@@ -715,6 +715,24 @@ describe('classification behavior', () => {
     expect(pointerRequiredForKey(null)).toBe(false);
   });
 
+  test('round 29 — primaryIdentityFreezable: typed and pointer-required keys need their pointer', () => {
+    const { primaryIdentityFreezable } = require('../services/service-report/trace-eligibility');
+    // resolved pointer: always freezable
+    expect(primaryIdentityFreezable({ serviceKey: 'flea_tick', findingsType: 'flea' })).toBe(true);
+    expect(primaryIdentityFreezable({ serviceKey: 'termite_liquid', findingsType: 'termite_treatment' })).toBe(true);
+    // self-classifying rules key without pointerRequired: freezable untyped
+    expect(primaryIdentityFreezable({ serviceKey: 'pest_general_quarterly', findingsType: null })).toBe(true);
+    // TYPED key without its pointer: NOT freezable (would pin
+    // unclassified forever)
+    expect(primaryIdentityFreezable({ serviceKey: 'flea_tick', findingsType: null })).toBe(false);
+    expect(primaryIdentityFreezable({ serviceKey: 'lawn_aeration', findingsType: null })).toBe(false);
+    // pointer-required key without its pointer: NOT freezable
+    expect(primaryIdentityFreezable({ serviceKey: 'termite_liquid', findingsType: null })).toBe(false);
+    // null key freezes name-only semantics — safe
+    expect(primaryIdentityFreezable({ serviceKey: null, findingsType: null })).toBe(true);
+    expect(primaryIdentityFreezable({})).toBe(true);
+  });
+
   test('round 19 — callback key overrides its stale snapshot; capture modes must agree', async () => {
     // pre-untype callback: the eligible one_time_pest_treatment snapshot
     // no longer bypasses the exterior-evidence condition
