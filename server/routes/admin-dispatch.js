@@ -427,8 +427,24 @@ async function renderRequiredTemplate(templateKey, vars, context = {}) {
 function ensureSmsContainsReportLink(body, reportLink) {
   const text = String(body || '').trim();
   const link = String(reportLink || '').trim();
-  if (!text || !link || text.includes(link)) return text;
-  const portalRootRe = /\b(?:https?:\/\/)?portal\.wavespestcontrol\.com(?:\/report\/[a-f0-9]{32})?/i;
+  if (!text || !link) return text;
+  // Portal links are delivered scheme-stripped (SMS allowlist rule), so a
+  // rendered body can hold the identical link without https:// — that
+  // counts as containing it. Without this, the domain-replace below fired
+  // on a body that already had the link and, because the regex consumed
+  // only the legacy /report/<32-hex> path, swapping the bare domain left
+  // the short-link path dangling: ".../l/report-x/l/report-x" (sent to a
+  // customer 2026-08-03). Presence is matched case-insensitively with the
+  // scheme optional, and the trailing lookahead stops a LONGER stale slug
+  // from satisfying a prefix of it (…/l/report-old12x must not count as
+  // containing …/l/report-old12 — it needs replacing, not skipping). The
+  // replacement regex consumes /l/<slug> paths too, so a genuine
+  // replacement swallows the whole stale link.
+  const schemeless = link.replace(/^https?:\/\//i, '');
+  const escaped = schemeless.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const presentRe = new RegExp(`(?:https?:\\/\\/)?${escaped}(?![A-Za-z0-9-])`, 'i');
+  if (presentRe.test(text)) return text;
+  const portalRootRe = /\b(?:https?:\/\/)?portal\.wavespestcontrol\.com(?:\/report\/[a-f0-9]{32}|\/l\/[A-Za-z0-9-]+)?/i;
   if (portalRootRe.test(text)) {
     return text.replace(portalRootRe, link);
   }
@@ -13006,6 +13022,7 @@ module.exports = router;
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
+  ensureSmsContainsReportLink,
   reportReconcileBlockPayload,
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,
