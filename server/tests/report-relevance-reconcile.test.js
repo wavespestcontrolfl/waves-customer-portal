@@ -114,6 +114,8 @@ describe('reconcileRainFigure', () => {
   test('a combined rain+irrigation total is never rewritten to rain-only (codex P2 r5)', () => {
     expect(reconcileRainFigure('Rain and irrigation totaled 1.95 inches this week.', 1.2)).toBeNull();
     expect(reconcileRainFigure('Total water including rain came to 1.95 inches this week.', 1.2)).toBeNull();
+    // The precipitation synonym rides the same combined-water guard (r8).
+    expect(reconcileRainFigure('Precipitation and irrigation totaled 1.95 inches this week.', 1.2)).toBeNull();
   });
 
   test('a delta-from-target figure is never rewritten to the total (codex P2 r5)', () => {
@@ -185,6 +187,10 @@ describe('replaceDroughtHypothesis', () => {
       .toBe('The stress there is possibly sprinkler-coverage-related.');
     // Observation forms without a hypothesis cue survive.
     expect(replaceDroughtHypothesis('Some dry areas near the stressed strip were noted.')).toBeNull();
+  });
+
+  test('a cue AFTER an observed dry area never converts it to a hypothesis (codex P2 r8)', () => {
+    expect(replaceDroughtHypothesis('Dry spots were noted in thin turf, and color is improving or stable.')).toBeNull();
   });
 
   test('a negated dry phrase does not shield a later hypothesis in the same sentence (codex P2 r7)', () => {
@@ -326,6 +332,13 @@ describe('firstSentence clause-boundary truncation', () => {
   test('no clause boundary falls back to the word-boundary ellipsis', () => {
     const out = firstSentence(`Recheck ${'the very long unbroken run of words '.repeat(8)}at the end`);
     expect(out).toMatch(/…$/);
+  });
+
+  test('a comma-only list keeps the honest ellipsis instead of fabricating a complete sentence (codex P2 r8)', () => {
+    const listy = 'Recheck the front yard, side yard, back yard, driveway edge, mailbox strip, pool cage strip, fence line, and shade corner for lingering stress signals and anything new that appears.';
+    const out = firstSentence(listy);
+    expect(out).toMatch(/…$/);
+    expect(out).not.toMatch(/\.$/);
   });
 });
 

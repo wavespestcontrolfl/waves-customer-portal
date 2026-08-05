@@ -612,8 +612,12 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
   // includes them would overstate the mystery (codex P2 r3) — a real number
   // in the payload renders as a number.
   const irrOnFile = water.scheduleOnFile !== false || irrigation > 0;
-  // Nothing measurable → don't draw an empty chart.
-  if (!hasRain && !hasIrr) return null;
+  // Nothing measurable → don't draw an empty chart… unless the missing
+  // schedule is the reason: the add-schedule CTA + explanation must survive
+  // an all-missing payload or the customer never learns how to fix it
+  // (codex P2 r8).
+  const hasAnyReading = hasRain || hasIrr;
+  if (!hasAnyReading && water.scheduleOnFile !== false) return null;
 
   // A weekly Total is only claimable when the server computed one or rain is
   // known — summing the leftovers when rain is missing would tell the
@@ -638,19 +642,25 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
         {hasTotal ? <><span style={{ color: MUTED }}>Total</span><strong style={{ textAlign: 'right', color: TEXT }}>{inchLabel(total)}</strong></> : null}
         {hasTarget ? <><span style={{ color: MUTED }}>Target range</span><strong style={{ textAlign: 'right', color: TEXT }}>~{inchLabel(Math.max(0, target - 0.25))}–{inchLabel(target + 0.25)}/wk</strong></> : null}
       </div>
-      {/* Stacked bar with a target marker — segments grow on mount */}
-      <div style={{ position: 'relative', height: 26, borderRadius: 8, background: '#F1EEE6', overflow: 'hidden' }}>
-        {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: COLORS.glassNavy, transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
-        {hasIrr && irrOnFile ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: 'rgba(4, 57, 94, 0.35)', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
-        {hasTarget ? (
-          <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
-        ) : null}
-      </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
-        {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
-        {hasIrr && irrOnFile ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
-        {hasTarget ? <Legend color={TEXT} label="Target" /> : null}
-      </div>
+      {/* Stacked bar with a target marker — segments grow on mount. Skipped
+          entirely when nothing is measurable (all-missing payload kept alive
+          for the CTA). */}
+      {hasAnyReading ? (
+        <div style={{ position: 'relative', height: 26, borderRadius: 8, background: '#F1EEE6', overflow: 'hidden' }}>
+          {hasRain ? <div title="Rain" style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: mounted ? pctOf(rain) : '0%', background: COLORS.glassNavy, transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+          {hasIrr && irrOnFile ? <div title="Irrigation" style={{ position: 'absolute', left: hasRain ? (mounted ? pctOf(rain) : '0%') : 0, top: 0, bottom: 0, width: mounted ? pctOf(irrigation) : '0%', background: 'rgba(4, 57, 94, 0.35)', transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1) 0.1s, left 0.8s cubic-bezier(0.4,0,0.2,1)' }} /> : null}
+          {hasTarget ? (
+            <div style={{ position: 'absolute', left: pctOf(target), top: -3, bottom: -3, width: 3, background: TEXT, borderRadius: 2, opacity: mounted ? 1 : 0, transition: 'opacity 0.4s ease 0.7s' }} title="Target" />
+          ) : null}
+        </div>
+      ) : null}
+      {hasAnyReading ? (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 8, fontSize: 11.5, color: MUTED }}>
+          {hasRain ? <Legend color={COLORS.glassNavy} label="Rain" /> : null}
+          {hasIrr && irrOnFile ? <Legend color='rgba(4, 57, 94, 0.35)' label="Irrigation" /> : null}
+          {hasTarget ? <Legend color={TEXT} label="Target" /> : null}
+        </div>
+      ) : null}
       <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <StatusPill status={status === 'unknown' ? 'tracking' : status} small />
         {/* When the rain reading is solid and only the schedule is missing,

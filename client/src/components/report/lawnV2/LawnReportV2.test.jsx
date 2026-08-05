@@ -46,6 +46,14 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.queryByText('Total')).not.toBeInTheDocument();
   });
 
+  it('all readings missing + no schedule: the CTA still renders (codex P2 r8)', () => {
+    render(<WaterIntakeBar water={{ rainInches: null, irrigationInches: null, totalInches: null, targetInches: 0.75, status: 'unknown', confidence: 'low', scheduleOnFile: false }} />);
+    expect(screen.getByText('Water This Week')).toBeInTheDocument();
+    expect(screen.getByText(/Add your watering schedule/)).toBeInTheDocument();
+    expect(screen.queryByText('Total')).not.toBeInTheDocument();
+    expect(screen.queryByText('Rain')).not.toBeInTheDocument();
+  });
+
   it('rain-unknown + no schedule keeps the low-confidence label (codex P2 r2)', () => {
     // Number(null) coerces to a finite 0 — the override must verify the rain
     // reading actually exists before claiming irrigation is the only gap.

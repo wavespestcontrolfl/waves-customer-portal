@@ -55,10 +55,12 @@ function firstSentence(text, max = 170) {
     // Over-cap: prefer ending on a complete CLAUSE (the tech's long
     // next-visit focus lines are single sentences joined by semicolons), so
     // the card never trails off mid-thought with "…inspect edge areas for
-    // chinch bug or drought…" (owner 2026-08-04). Word-boundary + ellipsis
-    // survives only as the no-clause-boundary fallback.
+    // chinch bug or drought…" (owner 2026-08-04). SEMICOLONS only: cutting
+    // at a list comma fabricates a "complete" sentence that silently drops
+    // trailing items (codex P2 r8) — comma-only over-length text keeps the
+    // honest ellipsis fallback.
     const head = out.slice(0, max);
-    const clauseEnd = Math.max(head.lastIndexOf('; '), head.lastIndexOf(', '));
+    const clauseEnd = head.lastIndexOf('; ');
     if (clauseEnd > 40) {
       out = `${head.slice(0, clauseEnd).trim()}.`;
     } else {
@@ -119,7 +121,7 @@ function reconcileRainFigure(text, canonicalRain) {
     // A COMBINED rain+irrigation/total-water figure is not the rain total —
     // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
     // contradict the widget's Total row (codex P2 r5).
-    if (/\brain(?:fall)?\s*(?:,|and|&|\+|plus)\s*irrigation\b|\birrigation\s*(?:,|and|&|\+|plus)\s*rain(?:fall)?\b|\bcombined water\b|\btotal water\b/i.test(sentence)) return sentence;
+    if (/\b(?:rain(?:fall)?|precipitation)\s*(?:,|and|&|\+|plus)\s*irrigation\b|\birrigation\s*(?:,|and|&|\+|plus)\s*(?:rain(?:fall)?|precipitation)\b|\bcombined water\b|\btotal water\b/i.test(sentence)) return sentence;
     // No sentence-level target bailout (codex P2 #3197 r1): "totaling 2.72
     // inches was above the 0.75 inch target" is the exact comparison this
     // pass reconciles. Per-number word guards do the work; only the FIRST
@@ -201,7 +203,10 @@ function replaceDroughtHypothesis(text) {
     // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").
     // dry patch/spot/area forms only rewrite under a hypothesis cue — "a few
     // dry patches were noted" is an OBSERVATION and must survive verbatim.
-    const hasCue = HYPOTHESIS_CUE_RE.test(sentence);
+    // The cue must PRECEDE the match nearby ("could be … or dry spots") — a
+    // cue word later in the sentence ("…, and color is improving or stable")
+    // must not convert an observed dry area into a hypothesis (codex P2 r8).
+    const cueBefore = (offset) => HYPOTHESIS_CUE_RE.test(sentence.slice(Math.max(0, offset - 48), offset));
     const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m, offset) => {
       // Negation is checked PER MATCH, not per sentence: it must attach to
       // this occurrence (negator + up to three plain same-clause words right
@@ -210,7 +215,7 @@ function replaceDroughtHypothesis(text) {
       // negated phrase AND still reconciles the later hypothesis
       // (codex P2 r3/r4/r7).
       if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}$/i.test(sentence.slice(0, offset))) return m;
-      if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !hasCue) return m;
+      if (/dry\s+(?:patch|spots?|areas?)/i.test(m) && !cueBefore(offset)) return m;
       if (/drought[- ]related/i.test(m)) {
         return /^[A-Z]/.test(m) ? 'Sprinkler-coverage-related' : 'sprinkler-coverage-related';
       }
