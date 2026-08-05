@@ -986,7 +986,10 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       let rowIds = null;
       try {
         await trx.transaction(async (sp) => {
-          rowIds = (await sp(table).where(column, loserId).select(pkColumn)).map((r) => r[pkColumn]);
+          // Bounded prefetch (r35): the journal stores {count} beyond the
+          // cap anyway — materializing every id first let a 10k+-row FK
+          // table allocate an unbounded list inside the merge transaction.
+          rowIds = (await sp(table).where(column, loserId).select(pkColumn).limit(REPOINT_ID_CAP + 1)).map((r) => r[pkColumn]);
         });
       } catch {
         rowIds = null;
@@ -1927,6 +1930,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   review_requests: ['created_at'],
   // timestamps(true, true) — 20260401000004.
   satisfaction_responses: ['created_at', 'updated_at'],
+  // timestamps(true, true) — 20260714000042; liveness = resolved_at NULL.
+  stripe_invoice_charge_attempts: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2441,6 +2446,21 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           label: 'Stripe orphan charge record(s)',
           consequence: 'undoing would separate a settled Stripe charge from the invoice it paid',
         },
+        // In-flight saved-card charges on journaled invoices (r35):
+        // chargeInvoiceWithSavedCard commits its claim row BEFORE calling
+        // Stripe and then proceeds on pre-undo snapshots — moving the
+        // invoice back mid-attempt mis-attributes the charge/payment/
+        // orphan writes or strands a blocking claim on the restored
+        // customer's invoice. Unresolved claims only (the partial index's
+        // liveness rule); settled attempts are history.
+        {
+          table: 'stripe_invoice_charge_attempts',
+          query: (q) => q.whereIn('invoice_id', journaledInvoiceIds)
+            .whereNull('resolved_at')
+            .whereIn('status', ['claimed', 'ambiguous']),
+          label: 'unresolved saved-card charge attempt(s)',
+          consequence: 'undoing mid-charge would attribute the settling payment to the wrong customer',
+        },
         // Attachments (r25 P2): an upload after the merge does not touch
         // the invoice row, so no other gate sees it — moving the invoice
         // back would leave a winner-owned attachment on the restored
@@ -2620,6 +2640,11 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           { table: 'pest_pressure_scores', label: 'Pest Pressure score(s)' },
           { table: 'review_requests', label: 'review request(s)' },
           { table: 'satisfaction_responses', label: 'satisfaction/NPS response(s)' },
+          // r35: /from-service mints an invoice stamped with
+          // service_record_id from the record's customer, never touching
+          // the record — an unjournaled invoice on a journaled record
+          // would keep its pay token on the kept customer.
+          { table: 'invoices', label: 'invoice(s) billed from the record' },
         ];
         for (const probe of serviceRecordChildProbes) {
           let childRows = [];

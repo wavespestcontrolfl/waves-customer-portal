@@ -316,6 +316,20 @@ router.get('/merges', async (req, res) => {
             row: c,
           })));
         }
+        // Unresolved saved-card charge attempts (r35) — same liveness
+        // filter as the endpoint's probe, so settled history never greys
+        // the page.
+        {
+          const attemptRows = await db('stripe_invoice_charge_attempts')
+            .whereIn('invoice_id', allJournaledInvoiceIds)
+            .whereNull('resolved_at')
+            .whereIn('status', ['claimed', 'ambiguous'])
+            .select(['id', 'invoice_id', ...activityColumnsFor('stripe_invoice_charge_attempts')]);
+          invoiceChildrenByTable.set('stripe_invoice_charge_attempts', attemptRows.map((c) => ({
+            invoiceIds: [c.invoice_id].filter(Boolean),
+            row: c,
+          })));
+        }
         // Annual-prepay terms link through prepay_invoice_id, not
         // invoice_id (r27 P2) — without this the page offered an Undo the
         // endpoint's term child probe deterministically 409s.
@@ -457,7 +471,7 @@ router.get('/merges', async (req, res) => {
               }) > 0;
               // 2. Payment children outside the journal (invoiceChildProbes).
               if (!invoiceActivityRefuses) {
-                for (const childTable of ['payments', 'customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences', 'stripe_orphan_charges', 'invoice_attachments', 'annual_prepay_terms']) {
+                for (const childTable of ['payments', 'customer_credit_ledger', 'payment_plans', 'invoice_followup_sequences', 'stripe_orphan_charges', 'invoice_attachments', 'annual_prepay_terms', 'stripe_invoice_charge_attempts']) {
                   const childRows = (invoiceChildrenByTable.get(childTable) || [])
                     .filter((c) => c.invoiceIds.some((id) => journaledInvoiceIds.has(id)))
                     .map((c) => c.row);

@@ -3246,9 +3246,15 @@ router.post('/', requireAdmin, async (req, res, next) => {
           const pfx = n === 1 ? 'service_contact' : `service_contact${n}`;
           return [`${pfx}_name`, `${pfx}_phone`, `${pfx}_email`, `${pfx}_role`];
         });
+        // Billing/pricing inputs join the fingerprint (r35): the booking's
+        // series-coverage, invoice-on-complete stamp, and pricing were
+        // computed from the pre-lock customer, and completion resolves
+        // payer/billing LIVE — a cleared inherited payer/mode/fee must
+        // retry the booking, not commit stale price state.
+        const BILLING_FINGERPRINT_COLS = ['payer_id', 'billing_mode', 'per_application_fee', 'waveguard_tier', 'monthly_rate'];
         const freshCustomer = await trx('customers')
           .where({ id: customerId })
-          .first('address_line1', 'address_line2', 'city', 'state', 'zip', ...CONTACT_SLOT_COLS);
+          .first('address_line1', 'address_line2', 'city', 'state', 'zip', ...CONTACT_SLOT_COLS, ...BILLING_FINGERPRINT_COLS);
         // The COMPLETE address tuple (r24): a merge can backfill ONLY
         // address_line2 (a street-only winner absorbing the loser's
         // apartment/unit), so a line1/city/zip comparison passes while the
@@ -3261,6 +3267,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         const commsDep = (row) => [
           row?.address_line1 || '', row?.address_line2 || '', row?.city || '', row?.state || '', row?.zip || '',
           ...CONTACT_SLOT_COLS.map((c) => row?.[c] || ''),
+          ...BILLING_FINGERPRINT_COLS.map((c) => String(row?.[c] ?? '')),
         ].join('|');
         if (!freshCustomer || commsDep(freshCustomer) !== commsDep(customer)) {
           const err = new Error('The customer record changed while booking (address or service contacts moved) — reload the customer and book again.');

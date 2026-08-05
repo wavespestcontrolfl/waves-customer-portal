@@ -2094,6 +2094,22 @@ async function createSelfBooking(payload = {}) {
             code: 'CUSTOMER_CHANGED_RETRY',
           });
         }
+        // Estimate linkage revalidates under the fence too (r35): a
+        // journaled estimate a merge-undo just returned no longer belongs
+        // to this customer — stamping estimate_id/source_estimate_id and
+        // pay-at-visit pricing onto the visit would re-split what the
+        // undo restored (pricingEstimate is always one of these two rows).
+        for (const estRef of [estimate?.id, sourceEstimateRow?.id]) {
+          if (!estRef) continue;
+          const freshEst = await trx('estimates').where({ id: estRef }).first('id', 'customer_id');
+          if (!freshEst || (freshEst.customer_id && String(freshEst.customer_id) !== String(custId))) {
+            throw Object.assign(new Error('Your quote was just updated — please refresh and book again.'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'CUSTOMER_CHANGED_RETRY',
+            });
+          }
+        }
       }
 
       // Idempotent replay: same customer, same day, same start time →
