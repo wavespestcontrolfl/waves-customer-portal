@@ -218,7 +218,10 @@ function replaceDroughtHypothesis(text) {
     // "Localized drought near the edge" — codex P2 r4). A bare "drought"
     // with no stress context still needs the cue ("A drought was declared
     // in the county" stays untouched).
-    if (!/chinch|stress|thin|tan\b|patch|scuff/i.test(sentence)
+    // "damage" joins the stress cues — the dashboard's own category is
+    // "Stress / Damage Signals" and summaries phrase the hypothesis with it
+    // ("Damage could be drought-related" — codex P2 r15).
+    if (!/chinch|stress|thin|tan\b|patch|scuff|damage/i.test(sentence)
       && !/\bdry\s+pockets?\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
     // Headline-position matches keep their capitalization ("Dry pocket near
     // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").

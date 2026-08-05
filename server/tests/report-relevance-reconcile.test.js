@@ -231,6 +231,13 @@ describe('replaceDroughtHypothesis', () => {
     expect(replaceDroughtHypothesis('Drought stress isn’t visible across the stressed areas.')).toBeNull();
   });
 
+  test('damage wording qualifies as a stress cue (codex P2 r15)', () => {
+    expect(replaceDroughtHypothesis('Damage could be drought-related.'))
+      .toBe('Damage could be sprinkler-coverage-related.');
+    expect(replaceDroughtHypothesis('Drought-related damage is possible near the edge.'))
+      .toBe('Sprinkler-coverage-related damage is possible near the edge.');
+  });
+
   test('drought dismissals stay verbatim (codex P2 r14)', () => {
     expect(replaceDroughtHypothesis('Drought stress is unlikely given the thin-patch pattern.')).toBeNull();
     expect(replaceDroughtHypothesis('Drought stress was ruled out for the stressed strip.')).toBeNull();
