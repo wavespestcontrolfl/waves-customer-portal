@@ -151,8 +151,16 @@ const NEGATED_RE_SERVICE_RE = new RegExp(`\\b(?:no|not|isn['’]?t|don['’]?t|d
 // into a free callback. Both orders, same clause window as the roach/rodent
 // historical strips.
 const RE_SERVICE_HISTORY_CUE = "(?:last\\s+(?:time|visit|week|month|year)|previous(?:ly)?|in\\s+the\\s+past|used\\s+to)";
-const HISTORICAL_RE_SERVICE_RE = new RegExp(`\\b${RE_SERVICE_HISTORY_CUE}\\b[^.!?\\n]{0,40}?${RE_SERVICE_PHRASE}\\b`, 'gi');
-const RE_SERVICE_HISTORICAL_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b[^.!?\\n]{0,40}?\\b(?:${RE_SERVICE_HISTORY_CUE}|ago)\\b`, 'gi');
+// A prior-visit cue that MOTIVATES a current request is not history (codex
+// #3222 r6): "I need a re-service because the last visit did not work" and
+// "last visit missed the lanai, please spray again" are affirmative current
+// asks. Both strip windows refuse to cross a causal / complaint / request
+// cue — same refusal-window technique as the rodent onset-verb and
+// contrast-cue guards.
+const RE_SERVICE_HISTORY_BREAK = "(?:because|since|but|now|please|again|need(?:s|ed)?|want(?:s|ed)?|missed|skipped|failed|didn['’]?t|doesn['’]?t|wasn['’]?t|not)";
+const RE_SERVICE_HISTORY_WINDOW = `(?:(?!\\b${RE_SERVICE_HISTORY_BREAK}\\b)[^.!?\\n]){0,40}?`;
+const HISTORICAL_RE_SERVICE_RE = new RegExp(`\\b${RE_SERVICE_HISTORY_CUE}\\b${RE_SERVICE_HISTORY_WINDOW}${RE_SERVICE_PHRASE}\\b`, 'gi');
+const RE_SERVICE_HISTORICAL_RE = new RegExp(`\\b${RE_SERVICE_PHRASE}\\b${RE_SERVICE_HISTORY_WINDOW}\\b(?:${RE_SERVICE_HISTORY_CUE}|ago)\\b`, 'gi');
 
 function hasAffirmativeReServiceIntent(text) {
   const cleaned = String(text || '')

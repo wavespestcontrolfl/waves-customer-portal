@@ -8953,8 +8953,25 @@ const CallRecordingProcessor = {
                 // holds too: fail closed, never a possibly-duplicate free
                 // visit.
                 if (isReServiceCatalogRow(callBookingCatalogRow)) {
-                  const { openCallbackExistsForLane } = require('./reservice-scheduler');
+                  const { reserviceLanesForCustomer, openCallbackExistsForLane } = require('./reservice-scheduler');
                   const reServiceLane = reServiceLaneForRow(callBookingCatalogRow);
+                  // Eligibility REVALIDATED under the locks (codex #3222 r6
+                  // — mirrors the reservice route's commit-time re-check):
+                  // the resolution-time lane lookup is pre-transaction, so a
+                  // plan cancelled or a customer deactivated in the gap
+                  // would otherwise still book a free callback. `customer`
+                  // is the fresh row re-read under the comms fence above.
+                  // Unverifiable → hold, fail closed.
+                  let laneStillEligible = false;
+                  try {
+                    laneStillEligible = !!customer && customer.active !== false
+                      && (await reserviceLanesForCustomer(customer)).includes(reServiceLane);
+                  } catch (eligErr) {
+                    logger.warn(`[call-proc] re-service eligibility recheck failed for ${maskSid(callSid)} (holding for review): ${eligErr.message}`);
+                  }
+                  if (!laneStillEligible) {
+                    return { __held: { reason: 'reservice_eligibility_lapsed' } };
+                  }
                   let laneCallbackOpen = true;
                   try {
                     laneCallbackOpen = await openCallbackExistsForLane(trx, customerId, reServiceLane);
@@ -9883,7 +9900,7 @@ const CallRecordingProcessor = {
     if (CALL_EXTRACTION_V2_DRIVES_ROUTING && v2ApprovedExtraction && extracted.appointment_confirmed) {
       const bookedServiceId = appointmentResult?.scheduledServiceId || null;
       // Held bookings already opened their own reason-specific card above.
-      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists']);
+      const heldReasons = new Set(['existing_appointment_same_date', 'ambiguous_existing_appointment', 'auto_booking_previously_cancelled', 'open_reservice_callback_exists', 'reservice_eligibility_lapsed']);
       if (!bookedServiceId && !heldReasons.has(appointmentResult?.skippedReason)) {
         const skipReason = appointmentResult?.skippedReason
           || appointmentResult?.scheduleError

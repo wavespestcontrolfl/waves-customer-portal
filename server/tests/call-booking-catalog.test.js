@@ -592,6 +592,19 @@ describe('existing-customer revisit → covered re-service row (owner catalog ru
     expect(hasCallReServiceIntent({}, "last month's re-service worked great — can we get another re-service now")).toBe(true);
   });
 
+  test('a prior-visit cue MOTIVATING a current request keeps its intent (codex r6)', () => {
+    expect(hasCallReServiceIntent({}, 'I need a re-service because the last visit did not work')).toBe(true);
+    expect(hasCallReServiceIntent({}, 'last visit missed the lanai, please spray again')).toBe(true);
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'I need a re-service because the last visit did not work' },
+      services: CATALOG_WITH_GENERIC,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row?.service_key).toBe('pest_re_service');
+  });
+
   test('dual-lane eligibility with no lane evidence declines — never guesses a free service (codex r5)', () => {
     const ambiguous = resolveCallBookingCatalogService({
       extracted: { requested_service: 'please come back out and take care of it' },
