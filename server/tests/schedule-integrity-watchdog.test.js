@@ -247,10 +247,11 @@ describe('runInner alerting', () => {
     expect(keys.filter((k) => k.startsWith('stale-visit:'))).toHaveLength(MAX_ALERTS_PER_RUN - 1);
   });
 
-  test('a fixable lawn-email audience gap rings; opt-out-only rows never do', async () => {
+  test('a fixable lawn-email audience gap rings with its dedupe key', async () => {
+    // The module contract returns ONLY pageable gaps (opt-outs and churned
+    // customers are suppressed inside findLawnEmailAudienceGaps).
     findLawnEmailAudienceGaps.mockResolvedValueOnce([
-      { customerId: 'cust-9', name: 'Pat Sample', fixable: ['no_coordinates'], optOuts: [], optOutOnly: false },
-      { customerId: 'cust-8', name: 'Lee Sample', fixable: [], optOuts: ['seasonal_tips_opt_out'], optOutOnly: true },
+      { customerId: 'cust-9', name: 'Pat Sample', fixable: ['no_coordinates'] },
     ]);
     makeDbMock();
     const result = await runInner({ now: NOW });

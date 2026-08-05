@@ -241,16 +241,17 @@ async function runInner({ now = new Date() } = {}) {
   // email (owner directive 2026-08-05: check daily). The email's audience is
   // computed at send time, so there is no enrollment list to reconcile — the
   // only drift class is a customer WITH recurring-lawn evidence failing a
-  // prerequisite (no email / no coordinates / lead-stage / inactive). Reuses
-  // the sender's own predicate (findLawnEmailAudienceGaps wraps the same
-  // recurringLawnEvidenceFilter the send uses) so check and send can't
-  // diverge. Opt-outs are the customer's choice and never page. A failed
-  // check is REPORTED in the result, never silently zero.
+  // prerequisite (unusable email / bad coordinates / lead-stage / inactive
+  // with live future evidence). Reuses the sender's own predicate AND its
+  // validators (findLawnEmailAudienceGaps) so check and send can't diverge;
+  // the module returns ONLY pageable gaps — opt-outs and legitimately
+  // churned customers never reach here. A failed check is REPORTED in the
+  // result, never silently zero.
   let lawnGaps = [];
   let lawnGapCheckFailed = false;
   try {
     const { findLawnEmailAudienceGaps } = require('./irrigation-weekly-email');
-    lawnGaps = (await findLawnEmailAudienceGaps({ now })).filter((g) => !g.optOutOnly);
+    lawnGaps = await findLawnEmailAudienceGaps({ now });
   } catch (e) {
     lawnGapCheckFailed = true;
     logger.error(`[schedule-integrity] lawn-email audience-gap check failed: ${e.message}`);
@@ -263,7 +264,7 @@ async function runInner({ now = new Date() } = {}) {
       `${g.name || 'This customer'} has live recurring lawn service but cannot receive the Monday ` +
       `irrigation email: ${g.fixable.join(', ')}. Fix the listed field(s) on their customer record ` +
       'and they are included automatically next Monday — the audience is computed at send time.',
-      { customer_id: g.customerId, fixable: g.fixable, opt_outs: g.optOuts },
+      { customer_id: g.customerId, fixable: g.fixable },
     );
   }
 

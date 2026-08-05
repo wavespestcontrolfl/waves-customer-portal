@@ -480,6 +480,37 @@ const LAWN_SERVICE_TYPE_LIKES = ['%lawn%', '%fertiliz%', '%fungicide%', '%turf%'
 // (findLawnEmailAudienceGaps). Two copies of one predicate diverge — the gap
 // check must see exactly the evidence the sender sees, or it reports gaps
 // the send doesn't have (or misses ones it does).
+// The upcoming-visit branch of the evidence, as a correlated subquery
+// builder — used inside recurringLawnEvidenceFilter's whereExists AND as a
+// selected EXISTS column by findLawnEmailAudienceGaps (a customer whose only
+// evidence is the trailing window has churned; stage/inactive on them is a
+// legitimate drop, not a gap — Codex #3209 r1).
+function upcomingLawnEvidenceBuilder(todayET) {
+  return db('scheduled_services as ss')
+    .select(db.raw('1'))
+    .whereRaw('ss.customer_id = c.id')
+    .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
+    // A same-ET-date row already COMPLETED is not upcoming evidence
+    // (Codex #2954 r2 P3): without this, a lapsed recurring-marked
+    // customer passes on the day of their last visit.
+    .whereNot('ss.status', 'completed')
+    .where('ss.scheduled_date', '>=', todayET)
+    // Recurring-series marker REQUIRED on the upcoming branch
+    // (Codex #2954 P2): a future one-time lawn job would otherwise
+    // qualify the moment it's booked. The seeder stamps all three
+    // markers on series visits; any one of them is proof.
+    .where(function recurringMarker() {
+      this.where('ss.is_recurring', true)
+        .orWhereNotNull('ss.recurring_parent_id')
+        .orWhereNotNull('ss.recurring_pattern');
+    })
+    .where(function serviceTypes() {
+      for (const pattern of LAWN_SERVICE_TYPE_LIKES) {
+        this.orWhereRaw('LOWER(ss.service_type) LIKE ?', [pattern]);
+      }
+    });
+}
+
 function recurringLawnEvidenceFilter(todayET, lawnServiceCutoff) {
   const lawnLikeSql = LAWN_SERVICE_TYPE_LIKES
     .map(() => 'LOWER(ss2.service_type) LIKE ?')
@@ -488,31 +519,7 @@ function recurringLawnEvidenceFilter(todayET, lawnServiceCutoff) {
   return function recurringLawnService() {
     // REQUIRED recurring-lawn evidence — tier / lawn_type / turf profile
     // never qualify a customer on their own (see the doc block above).
-    this.whereExists(function upcomingLawnVisit() {
-      this.select(db.raw('1'))
-        .from('scheduled_services as ss')
-        .whereRaw('ss.customer_id = c.id')
-        .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
-        // A same-ET-date row already COMPLETED is not upcoming evidence
-        // (Codex #2954 r2 P3): without this, a lapsed recurring-marked
-        // customer passes on the day of their last visit.
-        .whereNot('ss.status', 'completed')
-        .where('ss.scheduled_date', '>=', todayET)
-        // Recurring-series marker REQUIRED on the upcoming branch
-        // (Codex #2954 P2): a future one-time lawn job would otherwise
-        // qualify the moment it's booked. The seeder stamps all three
-        // markers on series visits; any one of them is proof.
-        .where(function recurringMarker() {
-          this.where('ss.is_recurring', true)
-            .orWhereNotNull('ss.recurring_parent_id')
-            .orWhereNotNull('ss.recurring_pattern');
-        })
-        .where(function serviceTypes() {
-          for (const pattern of LAWN_SERVICE_TYPE_LIKES) {
-            this.orWhereRaw('LOWER(ss.service_type) LIKE ?', [pattern]);
-          }
-        });
-    })
+    this.whereExists(upcomingLawnEvidenceBuilder(todayET))
       // …or a demonstrated cadence: ≥2 live lawn-flavored visits inside
       // the TRAILING window — bounded on both sides (pre-push P1: with
       // only the lower bound, two future one-time bookings would count;
@@ -825,10 +832,16 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
  * (recurringLawnEvidenceFilter), so this check cannot diverge from the send.
  * The audience is computed at send time, so there is no enrollment list to
  * reconcile; the only drift class is a customer WITH recurring-lawn evidence
- * failing a prerequisite. Each row carries `fixable` reasons (no email, no
- * coordinates, lead-stage, inactive) and `optOuts` (email_enabled /
- * seasonal_tips = false — the customer's own choice, flagged but never a
- * defect). Rows where optOutOnly is true have nothing to fix.
+ * failing a prerequisite. Returns ONLY pageable gaps (Codex #3209 r1):
+ *  - Opted-out customers (email_enabled / seasonal_tips = false) never
+ *    appear — this email is optional; their other missing fields are not
+ *    defects to fix for a send they declined.
+ *  - Prerequisites use the SEND PATH's validators, not null checks: an
+ *    unusable email ('not-an-email') or non-finite coordinates would pass
+ *    selection and then be skipped by the sender — those are gaps too.
+ *  - Stage/inactive failures page only with LIVE FUTURE recurring evidence;
+ *    trailing-window-only evidence on a non-customer stage is legitimate
+ *    churn, not something to "fix".
  */
 async function findLawnEmailAudienceGaps({ now = new Date() } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
@@ -842,24 +855,30 @@ async function findLawnEmailAudienceGaps({ now = new Date() } = {}) {
       'c.active', 'c.pipeline_stage',
       db.raw('(np.email_enabled IS DISTINCT FROM false) as email_pref_ok'),
       db.raw('(np.seasonal_tips IS DISTINCT FROM false) as tips_pref_ok'),
+      db.raw('exists(?) as has_future_evidence', [upcomingLawnEvidenceBuilder(todayET)]),
     );
   const gaps = [];
   for (const r of rows) {
+    // Intentional opt-out: never pageable, whatever else is missing.
+    if (!r.email_pref_ok || !r.tips_pref_ok) continue;
+    const isCustomer = CUSTOMER_STAGES.includes(r.pipeline_stage) && r.active === true;
+    // Trailing-window evidence on a non-customer = churn, a legitimate drop.
+    if (!isCustomer && !r.has_future_evidence) continue;
     const fixable = [];
-    const optOuts = [];
-    if (!CUSTOMER_STAGES.includes(r.pipeline_stage)) fixable.push(`pipeline_stage=${r.pipeline_stage}`);
-    if (r.active !== true) fixable.push('inactive');
-    if (!r.email) fixable.push('no_email');
-    if (r.latitude == null || r.longitude == null) fixable.push('no_coordinates');
-    if (!r.email_pref_ok) optOuts.push('email_disabled');
-    if (!r.tips_pref_ok) optOuts.push('seasonal_tips_opt_out');
-    if (fixable.length === 0 && optOuts.length === 0) continue;
+    if (!isCustomer) {
+      if (!CUSTOMER_STAGES.includes(r.pipeline_stage)) fixable.push(`pipeline_stage=${r.pipeline_stage}`);
+      if (r.active !== true) fixable.push('inactive');
+    }
+    // Mirror the sender's own validators: it skips non-email-like addresses
+    // (isEmailLike) and can't fetch weather without finite coordinates
+    // (numberOrNull) — a non-null-but-unusable value is still a gap.
+    if (!isEmailLike(r.email)) fixable.push(r.email ? 'unusable_email' : 'no_email');
+    if (numberOrNull(r.latitude) == null || numberOrNull(r.longitude) == null) fixable.push('no_coordinates');
+    if (fixable.length === 0) continue;
     gaps.push({
       customerId: r.id,
       name: [r.first_name, r.last_name].filter(Boolean).join(' '),
       fixable,
-      optOuts,
-      optOutOnly: fixable.length === 0,
     });
   }
   return gaps;
