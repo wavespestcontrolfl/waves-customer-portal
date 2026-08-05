@@ -673,7 +673,10 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           0/absent/disabled schedule as "not on file"), so a finite-zero irrigation
           with a known rain status still shows the CTA; once a real schedule is
           added, scheduleOnFile flips true and this hides. */}
-      {!water.scheduleOnFile && irrigationHref ? (
+      {/* Keyed off the same effective irrOnFile as the row above — a card
+          showing `Irrigation 1.25"` must not also claim "we don't have your
+          watering schedule yet" (codex P2 r4). */}
+      {!irrOnFile && irrigationHref ? (
         <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>Get a water reading built for your lawn</div>
           <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
@@ -1235,7 +1238,7 @@ export function LawnTrends({ trends = {}, baselineScore = null, hasNextVisit = f
   if (!hasOverall && !minis.length) {
     // null-check BEFORE Number(): Number(null) === 0 is finite — the same
     // trap the mowing band guard above documents.
-    if (baselineScore == null || !Number.isFinite(Number(baselineScore))) return null;
+    if (baselineScore == null || baselineScore === '' || !Number.isFinite(Number(baselineScore))) return null;
     // "Starting with your next visit" only when the payload backs a real
     // next visit (the server omits snapshot.nextVisit when it can't) — a
     // one-time visit must not promise a visit that isn't scheduled

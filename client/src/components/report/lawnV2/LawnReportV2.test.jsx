@@ -53,6 +53,9 @@ describe('WaterIntakeBar irrigation honesty (owner 2026-08-04)', () => {
     expect(screen.getByText('1.25"')).toBeInTheDocument();
     expect(screen.queryByText('Not on file')).not.toBeInTheDocument();
     expect(screen.queryByText('Irrigation not on file')).not.toBeInTheDocument();
+    // …and the add-schedule CTA can't sit under a numeric irrigation row
+    // claiming we don't have the schedule (codex P2 r4).
+    expect(screen.queryByText(/Add your watering schedule/)).not.toBeInTheDocument();
   });
 
   it('older payloads without scheduleOnFile keep the numeric row (no false "Not on file")', () => {
@@ -81,6 +84,10 @@ describe('LawnTrends first-visit baseline (owner 2026-08-04)', () => {
   it('no score → still renders nothing (an unscored visit makes no baseline claim)', () => {
     const { container } = render(<LawnTrends trends={{}} />);
     expect(container).toBeEmptyDOMElement();
+    // Empty string coerces to a finite 0 — must read as missing, never as
+    // "baseline at 0/100" (codex P2 r5).
+    const { container: empty } = render(<LawnTrends trends={{}} baselineScore="" />);
+    expect(empty).toBeEmptyDOMElement();
   });
 
   it('real trends render charts, never the baseline card', () => {

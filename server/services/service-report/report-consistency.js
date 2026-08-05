@@ -113,6 +113,10 @@ function reconcileRainFigure(text, canonicalRain) {
   const out = t.split(/(?<=[.!?])\s+/).map((sentence) => {
     if (!/\brain(?:fall)?\b/i.test(sentence)) return sentence;
     if (!/\bweek\b|\b7[- ]day\b|\bpast seven\b|\btotal(?:ing|ed|s)?\b/i.test(sentence)) return sentence;
+    // A COMBINED rain+irrigation/total-water figure is not the rain total —
+    // rewriting "Rain and irrigation totaled 1.95 inches" to rain-only would
+    // contradict the widget's Total row (codex P2 r5).
+    if (/\brain(?:fall)?\s*(?:,|and|&|\+|plus)\s*irrigation\b|\birrigation\s*(?:,|and|&|\+|plus)\s*rain(?:fall)?\b|\bcombined water\b|\btotal water\b/i.test(sentence)) return sentence;
     // No sentence-level target bailout (codex P2 #3197 r1): "totaling 2.72
     // inches was above the 0.75 inch target" is the exact comparison this
     // pass reconciles. Per-number word guards do the work; only the FIRST
@@ -140,9 +144,11 @@ function reconcileRainFigure(text, canonicalRain) {
       const TARGET_WORD = '(?:target|goal|aim(?:ing)?|recommend(?:ed|s)?|ideal)';
       // After-guard tolerates a rate qualifier between the figure and the
       // target word — "0.75 inches per week target" is still the target
-      // (codex P2 r4).
+      // (codex P2 r4) — and treats a DELTA figure the same way: "2.2 inches
+      // above the weekly target" measures distance from the target, not the
+      // rain total (codex P2 r5). Both skip without consuming the attempt.
       if (new RegExp(`\\b${TARGET_WORD}\\b[^.\\d]{0,12}$`, 'i').test(before)
-        || new RegExp(`^\\s*(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
+        || new RegExp(`^\\s*(?:(?:over|above|below|under|past|beyond|short\\s+of)\\s+)?(?:the\\s+)?(?:(?:per|a|each)\\s+week\\s+|weekly\\s+|/\\s*wk\\s+)?${TARGET_WORD}\\b`, 'i').test(after)) return match;
       // The sentence already quotes the canonical figure → it agrees with the
       // widget; stop scanning so a later, different number (e.g. the target)
       // is never mistaken for a stale total.
@@ -166,8 +172,11 @@ function reconcileRainFigure(text, canonicalRain) {
 // The tolerance lookahead covers the bare AND the "stress" form: without
 // `(?:\s+stress)?`, "drought stress tolerance" backtracked to match bare
 // "drought" and produced "uneven sprinkler coverage stress tolerance"
-// (codex P2 r2).
-const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|a\s+)?(?:drought(?:\s+stress)?|dry\s+pockets?|dry\s+spells?)\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
+// (codex P2 r2). "dry patch(es)" is in the set too (codex P2 r5), but only
+// rewrites in a hypothesis-marked sentence — see the cue check below — since
+// "dry patches" can also be a literal field observation.
+const DROUGHT_HYPOTHESIS_RE = /\b(?:localized\s+|an?\s+)?(?:drought(?:\s+stress)?|dry\s+pockets?|dry\s+spells?|dry\s+patch(?:es)?)\b(?!-)(?!(?:\s+stress)?\s+toleran)/gi;
+const HYPOTHESIS_CUE_RE = /\bor\b|\bcould\b|\bmay\b|\bmight\b|\bpossibly\b|\bconsistent with\b|\bsuggests?\b|\bline up with\b/i;
 
 function replaceDroughtHypothesis(text) {
   const t = String(text || '');
@@ -181,16 +190,21 @@ function replaceDroughtHypothesis(text) {
     // in the county" stays untouched).
     if (!/chinch|stress|thin|tan\b|patch|scuff/i.test(sentence)
       && !/\bdry\s+pockets?\b|\blocalized\s+drought\b/i.test(sentence)) return sentence;
-    // The negation must attach to the drought/dry wording itself ("no
-    // drought stress", "no signs of drought", "not drought-related") — an
-    // unrelated "No pests; drought stress remains possible" must still be
-    // reconciled (codex P2 r3).
-    if (/\b(?:no|not|isn['’]t|without)\s+(?:(?:visible|apparent|obvious|active|significant|clear)\s+|(?:signs?|evidence|indications?)\s+of\s+){0,2}(?:localized\s+)?(?:drought|dry)/i.test(sentence)) return sentence;
+    // The negation must attach to the drought/dry wording itself, allowing
+    // up to three plain intervening words in the SAME clause ("no recent dry
+    // spells", "no current signs of dry pockets", "not drought-related") —
+    // punctuation breaks the chain, so an unrelated "No pests; drought
+    // stress remains possible" is still reconciled (codex P2 r3 + r4).
+    if (/\b(?:no|not|isn['’]t|without)\s+(?:[a-z'’-]+\s+){0,3}(?:localized\s+)?(?:drought|dry)\b/i.test(sentence)) return sentence;
     // Headline-position matches keep their capitalization ("Dry pocket near
     // the sidewalk" → "Uneven sprinkler coverage near the sidewalk").
-    const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m) => (
-      /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage'
-    ));
+    // "dry patch(es)" only rewrites under a hypothesis cue — "a few dry
+    // patches were noted" is an OBSERVATION and must survive verbatim.
+    const hasCue = HYPOTHESIS_CUE_RE.test(sentence);
+    const replaced = sentence.replace(DROUGHT_HYPOTHESIS_RE, (m) => {
+      if (/dry\s+patch/i.test(m) && !hasCue) return m;
+      return /^[A-Z]/.test(m) ? 'Uneven sprinkler coverage' : 'uneven sprinkler coverage';
+    });
     if (replaced !== sentence) changed = true;
     return replaced;
   }).join(' ');

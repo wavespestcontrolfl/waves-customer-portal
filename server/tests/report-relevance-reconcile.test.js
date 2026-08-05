@@ -104,6 +104,18 @@ describe('reconcileRainFigure', () => {
       .toBeNull();
   });
 
+  test('a combined rain+irrigation total is never rewritten to rain-only (codex P2 r5)', () => {
+    expect(reconcileRainFigure('Rain and irrigation totaled 1.95 inches this week.', 1.2)).toBeNull();
+    expect(reconcileRainFigure('Total water including rain came to 1.95 inches this week.', 1.2)).toBeNull();
+  });
+
+  test('a delta-from-target figure is never rewritten to the total (codex P2 r5)', () => {
+    expect(reconcileRainFigure(
+      'Rain ran heavy this week, at 2.2 inches above the weekly target.',
+      2.96,
+    )).toBeNull();
+  });
+
   test('goal/recommended phrasing guards like target does', () => {
     expect(reconcileRainFigure(
       'Rain this week totaled 0.2 inches against the recommended 0.75 inches.',
@@ -146,6 +158,17 @@ describe('replaceDroughtHypothesis', () => {
       .toBe('Uneven sprinkler coverage near the sidewalk');
     expect(replaceDroughtHypothesis('Localized drought near the edge'))
       .toBe('Uneven sprinkler coverage near the edge');
+  });
+
+  test('negations with plain qualifiers are preserved (codex P2 r4)', () => {
+    expect(replaceDroughtHypothesis('No current signs of dry pockets in the stressed areas.')).toBeNull();
+    expect(replaceDroughtHypothesis('No recent dry spells are visible across the tan patches.')).toBeNull();
+  });
+
+  test('"dry patch" rewrites as a hypothesis but survives as an observation (codex P2 r5)', () => {
+    expect(replaceDroughtHypothesis('Thinning tan patches could be chinch bug activity or a dry patch.'))
+      .toBe('Thinning tan patches could be chinch bug activity or uneven sprinkler coverage.');
+    expect(replaceDroughtHypothesis('A few dry patches near the sidewalk were noted.')).toBeNull();
   });
 
   test('a sentence not about the stress signals is left alone', () => {
