@@ -893,8 +893,9 @@ function inferCluster(file, frontmatter = {}) {
 }
 
 function robotsNoindex(frontmatter = {}) {
-  return String(frontmatter.robots || frontmatter.indexing || '').toLowerCase().includes('noindex')
-    || frontmatter.noindex === true;
+  // Delegates to the planner's implementation — the planner excludes noindex
+  // sources before its cap so it never plans a task this gate would skip.
+  return planner._internals.robotsNoindex(frontmatter);
 }
 
 function isHeadingOccurrence(body, index) {

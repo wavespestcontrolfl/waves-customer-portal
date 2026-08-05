@@ -348,9 +348,19 @@ function canonicalPointsOffHub(frontmatterData = {}) {
   return false;
 }
 
+/**
+ * Same noindex detection the executor's gate applies (it delegates here) —
+ * a noindex source fails source_not_indexable at execution, so planning it
+ * would burn a cap slot.
+ */
+function robotsNoindex(frontmatter = {}) {
+  return String(frontmatter.robots || frontmatter.indexing || '').toLowerCase().includes('noindex')
+    || frontmatter.noindex === true;
+}
+
 function eligibleLinkSource(page) {
   const data = fm.parse(String(page?.body || '')).data || {};
-  return !sourceRendersOffHub(data) && !canonicalPointsOffHub(data);
+  return !sourceRendersOffHub(data) && !canonicalPointsOffHub(data) && !robotsNoindex(data);
 }
 
 function unwrapAngleHref(href) {
@@ -645,6 +655,7 @@ module.exports._internals = {
   pageAlreadyLinksTo,
   sourceRendersOffHub,
   canonicalPointsOffHub,
+  robotsNoindex,
   eligibleLinkSource,
   unwrapAngleHref,
   normalizePath,

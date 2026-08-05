@@ -656,6 +656,43 @@ describe('planForTarget', () => {
     expect(tasks.length).toBe(1);
     expect(tasks[0].source_file).toBe('src/content/blog/hedge-health.md');
   });
+  test('excludes noindex sources before the cap (executor would skip source_not_indexable)', () => {
+    const noindexPage = {
+      file: 'src/content/blog/noindex-page.md',
+      body: [
+        '---',
+        'title: Bed Bug Bite Photos',
+        'category: pest-control',
+        'primary_keyword: bed bug bites vs flea bites',
+        'robots: noindex, follow',
+        '---',
+        '',
+        'Compare bed bug bites vs flea bites in the gallery below.',
+      ].join('\n'),
+      url: '/blog/noindex-page/',
+    };
+    const indexable = {
+      file: 'src/content/blog/indexable-page.md',
+      body: [
+        '---',
+        'title: Overnight Itching Causes',
+        'category: pest-control',
+        'primary_keyword: overnight itching',
+        '---',
+        '',
+        'Bed bug bites that appear overnight are worth a closer look.',
+      ].join('\n'),
+      url: '/blog/indexable-page/',
+    };
+    // The noindex page even matches the full keyword (priority 10) — it must
+    // still lose to the indexable page rather than burn the only slot.
+    const tasks = planner.planForTarget(
+      { url: '/pest-control/bed-bug-bites-vs-flea-bites/', keyword: 'bed bug bites vs flea bites' },
+      { corpus: [noindexPage, indexable], cap: 1 }
+    );
+    expect(tasks.length).toBe(1);
+    expect(tasks[0].source_file).toBe('src/content/blog/indexable-page.md');
+  });
   test('uses service alias anchors instead of partial service fragments', () => {
     const tasks = planner.planForTarget({
       url: '/pest-control-bradenton-fl/',
