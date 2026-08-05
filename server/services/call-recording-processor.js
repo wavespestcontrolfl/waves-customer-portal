@@ -2144,6 +2144,23 @@ async function registerScheduleSideEffects({ scheduledServiceId, customerId, sch
     logger.error(`[call-proc] Appointment reminder registration failed: ${err.message}`);
   }
 
+  // Inspection credit: fast redemption for a confirmed call booking, same
+  // as every other booking surface (Codex #3178 r27 P2) — the marker alone
+  // leaves the credit unminted until the hourly sweep, and a Charge Now /
+  // pay link sent in that window collects the full amount. This helper's
+  // one caller is the fresh, non-outbound-review booking path (pending
+  // outbound rows redeem at office confirmation instead), and it runs
+  // post-commit. Best-effort — the sweep remains the durable guarantee.
+  try {
+    await require('./inspection-credit').redeemInspectionCreditForBooking({
+      customerId,
+      scheduledServiceId,
+      createdBy: 'system:inspection_credit_call_booking',
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] inspection credit fast redemption deferred to sweep for ${scheduledServiceId}: ${err.message}`);
+  }
+
   // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 }
 

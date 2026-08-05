@@ -495,6 +495,26 @@ describe('reverseInspectionCreditForBooking — a cancelled booking gives it bac
     expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-child-c' });
   });
 
+  it('rebinds through ANOTHER proven series whose anchor cancelled but child lives (r27 P2)', async () => {
+    // Offer bound to standalone booking B; proven anchor C in the window
+    // was cancelled while its seeded child D continues. C is non-live (not
+    // an alternate) and D carries no event (seeded), so both earlier probes
+    // miss — the in-window proven-anchor sweep must find D before money
+    // is clawed back from a customer whose booked series still stands.
+    mockOffers = [{
+      id: 'offer-1', customer_id: 'cust-1', amount: '75.00',
+      created_at: new Date('2026-08-01'), expires_at: new Date('2099-01-01'),
+      credit_ledger_id: 'ledger-1', source_scheduled_service_id: 'svc-insp',
+    }];
+    mockAlternates = []; // C is non-live, so no standalone proven alternate
+    mockEvents = [{ id: 'evt-c', scheduled_service_id: 'svc-anchor-c', customer_id: 'cust-1', created_at: new Date('2026-08-05') }];
+    mockBookings = [{ id: 'svc-d', status: 'confirmed' }]; // C's live seeded child
+    const res = await reverseInspectionCreditForBooking({ scheduledServiceId: 'svc-b' });
+    expect(res).toEqual({ reversed: 0 });
+    expect(mockPostCreditMovement).not.toHaveBeenCalled();
+    expect(mockUpdates[0]).toMatchObject({ redeemed_scheduled_service_id: 'svc-d', reversal_alerted_at: null });
+  });
+
   it('an UNPROVEN cancelled row never rebinds through its children', async () => {
     // Descendants qualify only under a PROVEN anchor — a seeder parent's
     // children must not hold a credit alive.
@@ -844,13 +864,44 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(frozenAt).toBeLessThan(tryAt); // frozen BEFORE the first insert attempt
   });
 
-  it('marker-only booking paths fast-redeem after their event writes (r26 P2)', () => {
+  it('marker-only booking paths fast-redeem after their event writes (r26/r27 P2)', () => {
     // A Charge Now / pay link sent before the hourly sweep would collect
     // the full amount while the credit strands afterwards.
     const ib = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
     expect(ib).toContain("createdBy: 'system:inspection_credit_ib_booking'");
     const confirm = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
     expect(confirm).toContain("createdBy: 'system:inspection_credit_outbound_confirm'");
+    const callProc = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(callProc).toContain("createdBy: 'system:inspection_credit_call_booking'");
+    const availability = fs.readFileSync(path.join(__dirname, '../services/availability.js'), 'utf8');
+    expect(availability).toContain("createdBy: 'system:inspection_credit_availability_confirm'");
+  });
+
+  it('the outbound-confirm fast redeem requires the evidence write to land (r27 P2)', () => {
+    const confirm = fs.readFileSync(path.join(__dirname, '../services/outbound-review-confirm.js'), 'utf8');
+    // The outbound row was inserted when the AI opened the pending review;
+    // without an event the redeemer falls back to that placeholder
+    // created_at — a row opened in-window but confirmed after expiry would
+    // mint a credit the booking did not earn. The sweep (event-only)
+    // recovers once the post-commit retry lands the event.
+    const markedAt = confirm.indexOf('const marked = await');
+    const gateAt = confirm.indexOf('if (marked === 1) {');
+    const redeemAt = confirm.indexOf("createdBy: 'system:inspection_credit_outbound_confirm'");
+    expect(markedAt).toBeGreaterThan(-1);
+    expect(gateAt).toBeGreaterThan(markedAt);
+    expect(redeemAt).toBeGreaterThan(gateAt); // redeem sits inside the gate
+  });
+
+  it('the no-channel alert rechecks after the completion handler settles (r27 P2)', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../services/inspection-credit.js'), 'utf8');
+    // setImmediate can outrun the handler's invoice mint — a first miss
+    // defers and rechecks instead of paging billing for a normal visit
+    // whose invoice lands moments later.
+    const fnAt = source.indexOf('function queueCreditReceiptResend');
+    const deferAt = source.indexOf('if (attempt < 1) {', fnAt);
+    const alertAt = source.indexOf("alertOfficeOnce('no_receipt_channel'", fnAt);
+    expect(deferAt).toBeGreaterThan(fnAt);
+    expect(alertAt).toBeGreaterThan(deferAt); // defer decision precedes the alert
   });
 
   it('the no-receipt office alert waits out a LIVE unpaid invoice (r24 P2)', () => {

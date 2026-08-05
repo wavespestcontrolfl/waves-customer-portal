@@ -1086,6 +1086,33 @@ async function reverseInspectionCreditForBooking({
               .orderBy('scheduled_date', 'asc')
               .first('id');
           }
+          // OTHER proven series in the window (Codex #3178 r27 P2): the
+          // alternate probe above only sees live rows carrying their own
+          // event, and the chain probe only follows THIS cancellation's
+          // lineage. An offer bound to standalone booking B still deserves
+          // rebinding when a different proven anchor C in the window was
+          // cancelled while its seeded child D lives on — C is non-live
+          // and D has no event, so both probes miss the continuing series.
+          // Descendants of proven in-window anchors only; seeder chains
+          // still never qualify.
+          if (!seriesChild) {
+            const provenAnchors = await db('inspection_credit_booking_events')
+              .where({ customer_id: offer.customer_id })
+              .where('created_at', '>=', offer.created_at)
+              .where('created_at', '<=', offer.expires_at)
+              .whereNotIn('scheduled_service_id',
+                [scheduledServiceId, offer.source_scheduled_service_id].filter(Boolean))
+              .select('scheduled_service_id');
+            const anchorIds = provenAnchors.map((r) => r.scheduled_service_id).filter(Boolean);
+            if (anchorIds.length) {
+              seriesChild = await db('scheduled_services')
+                .whereIn('recurring_parent_id', anchorIds)
+                .whereNot({ id: scheduledServiceId })
+                .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+                .orderBy('scheduled_date', 'asc')
+                .first('id');
+            }
+          }
         } catch (childErr) {
           logger.warn(`[inspection-credit] series-child probe failed for ${scheduledServiceId}: ${childErr.message}`);
         }
@@ -1177,7 +1204,7 @@ async function reverseInspectionCreditForBooking({
  * idempotency key makes replays safe. Fire-and-forget by contract — a
  * completion or sweep never waits on an email.
  */
-function queueCreditReceiptResend({ scheduledServiceId, offerId }) {
+function queueCreditReceiptResend({ scheduledServiceId, offerId, attempt = 0 }) {
   if (!scheduledServiceId || !offerId) return;
   setImmediate(() => {
     void (async () => {
@@ -1239,6 +1266,20 @@ function queueCreditReceiptResend({ scheduledServiceId, offerId }) {
             .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
             .first('id');
           if (liveInvoice) return;
+          // This helper is queued via setImmediate from the closeout path,
+          // which can run BEFORE the completion handler mints the ordinary
+          // pay-after-service invoice (Codex #3178 r27 P2) — deciding "no
+          // channel" now would page billing for a normal visit whose
+          // invoice lands moments later. Recheck once after the handler
+          // has long finished; only a visit STILL without a deliverable
+          // invoice escalates. unref'd so it never pins the process.
+          if (attempt < 1) {
+            const recheck = setTimeout(() => {
+              queueCreditReceiptResend({ scheduledServiceId, offerId, attempt: attempt + 1 });
+            }, 120000);
+            if (typeof recheck.unref === 'function') recheck.unref();
+            return;
+          }
           await alertOfficeOnce('no_receipt_channel',
             'This visit has no paid customer invoice, so the terms were not delivered — tell the customer their deadline.');
           return;

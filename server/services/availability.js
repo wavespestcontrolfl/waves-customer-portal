@@ -470,6 +470,20 @@ class AvailabilityEngine {
       return { booking: bookingRow, scheduled: scheduledRow };
     });
 
+    // Inspection credit: fast redemption post-commit, same as the other
+    // booking surfaces (Codex #3178 r27 P2) — a pay link or Charge Now
+    // before the hourly sweep must see the credit already in the balance.
+    // Best-effort; the sweep remains the durable guarantee.
+    try {
+      await require('./inspection-credit').redeemInspectionCreditForBooking({
+        customerId,
+        scheduledServiceId: scheduled.id,
+        createdBy: 'system:inspection_credit_availability_confirm',
+      });
+    } catch (creditErr) {
+      logger.warn(`[availability] inspection credit fast redemption deferred to sweep: ${creditErr.message}`);
+    }
+
     // Dispatch-v2 reads scheduled_services directly; no legacy dispatch sync.
 
     const notify = async () => {
