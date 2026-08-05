@@ -45,9 +45,9 @@ function unpricedChild(over = {}) {
   return {
     id: 'ss-child-1', customer_id: 'cust-1', status: 'pending',
     service_type: 'Bi-Monthly Tree & Shrub Care Service', service_date: '2026-08-10',
-    estimated_price: null, primary_line_price: null,
+    estimated_price: null, primary_line_price: null, prepaid_amount: null,
     is_recurring: true, recurring_parent_id: 'ss-parent-1',
-    parent_estimated_price: null, parent_primary_line_price: null,
+    parent_estimated_price: null, parent_primary_line_price: null, parent_prepaid_amount: null,
     ...over,
   };
 }
@@ -60,7 +60,7 @@ function makeDbMock({ staleRows = [], upcomingRows = [], alertedKeys = new Set()
       : table === 'scheduled_services as ss' ? upcomingRows
         : null;
     const c = {};
-    for (const m of ['whereIn', 'where', 'whereNotIn', 'leftJoin', 'select', 'orderBy']) {
+    for (const m of ['whereIn', 'where', 'whereNull', 'whereNotIn', 'leftJoin', 'select', 'orderBy']) {
       c[m] = jest.fn(() => c);
     }
     c.whereRaw = jest.fn((sql, params) => { c._dedupeKey = params && params[0]; return c; });
@@ -102,6 +102,18 @@ describe('classifiers', () => {
     expect(isUnpricedSeriesVisit(unpricedChild({
       recurring_parent_id: null, parent_estimated_price: null, parent_primary_line_price: null,
     }))).toBe(true);
+  });
+
+  test('a prepaid visit never pages — stamp on the row OR anywhere in the series', () => {
+    // prepaid-series.js fans one prepayment across siblings as
+    // scheduled_services.prepaid_amount; a NULL per-visit price under a
+    // stamp is the coverage convention, not a gap.
+    expect(isUnpricedSeriesVisit(unpricedChild({ prepaid_amount: '559.20' }))).toBe(false);
+    expect(isUnpricedSeriesVisit(unpricedChild({ parent_prepaid_amount: '559.20' }))).toBe(false);
+    // A booster bills alone, so a series stamp on the parent does NOT cover
+    // it — but its own stamp does.
+    expect(isUnpricedSeriesVisit(unpricedChild({ is_recurring: false, parent_prepaid_amount: '559.20' }))).toBe(true);
+    expect(isUnpricedSeriesVisit(unpricedChild({ is_recurring: false, prepaid_amount: '107.00' }))).toBe(false);
   });
 
   test('a booster child (is_recurring=false) bills alone — parent price never suppresses it', () => {
