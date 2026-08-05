@@ -994,6 +994,10 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(booking).toContain("createdBy: 'system:inspection_credit_self_book_replay'");
     // And the frozen terms carry the resolved key for FK-less recovery.
     expect(dispatch).toContain('serviceKey: completionProfile?.serviceKey || null,');
+    // On a resume the FROZEN key outranks the live re-resolution (r36 P2)
+    // — a repoint between closeout and retry must not re-key the offer
+    // away from the standing-promise classification.
+    expect(dispatch).toContain('serviceKey: frozenCreditTerms?.serviceKey || effectiveCompletionProfile?.serviceKey || null,');
   });
 
   it('both schedule serializers forward the lookup-failed marker (r34 P2)', () => {
@@ -1046,6 +1050,12 @@ describe('closeout route wiring — source contracts (the completion route is to
     // callbacks — unmintable rows must not spend the hourly limit.
     const filters = source.match(/COALESCE\(s\.is_callback, false\) = false/g) || [];
     expect(filters.length).toBe(2); // provenBookingInWindow + the provable join
+    // The rebind DESCENDANT probes and the rebind lock exclude callbacks
+    // too (r36 P2) — a free re-service child must not keep a redeemed
+    // offer alive when no collectible booking remains.
+    const childFilters = source.match(/COALESCE\(is_callback, false\) = false/g) || [];
+    expect(childFilters.length).toBe(2); // lineage probe + cross-anchor probe
+    expect(source).toContain('|| booking.is_callback === true'); // rebind lock
     // The stale-reversal loop routes through the ONE shared seam, so a
     // crash-lost cancellation's open invoice is voided before reversal
     // instead of alert-deferring forever.

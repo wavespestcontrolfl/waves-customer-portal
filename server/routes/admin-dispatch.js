@@ -7403,7 +7403,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           customerId: svc.customer_id,
           scheduledServiceId: svc.id,
           serviceRecordId: record.id,
-          serviceKey: effectiveCompletionProfile?.serviceKey || null,
+          // The FROZEN key wins (Codex #3178 r36 P2): on a resume after an
+          // update-details repoint, the live re-resolution can differ from
+          // the identity the closeout promised under — and the offer's
+          // source_service_key drives dark-mode standing redemption, so a
+          // rodent promise re-keyed to another inspection would never
+          // redeem before the flip.
+          serviceKey: frozenCreditTerms?.serviceKey || effectiveCompletionProfile?.serviceKey || null,
           ...(Number(frozenCreditTerms?.amount) > 0 ? { amount: Number(frozenCreditTerms.amount) } : {}),
           ...(Number(frozenCreditTerms?.windowDays) > 0 ? { windowDays: Number(frozenCreditTerms.windowDays) } : {}),
           createdBy: `tech:${req.technician?.name || req.technicianId || 'unknown'}`,

@@ -1106,9 +1106,12 @@ async function rebindRedeemedOffer(offerId, bookingId) {
       const booking = await trx('scheduled_services')
         .where({ id: bookingId })
         .forUpdate()
-        .first('status');
+        .first('status', 'is_callback');
       if (!booking
-        || NON_LIVE_APPOINTMENT_STATUSES.includes(String(booking.status || '').toLowerCase())) {
+        || NON_LIVE_APPOINTMENT_STATUSES.includes(String(booking.status || '').toLowerCase())
+        // A free callback can never hold a credit (r36 P2) — the same
+        // exclusion the mint's locked revalidation applies.
+        || booking.is_callback === true) {
         return;
       }
       await trx('inspection_credit_offers')
@@ -1302,6 +1305,9 @@ async function reverseInspectionCreditForBooking({
               .where({ recurring_parent_id: provenAnchorId })
               .whereNot({ id: scheduledServiceId })
               .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+              // A callback child is not a collectible booking (r36 P2) —
+              // same exclusion the mint and evidence probes apply.
+              .whereRaw('COALESCE(is_callback, false) = false')
               .orderBy('scheduled_date', 'asc')
               .first('id');
           }
@@ -1328,6 +1334,7 @@ async function reverseInspectionCreditForBooking({
                 .whereIn('recurring_parent_id', anchorIds)
                 .whereNot({ id: scheduledServiceId })
                 .whereNotIn('status', NON_LIVE_APPOINTMENT_STATUSES)
+                .whereRaw('COALESCE(is_callback, false) = false')
                 .orderBy('scheduled_date', 'asc')
                 .first('id');
             }
